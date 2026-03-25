@@ -124,7 +124,7 @@ GitHub Actions now builds `zmail-app` on `ubuntu-latest`, `macos-latest`, and `w
 On Linux, the desktop dependency stack also needs D-Bus, Fontconfig, and FreeType development headers. The same packages used in CI are:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxkbcommon-dev libfontconfig1-dev libfreetype6-dev
+sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
 ```
 
 ## Licensing

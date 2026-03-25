@@ -78,7 +78,7 @@ cargo audit
 Linux CI packages:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxkbcommon-dev libfontconfig1-dev libfreetype6-dev
+sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
 ```
 
 macOS note:
