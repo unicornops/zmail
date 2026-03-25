@@ -364,9 +364,7 @@ async fn fetch_emails(client: &Client, ids: &[String]) -> Result<Vec<JmapEmail>>
     for chunk in ids.chunks(QUERY_PAGE_SIZE) {
         let mut request = client.build();
         let get_request = request.get_email();
-        get_request
-            .ids(chunk.iter())
-            .properties(properties.clone());
+        get_request.ids(chunk.iter()).properties(properties.clone());
         get_request.arguments().fetch_all_body_values(true);
         let mut response: EmailGetResponse = request
             .send_get_email()
