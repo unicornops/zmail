@@ -1,0 +1,551 @@
+//! Real IMAP adapter for Phase 2.
+
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Once},
+    time::Duration,
+};
+
+use anyhow::{Context, Result, anyhow, bail};
+use async_imap::{
+    Client, Session,
+    types::{Fetch, Flag, Mailbox, Name, NameAttribute},
+};
+use futures_util::TryStreamExt;
+use mail_parser::{Address, MessageParser};
+use serde::{Deserialize, Serialize};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+    time::timeout,
+};
+use tokio_rustls::{
+    TlsConnector,
+    rustls::{ClientConfig, RootCertStore, pki_types::ServerName},
+};
+use url::Url;
+use zmail_core::{
+    AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, ProtocolKind, SyncTarget, ThreadSnapshot,
+};
+use zmail_security::sanitize_html_for_display;
+
+/// IMAP extensions prioritized by the plan.
+pub const PRIORITY_CAPABILITIES: &[&str] = &[
+    "STARTTLS",
+    "IDLE",
+    "UIDPLUS",
+    "MOVE",
+    "CONDSTORE",
+    "QRESYNC",
+    "LIST-STATUS",
+    "SPECIAL-USE",
+    "NAMESPACE",
+];
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const FETCH_BATCH_SIZE: usize = 50;
+const FETCH_QUERY: &str = "(UID INTERNALDATE FLAGS BODY.PEEK[])";
+
+fn ensure_rustls_provider() {
+    static RUSTLS_PROVIDER: Once = Once::new();
+
+    RUSTLS_PROVIDER.call_once(|| {
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
+/// Connects to a live IMAP account and returns the mailbox snapshot written into the local store.
+pub async fn discover_and_sync(
+    target: &SyncTarget,
+    secret: &str,
+    existing_mailboxes: &[MailboxSnapshot],
+) -> Result<AccountSyncSnapshot> {
+    if target.protocol != ProtocolKind::Imap {
+        bail!("IMAP adapter received a non-IMAP sync target");
+    }
+
+    let endpoint = parse_endpoint(&target.endpoint)?;
+    let identity_email = target
+        .identities
+        .iter()
+        .find(|identity| identity.is_primary)
+        .or_else(|| target.identities.first())
+        .map(|identity| identity.email_address.as_str())
+        .unwrap_or(target.username.as_str());
+    let mut session = connect_session(&endpoint, &target.username, secret).await?;
+    let mailbox_names = list_mailboxes(&mut session).await?;
+    let checkpoint = ImapCheckpoint::from_json(target.checkpoint.as_deref())?;
+    let existing = existing_mailbox_map(existing_mailboxes);
+
+    let mut next_checkpoint = BTreeMap::new();
+    let mut mailboxes = Vec::with_capacity(mailbox_names.len());
+    let mut refreshed = 0usize;
+
+    for mailbox_name in mailbox_names {
+        let name = mailbox_name.name().to_owned();
+        let status = session
+            .examine(&name)
+            .await
+            .with_context(|| format!("failed to examine IMAP mailbox {name}"))?;
+
+        let mailbox_checkpoint = ImapMailboxCheckpoint::from_status(&status);
+        next_checkpoint.insert(name.clone(), mailbox_checkpoint.clone());
+
+        if checkpoint.mailboxes.get(&name) == Some(&mailbox_checkpoint)
+            && let Some(existing_mailbox) = existing.get(name.as_str())
+        {
+            mailboxes.push(existing_mailbox.clone());
+            continue;
+        }
+
+        refreshed += 1;
+        mailboxes.push(
+            fetch_mailbox_snapshot(&mut session, &name, guess_role(&name), identity_email).await?,
+        );
+    }
+
+    let _ = session.logout().await;
+
+    let detail = if refreshed == 0 {
+        format!("IMAP mailbox state unchanged for {}", target.display_name)
+    } else {
+        format!(
+            "IMAP sync complete against {} with {} mailbox refreshes",
+            endpoint.host, refreshed
+        )
+    };
+
+    Ok(AccountSyncSnapshot {
+        checkpoint: serde_json::to_string(&ImapCheckpoint {
+            mailboxes: next_checkpoint,
+        })
+        .context("failed to serialize the IMAP sync checkpoint")?,
+        detail,
+        identities: None,
+        mailboxes,
+    })
+}
+
+#[derive(Debug)]
+struct ImapEndpoint {
+    host: String,
+    port: u16,
+    security: ImapSecurity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImapSecurity {
+    Plain,
+    ImplicitTls,
+}
+
+trait ImapIo: AsyncRead + AsyncWrite + Unpin + Send + std::fmt::Debug {}
+
+impl<T> ImapIo for T where T: AsyncRead + AsyncWrite + Unpin + Send + std::fmt::Debug {}
+
+type DynImapStream = Box<dyn ImapIo>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct ImapCheckpoint {
+    mailboxes: BTreeMap<String, ImapMailboxCheckpoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ImapMailboxCheckpoint {
+    uid_validity: Option<u32>,
+    uid_next: Option<u32>,
+    exists: u32,
+}
+
+impl ImapCheckpoint {
+    fn from_json(value: Option<&str>) -> Result<Self> {
+        match value {
+            Some(value) if !value.trim().is_empty() => serde_json::from_str(value)
+                .with_context(|| "failed to decode the IMAP sync checkpoint"),
+            _ => Ok(Self::default()),
+        }
+    }
+}
+
+impl ImapMailboxCheckpoint {
+    fn from_status(status: &Mailbox) -> Self {
+        Self {
+            uid_validity: status.uid_validity,
+            uid_next: status.uid_next,
+            exists: status.exists,
+        }
+    }
+}
+
+fn parse_endpoint(endpoint: &str) -> Result<ImapEndpoint> {
+    if let Ok(url) = Url::parse(endpoint) {
+        let host = url
+            .host_str()
+            .context("IMAP endpoint must include a host")?
+            .to_owned();
+        let (port, security) = match url.scheme() {
+            "imap" => (url.port().unwrap_or(143), ImapSecurity::Plain),
+            "imaps" => (url.port().unwrap_or(993), ImapSecurity::ImplicitTls),
+            scheme => bail!("unsupported IMAP endpoint scheme {scheme}"),
+        };
+        return Ok(ImapEndpoint {
+            host,
+            port,
+            security,
+        });
+    }
+
+    let (host, port) = if let Some((host, port)) = endpoint.rsplit_once(':') {
+        (
+            host.to_owned(),
+            port.parse::<u16>()
+                .with_context(|| format!("invalid IMAP port in endpoint {endpoint}"))?,
+        )
+    } else {
+        (endpoint.to_owned(), 993)
+    };
+
+    if host.trim().is_empty() {
+        bail!("IMAP endpoint must not be empty");
+    }
+
+    Ok(ImapEndpoint {
+        host,
+        port,
+        security: ImapSecurity::ImplicitTls,
+    })
+}
+
+async fn connect_session(
+    endpoint: &ImapEndpoint,
+    username: &str,
+    secret: &str,
+) -> Result<Session<DynImapStream>> {
+    ensure_rustls_provider();
+
+    let tcp = timeout(
+        CONNECT_TIMEOUT,
+        TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
+    )
+    .await
+    .context("timed out while connecting to the IMAP server")?
+    .with_context(|| format!("failed to connect to {}:{}", endpoint.host, endpoint.port))?;
+
+    let stream: DynImapStream = match endpoint.security {
+        ImapSecurity::Plain => Box::new(tcp),
+        ImapSecurity::ImplicitTls => {
+            let mut roots = RootCertStore::empty();
+            let native = rustls_native_certs::load_native_certs();
+            for cert in native.certs {
+                roots
+                    .add(cert)
+                    .map_err(|error| anyhow!("failed to add a native root certificate: {error}"))?;
+            }
+            if roots.is_empty() {
+                bail!("no TLS root certificates were loaded for the IMAP connection");
+            }
+
+            let config = ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let connector = TlsConnector::from(Arc::new(config));
+            let server_name = ServerName::try_from(endpoint.host.clone())
+                .with_context(|| format!("invalid IMAP server name {}", endpoint.host))?;
+            let tls_stream = timeout(CONNECT_TIMEOUT, connector.connect(server_name, tcp))
+                .await
+                .context("timed out while establishing IMAP TLS")?
+                .with_context(|| format!("failed to negotiate TLS with {}", endpoint.host))?;
+            Box::new(tls_stream)
+        }
+    };
+
+    let mut client = Client::new(stream);
+    client
+        .read_response()
+        .await
+        .context("failed to read the IMAP greeting")?
+        .context("the IMAP server closed the connection before greeting")?;
+
+    client
+        .login(username, secret)
+        .await
+        .map_err(|(error, _)| anyhow!(error))
+        .context("IMAP authentication failed")
+}
+
+async fn list_mailboxes(session: &mut Session<DynImapStream>) -> Result<Vec<Name>> {
+    let mailboxes = session
+        .list(None, Some("*"))
+        .await
+        .context("failed to list IMAP mailboxes")?
+        .try_collect::<Vec<_>>()
+        .await
+        .context("failed to stream the IMAP mailbox list")?;
+
+    Ok(mailboxes
+        .into_iter()
+        .filter(|mailbox| {
+            !mailbox
+                .attributes()
+                .iter()
+                .any(|attribute| matches!(attribute, NameAttribute::NoSelect))
+        })
+        .collect())
+}
+
+async fn fetch_mailbox_snapshot(
+    session: &mut Session<DynImapStream>,
+    mailbox_name: &str,
+    role: Option<String>,
+    identity_email: &str,
+) -> Result<MailboxSnapshot> {
+    session
+        .examine(mailbox_name)
+        .await
+        .with_context(|| format!("failed to re-open IMAP mailbox {mailbox_name}"))?;
+
+    let mut uids = session
+        .uid_search("ALL")
+        .await
+        .with_context(|| format!("failed to query message ids for {mailbox_name}"))?
+        .into_iter()
+        .collect::<Vec<_>>();
+    uids.sort_unstable();
+    uids.reverse();
+
+    let mut threads = Vec::with_capacity(uids.len());
+    for chunk in uids.chunks(FETCH_BATCH_SIZE) {
+        let uid_set = chunk
+            .iter()
+            .map(|uid| uid.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let fetches = session
+            .uid_fetch(&uid_set, FETCH_QUERY)
+            .await
+            .with_context(|| {
+                format!("failed to fetch metadata for mailbox {mailbox_name} and UID set {uid_set}")
+            })?
+            .try_collect::<Vec<_>>()
+            .await
+            .with_context(|| format!("failed to stream message metadata for {mailbox_name}"))?;
+
+        for fetch in fetches {
+            if let Some(thread) = fetch_to_thread_snapshot(fetch, identity_email) {
+                threads.push(thread);
+            }
+        }
+    }
+
+    threads.sort_by(|left, right| right.latest_message_at.cmp(&left.latest_message_at));
+
+    Ok(MailboxSnapshot {
+        name: mailbox_name.to_owned(),
+        role,
+        threads,
+    })
+}
+
+fn fetch_to_thread_snapshot(fetch: Fetch, identity_email: &str) -> Option<ThreadSnapshot> {
+    let raw = fetch.body()?;
+    let message = MessageParser::default().parse(raw)?;
+    let subject = message
+        .subject()
+        .map(str::to_owned)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "(no subject)".to_owned());
+    let sender = first_address(message.from()).unwrap_or_else(|| "Unknown sender".to_owned());
+    let recipients = format_recipients(message.to(), identity_email);
+    let participants = format!("{sender} -> {recipients}");
+    let (body_text, sanitized_html, has_remote_content, preview_source) = hydrate_bodies(&message);
+    let preview = excerpt(&preview_source, 180);
+    let latest_message_at = fetch
+        .internal_date()
+        .map(|date| date.to_rfc3339())
+        .or_else(|| message.date().map(|date| date.to_rfc3339()))
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned());
+    let is_read = fetch.flags().any(|flag| matches!(flag, Flag::Seen));
+    let is_flagged = fetch.flags().any(|flag| matches!(flag, Flag::Flagged));
+    let unread_count = usize::from(!is_read);
+
+    Some(ThreadSnapshot {
+        subject: subject.clone(),
+        participants,
+        preview: preview.clone(),
+        is_flagged,
+        unread_count,
+        latest_message_at: latest_message_at.clone(),
+        messages: vec![MessageSnapshot {
+            identity_email: identity_email.to_owned(),
+            sender,
+            recipients,
+            subject,
+            body_preview: preview,
+            body_text,
+            sanitized_html,
+            has_remote_content,
+            is_read,
+            is_flagged,
+            received_at: latest_message_at,
+        }],
+    })
+}
+
+fn first_address(addresses: Option<&Address<'_>>) -> Option<String> {
+    collect_addresses(addresses)
+        .into_iter()
+        .next()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn format_recipients(addresses: Option<&Address<'_>>, fallback: &str) -> String {
+    let recipients = collect_addresses(addresses);
+    if recipients.is_empty() {
+        fallback.to_owned()
+    } else {
+        recipients.join(", ")
+    }
+}
+
+fn collect_addresses(addresses: Option<&Address<'_>>) -> Vec<String> {
+    match addresses {
+        Some(Address::List(items)) => items
+            .iter()
+            .map(format_addr)
+            .filter(|value| !value.trim().is_empty())
+            .collect(),
+        Some(Address::Group(groups)) => groups
+            .iter()
+            .flat_map(|group| group.addresses.iter())
+            .map(format_addr)
+            .filter(|value| !value.trim().is_empty())
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+fn format_addr(address: &mail_parser::Addr<'_>) -> String {
+    match (address.name.as_deref(), address.address.as_deref()) {
+        (Some(name), Some(email)) if !name.trim().is_empty() => format!("{name} <{email}>"),
+        (_, Some(email)) => email.to_owned(),
+        (Some(name), None) => name.to_owned(),
+        (None, None) => String::new(),
+    }
+}
+
+fn hydrate_bodies(
+    message: &mail_parser::Message<'_>,
+) -> (Option<String>, Option<String>, bool, String) {
+    let body_text = message.body_text(0).map(|value| value.into_owned());
+    let html = message.body_html(0).map(|value| value.into_owned());
+
+    if let Some(body_text) = body_text {
+        let normalized = normalize_body_text(&body_text);
+        return (Some(normalized.clone()), None, false, normalized);
+    }
+
+    if let Some(html) = html {
+        let sanitized = sanitize_html_for_display(&html);
+        return (
+            None,
+            Some(sanitized.html),
+            sanitized.has_remote_content,
+            sanitized.text,
+        );
+    }
+
+    (None, None, false, "No preview available.".to_owned())
+}
+
+fn normalize_body_text(text: &str) -> String {
+    text.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
+}
+
+fn excerpt(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = compact.chars();
+    let preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else if preview.is_empty() {
+        "No preview available.".to_owned()
+    } else {
+        preview
+    }
+}
+
+fn guess_role(mailbox_name: &str) -> Option<String> {
+    match mailbox_name.to_ascii_lowercase().as_str() {
+        "inbox" => Some("inbox".to_owned()),
+        "archive" | "all mail" => Some("archive".to_owned()),
+        "sent" | "sent items" | "sent mail" => Some("sent".to_owned()),
+        "drafts" => Some("drafts".to_owned()),
+        "trash" | "deleted items" => Some("trash".to_owned()),
+        "junk" | "spam" => Some("junk".to_owned()),
+        _ => None,
+    }
+}
+
+fn existing_mailbox_map(mailboxes: &[MailboxSnapshot]) -> BTreeMap<&str, MailboxSnapshot> {
+    mailboxes
+        .iter()
+        .map(|mailbox| (mailbox.name.as_str(), mailbox.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, excerpt, guess_role, parse_endpoint,
+    };
+
+    #[test]
+    fn parses_imap_endpoints() {
+        let endpoint = parse_endpoint("imaps://mail.example.test:993").expect("valid endpoint");
+        assert_eq!(endpoint.host, "mail.example.test");
+        assert_eq!(endpoint.port, 993);
+        assert_eq!(endpoint.security, ImapSecurity::ImplicitTls);
+
+        let endpoint = parse_endpoint("imap://mail.example.test:3143").expect("valid endpoint");
+        assert_eq!(endpoint.host, "mail.example.test");
+        assert_eq!(endpoint.port, 3143);
+        assert_eq!(endpoint.security, ImapSecurity::Plain);
+    }
+
+    #[test]
+    fn checkpoint_round_trip_is_stable() {
+        let checkpoint = ImapCheckpoint {
+            mailboxes: [(
+                "Inbox".to_owned(),
+                ImapMailboxCheckpoint {
+                    uid_validity: Some(9),
+                    uid_next: Some(34),
+                    exists: 33,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let json = serde_json::to_string(&checkpoint).expect("checkpoint should serialize");
+        let parsed = ImapCheckpoint::from_json(Some(&json)).expect("checkpoint should parse");
+        assert_eq!(parsed, checkpoint);
+    }
+
+    #[test]
+    fn mailbox_roles_follow_common_names() {
+        assert_eq!(guess_role("Inbox").as_deref(), Some("inbox"));
+        assert_eq!(guess_role("Sent Items").as_deref(), Some("sent"));
+        assert_eq!(guess_role("Projects"), None);
+    }
+
+    #[test]
+    fn preview_excerpt_is_trimmed() {
+        let preview = excerpt("one two three four five six seven", 10);
+        assert!(preview.starts_with("one two th"));
+    }
+}

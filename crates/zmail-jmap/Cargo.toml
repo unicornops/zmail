@@ -1,0 +1,21 @@
+[package]
+name = "zmail-jmap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+jmap-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+zmail-core = { path = "../zmail-core" }
+zmail-security = { path = "../zmail-security" }
+zmail-smtp = { path = "../zmail-smtp" }
+
+[lints]
+workspace = true

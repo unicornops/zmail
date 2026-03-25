@@ -1,0 +1,17 @@
+[package]
+name = "zmail-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+zmail-core = { path = "../zmail-core" }
+zmail-security = { path = "../zmail-security" }
+
+[lints]
+workspace = true

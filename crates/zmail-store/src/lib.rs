@@ -1,0 +1,3594 @@
+//! SQLite-backed local store for persisted accounts, sync state, and mailbox metadata.
+
+use std::{
+    fs,
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use zmail_core::{
+    AccountOverview, AccountSummary, AccountSyncSnapshot, CachePolicySummary, DeliveryTarget,
+    DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate, IdentitySummary,
+    MailboxSnapshot, MailboxSummary, MessagePreview, MessageRenderMode, MessageSnapshot,
+    NewAccount, NewDraft, OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig,
+    OutgoingMessage, PendingOutboxJob, ProtocolKind, SearchHit, StoreStats, SubmissionKind,
+    SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget, ThreadMessage, ThreadSnapshot,
+    ThreadSummary, ThreadView,
+};
+use zmail_security::sanitize_html_for_display;
+
+/// The storage stance recorded during Phase 2.
+pub const STORAGE_MODEL: &str =
+    "SQLite metadata plus content-addressed blobs, optimized for large offline-first mailboxes.";
+
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("0001_phase2_store", PHASE2_SCHEMA),
+    ("0002_phase3_reader_and_mailbox_ops", PHASE3_SCHEMA),
+    ("0003_phase4_compose_and_send", PHASE4_SCHEMA),
+];
+
+const PHASE2_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS accounts (
+    id INTEGER PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    protocol_kind TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    username TEXT NOT NULL,
+    cache_policy_name TEXT NOT NULL,
+    cache_policy_description TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS identities (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    display_name TEXT NOT NULL,
+    email_address TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    is_primary INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sync_state (
+    account_id INTEGER PRIMARY KEY,
+    phase TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    checkpoint TEXT,
+    last_attempt_at TEXT,
+    last_success_at TEXT,
+    last_error_at TEXT,
+    last_error_message TEXT,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS mailboxes (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT,
+    sort_order INTEGER NOT NULL,
+    total_threads INTEGER NOT NULL,
+    unread_threads INTEGER NOT NULL,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS threads (
+    id INTEGER PRIMARY KEY,
+    mailbox_id INTEGER NOT NULL,
+    subject TEXT NOT NULL,
+    participants TEXT NOT NULL,
+    preview TEXT NOT NULL,
+    message_count INTEGER NOT NULL,
+    unread_count INTEGER NOT NULL,
+    latest_message_at TEXT NOT NULL,
+    latest_message_id INTEGER NOT NULL,
+    FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY,
+    thread_id INTEGER NOT NULL,
+    identity_id INTEGER NOT NULL,
+    sender TEXT NOT NULL,
+    recipients TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body_preview TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+    FOREIGN KEY(identity_id) REFERENCES identities(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_accounts_protocol ON accounts(protocol_kind, username);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_identities_email_per_account ON identities(account_id, email_address);
+CREATE INDEX IF NOT EXISTS idx_mailboxes_account_sort ON mailboxes(account_id, sort_order, name);
+CREATE INDEX IF NOT EXISTS idx_threads_mailbox_order ON threads(mailbox_id, latest_message_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, received_at DESC, id DESC);
+"#;
+
+const PHASE3_SCHEMA: &str = r#"
+ALTER TABLE threads ADD COLUMN is_flagged INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN body_text TEXT;
+ALTER TABLE messages ADD COLUMN sanitized_html TEXT;
+ALTER TABLE messages ADD COLUMN has_remote_content INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN is_read INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE messages ADD COLUMN is_flagged INTEGER NOT NULL DEFAULT 0;
+
+UPDATE messages
+SET body_text = COALESCE(body_text, body_preview)
+WHERE body_text IS NULL;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS search_documents USING fts5(
+    account_id UNINDEXED,
+    mailbox_id UNINDEXED,
+    thread_id UNINDEXED,
+    mailbox_name UNINDEXED,
+    subject,
+    participants,
+    preview,
+    body
+);
+
+INSERT INTO search_documents(account_id, mailbox_id, thread_id, mailbox_name, subject, participants, preview, body)
+SELECT
+    mailboxes.account_id,
+    mailboxes.id,
+    threads.id,
+    mailboxes.name,
+    threads.subject,
+    threads.participants,
+    threads.preview,
+    COALESCE(GROUP_CONCAT(COALESCE(messages.body_text, messages.sanitized_html, messages.body_preview), ' '), '')
+FROM threads
+JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+LEFT JOIN messages ON messages.thread_id = threads.id
+GROUP BY threads.id;
+"#;
+
+const PHASE4_SCHEMA: &str = r#"
+ALTER TABLE accounts ADD COLUMN submission_kind TEXT;
+ALTER TABLE accounts ADD COLUMN submission_host TEXT;
+ALTER TABLE accounts ADD COLUMN submission_port INTEGER;
+ALTER TABLE accounts ADD COLUMN submission_security TEXT;
+ALTER TABLE accounts ADD COLUMN submission_username TEXT;
+ALTER TABLE accounts ADD COLUMN submission_hello_name TEXT;
+
+CREATE TABLE IF NOT EXISTS drafts (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    identity_id INTEGER NOT NULL,
+    identity_name TEXT NOT NULL,
+    identity_email TEXT NOT NULL,
+    identity_signature TEXT NOT NULL,
+    state TEXT NOT NULL,
+    to_json TEXT NOT NULL,
+    cc_json TEXT NOT NULL,
+    bcc_json TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    queued_at TEXT,
+    sent_at TEXT,
+    last_error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS draft_attachments (
+    id INTEGER PRIMARY KEY,
+    draft_id INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    original_path TEXT NOT NULL,
+    storage_path TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(draft_id) REFERENCES drafts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS outbox_jobs (
+    id INTEGER PRIMARY KEY,
+    draft_id INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at TEXT,
+    next_attempt_at TEXT,
+    last_error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(draft_id) REFERENCES drafts(id) ON DELETE CASCADE,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_drafts_account_updated ON drafts(account_id, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_outbox_jobs_due ON outbox_jobs(state, next_attempt_at, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_jobs_active_draft
+ON outbox_jobs(draft_id)
+WHERE state IN ('queued', 'sending', 'retrying');
+"#;
+
+static EPHEMERAL_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Thread-safe local store handle backed by a persistent SQLite database.
+#[derive(Debug, Clone)]
+pub struct LocalStore {
+    path: Arc<PathBuf>,
+}
+
+impl LocalStore {
+    /// Opens a persistent store at the given path and applies migrations.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        let store = Self {
+            path: Arc::new(path),
+        };
+        store.apply_migrations()?;
+        Ok(store)
+    }
+
+    /// Opens an ephemeral store in the OS temp directory for tests.
+    pub fn open_ephemeral() -> Result<Self> {
+        let sequence = EPHEMERAL_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("zmail-{nanos}-{sequence}.sqlite3"));
+        Self::open(path)
+    }
+
+    /// Returns `true` when the store has no configured accounts yet.
+    pub fn needs_onboarding(&self) -> Result<bool> {
+        Ok(self.stats()?.account_count == 0)
+    }
+
+    /// Inserts a fully specified account draft and returns its new identifier.
+    pub fn insert_account(&self, account: &NewAccount) -> Result<i64> {
+        if account.identities.is_empty() {
+            bail!("accounts require at least one identity");
+        }
+
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the account creation transaction")?;
+
+        transaction.execute(
+            r#"
+            INSERT INTO accounts(
+                display_name,
+                protocol_kind,
+                endpoint,
+                username,
+                cache_policy_name,
+                cache_policy_description,
+                submission_kind,
+                submission_host,
+                submission_port,
+                submission_security,
+                submission_username,
+                submission_hello_name,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "#,
+            params![
+                account.display_name,
+                account.protocol.as_str(),
+                account.endpoint,
+                account.username,
+                account.cache_policy.name,
+                account.cache_policy.description,
+                account
+                    .outgoing
+                    .as_ref()
+                    .map(|outgoing| outgoing.kind.as_str()),
+                account
+                    .outgoing
+                    .as_ref()
+                    .and_then(|outgoing| outgoing.host.as_deref()),
+                account
+                    .outgoing
+                    .as_ref()
+                    .and_then(|outgoing| outgoing.port.map(i64::from)),
+                account
+                    .outgoing
+                    .as_ref()
+                    .and_then(|outgoing| outgoing.security.map(SubmissionSecurity::as_str)),
+                account
+                    .outgoing
+                    .as_ref()
+                    .and_then(|outgoing| outgoing.username.as_deref()),
+                account
+                    .outgoing
+                    .as_ref()
+                    .map(|outgoing| outgoing.hello_name.as_str()),
+                pseudo_now_timestamp(),
+            ],
+        )?;
+        let account_id = transaction.last_insert_rowid();
+
+        {
+            let mut insert_identity = transaction.prepare(
+                r#"
+                INSERT INTO identities(account_id, display_name, email_address, signature, is_primary)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+            )?;
+            for identity in &account.identities {
+                insert_identity.execute(params![
+                    account_id,
+                    identity.display_name,
+                    identity.email_address,
+                    identity.signature,
+                    identity.is_primary,
+                ])?;
+            }
+        }
+
+        transaction.execute(
+            r#"
+            INSERT INTO sync_state(account_id, phase, detail, checkpoint, failure_count)
+            VALUES (?1, ?2, ?3, NULL, 0)
+            "#,
+            params![
+                account_id,
+                SyncPhase::Idle.as_str(),
+                format!("{} account created locally", account.protocol.label()),
+            ],
+        )?;
+
+        transaction
+            .commit()
+            .context("failed to commit the new account transaction")?;
+
+        Ok(account_id)
+    }
+
+    /// Creates a deterministic demo account template for Phase 2 onboarding.
+    pub fn create_demo_account(&self, protocol: ProtocolKind) -> Result<i64> {
+        let ordinal = self.demo_account_ordinal(protocol)?;
+        let display_name = match protocol {
+            ProtocolKind::Imap => format!("Operations IMAP {ordinal}"),
+            ProtocolKind::Jmap => format!("Workspace JMAP {ordinal}"),
+        };
+        let username = match protocol {
+            ProtocolKind::Imap => format!("ops{ordinal}@zmail.dev"),
+            ProtocolKind::Jmap => format!("workspace{ordinal}@zmail.dev"),
+        };
+        let endpoint = match protocol {
+            ProtocolKind::Imap => format!("imap{ordinal}.mail.zmail.dev:993"),
+            ProtocolKind::Jmap => format!("https://jmap{ordinal}.mail.zmail.dev/jmap"),
+        };
+        let primary_name = match protocol {
+            ProtocolKind::Imap => "Operations Desk",
+            ProtocolKind::Jmap => "Workspace Team",
+        };
+        let secondary_name = match protocol {
+            ProtocolKind::Imap => "Incident Response",
+            ProtocolKind::Jmap => "Automations",
+        };
+
+        let account = NewAccount {
+            display_name,
+            protocol,
+            endpoint,
+            username: username.clone(),
+            cache_policy: CachePolicySummary::performance_first(),
+            outgoing: Some(match protocol {
+                ProtocolKind::Imap => {
+                    OutgoingConfig::smtp_default(format!("smtp{ordinal}.mail.zmail.dev"))
+                }
+                ProtocolKind::Jmap => OutgoingConfig::jmap_default(),
+            }),
+            identities: vec![
+                zmail_core::NewIdentity {
+                    display_name: primary_name.to_owned(),
+                    email_address: username.clone(),
+                    signature: format!("Regards,\n{primary_name}"),
+                    is_primary: true,
+                },
+                zmail_core::NewIdentity {
+                    display_name: secondary_name.to_owned(),
+                    email_address: match protocol {
+                        ProtocolKind::Imap => format!("alerts{ordinal}@zmail.dev"),
+                        ProtocolKind::Jmap => format!("flows{ordinal}@zmail.dev"),
+                    },
+                    signature: format!("Thanks,\n{secondary_name}"),
+                    is_primary: false,
+                },
+            ],
+        };
+
+        self.insert_account(&account)
+    }
+
+    /// Returns the list of configured accounts and their sync status.
+    pub fn list_accounts(&self) -> Result<Vec<AccountSummary>> {
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            r#"
+            SELECT
+                accounts.id,
+                accounts.display_name,
+                accounts.protocol_kind,
+                accounts.endpoint,
+                accounts.username,
+                accounts.cache_policy_name,
+                accounts.cache_policy_description,
+                COUNT(identities.id) AS identity_count,
+                sync_state.phase,
+                sync_state.detail,
+                sync_state.checkpoint,
+                sync_state.last_attempt_at,
+                sync_state.last_success_at,
+                sync_state.last_error_at,
+                sync_state.last_error_message,
+                sync_state.failure_count
+            FROM accounts
+            LEFT JOIN identities ON identities.account_id = accounts.id
+            LEFT JOIN sync_state ON sync_state.account_id = accounts.id
+            GROUP BY
+                accounts.id,
+                accounts.display_name,
+                accounts.protocol_kind,
+                accounts.endpoint,
+                accounts.username,
+                accounts.cache_policy_name,
+                accounts.cache_policy_description,
+                sync_state.phase,
+                sync_state.detail,
+                sync_state.checkpoint,
+                sync_state.last_attempt_at,
+                sync_state.last_success_at,
+                sync_state.last_error_at,
+                sync_state.last_error_message,
+                sync_state.failure_count
+            ORDER BY accounts.id ASC
+            "#,
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            let protocol = protocol_from_db(row.get::<_, String>(2)?)?;
+            let phase_value = row
+                .get::<_, Option<String>>(8)?
+                .unwrap_or_else(|| SyncPhase::Idle.as_str().to_owned());
+            let phase = sync_phase_from_db(phase_value)?;
+            Ok(AccountSummary {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                protocol,
+                endpoint: row.get(3)?,
+                username: row.get(4)?,
+                identity_count: row.get::<_, usize>(7)?,
+                cache_policy: CachePolicySummary {
+                    name: row.get(5)?,
+                    description: row.get(6)?,
+                },
+                sync_status: SyncStatusSummary {
+                    phase,
+                    detail: row
+                        .get::<_, Option<String>>(9)?
+                        .unwrap_or_else(|| "Awaiting first sync".to_owned()),
+                    checkpoint: row.get(10)?,
+                    last_attempt_at: row.get(11)?,
+                    last_success_at: row.get(12)?,
+                    last_error_at: row.get(13)?,
+                    last_error_message: row.get(14)?,
+                    failure_count: row.get::<_, Option<usize>>(15)?.unwrap_or_default(),
+                },
+            })
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list configured accounts")
+    }
+
+    /// Returns a sync target by account identifier.
+    pub fn sync_target(&self, account_id: i64) -> Result<Option<SyncTarget>> {
+        let conn = self.connection()?;
+        let account = conn
+            .query_row(
+                r#"
+                SELECT
+                    id,
+                    display_name,
+                    protocol_kind,
+                    endpoint,
+                    username,
+                    cache_policy_name,
+                    cache_policy_description
+                FROM accounts
+                WHERE id = ?1
+                "#,
+                params![account_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        protocol_from_db(row.get::<_, String>(2)?)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("failed to load the sync target")?;
+
+        let Some((id, display_name, protocol, endpoint, username, policy_name, policy_description)) =
+            account
+        else {
+            return Ok(None);
+        };
+
+        let identities = load_identities(&conn, id)?;
+        let checkpoint = conn
+            .query_row(
+                "SELECT checkpoint FROM sync_state WHERE account_id = ?1",
+                params![id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .context("failed to load the sync checkpoint")?
+            .flatten();
+
+        Ok(Some(SyncTarget {
+            id,
+            display_name,
+            protocol,
+            endpoint,
+            username,
+            cache_policy: CachePolicySummary {
+                name: policy_name,
+                description: policy_description,
+            },
+            identities,
+            checkpoint,
+        }))
+    }
+
+    /// Returns all sync targets in account order.
+    pub fn list_sync_targets(&self) -> Result<Vec<SyncTarget>> {
+        let account_ids = self
+            .list_accounts()?
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>();
+        let mut targets = Vec::with_capacity(account_ids.len());
+        for account_id in account_ids {
+            if let Some(target) = self.sync_target(account_id)? {
+                targets.push(target);
+            }
+        }
+        Ok(targets)
+    }
+
+    /// Returns the identities configured for an account.
+    pub fn list_identities(&self, account_id: i64) -> Result<Vec<IdentitySummary>> {
+        let conn = self.connection()?;
+        load_identities(&conn, account_id)
+    }
+
+    /// Returns the selected account overview used by the shell header.
+    pub fn account_overview(&self, account_id: i64) -> Result<Option<AccountOverview>> {
+        let accounts = self.list_accounts()?;
+        Ok(accounts
+            .into_iter()
+            .find(|account| account.id == account_id)
+            .map(|account| AccountOverview {
+                id: account.id,
+                display_name: account.display_name,
+                identity_count: account.identity_count,
+                cache_policy: account.cache_policy,
+            }))
+    }
+
+    /// Returns global store counts for the header.
+    pub fn stats(&self) -> Result<StoreStats> {
+        let conn = self.connection()?;
+        let account_count = query_count(&conn, "SELECT COUNT(*) FROM accounts")
+            .context("failed to count accounts")?;
+        let mailbox_count = query_count(&conn, "SELECT COUNT(*) FROM mailboxes")
+            .context("failed to count mailboxes")?;
+        let thread_count = query_count(&conn, "SELECT COUNT(*) FROM threads")
+            .context("failed to count threads")?;
+        let message_count = query_count(&conn, "SELECT COUNT(*) FROM messages")
+            .context("failed to count messages")?;
+
+        Ok(StoreStats {
+            account_count,
+            mailbox_count,
+            thread_count,
+            message_count,
+        })
+    }
+
+    /// Lists mailboxes for a single account in display order.
+    pub fn list_mailboxes(&self, account_id: i64) -> Result<Vec<MailboxSummary>> {
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            r#"
+            SELECT id, name, total_threads, unread_threads
+            FROM mailboxes
+            WHERE account_id = ?1
+            ORDER BY sort_order ASC, name ASC
+            "#,
+        )?;
+
+        let rows = statement.query_map(params![account_id], |row| {
+            Ok(MailboxSummary {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                total_threads: row.get::<_, usize>(2)?,
+                unread_threads: row.get::<_, usize>(3)?,
+            })
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list mailboxes")
+    }
+
+    /// Exports the current local mailbox mirror for an account.
+    pub fn account_mailbox_snapshots(&self, account_id: i64) -> Result<Vec<MailboxSnapshot>> {
+        let conn = self.connection()?;
+        let mailbox_rows = conn
+            .prepare(
+                r#"
+                SELECT id, name, role
+                FROM mailboxes
+                WHERE account_id = ?1
+                ORDER BY sort_order ASC, name ASC
+                "#,
+            )?
+            .query_map(params![account_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list mailbox snapshots")?;
+
+        let mut mailboxes = Vec::with_capacity(mailbox_rows.len());
+        for (mailbox_id, name, role) in mailbox_rows {
+            let thread_rows = conn
+                .prepare(
+                    r#"
+                    SELECT id, subject, participants, preview, is_flagged, unread_count, latest_message_at
+                    FROM threads
+                    WHERE mailbox_id = ?1
+                    ORDER BY latest_message_at DESC, id DESC
+                    "#,
+                )?
+                .query_map(params![mailbox_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, bool>(4)?,
+                        row.get::<_, usize>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to list thread snapshots")?;
+
+            let mut threads = Vec::with_capacity(thread_rows.len());
+            for (
+                thread_id,
+                subject,
+                participants,
+                preview,
+                is_flagged,
+                unread_count,
+                latest_message_at,
+            ) in thread_rows
+            {
+                let messages = conn
+                    .prepare(
+                        r#"
+                        SELECT
+                            identities.email_address,
+                            messages.sender,
+                            messages.recipients,
+                            messages.subject,
+                            messages.body_preview,
+                            messages.body_text,
+                            messages.sanitized_html,
+                            messages.has_remote_content,
+                            messages.is_read,
+                            messages.is_flagged,
+                            messages.received_at
+                        FROM messages
+                        JOIN identities ON identities.id = messages.identity_id
+                        WHERE messages.thread_id = ?1
+                        ORDER BY messages.received_at ASC, messages.id ASC
+                        "#,
+                    )?
+                    .query_map(params![thread_id], |row| {
+                        Ok(MessageSnapshot {
+                            identity_email: row.get(0)?,
+                            sender: row.get(1)?,
+                            recipients: row.get(2)?,
+                            subject: row.get(3)?,
+                            body_preview: row.get(4)?,
+                            body_text: row.get(5)?,
+                            sanitized_html: row.get(6)?,
+                            has_remote_content: row.get::<_, bool>(7)?,
+                            is_read: row.get::<_, bool>(8)?,
+                            is_flagged: row.get::<_, bool>(9)?,
+                            received_at: row.get(10)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .context("failed to list message snapshots")?;
+
+                threads.push(ThreadSnapshot {
+                    subject,
+                    participants,
+                    preview,
+                    is_flagged,
+                    unread_count,
+                    latest_message_at,
+                    messages,
+                });
+            }
+
+            mailboxes.push(MailboxSnapshot {
+                name,
+                role,
+                threads,
+            });
+        }
+
+        Ok(mailboxes)
+    }
+
+    /// Lists a visible range of threads for a mailbox, ordered by newest first.
+    pub fn list_threads(&self, mailbox_id: i64, range: Range<usize>) -> Result<Vec<ThreadSummary>> {
+        let limit = range.end.saturating_sub(range.start) as i64;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            r#"
+            SELECT
+                id,
+                subject,
+                participants,
+                preview,
+                message_count,
+                unread_count,
+                latest_message_at
+            FROM threads
+            WHERE mailbox_id = ?1
+            ORDER BY latest_message_at DESC, id DESC
+            LIMIT ?2 OFFSET ?3
+            "#,
+        )?;
+
+        let rows = statement.query_map(params![mailbox_id, limit, range.start as i64], |row| {
+            Ok(ThreadSummary {
+                id: row.get(0)?,
+                subject: row.get(1)?,
+                participants: row.get(2)?,
+                preview: row.get(3)?,
+                message_count: row.get::<_, usize>(4)?,
+                unread_count: row.get::<_, usize>(5)?,
+                latest_message_at: row.get(6)?,
+            })
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load a thread range")
+    }
+
+    /// Returns the first thread identifier for a mailbox, if one exists.
+    pub fn first_thread_id(&self, mailbox_id: i64) -> Result<Option<i64>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            r#"
+            SELECT id
+            FROM threads
+            WHERE mailbox_id = ?1
+            ORDER BY latest_message_at DESC, id DESC
+            LIMIT 1
+            "#,
+            params![mailbox_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("failed to query the first thread id")
+    }
+
+    /// Loads the latest message preview for the selected thread.
+    pub fn message_preview(&self, thread_id: i64) -> Result<Option<MessagePreview>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            r#"
+            SELECT
+                mailboxes.name,
+                threads.subject,
+                messages.sender,
+                threads.participants,
+                identities.display_name,
+                messages.body_preview,
+                threads.message_count,
+                threads.unread_count,
+                threads.latest_message_at
+            FROM threads
+            JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+            JOIN messages ON messages.id = threads.latest_message_id
+            JOIN identities ON identities.id = messages.identity_id
+            WHERE threads.id = ?1
+            "#,
+            params![thread_id],
+            |row| {
+                Ok(MessagePreview {
+                    mailbox_name: row.get(0)?,
+                    subject: row.get(1)?,
+                    sender: row.get(2)?,
+                    participants: row.get(3)?,
+                    identity_name: row.get(4)?,
+                    body_preview: row.get(5)?,
+                    message_count: row.get::<_, usize>(6)?,
+                    unread_count: row.get::<_, usize>(7)?,
+                    latest_message_at: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .context("failed to load the message preview")
+    }
+
+    /// Loads the full hydrated thread view for the Phase 3 reader.
+    pub fn thread_view(&self, thread_id: i64) -> Result<Option<ThreadView>> {
+        let conn = self.connection()?;
+        let thread = conn
+            .query_row(
+                r#"
+                SELECT
+                    threads.id,
+                    mailboxes.id,
+                    mailboxes.name,
+                    threads.subject,
+                    threads.participants,
+                    threads.message_count,
+                    threads.unread_count,
+                    threads.is_flagged
+                FROM threads
+                JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+                WHERE threads.id = ?1
+                "#,
+                params![thread_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, usize>(5)?,
+                        row.get::<_, usize>(6)?,
+                        row.get::<_, bool>(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("failed to load the thread header")?;
+
+        let Some((
+            thread_id,
+            mailbox_id,
+            mailbox_name,
+            subject,
+            participants,
+            message_count,
+            unread_count,
+            is_flagged,
+        )) = thread
+        else {
+            return Ok(None);
+        };
+
+        let mut statement = conn.prepare(
+            r#"
+            SELECT
+                messages.id,
+                messages.sender,
+                messages.recipients,
+                messages.subject,
+                messages.body_preview,
+                messages.body_text,
+                messages.sanitized_html,
+                messages.is_read,
+                messages.is_flagged,
+                messages.has_remote_content,
+                messages.received_at
+            FROM messages
+            WHERE messages.thread_id = ?1
+            ORDER BY messages.received_at ASC, messages.id ASC
+            "#,
+        )?;
+
+        let messages = statement
+            .query_map(params![thread_id], |row| {
+                let body_preview = row.get::<_, String>(4)?;
+                let body_text = row.get::<_, Option<String>>(5)?;
+                let sanitized_html = row.get::<_, Option<String>>(6)?;
+                let (rendered_body, render_mode) = renderable_body(
+                    &body_preview,
+                    body_text.as_deref(),
+                    sanitized_html.as_deref(),
+                );
+
+                Ok(ThreadMessage {
+                    id: row.get(0)?,
+                    sender: row.get(1)?,
+                    recipients: row.get(2)?,
+                    subject: row.get(3)?,
+                    body_preview,
+                    body_text,
+                    sanitized_html,
+                    rendered_body,
+                    render_mode,
+                    is_read: row.get::<_, bool>(7)?,
+                    is_flagged: row.get::<_, bool>(8)?,
+                    has_remote_content: row.get::<_, bool>(9)?,
+                    received_at: row.get(10)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load hydrated thread messages")?;
+
+        let has_remote_content = messages.iter().any(|message| message.has_remote_content);
+
+        Ok(Some(ThreadView {
+            id: thread_id,
+            mailbox_id,
+            mailbox_name,
+            subject,
+            participants,
+            message_count,
+            unread_count,
+            is_flagged,
+            has_remote_content,
+            messages,
+        }))
+    }
+
+    /// Runs a local full-text search against the selected account.
+    pub fn search_threads(
+        &self,
+        account_id: i64,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let Some(compiled_query) = build_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            r#"
+            SELECT
+                threads.mailbox_id,
+                mailboxes.name,
+                threads.id,
+                threads.subject,
+                threads.participants,
+                threads.preview,
+                threads.unread_count,
+                threads.is_flagged,
+                threads.latest_message_at
+            FROM search_documents
+            JOIN threads ON threads.id = search_documents.thread_id
+            JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+            WHERE search_documents.account_id = ?1
+              AND search_documents MATCH ?2
+            ORDER BY bm25(search_documents), threads.latest_message_at DESC
+            LIMIT ?3
+            "#,
+        )?;
+
+        let rows =
+            statement.query_map(params![account_id, compiled_query, limit as i64], |row| {
+                Ok(SearchHit {
+                    mailbox_id: row.get(0)?,
+                    mailbox_name: row.get(1)?,
+                    thread_id: row.get(2)?,
+                    subject: row.get(3)?,
+                    participants: row.get(4)?,
+                    preview: row.get(5)?,
+                    unread_count: row.get::<_, usize>(6)?,
+                    is_flagged: row.get::<_, bool>(7)?,
+                    latest_message_at: row.get(8)?,
+                })
+            })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to search threads")
+    }
+
+    /// Records a sync phase transition for an account.
+    pub fn begin_sync_attempt(
+        &self,
+        account_id: i64,
+        phase: SyncPhase,
+        detail: impl AsRef<str>,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            r#"
+            UPDATE sync_state
+            SET
+                phase = ?2,
+                detail = ?3,
+                last_attempt_at = ?4
+            WHERE account_id = ?1
+            "#,
+            params![
+                account_id,
+                phase.as_str(),
+                detail.as_ref(),
+                pseudo_now_timestamp()
+            ],
+        )
+        .with_context(|| format!("failed to update sync phase for account {account_id}"))?;
+        Ok(())
+    }
+
+    /// Records an automatic retry backoff after a failed attempt.
+    pub fn record_sync_backoff(
+        &self,
+        account_id: i64,
+        detail: impl AsRef<str>,
+        error: impl AsRef<str>,
+    ) -> Result<()> {
+        self.record_sync_error(account_id, SyncPhase::Backoff, detail, error)
+    }
+
+    /// Records a terminal sync failure.
+    pub fn record_sync_failure(
+        &self,
+        account_id: i64,
+        detail: impl AsRef<str>,
+        error: impl AsRef<str>,
+    ) -> Result<()> {
+        self.record_sync_error(account_id, SyncPhase::Failed, detail, error)
+    }
+
+    /// Applies a synced mailbox snapshot for an account.
+    pub fn replace_account_snapshot(
+        &self,
+        account_id: i64,
+        snapshot: &AccountSyncSnapshot,
+    ) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the snapshot transaction")?;
+
+        transaction.execute(
+            "DELETE FROM mailboxes WHERE account_id = ?1",
+            params![account_id],
+        )?;
+
+        if let Some(identities) = &snapshot.identities {
+            replace_account_identities(&transaction, account_id, identities)?;
+        }
+
+        let identity_map = identity_id_map(&transaction, account_id)?;
+        let fallback_identity_id = identity_map
+            .values()
+            .next()
+            .copied()
+            .context("cannot apply a mailbox snapshot without identities")?;
+
+        {
+            let mut insert_mailbox = transaction.prepare(
+                r#"
+                INSERT INTO mailboxes(account_id, name, role, sort_order, total_threads, unread_threads)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+            )?;
+            let mut insert_thread = transaction.prepare(
+                r#"
+                INSERT INTO threads(
+                    mailbox_id,
+                    subject,
+                    participants,
+                    preview,
+                    is_flagged,
+                    message_count,
+                    unread_count,
+                    latest_message_at,
+                    latest_message_id
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)
+                "#,
+            )?;
+            let mut update_thread =
+                transaction.prepare("UPDATE threads SET latest_message_id = ?2 WHERE id = ?1")?;
+            let mut insert_message = transaction.prepare(
+                r#"
+                INSERT INTO messages(
+                    thread_id,
+                    identity_id,
+                    sender,
+                    recipients,
+                    subject,
+                    body_preview,
+                    body_text,
+                    sanitized_html,
+                    has_remote_content,
+                    is_read,
+                    is_flagged,
+                    received_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                "#,
+            )?;
+
+            for (sort_order, mailbox) in snapshot.mailboxes.iter().enumerate() {
+                let unread_threads = mailbox
+                    .threads
+                    .iter()
+                    .filter(|thread| thread.unread_count > 0)
+                    .count();
+                insert_mailbox.execute(params![
+                    account_id,
+                    mailbox.name,
+                    mailbox.role,
+                    sort_order as i64,
+                    mailbox.threads.len() as i64,
+                    unread_threads as i64,
+                ])?;
+                let mailbox_id = transaction.last_insert_rowid();
+
+                for thread in &mailbox.threads {
+                    if thread.messages.is_empty() {
+                        continue;
+                    }
+
+                    insert_thread.execute(params![
+                        mailbox_id,
+                        thread.subject,
+                        thread.participants,
+                        thread.preview,
+                        thread.is_flagged,
+                        thread.messages.len() as i64,
+                        thread.unread_count as i64,
+                        thread.latest_message_at,
+                    ])?;
+                    let thread_id = transaction.last_insert_rowid();
+
+                    let mut latest_message_id = None;
+                    for message in &thread.messages {
+                        let identity_id = identity_map
+                            .get(message.identity_email.as_str())
+                            .copied()
+                            .unwrap_or(fallback_identity_id);
+                        insert_message.execute(params![
+                            thread_id,
+                            identity_id,
+                            message.sender,
+                            message.recipients,
+                            message.subject,
+                            message.body_preview,
+                            message.body_text,
+                            message.sanitized_html,
+                            message.has_remote_content,
+                            message.is_read,
+                            message.is_flagged,
+                            message.received_at,
+                        ])?;
+                        latest_message_id = Some(transaction.last_insert_rowid());
+                    }
+
+                    if let Some(latest_message_id) = latest_message_id {
+                        update_thread.execute(params![thread_id, latest_message_id])?;
+                    }
+                }
+            }
+        }
+
+        transaction
+            .commit()
+            .context("failed to commit the snapshot transaction")?;
+        self.refresh_account_search_index(account_id)
+    }
+
+    /// Records a successful sync and resets the failure counter.
+    pub fn record_sync_success(
+        &self,
+        account_id: i64,
+        detail: impl AsRef<str>,
+        checkpoint: impl AsRef<str>,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        let now = pseudo_now_timestamp();
+        conn.execute(
+            r#"
+            UPDATE sync_state
+            SET
+                phase = ?2,
+                detail = ?3,
+                checkpoint = ?4,
+                last_success_at = ?5,
+                last_error_at = NULL,
+                last_error_message = NULL,
+                failure_count = 0
+            WHERE account_id = ?1
+            "#,
+            params![
+                account_id,
+                SyncPhase::Idle.as_str(),
+                detail.as_ref(),
+                checkpoint.as_ref(),
+                now,
+            ],
+        )
+        .with_context(|| format!("failed to record sync success for account {account_id}"))?;
+        Ok(())
+    }
+
+    /// Returns the first mailbox id for the role on the selected account.
+    pub fn mailbox_id_by_role(&self, account_id: i64, role: &str) -> Result<Option<i64>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            r#"
+            SELECT id
+            FROM mailboxes
+            WHERE account_id = ?1 AND lower(role) = lower(?2)
+            ORDER BY sort_order ASC, id ASC
+            LIMIT 1
+            "#,
+            params![account_id, role],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("failed to load mailbox by role")
+    }
+
+    /// Marks every message in the thread as flagged or unflagged locally.
+    pub fn set_thread_flagged(&self, thread_id: i64, flagged: bool) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE messages SET is_flagged = ?2 WHERE thread_id = ?1",
+            params![thread_id, flagged],
+        )
+        .with_context(|| format!("failed to update message flags for thread {thread_id}"))?;
+        conn.execute(
+            "UPDATE threads SET is_flagged = ?2 WHERE id = ?1",
+            params![thread_id, flagged],
+        )
+        .with_context(|| format!("failed to update thread flag state for thread {thread_id}"))?;
+        Ok(())
+    }
+
+    /// Marks every message in the thread as read or unread locally.
+    pub fn set_thread_read(&self, thread_id: i64, read: bool) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the read-state transaction")?;
+        let Some(location) = thread_location(&transaction, thread_id)? else {
+            return Ok(());
+        };
+
+        let next_unread_count = if read { 0 } else { location.message_count };
+        transaction.execute(
+            "UPDATE messages SET is_read = ?2 WHERE thread_id = ?1",
+            params![thread_id, read],
+        )?;
+        transaction.execute(
+            "UPDATE threads SET unread_count = ?2 WHERE id = ?1",
+            params![thread_id, next_unread_count as i64],
+        )?;
+        update_mailbox_unread_threads(
+            &transaction,
+            location.mailbox_id,
+            location.unread_count > 0,
+            next_unread_count > 0,
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the read-state transaction")
+    }
+
+    /// Moves a thread between local mailboxes on the same account.
+    pub fn move_thread(&self, thread_id: i64, destination_mailbox_id: i64) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the move transaction")?;
+        let Some(location) = thread_location(&transaction, thread_id)? else {
+            return Ok(());
+        };
+
+        if location.mailbox_id == destination_mailbox_id {
+            return Ok(());
+        }
+
+        let Some(destination) = mailbox_identity(&transaction, destination_mailbox_id)? else {
+            bail!("destination mailbox {destination_mailbox_id} does not exist");
+        };
+        if destination.account_id != location.account_id {
+            bail!("threads can only move within the same account");
+        }
+
+        move_thread_in_transaction(
+            &transaction,
+            thread_id,
+            &location,
+            destination_mailbox_id,
+            destination.role.as_deref(),
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the move transaction")?;
+        self.refresh_account_search_index(location.account_id)
+    }
+
+    /// Moves a thread into the archive mailbox when one exists.
+    pub fn archive_thread(&self, thread_id: i64) -> Result<()> {
+        let Some(location) = self.thread_location(thread_id)? else {
+            return Ok(());
+        };
+        let Some(archive_mailbox_id) = self.mailbox_id_by_role(location.account_id, "archive")?
+        else {
+            bail!(
+                "no archive mailbox exists for account {}",
+                location.account_id
+            );
+        };
+        self.move_thread(thread_id, archive_mailbox_id)
+    }
+
+    /// Deletes a thread locally, preferring the trash mailbox when one exists.
+    pub fn delete_thread(&self, thread_id: i64) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the delete transaction")?;
+        let Some(location) = thread_location(&transaction, thread_id)? else {
+            return Ok(());
+        };
+
+        let trash_mailbox = mailbox_id_by_role(&transaction, location.account_id, "trash")?;
+        let source_mailbox = mailbox_identity(&transaction, location.mailbox_id)?
+            .context("source mailbox should exist for the thread being deleted")?;
+
+        if let Some(trash_mailbox_id) = trash_mailbox
+            && trash_mailbox_id != location.mailbox_id
+        {
+            move_thread_in_transaction(
+                &transaction,
+                thread_id,
+                &location,
+                trash_mailbox_id,
+                Some("trash"),
+            )?;
+            transaction
+                .commit()
+                .context("failed to commit the trash move transaction")?;
+            return self.refresh_account_search_index(location.account_id);
+        }
+
+        transaction.execute("DELETE FROM threads WHERE id = ?1", params![thread_id])?;
+        transaction.execute(
+            r#"
+            UPDATE mailboxes
+            SET
+                total_threads = MAX(total_threads - 1, 0),
+                unread_threads = MAX(unread_threads - ?2, 0)
+            WHERE id = ?1
+            "#,
+            params![source_mailbox.id, i64::from(location.unread_count > 0)],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the delete transaction")?;
+        self.refresh_account_search_index(location.account_id)
+    }
+
+    /// Creates a new local draft and returns its identifier.
+    pub fn create_draft(&self, draft: &NewDraft) -> Result<i64> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the draft creation transaction")?;
+        let identity = load_identity_snapshot(&transaction, draft.account_id, draft.identity_id)?
+            .with_context(|| {
+            format!(
+                "identity {} does not belong to account {}",
+                draft.identity_id, draft.account_id
+            )
+        })?;
+        let now = pseudo_now_timestamp();
+        let body = apply_default_signature(&draft.body, &identity.signature);
+        transaction.execute(
+            r#"
+            INSERT INTO drafts(
+                account_id,
+                identity_id,
+                identity_name,
+                identity_email,
+                identity_signature,
+                state,
+                to_json,
+                cc_json,
+                bcc_json,
+                subject,
+                body,
+                last_error_message,
+                created_at,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13)
+            "#,
+            params![
+                draft.account_id,
+                identity.id,
+                identity.display_name,
+                identity.email_address,
+                identity.signature,
+                DraftState::Editing.as_str(),
+                recipients_to_json(&draft.to)?,
+                recipients_to_json(&draft.cc)?,
+                recipients_to_json(&draft.bcc)?,
+                draft.subject,
+                body,
+                now,
+                now,
+            ],
+        )?;
+        let draft_id = transaction.last_insert_rowid();
+        transaction
+            .commit()
+            .context("failed to commit the draft creation transaction")?;
+        Ok(draft_id)
+    }
+
+    /// Lists drafts for one account or across the workspace when no filter is supplied.
+    pub fn list_drafts(&self, account_id: Option<i64>) -> Result<Vec<DraftSummary>> {
+        let conn = self.connection()?;
+        let sql = r#"
+            SELECT
+                drafts.id,
+                drafts.account_id,
+                drafts.identity_id,
+                drafts.identity_name,
+                drafts.to_json,
+                drafts.cc_json,
+                drafts.bcc_json,
+                drafts.subject,
+                drafts.state,
+                drafts.updated_at,
+                COUNT(draft_attachments.id) AS attachment_count
+            FROM drafts
+            LEFT JOIN draft_attachments ON draft_attachments.draft_id = drafts.id
+            WHERE (?1 IS NULL OR drafts.account_id = ?1)
+            GROUP BY
+                drafts.id,
+                drafts.account_id,
+                drafts.identity_id,
+                drafts.identity_name,
+                drafts.to_json,
+                drafts.cc_json,
+                drafts.bcc_json,
+                drafts.subject,
+                drafts.state,
+                drafts.updated_at
+            ORDER BY drafts.updated_at DESC, drafts.id DESC
+        "#;
+        let mut statement = conn.prepare(sql)?;
+        let rows = statement.query_map(params![account_id], |row| {
+            let to = recipients_from_json(row.get::<_, String>(4)?).map_err(to_from_sql_error)?;
+            let cc = recipients_from_json(row.get::<_, String>(5)?).map_err(to_from_sql_error)?;
+            let bcc = recipients_from_json(row.get::<_, String>(6)?).map_err(to_from_sql_error)?;
+            Ok(DraftSummary {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                identity_id: row.get(2)?,
+                identity_name: row.get(3)?,
+                recipient_summary: summarize_recipients(&to, &cc, &bcc),
+                subject: row.get(7)?,
+                state: draft_state_from_db(row.get::<_, String>(8)?)?,
+                updated_at: row.get(9)?,
+                attachment_count: row.get::<_, usize>(10)?,
+            })
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list drafts")
+    }
+
+    /// Loads the full draft detail for compose and send.
+    pub fn draft_detail(&self, draft_id: i64) -> Result<Option<DraftDetail>> {
+        let conn = self.connection()?;
+        let draft = conn
+            .query_row(
+                r#"
+                SELECT
+                    id,
+                    account_id,
+                    identity_id,
+                    identity_name,
+                    identity_email,
+                    identity_signature,
+                    state,
+                    to_json,
+                    cc_json,
+                    bcc_json,
+                    subject,
+                    body,
+                    updated_at,
+                    queued_at,
+                    sent_at,
+                    last_error_message
+                FROM drafts
+                WHERE id = ?1
+                "#,
+                params![draft_id],
+                |row| {
+                    Ok(DraftDetail {
+                        id: row.get(0)?,
+                        account_id: row.get(1)?,
+                        identity_id: row.get(2)?,
+                        identity_name: row.get(3)?,
+                        identity_email: row.get(4)?,
+                        identity_signature: row.get(5)?,
+                        state: draft_state_from_db(row.get::<_, String>(6)?)?,
+                        to: recipients_from_json(row.get::<_, String>(7)?)
+                            .map_err(to_from_sql_error)?,
+                        cc: recipients_from_json(row.get::<_, String>(8)?)
+                            .map_err(to_from_sql_error)?,
+                        bcc: recipients_from_json(row.get::<_, String>(9)?)
+                            .map_err(to_from_sql_error)?,
+                        subject: row.get(10)?,
+                        body: row.get(11)?,
+                        attachments: Vec::new(),
+                        updated_at: row.get(12)?,
+                        queued_at: row.get(13)?,
+                        sent_at: row.get(14)?,
+                        last_error_message: row.get(15)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load the draft detail")?;
+
+        let Some(mut draft) = draft else {
+            return Ok(None);
+        };
+        draft.attachments = load_draft_attachments(&conn, draft_id)?;
+        Ok(Some(draft))
+    }
+
+    /// Persists an autosave update for a draft.
+    pub fn update_draft(&self, draft_id: i64, update: &DraftUpdate) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the draft autosave transaction")?;
+        let (account_id, state) = transaction
+            .query_row(
+                "SELECT account_id, state FROM drafts WHERE id = ?1",
+                params![draft_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        draft_state_from_db(row.get::<_, String>(1)?)?,
+                    ))
+                },
+            )
+            .optional()?
+            .with_context(|| format!("draft {draft_id} does not exist"))?;
+        ensure_draft_is_editable(state)?;
+        let identity = load_identity_snapshot(&transaction, account_id, update.identity_id)?
+            .with_context(|| {
+                format!(
+                    "identity {} does not belong to account {}",
+                    update.identity_id, account_id
+                )
+            })?;
+        let now = pseudo_now_timestamp();
+        let next_body = if update.body.trim().is_empty() {
+            apply_default_signature(&update.body, &identity.signature)
+        } else {
+            update.body.clone()
+        };
+        transaction.execute(
+            r#"
+            UPDATE drafts
+            SET
+                identity_id = ?2,
+                identity_name = ?3,
+                identity_email = ?4,
+                identity_signature = ?5,
+                state = ?6,
+                to_json = ?7,
+                cc_json = ?8,
+                bcc_json = ?9,
+                subject = ?10,
+                body = ?11,
+                last_error_message = NULL,
+                updated_at = ?12
+            WHERE id = ?1
+            "#,
+            params![
+                draft_id,
+                identity.id,
+                identity.display_name,
+                identity.email_address,
+                identity.signature,
+                DraftState::Editing.as_str(),
+                recipients_to_json(&update.to)?,
+                recipients_to_json(&update.cc)?,
+                recipients_to_json(&update.bcc)?,
+                update.subject,
+                next_body,
+                now,
+            ],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the draft autosave transaction")
+    }
+
+    /// Adds an attachment to a local draft.
+    pub fn add_draft_attachment(
+        &self,
+        draft_id: i64,
+        source_path: impl AsRef<Path>,
+    ) -> Result<DraftAttachment> {
+        let source_path = source_path.as_ref();
+        let filename = source_path
+            .file_name()
+            .and_then(|filename| filename.to_str())
+            .with_context(|| format!("attachment path {} has no filename", source_path.display()))?
+            .to_owned();
+        let metadata = fs::metadata(source_path)
+            .with_context(|| format!("failed to inspect {}", source_path.display()))?;
+        let size_bytes = metadata.len();
+        let content_type = guess_content_type(source_path);
+        let storage_path = self.attachment_storage_dir().join(format!(
+            "draft-{draft_id}-{}-{}",
+            EPHEMERAL_COUNTER.fetch_add(1, Ordering::Relaxed),
+            sanitize_filename(&filename)
+        ));
+        if let Some(parent) = storage_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::copy(source_path, &storage_path).with_context(|| {
+            format!(
+                "failed to copy attachment {} into {}",
+                source_path.display(),
+                storage_path.display()
+            )
+        })?;
+
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the attachment transaction")?;
+        let state = transaction
+            .query_row(
+                "SELECT state FROM drafts WHERE id = ?1",
+                params![draft_id],
+                |row| draft_state_from_db(row.get::<_, String>(0)?),
+            )
+            .optional()?
+            .with_context(|| format!("draft {draft_id} does not exist"))?;
+        ensure_draft_is_editable(state)?;
+        let now = pseudo_now_timestamp();
+        transaction.execute(
+            r#"
+            INSERT INTO draft_attachments(
+                draft_id,
+                filename,
+                content_type,
+                size_bytes,
+                original_path,
+                storage_path,
+                created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                draft_id,
+                filename,
+                content_type,
+                size_bytes as i64,
+                source_path.display().to_string(),
+                storage_path.display().to_string(),
+                now,
+            ],
+        )?;
+        let attachment_id = transaction.last_insert_rowid();
+        transaction.execute(
+            "UPDATE drafts SET state = ?2, last_error_message = NULL, updated_at = ?3 WHERE id = ?1",
+            params![draft_id, DraftState::Editing.as_str(), now],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the attachment transaction")?;
+
+        Ok(DraftAttachment {
+            id: attachment_id,
+            filename,
+            content_type,
+            size_bytes,
+            original_path: source_path.display().to_string(),
+            storage_path: storage_path.display().to_string(),
+        })
+    }
+
+    /// Removes an attachment from a draft and deletes its stored copy.
+    pub fn remove_draft_attachment(&self, attachment_id: i64) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the attachment removal transaction")?;
+        let attachment = transaction
+            .query_row(
+                r#"
+                SELECT
+                    draft_attachments.draft_id,
+                    draft_attachments.storage_path,
+                    drafts.state
+                FROM draft_attachments
+                JOIN drafts ON drafts.id = draft_attachments.draft_id
+                WHERE draft_attachments.id = ?1
+                "#,
+                params![attachment_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        draft_state_from_db(row.get::<_, String>(2)?)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((draft_id, storage_path, state)) = attachment else {
+            return Ok(());
+        };
+        ensure_draft_is_editable(state)?;
+        let now = pseudo_now_timestamp();
+        transaction.execute(
+            "DELETE FROM draft_attachments WHERE id = ?1",
+            params![attachment_id],
+        )?;
+        transaction.execute(
+            "UPDATE drafts SET state = ?2, last_error_message = NULL, updated_at = ?3 WHERE id = ?1",
+            params![draft_id, DraftState::Editing.as_str(), now],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the attachment removal transaction")?;
+        let path = PathBuf::from(storage_path);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to delete {}", path.display()))
+            }
+        }
+    }
+
+    /// Queues a draft for background delivery and returns the new outbox job identifier.
+    pub fn queue_draft(&self, draft_id: i64) -> Result<i64> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the outbox queue transaction")?;
+        let draft = transaction
+            .query_row(
+                r#"
+                SELECT account_id, state, to_json, cc_json, bcc_json
+                FROM drafts
+                WHERE id = ?1
+                "#,
+                params![draft_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        draft_state_from_db(row.get::<_, String>(1)?)?,
+                        recipients_from_json(row.get::<_, String>(2)?)
+                            .map_err(to_from_sql_error)?,
+                        recipients_from_json(row.get::<_, String>(3)?)
+                            .map_err(to_from_sql_error)?,
+                        recipients_from_json(row.get::<_, String>(4)?)
+                            .map_err(to_from_sql_error)?,
+                    ))
+                },
+            )
+            .optional()?
+            .with_context(|| format!("draft {draft_id} does not exist"))?;
+        if matches!(draft.1, DraftState::Queued | DraftState::Sending) {
+            bail!("draft {draft_id} is already queued");
+        }
+        if draft.1 == DraftState::Sent {
+            bail!("draft {draft_id} has already been sent");
+        }
+        if draft.2.is_empty() && draft.3.is_empty() && draft.4.is_empty() {
+            bail!("draft {draft_id} has no recipients");
+        }
+
+        let now = pseudo_now_timestamp();
+        transaction.execute(
+            r#"
+            INSERT INTO outbox_jobs(
+                draft_id,
+                account_id,
+                state,
+                attempt_count,
+                next_attempt_at,
+                last_error_message,
+                created_at,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, 0, ?4, NULL, ?5, ?6)
+            "#,
+            params![
+                draft_id,
+                draft.0,
+                OutboxJobState::Queued.as_str(),
+                now,
+                now,
+                now,
+            ],
+        )?;
+        let job_id = transaction.last_insert_rowid();
+        transaction.execute(
+            r#"
+            UPDATE drafts
+            SET
+                state = ?2,
+                queued_at = ?3,
+                sent_at = NULL,
+                last_error_message = NULL,
+                updated_at = ?4
+            WHERE id = ?1
+            "#,
+            params![draft_id, DraftState::Queued.as_str(), now, now],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the outbox queue transaction")?;
+        Ok(job_id)
+    }
+
+    /// Lists outbox jobs for one account or across the workspace.
+    pub fn list_outbox_jobs(&self, account_id: Option<i64>) -> Result<Vec<OutboxJobSummary>> {
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            r#"
+            SELECT
+                id,
+                draft_id,
+                account_id,
+                state,
+                attempt_count,
+                next_attempt_at,
+                last_error_message
+            FROM outbox_jobs
+            WHERE (?1 IS NULL OR account_id = ?1)
+            ORDER BY updated_at DESC, id DESC
+            "#,
+        )?;
+        let rows = statement.query_map(params![account_id], |row| {
+            Ok(OutboxJobSummary {
+                id: row.get(0)?,
+                draft_id: row.get(1)?,
+                account_id: row.get(2)?,
+                state: outbox_job_state_from_db(row.get::<_, String>(3)?)?,
+                attempt_count: row.get::<_, usize>(4)?,
+                next_attempt_at: row.get(5)?,
+                last_error_message: row.get(6)?,
+            })
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list outbox jobs")
+    }
+
+    /// Claims the next due outbox job and marks it as sending.
+    pub fn claim_due_outbox_job(
+        &self,
+        account_id: Option<i64>,
+    ) -> Result<Option<PendingOutboxJob>> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the outbox claim transaction")?;
+        let now = pseudo_now_timestamp();
+        let job_id = transaction
+            .query_row(
+                r#"
+                SELECT id
+                FROM outbox_jobs
+                WHERE (?1 IS NULL OR account_id = ?1)
+                  AND state IN (?2, ?3)
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?4)
+                ORDER BY COALESCE(next_attempt_at, created_at) ASC, id ASC
+                LIMIT 1
+                "#,
+                params![
+                    account_id,
+                    OutboxJobState::Queued.as_str(),
+                    OutboxJobState::Retrying.as_str(),
+                    now,
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(job_id) = job_id else {
+            return Ok(None);
+        };
+
+        let draft_id = transaction.query_row(
+            "SELECT draft_id FROM outbox_jobs WHERE id = ?1",
+            params![job_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE outbox_jobs
+            SET
+                state = ?2,
+                attempt_count = attempt_count + 1,
+                last_attempt_at = ?3,
+                updated_at = ?4
+            WHERE id = ?1
+            "#,
+            params![job_id, OutboxJobState::Sending.as_str(), now, now],
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE drafts
+            SET
+                state = ?2,
+                last_error_message = NULL,
+                updated_at = ?3
+            WHERE id = ?1
+            "#,
+            params![draft_id, DraftState::Sending.as_str(), now],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the outbox claim transaction")?;
+        self.pending_outbox_job(job_id)
+    }
+
+    /// Records a transient delivery failure and schedules the next retry attempt.
+    pub fn record_outbox_retry(
+        &self,
+        job_id: i64,
+        error: impl AsRef<str>,
+        retry_after: Duration,
+    ) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the outbox retry transaction")?;
+        let draft_id = transaction
+            .query_row(
+                "SELECT draft_id FROM outbox_jobs WHERE id = ?1",
+                params![job_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .with_context(|| format!("outbox job {job_id} does not exist"))?;
+        let now = pseudo_now_timestamp();
+        let next_attempt_at = pseudo_timestamp_after(retry_after);
+        transaction.execute(
+            r#"
+            UPDATE outbox_jobs
+            SET
+                state = ?2,
+                next_attempt_at = ?3,
+                last_error_message = ?4,
+                updated_at = ?5
+            WHERE id = ?1
+            "#,
+            params![
+                job_id,
+                OutboxJobState::Retrying.as_str(),
+                next_attempt_at,
+                error.as_ref(),
+                now,
+            ],
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE drafts
+            SET
+                state = ?2,
+                last_error_message = ?3,
+                updated_at = ?4
+            WHERE id = ?1
+            "#,
+            params![draft_id, DraftState::Queued.as_str(), error.as_ref(), now],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the outbox retry transaction")
+    }
+
+    /// Records a terminal delivery failure.
+    pub fn record_outbox_failure(&self, job_id: i64, error: impl AsRef<str>) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the outbox failure transaction")?;
+        let draft_id = transaction
+            .query_row(
+                "SELECT draft_id FROM outbox_jobs WHERE id = ?1",
+                params![job_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .with_context(|| format!("outbox job {job_id} does not exist"))?;
+        let now = pseudo_now_timestamp();
+        transaction.execute(
+            r#"
+            UPDATE outbox_jobs
+            SET
+                state = ?2,
+                next_attempt_at = NULL,
+                last_error_message = ?3,
+                updated_at = ?4
+            WHERE id = ?1
+            "#,
+            params![job_id, OutboxJobState::Failed.as_str(), error.as_ref(), now],
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE drafts
+            SET
+                state = ?2,
+                last_error_message = ?3,
+                updated_at = ?4
+            WHERE id = ?1
+            "#,
+            params![draft_id, DraftState::Failed.as_str(), error.as_ref(), now],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the outbox failure transaction")
+    }
+
+    /// Records a successful delivery attempt.
+    pub fn record_outbox_sent(&self, job_id: i64) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the outbox success transaction")?;
+        let draft_id = transaction
+            .query_row(
+                "SELECT draft_id FROM outbox_jobs WHERE id = ?1",
+                params![job_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .with_context(|| format!("outbox job {job_id} does not exist"))?;
+        let now = pseudo_now_timestamp();
+        transaction.execute(
+            r#"
+            UPDATE outbox_jobs
+            SET
+                state = ?2,
+                next_attempt_at = NULL,
+                last_error_message = NULL,
+                updated_at = ?3
+            WHERE id = ?1
+            "#,
+            params![job_id, OutboxJobState::Sent.as_str(), now],
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE drafts
+            SET
+                state = ?2,
+                sent_at = ?3,
+                last_error_message = NULL,
+                updated_at = ?4
+            WHERE id = ?1
+            "#,
+            params![draft_id, DraftState::Sent.as_str(), now, now],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the outbox success transaction")
+    }
+
+    /// Manually requeues a failed outbox job for another delivery attempt.
+    pub fn retry_outbox_job(&self, job_id: i64) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the outbox requeue transaction")?;
+        let (draft_id, state) = transaction
+            .query_row(
+                "SELECT draft_id, state FROM outbox_jobs WHERE id = ?1",
+                params![job_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        outbox_job_state_from_db(row.get::<_, String>(1)?)?,
+                    ))
+                },
+            )
+            .optional()?
+            .with_context(|| format!("outbox job {job_id} does not exist"))?;
+        if matches!(state, OutboxJobState::Sending | OutboxJobState::Sent) {
+            bail!("outbox job {job_id} cannot be requeued from state {state}");
+        }
+
+        let now = pseudo_now_timestamp();
+        transaction.execute(
+            r#"
+            UPDATE outbox_jobs
+            SET
+                state = ?2,
+                next_attempt_at = ?3,
+                last_error_message = NULL,
+                updated_at = ?4
+            WHERE id = ?1
+            "#,
+            params![job_id, OutboxJobState::Queued.as_str(), now, now],
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE drafts
+            SET
+                state = ?2,
+                last_error_message = NULL,
+                updated_at = ?3
+            WHERE id = ?1
+            "#,
+            params![draft_id, DraftState::Queued.as_str(), now],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the outbox requeue transaction")
+    }
+
+    fn apply_migrations(&self) -> Result<()> {
+        let mut conn = self.connection()?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",
+        )
+        .context("failed to initialize the migration tracking table")?;
+
+        for (version, sql) in MIGRATIONS {
+            let already_applied = conn
+                .query_row(
+                    "SELECT 1 FROM schema_migrations WHERE version = ?1 LIMIT 1",
+                    params![version],
+                    |_| Ok(()),
+                )
+                .optional()
+                .context("failed to inspect the migration table")?
+                .is_some();
+
+            if already_applied {
+                continue;
+            }
+
+            let transaction = conn
+                .transaction()
+                .context("failed to begin the migration transaction")?;
+            transaction
+                .execute_batch(sql)
+                .with_context(|| format!("failed to apply migration {version}"))?;
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version) VALUES (?1)",
+                    params![version],
+                )
+                .with_context(|| format!("failed to record migration {version}"))?;
+            transaction
+                .commit()
+                .with_context(|| format!("failed to commit migration {version}"))?;
+        }
+
+        Ok(())
+    }
+
+    fn record_sync_error(
+        &self,
+        account_id: i64,
+        phase: SyncPhase,
+        detail: impl AsRef<str>,
+        error: impl AsRef<str>,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        let now = pseudo_now_timestamp();
+        conn.execute(
+            r#"
+            UPDATE sync_state
+            SET
+                phase = ?2,
+                detail = ?3,
+                last_error_at = ?4,
+                last_error_message = ?5,
+                failure_count = failure_count + 1
+            WHERE account_id = ?1
+            "#,
+            params![
+                account_id,
+                phase.as_str(),
+                detail.as_ref(),
+                now,
+                error.as_ref()
+            ],
+        )
+        .with_context(|| format!("failed to record sync error for account {account_id}"))?;
+        Ok(())
+    }
+
+    fn demo_account_ordinal(&self, protocol: ProtocolKind) -> Result<usize> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM accounts WHERE protocol_kind = ?1",
+            params![protocol.as_str()],
+            |row| row.get::<_, usize>(0),
+        )
+        .map(|count| count + 1)
+        .map_err(Into::into)
+    }
+
+    fn connection(&self) -> Result<Connection> {
+        let conn = Connection::open(&*self.path)
+            .with_context(|| format!("failed to open {}", self.path.display()))?;
+        configure_connection(&conn)?;
+        Ok(conn)
+    }
+
+    fn refresh_account_search_index(&self, account_id: i64) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "DELETE FROM search_documents WHERE account_id = ?1",
+            params![account_id],
+        )?;
+
+        let thread_ids = conn
+            .prepare(
+                r#"
+                SELECT threads.id
+                FROM threads
+                JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+                WHERE mailboxes.account_id = ?1
+                ORDER BY threads.id ASC
+                "#,
+            )?
+            .query_map(params![account_id], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to enumerate threads for search indexing")?;
+
+        let mut insert_statement = conn.prepare(
+            r#"
+            INSERT INTO search_documents(account_id, mailbox_id, thread_id, mailbox_name, subject, participants, preview, body)
+            SELECT
+                mailboxes.account_id,
+                mailboxes.id,
+                threads.id,
+                mailboxes.name,
+                threads.subject,
+                threads.participants,
+                threads.preview,
+                COALESCE(GROUP_CONCAT(COALESCE(messages.body_text, messages.sanitized_html, messages.body_preview), ' '), '')
+            FROM threads
+            JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+            LEFT JOIN messages ON messages.thread_id = threads.id
+            WHERE threads.id = ?1
+            GROUP BY threads.id
+            "#,
+        )?;
+
+        for thread_id in thread_ids {
+            insert_statement.execute(params![thread_id])?;
+        }
+
+        Ok(())
+    }
+
+    fn thread_location(&self, thread_id: i64) -> Result<Option<ThreadLocation>> {
+        let conn = self.connection()?;
+        thread_location(&conn, thread_id)
+    }
+
+    fn attachment_storage_dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map(|parent| parent.join("attachments"))
+            .unwrap_or_else(|| PathBuf::from("attachments"))
+    }
+
+    fn pending_outbox_job(&self, job_id: i64) -> Result<Option<PendingOutboxJob>> {
+        let conn = self.connection()?;
+        let row = conn
+            .query_row(
+                r#"
+                SELECT
+                    outbox_jobs.id,
+                    outbox_jobs.attempt_count,
+                    drafts.id,
+                    drafts.identity_id,
+                    drafts.identity_name,
+                    drafts.identity_email,
+                    drafts.subject,
+                    drafts.body,
+                    drafts.to_json,
+                    drafts.cc_json,
+                    drafts.bcc_json,
+                    accounts.id,
+                    accounts.protocol_kind,
+                    accounts.endpoint,
+                    accounts.username,
+                    accounts.submission_kind,
+                    accounts.submission_host,
+                    accounts.submission_port,
+                    accounts.submission_security,
+                    accounts.submission_username,
+                    accounts.submission_hello_name
+                FROM outbox_jobs
+                JOIN drafts ON drafts.id = outbox_jobs.draft_id
+                JOIN accounts ON accounts.id = outbox_jobs.account_id
+                WHERE outbox_jobs.id = ?1
+                "#,
+                params![job_id],
+                |row| {
+                    let account_id = row.get::<_, i64>(11)?;
+                    let protocol = protocol_from_db(row.get::<_, String>(12)?)?;
+                    let endpoint = row.get::<_, String>(13)?;
+                    let username = row.get::<_, String>(14)?;
+                    let outgoing = outgoing_from_row(
+                        protocol,
+                        &endpoint,
+                        &username,
+                        OutgoingRow {
+                            kind: row.get::<_, Option<String>>(15)?,
+                            host: row.get::<_, Option<String>>(16)?,
+                            port: row.get::<_, Option<i64>>(17)?,
+                            security: row.get::<_, Option<String>>(18)?,
+                            submission_username: row.get::<_, Option<String>>(19)?,
+                            hello_name: row.get::<_, Option<String>>(20)?,
+                        },
+                    )
+                    .map_err(to_from_sql_error)?;
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, usize>(1)?,
+                        DeliveryTarget {
+                            account_id,
+                            draft_id: row.get(2)?,
+                            identity_id: row.get(3)?,
+                            protocol,
+                            endpoint,
+                            username,
+                            identity_name: row.get(4)?,
+                            identity_email: row.get(5)?,
+                            outgoing,
+                        },
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        recipients_from_json(row.get::<_, String>(8)?)
+                            .map_err(to_from_sql_error)?,
+                        recipients_from_json(row.get::<_, String>(9)?)
+                            .map_err(to_from_sql_error)?,
+                        recipients_from_json(row.get::<_, String>(10)?)
+                            .map_err(to_from_sql_error)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("failed to load the pending outbox job")?;
+        let Some((job_id, attempt_count, target, subject, body, to, cc, bcc)) = row else {
+            return Ok(None);
+        };
+
+        let attachments = load_draft_attachments(&conn, target.draft_id)?
+            .into_iter()
+            .map(|attachment| {
+                let bytes = fs::read(&attachment.storage_path).with_context(|| {
+                    format!("failed to read attachment {}", attachment.storage_path)
+                })?;
+                Ok(OutgoingAttachment {
+                    filename: attachment.filename,
+                    content_type: attachment.content_type,
+                    bytes,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Some(PendingOutboxJob {
+            job_id,
+            attempt_count,
+            target: target.clone(),
+            message: OutgoingMessage {
+                from_email: target.identity_email.clone(),
+                from_name: Some(target.identity_name.clone()),
+                to,
+                cc,
+                bcc,
+                subject,
+                text_body: body,
+                attachments,
+            },
+        }))
+    }
+}
+
+fn configure_connection(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .context("failed to configure SQLite busy timeout")?;
+    conn.execute_batch(
+        r#"
+        PRAGMA foreign_keys = ON;
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA temp_store = MEMORY;
+        "#,
+    )
+    .context("failed to configure SQLite pragmas")
+}
+
+fn query_count(conn: &Connection, sql: &str) -> Result<usize> {
+    conn.query_row(sql, [], |row| row.get::<_, usize>(0))
+        .map_err(Into::into)
+}
+
+fn load_identities(conn: &Connection, account_id: i64) -> Result<Vec<IdentitySummary>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT id, display_name, email_address, signature, is_primary
+        FROM identities
+        WHERE account_id = ?1
+        ORDER BY is_primary DESC, id ASC
+        "#,
+    )?;
+    let rows = statement.query_map(params![account_id], |row| {
+        Ok(IdentitySummary {
+            id: row.get(0)?,
+            display_name: row.get(1)?,
+            email_address: row.get(2)?,
+            signature: row.get(3)?,
+            is_primary: row.get::<_, bool>(4)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to list identities")
+}
+
+fn load_identity_snapshot(
+    conn: &Connection,
+    account_id: i64,
+    identity_id: i64,
+) -> Result<Option<IdentitySummary>> {
+    conn.query_row(
+        r#"
+        SELECT id, display_name, email_address, signature, is_primary
+        FROM identities
+        WHERE account_id = ?1 AND id = ?2
+        "#,
+        params![account_id, identity_id],
+        |row| {
+            Ok(IdentitySummary {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                email_address: row.get(2)?,
+                signature: row.get(3)?,
+                is_primary: row.get::<_, bool>(4)?,
+            })
+        },
+    )
+    .optional()
+    .context("failed to load the selected identity")
+}
+
+fn load_draft_attachments(conn: &Connection, draft_id: i64) -> Result<Vec<DraftAttachment>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT id, filename, content_type, size_bytes, original_path, storage_path
+        FROM draft_attachments
+        WHERE draft_id = ?1
+        ORDER BY id ASC
+        "#,
+    )?;
+    let rows = statement.query_map(params![draft_id], |row| {
+        Ok(DraftAttachment {
+            id: row.get(0)?,
+            filename: row.get(1)?,
+            content_type: row.get(2)?,
+            size_bytes: row.get::<_, i64>(3)? as u64,
+            original_path: row.get(4)?,
+            storage_path: row.get(5)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to load draft attachments")
+}
+
+fn ensure_draft_is_editable(state: DraftState) -> Result<()> {
+    if matches!(
+        state,
+        DraftState::Queued | DraftState::Sending | DraftState::Sent
+    ) {
+        bail!("draft cannot be modified while it is {state}");
+    }
+    Ok(())
+}
+
+fn recipients_to_json(recipients: &[String]) -> Result<String> {
+    serde_json::to_string(recipients).context("failed to encode recipients")
+}
+
+fn recipients_from_json(json: String) -> Result<Vec<String>> {
+    serde_json::from_str(&json).context("failed to decode recipients")
+}
+
+fn summarize_recipients(to: &[String], cc: &[String], bcc: &[String]) -> String {
+    let mut recipients = to.iter().chain(cc.iter()).chain(bcc.iter());
+    match recipients.next() {
+        Some(first) if recipients.next().is_some() => {
+            format!("{first} +{}", to.len() + cc.len() + bcc.len() - 1)
+        }
+        Some(first) => first.clone(),
+        None => "(no recipients)".to_owned(),
+    }
+}
+
+fn apply_default_signature(body: &str, signature: &str) -> String {
+    if !body.trim().is_empty() {
+        return body.to_owned();
+    }
+    signature.trim().to_owned()
+}
+
+fn sanitize_filename(filename: &str) -> String {
+    filename
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => ch,
+            _ => '_',
+        })
+        .collect()
+}
+
+fn guess_content_type(path: &Path) -> String {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("txt") => "text/plain",
+        Some("md") => "text/markdown",
+        Some("html") | Some("htm") => "text/html",
+        Some("json") => "application/json",
+        Some("pdf") => "application/pdf",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("zip") => "application/zip",
+        _ => "application/octet-stream",
+    }
+    .to_owned()
+}
+
+fn draft_state_from_db(value: String) -> rusqlite::Result<DraftState> {
+    DraftState::parse(&value).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown draft state {value}"),
+            )),
+        )
+    })
+}
+
+fn outbox_job_state_from_db(value: String) -> rusqlite::Result<OutboxJobState> {
+    OutboxJobState::parse(&value).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown outbox job state {value}"),
+            )),
+        )
+    })
+}
+
+struct OutgoingRow {
+    kind: Option<String>,
+    host: Option<String>,
+    port: Option<i64>,
+    security: Option<String>,
+    submission_username: Option<String>,
+    hello_name: Option<String>,
+}
+
+fn outgoing_from_row(
+    protocol: ProtocolKind,
+    endpoint: &str,
+    username: &str,
+    row: OutgoingRow,
+) -> Result<OutgoingConfig> {
+    let kind = row
+        .kind
+        .as_deref()
+        .and_then(SubmissionKind::parse)
+        .unwrap_or(match protocol {
+            ProtocolKind::Imap => SubmissionKind::Smtp,
+            ProtocolKind::Jmap => SubmissionKind::Jmap,
+        });
+    let derived = default_outgoing(protocol, endpoint, username);
+    let OutgoingConfig {
+        host: derived_host,
+        port: derived_port,
+        username: derived_username,
+        security: derived_security,
+        hello_name: derived_hello_name,
+        ..
+    } = derived;
+    Ok(OutgoingConfig {
+        kind,
+        host: row.host.or(derived_host),
+        port: row
+            .port
+            .map(|value| u16::try_from(value).context("invalid submission port"))
+            .transpose()?
+            .or(derived_port),
+        username: row.submission_username.or(derived_username),
+        security: row
+            .security
+            .as_deref()
+            .and_then(SubmissionSecurity::parse)
+            .or(derived_security),
+        hello_name: row.hello_name.unwrap_or(derived_hello_name),
+    })
+}
+
+fn default_outgoing(protocol: ProtocolKind, endpoint: &str, username: &str) -> OutgoingConfig {
+    match protocol {
+        ProtocolKind::Jmap => OutgoingConfig::jmap_default(),
+        ProtocolKind::Imap => {
+            let host = extract_host(endpoint).unwrap_or_else(|| "localhost".to_owned());
+            let mut outgoing = OutgoingConfig::smtp_default(host);
+            outgoing.username = Some(username.to_owned());
+            outgoing
+        }
+    }
+}
+
+fn extract_host(endpoint: &str) -> Option<String> {
+    if let Some(without_scheme) = endpoint.split("://").nth(1) {
+        return extract_host(without_scheme);
+    }
+
+    endpoint
+        .split('/')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            if value.starts_with('[') {
+                value
+                    .split(']')
+                    .next()
+                    .map(|value| format!("{value}]"))
+                    .unwrap_or_else(|| value.to_owned())
+            } else {
+                value.split(':').next().unwrap_or(value).to_owned()
+            }
+        })
+}
+
+fn pseudo_timestamp_after(duration: Duration) -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_add(duration.as_secs());
+    pseudo_timestamp_from_epoch(seconds)
+}
+
+fn pseudo_timestamp_from_epoch(seconds: u64) -> String {
+    let day = (seconds / 86_400 % 28) + 1;
+    let hour = (seconds / 3_600) % 24;
+    let minute = (seconds / 60) % 60;
+    let second = seconds % 60;
+    format!("2026-03-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn to_from_sql_error(error: anyhow::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            error.to_string(),
+        )),
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ThreadLocation {
+    account_id: i64,
+    mailbox_id: i64,
+    message_count: usize,
+    unread_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct MailboxIdentity {
+    id: i64,
+    account_id: i64,
+    role: Option<String>,
+}
+
+fn thread_location(conn: &Connection, thread_id: i64) -> Result<Option<ThreadLocation>> {
+    conn.query_row(
+        r#"
+        SELECT
+            mailboxes.account_id,
+            threads.mailbox_id,
+            threads.message_count,
+            threads.unread_count
+        FROM threads
+        JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+        WHERE threads.id = ?1
+        "#,
+        params![thread_id],
+        |row| {
+            Ok(ThreadLocation {
+                account_id: row.get(0)?,
+                mailbox_id: row.get(1)?,
+                message_count: row.get::<_, usize>(2)?,
+                unread_count: row.get::<_, usize>(3)?,
+            })
+        },
+    )
+    .optional()
+    .context("failed to load thread location")
+}
+
+fn mailbox_identity(conn: &Connection, mailbox_id: i64) -> Result<Option<MailboxIdentity>> {
+    conn.query_row(
+        "SELECT id, account_id, role FROM mailboxes WHERE id = ?1",
+        params![mailbox_id],
+        |row| {
+            Ok(MailboxIdentity {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                role: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .context("failed to load mailbox metadata")
+}
+
+fn mailbox_id_by_role(conn: &Connection, account_id: i64, role: &str) -> Result<Option<i64>> {
+    conn.query_row(
+        r#"
+        SELECT id
+        FROM mailboxes
+        WHERE account_id = ?1 AND lower(role) = lower(?2)
+        ORDER BY sort_order ASC, id ASC
+        LIMIT 1
+        "#,
+        params![account_id, role],
+        |row| row.get(0),
+    )
+    .optional()
+    .context("failed to resolve a mailbox by role")
+}
+
+fn update_mailbox_unread_threads(
+    conn: &Connection,
+    mailbox_id: i64,
+    previously_unread: bool,
+    now_unread: bool,
+) -> Result<()> {
+    let delta = match (previously_unread, now_unread) {
+        (false, true) => 1,
+        (true, false) => -1,
+        _ => 0,
+    };
+    if delta == 0 {
+        return Ok(());
+    }
+
+    conn.execute(
+        r#"
+        UPDATE mailboxes
+        SET unread_threads = MAX(unread_threads + ?2, 0)
+        WHERE id = ?1
+        "#,
+        params![mailbox_id, delta],
+    )?;
+    Ok(())
+}
+
+fn move_thread_in_transaction(
+    transaction: &Transaction<'_>,
+    thread_id: i64,
+    location: &ThreadLocation,
+    destination_mailbox_id: i64,
+    _destination_role: Option<&str>,
+) -> Result<()> {
+    transaction.execute(
+        "UPDATE threads SET mailbox_id = ?2 WHERE id = ?1",
+        params![thread_id, destination_mailbox_id],
+    )?;
+    transaction.execute(
+        r#"
+        UPDATE mailboxes
+        SET
+            total_threads = MAX(total_threads - 1, 0),
+            unread_threads = MAX(unread_threads - ?2, 0)
+        WHERE id = ?1
+        "#,
+        params![location.mailbox_id, i64::from(location.unread_count > 0)],
+    )?;
+    transaction.execute(
+        r#"
+        UPDATE mailboxes
+        SET
+            total_threads = total_threads + 1,
+            unread_threads = unread_threads + ?2
+        WHERE id = ?1
+        "#,
+        params![destination_mailbox_id, i64::from(location.unread_count > 0)],
+    )?;
+    Ok(())
+}
+
+fn renderable_body(
+    preview: &str,
+    body_text: Option<&str>,
+    sanitized_html: Option<&str>,
+) -> (String, MessageRenderMode) {
+    if let Some(body_text) = body_text.filter(|value| !value.trim().is_empty()) {
+        return (body_text.to_owned(), MessageRenderMode::PlainText);
+    }
+
+    if let Some(sanitized_html) = sanitized_html.filter(|value| !value.trim().is_empty()) {
+        let sanitized = sanitize_html_for_display(sanitized_html);
+        return (sanitized.text, MessageRenderMode::SanitizedHtml);
+    }
+
+    (preview.to_owned(), MessageRenderMode::PreviewOnly)
+}
+
+fn build_fts_query(query: &str) -> Option<String> {
+    let tokens = query
+        .split_whitespace()
+        .map(|token| {
+            token
+                .chars()
+                .filter(|ch| ch.is_alphanumeric() || matches!(ch, '@' | '.' | '_' | '-'))
+                .collect::<String>()
+        })
+        .filter(|token| !token.is_empty())
+        .map(|token| format!("\"{token}\"*"))
+        .collect::<Vec<_>>();
+
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" AND "))
+    }
+}
+
+fn identity_id_map(
+    transaction: &Transaction<'_>,
+    account_id: i64,
+) -> Result<std::collections::HashMap<String, i64>> {
+    let mut statement = transaction.prepare(
+        "SELECT email_address, id FROM identities WHERE account_id = ?1 ORDER BY is_primary DESC, id ASC",
+    )?;
+    let rows = statement.query_map(params![account_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let pairs = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to build the identity lookup")?;
+    Ok(pairs.into_iter().collect())
+}
+
+fn replace_account_identities(
+    transaction: &Transaction<'_>,
+    account_id: i64,
+    identities: &[zmail_core::NewIdentity],
+) -> Result<()> {
+    if identities.is_empty() {
+        bail!("cannot replace identities with an empty set");
+    }
+
+    transaction.execute(
+        "DELETE FROM identities WHERE account_id = ?1",
+        params![account_id],
+    )?;
+    let mut insert_identity = transaction.prepare(
+        r#"
+        INSERT INTO identities(account_id, display_name, email_address, signature, is_primary)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+    )?;
+    for identity in identities {
+        insert_identity.execute(params![
+            account_id,
+            identity.display_name,
+            identity.email_address,
+            identity.signature,
+            identity.is_primary,
+        ])?;
+    }
+    Ok(())
+}
+
+fn protocol_from_db(value: String) -> rusqlite::Result<ProtocolKind> {
+    ProtocolKind::parse(&value).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown protocol kind {value}"),
+            )),
+        )
+    })
+}
+
+fn sync_phase_from_db(value: String) -> rusqlite::Result<SyncPhase> {
+    SyncPhase::parse(&value).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown sync phase {value}"),
+            )),
+        )
+    })
+}
+
+fn pseudo_now_timestamp() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    pseudo_timestamp_from_epoch(seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, time::Duration};
+
+    use super::LocalStore;
+    use zmail_core::{
+        AccountSyncSnapshot, DraftState, MailboxSnapshot, MessageRenderMode, MessageSnapshot,
+        NewDraft, NewIdentity, ProtocolKind, SyncPhase, ThreadSnapshot,
+    };
+
+    #[test]
+    fn creates_demo_accounts_and_lists_sync_targets() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        let accounts = store.list_accounts().expect("accounts should load");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, account_id);
+        assert_eq!(accounts[0].protocol, ProtocolKind::Imap);
+        assert_eq!(accounts[0].identity_count, 2);
+        assert_eq!(accounts[0].sync_status.phase, SyncPhase::Idle);
+
+        let targets = store.list_sync_targets().expect("targets should load");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].identities.len(), 2);
+    }
+
+    #[test]
+    fn applies_snapshots_and_surfaces_threads() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Jmap)
+            .expect("account should be created");
+
+        let target = store
+            .sync_target(account_id)
+            .expect("target should load")
+            .expect("account should exist");
+        let primary_identity = target.identities[0].email_address.clone();
+        let snapshot = AccountSyncSnapshot {
+            checkpoint: "jmap:1".to_owned(),
+            detail: "JMAP discovery complete".to_owned(),
+            identities: None,
+            mailboxes: vec![MailboxSnapshot {
+                name: "Inbox".to_owned(),
+                role: Some("inbox".to_owned()),
+                threads: vec![ThreadSnapshot {
+                    subject: "Phase 2 review".to_owned(),
+                    participants: "Kai Santos, Nora Walsh".to_owned(),
+                    preview: "The background supervisor now persists sync state.".to_owned(),
+                    is_flagged: false,
+                    unread_count: 1,
+                    latest_message_at: "2026-03-21T09:15:00Z".to_owned(),
+                    messages: vec![MessageSnapshot {
+                        identity_email: primary_identity,
+                        sender: "Kai Santos".to_owned(),
+                        recipients: target.username.clone(),
+                        subject: "Phase 2 review".to_owned(),
+                        body_preview: "The background supervisor now persists sync state."
+                            .to_owned(),
+                        body_text: Some(
+                            "The background supervisor now persists sync state.".to_owned(),
+                        ),
+                        sanitized_html: None,
+                        has_remote_content: false,
+                        is_read: false,
+                        is_flagged: false,
+                        received_at: "2026-03-21T09:15:00Z".to_owned(),
+                    }],
+                }],
+            }],
+        };
+
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+        store
+            .record_sync_success(account_id, &snapshot.detail, &snapshot.checkpoint)
+            .expect("success should record");
+
+        let mailboxes = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes should load");
+        assert_eq!(mailboxes.len(), 1);
+        let mailbox_id = mailboxes[0].id;
+
+        let threads = store
+            .list_threads(mailbox_id, 0..50)
+            .expect("threads should load");
+        assert_eq!(threads.len(), 1);
+
+        let preview = store
+            .message_preview(threads[0].id)
+            .expect("preview query should work")
+            .expect("preview should exist");
+        assert_eq!(preview.mailbox_name, "Inbox");
+        assert_eq!(preview.subject, "Phase 2 review");
+    }
+
+    #[test]
+    fn records_sync_failures() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        store
+            .begin_sync_attempt(account_id, SyncPhase::Connecting, "Connecting to server")
+            .expect("phase update should work");
+        store
+            .record_sync_failure(account_id, "Sync failed", "server greeting timeout")
+            .expect("failure should record");
+
+        let account = store
+            .list_accounts()
+            .expect("accounts should load")
+            .into_iter()
+            .find(|account| account.id == account_id)
+            .expect("account should exist");
+        assert_eq!(account.sync_status.phase, SyncPhase::Failed);
+        assert_eq!(account.sync_status.failure_count, 1);
+        assert_eq!(
+            account.sync_status.last_error_message.as_deref(),
+            Some("server greeting timeout")
+        );
+    }
+
+    #[test]
+    fn replaces_identities_after_clearing_existing_messages() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Jmap)
+            .expect("account should be created");
+
+        let original_target = store
+            .sync_target(account_id)
+            .expect("target should load")
+            .expect("account should exist");
+        let first_snapshot = AccountSyncSnapshot {
+            checkpoint: "jmap:1".to_owned(),
+            detail: "Initial sync".to_owned(),
+            identities: None,
+            mailboxes: vec![MailboxSnapshot {
+                name: "Inbox".to_owned(),
+                role: Some("inbox".to_owned()),
+                threads: vec![ThreadSnapshot {
+                    subject: "Initial message".to_owned(),
+                    participants: "Kai Santos".to_owned(),
+                    preview: "Initial body preview".to_owned(),
+                    is_flagged: false,
+                    unread_count: 1,
+                    latest_message_at: "2026-03-21T09:15:00Z".to_owned(),
+                    messages: vec![MessageSnapshot {
+                        identity_email: original_target.identities[0].email_address.clone(),
+                        sender: "Kai Santos".to_owned(),
+                        recipients: original_target.username.clone(),
+                        subject: "Initial message".to_owned(),
+                        body_preview: "Initial body preview".to_owned(),
+                        body_text: Some("Initial body preview".to_owned()),
+                        sanitized_html: None,
+                        has_remote_content: false,
+                        is_read: false,
+                        is_flagged: false,
+                        received_at: "2026-03-21T09:15:00Z".to_owned(),
+                    }],
+                }],
+            }],
+        };
+        store
+            .replace_account_snapshot(account_id, &first_snapshot)
+            .expect("initial snapshot should apply");
+
+        let refreshed_identity = NewIdentity {
+            display_name: "James Identity".to_owned(),
+            email_address: "jmap@localhost".to_owned(),
+            signature: "Regards,\nJames".to_owned(),
+            is_primary: true,
+        };
+        let refreshed_snapshot = AccountSyncSnapshot {
+            checkpoint: "jmap:2".to_owned(),
+            detail: "Identity refresh".to_owned(),
+            identities: Some(vec![refreshed_identity.clone()]),
+            mailboxes: vec![MailboxSnapshot {
+                name: "Inbox".to_owned(),
+                role: Some("inbox".to_owned()),
+                threads: vec![ThreadSnapshot {
+                    subject: "Updated message".to_owned(),
+                    participants: "James User".to_owned(),
+                    preview: "Updated body preview".to_owned(),
+                    is_flagged: true,
+                    unread_count: 0,
+                    latest_message_at: "2026-03-21T10:00:00Z".to_owned(),
+                    messages: vec![MessageSnapshot {
+                        identity_email: refreshed_identity.email_address.clone(),
+                        sender: "James User".to_owned(),
+                        recipients: refreshed_identity.email_address.clone(),
+                        subject: "Updated message".to_owned(),
+                        body_preview: "Updated body preview".to_owned(),
+                        body_text: Some("Updated body preview".to_owned()),
+                        sanitized_html: None,
+                        has_remote_content: false,
+                        is_read: true,
+                        is_flagged: true,
+                        received_at: "2026-03-21T10:00:00Z".to_owned(),
+                    }],
+                }],
+            }],
+        };
+        store
+            .replace_account_snapshot(account_id, &refreshed_snapshot)
+            .expect("snapshot with refreshed identities should apply");
+
+        let preview = store
+            .message_preview(
+                store
+                    .list_threads(
+                        store
+                            .list_mailboxes(account_id)
+                            .expect("mailboxes should load")[0]
+                            .id,
+                        0..1,
+                    )
+                    .expect("threads should load")[0]
+                    .id,
+            )
+            .expect("preview query should work")
+            .expect("preview should exist");
+        assert_eq!(preview.identity_name, "James Identity");
+        assert_eq!(preview.subject, "Updated message");
+    }
+
+    #[test]
+    fn hydrates_reader_threads_and_searches_local_mail() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        let target = store
+            .sync_target(account_id)
+            .expect("target should load")
+            .expect("account should exist");
+        let identity_email = target.identities[0].email_address.clone();
+        let snapshot = AccountSyncSnapshot {
+            checkpoint: "imap:phase3".to_owned(),
+            detail: "Phase 3 sync".to_owned(),
+            identities: None,
+            mailboxes: vec![MailboxSnapshot {
+                name: "Inbox".to_owned(),
+                role: Some("inbox".to_owned()),
+                threads: vec![ThreadSnapshot {
+                    subject: "Searchable incident".to_owned(),
+                    participants: "Kai Santos".to_owned(),
+                    preview: "Fallback preview".to_owned(),
+                    is_flagged: true,
+                    unread_count: 1,
+                    latest_message_at: "2026-03-22T12:00:00Z".to_owned(),
+                    messages: vec![MessageSnapshot {
+                        identity_email,
+                        sender: "Kai Santos".to_owned(),
+                        recipients: target.username.clone(),
+                        subject: "Searchable incident".to_owned(),
+                        body_preview: "Fallback preview".to_owned(),
+                        body_text: None,
+                        sanitized_html: Some(
+                            "<div>Status page blocked://status.zmail.test details</div>".to_owned(),
+                        ),
+                        has_remote_content: true,
+                        is_read: false,
+                        is_flagged: true,
+                        received_at: "2026-03-22T12:00:00Z".to_owned(),
+                    }],
+                }],
+            }],
+        };
+
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+
+        let mailbox_id = store
+            .mailbox_id_by_role(account_id, "inbox")
+            .expect("mailbox lookup should work")
+            .expect("inbox mailbox should exist");
+        let thread_id = store
+            .first_thread_id(mailbox_id)
+            .expect("thread lookup should work")
+            .expect("thread should exist");
+
+        let thread = store
+            .thread_view(thread_id)
+            .expect("thread view should load")
+            .expect("thread should exist");
+        assert!(thread.is_flagged);
+        assert!(thread.has_remote_content);
+        assert_eq!(thread.messages.len(), 1);
+        assert_eq!(
+            thread.messages[0].render_mode,
+            MessageRenderMode::SanitizedHtml
+        );
+        assert!(thread.messages[0].rendered_body.contains("Status page"));
+
+        let hits = store
+            .search_threads(account_id, "Status details", 10)
+            .expect("search should work");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].subject, "Searchable incident");
+        assert!(hits[0].is_flagged);
+    }
+
+    #[test]
+    fn applies_local_mailbox_operations_and_updates_counts() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        let target = store
+            .sync_target(account_id)
+            .expect("target should load")
+            .expect("account should exist");
+        let identity_email = target.identities[0].email_address.clone();
+        let snapshot = AccountSyncSnapshot {
+            checkpoint: "imap:ops".to_owned(),
+            detail: "Mailbox operations seed".to_owned(),
+            identities: None,
+            mailboxes: vec![
+                MailboxSnapshot {
+                    name: "Inbox".to_owned(),
+                    role: Some("inbox".to_owned()),
+                    threads: vec![ThreadSnapshot {
+                        subject: "Inbox task".to_owned(),
+                        participants: "Ops".to_owned(),
+                        preview: "Handle mailbox ops".to_owned(),
+                        is_flagged: false,
+                        unread_count: 1,
+                        latest_message_at: "2026-03-22T13:00:00Z".to_owned(),
+                        messages: vec![MessageSnapshot {
+                            identity_email: identity_email.clone(),
+                            sender: "Ops".to_owned(),
+                            recipients: target.username.clone(),
+                            subject: "Inbox task".to_owned(),
+                            body_preview: "Handle mailbox ops".to_owned(),
+                            body_text: Some("Handle mailbox ops".to_owned()),
+                            sanitized_html: None,
+                            has_remote_content: false,
+                            is_read: false,
+                            is_flagged: false,
+                            received_at: "2026-03-22T13:00:00Z".to_owned(),
+                        }],
+                    }],
+                },
+                MailboxSnapshot {
+                    name: "Archive".to_owned(),
+                    role: Some("archive".to_owned()),
+                    threads: Vec::new(),
+                },
+                MailboxSnapshot {
+                    name: "Trash".to_owned(),
+                    role: Some("trash".to_owned()),
+                    threads: Vec::new(),
+                },
+            ],
+        };
+
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+
+        let inbox_id = store
+            .mailbox_id_by_role(account_id, "inbox")
+            .expect("mailbox lookup should work")
+            .expect("inbox should exist");
+        let archive_id = store
+            .mailbox_id_by_role(account_id, "archive")
+            .expect("archive lookup should work")
+            .expect("archive should exist");
+        let trash_id = store
+            .mailbox_id_by_role(account_id, "trash")
+            .expect("trash lookup should work")
+            .expect("trash should exist");
+        let thread_id = store
+            .first_thread_id(inbox_id)
+            .expect("thread lookup should work")
+            .expect("thread should exist");
+
+        store
+            .set_thread_flagged(thread_id, true)
+            .expect("flagging should work");
+        store
+            .set_thread_read(thread_id, true)
+            .expect("marking read should work");
+        let thread = store
+            .thread_view(thread_id)
+            .expect("thread view should load")
+            .expect("thread should exist");
+        assert!(thread.is_flagged);
+        assert_eq!(thread.unread_count, 0);
+
+        store
+            .move_thread(thread_id, archive_id)
+            .expect("moving should work");
+        let archive_threads = store
+            .list_threads(archive_id, 0..10)
+            .expect("archive threads should load");
+        assert_eq!(archive_threads.len(), 1);
+        assert_eq!(
+            store
+                .list_threads(inbox_id, 0..10)
+                .expect("inbox threads")
+                .len(),
+            0
+        );
+
+        store
+            .delete_thread(thread_id)
+            .expect("delete should move the thread to trash");
+        assert_eq!(
+            store
+                .list_threads(archive_id, 0..10)
+                .expect("archive threads")
+                .len(),
+            0
+        );
+        assert_eq!(
+            store
+                .list_threads(trash_id, 0..10)
+                .expect("trash threads")
+                .len(),
+            1
+        );
+
+        store
+            .delete_thread(thread_id)
+            .expect("deleting from trash should remove the thread");
+        assert_eq!(
+            store
+                .list_threads(trash_id, 0..10)
+                .expect("trash threads")
+                .len(),
+            0
+        );
+        assert!(
+            store
+                .search_threads(account_id, "mailbox ops", 10)
+                .expect("search should work")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn creates_autosaves_and_attaches_to_drafts() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity = store
+            .list_identities(account_id)
+            .expect("identities should load")
+            .into_iter()
+            .next()
+            .expect("demo account should have an identity");
+
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id: identity.id,
+                to: Vec::new(),
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: String::new(),
+                body: String::new(),
+            })
+            .expect("draft should be created");
+
+        let initial = store
+            .draft_detail(draft_id)
+            .expect("draft detail should load")
+            .expect("draft should exist");
+        assert_eq!(initial.body, identity.signature);
+
+        let attachment_source =
+            std::env::temp_dir().join(format!("zmail-draft-attachment-{}.txt", draft_id));
+        fs::write(&attachment_source, b"attachment payload").expect("attachment should be written");
+        let attachment = store
+            .add_draft_attachment(draft_id, &attachment_source)
+            .expect("attachment should be added");
+
+        store
+            .update_draft(
+                draft_id,
+                &zmail_core::DraftUpdate {
+                    identity_id: identity.id,
+                    to: vec!["recipient@example.test".to_owned()],
+                    cc: vec!["copy@example.test".to_owned()],
+                    bcc: Vec::new(),
+                    subject: "Phase 4".to_owned(),
+                    body: "Draft body".to_owned(),
+                },
+            )
+            .expect("draft should autosave");
+
+        let updated = store
+            .draft_detail(draft_id)
+            .expect("draft detail should load")
+            .expect("draft should exist");
+        assert_eq!(updated.subject, "Phase 4");
+        assert_eq!(updated.body, "Draft body");
+        assert_eq!(updated.to, vec!["recipient@example.test".to_owned()]);
+        assert_eq!(updated.cc, vec!["copy@example.test".to_owned()]);
+        assert_eq!(updated.attachments.len(), 1);
+        assert_eq!(updated.attachments[0].id, attachment.id);
+
+        store
+            .remove_draft_attachment(attachment.id)
+            .expect("attachment should be removable");
+        let without_attachment = store
+            .draft_detail(draft_id)
+            .expect("draft detail should load")
+            .expect("draft should exist");
+        assert!(without_attachment.attachments.is_empty());
+    }
+
+    #[test]
+    fn queues_retries_and_completes_outbox_jobs() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity = store
+            .list_identities(account_id)
+            .expect("identities should load")
+            .into_iter()
+            .next()
+            .expect("demo account should have an identity");
+
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id: identity.id,
+                to: vec!["recipient@example.test".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Queued draft".to_owned(),
+                body: "Queued body".to_owned(),
+            })
+            .expect("draft should be created");
+        let job_id = store.queue_draft(draft_id).expect("draft should queue");
+
+        let jobs = store
+            .list_outbox_jobs(Some(account_id))
+            .expect("jobs should load");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, job_id);
+
+        let claimed = store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("job should claim")
+            .expect("job should exist");
+        assert_eq!(claimed.job_id, job_id);
+        assert_eq!(claimed.message.subject, "Queued draft");
+
+        store
+            .record_outbox_retry(job_id, "offline", Duration::from_secs(30))
+            .expect("retry should record");
+        let retried = store
+            .draft_detail(draft_id)
+            .expect("draft detail should load")
+            .expect("draft should exist");
+        assert_eq!(retried.state, DraftState::Queued);
+        assert_eq!(retried.last_error_message.as_deref(), Some("offline"));
+
+        store
+            .retry_outbox_job(job_id)
+            .expect("job should requeue manually");
+        let claimed_again = store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("job should claim again")
+            .expect("job should still exist");
+        assert_eq!(claimed_again.job_id, job_id);
+
+        store
+            .record_outbox_sent(job_id)
+            .expect("success should record");
+        let sent = store
+            .draft_detail(draft_id)
+            .expect("draft detail should load")
+            .expect("draft should exist");
+        assert_eq!(sent.state, DraftState::Sent);
+        assert!(sent.sent_at.is_some());
+    }
+}

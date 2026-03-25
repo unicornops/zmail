@@ -1,0 +1,35 @@
+services:
+  greenmail:
+    image: greenmail/standalone:2.1.8
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.smtp
+        -Dgreenmail.setup.test.imap
+        -Dgreenmail.hostname=0.0.0.0
+        -Dgreenmail.users=phase2:phase2-password@localhost,sender:sender-password@localhost
+        -Dgreenmail.preload.dir=/opt/greenmail/preload
+        -Dgreenmail.verbose
+      JAVA_OPTS: -Djava.net.preferIPv4Stack=true -Xmx512m
+    ports:
+      - "3025:3025"
+      - "3143:3143"
+      - "8080:8080"
+    volumes:
+      - ./preload:/opt/greenmail/preload:ro
+
+  james:
+    image: apache/james:memory-3.9.0
+    ports:
+      - "4025:25"
+      - "4081:8000"
+    volumes:
+      - ./james/conf/keystore:/root/conf/keystore:ro
+
+  jmap-proxy:
+    image: nginx:1.27-alpine
+    depends_on:
+      - james
+    ports:
+      - "4080:8080"
+    volumes:
+      - ./james/nginx.conf:/etc/nginx/nginx.conf:ro

@@ -1,0 +1,19 @@
+[package]
+name = "zmail-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+url.workspace = true
+zmail-core = { path = "../zmail-core" }
+zmail-security = { path = "../zmail-security" }
+zmail-store = { path = "../zmail-store" }
+zmail-sync = { path = "../zmail-sync" }
+
+[lints]
+workspace = true

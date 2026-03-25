@@ -1,0 +1,9 @@
+From: Sender <sender@localhost>
+To: phase2@localhost
+Subject: Preloaded Phase 2b message
+Date: Sat, 21 Mar 2026 10:00:00 +0000
+Message-ID: <phase2b-preloaded-001@localhost>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+This message is preloaded into the Phase 2b harness inbox so sync tests always start with a real IMAP message.

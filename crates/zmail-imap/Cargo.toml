@@ -1,0 +1,24 @@
+[package]
+name = "zmail-imap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+async-imap.workspace = true
+futures-util.workspace = true
+mail-parser.workspace = true
+rustls-native-certs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+url.workspace = true
+zmail-core = { path = "../zmail-core" }
+zmail-security = { path = "../zmail-security" }
+
+[lints]
+workspace = true

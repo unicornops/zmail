@@ -1,0 +1,26 @@
+{
+  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
+  "name": "Zmail Phase 0",
+  "author": "OpenAI Codex",
+  "themes": [
+    {
+      "name": "Zmail Phase 0 Dark",
+      "appearance": "dark",
+      "style": {
+        "accents": [
+          "#5BA3F5",
+          "#FFD166"
+        ],
+        "background": "#111827",
+        "surface.background": "#162033",
+        "border": "#2D3B55",
+        "border.variant": "#22304A",
+        "editor.foreground": "#E5EEF9",
+        "element.background": "#162033",
+        "element.selected": "#203559",
+        "text": "#E5EEF9",
+        "text.muted": "#9FB0C7"
+      }
+    }
+  ]
+}

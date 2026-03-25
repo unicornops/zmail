@@ -1,0 +1,20 @@
+[package]
+name = "zmail-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+zmail-core = { path = "../zmail-core" }
+zmail-imap = { path = "../zmail-imap" }
+zmail-jmap = { path = "../zmail-jmap" }
+zmail-security = { path = "../zmail-security" }
+zmail-smtp = { path = "../zmail-smtp" }
+zmail-store = { path = "../zmail-store" }
+
+[lints]
+workspace = true

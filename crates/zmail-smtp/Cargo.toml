@@ -1,0 +1,16 @@
+[package]
+name = "zmail-smtp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+mail-send.workspace = true
+tokio-rustls.workspace = true
+zmail-core = { path = "../zmail-core" }
+
+[lints]
+workspace = true
