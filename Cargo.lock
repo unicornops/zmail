@@ -7976,7 +7976,7 @@ checksum = "3be3d40e40a133f9c916ee3f9f4fa2d9d63435b5fbe1bfc6d9dae0aa0ada1513"
 
 [[package]]
 name = "zmail-app"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "rpassword",
@@ -7991,15 +7991,15 @@ dependencies = [
 
 [[package]]
 name = "zmail-auth"
-version = "0.0.1"
+version = "0.0.2"
 
 [[package]]
 name = "zmail-core"
-version = "0.0.1"
+version = "0.0.2"
 
 [[package]]
 name = "zmail-imap"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "async-imap",
@@ -8017,11 +8017,11 @@ dependencies = [
 
 [[package]]
 name = "zmail-index"
-version = "0.0.1"
+version = "0.0.2"
 
 [[package]]
 name = "zmail-jmap"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8036,7 +8036,7 @@ dependencies = [
 
 [[package]]
 name = "zmail-security"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "keyring",
@@ -8044,7 +8044,7 @@ dependencies = [
 
 [[package]]
 name = "zmail-smtp"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "mail-send",
@@ -8054,7 +8054,7 @@ dependencies = [
 
 [[package]]
 name = "zmail-store"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -8065,7 +8065,7 @@ dependencies = [
 
 [[package]]
 name = "zmail-sync"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "tokio",
@@ -8079,7 +8079,7 @@ dependencies = [
 
 [[package]]
 name = "zmail-test-support"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -8094,7 +8094,7 @@ dependencies = [
 
 [[package]]
 name = "zmail-theme"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -8102,7 +8102,7 @@ dependencies = [
 
 [[package]]
 name = "zmail-ui"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "gpui",
