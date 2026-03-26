@@ -9,7 +9,71 @@ permissions:
     contents: read
 
 jobs:
+    changes:
+        runs-on: ubuntu-latest
+        outputs:
+            app_code: ${{ steps.detect.outputs.app_code }}
+            workspace_checks: ${{ steps.detect.outputs.workspace_checks }}
+
+        steps:
+            - name: Checkout
+              if: github.event_name == 'pull_request'
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Detect app code changes
+              id: detect
+              shell: bash
+              run: |
+                  if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+                    echo "app_code=true" >> "$GITHUB_OUTPUT"
+                    echo "workspace_checks=true" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
+
+                  app_code=false
+                  workspace_checks=false
+                  while IFS= read -r file; do
+                    [[ -z "$file" ]] && continue
+
+                    case "$file" in
+                      docker/mail-harness/*)
+                        if [[ "$file" != *.md ]]; then
+                          workspace_checks=true
+                        fi
+                        ;;
+                      Cargo.toml|Cargo.lock|rust-toolchain.toml)
+                        app_code=true
+                        workspace_checks=true
+                        break
+                        ;;
+                      crates/*)
+                        if [[ "$file" != *.md ]]; then
+                          app_code=true
+                          workspace_checks=true
+                          break
+                        fi
+                        ;;
+                      themes/*)
+                        if [[ "$file" != *.md ]]; then
+                          app_code=true
+                          workspace_checks=true
+                          break
+                        fi
+                        ;;
+                      about.toml|deny.toml|scripts/mail-harness.sh)
+                        workspace_checks=true
+                        ;;
+                    esac
+                  done < <(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
+
+                  echo "app_code=$app_code" >> "$GITHUB_OUTPUT"
+                  echo "workspace_checks=$workspace_checks" >> "$GITHUB_OUTPUT"
+
     quality:
+        needs: changes
+        if: github.event_name != 'pull_request' || needs.changes.outputs.workspace_checks == 'true'
         runs-on: ubuntu-latest
 
         steps:
@@ -54,7 +118,10 @@ jobs:
 
     build:
         name: Build (${{ matrix.os }})
-        needs: quality
+        needs:
+            - changes
+            - quality
+        if: github.event_name != 'pull_request' || needs.changes.outputs.app_code == 'true'
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
