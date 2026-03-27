@@ -5,7 +5,7 @@ use std::{ops::Range, sync::Arc, time::Duration};
 use anyhow::{Context as _, Result, bail};
 use gpui::{
     AnyElement, App, Application, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, Render, Stateful, StatefulInteractiveElement, Styled, Timer,
+    KeyDownEvent, Render, Stateful, StatefulInteractiveElement, Styled, Timer, TitlebarOptions,
     UniformListScrollHandle, Window, WindowBounds, WindowOptions, div, linear_color_stop,
     linear_gradient, prelude::*, px, relative, rgb, rgba, size, uniform_list,
 };
@@ -36,6 +36,10 @@ pub fn run(
 
         if let Err(error) = cx.open_window(
             WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some(format!("{APP_NAME} {PHASE_LABEL}").into()),
+                    ..Default::default()
+                }),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },

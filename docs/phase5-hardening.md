@@ -38,3 +38,4 @@ This document records the Phase 5 hardening work that is present in-repo today a
 - Release PRs and GitHub releases are managed by Google Release Please.
 - Contributors should use Conventional Commit prefixes such as `feat:`, `fix:`, or `deps:` so Release Please can compute the next version and changelog.
 - The release workflow builds release archives on all supported desktop platforms and uploads them to the GitHub release.
+- A separate release-triggered workflow captures a Linux screenshot from the live mail harness and uploads the PNG to the same GitHub release without writing back to `main`.
