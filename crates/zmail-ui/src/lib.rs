@@ -6,8 +6,8 @@ use anyhow::{Context as _, Result, bail};
 use gpui::{
     AnyElement, App, Application, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
     KeyDownEvent, Render, Stateful, StatefulInteractiveElement, Styled, Timer,
-    UniformListScrollHandle, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
-    uniform_list,
+    UniformListScrollHandle, Window, WindowBounds, WindowOptions, div, linear_color_stop,
+    linear_gradient, prelude::*, px, relative, rgb, rgba, size, uniform_list,
 };
 use url::Url;
 use zmail_core::{
@@ -64,7 +64,6 @@ enum ListMode {
 enum DetailMode {
     Reader,
     Compose,
-    AccountSetup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,6 +366,7 @@ struct WorkspaceView {
     active_field: Option<EditorField>,
     search_query: UiBuffer,
     compose: Option<ComposeState>,
+    settings_open: bool,
     account_setup: AccountSetupState,
     store_error: Option<String>,
     status_message: Option<String>,
@@ -412,6 +412,7 @@ impl WorkspaceView {
             active_field: None,
             search_query: UiBuffer::single_line(String::new()),
             compose: None,
+            settings_open: false,
             account_setup: AccountSetupState::default(),
             store_error: None,
             status_message: None,
@@ -419,7 +420,7 @@ impl WorkspaceView {
         };
         view.refresh_from_store();
         if view.accounts.is_empty() {
-            view.detail_mode = DetailMode::AccountSetup;
+            view.settings_open = true;
             view.active_field = Some(EditorField::AccountDisplayName);
         }
         view
@@ -561,11 +562,6 @@ impl WorkspaceView {
     fn select_account(&mut self, account_id: i64, cx: &mut Context<Self>) {
         self.selected_account_id = Some(account_id);
         self.list_mode = ListMode::Mail;
-        self.detail_mode = if matches!(self.detail_mode, DetailMode::AccountSetup) {
-            DetailMode::Reader
-        } else {
-            self.detail_mode
-        };
         self.refresh_from_store();
         cx.notify();
     }
@@ -652,7 +648,7 @@ impl WorkspaceView {
 
     fn open_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(account_id) = self.selected_account_id else {
-            self.open_account_setup(window, cx);
+            self.open_settings_dialog(window, cx);
             return;
         };
         let Some(identity) = self
@@ -838,10 +834,22 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn open_account_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.detail_mode = DetailMode::AccountSetup;
+    fn open_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = true;
         self.active_field = Some(EditorField::AccountDisplayName);
         window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn close_settings_dialog(&mut self, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        if self
+            .active_field
+            .map(Self::is_account_field)
+            .unwrap_or(false)
+        {
+            self.active_field = None;
+        }
         cx.notify();
     }
 
@@ -855,8 +863,8 @@ impl WorkspaceView {
                         return;
                     }
                     self.selected_account_id = Some(account_id);
-                    self.detail_mode = DetailMode::Reader;
                     self.list_mode = ListMode::Mail;
+                    self.settings_open = false;
                     self.account_setup = AccountSetupState::default();
                     self.active_field = None;
                     self.status_message = Some(format!("Account {account_id} added."));
@@ -951,6 +959,24 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    fn is_account_field(field: EditorField) -> bool {
+        matches!(
+            field,
+            EditorField::AccountDisplayName
+                | EditorField::AccountEndpoint
+                | EditorField::AccountUsername
+                | EditorField::AccountPassword
+                | EditorField::AccountIdentityName
+                | EditorField::AccountIdentityEmail
+                | EditorField::AccountSignature
+                | EditorField::AccountAliasEmails
+                | EditorField::AccountSmtpHost
+                | EditorField::AccountSmtpPort
+                | EditorField::AccountSmtpSecurity
+                | EditorField::AccountSmtpUsername
+        )
+    }
+
     fn active_buffer_mut(&mut self) -> Option<&mut UiBuffer> {
         match self.active_field? {
             EditorField::SearchQuery => Some(&mut self.search_query),
@@ -986,6 +1012,10 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !event.is_held && event.keystroke.key == "escape" && self.settings_open {
+            self.close_settings_dialog(cx);
+            return;
+        }
         let pasted = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(buffer) = self.active_buffer_mut() else {
             return;
@@ -1060,7 +1090,7 @@ impl Render for WorkspaceView {
         let account_name = selected_account
             .as_ref()
             .map(|account| account.display_name.clone())
-            .unwrap_or_else(|| "No account selected".to_owned());
+            .unwrap_or_else(|| "Open Settings to add your first account".to_owned());
         let account_detail = selected_account
             .as_ref()
             .map(|account| {
@@ -1069,7 +1099,10 @@ impl Render for WorkspaceView {
                     account.protocol, account.identity_count, account.cache_policy.name
                 )
             })
-            .unwrap_or_else(|| "Add an IMAP or JMAP account to begin.".to_owned());
+            .unwrap_or_else(|| {
+                "Server setup lives in Settings. The main workspace stays focused on local mail."
+                    .to_owned()
+            });
         let header_detail = format!(
             "{} accounts • {} mailboxes • {} threads • {} messages",
             self.stats.account_count,
@@ -1098,13 +1131,74 @@ impl Render for WorkspaceView {
             ListMode::Drafts => "Drafts",
             ListMode::Outbox => "Outbox",
         };
+        let list_icon = match self.list_mode {
+            ListMode::Mail => "✉",
+            ListMode::Search => "⌕",
+            ListMode::Drafts => "D",
+            ListMode::Outbox => "↑",
+        };
+        let (detail_icon, detail_title, detail_subtitle) = match self.detail_mode {
+            DetailMode::Reader if self.accounts.is_empty() => (
+                "◎",
+                "Welcome".to_owned(),
+                "Connect an account in Settings, sync it, then pick a mailbox to start browsing."
+                    .to_owned(),
+            ),
+            DetailMode::Reader if selected_thread.is_some() => (
+                "✉",
+                "Reader".to_owned(),
+                "Messages are rendered from the local mirror with security-first defaults."
+                    .to_owned(),
+            ),
+            DetailMode::Reader => (
+                "✉",
+                "Reader".to_owned(),
+                "Choose a conversation from the middle column to inspect it here.".to_owned(),
+            ),
+            DetailMode::Compose => (
+                "✎",
+                "Compose".to_owned(),
+                "Drafts save locally as you type and move through the outbox when sent.".to_owned(),
+            ),
+        };
+        let list_detail = match self.list_mode {
+            ListMode::Mail => thread_header.clone(),
+            ListMode::Search => format!(
+                "{} result(s) for {}",
+                self.search_results.len(),
+                query_summary(&self.search_query.text)
+            ),
+            ListMode::Drafts => format!("{} draft(s) visible", self.drafts.len()),
+            ListMode::Outbox => format!("{} outbox job(s)", self.outbox_jobs.len()),
+        };
+        let (sync_badge_color, sync_badge_text) = selected_account
+            .as_ref()
+            .map(|account| sync_badge(account.sync_status.phase, accent))
+            .unwrap_or((accent, "Setup"));
+        let sync_detail = selected_account
+            .as_ref()
+            .map(|account| account.sync_status.detail.clone())
+            .unwrap_or_else(|| {
+                "Add an account in Settings to start syncing into the local mirror.".to_owned()
+            });
 
         div()
+            .relative()
             .size_full()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::handle_key_down))
             .bg(rgb(background))
             .text_color(rgb(foreground))
+            .child(
+                div().absolute().inset_0().bg(
+                    linear_gradient(
+                        140.0,
+                        linear_color_stop(rgba(0x233D62FF), 0.0),
+                        linear_color_stop(rgba(0x0A1220FF), 1.0),
+                    )
+                    .opacity(0.55),
+                ),
+            )
             .child(
                 div()
                     .flex()
@@ -1112,93 +1206,226 @@ impl Render for WorkspaceView {
                     .size_full()
                     .child(
                         div()
-                            .flex()
-                            .justify_between()
-                            .items_center()
                             .px_4()
-                            .py_3()
+                            .py_4()
                             .border_b_1()
                             .border_color(rgb(border))
                             .child(
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap_1()
-                                    .child(format!("{APP_NAME} {PHASE_LABEL}"))
-                                    .child(div().text_sm().text_color(rgb(muted)).child(account_name))
-                                    .child(div().text_sm().text_color(rgb(muted)).child(account_detail)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .items_end()
-                                    .gap_1()
-                                    .child(div().text_sm().child(header_detail))
-                                    .child(div().text_sm().text_color(rgb(muted)).child(upstream_detail)),
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .px_5()
+                                            .py_5()
+                                            .bg(linear_gradient(
+                                                128.0,
+                                                linear_color_stop(rgba(0x2B4F7BFF), 0.0),
+                                                linear_color_stop(rgba(0x101B2CFF), 1.0),
+                                            ))
+                                            .border_1()
+                                            .border_color(rgb(border))
+                                            .rounded_xl()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .justify_between()
+                                                    .items_start()
+                                                    .gap_6()
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .text_color(rgb(0xD7E4F8))
+                                                                    .child(format!(
+                                                                        "{APP_NAME} {PHASE_LABEL}"
+                                                                    )),
+                                                            )
+                                                            .child(account_name.clone())
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .text_color(rgb(0xD7E4F8))
+                                                                    .child(account_detail.clone()),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .flex()
+                                                                    .flex_wrap()
+                                                                    .gap_2()
+                                                                    .child(info_chip(
+                                                                        "Local-first mirror",
+                                                                        button_background,
+                                                                        border,
+                                                                        0xE5EEF9,
+                                                                    ))
+                                                                    .child(info_chip(
+                                                                        format!(
+                                                                            "Sync {sync_badge_text}"
+                                                                        ),
+                                                                        button_background,
+                                                                        border,
+                                                                        0xE5EEF9,
+                                                                    ))
+                                                                    .child(info_chip(
+                                                                        format!(
+                                                                            "View {detail_title}"
+                                                                        ),
+                                                                        button_background,
+                                                                        border,
+                                                                        0xE5EEF9,
+                                                                    )),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .items_end()
+                                                            .gap_1()
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .text_color(rgb(0xE5EEF9))
+                                                                    .child(header_detail.clone()),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .text_color(rgb(
+                                                                        sync_badge_color,
+                                                                    ))
+                                                                    .child(sync_detail.clone()),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .text_color(rgb(0xD7E4F8))
+                                                                    .child(upstream_detail.clone()),
+                                                            ),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .gap_3()
+                                            .child(summary_card(
+                                                "◎",
+                                                "Accounts",
+                                                self.stats.account_count.to_string(),
+                                                "Configured local mirrors",
+                                                surface,
+                                                border,
+                                                accent,
+                                                muted,
+                                            ))
+                                            .child(summary_card(
+                                                "#",
+                                                "Mailboxes",
+                                                self.stats.mailbox_count.to_string(),
+                                                thread_header.clone(),
+                                                surface,
+                                                border,
+                                                accent,
+                                                muted,
+                                            ))
+                                            .child(summary_card(
+                                                "✉",
+                                                "Messages",
+                                                self.stats.message_count.to_string(),
+                                                "Indexed for local browsing and search",
+                                                surface,
+                                                border,
+                                                accent,
+                                                muted,
+                                            ))
+                                            .child(summary_card(
+                                                "↻",
+                                                "Runtime",
+                                                self.bootstrap.runtime.worker_threads.to_string(),
+                                                format!(
+                                                    "{list_title} active • {sync_badge_text}"
+                                                ),
+                                                surface,
+                                                border,
+                                                accent,
+                                                muted,
+                                            )),
+                                    ),
                             ),
                     )
                     .child(
                         div()
                             .flex()
-                            .gap_2()
+                            .items_start()
+                            .flex_wrap()
+                            .gap_3()
                             .px_4()
                             .py_3()
                             .border_b_1()
                             .border_color(rgb(border))
-                            .child(toolbar_button(
-                                "Add Account",
-                                button_background,
-                                border,
-                                cx.listener(|this: &mut Self, _, window, cx| {
-                                    this.open_account_setup(window, cx);
-                                }),
-                            ))
-                            .child(toolbar_button(
-                                "Compose",
-                                button_background,
-                                border,
-                                cx.listener(|this: &mut Self, _, window, cx| {
-                                    this.open_compose(window, cx);
-                                }),
-                            ))
-                            .child(toolbar_button(
-                                "Mail",
-                                if matches!(self.list_mode, ListMode::Mail) {
-                                    selected_background
-                                } else {
-                                    button_background
-                                },
-                                border,
-                                cx.listener(|this: &mut Self, _, _, cx| {
-                                    this.set_list_mode(ListMode::Mail, cx);
-                                }),
-                            ))
-                            .child(toolbar_button(
-                                "Drafts",
-                                if matches!(self.list_mode, ListMode::Drafts) {
-                                    selected_background
-                                } else {
-                                    button_background
-                                },
-                                border,
-                                cx.listener(|this: &mut Self, _, _, cx| {
-                                    this.set_list_mode(ListMode::Drafts, cx);
-                                    this.detail_mode = DetailMode::Compose;
-                                }),
-                            ))
-                            .child(toolbar_button(
-                                "Outbox",
-                                if matches!(self.list_mode, ListMode::Outbox) {
-                                    selected_background
-                                } else {
-                                    button_background
-                                },
-                                border,
-                                cx.listener(|this: &mut Self, _, _, cx| {
-                                    this.set_list_mode(ListMode::Outbox, cx);
-                                }),
-                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(toolbar_button(
+                                        "⚙",
+                                        "Settings",
+                                        if self.settings_open {
+                                            selected_background
+                                        } else {
+                                            button_background
+                                        },
+                                        border,
+                                        cx.listener(|this: &mut Self, _, window, cx| {
+                                            this.open_settings_dialog(window, cx);
+                                        }),
+                                    ))
+                                    .child(toolbar_button(
+                                        "✎",
+                                        "Compose",
+                                        button_background,
+                                        border,
+                                        cx.listener(|this: &mut Self, _, window, cx| {
+                                            this.open_compose(window, cx);
+                                        }),
+                                    ))
+                                    .child(toolbar_button(
+                                        "↻",
+                                        "Sync Account",
+                                        button_background,
+                                        border,
+                                        cx.listener(|this: &mut Self, _, window, cx| {
+                                            this.sync_selected_account(window, cx);
+                                        }),
+                                    ))
+                                    .child(toolbar_button(
+                                        "⇄",
+                                        "Sync All",
+                                        button_background,
+                                        border,
+                                        cx.listener(|this: &mut Self, _, window, cx| {
+                                            this.sync_all(window, cx);
+                                        }),
+                                    ))
+                                    .child(toolbar_button(
+                                        "⟲",
+                                        "Refresh",
+                                        button_background,
+                                        border,
+                                        cx.listener(|this: &mut Self, _, _, cx| {
+                                            this.refresh_from_store();
+                                            cx.notify();
+                                        }),
+                                    )),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -1214,43 +1441,82 @@ impl Render for WorkspaceView {
                                             accent,
                                         )
                                         .on_click(cx.listener(|this, _, window, cx| {
-                                            this.set_active_field(EditorField::SearchQuery, window, cx);
+                                            this.set_active_field(
+                                                EditorField::SearchQuery,
+                                                window,
+                                                cx,
+                                            );
                                         })),
                                     ),
                             )
                             .child(toolbar_button(
-                                "Run Search",
+                                "⌕",
+                                "Search",
                                 button_background,
                                 border,
                                 cx.listener(|this: &mut Self, _, _, cx| {
                                     this.run_search(cx);
                                 }),
                             ))
-                            .child(toolbar_button(
-                                "Sync Selected",
-                                button_background,
-                                border,
-                                cx.listener(|this: &mut Self, _, window, cx| {
-                                    this.sync_selected_account(window, cx);
-                                }),
-                            ))
-                            .child(toolbar_button(
-                                "Sync All",
-                                button_background,
-                                border,
-                                cx.listener(|this: &mut Self, _, window, cx| {
-                                    this.sync_all(window, cx);
-                                }),
-                            ))
-                            .child(toolbar_button(
-                                "Refresh",
-                                button_background,
-                                border,
-                                cx.listener(|this: &mut Self, _, _, cx| {
-                                    this.refresh_from_store();
-                                    cx.notify();
-                                }),
-                            )),
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(toolbar_button(
+                                        "✉",
+                                        "Mail",
+                                        if matches!(self.list_mode, ListMode::Mail) {
+                                            selected_background
+                                        } else {
+                                            button_background
+                                        },
+                                        border,
+                                        cx.listener(|this: &mut Self, _, _, cx| {
+                                            this.set_list_mode(ListMode::Mail, cx);
+                                        }),
+                                    ))
+                                    .child(toolbar_button(
+                                        "D",
+                                        "Drafts",
+                                        if matches!(self.list_mode, ListMode::Drafts) {
+                                            selected_background
+                                        } else {
+                                            button_background
+                                        },
+                                        border,
+                                        cx.listener(|this: &mut Self, _, _, cx| {
+                                            this.set_list_mode(ListMode::Drafts, cx);
+                                            this.detail_mode = DetailMode::Compose;
+                                        }),
+                                    ))
+                                    .child(toolbar_button(
+                                        "↑",
+                                        "Outbox",
+                                        if matches!(self.list_mode, ListMode::Outbox) {
+                                            selected_background
+                                        } else {
+                                            button_background
+                                        },
+                                        border,
+                                        cx.listener(|this: &mut Self, _, _, cx| {
+                                            this.set_list_mode(ListMode::Outbox, cx);
+                                        }),
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(rgb(border))
+                            .bg(rgb(surface))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(muted))
+                                    .child("Start here: choose an account, pick a mailbox, and open a thread. Use Settings whenever you need to add or review account connections."),
+                            ),
                     )
                     .child(
                         div()
@@ -1265,20 +1531,13 @@ impl Render for WorkspaceView {
                                     .bg(rgb(surface))
                                     .border_r_1()
                                     .border_color(rgb(border))
-                                    .child(
-                                        div()
-                                            .px_3()
-                                            .py_3()
-                                            .border_b_1()
-                                            .border_color(rgb(border))
-                                            .child("Accounts")
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(rgb(muted))
-                                                    .child("Account setup, mailbox selection, and manual sync live here."),
-                                            ),
-                                    )
+                                    .child(panel_header(
+                                        "◎",
+                                        "Accounts",
+                                        "Pick which synced account mirror you want to browse. Settings handles server setup.",
+                                        border,
+                                        muted,
+                                    ))
                                     .child(
                                         div()
                                             .flex()
@@ -1355,20 +1614,13 @@ impl Render for WorkspaceView {
                                                     )
                                             })),
                                     )
-                                    .child(
-                                        div()
-                                            .px_3()
-                                            .py_3()
-                                            .border_b_1()
-                                            .border_color(rgb(border))
-                                            .child("Mailboxes")
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(rgb(muted))
-                                                    .child("Local mirror for the selected account."),
-                                            ),
-                                    )
+                                    .child(panel_header(
+                                        "#",
+                                        "Mailboxes",
+                                        "Everything here is read from the local mirror for the selected account.",
+                                        border,
+                                        muted,
+                                    ))
                                     .child(
                                         div()
                                             .flex_1()
@@ -1464,47 +1716,25 @@ impl Render for WorkspaceView {
                                     .bg(rgb(surface))
                                     .border_r_1()
                                     .border_color(rgb(border))
-                                    .child(
-                                        div()
-                                            .px_3()
-                                            .py_3()
-                                            .border_b_1()
-                                            .border_color(rgb(border))
-                                            .child(list_title)
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(rgb(muted))
-                                                    .child(match self.list_mode {
-                                                        ListMode::Mail => thread_header,
-                                                        ListMode::Search => format!(
-                                                            "{} result(s) for {:?}",
-                                                            self.search_results.len(),
-                                                            self.search_query.text
-                                                        ),
-                                                        ListMode::Drafts => format!(
-                                                            "{} draft(s) visible",
-                                                            self.drafts.len()
-                                                        ),
-                                                        ListMode::Outbox => format!(
-                                                            "{} outbox job(s)",
-                                                            self.outbox_jobs.len()
-                                                        ),
-                                                    }),
-                                            ),
-                                    )
+                                    .child(panel_header(
+                                        list_icon,
+                                        list_title,
+                                        &list_detail,
+                                        border,
+                                        muted,
+                                    ))
                                     .child(match self.list_mode {
                                         ListMode::Mail => {
                                             if self.accounts.is_empty() {
                                                 empty_state(
                                                     "No accounts yet",
-                                                    "Use Add Account to configure IMAP or JMAP directly in the app.",
+                                                    "Open Settings to connect your first IMAP or JMAP account.",
                                                     muted,
                                                 )
                                             } else if thread_count == 0 {
                                                 empty_state(
                                                     "No local mail yet",
-                                                    "Sync the selected account to populate the local mirror.",
+                                                    "Run Sync Account to populate the local mirror for the selected mailbox list.",
                                                     muted,
                                                 )
                                             } else {
@@ -1602,7 +1832,7 @@ impl Render for WorkspaceView {
                                             if self.search_results.is_empty() {
                                                 empty_state(
                                                     "No search results",
-                                                    "Type a query above and run search against the local index.",
+                                                    "Type a query above, then run search against the local mail index.",
                                                     muted,
                                                 )
                                             } else {
@@ -1757,18 +1987,13 @@ impl Render for WorkspaceView {
                                     .flex()
                                     .flex_col()
                                     .bg(rgb(background))
-                                    .child(
-                                        div()
-                                            .px_4()
-                                            .py_3()
-                                            .border_b_1()
-                                            .border_color(rgb(border))
-                                            .child(match self.detail_mode {
-                                                DetailMode::Reader => "Reader",
-                                                DetailMode::Compose => "Compose",
-                                                DetailMode::AccountSetup => "Account Setup",
-                                            }),
-                                    )
+                                    .child(panel_header(
+                                        detail_icon,
+                                        &detail_title,
+                                        &detail_subtitle,
+                                        border,
+                                        muted,
+                                    ))
                                     .child(
                                         div()
                                             .id("detail-scroll")
@@ -1777,18 +2002,59 @@ impl Render for WorkspaceView {
                                             .px_4()
                                             .py_4()
                                             .child(match self.detail_mode {
-                                                DetailMode::Reader => render_reader_detail(
-                                                    selected_thread.as_ref(),
-                                                    selected_account.as_ref(),
-                                                    &self.mailboxes,
-                                                    &self.identities,
-                                                    border,
-                                                    surface,
-                                                    button_background,
-                                                    muted,
-                                                    accent,
-                                                    cx,
-                                                ),
+                                                DetailMode::Reader => {
+                                                    if self.accounts.is_empty() {
+                                                        div()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap_4()
+                                                            .child("Set up your first account")
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .text_color(rgb(muted))
+                                                                    .child("Zmail keeps mail local-first. Add an IMAP or JMAP account in Settings, sync it, then browse mailboxes and conversations from the local mirror."),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .flex()
+                                                                    .gap_2()
+                                                                    .child(toolbar_button(
+                                                                        "⚙",
+                                                                        "Open Settings",
+                                                                        button_background,
+                                                                        border,
+                                                                        cx.listener(|this: &mut Self, _, window, cx| {
+                                                                            this.open_settings_dialog(window, cx);
+                                                                        }),
+                                                                    ))
+                                                                    .child(toolbar_button(
+                                                                        "↻",
+                                                                        "Refresh",
+                                                                        button_background,
+                                                                        border,
+                                                                        cx.listener(|this: &mut Self, _, _, cx| {
+                                                                            this.refresh_from_store();
+                                                                            cx.notify();
+                                                                        }),
+                                                                    )),
+                                                            )
+                                                            .into_any_element()
+                                                    } else {
+                                                        render_reader_detail(
+                                                            selected_thread.as_ref(),
+                                                            selected_account.as_ref(),
+                                                            &self.mailboxes,
+                                                            &self.identities,
+                                                            border,
+                                                            surface,
+                                                            button_background,
+                                                            muted,
+                                                            accent,
+                                                            cx,
+                                                        )
+                                                    }
+                                                }
                                                 DetailMode::Compose => div()
                                                     .flex()
                                                     .flex_col()
@@ -1838,6 +2104,7 @@ impl Render for WorkspaceView {
                                                                             )
                                                                             .child(
                                                                                 toolbar_button(
+                                                                                    "⌫",
                                                                                     "Remove",
                                                                                     button_background,
                                                                                     border,
@@ -1859,6 +2126,7 @@ impl Render for WorkspaceView {
                                                             .gap_2()
                                                             .pt_3()
                                                             .child(toolbar_button(
+                                                                "+",
                                                                 "Add Attachment",
                                                                 button_background,
                                                                 border,
@@ -1867,6 +2135,7 @@ impl Render for WorkspaceView {
                                                                 }),
                                                             ))
                                                             .child(toolbar_button(
+                                                                "↗",
                                                                 "Send Draft",
                                                                 button_background,
                                                                 border,
@@ -1876,30 +2145,6 @@ impl Render for WorkspaceView {
                                                             ))
                                                     )
                                                     .into_any_element(),
-                                                DetailMode::AccountSetup => render_account_setup_detail(
-                                                    &self.account_setup,
-                                                    self.active_field,
-                                                    surface,
-                                                    border,
-                                                    accent,
-                                                    muted,
-                                                    cx,
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .gap_2()
-                                                        .pt_3()
-                                                        .child(toolbar_button(
-                                                            "Save Account",
-                                                            button_background,
-                                                            border,
-                                                            cx.listener(|this: &mut Self, _, window, cx| {
-                                                                this.submit_account_setup(window, cx);
-                                                            }),
-                                                        )),
-                                                )
-                                                .into_any_element(),
                                             }),
                                     )
                                     .child(
@@ -1924,15 +2169,9 @@ impl Render for WorkspaceView {
                                                 DetailMode::Compose => div()
                                                     .flex()
                                                     .gap_2()
-                                                    .children(compose_focus_buttons(border, button_background, cx)),
-                                                DetailMode::AccountSetup => div()
-                                                    .flex()
-                                                    .gap_2()
-                                                    .children(account_protocol_buttons(
-                                                        self.account_setup.protocol,
+                                                    .children(compose_focus_buttons(
                                                         border,
                                                         button_background,
-                                                        selected_background,
                                                         cx,
                                                     )),
                                             }),
@@ -1940,32 +2179,145 @@ impl Render for WorkspaceView {
                             ),
                     )
                     .when_some(self.status_message.clone(), |this, message| {
-                        this.child(
-                            div()
-                                .px_4()
-                                .py_3()
-                                .bg(rgb(success_background))
-                                .border_t_1()
-                                .border_color(rgb(border))
-                                .child(div().text_sm().child(message)),
-                        )
+                        this.child(status_banner(
+                            "✓",
+                            "Status",
+                            message,
+                            success_background,
+                            border,
+                            muted,
+                        ))
                     })
                     .when_some(self.store_error.clone(), |this, error| {
-                        this.child(
-                            div()
-                                .px_4()
-                                .py_3()
-                                .bg(rgb(warning_background))
-                                .border_t_1()
-                                .border_color(rgb(border))
-                                .child(div().text_sm().child(format!("Issue: {error}"))),
-                        )
+                        this.child(status_banner(
+                            "!",
+                            "Issue",
+                            error,
+                            warning_background,
+                            border,
+                            muted,
+                        ))
                     }),
             )
+            .children(self.settings_open.then(|| {
+                render_settings_dialog(
+                    &self.accounts,
+                    self.selected_account_id,
+                    selected_account.as_ref(),
+                    &self.identities,
+                    &self.account_setup,
+                    self.active_field,
+                    background,
+                    surface,
+                    border,
+                    button_background,
+                    selected_background,
+                    accent,
+                    muted,
+                    cx,
+                )
+                .into_any_element()
+            }))
     }
 }
 
+fn icon_chip(icon: &str, background: u32, foreground: u32) -> gpui::Div {
+    div()
+        .w(px(18.0))
+        .h(px(18.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .bg(rgb(background))
+        .text_sm()
+        .text_color(rgb(foreground))
+        .child(icon.to_owned())
+}
+
+fn panel_header(icon: &str, title: &str, detail: &str, border: u32, muted: u32) -> gpui::Div {
+    div()
+        .px_3()
+        .py_3()
+        .border_b_1()
+        .border_color(rgb(border))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(icon_chip(icon, border, 0xE5EEF9))
+                .child(title.to_owned()),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(muted))
+                .child(detail.to_owned()),
+        )
+}
+
+fn info_chip(label: impl Into<String>, background: u32, border: u32, foreground: u32) -> gpui::Div {
+    div()
+        .px_2()
+        .py_1()
+        .bg(rgb(background))
+        .border_1()
+        .border_color(rgb(border))
+        .rounded_md()
+        .text_xs()
+        .text_color(rgb(foreground))
+        .child(label.into())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn summary_card(
+    icon: &str,
+    label: &str,
+    value: impl Into<String>,
+    detail: impl Into<String>,
+    background: u32,
+    border: u32,
+    accent: u32,
+    muted: u32,
+) -> gpui::Div {
+    let value = value.into();
+    let detail = detail.into();
+    div()
+        .w(px(220.0))
+        .flex_grow()
+        .px_4()
+        .py_3()
+        .bg(rgb(background))
+        .border_1()
+        .border_color(rgb(border))
+        .rounded_lg()
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .items_start()
+                .gap_3()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(muted))
+                                .child(label.to_owned()),
+                        )
+                        .child(value)
+                        .child(div().text_sm().text_color(rgb(muted)).child(detail)),
+                )
+                .child(icon_chip(icon, accent, 0x08111A)),
+        )
+}
+
 fn toolbar_button(
+    icon: &str,
     label: impl Into<String>,
     background: u32,
     border: u32,
@@ -1973,15 +2325,19 @@ fn toolbar_button(
 ) -> Stateful<gpui::Div> {
     let label = label.into();
     div()
-        .id("toolbar-button")
+        .flex()
+        .items_center()
+        .gap_2()
         .px_2()
         .py_1()
         .bg(rgb(background))
         .border_1()
         .border_color(rgb(border))
+        .rounded_md()
         .cursor_pointer()
         .on_click(on_click)
-        .child(label)
+        .child(icon_chip(icon, border, 0xE5EEF9))
+        .child(div().text_sm().child(label))
 }
 
 fn empty_state(title: &str, detail: &str, muted: u32) -> AnyElement {
@@ -2436,13 +2792,10 @@ fn render_account_setup_detail(
         .flex()
         .flex_col()
         .gap_3()
-        .child("Create a real IMAP or JMAP account directly in the desktop shell.")
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(muted))
-                .child("For IMAP accounts, configure SMTP submission here as well."),
-        )
+        .child("Add an account")
+        .child(div().text_sm().text_color(rgb(muted)).child(
+            "Enter the server details once. Zmail will sync into the local mirror after you save.",
+        ))
         .child(
             input_card(
                 "account-display-name-field",
@@ -2632,6 +2985,403 @@ fn render_account_setup_detail(
         }))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn render_settings_dialog(
+    accounts: &[AccountSummary],
+    selected_account_id: Option<i64>,
+    selected_account: Option<&AccountSummary>,
+    identities: &[IdentitySummary],
+    form: &AccountSetupState,
+    active_field: Option<EditorField>,
+    background: u32,
+    surface: u32,
+    border: u32,
+    button_background: u32,
+    selected_background: u32,
+    accent: u32,
+    muted: u32,
+    cx: &mut Context<WorkspaceView>,
+) -> gpui::Div {
+    div()
+        .absolute()
+        .inset_0()
+        .bg(rgba(0x08111CE6))
+        .child(
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .px_4()
+                .py_4()
+                .child(
+                    div()
+                        .w(relative(0.92))
+                        .h(relative(0.92))
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .bg(rgb(background))
+                        .border_1()
+                        .border_color(rgb(border))
+                        .rounded_xl()
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .px_5()
+                                .py_4()
+                                .bg(linear_gradient(
+                                    128.0,
+                                    linear_color_stop(rgba(0x26496EFF), 0.0),
+                                    linear_color_stop(rgba(0x101A2AFF), 1.0),
+                                ))
+                                .border_b_1()
+                                .border_color(rgb(border))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .justify_between()
+                                        .items_start()
+                                        .gap_4()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .child(icon_chip("⚙", border, 0xE5EEF9))
+                                                        .child("Settings"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(muted))
+                                                        .child("Account setup lives here so the main workspace stays focused on reading and composing mail."),
+                                                ),
+                                        )
+                                        .child(toolbar_button(
+                                            "✕",
+                                            "Close",
+                                            button_background,
+                                            border,
+                                            cx.listener(|this: &mut WorkspaceView, _, _, cx| {
+                                                this.close_settings_dialog(cx);
+                                            }),
+                                        )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_1()
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .w(px(340.0))
+                                        .flex()
+                                        .flex_col()
+                                        .bg(rgb(surface))
+                                        .border_r_1()
+                                        .border_color(rgb(border))
+                                        .child(panel_header(
+                                            "◎",
+                                            "Configured Accounts",
+                                            "Choose the local mirror you want to browse. Connection setup stays in this dialog.",
+                                            border,
+                                            muted,
+                                        ))
+                                        .child(if accounts.is_empty() {
+                                            empty_state(
+                                                "No accounts yet",
+                                                "Use the form on the right to connect your first IMAP or JMAP account.",
+                                                muted,
+                                            )
+                                        } else {
+                                            div()
+                                                .flex_1()
+                                                .overflow_y_scroll()
+                                                .children(accounts.iter().map(|account| {
+                                                    let account_id = account.id;
+                                                    let is_selected = Some(account_id) == selected_account_id;
+                                                    let background_color = if is_selected {
+                                                        rgb(selected_background)
+                                                    } else {
+                                                        rgb(surface)
+                                                    };
+                                                    let (badge_color, badge_text) =
+                                                        sync_badge(account.sync_status.phase, accent);
+                                                    div()
+                                                        .id(("settings-account", account_id as u64))
+                                                        .px_3()
+                                                        .py_3()
+                                                        .cursor_pointer()
+                                                        .border_b_1()
+                                                        .border_color(rgb(border))
+                                                        .bg(background_color)
+                                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                                            this.select_account(account_id, cx);
+                                                        }))
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .justify_between()
+                                                                .items_start()
+                                                                .gap_2()
+                                                                .child(
+                                                                    div()
+                                                                        .flex()
+                                                                        .flex_col()
+                                                                        .gap_1()
+                                                                        .child(account.display_name.clone())
+                                                                        .child(
+                                                                            div()
+                                                                                .text_sm()
+                                                                                .text_color(rgb(muted))
+                                                                                .child(format!(
+                                                                                    "{} • {} identities",
+                                                                                    account.protocol,
+                                                                                    account.identity_count
+                                                                                )),
+                                                                        )
+                                                                        .child(
+                                                                            div()
+                                                                                .text_sm()
+                                                                                .text_color(rgb(muted))
+                                                                                .truncate()
+                                                                                .child(account.endpoint.clone()),
+                                                                        )
+                                                                        .child(
+                                                                            div()
+                                                                                .text_sm()
+                                                                                .truncate()
+                                                                                .child(account.sync_status.detail.clone()),
+                                                                        ),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .px_2()
+                                                                        .py_1()
+                                                                        .bg(rgb(button_background))
+                                                                        .text_sm()
+                                                                        .text_color(rgb(badge_color))
+                                                                        .child(badge_text),
+                                                                ),
+                                                        )
+                                                }))
+                                                .into_any_element()
+                                        })
+                                        .child(panel_header(
+                                            "●",
+                                            "Selected Account",
+                                            "Review sync state and identities while you add another account.",
+                                            border,
+                                            muted,
+                                        ))
+                                        .child(
+                                            div()
+                                                .px_3()
+                                                .py_3()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_2()
+                                                .children(selected_account.map(|account| {
+                                                    let sync_detail = format!(
+                                                        "{} • {}",
+                                                        account.sync_status.phase,
+                                                        account.sync_status.detail
+                                                    );
+                                                    let identity_list = if identities.is_empty() {
+                                                        "No identities loaded yet.".to_owned()
+                                                    } else {
+                                                        identities
+                                                            .iter()
+                                                            .map(|identity| identity.email_address.clone())
+                                                            .collect::<Vec<_>>()
+                                                            .join(", ")
+                                                    };
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_2()
+                                                        .child(account.display_name.clone())
+                                                        .child(
+                                                            div()
+                                                                .text_sm()
+                                                                .text_color(rgb(muted))
+                                                                .child(format!(
+                                                                    "{} • {}",
+                                                                    account.protocol, account.cache_policy.name
+                                                                )),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_sm()
+                                                                .text_color(rgb(muted))
+                                                                .child(account.endpoint.clone()),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_sm()
+                                                                .text_color(rgb(accent))
+                                                                .child(sync_detail),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_sm()
+                                                                .text_color(rgb(muted))
+                                                                .child(format!("Identities: {identity_list}")),
+                                                        )
+                                                }).or_else(|| {
+                                                    Some(
+                                                        div()
+                                                            .text_sm()
+                                                            .text_color(rgb(muted))
+                                                            .child("Select an account to review its sync status here."),
+                                                    )
+                                                })),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .overflow_y_scroll()
+                                        .px_5()
+                                        .py_4()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_4()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .justify_between()
+                                                .items_start()
+                                                .gap_4()
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_1()
+                                                        .child("Add Account")
+                                                        .child(
+                                                            div()
+                                                                .text_sm()
+                                                                .text_color(rgb(muted))
+                                                                .child("Pick the protocol, enter the server details, and save once. Zmail will start syncing immediately."),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_wrap()
+                                                        .gap_2()
+                                                        .children(account_protocol_buttons(
+                                                            form.protocol,
+                                                            border,
+                                                            button_background,
+                                                            selected_background,
+                                                            cx,
+                                                        )),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .px_4()
+                                                .py_3()
+                                                .bg(rgb(surface))
+                                                .border_1()
+                                                .border_color(rgb(border))
+                                                .rounded_lg()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(muted))
+                                                        .child("New users usually only need the account email, server endpoint, password, and an SMTP host for IMAP accounts."),
+                                                ),
+                                        )
+                                        .child(render_account_setup_detail(
+                                            form,
+                                            active_field,
+                                            surface,
+                                            border,
+                                            accent,
+                                            muted,
+                                            cx,
+                                        ))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .justify_between()
+                                                .items_center()
+                                                .gap_3()
+                                                .pt_2()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(muted))
+                                                        .child("Credentials stay in the secret store. Press Escape to close Settings."),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .gap_2()
+                                                        .child(toolbar_button(
+                                                            "✓",
+                                                            "Save Account",
+                                                            button_background,
+                                                            border,
+                                                            cx.listener(|this: &mut WorkspaceView, _, window, cx| {
+                                                                this.submit_account_setup(window, cx);
+                                                            }),
+                                                        )),
+                                                ),
+                                        ),
+                                ),
+                        ),
+                ),
+        )
+}
+
+fn status_banner(
+    icon: &str,
+    label: &str,
+    detail: impl Into<String>,
+    background: u32,
+    border: u32,
+    muted: u32,
+) -> gpui::Div {
+    let detail = detail.into();
+    div()
+        .px_4()
+        .py_3()
+        .bg(rgb(background))
+        .border_t_1()
+        .border_color(rgb(border))
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap_3()
+                .child(icon_chip(icon, border, 0xE5EEF9))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(muted))
+                                .child(label.to_owned()),
+                        )
+                        .child(div().text_sm().child(detail)),
+                ),
+        )
+}
+
 fn reader_action_buttons(
     selected_thread: &Option<ThreadView>,
     mailboxes: &[MailboxSummary],
@@ -2647,6 +3397,7 @@ fn reader_action_buttons(
     let thread_is_flagged = thread.is_flagged;
     let mut buttons = vec![
         toolbar_button(
+            "●",
             if thread_has_unread {
                 "Mark Read"
             } else {
@@ -2669,6 +3420,7 @@ fn reader_action_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "★",
             if thread_is_flagged { "Unflag" } else { "Flag" },
             button_background,
             border,
@@ -2687,6 +3439,7 @@ fn reader_action_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "⇥",
             "Archive",
             button_background,
             border,
@@ -2705,6 +3458,7 @@ fn reader_action_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "⌫",
             "Delete",
             button_background,
             border,
@@ -2732,6 +3486,7 @@ fn reader_action_buttons(
         let mailbox_name = mailbox.name.clone();
         buttons.push(
             toolbar_button(
+                "→",
                 format!("Move: {mailbox_name}"),
                 button_background,
                 border,
@@ -2762,6 +3517,7 @@ fn compose_focus_buttons(
 ) -> Vec<AnyElement> {
     vec![
         toolbar_button(
+            "@",
             "Focus To",
             button_background,
             border,
@@ -2771,6 +3527,7 @@ fn compose_focus_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "#",
             "Focus Subject",
             button_background,
             border,
@@ -2780,6 +3537,7 @@ fn compose_focus_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "¶",
             "Focus Body",
             button_background,
             border,
@@ -2789,6 +3547,7 @@ fn compose_focus_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "↑",
             "Show Outbox",
             button_background,
             border,
@@ -2799,6 +3558,7 @@ fn compose_focus_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "↺",
             "Retry Selected Job",
             button_background,
             border,
@@ -2819,6 +3579,7 @@ fn account_protocol_buttons(
 ) -> Vec<AnyElement> {
     vec![
         toolbar_button(
+            "I",
             "IMAP + SMTP",
             if protocol == ProtocolKind::Imap {
                 selected_background
@@ -2833,6 +3594,7 @@ fn account_protocol_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "J",
             "JMAP",
             if protocol == ProtocolKind::Jmap {
                 selected_background
@@ -2909,6 +3671,15 @@ fn sync_badge(phase: SyncPhase, accent: u32) -> (u32, &'static str) {
 
 fn short_sha(value: &str) -> &str {
     value.get(..8).unwrap_or(value)
+}
+
+fn query_summary(query: &str) -> String {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        "the current query".to_owned()
+    } else {
+        format!("'{trimmed}'")
+    }
 }
 
 fn hex_to_rgb(hex: Option<&str>, fallback: u32) -> u32 {
