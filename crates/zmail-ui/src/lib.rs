@@ -1376,6 +1376,7 @@ impl Render for WorkspaceView {
                                     .flex()
                                     .gap_2()
                                     .child(toolbar_button(
+                                        "toolbar-settings",
                                         "⚙",
                                         "Settings",
                                         if self.settings_open {
@@ -1389,6 +1390,7 @@ impl Render for WorkspaceView {
                                         }),
                                     ))
                                     .child(toolbar_button(
+                                        "toolbar-compose",
                                         "✎",
                                         "Compose",
                                         button_background,
@@ -1398,6 +1400,7 @@ impl Render for WorkspaceView {
                                         }),
                                     ))
                                     .child(toolbar_button(
+                                        "toolbar-sync-account",
                                         "↻",
                                         "Sync Account",
                                         button_background,
@@ -1407,6 +1410,7 @@ impl Render for WorkspaceView {
                                         }),
                                     ))
                                     .child(toolbar_button(
+                                        "toolbar-sync-all",
                                         "⇄",
                                         "Sync All",
                                         button_background,
@@ -1416,6 +1420,7 @@ impl Render for WorkspaceView {
                                         }),
                                     ))
                                     .child(toolbar_button(
+                                        "toolbar-refresh",
                                         "⟲",
                                         "Refresh",
                                         button_background,
@@ -1450,6 +1455,7 @@ impl Render for WorkspaceView {
                                     ),
                             )
                             .child(toolbar_button(
+                                "toolbar-search",
                                 "⌕",
                                 "Search",
                                 button_background,
@@ -1463,6 +1469,7 @@ impl Render for WorkspaceView {
                                     .flex()
                                     .gap_2()
                                     .child(toolbar_button(
+                                        "toolbar-list-mail",
                                         "✉",
                                         "Mail",
                                         if matches!(self.list_mode, ListMode::Mail) {
@@ -1476,6 +1483,7 @@ impl Render for WorkspaceView {
                                         }),
                                     ))
                                     .child(toolbar_button(
+                                        "toolbar-list-drafts",
                                         "D",
                                         "Drafts",
                                         if matches!(self.list_mode, ListMode::Drafts) {
@@ -1490,6 +1498,7 @@ impl Render for WorkspaceView {
                                         }),
                                     ))
                                     .child(toolbar_button(
+                                        "toolbar-list-outbox",
                                         "↑",
                                         "Outbox",
                                         if matches!(self.list_mode, ListMode::Outbox) {
@@ -2020,6 +2029,7 @@ impl Render for WorkspaceView {
                                                                     .flex()
                                                                     .gap_2()
                                                                     .child(toolbar_button(
+                                                                        "welcome-open-settings",
                                                                         "⚙",
                                                                         "Open Settings",
                                                                         button_background,
@@ -2029,6 +2039,7 @@ impl Render for WorkspaceView {
                                                                         }),
                                                                     ))
                                                                     .child(toolbar_button(
+                                                                        "welcome-refresh",
                                                                         "↻",
                                                                         "Refresh",
                                                                         button_background,
@@ -2104,6 +2115,7 @@ impl Render for WorkspaceView {
                                                                             )
                                                                             .child(
                                                                                 toolbar_button(
+                                                                                    ("compose-remove-attachment", attachment_id as u64),
                                                                                     "⌫",
                                                                                     "Remove",
                                                                                     button_background,
@@ -2126,6 +2138,7 @@ impl Render for WorkspaceView {
                                                             .gap_2()
                                                             .pt_3()
                                                             .child(toolbar_button(
+                                                                "compose-add-attachment",
                                                                 "+",
                                                                 "Add Attachment",
                                                                 button_background,
@@ -2135,6 +2148,7 @@ impl Render for WorkspaceView {
                                                                 }),
                                                             ))
                                                             .child(toolbar_button(
+                                                                "compose-send-draft",
                                                                 "↗",
                                                                 "Send Draft",
                                                                 button_background,
@@ -2317,6 +2331,7 @@ fn summary_card(
 }
 
 fn toolbar_button(
+    id: impl Into<gpui::ElementId>,
     icon: &str,
     label: impl Into<String>,
     background: u32,
@@ -2325,6 +2340,7 @@ fn toolbar_button(
 ) -> Stateful<gpui::Div> {
     let label = label.into();
     div()
+        .id(id)
         .flex()
         .items_center()
         .gap_2()
@@ -3064,6 +3080,7 @@ fn render_settings_dialog(
                                                 ),
                                         )
                                         .child(toolbar_button(
+                                            "settings-close",
                                             "✕",
                                             "Close",
                                             button_background,
@@ -3102,6 +3119,7 @@ fn render_settings_dialog(
                                             )
                                         } else {
                                             div()
+                                                .id("settings-account-list")
                                                 .flex_1()
                                                 .overflow_y_scroll()
                                                 .children(accounts.iter().map(|account| {
@@ -3247,6 +3265,7 @@ fn render_settings_dialog(
                                 )
                                 .child(
                                     div()
+                                        .id("settings-form-scroll")
                                         .flex_1()
                                         .overflow_y_scroll()
                                         .px_5()
@@ -3329,6 +3348,7 @@ fn render_settings_dialog(
                                                         .flex()
                                                         .gap_2()
                                                         .child(toolbar_button(
+                                                            "settings-save-account",
                                                             "✓",
                                                             "Save Account",
                                                             button_background,
@@ -3397,6 +3417,7 @@ fn reader_action_buttons(
     let thread_is_flagged = thread.is_flagged;
     let mut buttons = vec![
         toolbar_button(
+            "reader-toggle-read",
             "●",
             if thread_has_unread {
                 "Mark Read"
@@ -3420,6 +3441,7 @@ fn reader_action_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "reader-toggle-flag",
             "★",
             if thread_is_flagged { "Unflag" } else { "Flag" },
             button_background,
@@ -3439,6 +3461,7 @@ fn reader_action_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "reader-archive",
             "⇥",
             "Archive",
             button_background,
@@ -3458,6 +3481,7 @@ fn reader_action_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "reader-delete",
             "⌫",
             "Delete",
             button_background,
@@ -3486,6 +3510,7 @@ fn reader_action_buttons(
         let mailbox_name = mailbox.name.clone();
         buttons.push(
             toolbar_button(
+                ("reader-move-mailbox", mailbox_id as u64),
                 "→",
                 format!("Move: {mailbox_name}"),
                 button_background,
@@ -3517,6 +3542,7 @@ fn compose_focus_buttons(
 ) -> Vec<AnyElement> {
     vec![
         toolbar_button(
+            "compose-focus-to",
             "@",
             "Focus To",
             button_background,
@@ -3527,6 +3553,7 @@ fn compose_focus_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "compose-focus-subject",
             "#",
             "Focus Subject",
             button_background,
@@ -3537,6 +3564,7 @@ fn compose_focus_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "compose-focus-body",
             "¶",
             "Focus Body",
             button_background,
@@ -3547,6 +3575,7 @@ fn compose_focus_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "compose-show-outbox",
             "↑",
             "Show Outbox",
             button_background,
@@ -3558,6 +3587,7 @@ fn compose_focus_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "compose-retry-job",
             "↺",
             "Retry Selected Job",
             button_background,
@@ -3579,6 +3609,7 @@ fn account_protocol_buttons(
 ) -> Vec<AnyElement> {
     vec![
         toolbar_button(
+            "settings-protocol-imap",
             "I",
             "IMAP + SMTP",
             if protocol == ProtocolKind::Imap {
@@ -3594,6 +3625,7 @@ fn account_protocol_buttons(
         )
         .into_any_element(),
         toolbar_button(
+            "settings-protocol-jmap",
             "J",
             "JMAP",
             if protocol == ProtocolKind::Jmap {
