@@ -4950,6 +4950,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rust-embed-utils",
+ "shellexpand",
  "syn 2.0.117",
  "walkdir",
 ]
@@ -5395,6 +5396,15 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "shellexpand"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
+dependencies = [
+ "dirs 4.0.0",
 ]
 
 [[package]]
@@ -7981,12 +7991,22 @@ dependencies = [
  "anyhow",
  "rpassword",
  "url",
+ "zmail-assets",
  "zmail-core",
  "zmail-security",
  "zmail-store",
  "zmail-sync",
  "zmail-theme",
  "zmail-ui",
+]
+
+[[package]]
+name = "zmail-assets"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "rust-embed",
 ]
 
 [[package]]
