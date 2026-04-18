@@ -1,93 +1,160 @@
 name: CI
 
 on:
-  push:
-  pull_request:
-  workflow_dispatch:
+    push:
+    pull_request:
+    workflow_dispatch:
 
 permissions:
-  contents: read
+    contents: read
 
 jobs:
-  quality:
-    runs-on: ubuntu-latest
+    changes:
+        runs-on: ubuntu-latest
+        outputs:
+            app_code: ${{ steps.detect.outputs.app_code }}
+            workspace_checks: ${{ steps.detect.outputs.workspace_checks }}
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+        steps:
+            - name: Checkout
+              if: github.event_name == 'pull_request'
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
 
-      - name: Install Linux build dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libxkbcommon-dev libfontconfig1-dev libfreetype6-dev
+            - name: Detect app code changes
+              id: detect
+              shell: bash
+              run: |
+                  if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+                    echo "app_code=true" >> "$GITHUB_OUTPUT"
+                    echo "workspace_checks=true" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.94.0
-          components: rustfmt, clippy
+                  app_code=false
+                  workspace_checks=false
+                  while IFS= read -r file; do
+                    [[ -z "$file" ]] && continue
 
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+                    case "$file" in
+                      docker/mail-harness/*)
+                        if [[ "$file" != *.md ]]; then
+                          workspace_checks=true
+                        fi
+                        ;;
+                      Cargo.toml|Cargo.lock|rust-toolchain.toml)
+                        app_code=true
+                        workspace_checks=true
+                        break
+                        ;;
+                      crates/*)
+                        if [[ "$file" != *.md ]]; then
+                          app_code=true
+                          workspace_checks=true
+                          break
+                        fi
+                        ;;
+                      themes/*)
+                        if [[ "$file" != *.md ]]; then
+                          app_code=true
+                          workspace_checks=true
+                          break
+                        fi
+                        ;;
+                      about.toml|deny.toml|scripts/mail-harness.sh)
+                        workspace_checks=true
+                        ;;
+                    esac
+                  done < <(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+                  echo "app_code=$app_code" >> "$GITHUB_OUTPUT"
+                  echo "workspace_checks=$workspace_checks" >> "$GITHUB_OUTPUT"
 
-      - name: Format
-        run: cargo fmt --all -- --check
+    quality:
+        needs: changes
+        if: github.event_name != 'pull_request' || needs.changes.outputs.workspace_checks == 'true'
+        runs-on: ubuntu-latest
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
 
-      - name: Policy
-        run: cargo deny check licenses advisories bans sources
+            - name: Install Linux build dependencies
+              run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
 
-      - name: Advisory audit
-        run: cargo audit
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: 1.94.0
+                  components: rustfmt, clippy
 
-      - name: Workspace tests
-        run: cargo test --workspace --locked
+            - name: Install cargo-deny
+              run: cargo install cargo-deny --locked
 
-      - name: Live Mail Harness Test
-        run: cargo test -p zmail-test-support --test live_mail_harness -- --ignored --nocapture
+            - name: Install cargo-audit
+              run: cargo install cargo-audit --locked
 
-      - name: Live JMAP Harness Test
-        run: cargo test -p zmail-test-support --test live_jmap_harness -- --ignored --nocapture
+            - name: Format
+              run: cargo fmt --all -- --check
 
-  build:
-    name: Build (${{ matrix.os }})
-    needs: quality
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact_name: zmail-linux
-            binary_path: target/release/zmail-app
-          - os: macos-latest
-            artifact_name: zmail-macos
-            binary_path: target/release/zmail-app
-          - os: windows-latest
-            artifact_name: zmail-windows
-            binary_path: target/release/zmail-app.exe
+            - name: Clippy
+              run: cargo clippy --workspace --all-targets -- -D warnings
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+            - name: Policy
+              run: cargo deny check licenses advisories bans sources
 
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libxkbcommon-dev libfontconfig1-dev libfreetype6-dev
+            - name: Advisory audit
+              run: cargo audit
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.94.0
+            - name: Workspace tests
+              run: cargo test --workspace --locked
 
-      - name: Build release binary
-        run: cargo build -p zmail-app --release --locked
+            - name: Live Mail Harness Test
+              run: cargo test -p zmail-test-support --test live_mail_harness -- --ignored --nocapture
 
-      - name: Upload release binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.binary_path }}
+            - name: Live JMAP Harness Test
+              run: cargo test -p zmail-test-support --test live_jmap_harness -- --ignored --nocapture
+
+    build:
+        name: Build (${{ matrix.os }})
+        needs:
+            - changes
+            - quality
+        if: github.event_name != 'pull_request' || needs.changes.outputs.app_code == 'true'
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-latest
+                      artifact_name: zmail-linux
+                      binary_path: target/release/zmail-app
+                    - os: macos-latest
+                      artifact_name: zmail-macos
+                      binary_path: target/release/zmail-app
+                    - os: windows-latest
+                      artifact_name: zmail-windows
+                      binary_path: target/release/zmail-app.exe
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Install Linux build dependencies
+              if: runner.os == 'Linux'
+              run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: 1.94.0
+
+            - name: Build release binary
+              run: cargo build -p zmail-app --release --locked
+
+            - name: Upload release binary
+              uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ matrix.artifact_name }}
+                  path: ${{ matrix.binary_path }}

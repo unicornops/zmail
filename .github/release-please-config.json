@@ -1,13 +1,19 @@
 {
-  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "release-type": "rust",
-  "include-component-in-tag": false,
-  "include-v-in-tag": true,
-  "plugins": ["cargo-workspace"],
-  "packages": {
-    ".": {
-      "component": "zmail",
-      "changelog-path": "CHANGELOG.md"
+    "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+    "plugins": [
+        {
+            "type": "cargo-workspace",
+            "updateAllPackages": true
+        }
+    ],
+    "packages": {
+        "crates/zmail-app": {
+            "release-type": "rust",
+            "component": "zmail",
+            "changelog-path": "CHANGELOG.md",
+            "include-component-in-tag": false,
+            "include-v-in-tag": true,
+            "initial-version": "0.0.1"
+        }
     }
-  }
 }
