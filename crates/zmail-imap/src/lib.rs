@@ -359,6 +359,7 @@ fn fetch_to_thread_snapshot(fetch: Fetch, identity_email: &str) -> Option<Thread
     let participants = format!("{sender} -> {recipients}");
     let (body_text, sanitized_html, has_remote_content, preview_source) = hydrate_bodies(&message);
     let preview = excerpt(&preview_source, 180);
+    let has_attachments = message.attachment_count() > 0;
     let latest_message_at = fetch
         .internal_date()
         .map(|date| date.to_rfc3339())
@@ -373,6 +374,7 @@ fn fetch_to_thread_snapshot(fetch: Fetch, identity_email: &str) -> Option<Thread
         participants,
         preview: preview.clone(),
         is_flagged,
+        has_attachments,
         unread_count,
         latest_message_at: latest_message_at.clone(),
         messages: vec![MessageSnapshot {

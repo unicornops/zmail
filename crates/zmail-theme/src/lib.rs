@@ -85,6 +85,18 @@ pub struct SemanticTheme {
     pub muted_foreground: Option<String>,
     /// Accent color.
     pub accent: Option<String>,
+    /// Selected item background color.
+    pub selected_background: Option<String>,
+    /// Hovered item background color.
+    pub hover_background: Option<String>,
+    /// Danger / error semantic color.
+    pub danger: Option<String>,
+    /// Warning semantic color.
+    pub warning: Option<String>,
+    /// Success semantic color.
+    pub success: Option<String>,
+    /// Info semantic color.
+    pub info: Option<String>,
 }
 
 impl SemanticTheme {
@@ -117,6 +129,30 @@ impl SemanticTheme {
             .cloned()
             .or_else(|| theme.style.color("element.selected").map(ToOwned::to_owned));
 
+        let selected_background = theme.style.color("element.selected").map(ToOwned::to_owned);
+
+        let hover_background = theme.style.color("element.hover").map(ToOwned::to_owned);
+
+        let danger = theme
+            .style
+            .color("status_bar.error_background")
+            .or_else(|| theme.style.color("error"))
+            .map(ToOwned::to_owned);
+
+        let warning = theme
+            .style
+            .color("status_bar.warning_background")
+            .or_else(|| theme.style.color("warning"))
+            .map(ToOwned::to_owned);
+
+        let success = theme
+            .style
+            .color("status_bar.info_background")
+            .or_else(|| theme.style.color("success"))
+            .map(ToOwned::to_owned);
+
+        let info = theme.style.color("info").map(ToOwned::to_owned);
+
         Self {
             background: theme.style.color("background").map(ToOwned::to_owned),
             surface,
@@ -124,15 +160,22 @@ impl SemanticTheme {
             foreground,
             muted_foreground,
             accent,
+            selected_background,
+            hover_background,
+            danger,
+            warning,
+            success,
+            info,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SemanticTheme, ThemeFamily};
+    use super::{Appearance, SemanticTheme, ThemeFamily};
 
     const SAMPLE_THEME: &str = include_str!("../../../themes/phase0-dark.json");
+    const SAMPLE_LIGHT_THEME: &str = include_str!("../../../themes/phase0-light.json");
 
     #[test]
     fn parses_an_unchanged_zed_theme_file() {
@@ -146,5 +189,22 @@ mod tests {
         assert_eq!(theme.name, "Zmail Phase 0 Dark");
         assert_eq!(semantic.background.as_deref(), Some("#111827"));
         assert_eq!(semantic.accent.as_deref(), Some("#5BA3F5"));
+    }
+
+    #[test]
+    fn parses_the_bundled_light_theme_file() {
+        let family =
+            ThemeFamily::from_json_str(SAMPLE_LIGHT_THEME).expect("theme family should parse");
+        let theme = family
+            .default_theme()
+            .expect("theme family should have a default theme");
+        let semantic = SemanticTheme::from_theme(theme);
+
+        assert_eq!(family.name, "Zmail Phase 0");
+        assert_eq!(theme.name, "Zmail Phase 0 Light");
+        assert_eq!(theme.appearance, Appearance::Light);
+        assert_eq!(semantic.background.as_deref(), Some("#FFFFFF"));
+        assert_eq!(semantic.hover_background.as_deref(), Some("#F1F5F9"));
+        assert_eq!(semantic.accent.as_deref(), Some("#2563EB"));
     }
 }

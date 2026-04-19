@@ -32,6 +32,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0001_phase2_store", PHASE2_SCHEMA),
     ("0002_phase3_reader_and_mailbox_ops", PHASE3_SCHEMA),
     ("0003_phase4_compose_and_send", PHASE4_SCHEMA),
+    ("0004_phase5_thread_attachment_metadata", PHASE5_SCHEMA),
 ];
 
 const PHASE2_SCHEMA: &str = r#"
@@ -219,6 +220,10 @@ CREATE INDEX IF NOT EXISTS idx_outbox_jobs_due ON outbox_jobs(state, next_attemp
 CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_jobs_active_draft
 ON outbox_jobs(draft_id)
 WHERE state IN ('queued', 'sending', 'retrying');
+"#;
+
+const PHASE5_SCHEMA: &str = r#"
+ALTER TABLE threads ADD COLUMN has_attachments INTEGER NOT NULL DEFAULT 0;
 "#;
 
 static EPHEMERAL_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -676,7 +681,15 @@ impl LocalStore {
             let thread_rows = conn
                 .prepare(
                     r#"
-                    SELECT id, subject, participants, preview, is_flagged, unread_count, latest_message_at
+                    SELECT
+                        id,
+                        subject,
+                        participants,
+                        preview,
+                        is_flagged,
+                        has_attachments,
+                        unread_count,
+                        latest_message_at
                     FROM threads
                     WHERE mailbox_id = ?1
                     ORDER BY latest_message_at DESC, id DESC
@@ -689,8 +702,9 @@ impl LocalStore {
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, bool>(4)?,
-                        row.get::<_, usize>(5)?,
-                        row.get::<_, String>(6)?,
+                        row.get::<_, bool>(5)?,
+                        row.get::<_, usize>(6)?,
+                        row.get::<_, String>(7)?,
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()
@@ -703,6 +717,7 @@ impl LocalStore {
                 participants,
                 preview,
                 is_flagged,
+                has_attachments,
                 unread_count,
                 latest_message_at,
             ) in thread_rows
@@ -751,6 +766,7 @@ impl LocalStore {
                     participants,
                     preview,
                     is_flagged,
+                    has_attachments,
                     unread_count,
                     latest_message_at,
                     messages,
@@ -778,16 +794,20 @@ impl LocalStore {
         let mut statement = conn.prepare(
             r#"
             SELECT
-                id,
-                subject,
-                participants,
-                preview,
-                message_count,
-                unread_count,
-                latest_message_at
+                threads.id,
+                threads.subject,
+                messages.sender,
+                threads.participants,
+                threads.preview,
+                threads.message_count,
+                threads.unread_count,
+                threads.is_flagged,
+                threads.has_attachments,
+                threads.latest_message_at
             FROM threads
+            JOIN messages ON messages.id = threads.latest_message_id
             WHERE mailbox_id = ?1
-            ORDER BY latest_message_at DESC, id DESC
+            ORDER BY threads.latest_message_at DESC, threads.id DESC
             LIMIT ?2 OFFSET ?3
             "#,
         )?;
@@ -796,11 +816,14 @@ impl LocalStore {
             Ok(ThreadSummary {
                 id: row.get(0)?,
                 subject: row.get(1)?,
-                participants: row.get(2)?,
-                preview: row.get(3)?,
-                message_count: row.get::<_, usize>(4)?,
-                unread_count: row.get::<_, usize>(5)?,
-                latest_message_at: row.get(6)?,
+                latest_sender: row.get(2)?,
+                participants: row.get(3)?,
+                preview: row.get(4)?,
+                message_count: row.get::<_, usize>(5)?,
+                unread_count: row.get::<_, usize>(6)?,
+                is_flagged: row.get::<_, bool>(7)?,
+                has_attachments: row.get::<_, bool>(8)?,
+                latest_message_at: row.get(9)?,
             })
         })?;
 
@@ -880,7 +903,8 @@ impl LocalStore {
                     threads.participants,
                     threads.message_count,
                     threads.unread_count,
-                    threads.is_flagged
+                    threads.is_flagged,
+                    threads.has_attachments
                 FROM threads
                 JOIN mailboxes ON mailboxes.id = threads.mailbox_id
                 WHERE threads.id = ?1
@@ -896,6 +920,7 @@ impl LocalStore {
                         row.get::<_, usize>(5)?,
                         row.get::<_, usize>(6)?,
                         row.get::<_, bool>(7)?,
+                        row.get::<_, bool>(8)?,
                     ))
                 },
             )
@@ -911,6 +936,7 @@ impl LocalStore {
             message_count,
             unread_count,
             is_flagged,
+            has_attachments,
         )) = thread
         else {
             return Ok(None);
@@ -977,6 +1003,7 @@ impl LocalStore {
             message_count,
             unread_count,
             is_flagged,
+            has_attachments,
             has_remote_content,
             messages,
         }))
@@ -1000,14 +1027,17 @@ impl LocalStore {
                 mailboxes.name,
                 threads.id,
                 threads.subject,
+                messages.sender,
                 threads.participants,
                 threads.preview,
                 threads.unread_count,
                 threads.is_flagged,
+                threads.has_attachments,
                 threads.latest_message_at
             FROM search_documents
             JOIN threads ON threads.id = search_documents.thread_id
             JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+            JOIN messages ON messages.id = threads.latest_message_id
             WHERE search_documents.account_id = ?1
               AND search_documents MATCH ?2
             ORDER BY bm25(search_documents), threads.latest_message_at DESC
@@ -1022,11 +1052,13 @@ impl LocalStore {
                     mailbox_name: row.get(1)?,
                     thread_id: row.get(2)?,
                     subject: row.get(3)?,
-                    participants: row.get(4)?,
-                    preview: row.get(5)?,
-                    unread_count: row.get::<_, usize>(6)?,
-                    is_flagged: row.get::<_, bool>(7)?,
-                    latest_message_at: row.get(8)?,
+                    latest_sender: row.get(4)?,
+                    participants: row.get(5)?,
+                    preview: row.get(6)?,
+                    unread_count: row.get::<_, usize>(7)?,
+                    is_flagged: row.get::<_, bool>(8)?,
+                    has_attachments: row.get::<_, bool>(9)?,
+                    latest_message_at: row.get(10)?,
                 })
             })?;
 
@@ -1124,12 +1156,13 @@ impl LocalStore {
                     participants,
                     preview,
                     is_flagged,
+                    has_attachments,
                     message_count,
                     unread_count,
                     latest_message_at,
                     latest_message_id
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)
                 "#,
             )?;
             let mut update_thread =
@@ -1181,6 +1214,7 @@ impl LocalStore {
                         thread.participants,
                         thread.preview,
                         thread.is_flagged,
+                        thread.has_attachments,
                         thread.messages.len() as i64,
                         thread.unread_count as i64,
                         thread.latest_message_at,
@@ -3051,6 +3085,7 @@ mod tests {
                     participants: "Kai Santos, Nora Walsh".to_owned(),
                     preview: "The background supervisor now persists sync state.".to_owned(),
                     is_flagged: false,
+                    has_attachments: false,
                     unread_count: 1,
                     latest_message_at: "2026-03-21T09:15:00Z".to_owned(),
                     messages: vec![MessageSnapshot {
@@ -3150,6 +3185,7 @@ mod tests {
                     participants: "Kai Santos".to_owned(),
                     preview: "Initial body preview".to_owned(),
                     is_flagged: false,
+                    has_attachments: false,
                     unread_count: 1,
                     latest_message_at: "2026-03-21T09:15:00Z".to_owned(),
                     messages: vec![MessageSnapshot {
@@ -3190,6 +3226,7 @@ mod tests {
                     participants: "James User".to_owned(),
                     preview: "Updated body preview".to_owned(),
                     is_flagged: true,
+                    has_attachments: false,
                     unread_count: 0,
                     latest_message_at: "2026-03-21T10:00:00Z".to_owned(),
                     messages: vec![MessageSnapshot {
@@ -3255,6 +3292,7 @@ mod tests {
                     participants: "Kai Santos".to_owned(),
                     preview: "Fallback preview".to_owned(),
                     is_flagged: true,
+                    has_attachments: true,
                     unread_count: 1,
                     latest_message_at: "2026-03-22T12:00:00Z".to_owned(),
                     messages: vec![MessageSnapshot {
@@ -3308,6 +3346,7 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].subject, "Searchable incident");
         assert!(hits[0].is_flagged);
+        assert!(hits[0].has_attachments);
     }
 
     #[test]
@@ -3335,6 +3374,7 @@ mod tests {
                         participants: "Ops".to_owned(),
                         preview: "Handle mailbox ops".to_owned(),
                         is_flagged: false,
+                        has_attachments: false,
                         unread_count: 1,
                         latest_message_at: "2026-03-22T13:00:00Z".to_owned(),
                         messages: vec![MessageSnapshot {
