@@ -61,6 +61,7 @@ impl WorkspaceView {
         let mail_id = toolbar_button_id("Mail");
         let drafts_id = toolbar_button_id("Drafts");
         let outbox_id = toolbar_button_id("Outbox");
+        let retry_outbox_id = toolbar_button_id("Retry Outbox");
         let run_search_id = toolbar_button_id("Run Search");
         let sync_selected_id = toolbar_button_id("Sync Selected");
         let sync_all_id = toolbar_button_id("Sync All");
@@ -246,6 +247,38 @@ impl WorkspaceView {
                                 this.set_hovered_element(outbox_id.clone(), *hovered, cx);
                             }
                         })),
+                    )
+                    .when(
+                        matches!(self.list_mode, ListMode::Outbox) && !self.outbox_jobs.is_empty(),
+                        |this| {
+                            this.child(
+                                toolbar_button(
+                                    "Retry Outbox",
+                                    Some("refresh-cw"),
+                                    self.interactive_background(
+                                        &retry_outbox_id,
+                                        false,
+                                        colors.button_background,
+                                        colors,
+                                    ),
+                                    colors.border,
+                                    colors.foreground,
+                                    cx.listener(|this: &mut Self, _, window, cx| {
+                                        this.retry_selected_outbox(window, cx);
+                                    }),
+                                )
+                                .on_hover(cx.listener({
+                                    let retry_outbox_id = retry_outbox_id.clone();
+                                    move |this, hovered, _, cx| {
+                                        this.set_hovered_element(
+                                            retry_outbox_id.clone(),
+                                            *hovered,
+                                            cx,
+                                        );
+                                    }
+                                })),
+                            )
+                        },
                     )
                     .child(
                         div().flex_1().child(
