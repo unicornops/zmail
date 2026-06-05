@@ -7,16 +7,18 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use zmail_assets::ZmailAssets;
 use zmail_core::{
     AppBootstrap, CachePolicySummary, DraftUpdate, NewAccount, NewDraft, NewIdentity,
-    OutgoingConfig, ProtocolKind, SubmissionSecurity, ThemeSummary, UpstreamPins,
+    OutgoingConfig, ProtocolKind, SubmissionSecurity, ThemeAppearance, ThemeSummary, UpstreamPins,
 };
 use zmail_security::{InMemorySecretStore, KeyringSecretStore, SecretStore};
 use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
-use zmail_theme::{SemanticTheme, ThemeFamily};
+use zmail_theme::{Appearance, SemanticTheme, ThemeFamily};
 
-const PHASE0_THEME: &str = include_str!("../../../themes/phase0-dark.json");
+const PHASE0_DARK_THEME: &str = include_str!("../../../themes/phase0-dark.json");
+const PHASE0_LIGHT_THEME: &str = include_str!("../../../themes/phase0-light.json");
 const ZED_UPSTREAM_COMMIT: &str = "30ceb9176cb751b0f4f60516a3248f4ded99b082";
 const GPUI_VERSION: &str = "0.2.2";
 
@@ -273,7 +275,7 @@ fn launch_gui() -> Result<()> {
     let _ = sync_service.bootstrap_existing_accounts();
 
     let bootstrap = build_bootstrap(runtime.summary())?;
-    zmail_ui::run(bootstrap, store, sync_service, secrets);
+    zmail_ui::run(ZmailAssets, bootstrap, store, sync_service, secrets);
     drop(runtime);
     Ok(())
 }
@@ -829,28 +831,47 @@ fn derive_host(endpoint: &str) -> String {
 }
 
 fn build_bootstrap(runtime: zmail_core::RuntimeSummary) -> Result<AppBootstrap> {
-    let theme_family = ThemeFamily::from_json_str(PHASE0_THEME)
-        .context("failed to parse the bundled Zed-format theme family")?;
-    let theme = theme_family
-        .default_theme()
-        .context("the bundled theme family does not contain any theme entries")?;
-    let semantic = SemanticTheme::from_theme(theme);
+    let theme = load_theme_summary(PHASE0_DARK_THEME, "dark")?;
+    let alternate_theme = load_theme_summary(PHASE0_LIGHT_THEME, "light")?;
 
     Ok(AppBootstrap {
         runtime,
-        theme: ThemeSummary {
-            family_name: theme_family.name.clone(),
-            theme_name: theme.name.clone(),
-            background: semantic.background,
-            surface: semantic.surface,
-            border: semantic.border,
-            foreground: semantic.foreground,
-            accent: semantic.accent,
-        },
+        theme,
+        alternate_theme,
         upstream: UpstreamPins {
             zed_commit: ZED_UPSTREAM_COMMIT.to_owned(),
             gpui_version: GPUI_VERSION.to_owned(),
         },
+    })
+}
+
+fn load_theme_summary(theme_json: &str, variant_label: &str) -> Result<ThemeSummary> {
+    let theme_family = ThemeFamily::from_json_str(theme_json)
+        .with_context(|| format!("failed to parse the bundled {variant_label} theme family"))?;
+    let theme = theme_family
+        .default_theme()
+        .with_context(|| format!("the bundled {variant_label} theme family is empty"))?;
+    let semantic = SemanticTheme::from_theme(theme);
+
+    Ok(ThemeSummary {
+        family_name: theme_family.name.clone(),
+        theme_name: theme.name.clone(),
+        appearance: match theme.appearance {
+            Appearance::Light => ThemeAppearance::Light,
+            Appearance::Dark => ThemeAppearance::Dark,
+        },
+        background: semantic.background,
+        surface: semantic.surface,
+        border: semantic.border,
+        foreground: semantic.foreground,
+        muted_foreground: semantic.muted_foreground,
+        accent: semantic.accent,
+        selected_background: semantic.selected_background,
+        hover_background: semantic.hover_background,
+        danger: semantic.danger,
+        warning: semantic.warning,
+        success: semantic.success,
+        info: semantic.info,
     })
 }
 

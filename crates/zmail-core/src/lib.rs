@@ -17,6 +17,15 @@ pub struct RuntimeSummary {
     pub bridge_verified: bool,
 }
 
+/// Light-or-dark appearance for a bundled UI theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeAppearance {
+    /// Light theme variant.
+    Light,
+    /// Dark theme variant.
+    Dark,
+}
+
 /// Theme facts shown by the shell while the real theming engine is still growing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThemeSummary {
@@ -24,6 +33,8 @@ pub struct ThemeSummary {
     pub family_name: String,
     /// Selected theme name within the family.
     pub theme_name: String,
+    /// Light or dark appearance of the active theme.
+    pub appearance: ThemeAppearance,
     /// App background color.
     pub background: Option<String>,
     /// Surface color for cards and panes.
@@ -32,8 +43,22 @@ pub struct ThemeSummary {
     pub border: Option<String>,
     /// Primary text color.
     pub foreground: Option<String>,
+    /// Muted / secondary text color.
+    pub muted_foreground: Option<String>,
     /// Accent color.
     pub accent: Option<String>,
+    /// Selected item background color.
+    pub selected_background: Option<String>,
+    /// Hovered item background color.
+    pub hover_background: Option<String>,
+    /// Danger / error semantic color.
+    pub danger: Option<String>,
+    /// Warning semantic color.
+    pub warning: Option<String>,
+    /// Success semantic color.
+    pub success: Option<String>,
+    /// Info semantic color.
+    pub info: Option<String>,
 }
 
 /// Local cache policy recorded for an account.
@@ -768,6 +793,8 @@ pub struct ThreadSummary {
     pub id: i64,
     /// Subject line.
     pub subject: String,
+    /// Latest sender display string.
+    pub latest_sender: String,
     /// Participant summary.
     pub participants: String,
     /// Preview text from the latest local message.
@@ -776,6 +803,10 @@ pub struct ThreadSummary {
     pub message_count: usize,
     /// Number of unread messages in the thread.
     pub unread_count: usize,
+    /// Whether any message in the thread is flagged.
+    pub is_flagged: bool,
+    /// Whether any message in the thread has one or more attachments.
+    pub has_attachments: bool,
     /// Latest local timestamp in ISO-8601 form.
     pub latest_message_at: String,
 }
@@ -881,6 +912,8 @@ pub struct ThreadView {
     pub unread_count: usize,
     /// Whether any message in the thread is flagged.
     pub is_flagged: bool,
+    /// Whether any message in the thread has one or more attachments.
+    pub has_attachments: bool,
     /// Whether any message body in the thread contains blocked remote content.
     pub has_remote_content: bool,
     /// Hydrated thread messages ordered oldest to newest.
@@ -898,6 +931,8 @@ pub struct SearchHit {
     pub thread_id: i64,
     /// Subject line.
     pub subject: String,
+    /// Latest sender display string.
+    pub latest_sender: String,
     /// Participant summary.
     pub participants: String,
     /// Matching preview snippet.
@@ -906,6 +941,8 @@ pub struct SearchHit {
     pub unread_count: usize,
     /// Whether the thread is flagged.
     pub is_flagged: bool,
+    /// Whether any message in the thread has one or more attachments.
+    pub has_attachments: bool,
     /// Latest local timestamp in ISO-8601 form.
     pub latest_message_at: String,
 }
@@ -958,6 +995,8 @@ pub struct ThreadSnapshot {
     pub preview: String,
     /// Whether any message in the thread is flagged.
     pub is_flagged: bool,
+    /// Whether any message in the thread has one or more attachments.
+    pub has_attachments: bool,
     /// Number of unread messages.
     pub unread_count: usize,
     /// Latest timestamp in ISO-8601 form.
@@ -1007,8 +1046,10 @@ pub struct UpstreamPins {
 pub struct AppBootstrap {
     /// Background runtime summary.
     pub runtime: RuntimeSummary,
-    /// Theme summary.
+    /// Active theme summary.
     pub theme: ThemeSummary,
+    /// Inactive bundled theme summary used by the runtime toggle.
+    pub alternate_theme: ThemeSummary,
     /// Upstream provenance.
     pub upstream: UpstreamPins,
 }

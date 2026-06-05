@@ -182,6 +182,7 @@ struct JmapEmail {
     received_at: String,
     unread: bool,
     flagged: bool,
+    has_attachments: bool,
     has_remote_content: bool,
     identity_email: String,
 }
@@ -355,6 +356,7 @@ async fn fetch_emails(client: &Client, ids: &[String]) -> Result<Vec<JmapEmail>>
         Property::To,
         Property::Subject,
         Property::Preview,
+        Property::HasAttachment,
         Property::BodyValues,
         Property::TextBody,
         Property::HtmlBody,
@@ -402,6 +404,7 @@ async fn fetch_emails(client: &Client, ids: &[String]) -> Result<Vec<JmapEmail>>
                     .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),
                 unread: !email.keywords().contains(&"$seen"),
                 flagged: email.keywords().contains(&"$flagged"),
+                has_attachments: email.has_attachment(),
                 has_remote_content,
                 identity_email,
             });
@@ -457,6 +460,7 @@ fn group_mailboxes(
                     participants: format!("{} -> {}", email.from, email.recipients),
                     preview: email.preview.clone(),
                     is_flagged: false,
+                    has_attachments: false,
                     unread_count: 0,
                     latest_message_at: email.received_at.clone(),
                     messages: Vec::new(),
@@ -468,6 +472,7 @@ fn group_mailboxes(
                 entry.participants = format!("{} -> {}", email.from, email.recipients);
             }
             entry.is_flagged |= email.flagged;
+            entry.has_attachments |= email.has_attachments;
             entry.unread_count += usize::from(email.unread);
             entry.messages.push(MessageSnapshot {
                 identity_email: identity_email.clone(),
@@ -500,6 +505,7 @@ fn group_mailboxes(
                         participants: thread.participants,
                         preview: thread.preview,
                         is_flagged: thread.is_flagged,
+                        has_attachments: thread.has_attachments,
                         unread_count: thread.unread_count,
                         latest_message_at: thread.latest_message_at,
                         messages: thread.messages,
@@ -535,6 +541,7 @@ struct ThreadAccumulator {
     participants: String,
     preview: String,
     is_flagged: bool,
+    has_attachments: bool,
     unread_count: usize,
     latest_message_at: String,
     messages: Vec<MessageSnapshot>,
