@@ -105,7 +105,17 @@ jobs:
               run: cargo deny check licenses advisories bans sources
 
             - name: Advisory audit
-              run: cargo audit
+              # If an advisory has no upstream fix reachable in the lock,
+              # silence it inline with --ignore and link the reason here.
+              # hickory-proto is pinned at the 0.26.0-alpha required by
+              # the mail-auth/mail-send stack (0118, 0119); quick-xml is
+              # pinned below 0.41 by that same stack (0194, 0195).
+              run: >-
+                cargo audit
+                --ignore RUSTSEC-2026-0118
+                --ignore RUSTSEC-2026-0119
+                --ignore RUSTSEC-2026-0194
+                --ignore RUSTSEC-2026-0195
 
             - name: Workspace tests
               run: cargo test --workspace --locked
