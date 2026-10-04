@@ -8,6 +8,14 @@ ignore = [
     { id = "RUSTSEC-2024-0384", reason = "instant is pulled transitively by the pinned GPUI stack and has no safe repo-local replacement yet" },
     { id = "RUSTSEC-2024-0436", reason = "paste is pulled transitively by the pinned GPUI stack and has no safe repo-local replacement yet" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is pulled transitively by the pinned GPUI stack and has no safe repo-local replacement yet" },
+    { id = "RUSTSEC-2026-0105", reason = "core2 is pulled transitively by the rav1e/ravif image stack and has no safe repo-local replacement yet" },
+    { id = "RUSTSEC-2026-0118", reason = "hickory-proto is pinned at the 0.26.0-alpha required by the mail-auth/mail-send stack and has no safe repo-local replacement yet" },
+    { id = "RUSTSEC-2026-0119", reason = "hickory-proto is pinned at the 0.26.0-alpha required by the mail-auth/mail-send stack and has no safe repo-local replacement yet" },
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is pulled transitively by the pinned GPUI stack and has no safe repo-local replacement yet" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is pulled transitively by the pinned GPUI font stack and has no safe repo-local replacement yet" },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml is pinned below 0.41 by the hickory/mail stack and has no safe repo-local replacement yet" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml is pinned below 0.41 by the hickory/mail stack and has no safe repo-local replacement yet" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz is pulled transitively by the pinned GPUI font stack and has no safe repo-local replacement yet" },
 ]
 
 [licenses]
