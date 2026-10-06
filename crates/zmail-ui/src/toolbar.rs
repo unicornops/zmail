@@ -56,6 +56,28 @@ impl WorkspaceView {
             self.bootstrap.runtime.worker_threads
         );
 
+        let queued_detail = format!(
+            "{} queued mailbox op(s) • {} outbox job(s)",
+            self.pending_op_count,
+            self.outbox_jobs.len()
+        );
+
+        let sync_error = self.selected_account().and_then(|account| {
+            if account.sync_status.failure_count > 0 {
+                Some(format!(
+                    "Sync failed {} time(s): {}",
+                    account.sync_status.failure_count,
+                    account
+                        .sync_status
+                        .last_error_message
+                        .as_deref()
+                        .unwrap_or("unknown error"),
+                ))
+            } else {
+                None
+            }
+        });
+
         let add_account_id = toolbar_button_id("Add Account");
         let compose_id = toolbar_button_id("Compose");
         let mail_id = toolbar_button_id("Mail");
@@ -118,7 +140,19 @@ impl WorkspaceView {
                                     .text_sm()
                                     .text_color(rgb(colors.muted))
                                     .child(upstream_detail),
-                            ),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(colors.muted))
+                                    .child(queued_detail),
+                            )
+                            .children(sync_error.map(|message| {
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(colors.danger))
+                                    .child(message)
+                            })),
                     ),
             )
             // ---- Toolbar action buttons + search field -------------------

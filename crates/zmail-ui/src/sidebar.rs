@@ -136,6 +136,23 @@ impl WorkspaceView {
                                                             .child(
                                                                 account.sync_status.detail.clone(),
                                                             ),
+                                                    )
+                                                    .children(
+                                                        (account.sync_status.failure_count > 0)
+                                                            .then(|| {
+                                                                div()
+                                                                    .text_sm()
+                                                                    .text_color(rgb(colors.danger))
+                                                                    .truncate()
+                                                                    .child(format!(
+                                                                        "Sync error: {}",
+                                                                        account
+                                                                            .sync_status
+                                                                            .last_error_message
+                                                                            .as_deref()
+                                                                            .unwrap_or("unknown"),
+                                                                    ))
+                                                            }),
                                                     ),
                                             ),
                                     )

@@ -1662,6 +1662,17 @@ impl LocalStore {
             .context("failed to list pending mailbox operations")
     }
 
+    /// Returns the number of queued write-back operations for an account.
+    pub fn pending_op_count(&self, account_id: i64) -> Result<usize> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM pending_ops WHERE account_id = ?1",
+            params![account_id],
+            |row| row.get::<_, usize>(0),
+        )
+        .context("failed to count the pending write-back operations")
+    }
+
     /// Removes a write-back operation after the server accepted it.
     pub fn complete_pending_op(&self, op_id: i64) -> Result<()> {
         let conn = self.connection()?;

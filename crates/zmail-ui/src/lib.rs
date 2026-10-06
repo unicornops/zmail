@@ -134,6 +134,9 @@ struct WorkspaceView {
     mailboxes: Vec<MailboxSummary>,
     drafts: Vec<DraftSummary>,
     outbox_jobs: Vec<OutboxJobSummary>,
+    /// Number of mailbox operations still queued for server write-back on
+    /// the selected account.
+    pending_op_count: usize,
     search_results: Vec<SearchHit>,
     selected_account_id: Option<i64>,
     selected_mailbox_id: Option<i64>,
