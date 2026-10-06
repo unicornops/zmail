@@ -299,7 +299,7 @@ fn launch_imap_fixture(endpoint: &str, username: &str, secret: &str, email: &str
         .with_context(|| format!("failed to sync the IMAP fixture account {account_id}"))?;
 
     let bootstrap = build_bootstrap(runtime.summary())?;
-    zmail_ui::run(bootstrap, store, sync_service, secrets);
+    zmail_ui::run(ZmailAssets, bootstrap, store, sync_service, secrets);
     drop(runtime);
     Ok(())
 }
