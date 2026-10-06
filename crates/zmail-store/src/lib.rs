@@ -276,6 +276,11 @@ impl LocalStore {
         Ok(store)
     }
 
+    /// Returns the on-disk path of the store database.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Opens an ephemeral store in the OS temp directory for tests.
     pub fn open_ephemeral() -> Result<Self> {
         let sequence = EPHEMERAL_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -653,6 +658,112 @@ impl LocalStore {
             thread_count,
             message_count,
         })
+    }
+
+    /// Writes a consistent snapshot copy of the database to `path`.
+    ///
+    /// Uses SQLite's `VACUUM INTO`, which produces a defragmented,
+    /// self-contained backup file while the store stays usable. The
+    /// target path must not already exist.
+    pub fn backup_to(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let target = path
+            .to_str()
+            .context("the backup path must be valid UTF-8")?
+            .to_owned();
+        let conn = self.connection()?;
+        conn.execute("VACUUM INTO ?1", params![target])
+            .with_context(|| format!("failed to back the store up to {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Creates a timestamped backup in `directory`, keeping the newest
+    /// `keep` backups. Returns the created backup path.
+    pub fn create_backup(&self, directory: impl AsRef<Path>, keep: usize) -> Result<PathBuf> {
+        let directory = directory.as_ref();
+        fs::create_dir_all(directory)
+            .with_context(|| format!("failed to create {}", directory.display()))?;
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = directory.join(format!("zmail-backup-{nanos}.sqlite3"));
+        self.backup_to(&path)?;
+
+        let mut backups: Vec<PathBuf> = fs::read_dir(directory)
+            .with_context(|| format!("failed to list {}", directory.display()))?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry.file_name().to_str().is_some_and(|name| {
+                    name.starts_with("zmail-backup-") && name.ends_with(".sqlite3")
+                })
+            })
+            .map(|entry| entry.path())
+            .collect();
+        backups.sort();
+
+        while backups.len() > keep {
+            let stale = backups.remove(0);
+            remove_backup_with_sidecars(&stale)?;
+        }
+
+        Ok(path)
+    }
+
+    /// Writes the account's locally mirrored mail to `writer` in mbox
+    /// format and returns the number of exported messages.
+    ///
+    /// The export reconstructs message headers from the stored mirror, so
+    /// it is intended for archival and migration rather than as a
+    /// byte-faithful copy of the original server messages.
+    pub fn export_account_mbox(
+        &self,
+        account_id: i64,
+        writer: &mut impl std::io::Write,
+    ) -> Result<usize> {
+        let mailboxes = self.account_mailbox_snapshots(account_id)?;
+        let mut exported = 0;
+        for mailbox in mailboxes {
+            for thread in mailbox.threads {
+                for message in thread.messages {
+                    let (body, _mode) = renderable_body(
+                        &message.body_preview,
+                        message.body_text.as_deref(),
+                        message.sanitized_html.as_deref(),
+                    );
+                    let sender = message
+                        .sender
+                        .split(['<', '>'])
+                        .last()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty() && value.contains('@'))
+                        .unwrap_or("MAILER-DAEMON");
+                    writeln!(writer, "From {sender} {}", message.received_at)
+                        .context("failed to write the mbox entry separator")?;
+                    write!(writer, "From: {}\n", message.sender)
+                        .and_then(|_| write!(writer, "To: {}\n", message.recipients))
+                        .and_then(|_| write!(writer, "Subject: {}\n", message.subject))
+                        .and_then(|_| write!(writer, "Date: {}\n", message.received_at))
+                        .and_then(|_| write!(writer, "Content-Type: text/plain; charset=utf-8\n"))
+                        .and_then(|_| write!(writer, "\n"))
+                        .context("failed to write the mbox entry headers")?;
+                    for line in body.lines() {
+                        let escaped = if line.starts_with("From ") {
+                            format!(">{line}")
+                        } else {
+                            line.to_owned()
+                        };
+                        writeln!(writer, "{escaped}")
+                            .context("failed to write the mbox entry body")?;
+                    }
+                    writeln!(writer).context("failed to write the mbox entry terminator")?;
+                    exported += 1;
+                }
+            }
+        }
+        writer.flush().context("failed to flush the mbox export")?;
+        Ok(exported)
     }
 
     /// Lists mailboxes for a single account in display order.
@@ -3433,6 +3544,17 @@ fn load_thread_flag(transaction: &Transaction<'_>, thread_id: i64) -> Result<boo
         .context("failed to load the thread flag during the snapshot merge")
 }
 
+/// Removes a backup database and any transient SQLite sidecar files
+/// next to it, ignoring sidecars that are already gone.
+fn remove_backup_with_sidecars(path: &Path) -> Result<()> {
+    let sidecars = ["-journal", "-wal", "-shm"];
+    for suffix in sidecars {
+        let _ = fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    fs::remove_file(path)
+        .with_context(|| format!("failed to remove the stale backup {}", path.display()))
+}
+
 /// Loads the remote ids of messages that still have a queued write-back
 /// operation, so their local state survives a snapshot merge.
 fn load_pending_op_remote_ids(
@@ -4257,6 +4379,97 @@ mod tests {
     }
 
     #[test]
+    fn backups_are_restorable_and_bounded() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        store
+            .replace_account_snapshot(
+                account_id,
+                &merge_test_snapshot(
+                    "Backup subject",
+                    "Backup body",
+                    "thread-11",
+                    "message-11",
+                    None,
+                ),
+            )
+            .expect("snapshot should apply");
+
+        let backup_dir =
+            std::env::temp_dir().join(format!("zmail-backup-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&backup_dir);
+
+        let first = store
+            .create_backup(&backup_dir, 2)
+            .expect("the first backup should be created");
+
+        store
+            .create_backup(&backup_dir, 2)
+            .expect("the second backup should be created");
+        store
+            .create_backup(&backup_dir, 2)
+            .expect("the third backup should be created");
+
+        let mut remaining: Vec<_> = fs::read_dir(&backup_dir)
+            .expect("the backup directory should list")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .collect();
+        remaining.sort();
+
+        assert_eq!(remaining.len(), 2, "only the two newest backups remain");
+        assert!(!remaining.contains(&first), "the oldest backup is pruned");
+
+        let restored = LocalStore::open(remaining[0].clone()).expect("the backup should reopen");
+        assert_eq!(
+            restored.stats().expect("stats should load").message_count,
+            store.stats().expect("stats should load").message_count,
+            "the backup contains the same messages"
+        );
+
+        let _ = fs::remove_dir_all(&backup_dir);
+    }
+
+    #[test]
+    fn mbox_export_writes_message_entries() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        store
+            .replace_account_snapshot(
+                account_id,
+                &merge_test_snapshot(
+                    "Export subject",
+                    "Export body",
+                    "thread-12",
+                    "message-12",
+                    None,
+                ),
+            )
+            .expect("snapshot should apply");
+
+        let mut buffer = Vec::new();
+        let exported = store
+            .export_account_mbox(account_id, &mut buffer)
+            .expect("the export should succeed");
+        assert_eq!(exported, 1, "one message should be exported");
+
+        let mbox = String::from_utf8(buffer).expect("the export should be UTF-8");
+        assert!(
+            mbox.starts_with("From "),
+            "mbox entries start with a From line"
+        );
+        assert!(mbox.contains("Subject: Export subject"));
+        assert!(mbox.contains("Export body"));
+        assert!(
+            mbox.ends_with("\n\n"),
+            "entries end with a blank separator line"
+        );
+    }
+
     fn move_and_delete_queue_server_write_back() {
         let store = LocalStore::open_ephemeral().expect("store should open");
         let account_id = store
