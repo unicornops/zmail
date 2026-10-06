@@ -734,19 +734,19 @@ impl LocalStore {
                     );
                     let sender = message
                         .sender
-                        .split(['<', '>'])
-                        .last()
+                        .rsplit(['<', '>'])
+                        .next()
                         .map(str::trim)
                         .filter(|value| !value.is_empty() && value.contains('@'))
                         .unwrap_or("MAILER-DAEMON");
                     writeln!(writer, "From {sender} {}", message.received_at)
                         .context("failed to write the mbox entry separator")?;
-                    write!(writer, "From: {}\n", message.sender)
-                        .and_then(|_| write!(writer, "To: {}\n", message.recipients))
-                        .and_then(|_| write!(writer, "Subject: {}\n", message.subject))
-                        .and_then(|_| write!(writer, "Date: {}\n", message.received_at))
-                        .and_then(|_| write!(writer, "Content-Type: text/plain; charset=utf-8\n"))
-                        .and_then(|_| write!(writer, "\n"))
+                    writeln!(writer, "From: {}", message.sender)
+                        .and_then(|_| writeln!(writer, "To: {}", message.recipients))
+                        .and_then(|_| writeln!(writer, "Subject: {}", message.subject))
+                        .and_then(|_| writeln!(writer, "Date: {}", message.received_at))
+                        .and_then(|_| writeln!(writer, "Content-Type: text/plain; charset=utf-8"))
+                        .and_then(|_| writeln!(writer))
                         .context("failed to write the mbox entry headers")?;
                     for line in body.lines() {
                         let escaped = if line.starts_with("From ") {
@@ -4470,6 +4470,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn move_and_delete_queue_server_write_back() {
         let store = LocalStore::open_ephemeral().expect("store should open");
         let account_id = store
