@@ -19,12 +19,12 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Application, AssetSource, Bounds, Context, FocusHandle, IntoElement, Render,
-    SharedString, Styled, UniformListScrollHandle, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size,
+    SharedString, Styled, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, rgb, size,
 };
 use zmail_core::{
-    AccountOverview, AccountSummary, AppBootstrap, DraftSummary, IdentitySummary, MailboxSummary,
-    OutboxJobSummary, SearchHit, StoreStats,
+    APP_NAME, AccountOverview, AccountSummary, AppBootstrap, DraftSummary, IdentitySummary,
+    MailboxSummary, OutboxJobSummary, PHASE_LABEL, SearchHit, StoreStats,
 };
 use zmail_security::SecretStore;
 use zmail_store::LocalStore;
@@ -76,6 +76,10 @@ pub fn run(
 
             if let Err(error) = cx.open_window(
                 WindowOptions {
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(format!("{APP_NAME} {PHASE_LABEL}").into()),
+                        ..Default::default()
+                    }),
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },

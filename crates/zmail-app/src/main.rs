@@ -12,7 +12,7 @@ use zmail_core::{
     AppBootstrap, CachePolicySummary, DraftUpdate, NewAccount, NewDraft, NewIdentity,
     OutgoingConfig, ProtocolKind, SubmissionSecurity, ThemeAppearance, ThemeSummary, UpstreamPins,
 };
-use zmail_security::{KeyringSecretStore, SecretStore};
+use zmail_security::{InMemorySecretStore, KeyringSecretStore, SecretStore};
 use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
 use zmail_theme::{Appearance, SemanticTheme, ThemeFamily};
@@ -25,6 +25,12 @@ const GPUI_VERSION: &str = "0.2.2";
 fn main() -> Result<()> {
     match Command::from_env()? {
         Command::Gui => launch_gui(),
+        Command::LaunchImapFixture {
+            endpoint,
+            username,
+            secret,
+            email,
+        } => launch_imap_fixture(&endpoint, &username, &secret, &email),
         Command::AddImap => add_account(ProtocolKind::Imap),
         Command::AddJmap => add_account(ProtocolKind::Jmap),
         Command::ListAccounts => list_accounts(),
@@ -55,6 +61,12 @@ fn main() -> Result<()> {
 
 enum Command {
     Gui,
+    LaunchImapFixture {
+        endpoint: String,
+        username: String,
+        secret: String,
+        email: String,
+    },
     AddImap,
     AddJmap,
     ListAccounts,
@@ -87,6 +99,20 @@ impl Command {
         };
 
         match command.as_str() {
+            "launch-imap-fixture" => Ok(Self::LaunchImapFixture {
+                endpoint: args
+                    .next()
+                    .context("launch-imap-fixture requires an IMAP endpoint")?,
+                username: args
+                    .next()
+                    .context("launch-imap-fixture requires a username")?,
+                secret: args
+                    .next()
+                    .context("launch-imap-fixture requires a password or app password")?,
+                email: args
+                    .next()
+                    .context("launch-imap-fixture requires a primary identity email")?,
+            }),
             "add-imap" => Ok(Self::AddImap),
             "add-jmap" => Ok(Self::AddJmap),
             "list-accounts" => Ok(Self::ListAccounts),
@@ -247,6 +273,30 @@ fn launch_gui() -> Result<()> {
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
     let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
     let _ = sync_service.bootstrap_existing_accounts();
+
+    let bootstrap = build_bootstrap(runtime.summary())?;
+    zmail_ui::run(ZmailAssets, bootstrap, store, sync_service, secrets);
+    drop(runtime);
+    Ok(())
+}
+
+fn launch_imap_fixture(endpoint: &str, username: &str, secret: &str, email: &str) -> Result<()> {
+    validate_endpoint(ProtocolKind::Imap, endpoint)?;
+
+    let runtime = BackgroundRuntime::start(4)?;
+    let store = Arc::new(LocalStore::open_ephemeral().context("failed to open the fixture store")?);
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    let account_id = store
+        .insert_account(&fixture_imap_account(endpoint, username, email))
+        .context("failed to insert the IMAP fixture account")?;
+    secrets
+        .set_account_secret(account_id, secret)
+        .with_context(|| format!("failed to store fixture credentials for account {account_id}"))?;
+
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("failed to sync the IMAP fixture account {account_id}"))?;
 
     let bootstrap = build_bootstrap(runtime.summary())?;
     zmail_ui::run(ZmailAssets, bootstrap, store, sync_service, secrets);
@@ -705,6 +755,23 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, String)> {
     ))
 }
 
+fn fixture_imap_account(endpoint: &str, username: &str, email: &str) -> NewAccount {
+    NewAccount {
+        display_name: "IMAP Fixture".to_owned(),
+        protocol: ProtocolKind::Imap,
+        endpoint: endpoint.to_owned(),
+        username: username.to_owned(),
+        cache_policy: CachePolicySummary::performance_first(),
+        outgoing: Some(OutgoingConfig::smtp_default(derive_host(endpoint))),
+        identities: vec![NewIdentity {
+            display_name: "Fixture Recipient".to_owned(),
+            email_address: email.to_owned(),
+            signature: "Regards,\nFixture Recipient".to_owned(),
+            is_primary: true,
+        }],
+    }
+}
+
 fn validate_endpoint(protocol: ProtocolKind, endpoint: &str) -> Result<()> {
     let parsed = url::Url::parse(endpoint)
         .with_context(|| format!("failed to parse endpoint {endpoint}"))?;
@@ -952,6 +1019,7 @@ fn join_or_placeholder(values: &[String]) -> String {
 fn print_help() {
     println!("Zmail commands:");
     println!("  zmail-app                 Launch the desktop app");
+    println!("  zmail-app launch-imap-fixture ENDPOINT USERNAME SECRET EMAIL");
     println!("  zmail-app add-imap        Add and sync a real IMAP account");
     println!("  zmail-app add-jmap        Add and sync a real JMAP account");
     println!("  zmail-app list-accounts   Show configured accounts");
