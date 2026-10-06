@@ -38,6 +38,7 @@ impl WorkspaceView {
         store: Arc<LocalStore>,
         sync_service: SyncService,
         secrets: Arc<dyn SecretStore>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         use gpui::UniformListScrollHandle;
@@ -83,6 +84,25 @@ impl WorkspaceView {
             view.detail_mode = DetailMode::AccountSetup;
             view.active_field = Some(EditorField::AccountDisplayName);
         }
+
+        // New mail synced in the background by the mail watcher appears
+        // without user interaction; the refresh reads local state only.
+        let entity = cx.entity();
+        window
+            .spawn(cx, async move |cx| {
+                loop {
+                    Timer::after(Duration::from_secs(5)).await;
+                    let refreshed = entity.update(cx, |this, cx| {
+                        this.refresh_from_store();
+                        cx.notify();
+                    });
+                    if refreshed.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+
         view
     }
 

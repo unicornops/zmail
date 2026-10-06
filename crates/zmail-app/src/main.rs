@@ -273,6 +273,7 @@ fn launch_gui() -> Result<()> {
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
     let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
     let _ = sync_service.bootstrap_existing_accounts();
+    let _ = sync_service.start_mail_watcher();
 
     let bootstrap = build_bootstrap(runtime.summary())?;
     zmail_ui::run(ZmailAssets, bootstrap, store, sync_service, secrets);

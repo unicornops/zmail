@@ -173,6 +173,47 @@ struct ImapEndpoint {
     security: ImapSecurity,
 }
 
+/// Waits until the IMAP server reports a mailbox change or the timeout
+/// elapses, whichever comes first.
+///
+/// The wait uses one IDLE connection on INBOX, re-issued at most once per
+/// call so the caller's interval always stays below the RFC 2177 guidance.
+/// Servers that do not advertise IDLE degrade to a plain sleep, so the
+/// caller's polling interval keeps governing latency.
+pub async fn wait_for_mail_changes(
+    target: &SyncTarget,
+    secret: &str,
+    wait: Duration,
+) -> Result<()> {
+    if target.protocol != ProtocolKind::Imap {
+        bail!("IMAP adapter received a non-IMAP sync target");
+    }
+
+    let endpoint = parse_endpoint(&target.endpoint)?;
+    let mut session = connect_session(&endpoint, &target.username, secret).await?;
+    session
+        .select("INBOX")
+        .await
+        .context("failed to select INBOX for the IDLE watcher")?;
+
+    let bounded_wait = wait.min(Duration::from_secs(29 * 60));
+    let mut idle = session.idle();
+    if idle.init().await.is_err() {
+        // The server does not advertise IDLE; fall back to the caller's
+        // poll interval so latency stays bounded. The half-initialized
+        // handle is dropped, which closes the connection.
+        tokio::time::sleep(bounded_wait).await;
+        return Ok(());
+    }
+
+    let (idle_wait, _stop) = idle.wait_with_timeout(bounded_wait);
+    let _ = idle_wait.await;
+    if let Ok(mut session) = idle.done().await {
+        let _ = session.logout().await;
+    }
+    Ok(())
+}
+
 /// Applies queued mailbox operations to the live IMAP account.
 ///
 /// Read and flag operations translate to `UID STORE`, move operations to
