@@ -5,6 +5,18 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
+description = "Zmail desktop email client"
+
+[package.metadata.deb]
+maintainer = "UnicornOps <noreply@unicornops.ie>"
+copyright = "2026, UnicornOps"
+depends = "libxkbcommon0, libdbus-1-3, libasound2t64 | libasound2, libfontconfig1, libfreetype6"
+section = "mail"
+priority = "optional"
+assets = [
+    ["target/release/zmail-app", "usr/bin/", "755"],
+]
+extended-description = "Zmail is a fast, standards-compliant desktop email client built with GPUI."
 
 [dependencies]
 anyhow.workspace = true
