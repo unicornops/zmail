@@ -81,6 +81,7 @@ pub async fn discover_and_sync(
     let mut next_checkpoint = BTreeMap::new();
     let mut mailboxes = Vec::with_capacity(mailbox_names.len());
     let mut refreshed = 0usize;
+    let mut incremental = 0usize;
 
     for mailbox_name in mailbox_names {
         let name = mailbox_name.name().to_owned();
@@ -89,30 +90,68 @@ pub async fn discover_and_sync(
             .await
             .with_context(|| format!("failed to examine IMAP mailbox {name}"))?;
 
-        let mailbox_checkpoint = ImapMailboxCheckpoint::from_status(&status);
+        let previous = checkpoint.mailboxes.get(&name).cloned();
+        let mut mailbox_checkpoint = ImapMailboxCheckpoint::from_status(&status);
         next_checkpoint.insert(name.clone(), mailbox_checkpoint.clone());
 
-        if checkpoint.mailboxes.get(&name) == Some(&mailbox_checkpoint)
-            && let Some(existing_mailbox) = existing.get(name.as_str())
+        // While UIDVALIDITY is stable the existing mirror can be reused;
+        // only flag changes and new mail need to be fetched.
+        if previous.as_ref().and_then(|state| state.uid_validity) == status.uid_validity
+            && previous.is_some()
+            && let Some(existing_mailbox) = existing.get(name.as_str()).cloned()
         {
-            mailboxes.push(existing_mailbox.clone());
+            let flag_map = fetch_flag_map(&mut session).await?;
+            let last_seen_uid = previous.as_ref().and_then(|state| state.last_seen_uid);
+            let new_uids = new_mailbox_uids(&mut session, last_seen_uid).await?;
+            let flags_unchanged =
+                previous.as_ref().map(|state| &state.uid_flags) == Some(&flag_map);
+
+            if new_uids.is_empty() && flags_unchanged && !has_expunged(&flag_map, &existing_mailbox)
+            {
+                // Nothing changed server-side; the mirror is reused as is.
+                mailboxes.push(existing_mailbox);
+                mailbox_checkpoint.last_seen_uid = last_seen_uid;
+                mailbox_checkpoint.uid_flags = flag_map;
+                next_checkpoint.insert(name, mailbox_checkpoint);
+                continue;
+            }
+
+            incremental += 1;
+            let mut merged = existing_mailbox;
+            merge_flag_changes(&mut merged, &flag_map);
+            if !new_uids.is_empty() {
+                append_new_threads(&mut session, &mut merged, &new_uids, identity_email).await?;
+            }
+            mailbox_checkpoint.last_seen_uid = Some(
+                new_uids
+                    .last()
+                    .copied()
+                    .unwrap_or(0)
+                    .max(last_seen_uid.unwrap_or(0)),
+            );
+            mailbox_checkpoint.uid_flags = flag_map;
+            next_checkpoint.insert(name, mailbox_checkpoint);
+            mailboxes.push(merged);
             continue;
         }
 
         refreshed += 1;
-        mailboxes.push(
-            fetch_mailbox_snapshot(&mut session, &name, guess_role(&name), identity_email).await?,
-        );
+        let (snapshot, uid_flags) =
+            fetch_mailbox_snapshot(&mut session, &name, guess_role(&name), identity_email).await?;
+        mailbox_checkpoint.last_seen_uid = uid_flags.keys().last().copied();
+        mailbox_checkpoint.uid_flags = uid_flags;
+        next_checkpoint.insert(name, mailbox_checkpoint);
+        mailboxes.push(snapshot);
     }
 
     let _ = session.logout().await;
 
-    let detail = if refreshed == 0 {
+    let detail = if refreshed == 0 && incremental == 0 {
         format!("IMAP mailbox state unchanged for {}", target.display_name)
     } else {
         format!(
-            "IMAP sync complete against {} with {} mailbox refreshes",
-            endpoint.host, refreshed
+            "IMAP sync complete against {} with {refreshed} full and {incremental} incremental mailbox refreshes",
+            endpoint.host
         )
     };
 
@@ -278,11 +317,15 @@ struct ImapCheckpoint {
     mailboxes: BTreeMap<String, ImapMailboxCheckpoint>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct ImapMailboxCheckpoint {
     uid_validity: Option<u32>,
     uid_next: Option<u32>,
     exists: u32,
+    #[serde(default)]
+    last_seen_uid: Option<u32>,
+    #[serde(default)]
+    uid_flags: BTreeMap<u32, Vec<String>>,
 }
 
 impl ImapCheckpoint {
@@ -301,6 +344,8 @@ impl ImapMailboxCheckpoint {
             uid_validity: status.uid_validity,
             uid_next: status.uid_next,
             exists: status.exists,
+            last_seen_uid: None,
+            uid_flags: BTreeMap::new(),
         }
     }
 }
@@ -426,7 +471,7 @@ async fn fetch_mailbox_snapshot(
     mailbox_name: &str,
     role: Option<String>,
     identity_email: &str,
-) -> Result<MailboxSnapshot> {
+) -> Result<(MailboxSnapshot, BTreeMap<u32, Vec<String>>)> {
     session
         .examine(mailbox_name)
         .await
@@ -442,6 +487,7 @@ async fn fetch_mailbox_snapshot(
     uids.reverse();
 
     let mut threads = Vec::with_capacity(uids.len());
+    let mut uid_flags = BTreeMap::new();
     for chunk in uids.chunks(FETCH_BATCH_SIZE) {
         let uid_set = chunk
             .iter()
@@ -459,6 +505,15 @@ async fn fetch_mailbox_snapshot(
             .with_context(|| format!("failed to stream message metadata for {mailbox_name}"))?;
 
         for fetch in fetches {
+            if let Some(uid) = fetch.uid {
+                uid_flags.insert(
+                    uid,
+                    fetch
+                        .flags()
+                        .map(|flag| flag_name(&flag))
+                        .collect::<Vec<_>>(),
+                );
+            }
             if let Some(thread) = fetch_to_thread_snapshot(fetch, identity_email) {
                 threads.push(thread);
             }
@@ -467,11 +522,161 @@ async fn fetch_mailbox_snapshot(
 
     threads.sort_by(|left, right| right.latest_message_at.cmp(&left.latest_message_at));
 
-    Ok(MailboxSnapshot {
+    let snapshot = MailboxSnapshot {
         name: mailbox_name.to_owned(),
         role,
         threads,
+    };
+    Ok((snapshot, uid_flags))
+}
+
+/// Formats an IMAP flag for the checkpoint comparison map.
+fn flag_name(flag: &Flag<'_>) -> String {
+    match flag {
+        Flag::Seen => "\\Seen".to_owned(),
+        Flag::Answered => "\\Answered".to_owned(),
+        Flag::Flagged => "\\Flagged".to_owned(),
+        Flag::Deleted => "\\Deleted".to_owned(),
+        Flag::Draft => "\\Draft".to_owned(),
+        Flag::Recent => "\\Recent".to_owned(),
+        Flag::MayCreate => "\\*".to_owned(),
+        Flag::Custom(name) => name.to_string(),
+    }
+}
+
+/// Fetches the current flags of every message without touching bodies.
+///
+/// The returned map doubles as the set of messages still present on the
+/// server: UIDs missing from it have been expunged.
+async fn fetch_flag_map(
+    session: &mut Session<DynImapStream>,
+) -> Result<BTreeMap<u32, Vec<String>>> {
+    let fetches = session
+        .uid_fetch("1:*", "(UID FLAGS)")
+        .await
+        .context("failed to fetch the message flags")?
+        .try_collect::<Vec<_>>()
+        .await
+        .context("failed to stream the message flags")?;
+
+    let mut flags = BTreeMap::new();
+    for fetch in fetches {
+        if let Some(uid) = fetch.uid {
+            flags.insert(
+                uid,
+                fetch
+                    .flags()
+                    .map(|flag| flag_name(&flag))
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+    Ok(flags)
+}
+
+/// Returns the UIDs that arrived after the last seen one.
+async fn new_mailbox_uids(
+    session: &mut Session<DynImapStream>,
+    last_seen_uid: Option<u32>,
+) -> Result<Vec<u32>> {
+    let Some(last_seen) = last_seen_uid else {
+        return Ok(Vec::new());
+    };
+
+    let mut uids = session
+        .uid_search(&format!("UID {}:*", last_seen.saturating_add(1)))
+        .await
+        .context("failed to search for new message ids")?
+        .into_iter()
+        .collect::<Vec<_>>();
+    // The `*:n` range semantics can return the highest UID even when it
+    // is below the search start, so filter explicitly.
+    uids.retain(|uid| *uid > last_seen);
+    uids.sort_unstable();
+    Ok(uids)
+}
+
+/// Returns `true` when a message in the existing mirror is missing from
+/// the server flag map, which means it was expunged.
+fn has_expunged(flag_map: &BTreeMap<u32, Vec<String>>, mailbox: &MailboxSnapshot) -> bool {
+    mailbox.threads.iter().any(|thread| {
+        thread.messages.iter().any(|message| {
+            message
+                .remote_id
+                .parse::<u32>()
+                .is_ok_and(|uid| !flag_map.contains_key(&uid))
+        })
     })
+}
+
+/// Applies the fetched server flags to the existing mirror and drops
+/// threads whose messages were expunged.
+fn merge_flag_changes(mailbox: &mut MailboxSnapshot, flag_map: &BTreeMap<u32, Vec<String>>) {
+    mailbox.threads.retain_mut(|thread| {
+        thread.messages.retain_mut(|message| {
+            let Some(uid) = message.remote_id.parse::<u32>().ok() else {
+                return true;
+            };
+            let Some(flags) = flag_map.get(&uid) else {
+                return false;
+            };
+            message.is_read = flags.iter().any(|flag| flag.contains("Seen"));
+            message.is_flagged = flags.iter().any(|flag| flag.contains("Flagged"));
+            true
+        });
+
+        if thread.messages.is_empty() {
+            return false;
+        }
+
+        thread.unread_count = thread
+            .messages
+            .iter()
+            .filter(|message| !message.is_read)
+            .count();
+        thread.is_flagged = thread.messages.iter().any(|message| message.is_flagged);
+        true
+    });
+
+    mailbox
+        .threads
+        .sort_by(|left, right| right.latest_message_at.cmp(&left.latest_message_at));
+}
+
+/// Fetches the given new UIDs and appends their threads to the mirror.
+async fn append_new_threads(
+    session: &mut Session<DynImapStream>,
+    mailbox: &mut MailboxSnapshot,
+    new_uids: &[u32],
+    identity_email: &str,
+) -> Result<()> {
+    let mut new_threads = Vec::with_capacity(new_uids.len());
+    for chunk in new_uids.chunks(FETCH_BATCH_SIZE) {
+        let uid_set = chunk
+            .iter()
+            .map(|uid| uid.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let fetches = session
+            .uid_fetch(&uid_set, FETCH_QUERY)
+            .await
+            .with_context(|| format!("failed to fetch new messages for UID set {uid_set}"))?
+            .try_collect::<Vec<_>>()
+            .await
+            .context("failed to stream new messages")?;
+
+        for fetch in fetches {
+            if let Some(thread) = fetch_to_thread_snapshot(fetch, identity_email) {
+                new_threads.push(thread);
+            }
+        }
+    }
+
+    mailbox.threads.extend(new_threads);
+    mailbox
+        .threads
+        .sort_by(|left, right| right.latest_message_at.cmp(&left.latest_message_at));
+    Ok(())
 }
 
 fn fetch_to_thread_snapshot(fetch: Fetch, identity_email: &str) -> Option<ThreadSnapshot> {
@@ -633,6 +838,8 @@ fn existing_mailbox_map(mailboxes: &[MailboxSnapshot]) -> BTreeMap<&str, Mailbox
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, excerpt, guess_role, parse_endpoint,
     };
@@ -659,6 +866,8 @@ mod tests {
                     uid_validity: Some(9),
                     uid_next: Some(34),
                     exists: 33,
+                    last_seen_uid: Some(33),
+                    uid_flags: BTreeMap::new(),
                 },
             )]
             .into_iter()
