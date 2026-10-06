@@ -1,5 +1,4 @@
 {
-  ".": "0.0.1",
   "crates/zmail-app": "0.1.0",
   "crates/zmail-assets": "0.0.1",
   "crates/zmail-auth": "0.0.1",
