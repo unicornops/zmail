@@ -1175,6 +1175,7 @@ impl LocalStore {
             .context("cannot apply a mailbox snapshot without identities")?;
 
         let existing_mailboxes = load_account_mailbox_ids(&transaction, account_id)?;
+        let pending_remote_ids = load_pending_op_remote_ids(&transaction, account_id)?;
 
         for (sort_order, mailbox) in snapshot.mailboxes.iter().enumerate() {
             let mailbox_id = match existing_mailboxes.get(&mailbox.name) {
@@ -1206,6 +1207,7 @@ impl LocalStore {
                 mailbox,
                 &identity_map,
                 fallback_identity_id,
+                &pending_remote_ids,
             )?;
             prune_mailbox_threads(&transaction, mailbox_id, &kept_thread_ids)?;
             transaction
@@ -3185,14 +3187,16 @@ fn load_account_mailbox_ids(
 
 /// Merges the snapshot threads for one mailbox and returns the ids kept.
 ///
-/// Locally changed read and flag state is preserved on threads and messages
-/// that still exist on the server; content fields follow the snapshot.
+/// Locally changed read and flag state is preserved only for messages with
+/// a queued write-back operation; everywhere else the server snapshot is
+/// authoritative, so changes made by other clients become visible.
 fn merge_mailbox_threads(
     transaction: &Transaction<'_>,
     mailbox_id: i64,
     mailbox: &MailboxSnapshot,
     identity_map: &std::collections::HashMap<String, i64>,
     fallback_identity_id: i64,
+    pending_remote_ids: &HashSet<String>,
 ) -> Result<HashSet<i64>> {
     let mut existing_threads: std::collections::HashMap<String, i64> =
         std::collections::HashMap::new();
@@ -3228,7 +3232,10 @@ fn merge_mailbox_threads(
             None => (thread.is_flagged, std::collections::HashMap::new()),
         };
 
-        // Apply the locally preserved state to the merged messages.
+        // Locally changed state survives only while its write-back
+        // operation is still queued; the server is authoritative elsewhere
+        // so changes from other clients become visible.
+        let mut thread_has_pending_op = false;
         let mut unread_count = 0usize;
         let mut merged_messages = Vec::with_capacity(thread.messages.len());
         for message in &thread.messages {
@@ -3236,13 +3243,28 @@ fn merge_mailbox_threads(
                 .get(message.identity_email.as_str())
                 .copied()
                 .unwrap_or(fallback_identity_id);
-            let (is_read, is_flagged) = message_flags
-                .get(&message.remote_id)
-                .map(|(is_read, is_flagged)| (*is_read, *is_flagged))
-                .unwrap_or((message.is_read, message.is_flagged));
+            let has_pending_op =
+                !message.remote_id.is_empty() && pending_remote_ids.contains(&message.remote_id);
+            thread_has_pending_op |= has_pending_op;
+            let (is_read, is_flagged) = if has_pending_op {
+                message_flags
+                    .get(&message.remote_id)
+                    .map(|(is_read, is_flagged)| (*is_read, *is_flagged))
+                    .unwrap_or((message.is_read, message.is_flagged))
+            } else {
+                (message.is_read, message.is_flagged)
+            };
             unread_count += usize::from(!is_read);
             merged_messages.push((message, is_read, is_flagged, identity_id));
         }
+
+        // The thread flag also follows the server unless a queued
+        // operation still protects the local change.
+        let thread_flagged = if thread_has_pending_op {
+            thread_flagged
+        } else {
+            thread.is_flagged
+        };
 
         let thread_row_id = match existing_thread_id {
             Some(existing_id) => {
@@ -3409,6 +3431,21 @@ fn load_thread_flag(transaction: &Transaction<'_>, thread_id: i64) -> Result<boo
             |row| row.get::<_, bool>(0),
         )
         .context("failed to load the thread flag during the snapshot merge")
+}
+
+/// Loads the remote ids of messages that still have a queued write-back
+/// operation, so their local state survives a snapshot merge.
+fn load_pending_op_remote_ids(
+    transaction: &Transaction<'_>,
+    account_id: i64,
+) -> Result<HashSet<String>> {
+    let mut statement =
+        transaction.prepare("SELECT DISTINCT remote_id FROM pending_ops WHERE account_id = ?1")?;
+    let rows = statement.query_map(params![account_id], |row| row.get::<_, String>(0))?;
+    let ids = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to load the pending write-back ids during the snapshot merge")?;
+    Ok(ids.into_iter().collect())
 }
 
 /// Loads the mailbox name for a mailbox row id.
@@ -3692,6 +3729,71 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn snapshot_merge_follows_the_server_without_pending_operations() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        store
+            .replace_account_snapshot(
+                account_id,
+                &merge_test_snapshot(
+                    "Server subject",
+                    "Server body",
+                    "thread-4",
+                    "message-4",
+                    None,
+                ),
+            )
+            .expect("initial snapshot should apply");
+
+        let mailbox_id = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes should load")[0]
+            .id;
+        let thread_id = store
+            .list_threads(mailbox_id, 0..1)
+            .expect("threads should load")[0]
+            .id;
+
+        store
+            .set_thread_read(thread_id, true)
+            .expect("thread should be marked read");
+        store
+            .set_thread_flagged(thread_id, true)
+            .expect("thread should be flagged");
+
+        // Once the write-back operations are no longer queued, the server
+        // state wins again: another client may have changed it.
+        for op in store.list_pending_ops(account_id).expect("ops should load") {
+            store
+                .complete_pending_op(op.id)
+                .expect("op should complete");
+        }
+
+        store
+            .replace_account_snapshot(
+                account_id,
+                &merge_test_snapshot(
+                    "Server subject",
+                    "Server body",
+                    "thread-4",
+                    "message-4",
+                    None,
+                ),
+            )
+            .expect("refreshed snapshot should apply");
+
+        let thread = store
+            .list_threads(mailbox_id, 0..1)
+            .expect("threads should load")[0]
+            .clone();
+        assert_eq!(thread.unread_count, 1, "the server unread state should win");
+        assert!(!thread.is_flagged, "the server flag state should win");
     }
 
     #[test]
