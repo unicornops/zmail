@@ -162,7 +162,9 @@ pub async fn apply_pending_ops(
     }
 
     for (mailbox, mailbox_ops) in by_mailbox {
-        if let Err(error) = session.examine(mailbox).await {
+        // Write-back needs read-write mailbox access; `examine` would make
+        // the server reject every STORE.
+        if let Err(error) = session.select(mailbox).await {
             for op in mailbox_ops {
                 report.failed.push((
                     op.id,
