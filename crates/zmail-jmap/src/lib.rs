@@ -171,6 +171,7 @@ struct JmapMailbox {
 
 #[derive(Debug)]
 struct JmapEmail {
+    id: String,
     thread_id: String,
     mailbox_ids: Vec<String>,
     from: String,
@@ -388,6 +389,7 @@ async fn fetch_emails(client: &Client, ids: &[String]) -> Result<Vec<JmapEmail>>
             let (body_text, sanitized_html, has_remote_content, hydrated_preview) =
                 extract_renderable_bodies(&email);
             emails.push(JmapEmail {
+                id: email.id().map(str::to_owned).unwrap_or_default(),
                 thread_id,
                 mailbox_ids: email.mailbox_ids().into_iter().map(str::to_owned).collect(),
                 from: format_jmap_addresses(email.from()),
@@ -456,6 +458,7 @@ fn group_mailboxes(
                 .threads
                 .entry(email.thread_id.clone())
                 .or_insert_with(|| ThreadAccumulator {
+                    remote_thread_id: email.thread_id.clone(),
                     subject: email.subject.clone(),
                     participants: format!("{} -> {}", email.from, email.recipients),
                     preview: email.preview.clone(),
@@ -475,6 +478,7 @@ fn group_mailboxes(
             entry.has_attachments |= email.has_attachments;
             entry.unread_count += usize::from(email.unread);
             entry.messages.push(MessageSnapshot {
+                remote_id: email.id.clone(),
                 identity_email: identity_email.clone(),
                 sender: email.from.clone(),
                 recipients: email.recipients.clone(),
@@ -501,6 +505,7 @@ fn group_mailboxes(
                         .messages
                         .sort_by(|left, right| left.received_at.cmp(&right.received_at));
                     ThreadSnapshot {
+                        remote_thread_id: thread.remote_thread_id,
                         subject: thread.subject,
                         participants: thread.participants,
                         preview: thread.preview,
@@ -537,6 +542,7 @@ struct MailboxAccumulator {
 
 #[derive(Debug)]
 struct ThreadAccumulator {
+    remote_thread_id: String,
     subject: String,
     participants: String,
     preview: String,
