@@ -90,7 +90,13 @@ Launch the desktop client:
 cargo run -p zmail-app
 ```
 
-By default, the development app persists its local store at `.zmail-dev/zmail.sqlite3`.
+The local store lives in a platform data directory so user data is independent of the launch directory:
+
+- Linux: `$XDG_DATA_HOME/zmail` (default `~/.local/share/zmail`)
+- macOS: `~/Library/Application Support/zmail`
+- Windows: `%APPDATA%\zmail`
+
+Set the `ZMAIL_DATA_DIR` environment variable to override the store directory for development. A legacy `.zmail-dev/zmail.sqlite3` store in the current directory is migrated to the platform data directory on first run; if the migration fails, the app keeps using the legacy store so no data is lost.
 
 The desktop shell no longer creates demo accounts from inside the UI. Configure accounts through the CLI commands above, then use the app to browse and refresh the local mirror.
 

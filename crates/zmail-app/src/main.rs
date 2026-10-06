@@ -1045,9 +1045,297 @@ fn print_help() {
 }
 
 fn open_store() -> Result<LocalStore> {
-    LocalStore::open(data_path())
+    LocalStore::open(store_path()?).context("failed to open the local store")
 }
 
-fn data_path() -> PathBuf {
-    PathBuf::from(".zmail-dev").join("zmail.sqlite3")
+/// Name of the SQLite database file inside the store directory.
+const STORE_FILE_NAME: &str = "zmail.sqlite3";
+
+/// Legacy store directory used before the platform data directory existed.
+const LEGACY_STORE_DIR: &str = ".zmail-dev";
+
+/// Environment variable that overrides the store directory for development.
+const DATA_DIR_ENV: &str = "ZMAIL_DATA_DIR";
+
+/// The resolved store path plus whether a legacy store was migrated into it.
+/// Resolves the store path, migrating a legacy `.zmail-dev` store on first use.
+///
+/// The store lives in a platform data directory so that user data survives
+/// regardless of the directory the app was launched from. A legacy
+/// `.zmail-dev` store in the current directory is moved there once; if the
+/// move fails the legacy store keeps working so no data is ever lost.
+fn store_path() -> Result<PathBuf> {
+    let dir = data_dir()?;
+    let store = dir.join(STORE_FILE_NAME);
+
+    let legacy = PathBuf::from(LEGACY_STORE_DIR);
+    if !store.exists() && legacy.join(STORE_FILE_NAME).exists() {
+        match migrate_legacy_store(&legacy, &dir) {
+            Ok(()) => {
+                eprintln!(
+                    "migrated the legacy {} store to {}",
+                    legacy.display(),
+                    dir.display()
+                );
+                return Ok(store);
+            }
+            Err(error) => {
+                eprintln!(
+                    "warning: failed to migrate the legacy {} store to {}: {error:#}",
+                    legacy.display(),
+                    dir.display()
+                );
+                return Ok(legacy.join(STORE_FILE_NAME));
+            }
+        }
+    }
+
+    Ok(store)
+}
+
+/// Returns the directory that holds the local store and attachments.
+fn data_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os(DATA_DIR_ENV)
+        && !dir.is_empty()
+    {
+        return Ok(PathBuf::from(dir));
+    }
+
+    resolve_platform_data_dir(
+        std::env::var_os("HOME"),
+        std::env::var_os("XDG_DATA_HOME"),
+        std::env::var_os("APPDATA"),
+    )
+}
+
+/// Moves a legacy store directory to the platform data directory.
+fn migrate_legacy_store(legacy: &PathBuf, target: &std::path::Path) -> Result<()> {
+    if target.exists() {
+        bail!(
+            "cannot migrate the legacy {} store because {} already exists",
+            legacy.display(),
+            target.display()
+        );
+    }
+    let parent = target
+        .parent()
+        .context("the target store directory has no parent")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+
+    match std::fs::rename(legacy, target) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // Cross-device moves are not possible; copy instead and leave
+            // the legacy directory in place as a safety net.
+            std::fs::create_dir_all(target)
+                .with_context(|| format!("failed to create {}", target.display()))?;
+            copy_dir_contents(legacy, target)?;
+            eprintln!(
+                "note: the legacy {} store was copied to {} and left in place",
+                legacy.display(),
+                target.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Recursively copies a directory's contents into `target`.
+fn copy_dir_contents(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    for entry in
+        std::fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to list {}", source.display()))?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", entry.path().display()))?;
+        let destination = target.join(entry.file_name());
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&destination)
+                .with_context(|| format!("failed to create {}", destination.display()))?;
+            copy_dir_contents(&entry.path(), &destination)?;
+        } else {
+            std::fs::copy(entry.path(), &destination).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    entry.path().display(),
+                    destination.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolves the platform data directory from the provided environment values.
+///
+/// The unused parameters keep a single signature across platforms so the
+/// resolution rules stay testable without mutating process environment.
+#[cfg(target_os = "macos")]
+fn resolve_platform_data_dir(
+    home: Option<std::ffi::OsString>,
+    _xdg_data_home: Option<std::ffi::OsString>,
+    _appdata: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    let home = home.context("the HOME environment variable is not set")?;
+    Ok(PathBuf::from(home)
+        .join("Library")
+        .join("Application Support")
+        .join("zmail"))
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_platform_data_dir(
+    _home: Option<std::ffi::OsString>,
+    _xdg_data_home: Option<std::ffi::OsString>,
+    appdata: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    let appdata = appdata.context("the APPDATA environment variable is not set")?;
+    Ok(PathBuf::from(appdata).join("zmail"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn resolve_platform_data_dir(
+    home: Option<std::ffi::OsString>,
+    xdg_data_home: Option<std::ffi::OsString>,
+    _appdata: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    if let Some(xdg) = xdg_data_home
+        && !xdg.is_empty()
+        && PathBuf::from(&xdg).is_absolute()
+    {
+        return Ok(PathBuf::from(xdg).join("zmail"));
+    }
+
+    let home = home.context("neither XDG_DATA_HOME nor HOME is set")?;
+    Ok(PathBuf::from(home)
+        .join(".local")
+        .join("share")
+        .join("zmail"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Creates a unique temporary directory for a test.
+    fn temp_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "zmail-store-path-{label}-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&dir).expect("failed to create the test directory");
+        dir
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn xdg_data_home_takes_precedence() {
+        let dir = resolve_platform_data_dir(
+            Some("/home/tester".into()),
+            Some("/custom/data".into()),
+            None,
+        )
+        .expect("resolution should succeed");
+        assert_eq!(dir, PathBuf::from("/custom/data/zmail"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn home_fallback_ignores_relative_xdg_data_home() {
+        let dir =
+            resolve_platform_data_dir(Some("/home/tester".into()), Some("relative".into()), None)
+                .expect("resolution should succeed");
+        assert_eq!(dir, PathBuf::from("/home/tester/.local/share/zmail"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_uses_application_support() {
+        let dir = resolve_platform_data_dir(Some("/Users/tester".into()), None, None)
+            .expect("resolution should succeed");
+        assert_eq!(
+            dir,
+            PathBuf::from("/Users/tester/Library/Application Support/zmail")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_uses_appdata() {
+        let dir = resolve_platform_data_dir(
+            None,
+            None,
+            Some("C:\\Users\\tester\\AppData\\Roaming".into()),
+        )
+        .expect("resolution should succeed");
+        assert_eq!(
+            dir,
+            PathBuf::from("C:\\Users\\tester\\AppData\\Roaming").join("zmail")
+        );
+    }
+
+    #[test]
+    fn migration_moves_the_legacy_store() {
+        let root = temp_dir("migrate");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(legacy.join("attachments"))
+            .expect("failed to create the legacy tree");
+        std::fs::write(legacy.join(STORE_FILE_NAME), "store")
+            .expect("failed to write the store file");
+        std::fs::write(legacy.join("attachments").join("draft.txt"), "attachment")
+            .expect("failed to write the attachment");
+
+        let target = root.join("target");
+        migrate_legacy_store(&legacy, &target).expect("migration should succeed");
+
+        assert!(target.join(STORE_FILE_NAME).exists());
+        assert!(target.join("attachments").join("draft.txt").exists());
+        assert!(!legacy.exists(), "the legacy store should be renamed away");
+    }
+
+    #[test]
+    fn migration_refuses_to_overwrite_an_existing_store() {
+        let root = temp_dir("migrate-existing");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(&legacy).expect("failed to create the legacy store");
+        std::fs::write(legacy.join(STORE_FILE_NAME), "store")
+            .expect("failed to write the store file");
+        let target = root.join("target");
+        std::fs::create_dir_all(&target).expect("failed to create the target store");
+
+        assert!(migrate_legacy_store(&legacy, &target).is_err());
+    }
+
+    #[test]
+    fn copy_dir_contents_copies_nested_files() {
+        let root = temp_dir("copy");
+        let source = root.join("source");
+        std::fs::create_dir_all(source.join("attachments"))
+            .expect("failed to create the source tree");
+        std::fs::write(source.join(STORE_FILE_NAME), "store")
+            .expect("failed to write the store file");
+        std::fs::write(source.join("attachments").join("draft.txt"), "attachment")
+            .expect("failed to write the attachment");
+
+        let target = root.join("target");
+        std::fs::create_dir_all(&target).expect("failed to create the target");
+        copy_dir_contents(&source, &target).expect("copy should succeed");
+
+        assert_eq!(
+            std::fs::read_to_string(target.join(STORE_FILE_NAME)).expect("store file should exist"),
+            "store"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("attachments").join("draft.txt"))
+                .expect("attachment should exist"),
+            "attachment"
+        );
+    }
 }
