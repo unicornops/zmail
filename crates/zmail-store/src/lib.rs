@@ -19,9 +19,9 @@ use zmail_core::{
     DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate, IdentitySummary,
     MailboxSnapshot, MailboxSummary, MessagePreview, MessageRenderMode, MessageSnapshot,
     NewAccount, NewDraft, OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig,
-    OutgoingMessage, PendingOutboxJob, ProtocolKind, SearchHit, StoreStats, SubmissionKind,
-    SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget, ThreadMessage, ThreadSnapshot,
-    ThreadSummary, ThreadView,
+    OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, SearchHit,
+    StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget,
+    ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -35,6 +35,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0003_phase4_compose_and_send", PHASE4_SCHEMA),
     ("0004_phase5_thread_attachment_metadata", PHASE5_SCHEMA),
     ("0005_stable_remote_ids", STABLE_REMOTE_ID_SCHEMA),
+    ("0006_pending_ops", PENDING_OPS_SCHEMA),
 ];
 
 const PHASE2_SCHEMA: &str = r#"
@@ -233,6 +234,22 @@ ALTER TABLE threads ADD COLUMN remote_thread_id TEXT;
 ALTER TABLE messages ADD COLUMN remote_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_threads_mailbox_remote ON threads(mailbox_id, remote_thread_id);
 CREATE INDEX IF NOT EXISTS idx_messages_remote ON messages(remote_id);
+"#;
+
+const PENDING_OPS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS pending_ops (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    op TEXT NOT NULL,
+    source_mailbox TEXT NOT NULL,
+    remote_id TEXT NOT NULL,
+    target_mailbox TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_pending_ops_account ON pending_ops(account_id, id);
 "#;
 
 static EPHEMERAL_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1281,23 +1298,51 @@ impl LocalStore {
         .context("failed to load mailbox by role")
     }
 
-    /// Marks every message in the thread as flagged or unflagged locally.
+    /// Marks every message in the thread as flagged or unflagged locally and
+    /// queues the matching server write-back operations.
     pub fn set_thread_flagged(&self, thread_id: i64, flagged: bool) -> Result<()> {
-        let conn = self.connection()?;
-        conn.execute(
-            "UPDATE messages SET is_flagged = ?2 WHERE thread_id = ?1",
-            params![thread_id, flagged],
-        )
-        .with_context(|| format!("failed to update message flags for thread {thread_id}"))?;
-        conn.execute(
-            "UPDATE threads SET is_flagged = ?2 WHERE id = ?1",
-            params![thread_id, flagged],
-        )
-        .with_context(|| format!("failed to update thread flag state for thread {thread_id}"))?;
-        Ok(())
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the flag-state transaction")?;
+        let Some(location) = thread_location(&transaction, thread_id)? else {
+            return Ok(());
+        };
+
+        transaction
+            .execute(
+                "UPDATE messages SET is_flagged = ?2 WHERE thread_id = ?1",
+                params![thread_id, flagged],
+            )
+            .with_context(|| format!("failed to update message flags for thread {thread_id}"))?;
+        transaction
+            .execute(
+                "UPDATE threads SET is_flagged = ?2 WHERE id = ?1",
+                params![thread_id, flagged],
+            )
+            .with_context(|| {
+                format!("failed to update thread flag state for thread {thread_id}")
+            })?;
+        let source_name = mailbox_name(&transaction, location.mailbox_id)?;
+        enqueue_thread_ops(
+            &transaction,
+            location.account_id,
+            thread_id,
+            &source_name,
+            if flagged {
+                PendingOpKind::SetFlagged
+            } else {
+                PendingOpKind::ClearFlagged
+            },
+            None,
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the flag-state transaction")
     }
 
-    /// Marks every message in the thread as read or unread locally.
+    /// Marks every message in the thread as read or unread locally and
+    /// queues the matching server write-back operations.
     pub fn set_thread_read(&self, thread_id: i64, read: bool) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
@@ -1322,12 +1367,26 @@ impl LocalStore {
             location.unread_count > 0,
             next_unread_count > 0,
         )?;
+        let source_name = mailbox_name(&transaction, location.mailbox_id)?;
+        enqueue_thread_ops(
+            &transaction,
+            location.account_id,
+            thread_id,
+            &source_name,
+            if read {
+                PendingOpKind::MarkRead
+            } else {
+                PendingOpKind::MarkUnread
+            },
+            None,
+        )?;
         transaction
             .commit()
             .context("failed to commit the read-state transaction")
     }
 
-    /// Moves a thread between local mailboxes on the same account.
+    /// Moves a thread between local mailboxes on the same account and
+    /// queues the matching server write-back operations.
     pub fn move_thread(&self, thread_id: i64, destination_mailbox_id: i64) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
@@ -1348,12 +1407,22 @@ impl LocalStore {
             bail!("threads can only move within the same account");
         }
 
+        let source_name = mailbox_name(&transaction, location.mailbox_id)?;
+        let destination_name = mailbox_name(&transaction, destination_mailbox_id)?;
         move_thread_in_transaction(
             &transaction,
             thread_id,
             &location,
             destination_mailbox_id,
             destination.role.as_deref(),
+        )?;
+        enqueue_thread_ops(
+            &transaction,
+            location.account_id,
+            thread_id,
+            &source_name,
+            PendingOpKind::Move,
+            Some(&destination_name),
         )?;
         transaction
             .commit()
@@ -1376,7 +1445,8 @@ impl LocalStore {
         self.move_thread(thread_id, archive_mailbox_id)
     }
 
-    /// Deletes a thread locally, preferring the trash mailbox when one exists.
+    /// Deletes a thread locally, preferring the trash mailbox when one exists,
+    /// and queues the matching server write-back operations.
     pub fn delete_thread(&self, thread_id: i64) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
@@ -1389,10 +1459,12 @@ impl LocalStore {
         let trash_mailbox = mailbox_id_by_role(&transaction, location.account_id, "trash")?;
         let source_mailbox = mailbox_identity(&transaction, location.mailbox_id)?
             .context("source mailbox should exist for the thread being deleted")?;
+        let source_name = mailbox_name(&transaction, location.mailbox_id)?;
 
         if let Some(trash_mailbox_id) = trash_mailbox
             && trash_mailbox_id != location.mailbox_id
         {
+            let trash_name = mailbox_name(&transaction, trash_mailbox_id)?;
             move_thread_in_transaction(
                 &transaction,
                 thread_id,
@@ -1400,12 +1472,30 @@ impl LocalStore {
                 trash_mailbox_id,
                 Some("trash"),
             )?;
+            enqueue_thread_ops(
+                &transaction,
+                location.account_id,
+                thread_id,
+                &source_name,
+                PendingOpKind::Move,
+                Some(&trash_name),
+            )?;
             transaction
                 .commit()
                 .context("failed to commit the trash move transaction")?;
             return self.refresh_account_search_index(location.account_id);
         }
 
+        // Without a trash mailbox the local rows are removed; the server
+        // operation mirrors that intent once write-back completes.
+        enqueue_thread_ops(
+            &transaction,
+            location.account_id,
+            thread_id,
+            &source_name,
+            PendingOpKind::Destroy,
+            None,
+        )?;
         transaction.execute("DELETE FROM threads WHERE id = ?1", params![thread_id])?;
         transaction.execute(
             r#"
@@ -1421,6 +1511,65 @@ impl LocalStore {
             .commit()
             .context("failed to commit the delete transaction")?;
         self.refresh_account_search_index(location.account_id)
+    }
+
+    /// Lists the queued server write-back operations for an account.
+    pub fn list_pending_ops(&self, account_id: i64) -> Result<Vec<PendingOp>> {
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            r#"
+            SELECT id, account_id, op, source_mailbox, remote_id, target_mailbox, attempts, last_error
+            FROM pending_ops
+            WHERE account_id = ?1
+            ORDER BY id ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![account_id], |row| {
+            Ok(PendingOp {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                kind: PendingOpKind::parse(&row.get::<_, String>(2)?).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "unknown pending op kind".to_owned(),
+                        )),
+                    )
+                })?,
+                source_mailbox: row.get(3)?,
+                remote_id: row.get(4)?,
+                target_mailbox: row.get(5)?,
+                attempts: row.get(6)?,
+                last_error: row.get(7)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list pending mailbox operations")
+    }
+
+    /// Removes a write-back operation after the server accepted it.
+    pub fn complete_pending_op(&self, op_id: i64) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute("DELETE FROM pending_ops WHERE id = ?1", params![op_id])
+            .with_context(|| format!("failed to complete pending operation {op_id}"))?;
+        Ok(())
+    }
+
+    /// Records a failed write-back attempt; the operation stays queued.
+    pub fn record_pending_op_failure(&self, op_id: i64, error: impl AsRef<str>) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            r#"
+            UPDATE pending_ops
+            SET attempts = attempts + 1, last_error = ?2
+            WHERE id = ?1
+            "#,
+            params![op_id, error.as_ref()],
+        )
+        .with_context(|| format!("failed to record the failure of pending operation {op_id}"))?;
+        Ok(())
     }
 
     /// Creates a new local draft and returns its identifier.
@@ -3262,6 +3411,50 @@ fn load_thread_flag(transaction: &Transaction<'_>, thread_id: i64) -> Result<boo
         .context("failed to load the thread flag during the snapshot merge")
 }
 
+/// Loads the mailbox name for a mailbox row id.
+fn mailbox_name(transaction: &Transaction<'_>, mailbox_id: i64) -> Result<String> {
+    transaction
+        .query_row(
+            "SELECT name FROM mailboxes WHERE id = ?1",
+            params![mailbox_id],
+            |row| row.get::<_, String>(0),
+        )
+        .context("failed to load the mailbox name")
+}
+
+/// Queues one write-back operation per message of a thread that has a
+/// stable remote id.
+///
+/// The source mailbox is passed explicitly because move operations change
+/// the thread's mailbox before this helper runs.
+fn enqueue_thread_ops(
+    transaction: &Transaction<'_>,
+    account_id: i64,
+    thread_id: i64,
+    source_mailbox: &str,
+    kind: PendingOpKind,
+    target_mailbox: Option<&str>,
+) -> Result<()> {
+    let mut statement = transaction.prepare(
+        r#"
+        INSERT INTO pending_ops(account_id, op, source_mailbox, remote_id, target_mailbox)
+        SELECT ?1, ?2, ?3, messages.remote_id, ?4
+        FROM messages
+        WHERE messages.thread_id = ?5
+          AND messages.remote_id IS NOT NULL
+          AND messages.remote_id != ''
+        "#,
+    )?;
+    statement.execute(params![
+        account_id,
+        kind.as_str(),
+        source_mailbox,
+        target_mailbox,
+        thread_id,
+    ])?;
+    Ok(())
+}
+
 /// Loads the locally set read and flag state of a thread's messages.
 fn load_message_flags(
     transaction: &Transaction<'_>,
@@ -3331,7 +3524,7 @@ mod tests {
     use super::LocalStore;
     use zmail_core::{
         AccountSyncSnapshot, DraftState, MailboxSnapshot, MessageRenderMode, MessageSnapshot,
-        NewDraft, NewIdentity, ProtocolKind, SyncPhase, ThreadSnapshot,
+        NewDraft, NewIdentity, PendingOpKind, ProtocolKind, SyncPhase, ThreadSnapshot,
     };
 
     #[test]
@@ -3891,6 +4084,121 @@ mod tests {
         assert_eq!(hits[0].subject, "Searchable incident");
         assert!(hits[0].is_flagged);
         assert!(hits[0].has_attachments);
+    }
+
+    #[test]
+    fn local_operations_queue_server_write_back() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        store
+            .replace_account_snapshot(
+                account_id,
+                &merge_test_snapshot("Op subject", "Op body", "thread-9", "message-9", None),
+            )
+            .expect("snapshot should apply");
+
+        let mailbox_id = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes should load")[0]
+            .id;
+        let thread_id = store
+            .list_threads(mailbox_id, 0..1)
+            .expect("threads should load")[0]
+            .id;
+
+        store
+            .set_thread_read(thread_id, true)
+            .expect("thread should be marked read");
+        store
+            .set_thread_flagged(thread_id, true)
+            .expect("thread should be flagged");
+
+        let ops = store
+            .list_pending_ops(account_id)
+            .expect("pending operations should load");
+        assert_eq!(ops.len(), 2, "read and flag operations should be queued");
+        assert!(ops.iter().any(|op| {
+            op.kind == PendingOpKind::MarkRead
+                && op.remote_id == "message-9"
+                && op.source_mailbox == "Inbox"
+        }));
+        assert!(
+            ops.iter()
+                .any(|op| op.kind == PendingOpKind::SetFlagged && op.remote_id == "message-9")
+        );
+
+        // Completing one operation removes it while the other stays queued.
+        store
+            .complete_pending_op(ops[0].id)
+            .expect("operation should complete");
+        let remaining = store
+            .list_pending_ops(account_id)
+            .expect("pending operations should load");
+        assert_eq!(remaining.len(), 1, "one operation should remain queued");
+
+        // Failures keep the operation queued with the error recorded.
+        store
+            .record_pending_op_failure(remaining[0].id, "server rejected the operation")
+            .expect("failure should be recorded");
+        let retried = store
+            .list_pending_ops(account_id)
+            .expect("pending operations should load");
+        assert_eq!(retried.len(), 1, "failed operations stay queued");
+        assert_eq!(retried[0].attempts, 1);
+        assert_eq!(
+            retried[0].last_error.as_deref(),
+            Some("server rejected the operation")
+        );
+    }
+
+    #[test]
+    fn move_and_delete_queue_server_write_back() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        store
+            .replace_account_snapshot(
+                account_id,
+                &merge_test_snapshot("Move subject", "Move body", "thread-10", "message-10", None),
+            )
+            .expect("snapshot should apply");
+
+        let mailboxes = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes should load");
+        let inbox_id = mailboxes[0].id;
+        let thread_id = store
+            .list_threads(inbox_id, 0..1)
+            .expect("threads should load")[0]
+            .id;
+
+        store
+            .move_thread(thread_id, inbox_id)
+            .expect("same-mailbox move should be a no-op");
+        assert!(
+            store
+                .list_pending_ops(account_id)
+                .expect("pending operations should load")
+                .is_empty(),
+            "a no-op move should not queue anything"
+        );
+
+        store
+            .delete_thread(thread_id)
+            .expect("thread should be deleted");
+        let ops = store
+            .list_pending_ops(account_id)
+            .expect("pending operations should load");
+        // The demo account has no trash mailbox, so the destroy operation
+        // mirrors the locally removed rows.
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].kind, PendingOpKind::Destroy);
+        assert_eq!(ops[0].remote_id, "message-10");
     }
 
     #[test]

@@ -25,7 +25,8 @@ use tokio_rustls::{
 };
 use url::Url;
 use zmail_core::{
-    AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, ProtocolKind, SyncTarget, ThreadSnapshot,
+    AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, OpApplyReport, PendingOp, PendingOpKind,
+    ProtocolKind, SyncTarget, ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -131,6 +132,131 @@ struct ImapEndpoint {
     host: String,
     port: u16,
     security: ImapSecurity,
+}
+
+/// Applies queued mailbox operations to the live IMAP account.
+///
+/// Read and flag operations translate to `UID STORE`, move operations to
+/// `UID MOVE` (falling back to `UID COPY` plus a deleted flag), and destroy
+/// operations mark the message deleted without expunging, so an accidental
+/// destroy never removes mail before the user can intervene.
+pub async fn apply_pending_ops(
+    target: &SyncTarget,
+    secret: &str,
+    ops: &[PendingOp],
+) -> Result<OpApplyReport> {
+    if target.protocol != ProtocolKind::Imap {
+        bail!("IMAP adapter received a non-IMAP sync target");
+    }
+
+    let endpoint = parse_endpoint(&target.endpoint)?;
+    let mut session = connect_session(&endpoint, &target.username, secret).await?;
+    let mut report = OpApplyReport::default();
+
+    let mut by_mailbox: BTreeMap<&str, Vec<&PendingOp>> = BTreeMap::new();
+    for op in ops {
+        by_mailbox
+            .entry(op.source_mailbox.as_str())
+            .or_default()
+            .push(op);
+    }
+
+    for (mailbox, mailbox_ops) in by_mailbox {
+        if let Err(error) = session.examine(mailbox).await {
+            for op in mailbox_ops {
+                report.failed.push((
+                    op.id,
+                    format!("mailbox {mailbox} is not selectable: {error:#}"),
+                ));
+            }
+            continue;
+        }
+
+        for op in mailbox_ops {
+            let Some(uid) = op.remote_id.parse::<u32>().ok() else {
+                report
+                    .failed
+                    .push((op.id, format!("invalid IMAP uid {}", op.remote_id)));
+                continue;
+            };
+            let result = apply_single_op(&mut session, uid, op).await;
+            match result {
+                Ok(()) => report.applied.push(op.id),
+                Err(error) => report.failed.push((op.id, format!("{error:#}"))),
+            }
+        }
+    }
+
+    let _ = session.logout().await;
+    Ok(report)
+}
+
+async fn apply_single_op(
+    session: &mut Session<DynImapStream>,
+    uid: u32,
+    op: &PendingOp,
+) -> Result<()> {
+    let uid_set = uid.to_string();
+    match op.kind {
+        PendingOpKind::MarkRead => {
+            store_flags(session, uid_set, "+FLAGS (\\Seen)".to_owned()).await
+        }
+        PendingOpKind::MarkUnread => {
+            store_flags(session, uid_set, "-FLAGS (\\Seen)".to_owned()).await
+        }
+        PendingOpKind::SetFlagged => {
+            store_flags(session, uid_set, "+FLAGS (\\Flagged)".to_owned()).await
+        }
+        PendingOpKind::ClearFlagged => {
+            store_flags(session, uid_set, "-FLAGS (\\Flagged)".to_owned()).await
+        }
+        PendingOpKind::Destroy => {
+            // Marking deleted is safe and reversible; expunging is not run
+            // until a dedicated, confirmed destroy flow exists.
+            store_flags(session, uid_set, "+FLAGS (\\Deleted)".to_owned()).await
+        }
+        PendingOpKind::Move => {
+            let Some(target_mailbox) = op.target_mailbox.as_deref().filter(|name| !name.is_empty())
+            else {
+                bail!("move operation without a target mailbox");
+            };
+            match session
+                .uid_mv(uid_set.clone(), target_mailbox.to_owned())
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(move_error) => {
+                    // Servers without the MOVE extension get the copy-plus-
+                    // delete fallback, which keeps the message available.
+                    session
+                        .uid_copy(uid_set.clone(), target_mailbox.to_owned())
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to copy uid {uid} to {target_mailbox} while moving: {move_error}"
+                            )
+                        })?;
+                    store_flags(session, uid_set, "+FLAGS (\\Deleted)".to_owned()).await
+                }
+            }
+        }
+    }
+}
+
+async fn store_flags(
+    session: &mut Session<DynImapStream>,
+    uid_set: String,
+    query: String,
+) -> Result<()> {
+    let stream = session
+        .uid_store(uid_set, query)
+        .await
+        .context("failed to run the IMAP STORE command")?;
+    stream
+        .try_collect::<Vec<_>>()
+        .await
+        .map(|_| ())
+        .context("failed to apply the IMAP flag operation")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -85,6 +85,57 @@ fn syncs_preloaded_mail_and_round_trips_smtp_submission() -> Result<()> {
             .contains("submitted through the local SMTP harness")
     );
 
+    // Local mailbox operations queue server write-back and the next sync
+    // applies them to the IMAP server.
+    let preloaded_thread = initial_threads
+        .iter()
+        .find(|thread| thread.subject == MAIL_HARNESS_PRELOADED_SUBJECT)
+        .context("the preloaded thread should still exist")?;
+    store.set_thread_read(preloaded_thread.id, true)?;
+    store.set_thread_flagged(preloaded_thread.id, true)?;
+    assert_eq!(
+        store.list_pending_ops(account_id)?.len(),
+        2,
+        "read and flag should queue IMAP write-back operations"
+    );
+
+    sync_service.sync_account_and_wait(account_id)?;
+    assert!(
+        store.list_pending_ops(account_id)?.is_empty(),
+        "the IMAP write-back operations should be applied and drained"
+    );
+
+    let threads = store.list_threads(inbox_mailbox_id, 0..50)?;
+    let preloaded = threads
+        .iter()
+        .find(|thread| thread.subject == MAIL_HARNESS_PRELOADED_SUBJECT)
+        .context("the preloaded thread should survive the write-back sync")?;
+    assert_eq!(preloaded.unread_count, 0, "the thread should stay read");
+    assert!(preloaded.is_flagged, "the thread should stay flagged");
+
+    // A fresh local mirror of the same account proves the server state
+    // itself changed, not just the local mirror.
+    let fresh_store = Arc::new(LocalStore::open_ephemeral()?);
+    let fresh_account_id = fresh_store.insert_account(&imap_account())?;
+    let fresh_secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    fresh_secrets.set_account_secret(fresh_account_id, MAIL_HARNESS_RECIPIENT_PASSWORD)?;
+    let fresh_sync = SyncService::new(runtime.handle().clone(), fresh_store.clone(), fresh_secrets);
+    fresh_sync.sync_account_and_wait(fresh_account_id)?;
+    let fresh_inbox = inbox_id(&fresh_store, fresh_account_id)?;
+    let fresh_threads = fresh_store.list_threads(fresh_inbox, 0..50)?;
+    let fresh_preloaded = fresh_threads
+        .iter()
+        .find(|thread| thread.subject == MAIL_HARNESS_PRELOADED_SUBJECT)
+        .context("the fresh mirror should contain the preloaded thread")?;
+    assert_eq!(
+        fresh_preloaded.unread_count, 0,
+        "the server should report the message as read"
+    );
+    assert!(
+        fresh_preloaded.is_flagged,
+        "the server should report the message as flagged"
+    );
+
     Ok(())
 }
 
