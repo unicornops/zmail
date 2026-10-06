@@ -71,6 +71,43 @@ fn syncs_mail_from_a_live_jmap_server() -> Result<()> {
         .context("JMAP roundtrip thread should have a preview")?;
     assert!(preview.body_preview.contains("incremental JMAP sync"));
 
+    // Local mailbox operations queue server write-back and the next sync
+    // applies them through JMAP Email/set.
+    store.set_thread_read(roundtrip_thread_id, true)?;
+    store.set_thread_flagged(roundtrip_thread_id, true)?;
+    assert_eq!(
+        store.list_pending_ops(account_id)?.len(),
+        2,
+        "read and flag should queue JMAP write-back operations"
+    );
+    sync_service.sync_account_and_wait(account_id)?;
+    assert!(
+        store.list_pending_ops(account_id)?.is_empty(),
+        "the JMAP write-back operations should be applied and drained"
+    );
+
+    // Move the thread into another mailbox the server already exposes.
+    let mailboxes = store.list_mailboxes(account_id)?;
+    let target = mailboxes
+        .iter()
+        .find(|mailbox| !mailbox.name.eq_ignore_ascii_case("Inbox"))
+        .context("the JMAP server should expose a second mailbox")?;
+    let target_id = target.id;
+    let target_name = target.name.clone();
+    store.move_thread(roundtrip_thread_id, target_id)?;
+    sync_service.sync_account_and_wait(account_id)?;
+    assert!(
+        store.list_pending_ops(account_id)?.is_empty(),
+        "the JMAP move should be applied and drained"
+    );
+    let moved_threads = store.list_threads(target_id, 0..50)?;
+    assert!(
+        moved_threads
+            .iter()
+            .any(|thread| thread.subject == "Phase 2b JMAP incremental sync"),
+        "the moved thread should appear in the {target_name} mailbox"
+    );
+
     Ok(())
 }
 

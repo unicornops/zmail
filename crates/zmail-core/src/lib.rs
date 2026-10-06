@@ -984,6 +984,80 @@ pub struct MailboxSnapshot {
     pub threads: Vec<ThreadSnapshot>,
 }
 
+/// Kind of mailbox operation queued for server write-back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingOpKind {
+    /// Mark the message as read on the server.
+    MarkRead,
+    /// Mark the message as unread on the server.
+    MarkUnread,
+    /// Add the flagged keyword on the server.
+    SetFlagged,
+    /// Remove the flagged keyword on the server.
+    ClearFlagged,
+    /// Move the message into another server mailbox.
+    Move,
+    /// Destroy the message on the server.
+    Destroy,
+}
+
+impl PendingOpKind {
+    /// Returns the stable database representation of the operation kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MarkRead => "mark_read",
+            Self::MarkUnread => "mark_unread",
+            Self::SetFlagged => "set_flagged",
+            Self::ClearFlagged => "clear_flagged",
+            Self::Move => "move",
+            Self::Destroy => "destroy",
+        }
+    }
+
+    /// Parses the database representation of an operation kind.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "mark_read" => Some(Self::MarkRead),
+            "mark_unread" => Some(Self::MarkUnread),
+            "set_flagged" => Some(Self::SetFlagged),
+            "clear_flagged" => Some(Self::ClearFlagged),
+            "move" => Some(Self::Move),
+            "destroy" => Some(Self::Destroy),
+            _ => None,
+        }
+    }
+}
+
+/// A locally applied mailbox operation waiting for server write-back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingOp {
+    /// Pending operation row id.
+    pub id: i64,
+    /// Account the operation applies to.
+    pub account_id: i64,
+    /// Operation kind.
+    pub kind: PendingOpKind,
+    /// Server name of the mailbox holding the message.
+    pub source_mailbox: String,
+    /// Stable remote id of the message within the source mailbox.
+    pub remote_id: String,
+    /// Server name of the target mailbox for move operations.
+    pub target_mailbox: Option<String>,
+    /// Number of failed write-back attempts.
+    pub attempts: i64,
+    /// Last write-back error, if any.
+    pub last_error: Option<String>,
+}
+
+/// Result of applying queued mailbox operations against a server.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpApplyReport {
+    /// Ids of operations the server accepted.
+    pub applied: Vec<i64>,
+    /// Ids of operations the server rejected, with the error detail.
+    pub failed: Vec<(i64, String)>,
+}
+
 /// Thread snapshot written into the local store by a sync adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadSnapshot {

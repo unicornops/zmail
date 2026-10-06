@@ -362,6 +362,49 @@ impl SyncService {
                 format!("failed to read the current local mirror for account {account_id}")
             })?;
 
+        // Locally applied mailbox operations are written back before the
+        // snapshot is fetched, so the fetched state includes them. Failed
+        // operations stay queued and are retried by the next sync.
+        let pending_ops = self
+            .inner
+            .store
+            .list_pending_ops(account_id)
+            .with_context(|| {
+                format!("failed to load pending operations for account {account_id}")
+            })?;
+        if !pending_ops.is_empty() {
+            self.inner.store.begin_sync_attempt(
+                account_id,
+                SyncPhase::Connecting,
+                format!(
+                    "Writing back {} pending mailbox operations",
+                    pending_ops.len()
+                ),
+            )?;
+            let report = match target.protocol {
+                ProtocolKind::Imap => {
+                    zmail_imap::apply_pending_ops(&target, &secret, &pending_ops).await?
+                }
+                ProtocolKind::Jmap => {
+                    zmail_jmap::apply_pending_ops(&target, &secret, &pending_ops).await?
+                }
+            };
+            for op_id in &report.applied {
+                self.inner
+                    .store
+                    .complete_pending_op(*op_id)
+                    .with_context(|| format!("failed to complete pending operation {op_id}"))?;
+            }
+            for (op_id, error) in &report.failed {
+                self.inner
+                    .store
+                    .record_pending_op_failure(*op_id, error)
+                    .with_context(|| {
+                        format!("failed to record pending operation {op_id} failure")
+                    })?;
+            }
+        }
+
         self.inner.store.begin_sync_attempt(
             account_id,
             SyncPhase::Discovering,

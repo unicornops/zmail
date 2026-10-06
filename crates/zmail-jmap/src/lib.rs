@@ -16,8 +16,8 @@ use jmap_client::{
 use serde::{Deserialize, Serialize};
 use url::Url;
 use zmail_core::{
-    AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, NewIdentity, OutgoingMessage,
-    ProtocolKind, SyncTarget, ThreadSnapshot,
+    AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, NewIdentity, OpApplyReport,
+    OutgoingMessage, PendingOp, PendingOpKind, ProtocolKind, SyncTarget, ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
 use zmail_smtp::render_rfc822_message;
@@ -101,6 +101,98 @@ pub async fn discover_and_sync(
         identities: Some(identities),
         mailboxes,
     })
+}
+
+/// Applies queued mailbox operations to the live JMAP account.
+///
+/// Read and flag operations update the `$seen` and `$flagged` keywords via
+/// `Email/set`, move operations replace the mailbox ids so the message is
+/// moved rather than copied, and destroy operations rely on the server's
+/// trash handling through `Email/set` destroy.
+pub async fn apply_pending_ops(
+    target: &SyncTarget,
+    secret: &str,
+    ops: &[PendingOp],
+) -> Result<OpApplyReport> {
+    if target.protocol != ProtocolKind::Jmap {
+        bail!("JMAP adapter received a non-JMAP sync target");
+    }
+
+    let client = connect_client(&target.endpoint, &target.username, secret).await?;
+    let mut report = OpApplyReport::default();
+
+    let needs_mailbox_map = ops.iter().any(|op| matches!(op.kind, PendingOpKind::Move));
+    let mailbox_ids: HashMap<String, String> = if needs_mailbox_map {
+        fetch_mailboxes(&client)
+            .await?
+            .0
+            .into_iter()
+            .map(|mailbox| (mailbox.name, mailbox.id))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    for op in ops {
+        let result = apply_single_jmap_op(&client, op, &mailbox_ids).await;
+        match result {
+            Ok(()) => report.applied.push(op.id),
+            Err(error) => report.failed.push((op.id, format!("{error:#}"))),
+        }
+    }
+
+    Ok(report)
+}
+
+async fn apply_single_jmap_op(
+    client: &Client,
+    op: &PendingOp,
+    mailbox_ids: &HashMap<String, String>,
+) -> Result<()> {
+    let email_id = op.remote_id.as_str();
+    match op.kind {
+        PendingOpKind::MarkRead => client
+            .email_set_keyword(email_id, "$seen", true)
+            .await
+            .map(|_| ())
+            .with_context(|| format!("failed to mark JMAP email {email_id} as read")),
+        PendingOpKind::MarkUnread => client
+            .email_set_keyword(email_id, "$seen", false)
+            .await
+            .map(|_| ())
+            .with_context(|| format!("failed to mark JMAP email {email_id} as unread")),
+        PendingOpKind::SetFlagged => client
+            .email_set_keyword(email_id, "$flagged", true)
+            .await
+            .map(|_| ())
+            .with_context(|| format!("failed to flag JMAP email {email_id}")),
+        PendingOpKind::ClearFlagged => client
+            .email_set_keyword(email_id, "$flagged", false)
+            .await
+            .map(|_| ())
+            .with_context(|| format!("failed to unflag JMAP email {email_id}")),
+        PendingOpKind::Destroy => client
+            .email_destroy(email_id)
+            .await
+            .with_context(|| format!("failed to destroy JMAP email {email_id}")),
+        PendingOpKind::Move => {
+            let Some(target_mailbox) = op.target_mailbox.as_deref() else {
+                bail!("move operation without a target mailbox");
+            };
+            let Some(target_id) = mailbox_ids.get(target_mailbox) else {
+                bail!("the JMAP account has no mailbox named {target_mailbox}");
+            };
+            // A move replaces the mailbox membership instead of adding a
+            // second mailbox, matching IMAP MOVE semantics.
+            client
+                .email_set_mailboxes(email_id, [target_id.to_owned()])
+                .await
+                .map(|_| ())
+                .with_context(|| {
+                    format!("failed to move JMAP email {email_id} to {target_mailbox}")
+                })
+        }
+    }
 }
 
 /// Submits a composed outgoing message through JMAP `EmailSubmission`.
