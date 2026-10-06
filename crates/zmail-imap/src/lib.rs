@@ -368,8 +368,10 @@ fn fetch_to_thread_snapshot(fetch: Fetch, identity_email: &str) -> Option<Thread
     let is_read = fetch.flags().any(|flag| matches!(flag, Flag::Seen));
     let is_flagged = fetch.flags().any(|flag| matches!(flag, Flag::Flagged));
     let unread_count = usize::from(!is_read);
+    let remote_id = fetch.uid.map(|uid| uid.to_string()).unwrap_or_default();
 
     Some(ThreadSnapshot {
+        remote_thread_id: remote_id.clone(),
         subject: subject.clone(),
         participants,
         preview: preview.clone(),
@@ -378,6 +380,7 @@ fn fetch_to_thread_snapshot(fetch: Fetch, identity_email: &str) -> Option<Thread
         unread_count,
         latest_message_at: latest_message_at.clone(),
         messages: vec![MessageSnapshot {
+            remote_id,
             identity_email: identity_email.to_owned(),
             sender,
             recipients,

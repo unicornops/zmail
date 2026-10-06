@@ -987,6 +987,11 @@ pub struct MailboxSnapshot {
 /// Thread snapshot written into the local store by a sync adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadSnapshot {
+    /// Stable server-side thread identifier, unique within a mailbox.
+    ///
+    /// JMAP adapters use the server thread id; IMAP adapters, which model
+    /// each message as its own thread, use the message UID.
+    pub remote_thread_id: String,
     /// Subject line.
     pub subject: String,
     /// Participant summary.
@@ -1008,6 +1013,10 @@ pub struct ThreadSnapshot {
 /// Message snapshot written into the local store by a sync adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageSnapshot {
+    /// Stable server-side message identifier, unique within a mailbox.
+    ///
+    /// JMAP adapters use the email object id; IMAP adapters use the UID.
+    pub remote_id: String,
     /// Identity email address used for the message.
     pub identity_email: String,
     /// Sender display string.
