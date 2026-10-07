@@ -527,7 +527,7 @@ async fn fetch_mailbox_snapshot(
     uids.sort_unstable();
     uids.reverse();
 
-    let mut threads = Vec::with_capacity(uids.len());
+    let mut conversations: BTreeMap<String, ImapThreadAccumulator> = BTreeMap::new();
     let mut uid_flags = BTreeMap::new();
     for chunk in uids.chunks(FETCH_BATCH_SIZE) {
         let uid_set = chunk
@@ -555,12 +555,14 @@ async fn fetch_mailbox_snapshot(
                         .collect::<Vec<_>>(),
                 );
             }
-            if let Some(thread) = fetch_to_thread_snapshot(fetch, identity_email) {
-                threads.push(thread);
-            }
+            accumulate_fetch(&mut conversations, fetch, identity_email);
         }
     }
 
+    let mut threads: Vec<ThreadSnapshot> = conversations
+        .into_values()
+        .map(ImapThreadAccumulator::into_thread_snapshot)
+        .collect();
     threads.sort_by(|left, right| right.latest_message_at.cmp(&left.latest_message_at));
 
     let snapshot = MailboxSnapshot {
@@ -691,7 +693,7 @@ async fn append_new_threads(
     new_uids: &[u32],
     identity_email: &str,
 ) -> Result<()> {
-    let mut new_threads = Vec::with_capacity(new_uids.len());
+    let mut conversations: BTreeMap<String, ImapThreadAccumulator> = BTreeMap::new();
     for chunk in new_uids.chunks(FETCH_BATCH_SIZE) {
         let uid_set = chunk
             .iter()
@@ -707,22 +709,131 @@ async fn append_new_threads(
             .context("failed to stream new messages")?;
 
         for fetch in fetches {
-            if let Some(thread) = fetch_to_thread_snapshot(fetch, identity_email) {
-                new_threads.push(thread);
-            }
+            accumulate_fetch(&mut conversations, fetch, identity_email);
         }
     }
 
-    mailbox.threads.extend(new_threads);
+    for new_thread in conversations
+        .into_values()
+        .map(ImapThreadAccumulator::into_thread_snapshot)
+    {
+        // Replies join the conversation already present in the mirror
+        // instead of opening a duplicate thread row.
+        let existing = mailbox
+            .threads
+            .iter_mut()
+            .find(|thread| thread.remote_thread_id == new_thread.remote_thread_id);
+        match existing {
+            Some(existing) => {
+                existing.messages.extend(new_thread.messages);
+                existing
+                    .messages
+                    .sort_by(|left, right| left.received_at.cmp(&right.received_at));
+                recompute_thread_aggregates(existing);
+            }
+            None => mailbox.threads.push(new_thread),
+        }
+    }
     mailbox
         .threads
         .sort_by(|left, right| right.latest_message_at.cmp(&left.latest_message_at));
     Ok(())
 }
 
-fn fetch_to_thread_snapshot(fetch: Fetch, identity_email: &str) -> Option<ThreadSnapshot> {
-    let raw = fetch.body()?;
-    let message = MessageParser::default().parse(raw)?;
+/// Recomputes the aggregate thread fields from its messages.
+///
+/// The messages are expected to be ordered by `received_at`, so the last
+/// message carries the newest display fields.
+fn recompute_thread_aggregates(thread: &mut ThreadSnapshot) {
+    if let Some(newest) = thread.messages.last() {
+        thread.latest_message_at = newest.received_at.clone();
+        thread.subject = newest.subject.clone();
+        thread.preview = newest.body_preview.clone();
+        thread.participants = format!("{} -> {}", newest.sender, newest.recipients);
+    }
+    thread.unread_count = thread
+        .messages
+        .iter()
+        .filter(|message| !message.is_read)
+        .count();
+    thread.is_flagged = thread.messages.iter().any(|message| message.is_flagged);
+}
+
+/// Accumulates the messages of one IMAP conversation.
+#[derive(Debug)]
+struct ImapThreadAccumulator {
+    remote_thread_id: String,
+    subject: String,
+    participants: String,
+    preview: String,
+    is_flagged: bool,
+    has_attachments: bool,
+    unread_count: usize,
+    latest_message_at: String,
+    messages: Vec<MessageSnapshot>,
+}
+
+impl ImapThreadAccumulator {
+    /// Adds one message to the conversation, following the latest message
+    /// for the display fields, like the JMAP accumulator does.
+    fn push_message(&mut self, message: MessageSnapshot) {
+        if message.received_at > self.latest_message_at {
+            self.latest_message_at = message.received_at.clone();
+            self.subject = message.subject.clone();
+            self.preview = message.body_preview.clone();
+            self.participants = format!("{} -> {}", message.sender, message.recipients);
+        }
+        self.is_flagged |= message.is_flagged;
+        self.unread_count += usize::from(!message.is_read);
+        self.messages.push(message);
+    }
+}
+
+/// Derives the conversation key of a message from its threading headers.
+///
+/// The first `References` entry is the root of the chain; replies without
+/// a `References` header fall back to `In-Reply-To`, then to the
+/// message's own `Message-ID`. Messages with no threading headers at
+/// all stay standalone, keyed by their UID (the pre-conversation
+/// behavior).
+fn conversation_key(message: &mail_parser::Message<'_>, uid: Option<u32>) -> String {
+    if let Some(references) = message.references().as_text_list()
+        && let Some(root) = references.first()
+        && !root.trim().is_empty()
+    {
+        return root.trim().to_owned();
+    }
+    if let Some(in_reply_to) = message.in_reply_to().as_text_list()
+        && let Some(parent) = in_reply_to.first()
+        && !parent.trim().is_empty()
+    {
+        return parent.trim().to_owned();
+    }
+    if let Some(in_reply_to) = message.in_reply_to().as_text()
+        && !in_reply_to.trim().is_empty()
+    {
+        return in_reply_to.trim().to_owned();
+    }
+    if let Some(message_id) = message.message_id().filter(|id| !id.trim().is_empty()) {
+        return message_id.trim().to_owned();
+    }
+    format!("uid:{}", uid.map(|uid| uid.to_string()).unwrap_or_default())
+}
+
+/// Accumulates one fetched message into its conversation bucket.
+fn accumulate_fetch(
+    threads: &mut BTreeMap<String, ImapThreadAccumulator>,
+    fetch: Fetch,
+    identity_email: &str,
+) {
+    let raw = match fetch.body() {
+        Some(raw) => raw,
+        None => return,
+    };
+    let message = match MessageParser::default().parse(raw) {
+        Some(message) => message,
+        None => return,
+    };
     let subject = message
         .subject()
         .map(str::to_owned)
@@ -730,44 +841,72 @@ fn fetch_to_thread_snapshot(fetch: Fetch, identity_email: &str) -> Option<Thread
         .unwrap_or_else(|| "(no subject)".to_owned());
     let sender = first_address(message.from()).unwrap_or_else(|| "Unknown sender".to_owned());
     let recipients = format_recipients(message.to(), identity_email);
-    let participants = format!("{sender} -> {recipients}");
     let (body_text, sanitized_html, has_remote_content, preview_source) = hydrate_bodies(&message);
     let preview = excerpt(&preview_source, 180);
     let has_attachments = message.attachment_count() > 0;
-    let latest_message_at = fetch
+    let received_at = fetch
         .internal_date()
         .map(|date| date.to_rfc3339())
         .or_else(|| message.date().map(|date| date.to_rfc3339()))
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned());
     let is_read = fetch.flags().any(|flag| matches!(flag, Flag::Seen));
     let is_flagged = fetch.flags().any(|flag| matches!(flag, Flag::Flagged));
-    let unread_count = usize::from(!is_read);
-    let remote_id = fetch.uid.map(|uid| uid.to_string()).unwrap_or_default();
-
-    Some(ThreadSnapshot {
-        remote_thread_id: remote_id.clone(),
-        subject: subject.clone(),
-        participants,
-        preview: preview.clone(),
+    let uid = fetch.uid;
+    let remote_id = uid.map(|uid| uid.to_string()).unwrap_or_default();
+    let message_snapshot = MessageSnapshot {
+        remote_id,
+        identity_email: identity_email.to_owned(),
+        sender,
+        recipients,
+        subject,
+        body_preview: preview,
+        body_text,
+        sanitized_html,
+        has_remote_content,
+        is_read,
         is_flagged,
-        has_attachments,
-        unread_count,
-        latest_message_at: latest_message_at.clone(),
-        messages: vec![MessageSnapshot {
-            remote_id,
-            identity_email: identity_email.to_owned(),
-            sender,
-            recipients,
-            subject,
-            body_preview: preview,
-            body_text,
-            sanitized_html,
-            has_remote_content,
-            is_read,
-            is_flagged,
-            received_at: latest_message_at,
-        }],
-    })
+        received_at: received_at.clone(),
+    };
+    let key = conversation_key(&message, uid);
+
+    let entry = match threads.entry(key.clone()) {
+        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::btree_map::Entry::Vacant(entry) => entry.insert(ImapThreadAccumulator {
+            remote_thread_id: key,
+            subject: message_snapshot.subject.clone(),
+            participants: format!(
+                "{} -> {}",
+                message_snapshot.sender, message_snapshot.recipients
+            ),
+            preview: message_snapshot.body_preview.clone(),
+            is_flagged: false,
+            has_attachments: false,
+            unread_count: 0,
+            latest_message_at: received_at,
+            messages: Vec::new(),
+        }),
+    };
+    entry.has_attachments |= has_attachments;
+    entry.push_message(message_snapshot);
+}
+
+impl ImapThreadAccumulator {
+    /// Converts the accumulator into a store snapshot.
+    fn into_thread_snapshot(mut self) -> ThreadSnapshot {
+        self.messages
+            .sort_by(|left, right| left.received_at.cmp(&right.received_at));
+        ThreadSnapshot {
+            remote_thread_id: self.remote_thread_id,
+            subject: self.subject,
+            participants: self.participants,
+            preview: self.preview,
+            is_flagged: self.is_flagged,
+            has_attachments: self.has_attachments,
+            unread_count: self.unread_count,
+            latest_message_at: self.latest_message_at,
+            messages: self.messages,
+        }
+    }
 }
 
 fn first_address(addresses: Option<&Address<'_>>) -> Option<String> {
@@ -882,8 +1021,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, excerpt, guess_role, parse_endpoint,
+        ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, conversation_key, excerpt, guess_role,
+        parse_endpoint, recompute_thread_aggregates,
     };
+    use zmail_core::{MessageSnapshot, ThreadSnapshot};
 
     #[test]
     fn parses_imap_endpoints() {
@@ -917,6 +1058,98 @@ mod tests {
         let json = serde_json::to_string(&checkpoint).expect("checkpoint should serialize");
         let parsed = ImapCheckpoint::from_json(Some(&json)).expect("checkpoint should parse");
         assert_eq!(parsed, checkpoint);
+    }
+
+    /// Parses a raw RFC822 message for the conversation tests.
+    fn parse_raw(raw: &[u8]) -> mail_parser::Message<'_> {
+        mail_parser::MessageParser::default()
+            .parse(raw)
+            .expect("the raw message should parse")
+    }
+
+    #[test]
+    fn conversation_key_follows_the_references_root() {
+        let raw = b"From: alice@example.com\r\n\r\nBody\r\n";
+        let root = conversation_key(&parse_raw(raw), Some(1));
+        assert_eq!(
+            root, "uid:1",
+            "a message without threading headers stays standalone"
+        );
+
+        let raw = b"Message-ID: <root@example.com>\r\n\r\nBody\r\n";
+        let key = conversation_key(&parse_raw(raw), Some(1));
+        assert_eq!(key, "root@example.com");
+
+        let raw =
+            b"Message-ID: <reply@example.com>\r\nIn-Reply-To: <root@example.com>\r\n\r\nBody\r\n";
+        let key = conversation_key(&parse_raw(raw), Some(2));
+        assert_eq!(
+            key, "root@example.com",
+            "In-Reply-To joins the parent conversation"
+        );
+
+        let raw = b"Message-ID: <reply2@example.com>\r\nReferences: <root@example.com> <reply@example.com>\r\n\r\nBody\r\n";
+        let key = conversation_key(&parse_raw(raw), Some(3));
+        assert_eq!(
+            key, "root@example.com",
+            "References keys by the root of the chain"
+        );
+    }
+
+    #[test]
+    fn conversation_key_falls_back_to_the_uid() {
+        let raw = b"From: bob@example.com\r\nSubject: no headers\r\n\r\nBody\r\n";
+        let key = conversation_key(&parse_raw(raw), Some(42));
+        assert_eq!(key, "uid:42");
+    }
+
+    #[test]
+    fn recompute_thread_aggregates_follows_the_newest_message() {
+        let older = MessageSnapshot {
+            remote_id: "1".to_owned(),
+            identity_email: "me@example.com".to_owned(),
+            sender: "Older Sender".to_owned(),
+            recipients: "me@example.com".to_owned(),
+            subject: "Older subject".to_owned(),
+            body_preview: "older preview".to_owned(),
+            body_text: None,
+            sanitized_html: None,
+            has_remote_content: false,
+            is_read: false,
+            is_flagged: false,
+            received_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        let newer = MessageSnapshot {
+            remote_id: "2".to_owned(),
+            identity_email: "me@example.com".to_owned(),
+            sender: "Newer Sender".to_owned(),
+            recipients: "me@example.com".to_owned(),
+            subject: "Newer subject".to_owned(),
+            body_preview: "newer preview".to_owned(),
+            body_text: None,
+            sanitized_html: None,
+            has_remote_content: false,
+            is_read: true,
+            is_flagged: true,
+            received_at: "2026-02-01T00:00:00Z".to_owned(),
+        };
+        let mut thread = ThreadSnapshot {
+            remote_thread_id: "root@example.com".to_owned(),
+            subject: String::new(),
+            participants: String::new(),
+            preview: String::new(),
+            is_flagged: false,
+            has_attachments: false,
+            unread_count: 0,
+            latest_message_at: String::new(),
+            messages: vec![older, newer],
+        };
+        recompute_thread_aggregates(&mut thread);
+        assert_eq!(thread.subject, "Newer subject");
+        assert_eq!(thread.preview, "newer preview");
+        assert_eq!(thread.latest_message_at, "2026-02-01T00:00:00Z");
+        assert_eq!(thread.unread_count, 1, "the older message stays unread");
+        assert!(thread.is_flagged);
     }
 
     #[test]
