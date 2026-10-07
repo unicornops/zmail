@@ -60,6 +60,7 @@ impl WorkspaceView {
             mailboxes: Vec::new(),
             drafts: Vec::new(),
             outbox_jobs: Vec::new(),
+            pending_op_count: 0,
             search_results: Vec::new(),
             selected_account_id: None,
             selected_mailbox_id: None,
@@ -161,6 +162,10 @@ impl WorkspaceView {
             .store
             .list_outbox_jobs(self.selected_account_id)
             .unwrap_or_default();
+        self.pending_op_count = self
+            .selected_account_id
+            .and_then(|account_id| self.store.pending_op_count(account_id).ok())
+            .unwrap_or(0);
 
         self.selected_mailbox_id = self
             .selected_mailbox_id
