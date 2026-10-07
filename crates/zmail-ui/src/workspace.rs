@@ -13,8 +13,8 @@ use anyhow::{Context as _, Result, bail};
 use gpui::{Context, KeyDownEvent, SharedString, Timer, Window};
 use url::Url;
 use zmail_core::{
-    AccountSummary, AppBootstrap, CachePolicySummary, DraftUpdate, IdentitySummary, MailboxSummary,
-    NewAccount, NewDraft, NewIdentity, OutgoingConfig, ProtocolKind, StoreStats,
+    AccountSummary, AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, IdentitySummary,
+    MailboxSummary, NewAccount, NewDraft, NewIdentity, OutgoingConfig, ProtocolKind, StoreStats,
     SubmissionSecurity, ThreadMessage, ThreadView,
 };
 use zmail_security::SecretStore;
@@ -930,6 +930,7 @@ impl WorkspaceView {
             NewAccount {
                 display_name,
                 protocol: form.protocol,
+                auth: AuthKind::Password,
                 endpoint,
                 username,
                 cache_policy: CachePolicySummary::performance_first(),

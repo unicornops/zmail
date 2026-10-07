@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use zmail_assets::ZmailAssets;
 use zmail_core::{
-    AppBootstrap, CachePolicySummary, DraftUpdate, NewAccount, NewDraft, NewIdentity,
+    AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, NewAccount, NewDraft, NewIdentity,
     OutgoingConfig, ProtocolKind, SubmissionSecurity, ThemeAppearance, ThemeSummary, UpstreamPins,
 };
 use zmail_security::{InMemorySecretStore, KeyringSecretStore, SecretStore};
@@ -1006,8 +1006,22 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, String)> {
     };
     validate_endpoint(protocol, &endpoint)?;
     let username = prompt("Username or account email")?;
-    let secret = rpassword::prompt_password("Password or app password: ")
-        .context("failed to read the account password")?;
+    let auth = match protocol {
+        ProtocolKind::Imap => {
+            if prompt_yes_no("Authenticate with an OAuth2 access token (XOAUTH2)?", false)? {
+                AuthKind::OAuth2
+            } else {
+                AuthKind::Password
+            }
+        }
+        ProtocolKind::Jmap => AuthKind::Password,
+    };
+    let secret = match auth {
+        AuthKind::Password => rpassword::prompt_password("Password or app password: ")
+            .context("failed to read the account password")?,
+        AuthKind::OAuth2 => rpassword::prompt_password("OAuth2 access token: ")
+            .context("failed to read the OAuth2 access token")?,
+    };
     let identity_name = prompt_with_default("Primary identity name", &display_name)?;
     let identity_email = prompt_with_default("Primary identity email", &username)?;
     let signature =
@@ -1045,6 +1059,7 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, String)> {
         NewAccount {
             display_name,
             protocol,
+            auth,
             endpoint,
             username,
             cache_policy: CachePolicySummary::performance_first(),
@@ -1059,6 +1074,7 @@ fn fixture_imap_account(endpoint: &str, username: &str, email: &str) -> NewAccou
     NewAccount {
         display_name: "IMAP Fixture".to_owned(),
         protocol: ProtocolKind::Imap,
+        auth: AuthKind::Password,
         endpoint: endpoint.to_owned(),
         username: username.to_owned(),
         cache_policy: CachePolicySummary::performance_first(),

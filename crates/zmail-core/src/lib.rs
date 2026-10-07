@@ -413,6 +413,8 @@ pub struct SyncTarget {
     pub display_name: String,
     /// Protocol family.
     pub protocol: ProtocolKind,
+    /// Authentication method used against the server.
+    pub auth: AuthKind,
     /// Endpoint used by the adapter.
     pub endpoint: String,
     /// Username used by the adapter.
@@ -425,6 +427,35 @@ pub struct SyncTarget {
     pub checkpoint: Option<String>,
 }
 
+/// How an account authenticates against its server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AuthKind {
+    /// Username and password (or app password) authentication.
+    #[default]
+    Password,
+    /// OAuth2 bearer token authentication (IMAP `XOAUTH2`).
+    OAuth2,
+}
+
+impl AuthKind {
+    /// Returns the stable database representation of the auth kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::OAuth2 => "oauth2",
+        }
+    }
+
+    /// Parses the database representation of an auth kind.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "password" => Some(Self::Password),
+            "oauth2" => Some(Self::OAuth2),
+            _ => None,
+        }
+    }
+}
+
 /// Draft used to create a new account in the local store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAccount {
@@ -432,6 +463,8 @@ pub struct NewAccount {
     pub display_name: String,
     /// Protocol family.
     pub protocol: ProtocolKind,
+    /// Authentication method used against the server.
+    pub auth: AuthKind,
     /// Canonical endpoint string.
     pub endpoint: String,
     /// Username or account address.
@@ -1135,4 +1168,29 @@ pub struct AppBootstrap {
     pub alternate_theme: ThemeSummary,
     /// Upstream provenance.
     pub upstream: UpstreamPins,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AuthKind, ProtocolKind};
+
+    #[test]
+    fn auth_kind_round_trips_through_its_database_representation() {
+        for kind in [AuthKind::Password, AuthKind::OAuth2] {
+            assert_eq!(AuthKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(AuthKind::Password.as_str(), "password");
+        assert_eq!(AuthKind::OAuth2.as_str(), "oauth2");
+        assert_eq!(AuthKind::parse("unknown"), None);
+        assert_eq!(
+            AuthKind::parse(ProtocolKind::Imap.as_str()),
+            None,
+            "auth kinds do not accept protocol names"
+        );
+    }
+
+    #[test]
+    fn auth_kind_defaults_to_password() {
+        assert_eq!(AuthKind::default(), AuthKind::Password);
+    }
 }
