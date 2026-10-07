@@ -17,6 +17,7 @@ use zmail_core::{
     MailboxSummary, NewAccount, NewDraft, NewIdentity, OutgoingConfig, ProtocolKind, StoreStats,
     SubmissionSecurity, ThreadMessage, ThreadView,
 };
+use zmail_notify::{NewMailNotifier, OsNotificationSink};
 use zmail_security::SecretStore;
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
@@ -33,11 +34,15 @@ impl WorkspaceView {
     // -----------------------------------------------------------------------
 
     /// Construct a new [`WorkspaceView`], loading initial state from the store.
+    // The constructor mirrors the shell's wiring inputs; grouping them into a
+    // config struct would hide the one-shot nature of the bootstrap.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         bootstrap: AppBootstrap,
         store: Arc<LocalStore>,
         sync_service: SyncService,
         secrets: Arc<dyn SecretStore>,
+        notifier: Arc<NewMailNotifier<OsNotificationSink>>,
         initial_draft_id: Option<i64>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -48,6 +53,7 @@ impl WorkspaceView {
             store,
             sync_service,
             secrets,
+            notifier,
             focus_handle: cx.focus_handle(),
             account: None,
             accounts: Vec::new(),
@@ -82,6 +88,18 @@ impl WorkspaceView {
             hovered_element: None,
             refresh_scheduled: false,
         };
+
+        // New mail only notifies while the window is unfocused: the quiet
+        // flag mirrors the window activation state.
+        view.notifier.set_quiet(window.is_window_active());
+        cx.observe_window_activation(
+            window,
+            |this: &mut WorkspaceView, window: &mut Window, _cx: &mut Context<Self>| {
+                this.notifier.set_quiet(window.is_window_active());
+            },
+        )
+        .detach();
+
         view.refresh_from_store();
         if view.accounts.is_empty() {
             view.detail_mode = DetailMode::AccountSetup;

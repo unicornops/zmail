@@ -23,6 +23,15 @@ This document records the Phase 5 hardening work that is present in-repo today a
 - Expunging happens exclusively through the explicit `zmail-app empty-trash ACCOUNT` command: it selects the trash mailbox read-write, marks every message `\Deleted`, and issues `EXPUNGE` within that mailbox only, followed by a sync to refresh the local mirror.
 - JMAP accounts have no dangling state: `Email/set` destroy removes messages server-side immediately, and trash semantics follow the server's own handling.
 
+## New Mail Notification Policy
+
+- Notifications are raised by the `zmail-notify` crate through `notify-rust`, which resolves to D-Bus `org.freedesktop.Notifications` on Linux, the notification center on macOS, and toast notifications on Windows.
+- One notification is raised per arrival batch — one sync that found new mail — naming the account and up to three arrival subjects.
+- The first sync of a mailbox counts as an initial import, not new mail, and never notifies; reconnecting a large account therefore cannot flood the user.
+- Notifications are capped at six per rolling minute; batches beyond the cap collapse into a summary line until the window frees up.
+- The GUI suppresses notifications while its window is focused (the quiet flag mirrors window activation), so mail arriving while the user reads it does not interrupt.
+- A missing notification daemon or a failed notification never fails the sync path; the failure is dropped.
+
 ## Crash And Error Reporting Policy
 
 - Zmail does not upload crash reports or telemetry automatically.

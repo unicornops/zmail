@@ -11,6 +11,7 @@ anyhow.workspace = true
 gpui.workspace = true
 url.workspace = true
 zmail-core = { path = "../zmail-core" }
+zmail-notify = { path = "../zmail-notify" }
 zmail-security = { path = "../zmail-security" }
 zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }
