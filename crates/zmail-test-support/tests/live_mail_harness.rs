@@ -302,22 +302,59 @@ fn hydrates_bodies_lazily_and_survives_offline_opens() -> Result<()> {
         "syncs must preserve hydrated bodies"
     );
 
+    // A second message arrives and stays un-hydrated after its sync.
+    let smtp_runtime = Builder::new_current_thread().enable_all().build()?;
+    smtp_runtime.block_on(async {
+        submit_text_message(
+            &SubmissionConfig {
+                host: MAIL_HARNESS_HOST.to_owned(),
+                port: MAIL_HARNESS_SMTP_PORT,
+                username: Some(MAIL_HARNESS_SENDER_LOGIN.to_owned()),
+                secret: Some(MAIL_HARNESS_SENDER_PASSWORD.to_owned()),
+                security: SubmissionSecurity::Plain,
+                hello_name: "localhost".to_owned(),
+            },
+            &SubmittedMessage {
+                envelope_from: MAIL_HARNESS_SENDER.to_owned(),
+                from_name: Some("Harness Sender".to_owned()),
+                recipients: vec![MAIL_HARNESS_RECIPIENT.to_owned()],
+                subject: "Phase 2b offline probe".to_owned(),
+                text_body: "This body is never fetched while the server is down.".to_owned(),
+            },
+        )
+        .await
+    })?;
+    sync_service.sync_account_and_wait(account_id)?;
+    let threads = store.list_threads(inbox_mailbox_id, 0..50)?;
+    let offline_thread = threads
+        .iter()
+        .find(|thread| thread.subject == "Phase 2b offline probe")
+        .context("the offline probe message should sync")?;
+    let view = store
+        .thread_view(offline_thread.id)?
+        .context("the offline probe thread should load")?;
+    assert_eq!(
+        view.messages[0].render_mode,
+        MessageRenderMode::PreviewOnly,
+        "the fresh message starts un-hydrated"
+    );
+
     // Offline opens keep the preview instead of surfacing an error.
     harness.down()?;
     let hydrate_result = runtime
         .handle()
-        .block_on(sync_service.hydrate_thread_body_and_wait(account_id, preloaded.id));
+        .block_on(sync_service.hydrate_thread_body_and_wait(account_id, offline_thread.id));
     assert!(
         hydrate_result.is_err(),
         "hydration against a stopped server should fail"
     );
     let view = store
-        .thread_view(preloaded.id)?
-        .context("the preloaded thread should load")?;
-    assert_ne!(
+        .thread_view(offline_thread.id)?
+        .context("the offline probe thread should load")?;
+    assert_eq!(
         view.messages[0].render_mode,
         MessageRenderMode::PreviewOnly,
-        "the hydrated body survives a failed hydration attempt"
+        "an offline open keeps the preview, not an error"
     );
 
     Ok(())
