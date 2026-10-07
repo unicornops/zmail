@@ -140,23 +140,17 @@ fn event_source_pushes_new_mail_before_the_timeout() -> Result<()> {
     // assert the push arrives well before the wait's 45 s budget expires.
     // The ping interval equals the budget, so an early return can only be
     // a real state change, not a keepalive.
-    let sync_handle = runtime.handle().clone();
     let submitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let submitted_writer = submitted.clone();
-    sync_handle.spawn(async move {
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        let smtp_runtime = Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("smtp runtime");
-        smtp_runtime
-            .block_on(async {
-                submit_harness_message(
-                    "Phase 2b JMAP push",
-                    "This message should wake the event source.",
-                )
-            })
-            .expect("harness submission should succeed");
+    // A plain OS thread, not a runtime task: submit_harness_message builds its
+    // own current-thread runtime, which would panic on a tokio worker thread.
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(3));
+        submit_harness_message(
+            "Phase 2b JMAP push",
+            "This message should wake the event source.",
+        )
+        .expect("harness submission should succeed");
         submitted_writer.store(true, std::sync::atomic::Ordering::SeqCst);
     });
 
