@@ -1015,7 +1015,9 @@ fn accumulate_fetch(
     identity_email: &str,
     attachments_dir: &Path,
 ) {
-    let raw = match fetch.body() {
+    // Header-only syncs carry the message in the BODY[HEADER] section;
+    // full fetches (hydration) carry it in BODY[].
+    let raw = match fetch.body().or_else(|| fetch.header()) {
         Some(raw) => raw,
         None => return,
     };
@@ -1222,8 +1224,17 @@ fn format_addr(address: &mail_parser::Addr<'_>) -> String {
 fn hydrate_bodies(
     message: &mail_parser::Message<'_>,
 ) -> (Option<String>, Option<String>, bool, String) {
-    let body_text = message.body_text(0).map(|value| value.into_owned());
-    let html = message.body_html(0).map(|value| value.into_owned());
+    let body_text = message
+        .body_text(0)
+        .map(|value| value.into_owned())
+        .filter(|value| !value.trim().is_empty());
+    // Header-only parses get a synthesized "<html><body></body></html>"
+    // shell from mail-parser; it carries no visible text and must surface as
+    // an un-hydrated message rather than as an (empty) HTML body.
+    let html = message
+        .body_html(0)
+        .map(|value| value.into_owned())
+        .filter(|value| html_has_visible_text(&value));
 
     if let Some(body_text) = body_text {
         let normalized = normalize_body_text(&body_text);
@@ -1241,6 +1252,21 @@ fn hydrate_bodies(
     }
 
     (None, None, false, "Body not downloaded.".to_owned())
+}
+
+/// Returns whether an HTML fragment carries text outside its tags.
+fn html_has_visible_text(html: &str) -> bool {
+    let mut text = String::new();
+    let mut inside_tag = false;
+    for character in html.chars() {
+        match character {
+            '<' => inside_tag = true,
+            '>' => inside_tag = false,
+            _ if !inside_tag => text.push(character),
+            _ => {}
+        }
+    }
+    !text.trim().is_empty()
 }
 
 fn normalize_body_text(text: &str) -> String {
@@ -1290,7 +1316,8 @@ mod tests {
 
     use super::{
         ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, conversation_key, excerpt, guess_role,
-        parse_endpoint, persist_attachments, recompute_thread_aggregates, xoauth2_response,
+        hydrate_bodies, parse_endpoint, persist_attachments, recompute_thread_aggregates,
+        xoauth2_response,
     };
     use zmail_core::{MessageSnapshot, ThreadSnapshot};
 
@@ -1342,6 +1369,29 @@ mod tests {
         assert_eq!(blob, b"attachment payload");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_header_only_messages_for_lazy_sync() {
+        let raw = concat!(
+            "From: sender@example.test\r\n",
+            "Subject: header only\r\n",
+            "To: rcpt@example.test\r\n",
+            "Message-ID: <header-only@example.test>\r\n",
+            "\r\n",
+        );
+        let message = mail_parser::MessageParser::default()
+            .parse(raw.as_bytes())
+            .expect("a header-only message should parse");
+        assert_eq!(message.subject(), Some("header only"));
+
+        // A header-only parse must surface as an un-hydrated message: no
+        // body fields and the lazy-sync placeholder preview.
+        let (body_text, sanitized_html, has_remote_content, preview) = hydrate_bodies(&message);
+        assert!(body_text.is_none());
+        assert!(sanitized_html.is_none());
+        assert!(!has_remote_content);
+        assert_eq!(preview, "Body not downloaded.");
     }
     #[test]
     fn parses_imap_endpoints() {
