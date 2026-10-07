@@ -137,6 +137,9 @@ struct WorkspaceView {
     /// Number of mailbox operations still queued for server write-back on
     /// the selected account.
     pending_op_count: usize,
+    /// Number of write-back operations that exhausted their retry budget
+    /// on the selected account.
+    dead_op_count: usize,
     search_results: Vec<SearchHit>,
     selected_account_id: Option<i64>,
     selected_mailbox_id: Option<i64>,

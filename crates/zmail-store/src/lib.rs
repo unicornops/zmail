@@ -36,6 +36,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0004_phase5_thread_attachment_metadata", PHASE5_SCHEMA),
     ("0005_stable_remote_ids", STABLE_REMOTE_ID_SCHEMA),
     ("0006_pending_ops", PENDING_OPS_SCHEMA),
+    ("0007_pending_op_states", PENDING_OP_STATES_SCHEMA),
 ];
 
 const PHASE2_SCHEMA: &str = r#"
@@ -250,6 +251,11 @@ CREATE TABLE IF NOT EXISTS pending_ops (
     FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_pending_ops_account ON pending_ops(account_id, id);
+"#;
+
+const PENDING_OP_STATES_SCHEMA: &str = r#"
+ALTER TABLE pending_ops ADD COLUMN state TEXT NOT NULL DEFAULT 'pending';
+CREATE INDEX IF NOT EXISTS idx_pending_ops_state ON pending_ops(account_id, state);
 "#;
 
 static EPHEMERAL_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1633,7 +1639,7 @@ impl LocalStore {
             r#"
             SELECT id, account_id, op, source_mailbox, remote_id, target_mailbox, attempts, last_error
             FROM pending_ops
-            WHERE account_id = ?1
+            WHERE account_id = ?1 AND state = 'pending'
             ORDER BY id ASC
             "#,
         )?;
@@ -1666,7 +1672,7 @@ impl LocalStore {
     pub fn pending_op_count(&self, account_id: i64) -> Result<usize> {
         let conn = self.connection()?;
         conn.query_row(
-            "SELECT COUNT(*) FROM pending_ops WHERE account_id = ?1",
+            "SELECT COUNT(*) FROM pending_ops WHERE account_id = ?1 AND state = 'pending'",
             params![account_id],
             |row| row.get::<_, usize>(0),
         )
@@ -1678,6 +1684,95 @@ impl LocalStore {
         let conn = self.connection()?;
         conn.execute("DELETE FROM pending_ops WHERE id = ?1", params![op_id])
             .with_context(|| format!("failed to complete pending operation {op_id}"))?;
+        Ok(())
+    }
+
+    /// Lists write-back operations that exhausted their retry budget.
+    pub fn list_dead_ops(&self, account_id: i64) -> Result<Vec<PendingOp>> {
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            r#"
+            SELECT id, account_id, op, source_mailbox, remote_id, target_mailbox, attempts, last_error
+            FROM pending_ops
+            WHERE account_id = ?1 AND state = 'dead'
+            ORDER BY id ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![account_id], |row| {
+            Ok(PendingOp {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                kind: PendingOpKind::parse(&row.get::<_, String>(2)?).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "unknown pending op kind".to_owned(),
+                        )),
+                    )
+                })?,
+                source_mailbox: row.get(3)?,
+                remote_id: row.get(4)?,
+                target_mailbox: row.get(5)?,
+                attempts: row.get(6)?,
+                last_error: row.get(7)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list dead-lettered mailbox operations")
+    }
+
+    /// Counts write-back operations that exhausted their retry budget.
+    pub fn dead_op_count(&self, account_id: i64) -> Result<usize> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM pending_ops WHERE account_id = ?1 AND state = 'dead'",
+            params![account_id],
+            |row| row.get::<_, usize>(0),
+        )
+        .context("failed to count the dead-lettered write-back operations")
+    }
+
+    /// Moves a write-back operation to the dead-letter state, stopping
+    /// further retries.
+    pub fn mark_pending_op_dead(&self, op_id: i64, error: impl AsRef<str>) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            r#"
+            UPDATE pending_ops
+            SET attempts = attempts + 1, last_error = ?2, state = 'dead'
+            WHERE id = ?1
+            "#,
+            params![op_id, error.as_ref()],
+        )
+        .with_context(|| format!("failed to dead-letter pending operation {op_id}"))?;
+        Ok(())
+    }
+
+    /// Requeues a dead-lettered operation, resetting its retry budget.
+    pub fn retry_dead_op(&self, op_id: i64) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            r#"
+            UPDATE pending_ops
+            SET attempts = 0, last_error = NULL, state = 'pending'
+            WHERE id = ?1 AND state = 'dead'
+            "#,
+            params![op_id],
+        )
+        .with_context(|| format!("failed to requeue dead operation {op_id}"))?;
+        Ok(())
+    }
+
+    /// Discards a dead-lettered operation record.
+    pub fn discard_dead_op(&self, op_id: i64) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "DELETE FROM pending_ops WHERE id = ?1 AND state = 'dead'",
+            params![op_id],
+        )
+        .with_context(|| format!("failed to discard dead operation {op_id}"))?;
         Ok(())
     }
 
@@ -3572,8 +3667,9 @@ fn load_pending_op_remote_ids(
     transaction: &Transaction<'_>,
     account_id: i64,
 ) -> Result<HashSet<String>> {
-    let mut statement =
-        transaction.prepare("SELECT DISTINCT remote_id FROM pending_ops WHERE account_id = ?1")?;
+    let mut statement = transaction.prepare(
+        "SELECT DISTINCT remote_id FROM pending_ops WHERE account_id = ?1 AND state = 'pending'",
+    )?;
     let rows = statement.query_map(params![account_id], |row| row.get::<_, String>(0))?;
     let ids = rows
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -3862,6 +3958,112 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn dead_lettered_operations_stop_retrying_and_stop_guarding_merges() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        store
+            .replace_account_snapshot(
+                account_id,
+                &merge_test_snapshot("Dead subject", "Dead body", "thread-5", "message-5", None),
+            )
+            .expect("snapshot should apply");
+
+        let mailbox_id = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes should load")[0]
+            .id;
+        let thread_id = store
+            .list_threads(mailbox_id, 0..1)
+            .expect("threads should load")[0]
+            .id;
+        store
+            .set_thread_read(thread_id, true)
+            .expect("thread should be marked read");
+        let op = store
+            .list_pending_ops(account_id)
+            .expect("ops should load")
+            .pop()
+            .expect("the read operation should be queued");
+
+        // Dead-letter the operation.
+        store
+            .mark_pending_op_dead(op.id, "permanently rejected")
+            .expect("the operation should dead-letter");
+        assert_eq!(
+            store
+                .list_pending_ops(account_id)
+                .expect("pending ops should load")
+                .len(),
+            0,
+            "dead operations leave the retry queue"
+        );
+        assert_eq!(
+            store.dead_op_count(account_id).expect("count should load"),
+            1,
+            "the dead operation is counted"
+        );
+        let dead = store
+            .list_dead_ops(account_id)
+            .expect("dead ops should load");
+        assert_eq!(dead.len(), 1);
+        assert_eq!(
+            dead[0].last_error.as_deref(),
+            Some("permanently rejected"),
+            "the dead operation keeps its last error"
+        );
+
+        // A dead operation no longer protects the local read state, so
+        // the server snapshot wins again.
+        store
+            .replace_account_snapshot(
+                account_id,
+                &merge_test_snapshot("Dead subject", "Dead body", "thread-5", "message-5", None),
+            )
+            .expect("refreshed snapshot should apply");
+        let thread = store
+            .list_threads(mailbox_id, 0..1)
+            .expect("threads should load")[0]
+            .clone();
+        assert_eq!(thread.unread_count, 1, "server state wins for dead ops");
+
+        // Retry requeues the operation with a fresh budget; discard removes it.
+        store
+            .retry_dead_op(dead[0].id)
+            .expect("retry should requeue");
+        assert_eq!(
+            store
+                .list_pending_ops(account_id)
+                .expect("pending ops should load")
+                .len(),
+            1,
+            "retry returns the operation to the queue"
+        );
+        assert_eq!(
+            store.dead_op_count(account_id).expect("count should load"),
+            0
+        );
+        let requeued = store
+            .list_pending_ops(account_id)
+            .expect("pending ops should load")
+            .pop()
+            .expect("the requeued operation exists");
+        assert_eq!(requeued.attempts, 0, "retry resets the attempt budget");
+        store
+            .mark_pending_op_dead(requeued.id, "failed again")
+            .expect("the operation should dead-letter again");
+        store
+            .discard_dead_op(requeued.id)
+            .expect("discard should remove the record");
+        assert_eq!(
+            store.dead_op_count(account_id).expect("count should load"),
+            0,
+            "discarding removes the dead record"
+        );
     }
 
     #[test]
