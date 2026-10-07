@@ -86,6 +86,11 @@ pub async fn discover_and_sync(
         .map(|identity| identity.email_address.as_str())
         .unwrap_or(target.username.as_str());
     let mut session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
+    let condstore = session
+        .capabilities()
+        .await
+        .map(|capabilities| capabilities.has_str("CONDSTORE"))
+        .unwrap_or(false);
     let mailbox_names = list_mailboxes(&mut session).await?;
     let checkpoint = ImapCheckpoint::from_json(target.checkpoint.as_deref())?;
     let existing = existing_mailbox_map(existing_mailboxes);
@@ -94,13 +99,24 @@ pub async fn discover_and_sync(
     let mut mailboxes = Vec::with_capacity(mailbox_names.len());
     let mut refreshed = 0usize;
     let mut incremental = 0usize;
+    let mut condstore_skipped = 0usize;
 
     for mailbox_name in mailbox_names {
         let name = mailbox_name.name().to_owned();
-        let status = session
-            .examine(&name)
-            .await
-            .with_context(|| format!("failed to examine IMAP mailbox {name}"))?;
+        // Selecting with (CONDSTORE) makes the server report the highest
+        // mod-sequence, which drives the incremental flag path; servers
+        // without the extension keep the plain read-only EXAMINE.
+        let status = if condstore {
+            session
+                .select_condstore(&name)
+                .await
+                .with_context(|| format!("failed to select IMAP mailbox {name}"))?
+        } else {
+            session
+                .examine(&name)
+                .await
+                .with_context(|| format!("failed to examine IMAP mailbox {name}"))?
+        };
 
         let previous = checkpoint.mailboxes.get(&name).cloned();
         let mut mailbox_checkpoint = ImapMailboxCheckpoint::from_status(&status);
@@ -112,9 +128,48 @@ pub async fn discover_and_sync(
             && previous.is_some()
             && let Some(existing_mailbox) = existing.get(name.as_str()).cloned()
         {
-            let flag_map = fetch_flag_map(&mut session).await?;
             let last_seen_uid = previous.as_ref().and_then(|state| state.last_seen_uid);
             let new_uids = new_mailbox_uids(&mut session, last_seen_uid).await?;
+            let previous_exists = previous.as_ref().map(|state| state.exists).unwrap_or(0);
+            let previous_modseq = previous.as_ref().and_then(|state| state.highest_modseq);
+
+            // CONDSTORE fast path: an unchanged mod-sequence with the same
+            // message count proves the mailbox state is identical, so no
+            // flag data is fetched at all. When the message count is stable
+            // but the mod-sequence advanced, only the changed messages are
+            // fetched and merged into the previous flag map.
+            let flag_map = if let (true, Some(previous_modseq)) = (condstore, previous_modseq) {
+                if status.exists == previous_exists
+                    && status.highest_modseq == Some(previous_modseq)
+                {
+                    mailboxes.push(existing_mailbox);
+                    mailbox_checkpoint.last_seen_uid = last_seen_uid;
+                    mailbox_checkpoint.uid_flags = previous
+                        .as_ref()
+                        .map(|state| state.uid_flags.clone())
+                        .unwrap_or_default();
+                    next_checkpoint.insert(name, mailbox_checkpoint);
+                    condstore_skipped += 1;
+                    continue;
+                }
+                if status.exists == previous_exists {
+                    let changed = fetch_changed_flags(&mut session, previous_modseq).await?;
+                    let mut merged = previous
+                        .as_ref()
+                        .map(|state| state.uid_flags.clone())
+                        .unwrap_or_default();
+                    for (uid, flags) in changed {
+                        merged.insert(uid, flags);
+                    }
+                    merged
+                } else {
+                    // Expunges or a mod-sequence reset mean the merged map
+                    // cannot be trusted; a full scan is the safe fallback.
+                    fetch_flag_map(&mut session).await?
+                }
+            } else {
+                fetch_flag_map(&mut session).await?
+            };
             let flags_unchanged =
                 previous.as_ref().map(|state| &state.uid_flags) == Some(&flag_map);
 
@@ -171,7 +226,12 @@ pub async fn discover_and_sync(
 
     let _ = session.logout().await;
 
-    let detail = if refreshed == 0 && incremental == 0 {
+    let detail = if refreshed == 0 && incremental == 0 && condstore_skipped > 0 {
+        format!(
+            "IMAP mailbox state unchanged for {} via CONDSTORE",
+            target.display_name
+        )
+    } else if refreshed == 0 && incremental == 0 {
         format!("IMAP mailbox state unchanged for {}", target.display_name)
     } else {
         format!(
@@ -503,6 +563,9 @@ struct ImapMailboxCheckpoint {
     last_seen_uid: Option<u32>,
     #[serde(default)]
     uid_flags: BTreeMap<u32, Vec<String>>,
+    /// Highest mod-sequence seen at the last sync (RFC 7162 CONDSTORE).
+    #[serde(default)]
+    highest_modseq: Option<u64>,
 }
 
 impl ImapCheckpoint {
@@ -523,6 +586,7 @@ impl ImapMailboxCheckpoint {
             exists: status.exists,
             last_seen_uid: None,
             uid_flags: BTreeMap::new(),
+            highest_modseq: status.highest_modseq,
         }
     }
 }
@@ -797,6 +861,35 @@ async fn fetch_flag_map(
 }
 
 /// Returns the UIDs that arrived after the last seen one.
+/// Fetches only the flags of messages whose mod-sequence exceeds `since`
+/// (RFC 7162 CONDSTORE). Implicitly enables CONDSTORE for the session.
+async fn fetch_changed_flags(
+    session: &mut Session<DynImapStream>,
+    since: u64,
+) -> Result<BTreeMap<u32, Vec<String>>> {
+    let fetches = session
+        .uid_fetch("1:*", &format!("(UID FLAGS) (CHANGEDSINCE {since})"))
+        .await
+        .context("failed to fetch the changed message flags")?
+        .try_collect::<Vec<_>>()
+        .await
+        .context("failed to stream the changed message flags")?;
+
+    let mut flags = BTreeMap::new();
+    for fetch in fetches {
+        if let Some(uid) = fetch.uid {
+            flags.insert(
+                uid,
+                fetch
+                    .flags()
+                    .map(|flag| flag_name(&flag))
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+    Ok(flags)
+}
+
 async fn new_mailbox_uids(
     session: &mut Session<DynImapStream>,
     last_seen_uid: Option<u32>,
@@ -1417,6 +1510,7 @@ mod tests {
                     exists: 33,
                     last_seen_uid: Some(33),
                     uid_flags: BTreeMap::new(),
+                    highest_modseq: Some(7001),
                 },
             )]
             .into_iter()
