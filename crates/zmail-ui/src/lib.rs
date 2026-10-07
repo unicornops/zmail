@@ -64,6 +64,7 @@ pub fn run(
     store: Arc<LocalStore>,
     sync_service: SyncService,
     secrets: Arc<dyn SecretStore>,
+    initial_draft_id: Option<i64>,
 ) {
     Application::new()
         .with_assets(asset_source)
@@ -73,6 +74,7 @@ pub fn run(
             let store = store.clone();
             let sync_service = sync_service.clone();
             let secrets = secrets.clone();
+            let initial_draft_id = initial_draft_id;
 
             if let Err(error) = cx.open_window(
                 WindowOptions {
@@ -88,8 +90,17 @@ pub fn run(
                     let store = store.clone();
                     let sync_service = sync_service.clone();
                     let secrets = secrets.clone();
+                    let initial_draft_id = initial_draft_id;
                     cx.new(|cx| {
-                        WorkspaceView::new(bootstrap, store, sync_service, secrets, window, cx)
+                        WorkspaceView::new(
+                            bootstrap,
+                            store,
+                            sync_service,
+                            secrets,
+                            initial_draft_id,
+                            window,
+                            cx,
+                        )
                     })
                 },
             ) {

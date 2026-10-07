@@ -25,6 +25,7 @@ const GPUI_VERSION: &str = "0.2.2";
 fn main() -> Result<()> {
     match Command::from_env()? {
         Command::Gui => launch_gui(),
+        Command::Mailto(url) => launch_gui_with_mailto(&url),
         Command::LaunchImapFixture {
             endpoint,
             username,
@@ -63,6 +64,7 @@ fn main() -> Result<()> {
 
 enum Command {
     Gui,
+    Mailto(String),
     LaunchImapFixture {
         endpoint: String,
         username: String,
@@ -283,13 +285,147 @@ impl Command {
                     .next()
                     .context("export-account requires an output path")?,
             }),
+            "mailto" => Ok(Self::Mailto(format!(
+                "mailto:{}",
+                args.next().context("mailto requires a URL body")?
+            ))),
+            other if other.starts_with("mailto:") => Ok(Self::Mailto(other.to_owned())),
             "help" | "--help" | "-h" => Ok(Self::Help),
             other => bail!("unknown command {other}"),
         }
     }
 }
 
+/// Launches the GUI with a compose draft pre-filled from a mailto URL.
+///
+/// Malformed URLs fall back to a plain GUI launch with a warning, and a
+/// missing account configuration surfaces the setup flow instead.
+fn launch_gui_with_mailto(url: &str) -> Result<()> {
+    match parse_mailto(url) {
+        Some(mailto) => {
+            let store = open_store().context("failed to open the local store")?;
+            let Some(target) = store.list_sync_targets()?.first().cloned() else {
+                eprintln!("no configured account exists; opening the app without a draft");
+                return launch_gui();
+            };
+            let identity = target
+                .identities
+                .iter()
+                .find(|identity| identity.is_primary)
+                .or_else(|| target.identities.first())
+                .context("the configured account has no identities")?;
+            let draft_id = store.create_draft(&NewDraft {
+                account_id: target.id,
+                identity_id: identity.id,
+                to: mailto.to,
+                cc: mailto.cc,
+                bcc: mailto.bcc,
+                subject: mailto.subject,
+                body: mailto.body,
+            })?;
+            launch_gui_with_initial_draft(Some(draft_id))
+        }
+        None => {
+            eprintln!("warning: ignoring malformed mailto URL {url}");
+            launch_gui()
+        }
+    }
+}
+
+/// A mailto URL decomposed into draft fields (RFC 6068).
+struct MailtoDraft {
+    to: Vec<String>,
+    cc: Vec<String>,
+    bcc: Vec<String>,
+    subject: String,
+    body: String,
+}
+
+/// Parses an RFC 6068 mailto URL into draft fields.
+fn parse_mailto(raw: &str) -> Option<MailtoDraft> {
+    let rest = raw.strip_prefix("mailto:")?;
+    let (recipients, query) = match rest.split_once('?') {
+        Some((recipients, query)) => (recipients, Some(query)),
+        None => (rest, None),
+    };
+
+    let mut draft = MailtoDraft {
+        to: split_addresses(recipients),
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: String::new(),
+        body: String::new(),
+    };
+
+    let Some(query) = query else {
+        return Some(draft);
+    };
+    for pair in query.split('&') {
+        let Some((name, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let value = percent_decode(value);
+        match name.to_ascii_lowercase().as_str() {
+            "to" => {
+                let decoded = split_addresses(&value);
+                draft.to.extend(decoded);
+            }
+            "cc" => draft.cc = split_addresses(&value),
+            "bcc" => draft.bcc = split_addresses(&value),
+            "subject" => draft.subject = value,
+            "body" => draft.body = value,
+            _ => {}
+        }
+    }
+    Some(draft)
+}
+
+/// Splits a comma-separated recipient list, dropping empty entries.
+fn split_addresses(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Percent-decodes a mailto component, mapping `+` to a space.
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok();
+                if let Some(hex) = hex
+                    && let Ok(byte) = u8::from_str_radix(hex, 16)
+                {
+                    decoded.push(byte);
+                    index += 3;
+                } else {
+                    decoded.push(b'%');
+                    index += 1;
+                }
+            }
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
 fn launch_gui() -> Result<()> {
+    launch_gui_with_initial_draft(None)
+}
+
+fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(open_store().context("failed to open the Phase 4 local store")?);
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
@@ -298,7 +434,14 @@ fn launch_gui() -> Result<()> {
     let _ = sync_service.start_mail_watcher();
 
     let bootstrap = build_bootstrap(runtime.summary())?;
-    zmail_ui::run(ZmailAssets, bootstrap, store, sync_service, secrets);
+    zmail_ui::run(
+        ZmailAssets,
+        bootstrap,
+        store,
+        sync_service,
+        secrets,
+        initial_draft_id,
+    );
     drop(runtime);
     Ok(())
 }
@@ -322,7 +465,7 @@ fn launch_imap_fixture(endpoint: &str, username: &str, secret: &str, email: &str
         .with_context(|| format!("failed to sync the IMAP fixture account {account_id}"))?;
 
     let bootstrap = build_bootstrap(runtime.summary())?;
-    zmail_ui::run(ZmailAssets, bootstrap, store, sync_service, secrets);
+    zmail_ui::run(ZmailAssets, bootstrap, store, sync_service, secrets, None);
     drop(runtime);
     Ok(())
 }
@@ -1284,6 +1427,37 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("failed to create the test directory");
         dir
+    }
+
+    #[test]
+    fn parse_mailto_extracts_recipients_and_headers() {
+        let draft = parse_mailto("mailto:person@example.com").expect("plain recipient parses");
+        assert_eq!(draft.to, vec!["person@example.com".to_owned()]);
+        assert_eq!(draft.subject, "");
+
+        let draft = parse_mailto(
+            "mailto:one@example.com,two@example.com?subject=Hello%20there&body=Hi%20again",
+        )
+        .expect("recipients with headers parse");
+        assert_eq!(
+            draft.to,
+            vec!["one@example.com".to_owned(), "two@example.com".to_owned()]
+        );
+        assert_eq!(draft.subject, "Hello there");
+        assert_eq!(draft.body, "Hi again");
+
+        let draft = parse_mailto(
+            "mailto:team@example.com?cc=lead@example.com&bcc=audit@example.com&subject=Sprint&body=Plus+decoded+spaces",
+        )
+        .expect("cc, bcc, and plus decoding parse");
+        assert_eq!(draft.cc, vec!["lead@example.com".to_owned()]);
+        assert_eq!(draft.bcc, vec!["audit@example.com".to_owned()]);
+        assert_eq!(draft.body, "Plus decoded spaces");
+
+        assert!(
+            parse_mailto("https://example.com").is_none(),
+            "non-mailto URLs are rejected"
+        );
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]

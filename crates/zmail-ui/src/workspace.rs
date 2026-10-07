@@ -38,6 +38,7 @@ impl WorkspaceView {
         store: Arc<LocalStore>,
         sync_service: SyncService,
         secrets: Arc<dyn SecretStore>,
+        initial_draft_id: Option<i64>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -84,6 +85,15 @@ impl WorkspaceView {
         if view.accounts.is_empty() {
             view.detail_mode = DetailMode::AccountSetup;
             view.active_field = Some(EditorField::AccountDisplayName);
+        }
+
+        // A mailto launch pre-selects the draft's account and opens the
+        // compose pane on the pre-filled draft.
+        if let Some(draft_id) = initial_draft_id
+            && let Ok(Some(draft)) = view.store.draft_detail(draft_id)
+        {
+            view.select_account(draft.account_id, cx);
+            view.load_draft_into_compose(draft_id);
         }
 
         // New mail synced in the background by the mail watcher appears
