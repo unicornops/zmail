@@ -52,6 +52,8 @@ fn main() -> Result<()> {
         Command::AddAttachment(draft_id, path) => add_attachment(draft_id, &path),
         Command::RemoveAttachment(attachment_id) => remove_attachment(attachment_id),
         Command::ProcessOutbox(account_id) => process_outbox(account_id),
+        Command::Backup { directory } => create_backup(directory.as_deref()),
+        Command::ExportAccount { account_id, path } => export_account(account_id, &path),
         Command::Help => {
             print_help();
             Ok(())
@@ -66,6 +68,13 @@ enum Command {
         username: String,
         secret: String,
         email: String,
+    },
+    Backup {
+        directory: Option<String>,
+    },
+    ExportAccount {
+        account_id: i64,
+        path: String,
     },
     AddImap,
     AddJmap,
@@ -261,6 +270,19 @@ impl Command {
                 args.next(),
                 "account id",
             )?)),
+            "backup" => Ok(Self::Backup {
+                directory: args.next(),
+            }),
+            "export-account" => Ok(Self::ExportAccount {
+                account_id: args
+                    .next()
+                    .context("export-account requires an account id")?
+                    .parse::<i64>()
+                    .context("account id must be an integer")?,
+                path: args
+                    .next()
+                    .context("export-account requires an output path")?,
+            }),
             "help" | "--help" | "-h" => Ok(Self::Help),
             other => bail!("unknown command {other}"),
         }
@@ -698,6 +720,33 @@ fn process_outbox(account_id: Option<i64>) -> Result<()> {
     Ok(())
 }
 
+fn create_backup(directory: Option<&str>) -> Result<()> {
+    let store = open_store().context("failed to open the local store")?;
+    let directory = match directory {
+        Some(directory) => std::path::PathBuf::from(directory),
+        None => store
+            .path()
+            .parent()
+            .map(|parent| parent.join("backups"))
+            .context("the store path has no parent directory")?,
+    };
+    let path = store.create_backup(&directory, 10)?;
+    println!(
+        "Backup written to {} (keeping the 10 most recent).",
+        path.display()
+    );
+    Ok(())
+}
+
+fn export_account(account_id: i64, path: &str) -> Result<()> {
+    let store = open_store().context("failed to open the local store")?;
+    let mut writer = std::fs::File::create(path)
+        .with_context(|| format!("failed to create the export file {path}"))?;
+    let exported = store.export_account_mbox(account_id, &mut writer)?;
+    println!("Exported {exported} message(s) to {path}.");
+    Ok(())
+}
+
 fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, String)> {
     println!("Setting up a new {protocol} account.");
     let display_name = prompt("Display name")?;
@@ -1043,6 +1092,8 @@ fn print_help() {
     println!("  zmail-app outbox [ACCOUNT]");
     println!("  zmail-app retry-outbox JOB");
     println!("  zmail-app process-outbox [ACCOUNT]");
+    println!("  zmail-app backup [DIRECTORY]");
+    println!("  zmail-app export-account ACCOUNT PATH");
 }
 
 fn open_store() -> Result<LocalStore> {
