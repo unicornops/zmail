@@ -66,6 +66,8 @@ pub fn run(
     secrets: Arc<dyn SecretStore>,
     initial_draft_id: Option<i64>,
 ) {
+    let notifier = Arc::new(zmail_notify::NewMailNotifier::os_backed());
+    sync_service.set_notifier(notifier.clone());
     Application::new()
         .with_assets(asset_source)
         .run(move |cx: &mut App| {
@@ -90,6 +92,7 @@ pub fn run(
                     let store = store.clone();
                     let sync_service = sync_service.clone();
                     let secrets = secrets.clone();
+                    let notifier = notifier.clone();
                     let initial_draft_id = initial_draft_id;
                     cx.new(|cx| {
                         WorkspaceView::new(
@@ -97,6 +100,7 @@ pub fn run(
                             store,
                             sync_service,
                             secrets,
+                            notifier,
                             initial_draft_id,
                             window,
                             cx,
@@ -137,6 +141,7 @@ struct WorkspaceView {
     store: Arc<LocalStore>,
     sync_service: SyncService,
     secrets: Arc<dyn SecretStore>,
+    notifier: Arc<zmail_notify::NewMailNotifier<zmail_notify::OsNotificationSink>>,
     focus_handle: FocusHandle,
     account: Option<AccountOverview>,
     accounts: Vec<AccountSummary>,

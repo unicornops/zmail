@@ -18,8 +18,10 @@ use tokio::{
     time::sleep,
 };
 use zmail_core::{
-    PendingOutboxJob, ProtocolKind, RuntimeSummary, SubmissionKind, SyncPhase, SyncTarget,
+    MailboxSnapshot, PendingOutboxJob, ProtocolKind, RuntimeSummary, SubmissionKind, SyncPhase,
+    SyncTarget,
 };
+use zmail_notify::{NewMailArrival, NewMailBatch, Notifier};
 use zmail_security::SecretStore;
 use zmail_smtp::SubmissionConfig;
 use zmail_store::LocalStore;
@@ -139,6 +141,7 @@ struct SyncServiceInner {
     outbox_supervisor_started: AtomicBool,
     watched_accounts: Mutex<HashSet<i64>>,
     watcher_poll_interval: Mutex<Option<Duration>>,
+    notifier: Mutex<Option<Arc<dyn Notifier>>>,
 }
 
 impl std::fmt::Debug for SyncService {
@@ -169,6 +172,7 @@ impl SyncService {
                 outbox_supervisor_started: AtomicBool::new(false),
                 watched_accounts: Mutex::new(HashSet::new()),
                 watcher_poll_interval: Mutex::new(None),
+                notifier: Mutex::new(None),
             }),
         };
         service.start_outbox_supervisor();
@@ -221,6 +225,17 @@ impl SyncService {
         rx.recv()
             .context("the sync worker exited before returning a result")?
             .map_err(anyhow::Error::msg)
+    }
+
+    /// Installs the new-mail notifier the sync reports arrivals through.
+    ///
+    /// Without one, syncs run silently, which keeps CLI runs headless.
+    pub fn set_notifier(&self, notifier: Arc<dyn Notifier>) {
+        *self
+            .inner
+            .notifier
+            .lock()
+            .expect("notifier mutex should not be poisoned") = Some(notifier);
     }
 
     /// Runs a sync for every configured account and blocks until all of them finish.
@@ -608,9 +623,37 @@ impl SyncService {
         self.inner
             .store
             .record_sync_success(account_id, &snapshot.detail, &snapshot.checkpoint)?;
+        self.notify_new_mail(&target, &existing_mailboxes, &snapshot);
         let _ = self.process_outbox(Some(account_id));
 
         Ok(())
+    }
+
+    /// Reports the threads that gained messages in this sync through the
+    /// installed notifier, if any.
+    fn notify_new_mail(
+        &self,
+        target: &SyncTarget,
+        existing_mailboxes: &[MailboxSnapshot],
+        snapshot: &zmail_core::AccountSyncSnapshot,
+    ) {
+        let Some(notifier) = self
+            .inner
+            .notifier
+            .lock()
+            .expect("notifier mutex should not be poisoned")
+            .clone()
+        else {
+            return;
+        };
+        let arrivals = collect_arrivals(existing_mailboxes, snapshot);
+        if arrivals.is_empty() {
+            return;
+        }
+        notifier.notify_new_mail(&NewMailBatch {
+            account: target.display_name.clone(),
+            arrivals,
+        });
     }
 
     async fn process_due_outbox_jobs(&self, account_id: Option<i64>) -> Result<usize> {
@@ -700,6 +743,45 @@ impl SyncService {
     }
 }
 
+/// Collects the threads that gained messages in a snapshot relative to the
+/// existing local mirror.
+///
+/// Mailboxes absent from the mirror (the first sync of an account) count as
+/// an initial import rather than new mail, so they never notify; reconnecting
+/// a large account therefore cannot flood the user with one notification per
+/// thread.
+fn collect_arrivals(
+    existing_mailboxes: &[MailboxSnapshot],
+    snapshot: &zmail_core::AccountSyncSnapshot,
+) -> Vec<NewMailArrival> {
+    let mut arrivals = Vec::new();
+    for mailbox in &snapshot.mailboxes {
+        let Some(existing_mailbox) = existing_mailboxes
+            .iter()
+            .find(|existing| existing.name == mailbox.name)
+        else {
+            continue;
+        };
+        for thread in &mailbox.threads {
+            let gained = match existing_mailbox
+                .threads
+                .iter()
+                .find(|existing| existing.remote_thread_id == thread.remote_thread_id)
+            {
+                None => !thread.messages.is_empty(),
+                Some(existing) => thread.messages.len() > existing.messages.len(),
+            };
+            if gained {
+                arrivals.push(NewMailArrival {
+                    subject: thread.subject.clone(),
+                    sender: thread.participants.clone(),
+                });
+            }
+        }
+    }
+    arrivals
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -708,9 +790,12 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{BackgroundRuntime, SyncService};
+    use super::{BackgroundRuntime, SyncService, collect_arrivals};
     use anyhow::{Result, anyhow};
-    use zmail_core::{ProtocolKind, SyncPhase};
+    use zmail_core::{
+        AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, ProtocolKind, SyncPhase,
+        ThreadSnapshot,
+    };
     use zmail_security::{InMemorySecretStore, SecretStore};
     use zmail_store::LocalStore;
 
@@ -876,5 +961,91 @@ mod tests {
             started_at.elapsed() < Duration::from_millis(250),
             "scheduling outbox processing should stay non-blocking for the caller"
         );
+    }
+
+    #[test]
+    fn collect_arrivals_reports_new_and_grown_threads() {
+        let existing = vec![mailbox(
+            "Inbox",
+            vec![
+                thread("thread-a", 1, "Existing subject"),
+                thread("thread-b", 2, "Grown subject"),
+            ],
+        )];
+        let snapshot = AccountSyncSnapshot {
+            checkpoint: "test".to_owned(),
+            detail: "test".to_owned(),
+            identities: None,
+            mailboxes: vec![mailbox(
+                "Inbox",
+                vec![
+                    thread("thread-a", 1, "Existing subject"),
+                    thread("thread-b", 5, "Grown subject"),
+                    thread("thread-c", 1, "New subject"),
+                ],
+            )],
+        };
+
+        let arrivals = collect_arrivals(&existing, &snapshot);
+        assert_eq!(arrivals.len(), 2, "only new and grown threads arrive");
+        assert_eq!(arrivals[0].subject, "Grown subject");
+        assert_eq!(arrivals[1].subject, "New subject");
+    }
+
+    #[test]
+    fn collect_arrivals_ignores_first_time_mailboxes() {
+        let snapshot = AccountSyncSnapshot {
+            checkpoint: "test".to_owned(),
+            detail: "test".to_owned(),
+            identities: None,
+            mailboxes: vec![mailbox(
+                "Inbox",
+                vec![thread("thread-a", 3, "Initial import")],
+            )],
+        };
+
+        let arrivals = collect_arrivals(&[], &snapshot);
+        assert!(
+            arrivals.is_empty(),
+            "the first sync of a mailbox is an import, not new mail"
+        );
+    }
+
+    fn thread(remote_id: &str, message_count: usize, subject: &str) -> ThreadSnapshot {
+        ThreadSnapshot {
+            remote_thread_id: remote_id.to_owned(),
+            subject: subject.to_owned(),
+            participants: "sender@example.test".to_owned(),
+            preview: "preview".to_owned(),
+            is_flagged: false,
+            has_attachments: false,
+            unread_count: 1,
+            latest_message_at: "2026-10-07T10:00:00Z".to_owned(),
+            messages: (0..message_count)
+                .map(|index| MessageSnapshot {
+                    remote_id: format!("{remote_id}-{index}"),
+                    identity_email: "user@example.test".to_owned(),
+                    sender: "sender@example.test".to_owned(),
+                    recipients: "user@example.test".to_owned(),
+                    subject: subject.to_owned(),
+                    body_preview: "preview".to_owned(),
+                    body_text: None,
+                    sanitized_html: None,
+                    has_remote_content: false,
+                    is_read: false,
+                    is_flagged: false,
+                    received_at: "2026-10-07T10:00:00Z".to_owned(),
+                    attachments: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    fn mailbox(name: &str, threads: Vec<ThreadSnapshot>) -> MailboxSnapshot {
+        MailboxSnapshot {
+            name: name.to_owned(),
+            role: Some("inbox".to_owned()),
+            threads,
+        }
     }
 }

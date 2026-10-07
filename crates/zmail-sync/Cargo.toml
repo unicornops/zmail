@@ -12,6 +12,7 @@ tokio.workspace = true
 zmail-core = { path = "../zmail-core" }
 zmail-imap = { path = "../zmail-imap" }
 zmail-jmap = { path = "../zmail-jmap" }
+zmail-notify = { path = "../zmail-notify" }
 zmail-security = { path = "../zmail-security" }
 zmail-smtp = { path = "../zmail-smtp" }
 zmail-store = { path = "../zmail-store" }
