@@ -27,8 +27,9 @@ use tokio_rustls::{
 };
 use url::Url;
 use zmail_core::{
-    AccountSyncSnapshot, AuthKind, MailboxSnapshot, MessageAttachment, MessageSnapshot,
-    OpApplyReport, PendingOp, PendingOpKind, ProtocolKind, SyncTarget, ThreadSnapshot,
+    AccountSyncSnapshot, AuthKind, HydratedBody, MailboxSnapshot, MessageAttachment,
+    MessageSnapshot, OpApplyReport, PendingOp, PendingOpKind, ProtocolKind, SyncTarget,
+    ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -47,7 +48,11 @@ pub const PRIORITY_CAPABILITIES: &[&str] = &[
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const FETCH_BATCH_SIZE: usize = 50;
-const FETCH_QUERY: &str = "(UID INTERNALDATE FLAGS BODY.PEEK[])";
+// Lazy sync: headers only. Bodies (and attachment blobs) are fetched on
+// demand by `fetch_message_bodies` when a message is opened.
+const FETCH_QUERY: &str = "(UID INTERNALDATE FLAGS BODY.PEEK[HEADER])";
+/// Full-message fetch used by the on-demand hydration path.
+const HYDRATE_QUERY: &str = "(UID INTERNALDATE FLAGS BODY.PEEK[])";
 /// Maximum number of attachments persisted per message.
 const MAX_ATTACHMENTS_PER_MESSAGE: usize = 25;
 /// Maximum size of a single persisted attachment blob.
@@ -194,6 +199,71 @@ struct ImapEndpoint {
 }
 
 /// Waits until the IMAP server reports a mailbox change or the timeout
+/// Fetches the full bodies (and attachments) of specific messages on demand.
+///
+/// UIDs must belong to `mailbox_name`. Returns one [`HydratedBody`] per UID
+/// found, in the order given; missing UIDs are skipped.
+pub async fn fetch_message_bodies(
+    target: &SyncTarget,
+    secret: &str,
+    mailbox_name: &str,
+    uids: &[u32],
+) -> Result<Vec<(u32, HydratedBody)>> {
+    if target.protocol != ProtocolKind::Imap {
+        bail!("IMAP adapter received a non-IMAP sync target");
+    }
+    if uids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let endpoint = parse_endpoint(&target.endpoint)?;
+    let attachments_dir = std::path::PathBuf::from(&target.attachments_dir);
+    let mut session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
+    session
+        .examine(mailbox_name)
+        .await
+        .with_context(|| format!("failed to open IMAP mailbox {mailbox_name} for hydration"))?;
+
+    let uid_set = uids
+        .iter()
+        .map(|uid| uid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let fetches = session
+        .uid_fetch(&uid_set, HYDRATE_QUERY)
+        .await
+        .with_context(|| format!("failed to fetch bodies for UID set {uid_set}"))?
+        .try_collect::<Vec<_>>()
+        .await
+        .context("failed to stream the hydration fetches")?;
+
+    let mut bodies = Vec::with_capacity(fetches.len());
+    for fetch in fetches {
+        let Some(uid) = fetch.uid else { continue };
+        let Some(raw) = fetch.body() else { continue };
+        let Some(message) = MessageParser::default().parse(raw) else {
+            continue;
+        };
+        let (body_text, sanitized_html, has_remote_content, preview_source) =
+            hydrate_bodies(&message);
+        let attachments =
+            persist_attachments(&message, mailbox_name, &uid.to_string(), &attachments_dir);
+        bodies.push((
+            uid,
+            HydratedBody {
+                body_text,
+                sanitized_html,
+                has_remote_content,
+                body_preview: excerpt(&preview_source, 180),
+                attachments,
+            },
+        ));
+    }
+
+    Ok(bodies)
+}
+
+/// Waits until the mail server reports a change or the bounded wait
 /// elapses, whichever comes first.
 ///
 /// The wait uses one IDLE connection on INBOX, re-issued at most once per
@@ -945,7 +1015,9 @@ fn accumulate_fetch(
     identity_email: &str,
     attachments_dir: &Path,
 ) {
-    let raw = match fetch.body() {
+    // Header-only syncs carry the message in the BODY[HEADER] section;
+    // full fetches (hydration) carry it in BODY[].
+    let raw = match fetch.body().or_else(|| fetch.header()) {
         Some(raw) => raw,
         None => return,
     };
@@ -1152,8 +1224,17 @@ fn format_addr(address: &mail_parser::Addr<'_>) -> String {
 fn hydrate_bodies(
     message: &mail_parser::Message<'_>,
 ) -> (Option<String>, Option<String>, bool, String) {
-    let body_text = message.body_text(0).map(|value| value.into_owned());
-    let html = message.body_html(0).map(|value| value.into_owned());
+    let body_text = message
+        .body_text(0)
+        .map(|value| value.into_owned())
+        .filter(|value| !value.trim().is_empty());
+    // Header-only parses get a synthesized "<html><body></body></html>"
+    // shell from mail-parser; it carries no visible text and must surface as
+    // an un-hydrated message rather than as an (empty) HTML body.
+    let html = message
+        .body_html(0)
+        .map(|value| value.into_owned())
+        .filter(|value| html_has_visible_text(value));
 
     if let Some(body_text) = body_text {
         let normalized = normalize_body_text(&body_text);
@@ -1170,7 +1251,22 @@ fn hydrate_bodies(
         );
     }
 
-    (None, None, false, "No preview available.".to_owned())
+    (None, None, false, "Body not downloaded.".to_owned())
+}
+
+/// Returns whether an HTML fragment carries text outside its tags.
+fn html_has_visible_text(html: &str) -> bool {
+    let mut text = String::new();
+    let mut inside_tag = false;
+    for character in html.chars() {
+        match character {
+            '<' => inside_tag = true,
+            '>' => inside_tag = false,
+            _ if !inside_tag => text.push(character),
+            _ => {}
+        }
+    }
+    !text.trim().is_empty()
 }
 
 fn normalize_body_text(text: &str) -> String {
@@ -1220,7 +1316,8 @@ mod tests {
 
     use super::{
         ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, conversation_key, excerpt, guess_role,
-        parse_endpoint, persist_attachments, recompute_thread_aggregates, xoauth2_response,
+        hydrate_bodies, parse_endpoint, persist_attachments, recompute_thread_aggregates,
+        xoauth2_response,
     };
     use zmail_core::{MessageSnapshot, ThreadSnapshot};
 
@@ -1272,6 +1369,29 @@ mod tests {
         assert_eq!(blob, b"attachment payload");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_header_only_messages_for_lazy_sync() {
+        let raw = concat!(
+            "From: sender@example.test\r\n",
+            "Subject: header only\r\n",
+            "To: rcpt@example.test\r\n",
+            "Message-ID: <header-only@example.test>\r\n",
+            "\r\n",
+        );
+        let message = mail_parser::MessageParser::default()
+            .parse(raw.as_bytes())
+            .expect("a header-only message should parse");
+        assert_eq!(message.subject(), Some("header only"));
+
+        // A header-only parse must surface as an un-hydrated message: no
+        // body fields and the lazy-sync placeholder preview.
+        let (body_text, sanitized_html, has_remote_content, preview) = hydrate_bodies(&message);
+        assert!(body_text.is_none());
+        assert!(sanitized_html.is_none());
+        assert!(!has_remote_content);
+        assert_eq!(preview, "Body not downloaded.");
     }
     #[test]
     fn parses_imap_endpoints() {

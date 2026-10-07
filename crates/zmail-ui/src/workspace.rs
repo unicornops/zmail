@@ -400,7 +400,40 @@ impl WorkspaceView {
         self.selected_mailbox_id = Some(mailbox_id);
         self.selected_thread_id = Some(thread_id);
         self.detail_mode = DetailMode::Reader;
+        self.hydrate_selected_thread_bodies(cx);
         cx.notify();
+    }
+
+    /// Fetches the bodies of the selected thread's un-hydrated messages on
+    /// demand; the reader shows the preview until the body lands.
+    ///
+    /// Hydration failures are not surfaced: an offline open keeps showing
+    /// the stored preview instead of an error.
+    pub(crate) fn hydrate_selected_thread_bodies(&mut self, cx: &mut Context<Self>) {
+        let (Some(account_id), Some(thread_id)) =
+            (self.selected_account_id, self.selected_thread_id)
+        else {
+            return;
+        };
+        let needs_hydration = match self.store.messages_missing_bodies(thread_id) {
+            Ok(Some(missing)) => !missing.is_empty(),
+            _ => false,
+        };
+        if !needs_hydration {
+            return;
+        }
+
+        let service = self.sync_service.clone();
+        cx.spawn(async move |this, cx| {
+            let _ = service
+                .hydrate_thread_body_and_wait(account_id, thread_id)
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.refresh_from_store();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // -----------------------------------------------------------------------
