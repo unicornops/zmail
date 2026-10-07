@@ -5,6 +5,7 @@ use std::{
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::Command,
+    sync::{Mutex, MutexGuard},
     thread,
     time::{Duration, Instant},
 };
@@ -80,6 +81,17 @@ pub const MAIL_HARNESS_PRELOADED_SUBJECT: &str = "Preloaded Phase 2b message";
 pub const MAIL_HARNESS_JMAP_ACCOUNT: &str = "jmap@localhost";
 /// Password for the live harness JMAP account.
 pub const MAIL_HARNESS_JMAP_PASSWORD: &str = "jmap-password";
+
+/// Serializes live-harness tests within one test binary.
+///
+/// Every live harness test owns the whole Docker Compose project for its
+/// duration: [`DockerMailHarness::start`] tears any previous stack down and
+/// [`DockerMailHarness::down`] removes it on exit. Tests therefore must not
+/// run concurrently, so each one grabs this lock before starting the harness.
+pub fn live_harness_lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Controller for the Docker-backed IMAP/SMTP test harness.
 #[derive(Debug)]

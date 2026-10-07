@@ -15,12 +15,13 @@ use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
 use zmail_test_support::{
     DockerMailHarness, MAIL_HARNESS_HOST, MAIL_HARNESS_JMAP_ACCOUNT, MAIL_HARNESS_JMAP_ENDPOINT,
-    MAIL_HARNESS_JMAP_PASSWORD, MAIL_HARNESS_JMAP_SMTP_PORT,
+    MAIL_HARNESS_JMAP_PASSWORD, MAIL_HARNESS_JMAP_SMTP_PORT, live_harness_lock,
 };
 
 #[test]
 #[ignore = "requires docker compose and the Phase 2b live mail harness"]
 fn syncs_mail_from_a_live_jmap_server() -> Result<()> {
+    let _harness_lock = live_harness_lock();
     let _harness = DockerMailHarness::start()?;
     let store = Arc::new(LocalStore::open_ephemeral()?);
     let account_id = store.insert_account(&jmap_account())?;
@@ -118,6 +119,7 @@ fn syncs_mail_from_a_live_jmap_server() -> Result<()> {
 #[test]
 #[ignore = "requires docker compose and the Phase 2b live mail harness"]
 fn event_source_pushes_new_mail_before_the_timeout() -> Result<()> {
+    let _harness_lock = live_harness_lock();
     let _harness = DockerMailHarness::start()?;
     let store = Arc::new(LocalStore::open_ephemeral()?);
     let account_id = store.insert_account(&jmap_account())?;

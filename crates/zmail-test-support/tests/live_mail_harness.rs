@@ -13,12 +13,13 @@ use zmail_test_support::{
     DockerMailHarness, MAIL_HARNESS_HOST, MAIL_HARNESS_IMAP_ENDPOINT,
     MAIL_HARNESS_PRELOADED_SUBJECT, MAIL_HARNESS_RECIPIENT, MAIL_HARNESS_RECIPIENT_LOGIN,
     MAIL_HARNESS_RECIPIENT_PASSWORD, MAIL_HARNESS_SENDER, MAIL_HARNESS_SENDER_LOGIN,
-    MAIL_HARNESS_SENDER_PASSWORD, MAIL_HARNESS_SMTP_PORT,
+    MAIL_HARNESS_SENDER_PASSWORD, MAIL_HARNESS_SMTP_PORT, live_harness_lock,
 };
 
 #[test]
 #[ignore = "requires docker compose and the Phase 2b live mail harness"]
 fn syncs_preloaded_mail_and_round_trips_smtp_submission() -> Result<()> {
+    let _harness_lock = live_harness_lock();
     let _harness = DockerMailHarness::start()?;
     let store = Arc::new(LocalStore::open_ephemeral()?);
     let account_id = store.insert_account(&imap_account())?;
