@@ -17,7 +17,9 @@ use tokio::{
     sync::oneshot,
     time::sleep,
 };
-use zmail_core::{PendingOutboxJob, ProtocolKind, RuntimeSummary, SubmissionKind, SyncPhase};
+use zmail_core::{
+    PendingOutboxJob, ProtocolKind, RuntimeSummary, SubmissionKind, SyncPhase, SyncTarget,
+};
 use zmail_security::SecretStore;
 use zmail_smtp::SubmissionConfig;
 use zmail_store::LocalStore;
@@ -25,6 +27,7 @@ use zmail_store::LocalStore;
 const OUTBOX_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const OUTBOX_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
 const MAX_OUTBOX_ATTEMPTS: usize = 3;
+const MAIL_WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Dedicated Tokio runtime host for background tasks.
 #[derive(Debug)]
@@ -133,6 +136,7 @@ struct SyncServiceInner {
     secrets: Arc<dyn SecretStore>,
     active_accounts: Mutex<HashSet<i64>>,
     outbox_supervisor_started: AtomicBool,
+    mail_watcher_started: AtomicBool,
 }
 
 impl std::fmt::Debug for SyncService {
@@ -161,6 +165,7 @@ impl SyncService {
                 secrets,
                 active_accounts: Mutex::new(HashSet::new()),
                 outbox_supervisor_started: AtomicBool::new(false),
+                mail_watcher_started: AtomicBool::new(false),
             }),
         };
         service.start_outbox_supervisor();
@@ -221,6 +226,70 @@ impl SyncService {
             self.sync_account_and_wait(account.id)?;
         }
         Ok(())
+    }
+
+    /// Starts background mail watchers for every configured account and
+    /// returns the number started.
+    ///
+    /// IMAP accounts hold one IDLE connection that triggers a sync as soon
+    /// as the server reports a change (falling back to the poll interval
+    /// when the server lacks IDLE). JMAP accounts poll at the same
+    /// interval until event-source push lands.
+    pub fn start_mail_watcher(&self) -> Result<usize> {
+        self.start_mail_watcher_with_interval(MAIL_WATCHER_POLL_INTERVAL)
+    }
+
+    /// Starts the background mail watcher with an explicit poll interval.
+    pub fn start_mail_watcher_with_interval(&self, poll_interval: Duration) -> Result<usize> {
+        if self.inner.mail_watcher_started.swap(true, Ordering::SeqCst) {
+            return Ok(0);
+        }
+
+        let mut started = 0;
+        for target in self.inner.store.list_sync_targets()? {
+            let Ok(secret) = self.inner.secrets.get_account_secret(target.id) else {
+                continue;
+            };
+            let service = self.clone();
+            self.inner.handle.spawn(async move {
+                service
+                    .run_mail_watcher(target, secret, poll_interval)
+                    .await;
+            });
+            started += 1;
+        }
+        Ok(started)
+    }
+
+    /// Waits for server-side changes for one account and syncs, forever.
+    async fn run_mail_watcher(&self, target: SyncTarget, secret: String, poll_interval: Duration) {
+        let mut reconnect_backoff = Duration::from_secs(1);
+        loop {
+            match target.protocol {
+                ProtocolKind::Imap => {
+                    match zmail_imap::wait_for_mail_changes(&target, &secret, poll_interval).await {
+                        Ok(()) => {
+                            reconnect_backoff = Duration::from_secs(1);
+                        }
+                        Err(_) => {
+                            // The IDLE connection dropped; wait with a
+                            // bounded backoff before reconnecting.
+                            sleep(reconnect_backoff).await;
+                            reconnect_backoff = reconnect_backoff
+                                .saturating_mul(2)
+                                .min(Duration::from_secs(60));
+                        }
+                    }
+                }
+                ProtocolKind::Jmap => {
+                    // JMAP event-source push is future work; polling keeps
+                    // new mail arriving within the interval.
+                    sleep(poll_interval).await;
+                }
+            }
+
+            let _ = self.sync_account(target.id);
+        }
     }
 
     /// Starts processing due outbox jobs in the background.

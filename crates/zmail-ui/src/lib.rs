@@ -83,12 +83,14 @@ pub fn run(
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                move |_, cx| {
+                move |window, cx| {
                     let bootstrap = bootstrap.clone();
                     let store = store.clone();
                     let sync_service = sync_service.clone();
                     let secrets = secrets.clone();
-                    cx.new(|cx| WorkspaceView::new(bootstrap, store, sync_service, secrets, cx))
+                    cx.new(|cx| {
+                        WorkspaceView::new(bootstrap, store, sync_service, secrets, window, cx)
+                    })
                 },
             ) {
                 panic!("failed to open the Phase 4 window: {error:#}");
