@@ -1234,7 +1234,7 @@ fn hydrate_bodies(
     let html = message
         .body_html(0)
         .map(|value| value.into_owned())
-        .filter(|value| html_has_visible_text(&value));
+        .filter(|value| html_has_visible_text(value));
 
     if let Some(body_text) = body_text {
         let normalized = normalize_body_text(&body_text);
