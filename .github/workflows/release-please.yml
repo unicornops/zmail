@@ -77,13 +77,66 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path "target/release/${{ matrix.binary_name }}" -DestinationPath "${{ matrix.artifact_path }}"
 
+      - name: Create Linux package
+        if: runner.os == 'Linux'
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb -p zmail-app --release --locked
+          mv target/debian/*.deb zmail-linux-x86_64.deb
+
+      - name: Create macOS app bundle
+        if: runner.os == 'macOS'
+        run: |
+          bundle="Zmail.app"
+          mkdir -p "${bundle}/Contents/MacOS" "${bundle}/Contents/Resources"
+          cp "target/release/${{ matrix.binary_name }}" "${bundle}/Contents/MacOS/Zmail"
+          cat > "${bundle}/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key><string>Zmail</string>
+            <key>CFBundleIdentifier</key><string>ie.unicornops.zmail</string>
+            <key>CFBundleName</key><string>Zmail</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${{ needs.release_please.outputs.tag_name }}</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>CFBundleDocumentTypes</key>
+            <array>
+              <dict>
+                <key>CFBundleURLName</key><string>Email address</string>
+                <key>CFBundleURLSchemes</key>
+                <array><string>mailto</string></array>
+              </dict>
+            </array>
+          </dict>
+          </plist>
+          PLIST
+          # Ad-hoc signature for local execution; Developer ID signing and
+          # notarization remain repository-controlled release work.
+          codesign --force --sign - "${bundle}" || true
+          ditto -c -k --sequesterRsrc --keepParent "${bundle}" zmail-macos.app.zip
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.archive_name }}
-          path: ${{ matrix.artifact_path }}
+          path: |
+            ${{ matrix.artifact_path }}
+            zmail-linux-x86_64.deb
+            zmail-macos.app.zip
 
       - name: Upload release asset
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ needs.release_please.outputs.tag_name }}" "${{ matrix.artifact_path }}" --clobber
+        shell: bash
+        run: |
+          assets="${{ matrix.artifact_path }}"
+          if [[ "${{ runner.os }}" == "Linux" && -f zmail-linux-x86_64.deb ]]; then
+            assets="$assets zmail-linux-x86_64.deb"
+          fi
+          if [[ "${{ runner.os }}" == "macOS" && -f zmail-macos.app.zip ]]; then
+            assets="$assets zmail-macos.app.zip"
+          fi
+          sha256sum $assets > SHA256SUMS
+          gh release upload "${{ needs.release_please.outputs.tag_name }}" $assets SHA256SUMS --clobber

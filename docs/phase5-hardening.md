@@ -27,9 +27,9 @@ This document records the Phase 5 hardening work that is present in-repo today a
 
 - GitHub Actions produces release archives for Linux, macOS, and Windows from the same tagged source.
 - The current packaging target is the compiled `zmail-app` binary in a platform archive.
-- Native installers for Linux, macOS, and Windows are not yet produced in-repo.
-- Signing is not configured yet and remains opt-in and repository-controlled. Release automation should only be extended with platform signing secrets when those secrets are available and the signing identity is stable.
-- This means the Phase 5 `installers and signing` item from [`PLAN.md`](../PLAN.md) is still open.
+- Tagged releases additionally produce a Linux `.deb` package (via `cargo-deb`) and a macOS `.app` bundle (ad-hoc signed), each attached with a `SHA256SUMS` manifest.
+- Windows releases still ship the zip archive; an MSI installer is pending release work.
+- Developer ID signing and notarization are not configured yet and remain opt-in and repository-controlled. Release automation should only be extended with platform signing secrets when those secrets are available and the signing identity is stable.
 - No packaging step may introduce a background helper process that outlives the GUI binary.
 
 ## Release Process
