@@ -234,10 +234,10 @@ impl SyncService {
     /// Starts background mail watchers for every configured account and
     /// returns the number started.
     ///
-    /// IMAP accounts hold one IDLE connection that triggers a sync as soon
-    /// as the server reports a change (falling back to the poll interval
-    /// when the server lacks IDLE). JMAP accounts poll at the same
-    /// interval until event-source push lands.
+    /// IMAP accounts hold one IDLE connection and JMAP accounts hold one
+    /// event-source connection; both trigger a sync as soon as the server
+    /// reports a change and fall back to the poll interval when the server
+    /// lacks the capability or the connection drops.
     pub fn start_mail_watcher(&self) -> Result<usize> {
         self.start_mail_watcher_with_interval(MAIL_WATCHER_POLL_INTERVAL)
     }
@@ -355,9 +355,21 @@ impl SyncService {
                     }
                 }
                 ProtocolKind::Jmap => {
-                    // JMAP event-source push is future work; polling keeps
-                    // new mail arriving within the interval.
-                    sleep(poll_interval).await;
+                    // Event-source push wakes the watcher as soon as the
+                    // server reports a change; errors (or servers without
+                    // the eventSource capability) back off and retry, so
+                    // the interval bounds worst-case latency.
+                    match zmail_jmap::wait_for_mail_changes(&target, &secret, poll_interval).await {
+                        Ok(()) => {
+                            reconnect_backoff = Duration::from_secs(1);
+                        }
+                        Err(_) => {
+                            sleep(reconnect_backoff).await;
+                            reconnect_backoff = reconnect_backoff
+                                .saturating_mul(2)
+                                .min(Duration::from_secs(60));
+                        }
+                    }
                 }
             }
 

@@ -9,7 +9,9 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 jmap-client.workspace = true
+tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
