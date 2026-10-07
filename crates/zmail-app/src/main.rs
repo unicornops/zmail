@@ -1165,29 +1165,51 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, String)> {
     ))
 }
 
-/// Prompts for the OAuth2 client configuration used by the browser flow.
-///
-/// Provider presets (Gmail, Microsoft 365) pre-fill these values in a
-/// follow-up; today the endpoints are entered per account.
+/// Prompts for the OAuth2 client configuration used by the browser flow,
+/// with Gmail and Microsoft 365 presets pre-filling the endpoints.
 fn prompt_oauth2_client() -> Result<zmail_auth::OAuth2Client> {
-    let client_id = prompt("OAuth2 client id")?;
-    let authorization_endpoint = prompt("Authorization endpoint URL")?;
-    let token_endpoint = prompt("Token endpoint URL")?;
-    let scopes = prompt_with_default("Scopes (space-separated)", "email")?
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+    let preset = prompt_with_default(
+        "Provider (1 = Gmail, 2 = Microsoft 365, 3 = custom endpoints)",
+        "3",
+    )?;
     let redirect_port: u16 = prompt_with_default("Local redirect port", "8357")?
         .parse()
         .context("the redirect port must be a number")?;
-    Ok(zmail_auth::OAuth2Client {
-        client_id,
-        client_secret: None,
-        authorization_endpoint,
-        token_endpoint,
-        scopes,
-        redirect_port,
-    })
+
+    match preset.trim() {
+        "1" => {
+            let client_id = prompt("Google OAuth2 client id")?;
+            let client_secret = prompt_optional("Client secret (embedded in desktop clients)")?;
+            Ok(zmail_auth::OAuth2Preset::Gmail.client(client_id, client_secret, redirect_port))
+        }
+        "2" => {
+            let client_id = prompt("Microsoft application (client) id")?;
+            let client_secret = prompt_optional("Client secret (public clients leave this empty)")?;
+            Ok(zmail_auth::OAuth2Preset::Microsoft365.client(
+                client_id,
+                client_secret,
+                redirect_port,
+            ))
+        }
+        _ => {
+            let client_id = prompt("OAuth2 client id")?;
+            let authorization_endpoint = prompt("Authorization endpoint URL")?;
+            let token_endpoint = prompt("Token endpoint URL")?;
+            let scopes = prompt_with_default("Scopes (space-separated)", "email")?
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            Ok(zmail_auth::OAuth2Client {
+                client_id,
+                client_secret: None,
+                authorization_endpoint,
+                token_endpoint,
+                scopes,
+                redirect_port,
+                extra_authorize_params: Vec::new(),
+            })
+        }
+    }
 }
 
 fn fixture_imap_account(endpoint: &str, username: &str, email: &str) -> NewAccount {

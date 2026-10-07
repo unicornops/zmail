@@ -41,6 +41,71 @@ pub struct OAuth2Client {
     pub scopes: Vec<String>,
     /// Loopback port the redirect receiver listens on.
     pub redirect_port: u16,
+    /// Extra authorization-endpoint parameters (for example Google's
+    /// `access_type=offline`) appended to the request URL.
+    pub extra_authorize_params: Vec<(String, String)>,
+}
+
+/// Well-known provider presets for the browser flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuth2Preset {
+    /// Google Workspace / Gmail.
+    Gmail,
+    /// Microsoft 365 / Outlook.com.
+    Microsoft365,
+}
+
+impl OAuth2Preset {
+    /// The preset's display name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Gmail => "Gmail",
+            Self::Microsoft365 => "Microsoft 365",
+        }
+    }
+
+    /// Builds the provider client with its preset endpoints and scopes.
+    pub fn client(
+        self,
+        client_id: String,
+        client_secret: Option<String>,
+        port: u16,
+    ) -> OAuth2Client {
+        match self {
+            Self::Gmail => OAuth2Client {
+                client_id,
+                // Google's desktop clients are confidential; the secret is
+                // embedded in the application, and PKCE keeps the flow
+                // honest on top of it.
+                client_secret,
+                authorization_endpoint: "https://accounts.google.com/o/oauth2/v2/auth".to_owned(),
+                token_endpoint: "https://oauth2.googleapis.com/token".to_owned(),
+                // The full IMAP scope is required for XOAUTH2.
+                scopes: vec!["https://mail.google.com/".to_owned()],
+                redirect_port: port,
+                // Refresh tokens are only granted for explicitly offline
+                // access, and only on a consent prompt.
+                extra_authorize_params: vec![
+                    ("access_type".to_owned(), "offline".to_owned()),
+                    ("prompt".to_owned(), "consent".to_owned()),
+                ],
+            },
+            Self::Microsoft365 => OAuth2Client {
+                client_id,
+                client_secret,
+                authorization_endpoint:
+                    "https://login.microsoftonline.com/common/oauth2/v2.0/authorize".to_owned(),
+                token_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+                    .to_owned(),
+                scopes: vec![
+                    "https://outlook.office365.com/IMAP.AccessAsUser.All".to_owned(),
+                    "offline_access".to_owned(),
+                ],
+                redirect_port: port,
+                extra_authorize_params: Vec::new(),
+            },
+        }
+    }
 }
 
 /// PKCE pair (RFC 7636): the secret verifier and its S256 challenge.
@@ -132,6 +197,12 @@ impl OAuth2Client {
         if let Some(secret) = &self.client_secret {
             url.push_str("&client_secret=");
             url.push_str(&urlencode(secret));
+        }
+        for (key, value) in &self.extra_authorize_params {
+            url.push('&');
+            url.push_str(&urlencode(key));
+            url.push('=');
+            url.push_str(&urlencode(value));
         }
 
         AuthorizationRequest { url, state, pkce }
@@ -373,7 +444,49 @@ mod tests {
             token_endpoint: format!("http://127.0.0.1:{port}/token"),
             scopes: vec!["imap".to_owned(), "email".to_owned()],
             redirect_port: port,
+            extra_authorize_params: Vec::new(),
         }
+    }
+
+    #[test]
+    fn gmail_preset_requests_offline_imap_access() {
+        let client = super::OAuth2Preset::Gmail.client(
+            "gmail-client".to_owned(),
+            Some("gmail-secret".to_owned()),
+            8357,
+        );
+        assert_eq!(
+            client.authorization_endpoint,
+            "https://accounts.google.com/o/oauth2/v2/auth"
+        );
+        assert_eq!(client.token_endpoint, "https://oauth2.googleapis.com/token");
+        assert_eq!(client.scopes, vec!["https://mail.google.com/".to_owned()]);
+
+        let request = client.authorization_request();
+        assert!(request.url.contains("access_type=offline"));
+        assert!(request.url.contains("prompt=consent"));
+        assert!(request.url.contains("client_secret=gmail-secret"));
+    }
+
+    #[test]
+    fn microsoft_preset_targets_the_common_tenant() {
+        let client = super::OAuth2Preset::Microsoft365.client("ms-client".to_owned(), None, 8357);
+        assert!(
+            client
+                .authorization_endpoint
+                .starts_with("https://login.microsoftonline.com/common/oauth2/v2.0/authorize")
+        );
+        assert!(
+            client
+                .token_endpoint
+                .starts_with("https://login.microsoftonline.com/common/oauth2/v2.0/token")
+        );
+        assert!(client.scopes.contains(&"offline_access".to_owned()));
+        assert!(
+            client
+                .scopes
+                .contains(&"https://outlook.office365.com/IMAP.AccessAsUser.All".to_owned())
+        );
     }
 
     fn free_port() -> u16 {
