@@ -5,10 +5,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::runtime::Builder;
 use zmail_core::{
-    AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutgoingConfig, ProtocolKind,
+    AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutgoingAttachment, OutgoingConfig,
+    OutgoingMessage, ProtocolKind,
 };
 use zmail_security::{InMemorySecretStore, SecretStore};
-use zmail_smtp::{SubmissionConfig, SubmissionSecurity, SubmittedMessage, submit_text_message};
+use zmail_smtp::{
+    SubmissionConfig, SubmissionSecurity, SubmittedMessage, submit_outgoing_message,
+    submit_text_message,
+};
 use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
 use zmail_test_support::{
@@ -139,6 +143,82 @@ fn syncs_preloaded_mail_and_round_trips_smtp_submission() -> Result<()> {
         "the server should report the message as flagged"
     );
 
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn syncs_attachments_and_saves_the_original_bytes() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&imap_account())?;
+
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_RECIPIENT_PASSWORD)?;
+
+    let attachment_bytes = b"received attachment payload".to_vec();
+    let smtp_runtime = Builder::new_current_thread().enable_all().build()?;
+    smtp_runtime.block_on(async {
+        submit_outgoing_message(
+            &SubmissionConfig {
+                host: MAIL_HARNESS_HOST.to_owned(),
+                port: MAIL_HARNESS_SMTP_PORT,
+                username: Some(MAIL_HARNESS_SENDER_LOGIN.to_owned()),
+                secret: Some(MAIL_HARNESS_SENDER_PASSWORD.to_owned()),
+                security: SubmissionSecurity::Plain,
+                hello_name: "localhost".to_owned(),
+            },
+            &OutgoingMessage {
+                from_email: MAIL_HARNESS_SENDER.to_owned(),
+                from_name: Some("Harness Sender".to_owned()),
+                to: vec![MAIL_HARNESS_RECIPIENT.to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Phase 2b attachment roundtrip".to_owned(),
+                text_body: "This message carries an attachment.".to_owned(),
+                attachments: vec![OutgoingAttachment {
+                    filename: "notes.txt".to_owned(),
+                    content_type: "text/plain".to_owned(),
+                    bytes: attachment_bytes.clone(),
+                }],
+            },
+        )
+        .await
+    })?;
+
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.sync_account_and_wait(account_id)?;
+
+    let inbox_mailbox_id = inbox_id(&store, account_id)?;
+    let threads = store.list_threads(inbox_mailbox_id, 0..50)?;
+    let thread = threads
+        .iter()
+        .find(|thread| thread.subject == "Phase 2b attachment roundtrip")
+        .context("the attachment message should sync into the inbox")?;
+
+    let view = store
+        .thread_view(thread.id)?
+        .context("the attachment thread should load")?;
+    assert_eq!(view.messages.len(), 1);
+    assert_eq!(view.messages[0].attachments.len(), 1);
+    let attachment = &view.messages[0].attachments[0];
+    assert_eq!(attachment.filename, "notes.txt");
+    assert_eq!(attachment.content_type, "text/plain");
+    assert_eq!(attachment.size_bytes, attachment_bytes.len() as u64);
+
+    let destination =
+        std::env::temp_dir().join(format!("zmail-live-attachment-{}", std::process::id()));
+    let saved = store.save_attachment(attachment.id, &destination)?;
+    assert_eq!(saved, destination.join("notes.txt"));
+    let written = std::fs::read(&saved)?;
+    assert_eq!(
+        written, attachment_bytes,
+        "save-as restores the original bytes"
+    );
+
+    let _ = std::fs::remove_dir_all(&destination);
     Ok(())
 }
 

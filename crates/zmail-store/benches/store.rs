@@ -37,6 +37,7 @@ fn synthetic_snapshot(thread_count: usize) -> AccountSyncSnapshot {
                 is_read: false,
                 is_flagged: false,
                 received_at: format!("2026-01-01T00:{:02}:{:02}Z", index / 60 % 60, index % 60),
+                attachments: Vec::new(),
             }],
         })
         .collect();

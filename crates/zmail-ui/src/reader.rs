@@ -220,7 +220,7 @@ pub(crate) fn reader_primary_action_buttons(
     let thread_has_unread = thread.unread_count > 0;
     let thread_is_flagged = thread.is_flagged;
 
-    vec![
+    let mut buttons = vec![
         toolbar_button(
             "Reply",
             Some("reply"),
@@ -340,7 +340,29 @@ pub(crate) fn reader_primary_action_buttons(
             }),
         )
         .into_any_element(),
-    ]
+    ];
+
+    let thread_has_attachments = thread
+        .messages
+        .iter()
+        .any(|message| !message.attachments.is_empty());
+    if thread_has_attachments {
+        buttons.push(
+            toolbar_button(
+                "Save attachments",
+                Some("save"),
+                colors.button_background,
+                colors.border,
+                colors.foreground,
+                cx.listener(|this: &mut WorkspaceView, _, _, cx| {
+                    this.save_selected_thread_attachments(cx);
+                }),
+            )
+            .into_any_element(),
+        );
+    }
+
+    buttons
 }
 
 /// Build the move-to-mailbox buttons rendered at the bottom of the reader pane.
@@ -470,6 +492,15 @@ fn render_thread_message(index: usize, message: &ThreadMessage, colors: &UiColor
                                 .gap_2()
                                 .children(message_status_badges(message, colors)),
                         )
+                        .when(!message.attachments.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .children(message_attachments(message, colors)),
+                            )
+                        })
                         .child(div().text_sm().child(message.rendered_body.clone())),
                 ),
         )
@@ -527,6 +558,42 @@ fn thread_header_badges(thread: &ThreadView, colors: &UiColors) -> Vec<AnyElemen
     }
 
     badges
+}
+
+fn message_attachments(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyElement> {
+    message
+        .attachments
+        .iter()
+        .map(|attachment| {
+            label_chip(
+                format!(
+                    "{} ({})",
+                    attachment.filename,
+                    format_size(attachment.size_bytes)
+                ),
+                Some("paperclip"),
+                colors.button_background,
+                colors.info,
+            )
+            .into_any_element()
+        })
+        .collect()
+}
+
+/// Formats a byte count with one fractional digit and a binary unit.
+fn format_size(size_bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = size_bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{size_bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn message_status_badges(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyElement> {

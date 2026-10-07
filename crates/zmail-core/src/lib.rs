@@ -423,6 +423,9 @@ pub struct SyncTarget {
     pub cache_policy: CachePolicySummary,
     /// Configured identities.
     pub identities: Vec<IdentitySummary>,
+    /// Absolute path of the store's attachments directory, where sync
+    /// adapters persist received attachment blobs.
+    pub attachments_dir: String,
     /// Previous checkpoint token for incremental sync.
     pub checkpoint: Option<String>,
 }
@@ -924,6 +927,8 @@ pub struct ThreadMessage {
     pub has_remote_content: bool,
     /// Received timestamp in ISO-8601 form.
     pub received_at: String,
+    /// Attachments persisted with this message.
+    pub attachments: Vec<ReceivedAttachment>,
 }
 
 /// Full conversation state shown in the Phase 3 reader pane.
@@ -1117,6 +1122,35 @@ pub struct ThreadSnapshot {
     pub messages: Vec<MessageSnapshot>,
 }
 
+/// Attachment metadata carried on a message snapshot; the blob itself is
+/// persisted by the sync adapter into the store's attachments directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageAttachment {
+    /// Display filename from the MIME part.
+    pub filename: String,
+    /// MIME content type of the part.
+    pub content_type: String,
+    /// Size of the stored blob in bytes.
+    pub size_bytes: u64,
+    /// Path of the stored blob relative to the store's attachments directory.
+    pub storage_path: String,
+}
+
+/// Received attachment surfaced to the reader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceivedAttachment {
+    /// Local attachment identifier.
+    pub id: i64,
+    /// Display filename from the MIME part.
+    pub filename: String,
+    /// MIME content type of the part.
+    pub content_type: String,
+    /// Size of the stored blob in bytes.
+    pub size_bytes: u64,
+    /// Path of the stored blob relative to the store's attachments directory.
+    pub storage_path: String,
+}
+
 /// Message snapshot written into the local store by a sync adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageSnapshot {
@@ -1146,6 +1180,8 @@ pub struct MessageSnapshot {
     pub is_flagged: bool,
     /// Received timestamp in ISO-8601 form.
     pub received_at: String,
+    /// Attachments persisted with this message.
+    pub attachments: Vec<MessageAttachment>,
 }
 
 /// Upstream inputs recorded for this bootstrap.

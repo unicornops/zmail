@@ -2,6 +2,8 @@
 
 use std::{
     collections::BTreeMap,
+    fs,
+    path::Path,
     sync::{Arc, Once},
     time::Duration,
 };
@@ -12,7 +14,7 @@ use async_imap::{
     types::{Fetch, Flag, Mailbox, Name, NameAttribute},
 };
 use futures_util::TryStreamExt;
-use mail_parser::{Address, MessageParser};
+use mail_parser::{Address, MessageParser, MimeHeaders};
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -25,8 +27,8 @@ use tokio_rustls::{
 };
 use url::Url;
 use zmail_core::{
-    AccountSyncSnapshot, AuthKind, MailboxSnapshot, MessageSnapshot, OpApplyReport, PendingOp,
-    PendingOpKind, ProtocolKind, SyncTarget, ThreadSnapshot,
+    AccountSyncSnapshot, AuthKind, MailboxSnapshot, MessageAttachment, MessageSnapshot,
+    OpApplyReport, PendingOp, PendingOpKind, ProtocolKind, SyncTarget, ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -46,6 +48,10 @@ pub const PRIORITY_CAPABILITIES: &[&str] = &[
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const FETCH_BATCH_SIZE: usize = 50;
 const FETCH_QUERY: &str = "(UID INTERNALDATE FLAGS BODY.PEEK[])";
+/// Maximum number of attachments persisted per message.
+const MAX_ATTACHMENTS_PER_MESSAGE: usize = 25;
+/// Maximum size of a single persisted attachment blob.
+const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 
 fn ensure_rustls_provider() {
     static RUSTLS_PROVIDER: Once = Once::new();
@@ -66,6 +72,7 @@ pub async fn discover_and_sync(
     }
 
     let endpoint = parse_endpoint(&target.endpoint)?;
+    let attachments_dir = std::path::PathBuf::from(&target.attachments_dir);
     let identity_email = target
         .identities
         .iter()
@@ -120,7 +127,14 @@ pub async fn discover_and_sync(
             let mut merged = existing_mailbox;
             merge_flag_changes(&mut merged, &flag_map);
             if !new_uids.is_empty() {
-                append_new_threads(&mut session, &mut merged, &new_uids, identity_email).await?;
+                append_new_threads(
+                    &mut session,
+                    &mut merged,
+                    &new_uids,
+                    identity_email,
+                    &attachments_dir,
+                )
+                .await?;
             }
             mailbox_checkpoint.last_seen_uid = Some(
                 new_uids
@@ -136,8 +150,14 @@ pub async fn discover_and_sync(
         }
 
         refreshed += 1;
-        let (snapshot, uid_flags) =
-            fetch_mailbox_snapshot(&mut session, &name, guess_role(&name), identity_email).await?;
+        let (snapshot, uid_flags) = fetch_mailbox_snapshot(
+            &mut session,
+            &name,
+            guess_role(&name),
+            identity_email,
+            &attachments_dir,
+        )
+        .await?;
         mailbox_checkpoint.last_seen_uid = uid_flags.keys().last().copied();
         mailbox_checkpoint.uid_flags = uid_flags;
         next_checkpoint.insert(name, mailbox_checkpoint);
@@ -594,6 +614,7 @@ async fn fetch_mailbox_snapshot(
     mailbox_name: &str,
     role: Option<String>,
     identity_email: &str,
+    attachments_dir: &Path,
 ) -> Result<(MailboxSnapshot, BTreeMap<u32, Vec<String>>)> {
     session
         .examine(mailbox_name)
@@ -637,7 +658,13 @@ async fn fetch_mailbox_snapshot(
                         .collect::<Vec<_>>(),
                 );
             }
-            accumulate_fetch(&mut conversations, fetch, identity_email);
+            accumulate_fetch(
+                &mut conversations,
+                fetch,
+                mailbox_name,
+                identity_email,
+                attachments_dir,
+            );
         }
     }
 
@@ -774,7 +801,9 @@ async fn append_new_threads(
     mailbox: &mut MailboxSnapshot,
     new_uids: &[u32],
     identity_email: &str,
+    attachments_dir: &Path,
 ) -> Result<()> {
+    let mailbox_name = mailbox.name.clone();
     let mut conversations: BTreeMap<String, ImapThreadAccumulator> = BTreeMap::new();
     for chunk in new_uids.chunks(FETCH_BATCH_SIZE) {
         let uid_set = chunk
@@ -791,7 +820,13 @@ async fn append_new_threads(
             .context("failed to stream new messages")?;
 
         for fetch in fetches {
-            accumulate_fetch(&mut conversations, fetch, identity_email);
+            accumulate_fetch(
+                &mut conversations,
+                fetch,
+                &mailbox_name,
+                identity_email,
+                attachments_dir,
+            );
         }
     }
 
@@ -906,7 +941,9 @@ fn conversation_key(message: &mail_parser::Message<'_>, uid: Option<u32>) -> Str
 fn accumulate_fetch(
     threads: &mut BTreeMap<String, ImapThreadAccumulator>,
     fetch: Fetch,
+    mailbox_name: &str,
     identity_email: &str,
+    attachments_dir: &Path,
 ) {
     let raw = match fetch.body() {
         Some(raw) => raw,
@@ -926,6 +963,8 @@ fn accumulate_fetch(
     let (body_text, sanitized_html, has_remote_content, preview_source) = hydrate_bodies(&message);
     let preview = excerpt(&preview_source, 180);
     let has_attachments = message.attachment_count() > 0;
+    let remote_stub = fetch.uid.map(|uid| uid.to_string()).unwrap_or_default();
+    let attachments = persist_attachments(&message, mailbox_name, &remote_stub, attachments_dir);
     let received_at = fetch
         .internal_date()
         .map(|date| date.to_rfc3339())
@@ -948,6 +987,7 @@ fn accumulate_fetch(
         is_read,
         is_flagged,
         received_at: received_at.clone(),
+        attachments,
     };
     let key = conversation_key(&message, uid);
 
@@ -970,6 +1010,82 @@ fn accumulate_fetch(
     };
     entry.has_attachments |= has_attachments;
     entry.push_message(message_snapshot);
+}
+
+/// Persists the attachment parts of a parsed message into the store's
+/// attachments directory and returns their metadata.
+///
+/// Blobs go straight to disk; only the raw fetched message is held in memory,
+/// so attachment bytes never round-trip through the store or the database.
+/// Parts beyond the per-message count or single-part size caps are skipped
+/// rather than half-persisted.
+fn persist_attachments(
+    message: &mail_parser::Message<'_>,
+    mailbox_name: &str,
+    remote_id: &str,
+    attachments_dir: &Path,
+) -> Vec<MessageAttachment> {
+    let mut attachments = Vec::new();
+    if message.attachment_count() == 0 {
+        return attachments;
+    }
+
+    if !attachments_dir.is_dir() && fs::create_dir_all(attachments_dir).is_err() {
+        // Without a writable blob directory the sync must not fail: the
+        // message still stores, the attachment parts are simply not kept.
+        return attachments;
+    }
+
+    for (index, part) in message.attachments().enumerate() {
+        if attachments.len() >= MAX_ATTACHMENTS_PER_MESSAGE {
+            break;
+        }
+        let contents = part.contents();
+        if contents.len() > MAX_ATTACHMENT_BYTES {
+            continue;
+        }
+        let Some(filename) = part.attachment_name().map(str::to_owned) else {
+            continue;
+        };
+        if filename.trim().is_empty() {
+            continue;
+        }
+        let content_type = part
+            .content_type()
+            .map(|content_type| match content_type.subtype() {
+                Some(subtype) => format!("{}/{}", content_type.ctype(), subtype),
+                None => content_type.ctype().to_owned(),
+            })
+            .unwrap_or_else(|| "application/octet-stream".to_owned());
+        let storage_name = format!(
+            "incoming-{}-{remote_id}-{index}-{}",
+            sanitize_component(mailbox_name),
+            sanitize_component(&filename),
+        );
+        let storage_path = attachments_dir.join(&storage_name);
+        if fs::write(&storage_path, contents).is_err() {
+            continue;
+        }
+        attachments.push(MessageAttachment {
+            filename,
+            content_type,
+            size_bytes: contents.len() as u64,
+            storage_path: storage_name,
+        });
+    }
+
+    attachments
+}
+
+/// Restricts a filename- or mailbox-derived path component to safe characters.
+fn sanitize_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => ch,
+            _ => '_',
+        })
+        .collect()
 }
 
 impl ImapThreadAccumulator {
@@ -1104,7 +1220,7 @@ mod tests {
 
     use super::{
         ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, conversation_key, excerpt, guess_role,
-        parse_endpoint, recompute_thread_aggregates, xoauth2_response,
+        parse_endpoint, persist_attachments, recompute_thread_aggregates, xoauth2_response,
     };
     use zmail_core::{MessageSnapshot, ThreadSnapshot};
 
@@ -1117,6 +1233,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn persists_attachment_parts_from_a_parsed_message() {
+        let raw = concat!(
+            "From: sender@example.test\r\n",
+            "Subject: with attachment\r\n",
+            "To: rcpt@example.test\r\n",
+            "Content-Type: multipart/mixed; boundary=\"BOUND\"\r\n",
+            "\r\n",
+            "--BOUND\r\n",
+            "Content-Type: text/plain\r\n",
+            "\r\n",
+            "Body text.\r\n",
+            "--BOUND\r\n",
+            "Content-Type: text/plain; name=\"notes.txt\"\r\n",
+            "Content-Disposition: attachment; filename=\"notes.txt\"\r\n",
+            "\r\n",
+            "attachment payload\r\n",
+            "--BOUND--\r\n",
+        );
+        let message = mail_parser::MessageParser::default()
+            .parse(raw.as_bytes())
+            .expect("the message should parse");
+
+        let dir = std::env::temp_dir().join(format!("zmail-imap-attach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let attachments = persist_attachments(&message, "Inbox", "42", &dir);
+        assert_eq!(attachments.len(), 1, "one attachment should persist");
+        let attachment = &attachments[0];
+        assert_eq!(attachment.filename, "notes.txt");
+        assert_eq!(attachment.content_type, "text/plain");
+        assert_eq!(attachment.size_bytes, "attachment payload".len() as u64);
+        assert_eq!(attachment.storage_path, "incoming-Inbox-42-0-notes.txt");
+
+        let blob_path = dir.join(&attachment.storage_path);
+        let blob = std::fs::read(&blob_path).expect("the blob should be readable");
+        assert_eq!(blob, b"attachment payload");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn parses_imap_endpoints() {
         let endpoint = parse_endpoint("imaps://mail.example.test:993").expect("valid endpoint");
@@ -1209,6 +1365,7 @@ mod tests {
             is_read: false,
             is_flagged: false,
             received_at: "2026-01-01T00:00:00Z".to_owned(),
+            attachments: Vec::new(),
         };
         let newer = MessageSnapshot {
             remote_id: "2".to_owned(),
@@ -1223,6 +1380,7 @@ mod tests {
             is_read: true,
             is_flagged: true,
             received_at: "2026-02-01T00:00:00Z".to_owned(),
+            attachments: Vec::new(),
         };
         let mut thread = ThreadSnapshot {
             remote_thread_id: "root@example.com".to_owned(),
