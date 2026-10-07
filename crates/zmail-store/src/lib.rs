@@ -1293,16 +1293,22 @@ impl LocalStore {
 
         let existing_mailboxes = load_account_mailbox_ids(&transaction, account_id)?;
         let pending_remote_ids = load_pending_op_remote_ids(&transaction, account_id)?;
+        let mut account_changed = snapshot.identities.is_some();
 
         for (sort_order, mailbox) in snapshot.mailboxes.iter().enumerate() {
             let mailbox_id = match existing_mailboxes.get(&mailbox.name) {
-                Some(existing_id) => {
-                    transaction
-                        .execute(
-                            "UPDATE mailboxes SET role = ?2, sort_order = ?3 WHERE id = ?1",
-                            params![existing_id, mailbox.role, sort_order as i64],
-                        )
-                        .context("failed to update the mailbox during the snapshot merge")?;
+                Some((existing_id, role, sort_order_stored)) => {
+                    if role.as_deref() != mailbox.role.as_deref()
+                        || *sort_order_stored != sort_order as i64
+                    {
+                        transaction
+                            .execute(
+                                "UPDATE mailboxes SET role = ?2, sort_order = ?3 WHERE id = ?1",
+                                params![existing_id, mailbox.role, sort_order as i64],
+                            )
+                            .context("failed to update the mailbox during the snapshot merge")?;
+                        account_changed = true;
+                    }
                     *existing_id
                 }
                 None => {
@@ -1314,11 +1320,12 @@ impl LocalStore {
                         params![account_id, mailbox.name, mailbox.role, sort_order as i64],
                     )
                     .context("failed to insert the mailbox during the snapshot merge")?;
+                    account_changed = true;
                     transaction.last_insert_rowid()
                 }
             };
 
-            let kept_thread_ids = merge_mailbox_threads(
+            let (kept_thread_ids, threads_changed) = merge_mailbox_threads(
                 &transaction,
                 mailbox_id,
                 mailbox,
@@ -1326,10 +1333,12 @@ impl LocalStore {
                 fallback_identity_id,
                 &pending_remote_ids,
             )?;
-            prune_mailbox_threads(&transaction, mailbox_id, &kept_thread_ids)?;
-            transaction
-                .execute(
-                    r#"
+            let pruned = prune_mailbox_threads(&transaction, mailbox_id, &kept_thread_ids)?;
+            account_changed |= threads_changed || pruned;
+            if threads_changed || pruned {
+                transaction
+                    .execute(
+                        r#"
                 UPDATE mailboxes
                 SET
                     total_threads = (SELECT COUNT(*) FROM threads WHERE mailbox_id = mailboxes.id),
@@ -1339,9 +1348,10 @@ impl LocalStore {
                     )
                 WHERE id = ?1
                 "#,
-                    params![mailbox_id],
-                )
-                .context("failed to refresh the mailbox counters during the snapshot merge")?;
+                        params![mailbox_id],
+                    )
+                    .context("failed to refresh the mailbox counters during the snapshot merge")?;
+            }
         }
 
         let snapshot_names: HashSet<&str> = snapshot
@@ -1349,20 +1359,25 @@ impl LocalStore {
             .iter()
             .map(|mailbox| mailbox.name.as_str())
             .collect();
-        for (name, mailbox_id) in &existing_mailboxes {
+        for (name, (mailbox_id, _, _)) in &existing_mailboxes {
             if !snapshot_names.contains(name.as_str()) {
                 transaction
                     .execute("DELETE FROM mailboxes WHERE id = ?1", params![mailbox_id])
                     .with_context(|| {
                         format!("failed to remove the {name} mailbox missing from the snapshot")
                     })?;
+                account_changed = true;
             }
         }
 
         transaction
             .commit()
             .context("failed to commit the snapshot transaction")?;
-        self.refresh_account_search_index(account_id)
+        if account_changed {
+            self.refresh_account_search_index(account_id)
+        } else {
+            Ok(())
+        }
     }
 
     /// Records a successful sync and resets the failure counter.
@@ -3404,15 +3419,25 @@ fn replace_account_identities(
     Ok(())
 }
 
-/// Loads the mailbox row ids for an account, keyed by mailbox name.
+/// An existing mailbox row: id, server role, and sort order.
+type ExistingMailbox = (i64, Option<String>, i64);
+
+/// Loads the mailbox rows for an account, keyed by mailbox name.
 fn load_account_mailbox_ids(
     transaction: &Transaction<'_>,
     account_id: i64,
-) -> Result<std::collections::HashMap<String, i64>> {
-    let mut statement =
-        transaction.prepare("SELECT id, name FROM mailboxes WHERE account_id = ?1")?;
+) -> Result<std::collections::HashMap<String, ExistingMailbox>> {
+    let mut statement = transaction
+        .prepare("SELECT id, name, role, sort_order FROM mailboxes WHERE account_id = ?1")?;
     let rows = statement.query_map(params![account_id], |row| {
-        Ok((row.get::<_, String>(1)?, row.get::<_, i64>(0)?))
+        Ok((
+            row.get::<_, String>(1)?,
+            (
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+            ),
+        ))
     })?;
     let pairs = rows
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -3432,7 +3457,7 @@ fn merge_mailbox_threads(
     identity_map: &std::collections::HashMap<String, i64>,
     fallback_identity_id: i64,
     pending_remote_ids: &HashSet<String>,
-) -> Result<HashSet<i64>> {
+) -> Result<(HashSet<i64>, bool)> {
     let mut existing_threads: std::collections::HashMap<String, i64> =
         std::collections::HashMap::new();
     {
@@ -3453,6 +3478,7 @@ fn merge_mailbox_threads(
     }
 
     let mut kept_thread_ids: HashSet<i64> = HashSet::new();
+    let mut changed = false;
     for thread in &mailbox.threads {
         if thread.messages.is_empty() {
             continue;
@@ -3500,6 +3526,24 @@ fn merge_mailbox_threads(
         } else {
             thread.is_flagged
         };
+
+        // Steady-state syncs re-apply identical snapshots; comparing the
+        // merged values against the stored rows skips the rewrite and
+        // keeps the search index untouched for unchanged threads.
+        if let Some(existing_id) = existing_thread_id
+            && stored_thread_matches(
+                transaction,
+                existing_id,
+                thread,
+                thread_flagged,
+                unread_count,
+                &merged_messages,
+            )?
+        {
+            kept_thread_ids.insert(existing_id);
+            continue;
+        }
+        changed = true;
 
         let thread_row_id = match existing_thread_id {
             Some(existing_id) => {
@@ -3630,7 +3674,163 @@ fn merge_mailbox_threads(
         kept_thread_ids.insert(thread_row_id);
     }
 
-    Ok(kept_thread_ids)
+    Ok((kept_thread_ids, changed))
+}
+
+/// Returns `true` when the stored thread already matches the merged
+/// snapshot values exactly, so the merge can skip rewriting it.
+fn stored_thread_matches(
+    transaction: &Transaction<'_>,
+    thread_id: i64,
+    thread: &ThreadSnapshot,
+    thread_flagged: bool,
+    unread_count: usize,
+    merged_messages: &[(&MessageSnapshot, bool, bool, i64)],
+) -> Result<bool> {
+    let stored_thread = match load_stored_thread(transaction, thread_id)? {
+        Some(stored) => stored,
+        None => return Ok(false),
+    };
+
+    if stored_thread.subject != thread.subject
+        || stored_thread.participants != thread.participants
+        || stored_thread.preview != thread.preview
+        || stored_thread.is_flagged != thread_flagged
+        || stored_thread.has_attachments != thread.has_attachments
+        || stored_thread.message_count != thread.messages.len()
+        || stored_thread.unread_count != unread_count
+        || stored_thread.latest_message_at != thread.latest_message_at
+    {
+        return Ok(false);
+    }
+
+    let stored_messages = load_stored_messages(transaction, thread_id)?;
+    if stored_messages.len() != merged_messages.len() {
+        return Ok(false);
+    }
+
+    let stored_by_remote_id: std::collections::HashMap<&str, &StoredMessage> = stored_messages
+        .iter()
+        .map(|message| (message.remote_id.as_str(), message))
+        .collect();
+    if stored_by_remote_id.len() != stored_messages.len() {
+        return Ok(false);
+    }
+
+    for (message, is_read, is_flagged, identity_id) in merged_messages {
+        let Some(stored) = stored_by_remote_id.get(message.remote_id.as_str()) else {
+            return Ok(false);
+        };
+        if stored.identity_id != *identity_id
+            || stored.sender != message.sender
+            || stored.recipients != message.recipients
+            || stored.subject != message.subject
+            || stored.body_preview != message.body_preview
+            || stored.body_text != message.body_text
+            || stored.sanitized_html != message.sanitized_html
+            || stored.has_remote_content != message.has_remote_content
+            || stored.is_read != *is_read
+            || stored.is_flagged != *is_flagged
+            || stored.received_at != message.received_at
+        {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+/// The stored form of a thread row for merge comparisons.
+struct StoredThread {
+    subject: String,
+    participants: String,
+    preview: String,
+    is_flagged: bool,
+    has_attachments: bool,
+    message_count: usize,
+    unread_count: usize,
+    latest_message_at: String,
+}
+
+/// The stored form of a message row for merge comparisons.
+struct StoredMessage {
+    remote_id: String,
+    identity_id: i64,
+    sender: String,
+    recipients: String,
+    subject: String,
+    body_preview: String,
+    body_text: Option<String>,
+    sanitized_html: Option<String>,
+    has_remote_content: bool,
+    is_read: bool,
+    is_flagged: bool,
+    received_at: String,
+}
+
+/// Loads a thread row for merge comparison.
+fn load_stored_thread(
+    transaction: &Transaction<'_>,
+    thread_id: i64,
+) -> Result<Option<StoredThread>> {
+    transaction
+        .query_row(
+            r#"
+            SELECT subject, participants, preview, is_flagged, has_attachments,
+                   message_count, unread_count, latest_message_at
+            FROM threads
+            WHERE id = ?1
+            "#,
+            params![thread_id],
+            |row| {
+                Ok(StoredThread {
+                    subject: row.get(0)?,
+                    participants: row.get(1)?,
+                    preview: row.get(2)?,
+                    is_flagged: row.get(3)?,
+                    has_attachments: row.get(4)?,
+                    message_count: row.get::<_, usize>(5)?,
+                    unread_count: row.get::<_, usize>(6)?,
+                    latest_message_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .context("failed to load the stored thread for the merge comparison")
+}
+
+/// Loads a thread's message rows for merge comparison.
+fn load_stored_messages(
+    transaction: &Transaction<'_>,
+    thread_id: i64,
+) -> Result<Vec<StoredMessage>> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT COALESCE(remote_id, ''), identity_id, sender, recipients, subject,
+               body_preview, body_text, sanitized_html, has_remote_content,
+               is_read, is_flagged, received_at
+        FROM messages
+        WHERE thread_id = ?1
+        "#,
+    )?;
+    let rows = statement.query_map(params![thread_id], |row| {
+        Ok(StoredMessage {
+            remote_id: row.get(0)?,
+            identity_id: row.get(1)?,
+            sender: row.get(2)?,
+            recipients: row.get(3)?,
+            subject: row.get(4)?,
+            body_preview: row.get(5)?,
+            body_text: row.get(6)?,
+            sanitized_html: row.get(7)?,
+            has_remote_content: row.get(8)?,
+            is_read: row.get(9)?,
+            is_flagged: row.get(10)?,
+            received_at: row.get(11)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to load the stored messages for the merge comparison")
 }
 
 /// Removes threads of a mailbox that the snapshot no longer contains.
@@ -3638,7 +3838,7 @@ fn prune_mailbox_threads(
     transaction: &Transaction<'_>,
     mailbox_id: i64,
     kept_thread_ids: &HashSet<i64>,
-) -> Result<()> {
+) -> Result<bool> {
     let stale_ids: Vec<i64> = {
         let mut statement = transaction.prepare("SELECT id FROM threads WHERE mailbox_id = ?1")?;
         let rows = statement.query_map(params![mailbox_id], |row| row.get::<_, i64>(0))?;
@@ -3649,12 +3849,13 @@ fn prune_mailbox_threads(
             .collect()
     };
 
+    let pruned = !stale_ids.is_empty();
     for thread_id in stale_ids {
         transaction
             .execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
             .context("failed to remove a thread missing from the snapshot merge")?;
     }
-    Ok(())
+    Ok(pruned)
 }
 
 /// Loads the locally set flag state of a thread.
@@ -4116,6 +4317,97 @@ mod tests {
             store.dead_op_count(account_id).expect("count should load"),
             0,
             "discarding removes the dead record"
+        );
+    }
+
+    #[test]
+    fn snapshot_remerge_skips_unchanged_threads() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        store
+            .replace_account_snapshot(
+                account_id,
+                &merge_test_snapshot(
+                    "Stable subject",
+                    "Stable body",
+                    "thread-7",
+                    "message-7",
+                    None,
+                ),
+            )
+            .expect("snapshot should apply");
+
+        let mailbox_id = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes should load")[0]
+            .id;
+        let thread_id = store
+            .list_threads(mailbox_id, 0..1)
+            .expect("threads should load")[0]
+            .id;
+        let before = store
+            .thread_view(thread_id)
+            .expect("thread view should load")
+            .expect("thread view should exist");
+        let before_message_ids: Vec<i64> = before.messages.iter().map(|m| m.id).collect();
+        assert_eq!(before_message_ids.len(), 1);
+
+        // Re-applying the identical snapshot must not rewrite the thread:
+        // the message row ids stay the same instead of being re-inserted.
+        store
+            .replace_account_snapshot(
+                account_id,
+                &merge_test_snapshot(
+                    "Stable subject",
+                    "Stable body",
+                    "thread-7",
+                    "message-7",
+                    None,
+                ),
+            )
+            .expect("identical re-merge should apply");
+
+        let after = store
+            .thread_view(thread_id)
+            .expect("thread view should load")
+            .expect("thread view should exist");
+        let after_message_ids: Vec<i64> = after.messages.iter().map(|m| m.id).collect();
+        assert_eq!(
+            before_message_ids, after_message_ids,
+            "unchanged threads are not rewritten"
+        );
+
+        // Search still finds the thread and a real change still updates it.
+        let hits = store
+            .search_threads(account_id, "Stable", 10)
+            .expect("search should run");
+        assert!(
+            !hits.is_empty(),
+            "the search index stays intact after a skipped merge"
+        );
+
+        store
+            .replace_account_snapshot(
+                account_id,
+                &merge_test_snapshot(
+                    "Changed subject",
+                    "Stable body",
+                    "thread-7",
+                    "message-7",
+                    None,
+                ),
+            )
+            .expect("changed re-merge should apply");
+        let thread = store
+            .list_threads(mailbox_id, 0..1)
+            .expect("threads should load")[0]
+            .clone();
+        assert_eq!(
+            thread.subject, "Changed subject",
+            "changed threads are still rewritten"
         );
     }
 
