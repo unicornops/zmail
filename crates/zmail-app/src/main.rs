@@ -1098,8 +1098,24 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, String)> {
     let secret = match auth {
         AuthKind::Password => rpassword::prompt_password("Password or app password: ")
             .context("failed to read the account password")?,
-        AuthKind::OAuth2 => rpassword::prompt_password("OAuth2 access token: ")
-            .context("failed to read the OAuth2 access token")?,
+        AuthKind::OAuth2 => {
+            if prompt_yes_no("Run the browser authorization flow (PKCE)?", true)? {
+                let client = prompt_oauth2_client()?;
+                let tokens = client.authorize_interactively()?;
+                println!(
+                    "Received an access token{}.",
+                    if tokens.refresh_token.is_some() {
+                        " and a refresh token"
+                    } else {
+                        ""
+                    }
+                );
+                tokens.access_token
+            } else {
+                rpassword::prompt_password("OAuth2 access token: ")
+                    .context("failed to read the OAuth2 access token")?
+            }
+        }
     };
     let identity_name = prompt_with_default("Primary identity name", &display_name)?;
     let identity_email = prompt_with_default("Primary identity email", &username)?;
@@ -1147,6 +1163,31 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, String)> {
         },
         secret,
     ))
+}
+
+/// Prompts for the OAuth2 client configuration used by the browser flow.
+///
+/// Provider presets (Gmail, Microsoft 365) pre-fill these values in a
+/// follow-up; today the endpoints are entered per account.
+fn prompt_oauth2_client() -> Result<zmail_auth::OAuth2Client> {
+    let client_id = prompt("OAuth2 client id")?;
+    let authorization_endpoint = prompt("Authorization endpoint URL")?;
+    let token_endpoint = prompt("Token endpoint URL")?;
+    let scopes = prompt_with_default("Scopes (space-separated)", "email")?
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let redirect_port: u16 = prompt_with_default("Local redirect port", "8357")?
+        .parse()
+        .context("the redirect port must be a number")?;
+    Ok(zmail_auth::OAuth2Client {
+        client_id,
+        client_secret: None,
+        authorization_endpoint,
+        token_endpoint,
+        scopes,
+        redirect_port,
+    })
 }
 
 fn fixture_imap_account(endpoint: &str, username: &str, email: &str) -> NewAccount {
