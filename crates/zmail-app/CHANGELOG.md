@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0](https://github.com/unicornops/zmail/compare/v0.2.0...v0.3.0) (2026-10-07)
+
+
+### Features
+
+* add a store benchmark harness ([#59](https://github.com/unicornops/zmail/issues/59)) ([017d3ba8f9332dc20187fc9025a3d45df59001b5](https://github.com/unicornops/zmail/commit/017d3ba8f9332dc20187fc9025a3d45df59001b5)), closes [#51](https://github.com/unicornops/zmail/issues/51)
+* **auth:** support IMAP XOAUTH2 bearer-token authentication ([#63](https://github.com/unicornops/zmail/issues/63)) ([5bb0f8615fe84593eac416290582dd3e846efa27](https://github.com/unicornops/zmail/commit/5bb0f8615fe84593eac416290582dd3e846efa27))
+* dead-letter write-back operations after five failures ([#56](https://github.com/unicornops/zmail/issues/56)) ([e0912cc4bbb879b73d6166cb4a413d63028818e0](https://github.com/unicornops/zmail/commit/e0912cc4bbb879b73d6166cb4a413d63028818e0)), closes [#48](https://github.com/unicornops/zmail/issues/48)
+* define the deletion policy with an explicit empty-trash command ([#58](https://github.com/unicornops/zmail/issues/58)) ([5189d0fc0f6d8c9abf394255cee6928fe594fffb](https://github.com/unicornops/zmail/commit/5189d0fc0f6d8c9abf394255cee6928fe594fffb)), closes [#49](https://github.com/unicornops/zmail/issues/49)
+* group IMAP messages into conversations ([#54](https://github.com/unicornops/zmail/issues/54)) ([75d969ce1f8ab3a0f4d4b11b66bebccc72961317](https://github.com/unicornops/zmail/commit/75d969ce1f8ab3a0f4d4b11b66bebccc72961317)), closes [#41](https://github.com/unicornops/zmail/issues/41)
+* handle mailto URLs on launch ([#55](https://github.com/unicornops/zmail/issues/55)) ([3438ef2063f8daf697ccdbfd87e0b2b922f9e7eb](https://github.com/unicornops/zmail/commit/3438ef2063f8daf697ccdbfd87e0b2b922f9e7eb)), closes [#42](https://github.com/unicornops/zmail/issues/42)
+* push new mail for JMAP accounts through the event source ([#62](https://github.com/unicornops/zmail/issues/62)) ([84fac604c74cc3f43acb46ff71c3f44e572dd9dc](https://github.com/unicornops/zmail/commit/84fac604c74cc3f43acb46ff71c3f44e572dd9dc)), closes [#47](https://github.com/unicornops/zmail/issues/47)
+* skip unchanged threads during snapshot merges ([#61](https://github.com/unicornops/zmail/issues/61)) ([9d2511aa001351164a9715a88207af513fb1e6df](https://github.com/unicornops/zmail/commit/9d2511aa001351164a9715a88207af513fb1e6df)), closes [#60](https://github.com/unicornops/zmail/issues/60)
+* watch accounts added after launch ([#52](https://github.com/unicornops/zmail/issues/52)) ([eb072ffdf63672f09d8bfe4ab45eb96331def7ce](https://github.com/unicornops/zmail/commit/eb072ffdf63672f09d8bfe4ab45eb96331def7ce)), closes [#38](https://github.com/unicornops/zmail/issues/38)
+
+### Bug Fixes
+
+* build the Linux package with cargo-deb's release defaults ([#37](https://github.com/unicornops/zmail/issues/37)) ([afb7b65f03b31d3b85fcb315778ac4c60c3e0042](https://github.com/unicornops/zmail/commit/afb7b65f03b31d3b85fcb315778ac4c60c3e0042))
+* capture the release screenshot from the release workflow chain ([#53](https://github.com/unicornops/zmail/issues/53)) ([f51d0701195748a3d6f47afe627f3a4dafd181a6](https://github.com/unicornops/zmail/commit/f51d0701195748a3d6f47afe627f3a4dafd181a6)), closes [#39](https://github.com/unicornops/zmail/issues/39)
+
 ## [0.2.0](https://github.com/unicornops/zmail/compare/v0.1.0...v0.2.0) (2026-10-07)
 
 
