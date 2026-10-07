@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::runtime::Builder;
-use zmail_core::{CachePolicySummary, NewAccount, NewIdentity, OutgoingConfig, ProtocolKind};
+use zmail_core::{
+    AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutgoingConfig, ProtocolKind,
+};
 use zmail_security::{InMemorySecretStore, SecretStore};
 use zmail_smtp::{SubmissionConfig, SubmissionSecurity, SubmittedMessage, submit_text_message};
 use zmail_store::LocalStore;
@@ -143,6 +145,7 @@ fn imap_account() -> NewAccount {
     NewAccount {
         display_name: "Phase 2b Harness".to_owned(),
         protocol: ProtocolKind::Imap,
+        auth: AuthKind::Password,
         endpoint: MAIL_HARNESS_IMAP_ENDPOINT.to_owned(),
         username: MAIL_HARNESS_RECIPIENT_LOGIN.to_owned(),
         cache_policy: CachePolicySummary::performance_first(),

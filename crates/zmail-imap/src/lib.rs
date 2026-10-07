@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_imap::{
-    Client, Session,
+    Authenticator, Client, Session,
     types::{Fetch, Flag, Mailbox, Name, NameAttribute},
 };
 use futures_util::TryStreamExt;
@@ -25,8 +25,8 @@ use tokio_rustls::{
 };
 use url::Url;
 use zmail_core::{
-    AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, OpApplyReport, PendingOp, PendingOpKind,
-    ProtocolKind, SyncTarget, ThreadSnapshot,
+    AccountSyncSnapshot, AuthKind, MailboxSnapshot, MessageSnapshot, OpApplyReport, PendingOp,
+    PendingOpKind, ProtocolKind, SyncTarget, ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -73,7 +73,7 @@ pub async fn discover_and_sync(
         .or_else(|| target.identities.first())
         .map(|identity| identity.email_address.as_str())
         .unwrap_or(target.username.as_str());
-    let mut session = connect_session(&endpoint, &target.username, secret).await?;
+    let mut session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
     let mailbox_names = list_mailboxes(&mut session).await?;
     let checkpoint = ImapCheckpoint::from_json(target.checkpoint.as_deref())?;
     let existing = existing_mailbox_map(existing_mailboxes);
@@ -190,7 +190,7 @@ pub async fn wait_for_mail_changes(
     }
 
     let endpoint = parse_endpoint(&target.endpoint)?;
-    let mut session = connect_session(&endpoint, &target.username, secret).await?;
+    let mut session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
     session
         .select("INBOX")
         .await
@@ -232,7 +232,7 @@ pub async fn empty_trash(
     }
 
     let endpoint = parse_endpoint(&target.endpoint)?;
-    let mut session = connect_session(&endpoint, &target.username, secret).await?;
+    let mut session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
     let status = session
         .select(trash_mailbox_name)
         .await
@@ -276,7 +276,7 @@ pub async fn apply_pending_ops(
     }
 
     let endpoint = parse_endpoint(&target.endpoint)?;
-    let mut session = connect_session(&endpoint, &target.username, secret).await?;
+    let mut session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
     let mut report = OpApplyReport::default();
 
     let mut by_mailbox: BTreeMap<&str, Vec<&PendingOp>> = BTreeMap::new();
@@ -476,10 +476,33 @@ fn parse_endpoint(endpoint: &str) -> Result<ImapEndpoint> {
     })
 }
 
+/// SASL XOAUTH2 string for IMAP bearer-token authentication.
+///
+/// The value is the clear-text mechanism response; the IMAP client base64-encodes
+/// it before sending it to the server.
+fn xoauth2_response(username: &str, token: &str) -> Vec<u8> {
+    format!("user={username}\x01auth=Bearer {token}\x01\x01").into_bytes()
+}
+
+/// [`Authenticator`] that answers the XOAUTH2 challenge with a bearer token.
+struct Xoauth2Authenticator<'a> {
+    username: &'a str,
+    token: &'a str,
+}
+
+impl Authenticator for Xoauth2Authenticator<'_> {
+    type Response = Vec<u8>;
+
+    fn process(&mut self, _challenge: &[u8]) -> Self::Response {
+        xoauth2_response(self.username, self.token)
+    }
+}
+
 async fn connect_session(
     endpoint: &ImapEndpoint,
     username: &str,
     secret: &str,
+    auth: AuthKind,
 ) -> Result<Session<DynImapStream>> {
     ensure_rustls_provider();
 
@@ -526,11 +549,24 @@ async fn connect_session(
         .context("failed to read the IMAP greeting")?
         .context("the IMAP server closed the connection before greeting")?;
 
-    client
-        .login(username, secret)
-        .await
-        .map_err(|(error, _)| anyhow!(error))
-        .context("IMAP authentication failed")
+    match auth {
+        AuthKind::Password => client
+            .login(username, secret)
+            .await
+            .map_err(|(error, _)| anyhow!(error))
+            .context("IMAP authentication failed"),
+        AuthKind::OAuth2 => {
+            let authenticator = Xoauth2Authenticator {
+                username,
+                token: secret,
+            };
+            client
+                .authenticate("XOAUTH2", authenticator)
+                .await
+                .map_err(|(error, _)| anyhow!(error))
+                .context("IMAP XOAUTH2 authentication failed")
+        }
+    }
 }
 
 async fn list_mailboxes(session: &mut Session<DynImapStream>) -> Result<Vec<Name>> {
@@ -1068,9 +1104,18 @@ mod tests {
 
     use super::{
         ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, conversation_key, excerpt, guess_role,
-        parse_endpoint, recompute_thread_aggregates,
+        parse_endpoint, recompute_thread_aggregates, xoauth2_response,
     };
     use zmail_core::{MessageSnapshot, ThreadSnapshot};
+
+    #[test]
+    fn xoauth2_response_matches_the_sasl_mechanism_format() {
+        let response = xoauth2_response("user@example.test", "token-1234");
+        assert_eq!(
+            String::from_utf8(response).expect("the XOAUTH2 response is UTF-8"),
+            "user=user@example.test\x01auth=Bearer token-1234\x01\x01"
+        );
+    }
 
     #[test]
     fn parses_imap_endpoints() {

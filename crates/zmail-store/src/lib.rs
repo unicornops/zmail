@@ -15,13 +15,13 @@ use std::{
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use zmail_core::{
-    AccountOverview, AccountSummary, AccountSyncSnapshot, CachePolicySummary, DeliveryTarget,
-    DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate, IdentitySummary,
-    MailboxSnapshot, MailboxSummary, MessagePreview, MessageRenderMode, MessageSnapshot,
-    NewAccount, NewDraft, OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig,
-    OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, SearchHit,
-    StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget,
-    ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
+    AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, CachePolicySummary,
+    DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate,
+    IdentitySummary, MailboxSnapshot, MailboxSummary, MessagePreview, MessageRenderMode,
+    MessageSnapshot, NewAccount, NewDraft, OutboxJobState, OutboxJobSummary, OutgoingAttachment,
+    OutgoingConfig, OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind,
+    SearchHit, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary,
+    SyncTarget, ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -37,6 +37,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0005_stable_remote_ids", STABLE_REMOTE_ID_SCHEMA),
     ("0006_pending_ops", PENDING_OPS_SCHEMA),
     ("0007_pending_op_states", PENDING_OP_STATES_SCHEMA),
+    ("0008_account_auth_kind", ACCOUNT_AUTH_KIND_SCHEMA),
 ];
 
 const PHASE2_SCHEMA: &str = r#"
@@ -253,6 +254,10 @@ CREATE TABLE IF NOT EXISTS pending_ops (
 CREATE INDEX IF NOT EXISTS idx_pending_ops_account ON pending_ops(account_id, id);
 "#;
 
+const ACCOUNT_AUTH_KIND_SCHEMA: &str = r#"
+ALTER TABLE accounts ADD COLUMN auth_kind TEXT NOT NULL DEFAULT 'password';
+"#;
+
 const PENDING_OP_STATES_SCHEMA: &str = r#"
 ALTER TABLE pending_ops ADD COLUMN state TEXT NOT NULL DEFAULT 'pending';
 CREATE INDEX IF NOT EXISTS idx_pending_ops_state ON pending_ops(account_id, state);
@@ -319,6 +324,7 @@ impl LocalStore {
             INSERT INTO accounts(
                 display_name,
                 protocol_kind,
+                auth_kind,
                 endpoint,
                 username,
                 cache_policy_name,
@@ -331,11 +337,12 @@ impl LocalStore {
                 submission_hello_name,
                 updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             "#,
             params![
                 account.display_name,
                 account.protocol.as_str(),
+                account.auth.as_str(),
                 account.endpoint,
                 account.username,
                 account.cache_policy.name,
@@ -433,6 +440,7 @@ impl LocalStore {
         let account = NewAccount {
             display_name,
             protocol,
+            auth: AuthKind::Password,
             endpoint,
             username: username.clone(),
             cache_policy: CachePolicySummary::performance_first(),
@@ -555,6 +563,7 @@ impl LocalStore {
                     id,
                     display_name,
                     protocol_kind,
+                    auth_kind,
                     endpoint,
                     username,
                     cache_policy_name,
@@ -568,18 +577,27 @@ impl LocalStore {
                         row.get::<_, i64>(0)?,
                         row.get::<_, String>(1)?,
                         protocol_from_db(row.get::<_, String>(2)?)?,
-                        row.get::<_, String>(3)?,
+                        auth_kind_from_db(row.get::<_, String>(3)?)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
                     ))
                 },
             )
             .optional()
             .context("failed to load the sync target")?;
 
-        let Some((id, display_name, protocol, endpoint, username, policy_name, policy_description)) =
-            account
+        let Some((
+            id,
+            display_name,
+            protocol,
+            auth,
+            endpoint,
+            username,
+            policy_name,
+            policy_description,
+        )) = account
         else {
             return Ok(None);
         };
@@ -599,6 +617,7 @@ impl LocalStore {
             id,
             display_name,
             protocol,
+            auth,
             endpoint,
             username,
             cache_policy: CachePolicySummary {
@@ -3968,6 +3987,19 @@ fn load_message_flags(
         .collect())
 }
 
+fn auth_kind_from_db(value: String) -> rusqlite::Result<AuthKind> {
+    AuthKind::parse(&value).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown auth kind {value}"),
+            )),
+        )
+    })
+}
+
 fn protocol_from_db(value: String) -> rusqlite::Result<ProtocolKind> {
     ProtocolKind::parse(&value).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -4008,8 +4040,9 @@ mod tests {
 
     use super::LocalStore;
     use zmail_core::{
-        AccountSyncSnapshot, DraftState, MailboxSnapshot, MessageRenderMode, MessageSnapshot,
-        NewDraft, NewIdentity, PendingOpKind, ProtocolKind, SyncPhase, ThreadSnapshot,
+        AccountSyncSnapshot, AuthKind, CachePolicySummary, DraftState, MailboxSnapshot,
+        MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, NewIdentity, PendingOpKind,
+        ProtocolKind, SyncPhase, ThreadSnapshot,
     };
 
     #[test]
@@ -4029,6 +4062,43 @@ mod tests {
         let targets = store.list_sync_targets().expect("targets should load");
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].identities.len(), 2);
+    }
+
+    #[test]
+    fn sync_target_preserves_the_account_auth_kind() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .insert_account(&NewAccount {
+                display_name: "OAuth2 Account".to_owned(),
+                protocol: ProtocolKind::Imap,
+                auth: AuthKind::OAuth2,
+                endpoint: "imaps://mail.example.com:993".to_owned(),
+                username: "user@example.com".to_owned(),
+                cache_policy: CachePolicySummary::performance_first(),
+                outgoing: None,
+                identities: vec![NewIdentity {
+                    display_name: "OAuth2 Account".to_owned(),
+                    email_address: "user@example.com".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }],
+            })
+            .expect("the account should be inserted");
+
+        let target = store
+            .sync_target(account_id)
+            .expect("the sync target should load")
+            .expect("the sync target should exist");
+        assert_eq!(target.auth, AuthKind::OAuth2);
+
+        let legacy = store
+            .create_demo_account(ProtocolKind::Jmap)
+            .expect("the demo account should be created");
+        let target = store
+            .sync_target(legacy)
+            .expect("the sync target should load")
+            .expect("the sync target should exist");
+        assert_eq!(target.auth, AuthKind::Password);
     }
 
     #[test]

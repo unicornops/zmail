@@ -4,7 +4,9 @@ use std::{sync::Arc, thread, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use tokio::runtime::Builder;
-use zmail_core::{CachePolicySummary, NewAccount, NewIdentity, OutgoingConfig, ProtocolKind};
+use zmail_core::{
+    AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutgoingConfig, ProtocolKind,
+};
 use zmail_security::{InMemorySecretStore, SecretStore};
 use zmail_smtp::{SubmissionConfig, SubmissionSecurity, SubmittedMessage, submit_text_message};
 use zmail_store::LocalStore;
@@ -159,6 +161,7 @@ fn jmap_account() -> NewAccount {
     NewAccount {
         display_name: "Phase 2b JMAP Harness".to_owned(),
         protocol: ProtocolKind::Jmap,
+        auth: AuthKind::Password,
         endpoint: MAIL_HARNESS_JMAP_ENDPOINT.to_owned(),
         username: MAIL_HARNESS_JMAP_ACCOUNT.to_owned(),
         cache_policy: CachePolicySummary::performance_first(),
