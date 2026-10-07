@@ -16,6 +16,13 @@ This document records the Phase 5 hardening work that is present in-repo today a
 - Local browsing, mailbox switching, and search continue to read from the local mirror rather than from network paths.
 - Phase 5 adds tests that assert sync and outbox scheduling return immediately instead of waiting on slow background work.
 
+## Mailbox Deletion Policy
+
+- Deletion moves messages to the account's trash mailbox whenever the server reports one; the write-back queue applies the move to the server on the next sync.
+- When no trash mailbox exists, destroyed messages are only marked `\Deleted` on the server — never expunged — so deletion stays reversible.
+- Expunging happens exclusively through the explicit `zmail-app empty-trash ACCOUNT` command: it selects the trash mailbox read-write, marks every message `\Deleted`, and issues `EXPUNGE` within that mailbox only, followed by a sync to refresh the local mirror.
+- JMAP accounts have no dangling state: `Email/set` destroy removes messages server-side immediately, and trash semantics follow the server's own handling.
+
 ## Crash And Error Reporting Policy
 
 - Zmail does not upload crash reports or telemetry automatically.

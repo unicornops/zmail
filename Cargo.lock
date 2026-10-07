@@ -8042,6 +8042,7 @@ dependencies = [
  "url",
  "zmail-assets",
  "zmail-core",
+ "zmail-imap",
  "zmail-security",
  "zmail-store",
  "zmail-sync",

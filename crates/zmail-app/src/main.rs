@@ -58,6 +58,7 @@ fn main() -> Result<()> {
         Command::DeadOps { account_id } => list_dead_ops(account_id),
         Command::RetryOp(op_id) => retry_dead_op(op_id),
         Command::DiscardOp(op_id) => discard_dead_op(op_id),
+        Command::EmptyTrash(account_id) => empty_trash(account_id),
         Command::Help => {
             print_help();
             Ok(())
@@ -82,6 +83,7 @@ enum Command {
     },
     RetryOp(i64),
     DiscardOp(i64),
+    EmptyTrash(i64),
     ExportAccount {
         account_id: i64,
         path: String,
@@ -297,6 +299,12 @@ impl Command {
                     .context("discard-op requires a dead operation id")?
                     .parse::<i64>()
                     .context("operation id must be an integer")?,
+            )),
+            "empty-trash" => Ok(Self::EmptyTrash(
+                args.next()
+                    .context("empty-trash requires an account id")?
+                    .parse::<i64>()
+                    .context("account id must be an integer")?,
             )),
             "export-account" => Ok(Self::ExportAccount {
                 account_id: args
@@ -932,6 +940,36 @@ fn discard_dead_op(op_id: i64) -> Result<()> {
     Ok(())
 }
 
+fn empty_trash(account_id: i64) -> Result<()> {
+    let store = Arc::new(open_store().context("failed to open the local store")?);
+    let trash_name = store
+        .mailbox_name_by_role(account_id, "trash")?
+        .with_context(|| format!("account {account_id} has no trash mailbox"))?;
+
+    println!(
+        "This expunges every message in the {trash_name} mailbox of account {account_id} on the server."
+    );
+
+    let target = store
+        .sync_target(account_id)?
+        .with_context(|| format!("account {account_id} no longer exists"))?;
+
+    let runtime = BackgroundRuntime::start(4)?;
+    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+    let secret = secrets
+        .get_account_secret(account_id)
+        .context("failed to read the account credentials")?;
+    let expunged =
+        runtime
+            .handle()
+            .block_on(zmail_imap::empty_trash(&target, &secret, &trash_name))?;
+
+    println!("Expunged {expunged} message(s) from {trash_name}; syncing the local mirror.");
+    let sync_service = SyncService::new(runtime.handle().clone(), store, secrets);
+    let _ = sync_service.sync_account_and_wait(account_id);
+    Ok(())
+}
+
 fn create_backup(directory: Option<&str>) -> Result<()> {
     let store = open_store().context("failed to open the local store")?;
     let directory = match directory {
@@ -1309,6 +1347,7 @@ fn print_help() {
     println!("  zmail-app dead-ops [ACCOUNT]");
     println!("  zmail-app retry-op OPERATION");
     println!("  zmail-app discard-op OPERATION");
+    println!("  zmail-app empty-trash ACCOUNT");
 }
 
 fn open_store() -> Result<LocalStore> {
