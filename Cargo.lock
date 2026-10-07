@@ -8302,7 +8302,7 @@ name = "zmail-auth"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "rand 0.8.5",
+ "rand 0.8.6",
  "reqwest",
  "serde_json",
  "sha2",
