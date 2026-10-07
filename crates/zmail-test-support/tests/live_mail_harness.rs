@@ -82,6 +82,12 @@ fn syncs_preloaded_mail_and_round_trips_smtp_submission() -> Result<()> {
         "message count should increase after SMTP submission"
     );
 
+    // Lazy sync stores headers only; the round-trip body arrives on demand.
+    let hydrated = runtime
+        .handle()
+        .block_on(sync_service.hydrate_thread_body_and_wait(account_id, roundtrip_thread.id))?;
+    assert_eq!(hydrated, 1, "the round-trip message body should hydrate");
+
     let preview = store
         .message_preview(roundtrip_thread.id)?
         .context("roundtrip thread should have a preview")?;
@@ -198,6 +204,11 @@ fn syncs_attachments_and_saves_the_original_bytes() -> Result<()> {
         .find(|thread| thread.subject == "Phase 2b attachment roundtrip")
         .context("the attachment message should sync into the inbox")?;
 
+    let hydrated = runtime
+        .handle()
+        .block_on(sync_service.hydrate_thread_body_and_wait(account_id, thread.id))?;
+    assert_eq!(hydrated, 1, "the attachment message body should hydrate");
+
     let view = store
         .thread_view(thread.id)?
         .context("the attachment thread should load")?;
@@ -219,6 +230,96 @@ fn syncs_attachments_and_saves_the_original_bytes() -> Result<()> {
     );
 
     let _ = std::fs::remove_dir_all(&destination);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn hydrates_bodies_lazily_and_survives_offline_opens() -> Result<()> {
+    use zmail_core::MessageRenderMode;
+
+    let _harness_lock = live_harness_lock();
+    let harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&imap_account())?;
+
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_RECIPIENT_PASSWORD)?;
+
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.sync_account_and_wait(account_id)?;
+
+    let inbox_mailbox_id = inbox_id(&store, account_id)?;
+    let threads = store.list_threads(inbox_mailbox_id, 0..50)?;
+    let preloaded = threads
+        .iter()
+        .find(|thread| thread.subject == MAIL_HARNESS_PRELOADED_SUBJECT)
+        .context("the preloaded message should sync")?;
+
+    // Headers-only sync: the body is absent and the reader falls back to
+    // the preview.
+    let view = store
+        .thread_view(preloaded.id)?
+        .context("the preloaded thread should load")?;
+    assert_eq!(view.messages[0].render_mode, MessageRenderMode::PreviewOnly);
+
+    // Opening hydrates the body and records its preview.
+    let missing = store
+        .messages_missing_bodies(preloaded.id)?
+        .context("the thread should exist")?;
+    assert_eq!(missing.len(), 1, "one message awaits hydration");
+    let started = std::time::Instant::now();
+    let hydrated = runtime
+        .handle()
+        .block_on(sync_service.hydrate_thread_body_and_wait(account_id, preloaded.id))?;
+    assert_eq!(hydrated, 1);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "hydration should complete within a second on the harness"
+    );
+    let view = store
+        .thread_view(preloaded.id)?
+        .context("the preloaded thread should load")?;
+    assert_ne!(view.messages[0].render_mode, MessageRenderMode::PreviewOnly);
+    assert!(
+        store
+            .messages_missing_bodies(preloaded.id)?
+            .expect("the thread should exist")
+            .is_empty(),
+        "hydration drains the missing list"
+    );
+
+    // A later sync must not wipe the hydrated body: the merge keeps local
+    // bodies the header-only snapshot cannot re-supply.
+    sync_service.sync_account_and_wait(account_id)?;
+    let view = store
+        .thread_view(preloaded.id)?
+        .context("the preloaded thread should load")?;
+    assert_ne!(
+        view.messages[0].render_mode,
+        MessageRenderMode::PreviewOnly,
+        "syncs must preserve hydrated bodies"
+    );
+
+    // Offline opens keep the preview instead of surfacing an error.
+    harness.down()?;
+    let hydrate_result = runtime
+        .handle()
+        .block_on(sync_service.hydrate_thread_body_and_wait(account_id, preloaded.id));
+    assert!(
+        hydrate_result.is_err(),
+        "hydration against a stopped server should fail"
+    );
+    let view = store
+        .thread_view(preloaded.id)?
+        .context("the preloaded thread should load")?;
+    assert_ne!(
+        view.messages[0].render_mode,
+        MessageRenderMode::PreviewOnly,
+        "the hydrated body survives a failed hydration attempt"
+    );
+
     Ok(())
 }
 

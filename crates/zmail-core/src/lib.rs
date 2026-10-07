@@ -1136,6 +1136,21 @@ pub struct MessageAttachment {
     pub storage_path: String,
 }
 
+/// A message body fetched on demand by a sync adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HydratedBody {
+    /// Full plain-text body when available.
+    pub body_text: Option<String>,
+    /// Sanitized HTML body when plain text is unavailable.
+    pub sanitized_html: Option<String>,
+    /// Whether the source body referenced remote content.
+    pub has_remote_content: bool,
+    /// Preview excerpt derived from the fetched body.
+    pub body_preview: String,
+    /// Attachments persisted alongside the fetched body.
+    pub attachments: Vec<MessageAttachment>,
+}
+
 /// Received attachment surfaced to the reader.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedAttachment {

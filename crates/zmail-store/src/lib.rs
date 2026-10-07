@@ -17,11 +17,12 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use zmail_core::{
     AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, CachePolicySummary,
     DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate,
-    IdentitySummary, MailboxSnapshot, MailboxSummary, MessagePreview, MessageRenderMode,
-    MessageSnapshot, NewAccount, NewDraft, OutboxJobState, OutboxJobSummary, OutgoingAttachment,
-    OutgoingConfig, OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind,
-    ReceivedAttachment, SearchHit, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase,
-    SyncStatusSummary, SyncTarget, ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
+    HydratedBody, IdentitySummary, MailboxSnapshot, MailboxSummary, MessageAttachment,
+    MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, OutboxJobState,
+    OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp,
+    PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, StoreStats,
+    SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget, ThreadMessage,
+    ThreadSnapshot, ThreadSummary, ThreadView,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -1281,6 +1282,117 @@ impl LocalStore {
             format!("failed to copy the attachment to {}", destination.display())
         })?;
         Ok(destination)
+    }
+
+    /// Lists the messages of a thread whose bodies are not hydrated yet,
+    /// as `(row id, remote id)` pairs. Returns `None` for a missing thread.
+    pub fn messages_missing_bodies(&self, thread_id: i64) -> Result<Option<Vec<(i64, String)>>> {
+        let conn = self.connection()?;
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM threads WHERE id = ?1",
+                params![thread_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Ok(None);
+        }
+
+        let mut statement = conn.prepare(
+            r#"
+            SELECT id, COALESCE(remote_id, '')
+            FROM messages
+            WHERE thread_id = ?1
+              AND body_text IS NULL
+              AND sanitized_html IS NULL
+            ORDER BY received_at ASC, id ASC
+            "#,
+        )?;
+        let rows = statement
+            .query_map(params![thread_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list the messages missing bodies")?;
+        Ok(Some(rows))
+    }
+
+    /// Persists a fetched body (and attachments) for one stored message.
+    ///
+    /// Existing attachment rows for the message are replaced, so a repeated
+    /// hydration cannot duplicate metadata.
+    pub fn hydrate_message_body(&self, message_id: i64, hydration: &HydratedBody) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the hydration transaction")?;
+        let thread_id: Option<i64> = transaction
+            .query_row(
+                "SELECT thread_id FROM messages WHERE id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to load the hydrated message thread")?;
+        let Some(thread_id) = thread_id else {
+            bail!("message {message_id} does not exist");
+        };
+
+        transaction
+            .execute(
+                r#"
+                UPDATE messages
+                SET body_text = ?2,
+                    sanitized_html = ?3,
+                    has_remote_content = ?4,
+                    body_preview = ?5
+                WHERE id = ?1
+                "#,
+                params![
+                    message_id,
+                    hydration.body_text,
+                    hydration.sanitized_html,
+                    hydration.has_remote_content,
+                    hydration.body_preview,
+                ],
+            )
+            .context("failed to store the hydrated body")?;
+        transaction.execute(
+            "DELETE FROM message_attachments WHERE message_id = ?1",
+            params![message_id],
+        )?;
+        for attachment in &hydration.attachments {
+            transaction
+                .execute(
+                    r#"
+                    INSERT INTO message_attachments(
+                        message_id,
+                        filename,
+                        content_type,
+                        size_bytes,
+                        storage_path
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    "#,
+                    params![
+                        message_id,
+                        attachment.filename,
+                        attachment.content_type,
+                        attachment.size_bytes as i64,
+                        attachment.storage_path,
+                    ],
+                )
+                .context("failed to store the hydrated attachment metadata")?;
+        }
+        let has_attachments = !hydration.attachments.is_empty();
+        transaction.execute(
+            "UPDATE threads SET has_attachments = MAX(has_attachments, ?2) WHERE id = ?1",
+            params![thread_id, has_attachments],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the hydration transaction")
     }
 
     /// Runs a local full-text search against the selected account.
@@ -3610,13 +3722,20 @@ fn merge_mailbox_threads(
         }
 
         let existing_thread_id = existing_threads.get(&thread.remote_thread_id).copied();
-        let (thread_flagged, message_flags) = match existing_thread_id {
-            Some(existing_id) => (
-                load_thread_flag(transaction, existing_id)?,
-                load_message_flags(transaction, existing_id)?,
-            ),
-            None => (thread.is_flagged, std::collections::HashMap::new()),
+        let (thread_flagged, thread_had_attachments, message_flags) = match existing_thread_id {
+            Some(existing_id) => {
+                let stored_thread = load_stored_thread(transaction, existing_id)?
+                    .context("the stored thread vanished during the snapshot merge")?;
+                let had_attachments = stored_thread.has_attachments;
+                (
+                    load_thread_flag(transaction, existing_id)?,
+                    had_attachments,
+                    load_message_flags(transaction, existing_id)?,
+                )
+            }
+            None => (thread.is_flagged, false, std::collections::HashMap::new()),
         };
+        let thread_has_attachments = thread.has_attachments || thread_had_attachments;
 
         // Locally changed state survives only while its write-back
         // operation is still queued; the server is authoritative elsewhere
@@ -3661,6 +3780,7 @@ fn merge_mailbox_threads(
                 existing_id,
                 thread,
                 thread_flagged,
+                thread_has_attachments,
                 unread_count,
                 &merged_messages,
             )?
@@ -3669,6 +3789,33 @@ fn merge_mailbox_threads(
             continue;
         }
         changed = true;
+
+        // Lazy adapters sync headers without bodies, and hydration is local
+        // state the server snapshot cannot re-supply. When a changed thread is
+        // rewritten, the stored bodies, previews, and attachment metadata are
+        // re-attached first so the rewrite cannot drop them.
+        let write_messages: Vec<MessageSnapshot> = match existing_thread_id {
+            Some(existing_id)
+                if thread.messages.iter().any(|message| {
+                    message.body_text.is_none() && message.sanitized_html.is_none()
+                }) || (thread_had_attachments
+                    && thread
+                        .messages
+                        .iter()
+                        .any(|message| message.attachments.is_empty())) =>
+            {
+                materialize_stored_state(transaction, existing_id, thread, thread_had_attachments)?
+            }
+            Some(_) => thread.messages.clone(),
+            None => thread.messages.clone(),
+        };
+        let merged_messages: Vec<(MessageSnapshot, bool, bool, i64)> = write_messages
+            .into_iter()
+            .zip(merged_messages)
+            .map(|(message, (_, is_read, is_flagged, identity_id))| {
+                (message, is_read, is_flagged, identity_id)
+            })
+            .collect();
 
         let thread_row_id = match existing_thread_id {
             Some(existing_id) => {
@@ -3694,7 +3841,7 @@ fn merge_mailbox_threads(
                             thread.participants,
                             thread.preview,
                             thread_flagged,
-                            thread.has_attachments,
+                            thread_has_attachments,
                             thread.messages.len() as i64,
                             unread_count as i64,
                             thread.latest_message_at,
@@ -3735,7 +3882,7 @@ fn merge_mailbox_threads(
                             thread.participants,
                             thread.preview,
                             thread_flagged,
-                            thread.has_attachments,
+                            thread_has_attachments,
                             thread.messages.len() as i64,
                             unread_count as i64,
                             thread.latest_message_at,
@@ -3833,6 +3980,7 @@ fn stored_thread_matches(
     thread_id: i64,
     thread: &ThreadSnapshot,
     thread_flagged: bool,
+    thread_has_attachments: bool,
     unread_count: usize,
     merged_messages: &[(&MessageSnapshot, bool, bool, i64)],
 ) -> Result<bool> {
@@ -3845,7 +3993,7 @@ fn stored_thread_matches(
         || stored_thread.participants != thread.participants
         || stored_thread.preview != thread.preview
         || stored_thread.is_flagged != thread_flagged
-        || stored_thread.has_attachments != thread.has_attachments
+        || stored_thread.has_attachments != thread_has_attachments
         || stored_thread.message_count != thread.messages.len()
         || stored_thread.unread_count != unread_count
         || stored_thread.latest_message_at != thread.latest_message_at
@@ -3870,21 +4018,44 @@ fn stored_thread_matches(
         let Some(stored) = stored_by_remote_id.get(message.remote_id.as_str()) else {
             return Ok(false);
         };
-        if stored.identity_id != *identity_id
+        let stored_has_body = stored.body_text.is_some() || stored.sanitized_html.is_some();
+        let incoming_has_body = message.body_text.is_some() || message.sanitized_html.is_some();
+        if incoming_has_body {
+            if stored.identity_id != *identity_id
+                || stored.sender != message.sender
+                || stored.recipients != message.recipients
+                || stored.subject != message.subject
+                || stored.body_preview != message.body_preview
+                || stored.body_text != message.body_text
+                || stored.sanitized_html != message.sanitized_html
+                || stored.has_remote_content != message.has_remote_content
+                || stored.is_read != *is_read
+                || stored.is_flagged != *is_flagged
+                || stored.received_at != message.received_at
+            {
+                return Ok(false);
+            }
+        } else if stored.identity_id != *identity_id
             || stored.sender != message.sender
             || stored.recipients != message.recipients
             || stored.subject != message.subject
-            || stored.body_preview != message.body_preview
-            || stored.body_text != message.body_text
-            || stored.sanitized_html != message.sanitized_html
-            || stored.has_remote_content != message.has_remote_content
             || stored.is_read != *is_read
             || stored.is_flagged != *is_flagged
             || stored.received_at != message.received_at
+            || (!stored_has_body && stored.body_preview != message.body_preview)
         {
+            // Lazy snapshot: the body, its preview, and the remote-content
+            // flag are local hydration state the snapshot cannot re-supply.
+            // A stored body defers entirely; body-less messages must still
+            // agree on the preview.
             return Ok(false);
         }
 
+        if message.attachments.is_empty() {
+            // Lazy snapshots cannot re-supply attachment metadata; the
+            // stored rows are authoritative.
+            continue;
+        }
         let stored_attachments = load_stored_message_attachments(transaction, stored.id)?;
         if stored_attachments.len() != message.attachments.len() {
             return Ok(false);
@@ -3902,6 +4073,16 @@ fn stored_thread_matches(
 
     Ok(true)
 }
+
+/// Hydrated state re-attached to a lazy snapshot's messages during a
+/// rewrite: body, remote-content flag, preview, and attachment metadata.
+type StoredHydration = (
+    Option<String>,
+    Option<String>,
+    bool,
+    String,
+    Vec<MessageAttachment>,
+);
 
 /// The stored form of a message attachment for merge comparisons.
 struct StoredAttachment {
@@ -4168,6 +4349,90 @@ fn load_message_flags(
         .collect())
 }
 
+/// Re-attaches the stored hydrated state to a lazy snapshot's messages.
+///
+/// Called only for threads whose rows are about to be rewritten: bodies and
+/// attachment metadata are loaded for that thread alone, so unchanged
+/// threads never pay the cost.
+fn materialize_stored_state(
+    transaction: &Transaction<'_>,
+    thread_id: i64,
+    thread: &ThreadSnapshot,
+    thread_had_attachments: bool,
+) -> Result<Vec<MessageSnapshot>> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT id, COALESCE(remote_id, ''),
+               body_text, sanitized_html, has_remote_content, body_preview
+        FROM messages
+        WHERE thread_id = ?1
+        "#,
+    )?;
+    let rows = statement
+        .query_map(params![thread_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, bool>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to load the stored bodies during the snapshot merge")?;
+
+    let mut stored: std::collections::HashMap<String, StoredHydration> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for (message_id, remote_id, body_text, sanitized_html, has_remote_content, body_preview) in rows
+    {
+        let attachments = if thread_had_attachments {
+            load_stored_message_attachments(transaction, message_id)?
+                .into_iter()
+                .map(|attachment| MessageAttachment {
+                    filename: attachment.filename,
+                    content_type: attachment.content_type,
+                    size_bytes: attachment.size_bytes,
+                    storage_path: attachment.storage_path,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        stored.insert(
+            remote_id,
+            (
+                body_text,
+                sanitized_html,
+                has_remote_content,
+                body_preview,
+                attachments,
+            ),
+        );
+    }
+
+    let mut materialized = Vec::with_capacity(thread.messages.len());
+    for message in &thread.messages {
+        let mut owned = message.clone();
+        if let Some((body_text, sanitized_html, has_remote_content, body_preview, attachments)) =
+            stored.get(&owned.remote_id)
+        {
+            let stored_has_body = body_text.is_some() || sanitized_html.is_some();
+            if owned.body_text.is_none() && owned.sanitized_html.is_none() && stored_has_body {
+                owned.body_text = body_text.clone();
+                owned.sanitized_html = sanitized_html.clone();
+                owned.has_remote_content = *has_remote_content;
+                owned.body_preview = body_preview.clone();
+            }
+            if owned.attachments.is_empty() && thread_had_attachments {
+                owned.attachments = attachments.clone();
+            }
+        }
+        materialized.push(owned);
+    }
+    Ok(materialized)
+}
+
 fn auth_kind_from_db(value: String) -> rusqlite::Result<AuthKind> {
     AuthKind::parse(&value).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -4221,9 +4486,9 @@ mod tests {
 
     use super::LocalStore;
     use zmail_core::{
-        AccountSyncSnapshot, AuthKind, CachePolicySummary, DraftState, MailboxSnapshot,
-        MessageAttachment, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, NewIdentity,
-        PendingOpKind, ProtocolKind, SyncPhase, ThreadSnapshot,
+        AccountSyncSnapshot, AuthKind, CachePolicySummary, DraftState, HydratedBody,
+        MailboxSnapshot, MessageAttachment, MessageRenderMode, MessageSnapshot, NewAccount,
+        NewDraft, NewIdentity, PendingOpKind, ProtocolKind, SyncPhase, ThreadSnapshot,
     };
 
     #[test]
@@ -5329,6 +5594,109 @@ mod tests {
             .find(|mailbox| mailbox.name == name)
             .map(|mailbox| mailbox.id)
             .expect("the mailbox should exist")
+    }
+
+    #[test]
+    fn hydrated_bodies_survive_header_only_resyncs() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        // Header-only snapshot, as the lazy IMAP adapter sends it.
+        let mut snapshot = merge_test_snapshot(
+            "Lazy subject",
+            "Lazy body",
+            "thread-lazy",
+            "message-lazy",
+            None,
+        );
+        snapshot.mailboxes[0].threads[0].messages[0].body_text = None;
+        snapshot.mailboxes[0].threads[0].messages[0].sanitized_html = None;
+        snapshot.mailboxes[0].threads[0].messages[0].body_preview =
+            "Body not downloaded.".to_owned();
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+
+        let mailbox_id = mailbox_id_by_name(&store, account_id, "Inbox");
+        let threads = store
+            .list_threads(mailbox_id, 0..10)
+            .expect("threads should load");
+        let view = store
+            .thread_view(threads[0].id)
+            .expect("the thread view should load")
+            .expect("the thread view should exist");
+        assert_eq!(view.messages[0].render_mode, MessageRenderMode::PreviewOnly);
+        let missing = store
+            .messages_missing_bodies(threads[0].id)
+            .expect("missing bodies should load")
+            .expect("the thread should exist");
+        assert_eq!(missing.len(), 1);
+
+        store
+            .hydrate_message_body(
+                missing[0].0,
+                &HydratedBody {
+                    body_text: Some("Lazy body".to_owned()),
+                    sanitized_html: None,
+                    has_remote_content: false,
+                    body_preview: "Lazy body".to_owned(),
+                    attachments: vec![MessageAttachment {
+                        filename: "notes.txt".to_owned(),
+                        content_type: "text/plain".to_owned(),
+                        size_bytes: 6,
+                        storage_path: "incoming-inbox-1-0-notes.txt".to_owned(),
+                    }],
+                },
+            )
+            .expect("hydration should persist");
+
+        let view = store
+            .thread_view(threads[0].id)
+            .expect("the thread view should load")
+            .expect("the thread view should exist");
+        assert_eq!(view.messages[0].render_mode, MessageRenderMode::PlainText);
+        assert_eq!(view.messages[0].attachments.len(), 1);
+        assert!(
+            view.has_attachments,
+            "hydration sets the thread attachment flag"
+        );
+        assert!(
+            store
+                .messages_missing_bodies(threads[0].id)
+                .expect("missing bodies should load")
+                .expect("the thread should exist")
+                .is_empty(),
+            "hydration drains the missing list"
+        );
+
+        // The next header-only sync must not wipe the hydrated state.
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("the header-only snapshot should re-apply");
+        let view = store
+            .thread_view(threads[0].id)
+            .expect("the thread view should load")
+            .expect("the thread view should exist");
+        assert_eq!(
+            view.messages[0].render_mode,
+            MessageRenderMode::PlainText,
+            "syncs must preserve hydrated bodies"
+        );
+        assert_eq!(
+            view.messages[0].attachments.len(),
+            1,
+            "syncs must preserve hydrated attachment metadata"
+        );
+        assert!(
+            view.has_attachments,
+            "syncs must preserve the thread attachment flag"
+        );
+        assert_eq!(
+            view.messages[0].body_preview, "Lazy body",
+            "syncs must keep the hydrated preview"
+        );
     }
     #[test]
     fn mbox_export_writes_message_entries() {

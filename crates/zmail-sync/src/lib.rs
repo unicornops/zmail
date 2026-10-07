@@ -227,6 +227,80 @@ impl SyncService {
             .map_err(anyhow::Error::msg)
     }
 
+    /// Fetches and stores the bodies of a thread's not-yet-hydrated messages.
+    ///
+    /// Returns `false` when the protocol has no lazy body path (JMAP syncs
+    /// bodies with the message) or when the thread has nothing to fetch.
+    pub fn hydrate_thread_body(&self, account_id: i64, thread_id: i64) -> Result<bool> {
+        let service = self.clone();
+        self.inner.handle.spawn(async move {
+            if let Err(error) = service
+                .hydrate_thread_body_and_wait(account_id, thread_id)
+                .await
+            {
+                // Offline opens keep the stored preview; hydration failures are
+                // not surfaced as errors.
+                let _ = error;
+            }
+        });
+        Ok(true)
+    }
+
+    /// Fetches and stores the bodies of a thread's not-yet-hydrated messages,
+    /// blocking until the fetch completes. Returns the number hydrated.
+    pub async fn hydrate_thread_body_and_wait(
+        &self,
+        account_id: i64,
+        thread_id: i64,
+    ) -> Result<usize> {
+        let Some(target) = self.inner.store.sync_target(account_id)? else {
+            bail!("account {account_id} no longer exists");
+        };
+        if target.protocol != ProtocolKind::Imap {
+            // JMAP delivers bodies with the sync snapshot; nothing to fetch.
+            return Ok(0);
+        }
+        let Some(missing) = self.inner.store.messages_missing_bodies(thread_id)? else {
+            bail!("thread {thread_id} does not exist");
+        };
+        if missing.is_empty() {
+            return Ok(0);
+        }
+
+        let thread = self
+            .inner
+            .store
+            .thread_view(thread_id)?
+            .with_context(|| format!("thread {thread_id} does not exist"))?;
+        let secret = self
+            .inner
+            .secrets
+            .get_account_secret(account_id)
+            .with_context(|| format!("missing credentials for account {account_id}"))?;
+
+        let uids = missing
+            .iter()
+            .filter_map(|(_, remote_id)| remote_id.parse::<u32>().ok())
+            .collect::<Vec<_>>();
+        let bodies =
+            zmail_imap::fetch_message_bodies(&target, &secret, &thread.mailbox_name, &uids).await?;
+
+        let mut by_uid = std::collections::HashMap::new();
+        for (uid, body) in bodies {
+            by_uid.insert(uid.to_string(), body);
+        }
+
+        let mut hydrated = 0;
+        for (message_id, remote_id) in &missing {
+            let Some(body) = by_uid.get(remote_id) else {
+                continue;
+            };
+            self.inner.store.hydrate_message_body(*message_id, body)?;
+            hydrated += 1;
+        }
+        Ok(hydrated)
+    }
+
     /// Installs the new-mail notifier the sync reports arrivals through.
     ///
     /// Without one, syncs run silently, which keeps CLI runs headless.

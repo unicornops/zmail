@@ -27,8 +27,9 @@ use tokio_rustls::{
 };
 use url::Url;
 use zmail_core::{
-    AccountSyncSnapshot, AuthKind, MailboxSnapshot, MessageAttachment, MessageSnapshot,
-    OpApplyReport, PendingOp, PendingOpKind, ProtocolKind, SyncTarget, ThreadSnapshot,
+    AccountSyncSnapshot, AuthKind, HydratedBody, MailboxSnapshot, MessageAttachment,
+    MessageSnapshot, OpApplyReport, PendingOp, PendingOpKind, ProtocolKind, SyncTarget,
+    ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -47,7 +48,11 @@ pub const PRIORITY_CAPABILITIES: &[&str] = &[
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const FETCH_BATCH_SIZE: usize = 50;
-const FETCH_QUERY: &str = "(UID INTERNALDATE FLAGS BODY.PEEK[])";
+// Lazy sync: headers only. Bodies (and attachment blobs) are fetched on
+// demand by `fetch_message_bodies` when a message is opened.
+const FETCH_QUERY: &str = "(UID INTERNALDATE FLAGS BODY.PEEK[HEADER])";
+/// Full-message fetch used by the on-demand hydration path.
+const HYDRATE_QUERY: &str = "(UID INTERNALDATE FLAGS BODY.PEEK[])";
 /// Maximum number of attachments persisted per message.
 const MAX_ATTACHMENTS_PER_MESSAGE: usize = 25;
 /// Maximum size of a single persisted attachment blob.
@@ -194,6 +199,71 @@ struct ImapEndpoint {
 }
 
 /// Waits until the IMAP server reports a mailbox change or the timeout
+/// Fetches the full bodies (and attachments) of specific messages on demand.
+///
+/// UIDs must belong to `mailbox_name`. Returns one [`HydratedBody`] per UID
+/// found, in the order given; missing UIDs are skipped.
+pub async fn fetch_message_bodies(
+    target: &SyncTarget,
+    secret: &str,
+    mailbox_name: &str,
+    uids: &[u32],
+) -> Result<Vec<(u32, HydratedBody)>> {
+    if target.protocol != ProtocolKind::Imap {
+        bail!("IMAP adapter received a non-IMAP sync target");
+    }
+    if uids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let endpoint = parse_endpoint(&target.endpoint)?;
+    let attachments_dir = std::path::PathBuf::from(&target.attachments_dir);
+    let mut session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
+    session
+        .examine(mailbox_name)
+        .await
+        .with_context(|| format!("failed to open IMAP mailbox {mailbox_name} for hydration"))?;
+
+    let uid_set = uids
+        .iter()
+        .map(|uid| uid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let fetches = session
+        .uid_fetch(&uid_set, HYDRATE_QUERY)
+        .await
+        .with_context(|| format!("failed to fetch bodies for UID set {uid_set}"))?
+        .try_collect::<Vec<_>>()
+        .await
+        .context("failed to stream the hydration fetches")?;
+
+    let mut bodies = Vec::with_capacity(fetches.len());
+    for fetch in fetches {
+        let Some(uid) = fetch.uid else { continue };
+        let Some(raw) = fetch.body() else { continue };
+        let Some(message) = MessageParser::default().parse(raw) else {
+            continue;
+        };
+        let (body_text, sanitized_html, has_remote_content, preview_source) =
+            hydrate_bodies(&message);
+        let attachments =
+            persist_attachments(&message, mailbox_name, &uid.to_string(), &attachments_dir);
+        bodies.push((
+            uid,
+            HydratedBody {
+                body_text,
+                sanitized_html,
+                has_remote_content,
+                body_preview: excerpt(&preview_source, 180),
+                attachments,
+            },
+        ));
+    }
+
+    Ok(bodies)
+}
+
+/// Waits until the mail server reports a change or the bounded wait
 /// elapses, whichever comes first.
 ///
 /// The wait uses one IDLE connection on INBOX, re-issued at most once per
@@ -1170,7 +1240,7 @@ fn hydrate_bodies(
         );
     }
 
-    (None, None, false, "No preview available.".to_owned())
+    (None, None, false, "Body not downloaded.".to_owned())
 }
 
 fn normalize_body_text(text: &str) -> String {
