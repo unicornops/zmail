@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Zmail
+GenericName=Email Client
+Comment=Fast, standards-compliant desktop email client
+Exec=zmail-app %u
+Terminal=false
+Categories=Network;Email;
+MimeType=x-scheme-handler/mailto;
