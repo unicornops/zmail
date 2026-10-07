@@ -81,7 +81,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cargo install cargo-deb --locked
-          cargo deb -p zmail-app --release --locked
+          # cargo-deb builds with the release profile by default and rejects
+          # a second --release; --locked keeps the Cargo.lock authoritative.
+          cargo deb -p zmail-app --locked
           mv target/debian/*.deb zmail-linux-x86_64.deb
 
       - name: Create macOS app bundle
@@ -138,5 +140,5 @@ jobs:
           if [[ "${{ runner.os }}" == "macOS" && -f zmail-macos.app.zip ]]; then
             assets="$assets zmail-macos.app.zip"
           fi
-          sha256sum $assets > SHA256SUMS
-          gh release upload "${{ needs.release_please.outputs.tag_name }}" $assets SHA256SUMS --clobber
+          sha256sum $assets > "SHA256SUMS-${{ runner.os }}"
+          gh release upload "${{ needs.release_please.outputs.tag_name }}" $assets "SHA256SUMS-${{ runner.os }}" --clobber
