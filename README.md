@@ -18,7 +18,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - unchanged Zed theme file parsing and semantic theme mapping
 - coalesced UI refresh polling so background sync and outbox jobs do not flood the GUI thread
 - multi-platform GitHub Actions builds plus Release Please automation starting at `0.0.1`
-- published GitHub releases also attach a Linux screenshot captured from the live mail harness
+- Tagged releases also attach a Linux screenshot captured from the live mail harness by the Release Please workflow chain
 - release archives currently ship raw platform binaries; native installers and signing remain pending release work
 - Phase 5 hardening and release policy documentation
 
