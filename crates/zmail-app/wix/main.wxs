@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <!--
+      Zmail MSI definition (WiX v3, built by cargo-wix on the Windows
+      release job). Installs to Program Files, adds a Start-menu shortcut,
+      and registers the mailto: URL scheme so browsers and file managers
+      can offer Zmail as the mail handler.
+    -->
+    <Product Id="*"
+             Name="Zmail"
+             Language="1033"
+             Version="!(bind.fileVersion.zmail-app.exe)"
+             Manufacturer="UnicornOps"
+             UpgradeCode="7A8AFF84-FB5F-4920-8320-5DD02BCD7EFB">
+        <Package InstallerVersion="200"
+                 Compressed="yes"
+                 InstallScope="perMachine"
+                 Description="Zmail desktop email client" />
+        <MajorUpgrade DowngradeErrorMessage="A newer version of Zmail is already installed."
+                      AllowSameVersionUpgrades="yes" />
+        <MediaTemplate EmbedCab="yes" />
+
+        <Feature Id="Main"
+                 Title="Zmail"
+                 Level="1"
+                 Absent="disallow">
+            <ComponentGroupRef Id="ProductComponents" />
+        </Feature>
+    </Product>
+
+    <Fragment>
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder">
+                <Directory Id="APPLICATIONFOLDER" Name="Zmail">
+                    <Component Id="zmail_app.exe"
+                               Guid="1E8E9408-EA69-4F6A-B7A8-7D489BF5AF53"
+                               Win64="yes">
+                        <File Id="zmail-app.exe"
+                              Name="zmail-app.exe"
+                              Source="target/release/zmail-app.exe"
+                              KeyPath="yes" />
+                    </Component>
+                    <Component Id="mailto_registration"
+                               Guid="F935E04A-DD05-4FCB-94A2-060B7F6D7840"
+                               Win64="yes">
+                        <RegistryValue Root="HKLM"
+                                       Key="SOFTWARE\Classes\mailto"
+                                       Type="string"
+                                       Value="URL:MailTo Protocol" />
+                        <RegistryValue Root="HKLM"
+                                       Key="SOFTWARE\Classes\mailto"
+                                       Name="URL Protocol"
+                                       Type="string"
+                                       Value="" />
+                        <RegistryValue Root="HKLM"
+                                       Key="SOFTWARE\Classes\mailto\DefaultIcon"
+                                       Type="string"
+                                       Value="[APPLICATIONFOLDER]zmail-app.exe,0" />
+                        <RegistryValue Root="HKLM"
+                                       Key="SOFTWARE\Classes\mailto\shell\open\command"
+                                       Type="string"
+                                       Value="&quot;[APPLICATIONFOLDER]zmail-app.exe&quot; &quot;%1&quot;" />
+                    </Component>
+                </Directory>
+            </Directory>
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="ApplicationProgramsFolder" Name="Zmail" />
+            </Directory>
+        </Directory>
+    </Fragment>
+
+    <Fragment>
+        <ComponentGroup Id="ProductComponents" Directory="APPLICATIONFOLDER">
+            <ComponentRef Id="zmail_app.exe" />
+            <ComponentRef Id="mailto_registration" />
+            <Component Id="start_menu_shortcut"
+                       Guid="4792AC98-B099-4175-ACF2-739E500B649D"
+                       Directory="ApplicationProgramsFolder">
+                <Shortcut Id="ZmailStartMenuShortcut"
+                          Name="Zmail"
+                          Description="Zmail desktop email client"
+                          Target="[APPLICATIONFOLDER]zmail-app.exe"
+                          WorkingDirectory="APPLICATIONFOLDER" />
+                <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+                <RegistryValue Root="HKCU"
+                               Key="Software\Zmail"
+                               Name="installed"
+                               Type="integer"
+                               Value="1"
+                               KeyPath="yes" />
+            </Component>
+        </ComponentGroup>
+    </Fragment>
+</Wix>

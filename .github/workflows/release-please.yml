@@ -120,6 +120,33 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path "target/release/${{ matrix.binary_name }}" -DestinationPath "${{ matrix.artifact_path }}"
 
+      # Opt-in Authenticode signing: the steps no-op until the repository
+      # secrets carry a certificate (see docs/phase5-hardening.md).
+      - name: Decode signing certificate
+        if: runner.os == 'Windows' && env.WINDOWS_SIGNING_CERT != ''
+        env:
+          WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP/cert.pfx", [Convert]::FromBase64String("$env:WINDOWS_SIGNING_CERT"))
+      - name: Sign the Windows artifacts
+        if: runner.os == 'Windows' && env.WINDOWS_SIGNING_CERT != ''
+        env:
+          WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        shell: pwsh
+        run: |
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2("$env:RUNNER_TEMP/cert.pfx", "$env:WINDOWS_SIGNING_PASSWORD")
+          $signTool = (Get-ChildItem "C:/Program Files (x86)/Windows Kits/10/bin/*/x64/signtool.exe" | Select-Object -Last 1).FullName
+          & $signTool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 /f "$env:RUNNER_TEMP/cert.pfx" /p "$env:WINDOWS_SIGNING_PASSWORD" "target/release/${{ matrix.binary_name }}" "${{ matrix.artifact_path }}"
+
+      - name: Create Windows installer
+        if: runner.os == 'Windows'
+        run: |
+          cargo install cargo-wix --locked
+          cargo wix -p zmail-app --no-build
+          mv target/wix/zmail-app_*.msi zmail-windows-x86_64.msi
+
       - name: Create Linux package
         if: runner.os == 'Linux'
         run: |
@@ -182,6 +209,9 @@ jobs:
           fi
           if [[ "${{ runner.os }}" == "macOS" && -f zmail-macos.app.zip ]]; then
             assets="$assets zmail-macos.app.zip"
+          fi
+          if [[ "${{ runner.os }}" == "Windows" && -f zmail-windows-x86_64.msi ]]; then
+            assets="$assets zmail-windows-x86_64.msi"
           fi
           sha256sum $assets > "SHA256SUMS-${{ runner.os }}"
           gh release upload "${{ needs.release_please.outputs.tag_name }}" $assets "SHA256SUMS-${{ runner.os }}" --clobber
