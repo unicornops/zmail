@@ -10,8 +10,9 @@ RUN useradd -m -u 5000 mailuser \
     && chown -R 5000:5000 /var/mail
 
 COPY dovecot.conf /etc/dovecot/conf.d/99-zmail.conf
+COPY auth.conf /etc/dovecot/conf.d/10-auth.conf
 COPY users /etc/dovecot/users
-RUN chmod 600 /etc/dovecot/users
+RUN chmod 644 /etc/dovecot/users
 
 EXPOSE 143
 CMD ["dovecot", "-F"]
