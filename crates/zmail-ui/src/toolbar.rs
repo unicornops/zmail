@@ -61,6 +61,12 @@ impl WorkspaceView {
             self.pending_op_count,
             self.outbox_jobs.len()
         );
+        let dead_detail = (self.dead_op_count > 0).then(|| {
+            format!(
+                "{} dead-lettered op(s) (zmail-app dead-ops)",
+                self.dead_op_count
+            )
+        });
 
         let sync_error = self.selected_account().and_then(|account| {
             if account.sync_status.failure_count > 0 {
@@ -147,6 +153,12 @@ impl WorkspaceView {
                                     .text_color(rgb(colors.muted))
                                     .child(queued_detail),
                             )
+                            .children(dead_detail.map(|message| {
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(colors.danger))
+                                    .child(message)
+                            }))
                             .children(sync_error.map(|message| {
                                 div()
                                     .text_sm()

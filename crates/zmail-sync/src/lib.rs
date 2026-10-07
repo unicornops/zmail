@@ -28,6 +28,7 @@ const OUTBOX_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const OUTBOX_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
 const MAX_OUTBOX_ATTEMPTS: usize = 3;
 const MAIL_WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_PENDING_OP_ATTEMPTS: i64 = 5;
 
 /// Dedicated Tokio runtime host for background tasks.
 #[derive(Debug)]
@@ -537,12 +538,28 @@ impl SyncService {
                     .with_context(|| format!("failed to complete pending operation {op_id}"))?;
             }
             for (op_id, error) in &report.failed {
-                self.inner
-                    .store
-                    .record_pending_op_failure(*op_id, error)
-                    .with_context(|| {
-                        format!("failed to record pending operation {op_id} failure")
-                    })?;
+                // After the retry budget the operation moves to the dead
+                // letter: no more drain attempts, and the snapshot merge
+                // becomes server-authoritative for it again.
+                let attempts = pending_ops
+                    .iter()
+                    .find(|op| op.id == *op_id)
+                    .map(|op| op.attempts)
+                    .unwrap_or(0);
+                let result = if attempts.saturating_add(1) >= MAX_PENDING_OP_ATTEMPTS {
+                    self.inner
+                        .store
+                        .mark_pending_op_dead(*op_id, error)
+                        .with_context(|| format!("failed to dead-letter operation {op_id}"))
+                } else {
+                    self.inner
+                        .store
+                        .record_pending_op_failure(*op_id, error)
+                        .with_context(|| {
+                            format!("failed to record pending operation {op_id} failure")
+                        })
+                };
+                result?;
             }
         }
 

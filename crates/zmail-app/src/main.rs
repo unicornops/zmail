@@ -55,6 +55,9 @@ fn main() -> Result<()> {
         Command::ProcessOutbox(account_id) => process_outbox(account_id),
         Command::Backup { directory } => create_backup(directory.as_deref()),
         Command::ExportAccount { account_id, path } => export_account(account_id, &path),
+        Command::DeadOps { account_id } => list_dead_ops(account_id),
+        Command::RetryOp(op_id) => retry_dead_op(op_id),
+        Command::DiscardOp(op_id) => discard_dead_op(op_id),
         Command::Help => {
             print_help();
             Ok(())
@@ -74,6 +77,11 @@ enum Command {
     Backup {
         directory: Option<String>,
     },
+    DeadOps {
+        account_id: Option<i64>,
+    },
+    RetryOp(i64),
+    DiscardOp(i64),
     ExportAccount {
         account_id: i64,
         path: String,
@@ -275,6 +283,21 @@ impl Command {
             "backup" => Ok(Self::Backup {
                 directory: args.next(),
             }),
+            "dead-ops" => Ok(Self::DeadOps {
+                account_id: parse_optional_id(args.next(), "account id")?,
+            }),
+            "retry-op" => Ok(Self::RetryOp(
+                args.next()
+                    .context("retry-op requires a dead operation id")?
+                    .parse::<i64>()
+                    .context("operation id must be an integer")?,
+            )),
+            "discard-op" => Ok(Self::DiscardOp(
+                args.next()
+                    .context("discard-op requires a dead operation id")?
+                    .parse::<i64>()
+                    .context("operation id must be an integer")?,
+            )),
             "export-account" => Ok(Self::ExportAccount {
                 account_id: args
                     .next()
@@ -863,6 +886,52 @@ fn process_outbox(account_id: Option<i64>) -> Result<()> {
     Ok(())
 }
 
+fn list_dead_ops(account_id: Option<i64>) -> Result<()> {
+    let store = open_store().context("failed to open the local store")?;
+    let accounts = match account_id {
+        Some(account_id) => vec![account_id],
+        None => store
+            .list_sync_targets()?
+            .into_iter()
+            .map(|target| target.id)
+            .collect(),
+    };
+
+    let mut printed = 0;
+    for account_id in accounts {
+        for op in store.list_dead_ops(account_id)? {
+            println!(
+                "op {} • account {} • {:?} {} in {} -> {} • attempts: {} • last error: {}",
+                op.id,
+                op.account_id,
+                op.kind,
+                op.remote_id,
+                op.source_mailbox,
+                op.target_mailbox.as_deref().unwrap_or("-"),
+                op.attempts,
+                op.last_error.as_deref().unwrap_or("none"),
+            );
+            printed += 1;
+        }
+    }
+    println!("{printed} dead-lettered operation(s).");
+    Ok(())
+}
+
+fn retry_dead_op(op_id: i64) -> Result<()> {
+    let store = open_store().context("failed to open the local store")?;
+    store.retry_dead_op(op_id)?;
+    println!("Operation {op_id} requeued; the next sync retries it.");
+    Ok(())
+}
+
+fn discard_dead_op(op_id: i64) -> Result<()> {
+    let store = open_store().context("failed to open the local store")?;
+    store.discard_dead_op(op_id)?;
+    println!("Operation {op_id} discarded.");
+    Ok(())
+}
+
 fn create_backup(directory: Option<&str>) -> Result<()> {
     let store = open_store().context("failed to open the local store")?;
     let directory = match directory {
@@ -1237,6 +1306,9 @@ fn print_help() {
     println!("  zmail-app process-outbox [ACCOUNT]");
     println!("  zmail-app backup [DIRECTORY]");
     println!("  zmail-app export-account ACCOUNT PATH");
+    println!("  zmail-app dead-ops [ACCOUNT]");
+    println!("  zmail-app retry-op OPERATION");
+    println!("  zmail-app discard-op OPERATION");
 }
 
 fn open_store() -> Result<LocalStore> {
