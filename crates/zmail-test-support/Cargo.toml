@@ -12,6 +12,7 @@ reqwest.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 zmail-core = { path = "../zmail-core" }
+zmail-jmap = { path = "../zmail-jmap" }
 zmail-security = { path = "../zmail-security" }
 zmail-smtp = { path = "../zmail-smtp" }
 zmail-store = { path = "../zmail-store" }

@@ -2,9 +2,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use jmap_client::{
+    DataType,
     client::Client,
     core::{
         query::QueryResponse,
@@ -101,6 +105,43 @@ pub async fn discover_and_sync(
         identities: Some(identities),
         mailboxes,
     })
+}
+
+/// Waits until the JMAP server reports a state change or the timeout
+/// elapses, whichever comes first.
+///
+/// The wait holds one event-source connection (SSE) for Email and Mailbox
+/// state changes, with the keepalive ping set to the same interval as the
+/// timeout so only genuine state changes wake the caller early. Transport
+/// errors return `Err` so the caller can back off and fall back to its
+/// polling interval.
+pub async fn wait_for_mail_changes(
+    target: &SyncTarget,
+    secret: &str,
+    wait: Duration,
+) -> Result<()> {
+    if target.protocol != ProtocolKind::Jmap {
+        bail!("JMAP adapter received a non-JMAP sync target");
+    }
+
+    let client = connect_client(&target.endpoint, &target.username, secret).await?;
+    let mut notifications = client
+        .event_source(
+            Some([DataType::Email, DataType::Mailbox]),
+            false,
+            Some(wait.as_secs().max(1) as u32),
+            None,
+        )
+        .await
+        .context("failed to open the JMAP event source")?;
+
+    match tokio::time::timeout(wait, notifications.next()).await {
+        Ok(Some(Ok(_notification))) => Ok(()),
+        Ok(Some(Err(error))) => Err(anyhow::anyhow!("the JMAP event source failed: {error}")),
+        // The server closed the stream; the caller reopens on the next loop.
+        Ok(None) => Ok(()),
+        Err(_elapsed) => Ok(()),
+    }
 }
 
 /// Applies queued mailbox operations to the live JMAP account.

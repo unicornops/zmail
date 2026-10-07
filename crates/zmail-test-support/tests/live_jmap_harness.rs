@@ -1,6 +1,10 @@
 //! Live JMAP sync test for the Docker mail harness.
 
-use std::{sync::Arc, thread, time::Duration};
+use std::{
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use tokio::runtime::Builder;
@@ -13,12 +17,13 @@ use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
 use zmail_test_support::{
     DockerMailHarness, MAIL_HARNESS_HOST, MAIL_HARNESS_JMAP_ACCOUNT, MAIL_HARNESS_JMAP_ENDPOINT,
-    MAIL_HARNESS_JMAP_PASSWORD, MAIL_HARNESS_JMAP_SMTP_PORT,
+    MAIL_HARNESS_JMAP_PASSWORD, MAIL_HARNESS_JMAP_SMTP_PORT, live_harness_lock,
 };
 
 #[test]
 #[ignore = "requires docker compose and the Phase 2b live mail harness"]
 fn syncs_mail_from_a_live_jmap_server() -> Result<()> {
+    let _harness_lock = live_harness_lock();
     let _harness = DockerMailHarness::start()?;
     let store = Arc::new(LocalStore::open_ephemeral()?);
     let account_id = store.insert_account(&jmap_account())?;
@@ -108,6 +113,64 @@ fn syncs_mail_from_a_live_jmap_server() -> Result<()> {
             .iter()
             .any(|thread| thread.subject == "Phase 2b JMAP incremental sync"),
         "the moved thread should appear in the {target_name} mailbox"
+    );
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn event_source_pushes_new_mail_before_the_timeout() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_JMAP_PASSWORD)?;
+
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
+    sync_service.sync_account_and_wait(account_id)?;
+
+    let target = store
+        .sync_target(account_id)?
+        .with_context(|| "the JMAP target should load")?;
+    let secret = secrets.get_account_secret(account_id)?;
+
+    // Submit a message while the event source is already listening, then
+    // assert the push arrives well before the wait's 45 s budget expires.
+    // The ping interval equals the budget, so an early return can only be
+    // a real state change, not a keepalive.
+    let submitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let submitted_writer = submitted.clone();
+    // A plain OS thread, not a runtime task: submit_harness_message builds its
+    // own current-thread runtime, which would panic on a tokio worker thread.
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(3));
+        submit_harness_message(
+            "Phase 2b JMAP push",
+            "This message should wake the event source.",
+        )
+        .expect("harness submission should succeed");
+        submitted_writer.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let wait_secret = secret.clone();
+    let started = Instant::now();
+    let push = runtime.handle().block_on(async {
+        zmail_jmap::wait_for_mail_changes(&target, &wait_secret, Duration::from_secs(45)).await
+    });
+    let elapsed = started.elapsed();
+
+    assert!(
+        submitted.load(std::sync::atomic::Ordering::SeqCst),
+        "the harness message was submitted"
+    );
+    push.with_context(|| "the JMAP event source should connect against James")?;
+    assert!(
+        elapsed < Duration::from_secs(35),
+        "a server state change should arrive before the wait budget, took {elapsed:?}"
     );
 
     Ok(())
