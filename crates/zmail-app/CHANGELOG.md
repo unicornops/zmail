@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.0](https://github.com/unicornops/zmail/compare/v0.2.0...v0.3.0) (2026-10-07)
+
+
+### Features
+
+* **auth:** support IMAP XOAUTH2 bearer-token authentication ([#63](https://github.com/unicornops/zmail/issues/63)) ([5bb0f86](https://github.com/unicornops/zmail/commit/5bb0f8615fe84593eac416290582dd3e846efa27))
+* dead-letter write-back operations after five failures ([#56](https://github.com/unicornops/zmail/issues/56)) ([e0912cc](https://github.com/unicornops/zmail/commit/e0912cc4bbb879b73d6166cb4a413d63028818e0)), closes [#48](https://github.com/unicornops/zmail/issues/48)
+* define the deletion policy with an explicit empty-trash command ([#58](https://github.com/unicornops/zmail/issues/58)) ([5189d0f](https://github.com/unicornops/zmail/commit/5189d0fc0f6d8c9abf394255cee6928fe594fffb)), closes [#49](https://github.com/unicornops/zmail/issues/49)
+* handle mailto URLs on launch ([#55](https://github.com/unicornops/zmail/issues/55)) ([3438ef2](https://github.com/unicornops/zmail/commit/3438ef2063f8daf697ccdbfd87e0b2b922f9e7eb)), closes [#42](https://github.com/unicornops/zmail/issues/42)
+
 ## [0.2.0](https://github.com/unicornops/zmail/compare/v0.1.0...v0.2.0) (2026-10-07)
 
 
