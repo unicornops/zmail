@@ -136,7 +136,8 @@ struct SyncServiceInner {
     secrets: Arc<dyn SecretStore>,
     active_accounts: Mutex<HashSet<i64>>,
     outbox_supervisor_started: AtomicBool,
-    mail_watcher_started: AtomicBool,
+    watched_accounts: Mutex<HashSet<i64>>,
+    watcher_poll_interval: Mutex<Option<Duration>>,
 }
 
 impl std::fmt::Debug for SyncService {
@@ -165,7 +166,8 @@ impl SyncService {
                 secrets,
                 active_accounts: Mutex::new(HashSet::new()),
                 outbox_supervisor_started: AtomicBool::new(false),
-                mail_watcher_started: AtomicBool::new(false),
+                watched_accounts: Mutex::new(HashSet::new()),
+                watcher_poll_interval: Mutex::new(None),
             }),
         };
         service.start_outbox_supervisor();
@@ -240,14 +242,48 @@ impl SyncService {
     }
 
     /// Starts the background mail watcher with an explicit poll interval.
+    ///
+    /// Idempotent: accounts that already have a running watcher keep
+    /// theirs, and accounts added since the last call start one.
     pub fn start_mail_watcher_with_interval(&self, poll_interval: Duration) -> Result<usize> {
-        if self.inner.mail_watcher_started.swap(true, Ordering::SeqCst) {
-            return Ok(0);
+        {
+            let mut interval = self
+                .inner
+                .watcher_poll_interval
+                .lock()
+                .expect("watcher poll interval mutex should not be poisoned");
+            if interval.is_none() {
+                *interval = Some(poll_interval);
+            }
         }
+        self.sync_watchers()
+    }
+
+    /// Ensures every configured account has a running mail watcher.
+    ///
+    /// Accounts that already have a watcher are skipped; accounts added
+    /// after startup start watching immediately. Returns the number of
+    /// newly started watchers.
+    pub fn sync_watchers(&self) -> Result<usize> {
+        let poll_interval = {
+            let mut interval = self
+                .inner
+                .watcher_poll_interval
+                .lock()
+                .expect("watcher poll interval mutex should not be poisoned");
+            if interval.is_none() {
+                *interval = Some(MAIL_WATCHER_POLL_INTERVAL);
+            }
+            interval.expect("the watcher poll interval is always set")
+        };
 
         let mut started = 0;
         for target in self.inner.store.list_sync_targets()? {
+            if !self.mark_watched(target.id) {
+                continue;
+            }
             let Ok(secret) = self.inner.secrets.get_account_secret(target.id) else {
+                self.unwatch_account(target.id);
                 continue;
             };
             let service = self.clone();
@@ -261,10 +297,46 @@ impl SyncService {
         Ok(started)
     }
 
-    /// Waits for server-side changes for one account and syncs, forever.
+    /// Registers an account as watched, returning `true` when it is new.
+    fn mark_watched(&self, account_id: i64) -> bool {
+        let mut watched = self
+            .inner
+            .watched_accounts
+            .lock()
+            .expect("watched account mutex should not be poisoned");
+        watched.insert(account_id)
+    }
+
+    /// Removes an account from the watcher registry so a later
+    /// `sync_watchers` call can watch it again.
+    fn unwatch_account(&self, account_id: i64) {
+        let mut watched = self
+            .inner
+            .watched_accounts
+            .lock()
+            .expect("watched account mutex should not be poisoned");
+        watched.remove(&account_id);
+    }
+
+    /// Waits for server-side changes for one account and syncs until the
+    /// account disappears.
     async fn run_mail_watcher(&self, target: SyncTarget, secret: String, poll_interval: Duration) {
         let mut reconnect_backoff = Duration::from_secs(1);
         loop {
+            // Stop watching accounts that no longer exist so the watcher
+            // registry slot is free if the id is ever reused.
+            if self
+                .inner
+                .store
+                .sync_target(target.id)
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                self.unwatch_account(target.id);
+                return;
+            }
+
             match target.protocol {
                 ProtocolKind::Imap => {
                     match zmail_imap::wait_for_mail_changes(&target, &secret, poll_interval).await {
@@ -631,6 +703,40 @@ mod tests {
         fn delete_account_secret(&self, _account_id: i64) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn sync_watchers_starts_watchers_for_new_accounts_only() {
+        let runtime = BackgroundRuntime::start(2).expect("runtime should start");
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        let service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
+
+        // No accounts yet: nothing to watch, and the call is idempotent.
+        assert_eq!(
+            service.sync_watchers().expect("watchers should sync"),
+            0,
+            "an empty store starts no watchers"
+        );
+
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        secrets
+            .set_account_secret(account_id, "demo-secret")
+            .expect("secret should be set");
+
+        // The new account gets a watcher; a second call must not duplicate it.
+        assert_eq!(
+            service.sync_watchers().expect("watchers should sync"),
+            1,
+            "the new account starts exactly one watcher"
+        );
+        assert_eq!(
+            service.sync_watchers().expect("watchers should sync"),
+            0,
+            "an already-watched account starts no second watcher"
+        );
     }
 
     #[test]

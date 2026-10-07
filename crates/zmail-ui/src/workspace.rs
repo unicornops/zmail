@@ -842,6 +842,9 @@ impl WorkspaceView {
                     self.active_field = None;
                     self.status_message = Some(format!("Account {account_id} added."));
                     let _ = self.sync_service.sync_account(account_id);
+                    // Start the new account's background watcher immediately
+                    // instead of waiting for the next app launch.
+                    let _ = self.sync_service.sync_watchers();
                     self.refresh_from_store();
                     self.schedule_refresh(window, cx);
                 }
