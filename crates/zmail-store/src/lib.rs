@@ -1632,6 +1632,24 @@ impl LocalStore {
         self.refresh_account_search_index(location.account_id)
     }
 
+    /// Returns the server name of the account's mailbox for a role.
+    pub fn mailbox_name_by_role(&self, account_id: i64, role: &str) -> Result<Option<String>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            r#"
+            SELECT name
+            FROM mailboxes
+            WHERE account_id = ?1 AND lower(role) = lower(?2)
+            ORDER BY sort_order ASC, id ASC
+            LIMIT 1
+            "#,
+            params![account_id, role],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("failed to load the mailbox name by role")
+    }
+
     /// Lists the queued server write-back operations for an account.
     pub fn list_pending_ops(&self, account_id: i64) -> Result<Vec<PendingOp>> {
         let conn = self.connection()?;
@@ -3958,6 +3976,41 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn mailbox_name_by_role_resolves_the_trash_mailbox() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        let mut snapshot =
+            merge_test_snapshot("Trash subject", "Trash body", "thread-6", "message-6", None);
+        snapshot.mailboxes.push(MailboxSnapshot {
+            name: "Deleted Items".to_owned(),
+            role: Some("trash".to_owned()),
+            threads: Vec::new(),
+        });
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+
+        assert_eq!(
+            store
+                .mailbox_name_by_role(account_id, "TRASH")
+                .expect("name lookup should work")
+                .as_deref(),
+            Some("Deleted Items"),
+            "role lookup is case-insensitive"
+        );
+        assert_eq!(
+            store
+                .mailbox_name_by_role(account_id, "archive")
+                .expect("name lookup should work"),
+            None,
+            "unknown roles resolve to nothing"
+        );
     }
 
     #[test]

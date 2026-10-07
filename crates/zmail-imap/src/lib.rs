@@ -214,6 +214,52 @@ pub async fn wait_for_mail_changes(
     Ok(())
 }
 
+/// Empties the server's trash mailbox, expunging every message in it.
+///
+/// Deletion normally moves messages to trash and marks destroyed
+/// messages `\Deleted` without expunging, so storage would grow without
+/// bound. This is the explicit, user-initiated expunge: it selects the
+/// trash mailbox read-write, marks every message `\Deleted`, and issues
+/// `EXPUNGE`, which affects only the selected mailbox. Returns the
+/// number of messages expunged.
+pub async fn empty_trash(
+    target: &SyncTarget,
+    secret: &str,
+    trash_mailbox_name: &str,
+) -> Result<u32> {
+    if target.protocol != ProtocolKind::Imap {
+        bail!("IMAP adapter received a non-IMAP sync target");
+    }
+
+    let endpoint = parse_endpoint(&target.endpoint)?;
+    let mut session = connect_session(&endpoint, &target.username, secret).await?;
+    let status = session
+        .select(trash_mailbox_name)
+        .await
+        .with_context(|| format!("failed to select the trash mailbox {trash_mailbox_name}"))?;
+
+    if status.exists > 0 {
+        store_flags(
+            &mut session,
+            "1:*".to_owned(),
+            "+FLAGS (\\Deleted)".to_owned(),
+        )
+        .await?;
+        let expunged = session
+            .expunge()
+            .await
+            .context("failed to expunge the trash mailbox")?
+            .try_collect::<Vec<_>>()
+            .await
+            .context("failed to stream the trash expunge")?;
+        let _ = session.logout().await;
+        Ok(expunged.len() as u32)
+    } else {
+        let _ = session.logout().await;
+        Ok(0)
+    }
+}
+
 /// Applies queued mailbox operations to the live IMAP account.
 ///
 /// Read and flag operations translate to `UID STORE`, move operations to

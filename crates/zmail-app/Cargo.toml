@@ -25,6 +25,7 @@ rpassword.workspace = true
 url.workspace = true
 zmail-assets = { path = "../zmail-assets" }
 zmail-core = { path = "../zmail-core" }
+zmail-imap = { path = "../zmail-imap" }
 zmail-security = { path = "../zmail-security" }
 zmail-sync = { path = "../zmail-sync" }
 zmail-store = { path = "../zmail-store" }
