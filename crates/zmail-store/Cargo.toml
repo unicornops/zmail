@@ -15,3 +15,10 @@ zmail-security = { path = "../zmail-security" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+divan = "0.1"
+
+[[bench]]
+name = "store"
+harness = false
