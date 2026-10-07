@@ -623,6 +623,7 @@ fn group_mailboxes(
                 is_read: !email.unread,
                 is_flagged: email.flagged,
                 received_at: email.received_at.clone(),
+                attachments: Vec::new(),
             });
         }
     }

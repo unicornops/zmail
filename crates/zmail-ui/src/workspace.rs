@@ -531,6 +531,48 @@ impl WorkspaceView {
     }
 
     /// Open a forward draft for the selected thread.
+    /// Saves every attachment of the selected thread into the store's
+    /// `saved-attachments` directory and reports the destination.
+    pub(crate) fn save_selected_thread_attachments(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.selected_thread_view() else {
+            self.store_error
+                .get_or_insert_with(|| "Select a thread first.".to_owned());
+            cx.notify();
+            return;
+        };
+
+        let destination = self
+            .store
+            .path()
+            .parent()
+            .map(|parent| parent.join("saved-attachments"))
+            .unwrap_or_else(|| std::path::PathBuf::from("saved-attachments"));
+
+        let mut saved = 0usize;
+        let mut last_error = None;
+        for message in &thread.messages {
+            for attachment in &message.attachments {
+                match self.store.save_attachment(attachment.id, &destination) {
+                    Ok(_) => saved += 1,
+                    Err(error) => last_error = Some(error.to_string()),
+                }
+            }
+        }
+
+        if let Some(error) = last_error {
+            self.store_error = Some(error);
+        } else if saved == 0 {
+            self.store_error = Some("The selected thread has no attachments.".to_owned());
+        } else {
+            self.store_error = None;
+            self.status_message = Some(format!(
+                "Saved {saved} attachment(s) to {}.",
+                destination.display()
+            ));
+        }
+        cx.notify();
+    }
+
     pub(crate) fn forward_selected_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.selected_thread_view() else {
             self.store_error

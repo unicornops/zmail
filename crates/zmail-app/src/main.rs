@@ -39,6 +39,11 @@ fn main() -> Result<()> {
         Command::SyncAccount(account_id) => sync_accounts(Some(account_id)),
         Command::Search(account_id, query) => search_threads(account_id, &query),
         Command::ReadThread(thread_id) => read_thread(thread_id),
+        Command::ListAttachments(thread_id) => list_attachments(thread_id),
+        Command::SaveAttachment {
+            attachment_id,
+            destination,
+        } => save_attachment(attachment_id, destination.as_deref()),
         Command::FlagThread(thread_id, flagged) => flag_thread(thread_id, flagged),
         Command::MarkThreadRead(thread_id, read) => mark_thread_read(thread_id, read),
         Command::MoveThread(thread_id, mailbox_id) => move_thread(thread_id, mailbox_id),
@@ -95,6 +100,11 @@ enum Command {
     SyncAccount(i64),
     Search(i64, String),
     ReadThread(i64),
+    ListAttachments(i64),
+    SaveAttachment {
+        attachment_id: i64,
+        destination: Option<String>,
+    },
     FlagThread(i64, bool),
     MarkThreadRead(i64, bool),
     MoveThread(i64, i64),
@@ -170,6 +180,31 @@ impl Command {
                     .parse::<i64>()
                     .context("thread id must be an integer")?,
             )),
+            "attachments" => Ok(Self::ListAttachments(
+                args.next()
+                    .context("attachments requires a thread id")?
+                    .parse::<i64>()
+                    .context("thread id must be an integer")?,
+            )),
+            "save-attachment" => {
+                let attachment_id = args
+                    .next()
+                    .context("save-attachment requires an attachment id")?
+                    .parse::<i64>()
+                    .context("attachment id must be an integer")?;
+                let destination = match args.next().as_deref() {
+                    Some(path) if path != "--dest" => Some(path.to_owned()),
+                    Some("--dest") => Some(
+                        args.next()
+                            .context("save-attachment --dest requires a directory")?,
+                    ),
+                    _ => None,
+                };
+                Ok(Self::SaveAttachment {
+                    attachment_id,
+                    destination,
+                })
+            }
             "flag" => Ok(Self::FlagThread(
                 args.next()
                     .context("flag requires a thread id")?
@@ -608,9 +643,53 @@ fn read_thread(thread_id: i64) -> Result<()> {
             "{} • read={} • flagged={} • remote_content={}",
             message.received_at, message.is_read, message.is_flagged, message.has_remote_content
         );
+        for attachment in &message.attachments {
+            println!(
+                "  attachment #{} {} [{}] {} bytes",
+                attachment.id, attachment.filename, attachment.content_type, attachment.size_bytes
+            );
+        }
         println!("{}", message.rendered_body);
     }
 
+    Ok(())
+}
+
+fn list_attachments(thread_id: i64) -> Result<()> {
+    let store = open_store().context("failed to open the local store")?;
+    let thread = store
+        .thread_view(thread_id)?
+        .with_context(|| format!("thread {thread_id} does not exist"))?;
+
+    println!(
+        "#{} [{}] {}",
+        thread.id, thread.mailbox_name, thread.subject
+    );
+    let mut count = 0;
+    for message in &thread.messages {
+        for attachment in &message.attachments {
+            println!(
+                "#{} {} [{}] {} bytes (message {})",
+                attachment.id,
+                attachment.filename,
+                attachment.content_type,
+                attachment.size_bytes,
+                message.id
+            );
+            count += 1;
+        }
+    }
+    if count == 0 {
+        println!("Thread {thread_id} has no attachments.");
+    }
+    Ok(())
+}
+
+fn save_attachment(attachment_id: i64, destination: Option<&str>) -> Result<()> {
+    let store = open_store().context("failed to open the local store")?;
+    let destination = destination.unwrap_or(".");
+    let path = store.save_attachment(attachment_id, destination)?;
+    println!("Saved attachment {attachment_id} to {}.", path.display());
     Ok(())
 }
 
@@ -1360,6 +1439,8 @@ fn print_help() {
     println!("  zmail-app process-outbox [ACCOUNT]");
     println!("  zmail-app backup [DIRECTORY]");
     println!("  zmail-app export-account ACCOUNT PATH");
+    println!("  zmail-app attachments THREAD");
+    println!("  zmail-app save-attachment ATTACHMENT [--dest DIRECTORY]");
     println!("  zmail-app dead-ops [ACCOUNT]");
     println!("  zmail-app retry-op OPERATION");
     println!("  zmail-app discard-op OPERATION");

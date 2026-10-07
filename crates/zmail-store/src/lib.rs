@@ -1,7 +1,7 @@
 //! SQLite-backed local store for persisted accounts, sync state, and mailbox metadata.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     ops::Range,
     path::{Path, PathBuf},
@@ -20,8 +20,8 @@ use zmail_core::{
     IdentitySummary, MailboxSnapshot, MailboxSummary, MessagePreview, MessageRenderMode,
     MessageSnapshot, NewAccount, NewDraft, OutboxJobState, OutboxJobSummary, OutgoingAttachment,
     OutgoingConfig, OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind,
-    SearchHit, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary,
-    SyncTarget, ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
+    ReceivedAttachment, SearchHit, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase,
+    SyncStatusSummary, SyncTarget, ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -38,6 +38,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0006_pending_ops", PENDING_OPS_SCHEMA),
     ("0007_pending_op_states", PENDING_OP_STATES_SCHEMA),
     ("0008_account_auth_kind", ACCOUNT_AUTH_KIND_SCHEMA),
+    ("0009_message_attachments", MESSAGE_ATTACHMENTS_SCHEMA),
 ];
 
 const PHASE2_SCHEMA: &str = r#"
@@ -256,6 +257,21 @@ CREATE INDEX IF NOT EXISTS idx_pending_ops_account ON pending_ops(account_id, id
 
 const ACCOUNT_AUTH_KIND_SCHEMA: &str = r#"
 ALTER TABLE accounts ADD COLUMN auth_kind TEXT NOT NULL DEFAULT 'password';
+"#;
+
+const MESSAGE_ATTACHMENTS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS message_attachments (
+    id INTEGER PRIMARY KEY,
+    message_id INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    storage_path TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_message_attachments_message
+ON message_attachments(message_id, id);
 "#;
 
 const PENDING_OP_STATES_SCHEMA: &str = r#"
@@ -620,6 +636,7 @@ impl LocalStore {
             auth,
             endpoint,
             username,
+            attachments_dir: self.attachment_storage_dir().display().to_string(),
             cache_policy: CachePolicySummary {
                 name: policy_name,
                 description: policy_description,
@@ -923,6 +940,7 @@ impl LocalStore {
                             is_read: row.get::<_, bool>(9)?,
                             is_flagged: row.get::<_, bool>(10)?,
                             received_at: row.get(11)?,
+                            attachments: Vec::new(),
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()
@@ -1130,7 +1148,7 @@ impl LocalStore {
             "#,
         )?;
 
-        let messages = statement
+        let mut messages = statement
             .query_map(params![thread_id], |row| {
                 let body_preview = row.get::<_, String>(4)?;
                 let body_text = row.get::<_, Option<String>>(5)?;
@@ -1155,10 +1173,49 @@ impl LocalStore {
                     is_flagged: row.get::<_, bool>(8)?,
                     has_remote_content: row.get::<_, bool>(9)?,
                     received_at: row.get(10)?,
+                    attachments: Vec::new(),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to load hydrated thread messages")?;
+
+        let mut attachments_by_message: HashMap<i64, Vec<ReceivedAttachment>> = HashMap::new();
+        {
+            let mut statement = conn.prepare(
+                r#"
+                SELECT message_id, id, filename, content_type, size_bytes, storage_path
+                FROM message_attachments
+                WHERE message_id IN (SELECT id FROM messages WHERE thread_id = ?1)
+                ORDER BY id ASC
+                "#,
+            )?;
+            let rows = statement
+                .query_map(params![thread_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        ReceivedAttachment {
+                            id: row.get(1)?,
+                            filename: row.get(2)?,
+                            content_type: row.get(3)?,
+                            size_bytes: row.get::<_, i64>(4)? as u64,
+                            storage_path: row.get(5)?,
+                        },
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to load the thread attachments")?;
+            for (message_id, attachment) in rows {
+                attachments_by_message
+                    .entry(message_id)
+                    .or_default()
+                    .push(attachment);
+            }
+        }
+        for message in &mut messages {
+            if let Some(attachments) = attachments_by_message.remove(&message.id) {
+                message.attachments = attachments;
+            }
+        }
 
         let has_remote_content = messages.iter().any(|message| message.has_remote_content);
 
@@ -1175,6 +1232,55 @@ impl LocalStore {
             has_remote_content,
             messages,
         }))
+    }
+
+    /// Copies a received attachment into `destination_dir` using its original
+    /// filename and returns the written path.
+    pub fn save_attachment(
+        &self,
+        attachment_id: i64,
+        destination_dir: impl AsRef<Path>,
+    ) -> Result<PathBuf> {
+        let conn = self.connection()?;
+        let (filename, storage_path) = conn
+            .query_row(
+                r#"
+                SELECT filename, storage_path
+                FROM message_attachments
+                WHERE id = ?1
+                "#,
+                params![attachment_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .context("failed to load the attachment")?
+            .with_context(|| format!("attachment {attachment_id} does not exist"))?;
+        drop(conn);
+
+        let relative = Path::new(&storage_path);
+        if relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            bail!("attachment {attachment_id} has an invalid storage path");
+        }
+        let source = self.attachment_storage_dir().join(relative);
+        if !source.is_file() {
+            bail!(
+                "the stored blob for attachment {attachment_id} is missing at {}",
+                source.display()
+            );
+        }
+
+        let destination_dir = destination_dir.as_ref();
+        fs::create_dir_all(destination_dir)
+            .with_context(|| format!("failed to create {}", destination_dir.display()))?;
+        let safe_filename = sanitize_filename(&filename);
+        let destination = destination_dir.join(&safe_filename);
+        fs::copy(&source, &destination).with_context(|| {
+            format!("failed to copy the attachment to {}", destination.display())
+        })?;
+        Ok(destination)
     }
 
     /// Runs a local full-text search against the selected account.
@@ -3679,7 +3785,31 @@ fn merge_mailbox_threads(
                     ],
                 )
                 .context("failed to insert the message during the snapshot merge")?;
-            latest_message_id = Some(transaction.last_insert_rowid());
+            let message_row_id = transaction.last_insert_rowid();
+            for attachment in &message.attachments {
+                transaction
+                    .execute(
+                        r#"
+                    INSERT INTO message_attachments(
+                        message_id,
+                        filename,
+                        content_type,
+                        size_bytes,
+                        storage_path
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    "#,
+                        params![
+                            message_row_id,
+                            attachment.filename,
+                            attachment.content_type,
+                            attachment.size_bytes as i64,
+                            attachment.storage_path,
+                        ],
+                    )
+                    .context("failed to insert the message attachment during the snapshot merge")?;
+            }
+            latest_message_id = Some(message_row_id);
         }
 
         if let Some(latest_message_id) = latest_message_id {
@@ -3754,9 +3884,58 @@ fn stored_thread_matches(
         {
             return Ok(false);
         }
+
+        let stored_attachments = load_stored_message_attachments(transaction, stored.id)?;
+        if stored_attachments.len() != message.attachments.len() {
+            return Ok(false);
+        }
+        for (stored, incoming) in stored_attachments.iter().zip(&message.attachments) {
+            if stored.filename != incoming.filename
+                || stored.content_type != incoming.content_type
+                || stored.size_bytes != incoming.size_bytes
+                || stored.storage_path != incoming.storage_path
+            {
+                return Ok(false);
+            }
+        }
     }
 
     Ok(true)
+}
+
+/// The stored form of a message attachment for merge comparisons.
+struct StoredAttachment {
+    filename: String,
+    content_type: String,
+    size_bytes: u64,
+    storage_path: String,
+}
+
+/// Loads the attachments of one stored message for merge comparison.
+fn load_stored_message_attachments(
+    transaction: &Transaction<'_>,
+    message_id: i64,
+) -> Result<Vec<StoredAttachment>> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT filename, content_type, size_bytes, storage_path
+        FROM message_attachments
+        WHERE message_id = ?1
+        ORDER BY id ASC
+        "#,
+    )?;
+    let attachments = statement
+        .query_map(params![message_id], |row| {
+            Ok(StoredAttachment {
+                filename: row.get(0)?,
+                content_type: row.get(1)?,
+                size_bytes: row.get::<_, i64>(2)? as u64,
+                storage_path: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to load the stored message attachments")?;
+    Ok(attachments)
 }
 
 /// The stored form of a thread row for merge comparisons.
@@ -3773,6 +3952,7 @@ struct StoredThread {
 
 /// The stored form of a message row for merge comparisons.
 struct StoredMessage {
+    id: i64,
     remote_id: String,
     identity_id: i64,
     sender: String,
@@ -3825,7 +4005,7 @@ fn load_stored_messages(
 ) -> Result<Vec<StoredMessage>> {
     let mut statement = transaction.prepare(
         r#"
-        SELECT COALESCE(remote_id, ''), identity_id, sender, recipients, subject,
+        SELECT id, COALESCE(remote_id, ''), identity_id, sender, recipients, subject,
                body_preview, body_text, sanitized_html, has_remote_content,
                is_read, is_flagged, received_at
         FROM messages
@@ -3834,18 +4014,19 @@ fn load_stored_messages(
     )?;
     let rows = statement.query_map(params![thread_id], |row| {
         Ok(StoredMessage {
-            remote_id: row.get(0)?,
-            identity_id: row.get(1)?,
-            sender: row.get(2)?,
-            recipients: row.get(3)?,
-            subject: row.get(4)?,
-            body_preview: row.get(5)?,
-            body_text: row.get(6)?,
-            sanitized_html: row.get(7)?,
-            has_remote_content: row.get(8)?,
-            is_read: row.get(9)?,
-            is_flagged: row.get(10)?,
-            received_at: row.get(11)?,
+            id: row.get(0)?,
+            remote_id: row.get(1)?,
+            identity_id: row.get(2)?,
+            sender: row.get(3)?,
+            recipients: row.get(4)?,
+            subject: row.get(5)?,
+            body_preview: row.get(6)?,
+            body_text: row.get(7)?,
+            sanitized_html: row.get(8)?,
+            has_remote_content: row.get(9)?,
+            is_read: row.get(10)?,
+            is_flagged: row.get(11)?,
+            received_at: row.get(12)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -4041,8 +4222,8 @@ mod tests {
     use super::LocalStore;
     use zmail_core::{
         AccountSyncSnapshot, AuthKind, CachePolicySummary, DraftState, MailboxSnapshot,
-        MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, NewIdentity, PendingOpKind,
-        ProtocolKind, SyncPhase, ThreadSnapshot,
+        MessageAttachment, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, NewIdentity,
+        PendingOpKind, ProtocolKind, SyncPhase, ThreadSnapshot,
     };
 
     #[test]
@@ -4145,6 +4326,7 @@ mod tests {
                         is_read: false,
                         is_flagged: false,
                         received_at: "2026-03-21T09:15:00Z".to_owned(),
+                        attachments: Vec::new(),
                     }],
                 }],
             }],
@@ -4243,6 +4425,7 @@ mod tests {
                         is_read: false,
                         is_flagged: false,
                         received_at: "2026-03-21T09:15:00Z".to_owned(),
+                        attachments: Vec::new(),
                     }],
                 }],
             }],
@@ -4785,6 +4968,7 @@ mod tests {
                         is_read: false,
                         is_flagged: false,
                         received_at: "2026-03-21T09:15:00Z".to_owned(),
+                        attachments: Vec::new(),
                     }],
                 }],
             }],
@@ -4828,6 +5012,7 @@ mod tests {
                         is_read: true,
                         is_flagged: true,
                         received_at: "2026-03-21T10:00:00Z".to_owned(),
+                        attachments: Vec::new(),
                     }],
                 }],
             }],
@@ -4898,6 +5083,7 @@ mod tests {
                         is_read: false,
                         is_flagged: true,
                         received_at: "2026-03-22T12:00:00Z".to_owned(),
+                        attachments: Vec::new(),
                     }],
                 }],
             }],
@@ -5061,6 +5247,90 @@ mod tests {
     }
 
     #[test]
+    fn persists_and_saves_received_attachments() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        let blob = b"attachment payload bytes".to_vec();
+        let target = store
+            .sync_target(account_id)
+            .expect("the sync target should load")
+            .expect("the sync target should exist");
+        let attachments_dir = std::path::PathBuf::from(&target.attachments_dir);
+        std::fs::create_dir_all(&attachments_dir).expect("the attachments dir should be created");
+        std::fs::write(attachments_dir.join("incoming-inbox-1-0-report.txt"), &blob)
+            .expect("the blob should be written");
+
+        let mut snapshot = merge_test_snapshot(
+            "Attachment subject",
+            "Attachment body",
+            "thread-attach",
+            "message-attach",
+            None,
+        );
+        snapshot.mailboxes[0].threads[0].messages[0].attachments = vec![MessageAttachment {
+            filename: "report.txt".to_owned(),
+            content_type: "text/plain".to_owned(),
+            size_bytes: blob.len() as u64,
+            storage_path: "incoming-inbox-1-0-report.txt".to_owned(),
+        }];
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+
+        let threads = store
+            .list_threads(mailbox_id_by_name(&store, account_id, "Inbox"), 0..10)
+            .expect("threads should load");
+        let thread = store
+            .thread_view(threads[0].id)
+            .expect("the thread view should load")
+            .expect("the thread view should exist");
+        assert_eq!(thread.messages.len(), 1);
+        assert_eq!(thread.messages[0].attachments.len(), 1);
+        let attachment = &thread.messages[0].attachments[0];
+        assert_eq!(attachment.filename, "report.txt");
+        assert_eq!(attachment.content_type, "text/plain");
+        assert_eq!(attachment.size_bytes, blob.len() as u64);
+        assert_eq!(attachment.storage_path, "incoming-inbox-1-0-report.txt");
+
+        // An identical re-merge skips the thread and does not duplicate rows.
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("the identical snapshot should apply");
+        let thread = store
+            .thread_view(threads[0].id)
+            .expect("the thread view should load")
+            .expect("the thread view should exist");
+        assert_eq!(
+            thread.messages[0].attachments.len(),
+            1,
+            "an identical re-merge keeps a single attachment row"
+        );
+
+        let destination =
+            std::env::temp_dir().join(format!("zmail-attachment-save-{}", std::process::id()));
+        let saved = store
+            .save_attachment(attachment.id, &destination)
+            .expect("the attachment should save");
+        assert_eq!(saved, destination.join("report.txt"));
+        let written = std::fs::read(&saved).expect("the saved blob should read back");
+        assert_eq!(written, blob, "save-as writes the original bytes");
+        let _ = std::fs::remove_dir_all(&destination);
+    }
+
+    /// Returns the local id of an account mailbox by name.
+    fn mailbox_id_by_name(store: &LocalStore, account_id: i64, name: &str) -> i64 {
+        store
+            .list_mailboxes(account_id)
+            .expect("mailboxes should load")
+            .into_iter()
+            .find(|mailbox| mailbox.name == name)
+            .map(|mailbox| mailbox.id)
+            .expect("the mailbox should exist")
+    }
+    #[test]
     fn mbox_export_writes_message_entries() {
         let store = LocalStore::open_ephemeral().expect("store should open");
         let account_id = store
@@ -5187,6 +5457,7 @@ mod tests {
                             is_read: false,
                             is_flagged: false,
                             received_at: "2026-03-22T13:00:00Z".to_owned(),
+                            attachments: Vec::new(),
                         }],
                     }],
                 },
