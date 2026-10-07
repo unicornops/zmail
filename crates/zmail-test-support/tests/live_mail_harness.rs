@@ -419,14 +419,19 @@ impl RawImap {
             return Ok(first);
         }
 
+        // Keep the untagged lines too: SEARCH results and friends arrive
+        // as `* ...` responses before the tagged completion.
         let mut response = first;
+        let mut transcript = String::new();
         while !response.starts_with(&tag) {
+            transcript.push_str(&response);
             response = self.read_line()?;
         }
+        transcript.push_str(&response);
         if !response.contains("OK") {
             bail!("IMAP command failed: {command} -> {response}");
         }
-        Ok(response)
+        Ok(transcript)
     }
 
     fn append(&mut self, message: &str) -> Result<()> {

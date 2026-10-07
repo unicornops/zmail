@@ -115,7 +115,7 @@ impl DockerMailHarness {
         let _ = harness.compose(["down", "-v", "--remove-orphans"]);
         harness.compose(["up", "-d", "--remove-orphans"])?;
         harness.wait_until_ready(Duration::from_secs(30))?;
-        harness.provision_jmap_accounts(Duration::from_secs(30))?;
+        harness.provision_jmap_accounts(Duration::from_secs(90))?;
 
         Ok(harness)
     }
