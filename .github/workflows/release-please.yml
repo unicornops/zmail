@@ -43,7 +43,7 @@ jobs:
           ref: ${{ needs.release_please.outputs.release_sha }}
 
       - name: Install Linux build and capture dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev xvfb openbox xdotool imagemagick
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev libgl1 libegl1 libgl1-mesa-dri mesa-vulkan-drivers xvfb openbox xdotool imagemagick
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
