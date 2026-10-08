@@ -25,6 +25,11 @@ services:
     volumes:
       - ./james/conf/keystore:/root/conf/keystore:ro
 
+  dovecot:
+    build: ./dovecot
+    ports:
+      - "3243:143"
+
   jmap-proxy:
     image: nginx:1.27-alpine
     depends_on:

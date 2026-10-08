@@ -55,6 +55,12 @@ pub const MAIL_HARNESS_PROJECT: &str = "zmail-phase2b-mail";
 pub const MAIL_HARNESS_HOST: &str = "127.0.0.1";
 /// Local IMAP endpoint for the live harness.
 pub const MAIL_HARNESS_IMAP_ENDPOINT: &str = "imap://127.0.0.1:3143";
+/// Local IMAP endpoint for the CONDSTORE-capable Dovecot harness.
+pub const MAIL_HARNESS_DOVECOT_ENDPOINT: &str = "imap://127.0.0.1:3243";
+/// IMAP login for the Dovecot harness account.
+pub const MAIL_HARNESS_DOVECOT_LOGIN: &str = "mailuser";
+/// Password for the Dovecot harness account.
+pub const MAIL_HARNESS_DOVECOT_PASSWORD: &str = "mailuser-password";
 /// Local SMTP port for the live harness.
 pub const MAIL_HARNESS_SMTP_PORT: u16 = 3025;
 /// Local JMAP base URL for the live harness.
@@ -109,7 +115,7 @@ impl DockerMailHarness {
         let _ = harness.compose(["down", "-v", "--remove-orphans"]);
         harness.compose(["up", "-d", "--remove-orphans"])?;
         harness.wait_until_ready(Duration::from_secs(30))?;
-        harness.provision_jmap_accounts(Duration::from_secs(30))?;
+        harness.provision_jmap_accounts(Duration::from_secs(90))?;
 
         Ok(harness)
     }
@@ -122,6 +128,7 @@ impl DockerMailHarness {
     fn wait_until_ready(&self, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
         let smtp = SocketAddr::from(([127, 0, 0, 1], MAIL_HARNESS_SMTP_PORT));
+        let dovecot = SocketAddr::from(([127, 0, 0, 1], 3243));
         let imap = SocketAddr::from(([127, 0, 0, 1], 3143));
         let jmap_smtp = SocketAddr::from(([127, 0, 0, 1], MAIL_HARNESS_JMAP_SMTP_PORT));
         let jmap_http = SocketAddr::from(([127, 0, 0, 1], 4080));
@@ -133,6 +140,7 @@ impl DockerMailHarness {
                 && port_is_open(jmap_smtp)
                 && port_is_open(jmap_http)
                 && port_is_open(jmap_admin)
+                && port_is_open(dovecot)
             {
                 return Ok(());
             }
