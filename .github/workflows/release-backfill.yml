@@ -23,12 +23,6 @@ jobs:
               with:
                   ref: ${{ inputs.release_tag }}
 
-            - name: Install Windows build dependencies
-              run: |
-                  choco install --no-progress -y llvm
-                  vcpkg install libxkbcommon[core] openssl zstd
-                  echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
-
             - name: Install Rust
               uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
               with:
