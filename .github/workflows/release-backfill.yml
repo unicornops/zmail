@@ -1,0 +1,51 @@
+name: Release Asset Backfill
+
+# Rebuilds and uploads the Windows release assets (zip, MSI, checksums)
+# for an existing tagged release. Used when a release job failed after
+# the other assets were already published.
+on:
+    workflow_dispatch:
+        inputs:
+            release_tag:
+                description: "The existing tag to rebuild Windows assets for (e.g. v0.4.0)"
+                required: true
+                type: string
+
+permissions:
+    contents: write
+
+jobs:
+    backfill-windows-assets:
+        runs-on: windows-latest
+        steps:
+            - name: Checkout release commit
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  ref: ${{ inputs.release_tag }}
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+              with:
+                  toolchain: 1.94.0
+
+            - name: Build release binary
+              run: cargo build -p zmail-app --release --locked
+
+            - name: Create Windows archive
+              shell: pwsh
+              run: Compress-Archive -Path "target/release/zmail-app.exe" -DestinationPath "zmail-windows-x86_64.zip"
+
+            - name: Create Windows installer
+              shell: bash
+              run: |
+                  cargo install cargo-wix --locked
+                  cargo wix -p zmail-app --no-build --nocapture
+                  mv target/wix/*.msi zmail-windows-x86_64.msi
+
+            - name: Upload release assets
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              shell: bash
+              run: |
+                  sha256sum zmail-windows-x86_64.zip zmail-windows-x86_64.msi > SHA256SUMS-Windows
+                  gh release upload "${{ inputs.release_tag }}" zmail-windows-x86_64.zip zmail-windows-x86_64.msi SHA256SUMS-Windows --clobber
