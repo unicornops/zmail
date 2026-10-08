@@ -146,7 +146,7 @@ jobs:
         run: |
           cargo install cargo-wix --locked
           cargo wix -p zmail-app --no-build --nocapture
-          mv target/wix/zmail-app_*.msi zmail-windows-x86_64.msi
+          mv target/wix/*.msi zmail-windows-x86_64.msi
 
       - name: Create Linux package
         if: runner.os == 'Linux'
