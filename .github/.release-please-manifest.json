@@ -6,6 +6,7 @@
   "crates/zmail-imap": "0.0.1",
   "crates/zmail-index": "0.0.1",
   "crates/zmail-jmap": "0.0.1",
+  "crates/zmail-notify": "0.0.1",
   "crates/zmail-security": "0.0.1",
   "crates/zmail-smtp": "0.0.1",
   "crates/zmail-store": "0.0.1",
