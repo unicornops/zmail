@@ -18,11 +18,11 @@ use zmail_core::{
     AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, CachePolicySummary,
     DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate,
     HydratedBody, IdentitySummary, MailboxSnapshot, MailboxSummary, MessageAttachment,
-    MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, OutboxJobState,
-    OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp,
-    PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, StoreStats,
-    SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget, ThreadMessage,
-    ThreadSnapshot, ThreadSummary, ThreadView,
+    MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, OAuth2TargetConfig,
+    OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage,
+    PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit,
+    StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget,
+    ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -40,6 +40,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0007_pending_op_states", PENDING_OP_STATES_SCHEMA),
     ("0008_account_auth_kind", ACCOUNT_AUTH_KIND_SCHEMA),
     ("0009_message_attachments", MESSAGE_ATTACHMENTS_SCHEMA),
+    ("0010_account_oauth2_client", ACCOUNT_OAUTH2_CLIENT_SCHEMA),
 ];
 
 const PHASE2_SCHEMA: &str = r#"
@@ -273,6 +274,12 @@ CREATE TABLE IF NOT EXISTS message_attachments (
 );
 CREATE INDEX IF NOT EXISTS idx_message_attachments_message
 ON message_attachments(message_id, id);
+"#;
+
+const ACCOUNT_OAUTH2_CLIENT_SCHEMA: &str = r#"
+ALTER TABLE accounts ADD COLUMN oauth2_token_endpoint TEXT;
+ALTER TABLE accounts ADD COLUMN oauth2_client_id TEXT;
+ALTER TABLE accounts ADD COLUMN oauth2_access_expires_at INTEGER;
 "#;
 
 const PENDING_OP_STATES_SCHEMA: &str = r#"
@@ -584,7 +591,10 @@ impl LocalStore {
                     endpoint,
                     username,
                     cache_policy_name,
-                    cache_policy_description
+                    cache_policy_description,
+                    oauth2_token_endpoint,
+                    oauth2_client_id,
+                    oauth2_access_expires_at
                 FROM accounts
                 WHERE id = ?1
                 "#,
@@ -599,6 +609,9 @@ impl LocalStore {
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<i64>>(10)?,
                     ))
                 },
             )
@@ -614,6 +627,9 @@ impl LocalStore {
             username,
             policy_name,
             policy_description,
+            oauth2_token_endpoint,
+            oauth2_client_id,
+            oauth2_access_expires_at,
         )) = account
         else {
             return Ok(None);
@@ -644,7 +660,56 @@ impl LocalStore {
             },
             identities,
             checkpoint,
+            oauth2: match (auth, oauth2_token_endpoint, oauth2_client_id) {
+                (AuthKind::OAuth2, Some(token_endpoint), Some(client_id)) => {
+                    Some(OAuth2TargetConfig {
+                        token_endpoint,
+                        client_id,
+                        access_token_expires_at: oauth2_access_expires_at,
+                    })
+                }
+                _ => None,
+            },
         }))
+    }
+
+    /// Persists the OAuth2 client configuration a background refresh needs.
+    ///
+    /// The provider client secret is deliberately not stored here; it lives
+    /// in the secret store alongside the granted tokens.
+    pub fn save_account_oauth2_client(
+        &self,
+        account_id: i64,
+        token_endpoint: &str,
+        client_id: &str,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE accounts SET oauth2_token_endpoint = ?2, oauth2_client_id = ?3, \
+             updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![account_id, token_endpoint, client_id],
+        )
+        .with_context(|| format!("failed to save the OAuth2 client for account {account_id}"))?;
+        Ok(())
+    }
+
+    /// Records when the current OAuth2 access token expires.
+    ///
+    /// `None` clears the recorded expiry, used when the provider does not
+    /// report a token lifetime.
+    pub fn set_account_oauth2_expiry(
+        &self,
+        account_id: i64,
+        expires_at: Option<i64>,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE accounts SET oauth2_access_expires_at = ?2, \
+             updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![account_id, expires_at],
+        )
+        .with_context(|| format!("failed to record the token expiry for account {account_id}"))?;
+        Ok(())
     }
 
     /// Returns all sync targets in account order.
@@ -4545,6 +4610,86 @@ mod tests {
             .expect("the sync target should load")
             .expect("the sync target should exist");
         assert_eq!(target.auth, AuthKind::Password);
+    }
+
+    #[test]
+    fn oauth2_client_config_and_expiry_round_trip_through_sync_targets() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .insert_account(&NewAccount {
+                display_name: "OAuth2 Account".to_owned(),
+                protocol: ProtocolKind::Imap,
+                auth: AuthKind::OAuth2,
+                endpoint: "imaps://mail.example.com:993".to_owned(),
+                username: "user@example.com".to_owned(),
+                cache_policy: CachePolicySummary::performance_first(),
+                outgoing: None,
+                identities: vec![NewIdentity {
+                    display_name: "OAuth2 Account".to_owned(),
+                    email_address: "user@example.com".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }],
+            })
+            .expect("the account should be inserted");
+
+        // Before any client is saved the target carries no OAuth2 config.
+        let target = store
+            .sync_target(account_id)
+            .expect("the sync target should load")
+            .expect("the sync target should exist");
+        assert!(target.oauth2.is_none(), "no client saved yet");
+
+        store
+            .save_account_oauth2_client(account_id, "https://oauth2.example.test/token", "client-1")
+            .expect("the client should save");
+        store
+            .set_account_oauth2_expiry(account_id, Some(1_700_000_000))
+            .expect("the expiry should save");
+
+        let target = store
+            .sync_target(account_id)
+            .expect("the sync target should load")
+            .expect("the sync target should exist");
+        let config = target
+            .oauth2
+            .as_ref()
+            .expect("the saved client should load on the target");
+        assert_eq!(config.token_endpoint, "https://oauth2.example.test/token");
+        assert_eq!(config.client_id, "client-1");
+        assert_eq!(config.access_token_expires_at, Some(1_700_000_000));
+
+        store
+            .set_account_oauth2_expiry(account_id, None)
+            .expect("the expiry should clear");
+        let target = store
+            .sync_target(account_id)
+            .expect("the sync target should load")
+            .expect("the sync target should exist");
+        assert_eq!(
+            target
+                .oauth2
+                .as_ref()
+                .expect("the client should still be saved")
+                .access_token_expires_at,
+            None
+        );
+
+        // Password accounts never surface an OAuth2 config, even with columns set.
+        let legacy = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("the demo account should be created");
+        store
+            .save_account_oauth2_client(legacy, "https://oauth2.example.test/token", "client-1")
+            .expect("the client should save");
+        let target = store
+            .sync_target(legacy)
+            .expect("the sync target should load")
+            .expect("the sync target should exist");
+        assert!(
+            target.oauth2.is_none(),
+            "password accounts do not carry OAuth2 config"
+        );
     }
 
     #[test]

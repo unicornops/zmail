@@ -12,7 +12,7 @@ use zmail_core::{
     AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, NewAccount, NewDraft, NewIdentity,
     OutgoingConfig, ProtocolKind, SubmissionSecurity, ThemeAppearance, ThemeSummary, UpstreamPins,
 };
-use zmail_security::{InMemorySecretStore, KeyringSecretStore, SecretStore};
+use zmail_security::{InMemorySecretStore, KeyringSecretStore, SecretSlot, SecretStore};
 use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
 use zmail_theme::{Appearance, SemanticTheme, ThemeFamily};
@@ -541,9 +541,7 @@ fn add_account(protocol: ProtocolKind) -> Result<()> {
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
     let (account, secret) = prompt_account(protocol)?;
     let account_id = store.insert_account(&account)?;
-    secrets
-        .set_account_secret(account_id, &secret)
-        .with_context(|| format!("failed to store credentials for account {account_id}"))?;
+    secret.store(store.as_ref(), secrets.as_ref(), account_id)?;
 
     let runtime = BackgroundRuntime::start(4)?;
     let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
@@ -1035,16 +1033,17 @@ fn empty_trash(account_id: i64) -> Result<()> {
 
     let runtime = BackgroundRuntime::start(4)?;
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-    let secret = secrets
-        .get_account_secret(account_id)
-        .context("failed to read the account credentials")?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    let secret = runtime
+        .handle()
+        .block_on(sync_service.connect_secret(&target))
+        .context("failed to resolve the account credentials")?;
     let expunged =
         runtime
             .handle()
             .block_on(zmail_imap::empty_trash(&target, &secret, &trash_name))?;
 
     println!("Expunged {expunged} message(s) from {trash_name}; syncing the local mirror.");
-    let sync_service = SyncService::new(runtime.handle().clone(), store, secrets);
     let _ = sync_service.sync_account_and_wait(account_id);
     Ok(())
 }
@@ -1076,7 +1075,97 @@ fn export_account(account_id: i64, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, String)> {
+/// Credentials collected while setting up a new account.
+enum AccountSecret {
+    /// Password or app password.
+    Password(String),
+    /// An OAuth2 access token pasted by the user (no refresh grant).
+    PastedAccessToken(String),
+    /// Tokens granted by the browser flow, with the client that ran it.
+    OAuth2Flow {
+        client: zmail_auth::OAuth2Client,
+        tokens: zmail_auth::TokenSet,
+    },
+}
+
+impl AccountSecret {
+    /// Persists the credentials for a freshly inserted account.
+    fn store(&self, store: &LocalStore, secrets: &dyn SecretStore, account_id: i64) -> Result<()> {
+        match self {
+            Self::Password(secret) => secrets
+                .set_account_secret(account_id, secret)
+                .with_context(|| format!("failed to store credentials for account {account_id}")),
+            Self::PastedAccessToken(token) => secrets
+                .set_account_secret_in_slot(account_id, SecretSlot::AccessToken, token)
+                .with_context(|| {
+                    format!("failed to store the access token for account {account_id}")
+                }),
+            Self::OAuth2Flow { client, tokens } => {
+                // The full grant is persisted so background sync can refresh
+                // the access token without user interaction.
+                secrets
+                    .set_account_secret_in_slot(
+                        account_id,
+                        SecretSlot::AccessToken,
+                        &tokens.access_token,
+                    )
+                    .with_context(|| {
+                        format!("failed to store the access token for account {account_id}")
+                    })?;
+                if let Some(refresh_token) = &tokens.refresh_token {
+                    secrets
+                        .set_account_secret_in_slot(
+                            account_id,
+                            SecretSlot::RefreshToken,
+                            refresh_token,
+                        )
+                        .with_context(|| {
+                            format!("failed to store the refresh token for account {account_id}")
+                        })?;
+                }
+                if let Some(client_secret) = &client.client_secret {
+                    secrets
+                        .set_account_secret_in_slot(
+                            account_id,
+                            SecretSlot::ClientSecret,
+                            client_secret,
+                        )
+                        .with_context(|| {
+                            format!("failed to store the client secret for account {account_id}")
+                        })?;
+                }
+                store
+                    .save_account_oauth2_client(
+                        account_id,
+                        &client.token_endpoint,
+                        &client.client_id,
+                    )
+                    .with_context(|| {
+                        format!("failed to save the OAuth2 client for account {account_id}")
+                    })?;
+                let expires_at = tokens
+                    .expires_in
+                    .map(|lifetime| unix_now() + lifetime as i64);
+                store
+                    .set_account_oauth2_expiry(account_id, expires_at)
+                    .with_context(|| {
+                        format!("failed to record the token expiry for account {account_id}")
+                    })?;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Current wall-clock time in seconds since the Unix epoch.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, AccountSecret)> {
     println!("Setting up a new {protocol} account.");
     let display_name = prompt("Display name")?;
     let endpoint = match protocol {
@@ -1096,8 +1185,10 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, String)> {
         ProtocolKind::Jmap => AuthKind::Password,
     };
     let secret = match auth {
-        AuthKind::Password => rpassword::prompt_password("Password or app password: ")
-            .context("failed to read the account password")?,
+        AuthKind::Password => AccountSecret::Password(
+            rpassword::prompt_password("Password or app password: ")
+                .context("failed to read the account password")?,
+        ),
         AuthKind::OAuth2 => {
             if prompt_yes_no("Run the browser authorization flow (PKCE)?", true)? {
                 let client = prompt_oauth2_client()?;
@@ -1110,10 +1201,12 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, String)> {
                         ""
                     }
                 );
-                tokens.access_token
+                AccountSecret::OAuth2Flow { client, tokens }
             } else {
-                rpassword::prompt_password("OAuth2 access token: ")
-                    .context("failed to read the OAuth2 access token")?
+                AccountSecret::PastedAccessToken(
+                    rpassword::prompt_password("OAuth2 access token: ")
+                        .context("failed to read the OAuth2 access token")?,
+                )
             }
         }
     };

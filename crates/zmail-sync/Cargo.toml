@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
+zmail-auth = { path = "../zmail-auth" }
 zmail-core = { path = "../zmail-core" }
 zmail-imap = { path = "../zmail-imap" }
 zmail-jmap = { path = "../zmail-jmap" }

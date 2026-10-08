@@ -8394,6 +8394,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "tokio",
+ "zmail-auth",
  "zmail-core",
  "zmail-imap",
  "zmail-jmap",

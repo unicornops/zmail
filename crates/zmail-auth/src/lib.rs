@@ -290,62 +290,6 @@ impl OAuth2Client {
         self.token_request(form)
     }
 
-    /// Refreshes the access token with a previously granted refresh token.
-    pub fn refresh(&self, refresh_token: &str) -> Result<TokenSet> {
-        let mut form = vec![
-            ("grant_type", "refresh_token".to_owned()),
-            ("refresh_token", refresh_token.to_owned()),
-            ("client_id", self.client_id.clone()),
-        ];
-        if let Some(secret) = &self.client_secret {
-            form.push(("client_secret", secret.clone()));
-        }
-        let tokens = self.token_request(form)?;
-        Ok(TokenSet {
-            access_token: tokens.access_token,
-            // Per RFC 6749 the refresh token may be omitted on refresh.
-            refresh_token: tokens.refresh_token.or(Some(refresh_token.to_owned())),
-            expires_in: tokens.expires_in,
-        })
-    }
-
-    fn token_request(&self, form: Vec<(&str, String)>) -> Result<TokenSet> {
-        #[cfg(test)]
-        let client = reqwest::blocking::Client::builder()
-            // Unit tests talk to loopback mock endpoints; the host proxy
-            // environment must not intercept them.
-            .no_proxy()
-            .build()
-            .context("failed to prepare the token client")?;
-        #[cfg(not(test))]
-        let client = reqwest::blocking::Client::new();
-        let response = client
-            .post(&self.token_endpoint)
-            .form(&form)
-            .send()
-            .context("the token request failed")?;
-        if !response.status().is_success() {
-            bail!(
-                "the token endpoint rejected the request with HTTP {}",
-                response.status()
-            );
-        }
-        let json: serde_json::Value = response.json().context("the token response was not JSON")?;
-        let access_token = json
-            .get("access_token")
-            .and_then(|value| value.as_str())
-            .context("the token response carried no access_token")?
-            .to_owned();
-        Ok(TokenSet {
-            access_token,
-            refresh_token: json
-                .get("refresh_token")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned),
-            expires_in: json.get("expires_in").and_then(|value| value.as_u64()),
-        })
-    }
-
     /// Runs the whole browser flow: request URL, redirect capture, exchange.
     pub fn authorize_interactively(&self) -> Result<TokenSet> {
         let request = self.authorization_request();
@@ -357,6 +301,86 @@ impl OAuth2Client {
         let code = self.listen_for_redirect(&request.state, Duration::from_secs(300))?;
         self.exchange_code(&code, &request.pkce)
     }
+
+    /// Refreshes the access token with a previously granted refresh token.
+    pub fn refresh(&self, refresh_token: &str) -> Result<TokenSet> {
+        refresh_access_token(
+            &self.token_endpoint,
+            &self.client_id,
+            self.client_secret.as_deref(),
+            refresh_token,
+        )
+    }
+
+    fn token_request(&self, form: Vec<(&str, String)>) -> Result<TokenSet> {
+        token_request(&self.token_endpoint, form)
+    }
+}
+
+/// Refreshes an access token against a provider token endpoint.
+///
+/// This is the background-refresh entry point used by sync: it needs only
+/// the fields persisted with the account, not the full interactive client.
+/// Per RFC 6749 the response may omit the refresh token; the returned set
+/// then keeps the grant that was used.
+pub fn refresh_access_token(
+    token_endpoint: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
+) -> Result<TokenSet> {
+    let mut form = vec![
+        ("grant_type", "refresh_token".to_owned()),
+        ("refresh_token", refresh_token.to_owned()),
+        ("client_id", client_id.to_owned()),
+    ];
+    if let Some(secret) = client_secret {
+        form.push(("client_secret", secret.to_owned()));
+    }
+    let tokens = token_request(token_endpoint, form)?;
+    Ok(TokenSet {
+        access_token: tokens.access_token,
+        // Per RFC 6749 the refresh token may be omitted on refresh.
+        refresh_token: tokens.refresh_token.or(Some(refresh_token.to_owned())),
+        expires_in: tokens.expires_in,
+    })
+}
+
+fn token_request(endpoint: &str, form: Vec<(&str, String)>) -> Result<TokenSet> {
+    #[cfg(test)]
+    let client = reqwest::blocking::Client::builder()
+        // Unit tests talk to loopback mock endpoints; the host proxy
+        // environment must not intercept them.
+        .no_proxy()
+        .build()
+        .context("failed to prepare the token client")?;
+    #[cfg(not(test))]
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .post(endpoint)
+        .form(&form)
+        .send()
+        .context("the token request failed")?;
+    if !response.status().is_success() {
+        bail!(
+            "the token endpoint rejected the request with HTTP {}",
+            response.status()
+        );
+    }
+    let json: serde_json::Value = response.json().context("the token response was not JSON")?;
+    let access_token = json
+        .get("access_token")
+        .and_then(|value| value.as_str())
+        .context("the token response carried no access_token")?
+        .to_owned();
+    Ok(TokenSet {
+        access_token,
+        refresh_token: json
+            .get("refresh_token")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        expires_in: json.get("expires_in").and_then(|value| value.as_u64()),
+    })
 }
 
 /// Opens `url` with the platform browser; failures leave the printed URL.
@@ -684,6 +708,33 @@ mod tests {
             Some("refresh-1"),
             "an omitted refresh token keeps the previous grant"
         );
+        server
+            .join()
+            .expect("the mock server should finish")
+            .expect("the mock server should validate the request");
+    }
+
+    #[test]
+    fn refresh_access_token_uses_only_the_persisted_fields() {
+        let port = free_port();
+        let server = mock_token_server(port, "refresh_token");
+
+        let tokens = retry_until_bound(|| {
+            super::refresh_access_token(
+                &format!("http://127.0.0.1:{port}/token"),
+                "test-client",
+                None,
+                "refresh-1",
+            )
+        })
+        .expect("the background refresh should succeed");
+        assert_eq!(tokens.access_token, "access-1");
+        assert_eq!(
+            tokens.refresh_token.as_deref(),
+            Some("refresh-1"),
+            "an omitted refresh token keeps the previous grant"
+        );
+        assert_eq!(tokens.expires_in, Some(3600));
         server
             .join()
             .expect("the mock server should finish")

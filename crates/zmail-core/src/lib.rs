@@ -428,6 +428,22 @@ pub struct SyncTarget {
     pub attachments_dir: String,
     /// Previous checkpoint token for incremental sync.
     pub checkpoint: Option<String>,
+    /// OAuth2 client configuration for accounts that authenticate with
+    /// bearer tokens; `None` for password accounts.
+    pub oauth2: Option<OAuth2TargetConfig>,
+}
+
+/// The OAuth2 client configuration a background sync needs to refresh
+/// expired access tokens without user interaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuth2TargetConfig {
+    /// Provider token endpoint used for refresh requests.
+    pub token_endpoint: String,
+    /// Provider application client id.
+    pub client_id: String,
+    /// Unix timestamp (seconds) when the current access token expires,
+    /// when the provider reported a lifetime.
+    pub access_token_expires_at: Option<i64>,
 }
 
 /// How an account authenticates against its server.
