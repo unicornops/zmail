@@ -142,9 +142,10 @@ jobs:
 
       - name: Create Windows installer
         if: runner.os == 'Windows'
+        shell: bash
         run: |
           cargo install cargo-wix --locked
-          cargo wix -p zmail-app --no-build
+          cargo wix -p zmail-app --no-build --nocapture
           mv target/wix/zmail-app_*.msi zmail-windows-x86_64.msi
 
       - name: Create Linux package

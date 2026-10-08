@@ -37,7 +37,7 @@
                                Win64="yes">
                         <File Id="zmail-app.exe"
                               Name="zmail-app.exe"
-                              Source="target/release/zmail-app.exe"
+                              Source="$(var.CargoTargetDir)\release\zmail-app.exe"
                               KeyPath="yes" />
                     </Component>
                     <Component Id="mailto_registration"
