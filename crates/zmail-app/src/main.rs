@@ -1103,66 +1103,10 @@ impl AccountSecret {
             Self::OAuth2Flow { client, tokens } => {
                 // The full grant is persisted so background sync can refresh
                 // the access token without user interaction.
-                secrets
-                    .set_account_secret_in_slot(
-                        account_id,
-                        SecretSlot::AccessToken,
-                        &tokens.access_token,
-                    )
-                    .with_context(|| {
-                        format!("failed to store the access token for account {account_id}")
-                    })?;
-                if let Some(refresh_token) = &tokens.refresh_token {
-                    secrets
-                        .set_account_secret_in_slot(
-                            account_id,
-                            SecretSlot::RefreshToken,
-                            refresh_token,
-                        )
-                        .with_context(|| {
-                            format!("failed to store the refresh token for account {account_id}")
-                        })?;
-                }
-                if let Some(client_secret) = &client.client_secret {
-                    secrets
-                        .set_account_secret_in_slot(
-                            account_id,
-                            SecretSlot::ClientSecret,
-                            client_secret,
-                        )
-                        .with_context(|| {
-                            format!("failed to store the client secret for account {account_id}")
-                        })?;
-                }
-                store
-                    .save_account_oauth2_client(
-                        account_id,
-                        &client.token_endpoint,
-                        &client.client_id,
-                    )
-                    .with_context(|| {
-                        format!("failed to save the OAuth2 client for account {account_id}")
-                    })?;
-                let expires_at = tokens
-                    .expires_in
-                    .map(|lifetime| unix_now() + lifetime as i64);
-                store
-                    .set_account_oauth2_expiry(account_id, expires_at)
-                    .with_context(|| {
-                        format!("failed to record the token expiry for account {account_id}")
-                    })?;
-                Ok(())
+                zmail_sync::persist_oauth2_grant(store, secrets, account_id, client, tokens)
             }
         }
     }
-}
-
-/// Current wall-clock time in seconds since the Unix epoch.
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or_default()
 }
 
 fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, AccountSecret)> {

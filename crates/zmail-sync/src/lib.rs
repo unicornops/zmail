@@ -997,6 +997,57 @@ fn unix_now() -> i64 {
         .unwrap_or_default()
 }
 
+/// Persists a granted OAuth2 token set for an account.
+///
+/// The access token, rotated refresh token, and provider client secret go
+/// into the secret store's slots; the client configuration (token endpoint,
+/// client id) and the token expiry go into the local store, so background
+/// sync can refresh the grant without user interaction. Shared by the CLI
+/// and the UI account setup flows.
+pub fn persist_oauth2_grant(
+    store: &LocalStore,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    client: &zmail_auth::OAuth2Client,
+    tokens: &zmail_auth::TokenSet,
+) -> Result<()> {
+    secrets
+        .set_account_secret_in_slot(account_id, SecretSlot::AccessToken, &tokens.access_token)
+        .with_context(|| format!("failed to store the access token for account {account_id}"))?;
+    if let Some(refresh_token) = tokens
+        .refresh_token
+        .as_ref()
+        .filter(|token| !token.is_empty())
+    {
+        secrets
+            .set_account_secret_in_slot(account_id, SecretSlot::RefreshToken, refresh_token)
+            .with_context(|| {
+                format!("failed to store the refresh token for account {account_id}")
+            })?;
+    }
+    if let Some(client_secret) = client
+        .client_secret
+        .as_ref()
+        .filter(|secret| !secret.is_empty())
+    {
+        secrets
+            .set_account_secret_in_slot(account_id, SecretSlot::ClientSecret, client_secret)
+            .with_context(|| {
+                format!("failed to store the client secret for account {account_id}")
+            })?;
+    }
+    store
+        .save_account_oauth2_client(account_id, &client.token_endpoint, &client.client_id)
+        .with_context(|| format!("failed to save the OAuth2 client for account {account_id}"))?;
+    let expires_at = tokens
+        .expires_in
+        .map(|lifetime| unix_now() + lifetime as i64);
+    store
+        .set_account_oauth2_expiry(account_id, expires_at)
+        .with_context(|| format!("failed to record the token expiry for account {account_id}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1317,6 +1368,70 @@ mod oauth2_refresh_tests {
     use zmail_store::LocalStore;
 
     use super::tests::insert_account;
+
+    #[test]
+    fn persist_oauth2_grant_stores_the_full_grant() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let secrets = InMemorySecretStore::shared();
+        let account_id = insert_account(&store, AuthKind::OAuth2);
+        let client = zmail_auth::OAuth2Client {
+            client_id: "client-1".to_owned(),
+            client_secret: Some("client-secret-1".to_owned()),
+            authorization_endpoint: "https://provider.test/authorize".to_owned(),
+            token_endpoint: "https://provider.test/token".to_owned(),
+            scopes: Vec::new(),
+            redirect_port: 8357,
+            extra_authorize_params: Vec::new(),
+        };
+        let tokens = zmail_auth::TokenSet {
+            access_token: "access-1".to_owned(),
+            refresh_token: Some("refresh-1".to_owned()),
+            expires_in: Some(3600),
+        };
+
+        super::persist_oauth2_grant(&store, secrets.as_ref(), account_id, &client, &tokens)
+            .expect("the grant should persist");
+
+        assert_eq!(
+            secrets
+                .get_account_secret_from_slot(account_id, SecretSlot::AccessToken)
+                .expect("the access token should load"),
+            "access-1"
+        );
+        assert_eq!(
+            secrets
+                .get_account_secret_from_slot(account_id, SecretSlot::RefreshToken)
+                .expect("the refresh token should load"),
+            "refresh-1"
+        );
+        assert_eq!(
+            secrets
+                .get_account_secret_from_slot(account_id, SecretSlot::ClientSecret)
+                .expect("the client secret should load"),
+            "client-secret-1"
+        );
+        let target = store
+            .sync_target(account_id)
+            .expect("the target should load")
+            .expect("the target should exist");
+        let config = target
+            .oauth2
+            .as_ref()
+            .expect("the client config should load on the target");
+        assert_eq!(config.token_endpoint, "https://provider.test/token");
+        assert_eq!(config.client_id, "client-1");
+        let expires_at = config
+            .access_token_expires_at
+            .expect("the expiry should be recorded");
+        assert!(
+            expires_at > unix_now(),
+            "the recorded expiry must lie in the future"
+        );
+        assert!(
+            expires_at <= unix_now() + 3600,
+            "the recorded expiry must match the granted lifetime"
+        );
+    }
 
     fn service() -> (Arc<LocalStore>, Arc<InMemorySecretStore>, SyncService) {
         // The tests below never reach the network; a plain Tokio test

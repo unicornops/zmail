@@ -10,6 +10,7 @@ publish = false
 anyhow.workspace = true
 gpui.workspace = true
 url.workspace = true
+zmail-auth = { path = "../zmail-auth" }
 zmail-core = { path = "../zmail-core" }
 zmail-notify = { path = "../zmail-notify" }
 zmail-security = { path = "../zmail-security" }

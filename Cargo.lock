@@ -8435,6 +8435,7 @@ dependencies = [
  "anyhow",
  "gpui",
  "url",
+ "zmail-auth",
  "zmail-core",
  "zmail-notify",
  "zmail-security",

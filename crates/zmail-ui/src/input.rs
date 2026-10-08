@@ -27,6 +27,8 @@ pub(crate) enum EditorField {
     AccountEndpoint,
     AccountUsername,
     AccountPassword,
+    AccountOauthClientId,
+    AccountOauthClientSecret,
     AccountIdentityName,
     AccountIdentityEmail,
     AccountSignature,

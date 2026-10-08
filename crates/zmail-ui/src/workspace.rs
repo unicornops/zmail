@@ -15,7 +15,7 @@ use url::Url;
 use zmail_core::{
     AccountSummary, AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, IdentitySummary,
     MailboxSummary, NewAccount, NewDraft, NewIdentity, OutgoingConfig, ProtocolKind, StoreStats,
-    SubmissionSecurity, ThreadMessage, ThreadView,
+    SubmissionSecurity, SyncPhase, ThreadMessage, ThreadView,
 };
 use zmail_notify::{NewMailNotifier, OsNotificationSink};
 use zmail_security::SecretStore;
@@ -938,18 +938,49 @@ impl WorkspaceView {
         match self.build_account_from_form() {
             Ok((account, secret)) => match self.store.insert_account(&account) {
                 Ok(account_id) => {
-                    if let Err(error) = self.secrets.set_account_secret(account_id, &secret) {
-                        self.store_error = Some(error.to_string());
-                        cx.notify();
-                        return;
-                    }
+                    let oauth2_flow = match secret {
+                        AccountSetupSecret::Password(secret) => {
+                            if let Err(error) = self.secrets.set_account_secret(account_id, &secret)
+                            {
+                                self.store_error = Some(error.to_string());
+                                cx.notify();
+                                return;
+                            }
+                            None
+                        }
+                        AccountSetupSecret::OAuth2(client) => {
+                            // The browser flow blocks for up to its redirect
+                            // timeout, so it runs off the GUI thread; the
+                            // account's sync status marks the wait, and the
+                            // grant (tokens, client config, expiry) is
+                            // persisted before the first sync starts.
+                            let _ = self.store.begin_sync_attempt(
+                                account_id,
+                                SyncPhase::Connecting,
+                                "Waiting for browser authorization",
+                            );
+                            self.spawn_oauth2_authorization(account_id, client);
+                            Some(())
+                        }
+                    };
                     self.selected_account_id = Some(account_id);
                     self.detail_mode = DetailMode::Reader;
                     self.list_mode = ListMode::Mail;
                     self.account_setup = AccountSetupState::default();
                     self.active_field = None;
-                    self.status_message = Some(format!("Account {account_id} added."));
-                    let _ = self.sync_service.sync_account(account_id);
+                    self.status_message = Some(if oauth2_flow.is_some() {
+                        format!(
+                            "Account {account_id} added. Finish the authorization in the opened browser page; the account syncs once it completes."
+                        )
+                    } else {
+                        format!("Account {account_id} added.")
+                    });
+                    // OAuth2 accounts sync from the authorization thread,
+                    // once the grant is stored; syncing here would only
+                    // record a missing-credentials failure.
+                    if oauth2_flow.is_none() {
+                        let _ = self.sync_service.sync_account(account_id);
+                    }
                     // Start the new account's background watcher immediately
                     // instead of waiting for the next app launch.
                     let _ = self.sync_service.sync_watchers();
@@ -963,14 +994,89 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Build a [`NewAccount`] + plaintext secret from the current form state.
-    pub(crate) fn build_account_from_form(&self) -> Result<(NewAccount, String)> {
+    /// Runs the OAuth2 browser flow on a background thread and stores the
+    /// resulting grant, so the GUI never blocks on the redirect wait.
+    fn spawn_oauth2_authorization(&self, account_id: i64, client: zmail_auth::OAuth2Client) {
+        let store = self.store.clone();
+        let secrets = self.secrets.clone();
+        let sync_service = self.sync_service.clone();
+        let spawn = std::thread::Builder::new()
+            .name("zmail-oauth2-setup".to_owned())
+            .spawn(move || {
+                let tokens = match client.authorize_interactively() {
+                    Ok(tokens) => tokens,
+                    Err(error) => {
+                        let _ = store.record_sync_failure(
+                            account_id,
+                            "Browser authorization failed",
+                            error.to_string(),
+                        );
+                        return;
+                    }
+                };
+                if let Err(error) = zmail_sync::persist_oauth2_grant(
+                    &store,
+                    secrets.as_ref(),
+                    account_id,
+                    &client,
+                    &tokens,
+                ) {
+                    let _ = store.record_sync_failure(
+                        account_id,
+                        "Storing the authorization failed",
+                        error.to_string(),
+                    );
+                    return;
+                }
+                let _ = sync_service.sync_account(account_id);
+                let _ = sync_service.sync_watchers();
+            });
+        if let Err(error) = spawn {
+            let _ = self.store.record_sync_failure(
+                account_id,
+                "Browser authorization failed",
+                error.to_string(),
+            );
+        }
+    }
+
+    /// Build a [`NewAccount`] plus the form's credential plan.
+    pub(crate) fn build_account_from_form(&self) -> Result<(NewAccount, AccountSetupSecret)> {
         let form = &self.account_setup;
         let display_name = required_text("Display name", &form.display_name.text)?;
         let endpoint = required_text("Endpoint", &form.endpoint.text)?;
         validate_endpoint(form.protocol, &endpoint)?;
         let username = required_text("Username", &form.username.text)?;
-        let secret = required_text("Password", &form.password.text)?;
+
+        // JMAP accounts authenticate with a password; bearer-token auth for
+        // JMAP is not wired yet.
+        let (auth, secret) = if form.protocol == ProtocolKind::Jmap {
+            (
+                AuthKind::Password,
+                AccountSetupSecret::Password(required_text("Password", &form.password.text)?),
+            )
+        } else {
+            match form.auth {
+                AuthKind::Password => (
+                    AuthKind::Password,
+                    AccountSetupSecret::Password(required_text("Password", &form.password.text)?),
+                ),
+                AuthKind::OAuth2 => {
+                    let preset = form
+                        .oauth_preset
+                        .context("Choose an OAuth2 provider (Gmail or Microsoft 365)")?;
+                    let client_id = required_text("OAuth2 client id", &form.oauth_client_id.text)?;
+                    let client_secret = form.oauth_client_secret.text.trim();
+                    let client_secret = if client_secret.is_empty() {
+                        None
+                    } else {
+                        Some(client_secret.to_owned())
+                    };
+                    let client = preset.client(client_id, client_secret, OAUTH2_REDIRECT_PORT);
+                    (AuthKind::OAuth2, AccountSetupSecret::OAuth2(client))
+                }
+            }
+        };
         let identity_name = if form.identity_name.text.trim().is_empty() {
             display_name.clone()
         } else {
@@ -1023,7 +1129,7 @@ impl WorkspaceView {
             NewAccount {
                 display_name,
                 protocol: form.protocol,
-                auth: AuthKind::Password,
+                auth,
                 endpoint,
                 username,
                 cache_policy: CachePolicySummary::performance_first(),
@@ -1066,6 +1172,10 @@ impl WorkspaceView {
             EditorField::AccountEndpoint => Some(&mut self.account_setup.endpoint),
             EditorField::AccountUsername => Some(&mut self.account_setup.username),
             EditorField::AccountPassword => Some(&mut self.account_setup.password),
+            EditorField::AccountOauthClientId => Some(&mut self.account_setup.oauth_client_id),
+            EditorField::AccountOauthClientSecret => {
+                Some(&mut self.account_setup.oauth_client_secret)
+            }
             EditorField::AccountIdentityName => Some(&mut self.account_setup.identity_name),
             EditorField::AccountIdentityEmail => Some(&mut self.account_setup.identity_email),
             EditorField::AccountSignature => Some(&mut self.account_setup.signature),
@@ -1117,6 +1227,7 @@ impl WorkspaceView {
                 EditorField::SearchQuery => self.run_search(cx),
                 EditorField::ComposeAttachmentPath => self.add_current_attachment(cx),
                 EditorField::AccountPassword
+                | EditorField::AccountOauthClientSecret
                 | EditorField::AccountSignature
                 | EditorField::AccountAliasEmails
                 | EditorField::AccountSmtpUsername => self.submit_account_setup(window, cx),
@@ -1150,6 +1261,18 @@ pub(crate) fn split_addresses(value: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// Loopback port the UI OAuth2 flow listens on for the provider redirect,
+/// matching the CLI default.
+const OAUTH2_REDIRECT_PORT: u16 = 8357;
+
+/// Credentials the account setup form collected for a new account.
+pub(crate) enum AccountSetupSecret {
+    /// Password or app password, stored directly.
+    Password(String),
+    /// The OAuth2 client whose browser flow runs after the account is stored.
+    OAuth2(zmail_auth::OAuth2Client),
 }
 
 /// Return `Ok(trimmed)` or an error if `value` is empty or whitespace-only.
