@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use std::time::Duration;
+use std::{fs, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -20,8 +20,9 @@ use jmap_client::{
 use serde::{Deserialize, Serialize};
 use url::Url;
 use zmail_core::{
-    AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, NewIdentity, OpApplyReport,
-    OutgoingMessage, PendingOp, PendingOpKind, ProtocolKind, SyncTarget, ThreadSnapshot,
+    AccountSyncSnapshot, MailboxSnapshot, MessageAttachment, MessageSnapshot, NewIdentity,
+    OpApplyReport, OutgoingMessage, PendingOp, PendingOpKind, ProtocolKind, SyncTarget,
+    ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
 use zmail_smtp::render_rfc822_message;
@@ -39,6 +40,12 @@ pub const MVP_SCOPE: &[&str] = &[
 ];
 
 const QUERY_PAGE_SIZE: usize = 250;
+/// Maximum number of attachment blobs persisted per message, mirroring the
+/// IMAP adapter's cap.
+const MAX_ATTACHMENTS_PER_MESSAGE: usize = 25;
+/// Maximum size of a single persisted attachment blob, mirroring the IMAP
+/// adapter's cap.
+const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 
 /// Connects to a live JMAP account and returns the mailbox snapshot written into the local store.
 pub async fn discover_and_sync(
@@ -88,7 +95,7 @@ pub async fn discover_and_sync(
         });
     }
 
-    let emails = fetch_emails(&client, &email_query.ids).await?;
+    let emails = fetch_emails(&client, &email_query.ids, &target.attachments_dir).await?;
     let mailboxes = group_mailboxes(mailbox_details, emails, &identities, &target.username);
 
     Ok(AccountSyncSnapshot {
@@ -319,6 +326,7 @@ struct JmapEmail {
     has_attachments: bool,
     has_remote_content: bool,
     identity_email: String,
+    attachments: Vec<MessageAttachment>,
 }
 
 #[derive(Debug)]
@@ -479,7 +487,21 @@ async fn fetch_email_query(client: &Client) -> Result<JmapQueryResult> {
     })
 }
 
-async fn fetch_emails(client: &Client, ids: &[String]) -> Result<Vec<JmapEmail>> {
+/// Fetches email details, downloading attachment blobs into the store's
+/// attachments directory.
+///
+/// JMAP delivers bodies with the snapshot (there is no lazy hydration path),
+/// so attachments download during sync as well. Each part resolves through
+/// the email's `attachments` property and downloads over the session's
+/// binary download URL; `jmap-client` 0.4.0 has no `Blob/get` request helper,
+/// but the download endpoint returns the same bytes. Failures skip the part
+/// rather than failing the sync, mirroring the IMAP adapter's tolerance.
+async fn fetch_emails(
+    client: &Client,
+    ids: &[String],
+    attachments_dir: &str,
+) -> Result<Vec<JmapEmail>> {
+    let attachments_dir = std::path::PathBuf::from(attachments_dir);
     let mut emails = Vec::with_capacity(ids.len());
     let properties = vec![
         Property::Id,
@@ -491,6 +513,7 @@ async fn fetch_emails(client: &Client, ids: &[String]) -> Result<Vec<JmapEmail>>
         Property::Subject,
         Property::Preview,
         Property::HasAttachment,
+        Property::Attachments,
         Property::BodyValues,
         Property::TextBody,
         Property::HtmlBody,
@@ -518,11 +541,13 @@ async fn fetch_emails(client: &Client, ids: &[String]) -> Result<Vec<JmapEmail>>
                 .and_then(|addresses| addresses.first())
                 .map(|address| address.email().to_owned())
                 .unwrap_or_default();
+            let id = email.id().map(str::to_owned).unwrap_or_default();
 
             let (body_text, sanitized_html, has_remote_content, hydrated_preview) =
                 extract_renderable_bodies(&email);
+            let attachments = download_attachments(client, &email, &id, &attachments_dir).await;
             emails.push(JmapEmail {
-                id: email.id().map(str::to_owned).unwrap_or_default(),
+                id,
                 thread_id,
                 mailbox_ids: email.mailbox_ids().into_iter().map(str::to_owned).collect(),
                 from: format_jmap_addresses(email.from()),
@@ -539,14 +564,95 @@ async fn fetch_emails(client: &Client, ids: &[String]) -> Result<Vec<JmapEmail>>
                     .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),
                 unread: !email.keywords().contains(&"$seen"),
                 flagged: email.keywords().contains(&"$flagged"),
-                has_attachments: email.has_attachment(),
+                has_attachments: email.has_attachment() || !attachments.is_empty(),
                 has_remote_content,
                 identity_email,
+                attachments,
             });
         }
     }
 
     Ok(emails)
+}
+
+/// Downloads one email's attachment parts into the blob directory.
+///
+/// Parts without a blob id or a name, oversized parts, and failed downloads
+/// are skipped so a single bad part never fails the account sync.
+async fn download_attachments(
+    client: &Client,
+    email: &jmap_client::email::Email,
+    email_id: &str,
+    attachments_dir: &std::path::Path,
+) -> Vec<MessageAttachment> {
+    let mut attachments = Vec::new();
+    let Some(parts) = email.attachments() else {
+        return attachments;
+    };
+    if parts.is_empty() || !ensure_blob_directory(attachments_dir) {
+        return attachments;
+    }
+
+    for (index, part) in parts.iter().enumerate() {
+        if attachments.len() >= MAX_ATTACHMENTS_PER_MESSAGE {
+            break;
+        }
+        let Some(blob_id) = part.blob_id() else {
+            continue;
+        };
+        if part.size() > MAX_ATTACHMENT_BYTES {
+            continue;
+        }
+        let Some(filename) = part.name().map(str::to_owned) else {
+            continue;
+        };
+        if filename.trim().is_empty() {
+            continue;
+        }
+        let Ok(contents) = client.download(blob_id).await else {
+            continue;
+        };
+        if contents.len() > MAX_ATTACHMENT_BYTES {
+            continue;
+        }
+        let storage_name = format!(
+            "incoming-jmap-{email_id}-{index}-{}",
+            sanitize_component(&filename)
+        );
+        let storage_path = attachments_dir.join(&storage_name);
+        if fs::write(&storage_path, &contents).is_err() {
+            continue;
+        }
+        attachments.push(MessageAttachment {
+            filename,
+            content_type: part
+                .content_type()
+                .map(str::to_owned)
+                .unwrap_or_else(|| "application/octet-stream".to_owned()),
+            size_bytes: contents.len() as u64,
+            storage_path: storage_name,
+        });
+    }
+
+    attachments
+}
+
+/// Creates the blob directory when it is missing, reporting whether it is
+/// usable; without a writable directory the sync must not fail, the
+/// attachment parts are simply not kept.
+fn ensure_blob_directory(attachments_dir: &std::path::Path) -> bool {
+    attachments_dir.is_dir() || fs::create_dir_all(attachments_dir).is_ok()
+}
+
+/// Restricts a filename-derived path component to safe characters.
+fn sanitize_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => ch,
+            _ => '_',
+        })
+        .collect()
 }
 
 fn group_mailboxes(
@@ -623,7 +729,7 @@ fn group_mailboxes(
                 is_read: !email.unread,
                 is_flagged: email.flagged,
                 received_at: email.received_at.clone(),
-                attachments: Vec::new(),
+                attachments: email.attachments.clone(),
             });
         }
     }
@@ -796,7 +902,14 @@ fn timestamp_to_rfc3339(timestamp: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{JmapCheckpoint, format_jmap_addresses, timestamp_to_rfc3339};
+    use super::{JmapCheckpoint, format_jmap_addresses, sanitize_component, timestamp_to_rfc3339};
+
+    #[test]
+    fn attachment_filenames_sanitize_to_safe_components() {
+        assert_eq!(sanitize_component("report.txt"), "report.txt");
+        assert_eq!(sanitize_component("a b/c:d.txt"), "a_b_c_d.txt");
+        assert_eq!(sanitize_component("../../etc/passwd"), ".._.._etc_passwd");
+    }
 
     #[test]
     fn checkpoint_round_trip_is_stable() {
