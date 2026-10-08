@@ -32,5 +32,8 @@ zmail-store = { path = "../zmail-store" }
 zmail-theme = { path = "../zmail-theme" }
 zmail-ui = { path = "../zmail-ui" }
 
+[build-dependencies]
+winresource = "0.1"
+
 [lints]
 workspace = true

@@ -44,8 +44,13 @@ This document records the Phase 5 hardening work that is present in-repo today a
 - GitHub Actions produces release archives for Linux, macOS, and Windows from the same tagged source.
 - The current packaging target is the compiled `zmail-app` binary in a platform archive.
 - Tagged releases additionally produce a Linux `.deb` package (via `cargo-deb`) and a macOS `.app` bundle (ad-hoc signed), each attached with a `SHA256SUMS` manifest.
-- Windows releases still ship the zip archive; an MSI installer is pending release work.
-- Developer ID signing and notarization are not configured yet and remain opt-in and repository-controlled. Release automation should only be extended with platform signing secrets when those secrets are available and the signing identity is stable.
+- Windows releases carry the zip archive and a WiX-built MSI installer (Program Files, Start-menu shortcut, `mailto:` scheme registration) produced by `cargo wix`; the executable embeds a VERSIONINFO resource (`crates/zmail-app/build.rs`) the MSI binds its product version against.
+- Signing and notarization are opt-in, repository-controlled, and no-op until the secrets exist. The concrete secret inventory a maintainer adds to activate them:
+  - `WINDOWS_SIGNING_CERT` — an Authenticode certificate as base64-encoded PFX. When present, the Windows release job signs the binary and the zip with `signtool` (RFC 3161 timestamping) before uploading.
+  - `WINDOWS_SIGNING_PASSWORD` — the PFX passphrase for the certificate above.
+  - macOS notarization (pending work, same pattern): `MACOS_SIGNING_CERTIFICATE` (base64 P12), `MACOS_SIGNING_CERTIFICATE_PASSWORD`, and the App Store Connect API key (`APPLE_ID`, `APPLE_ID_PASSWORD`, `APPLE_TEAM_ID`) for `notarytool`; today the `.app` ships ad-hoc signed.
+  - `.deb` signing (pending work): a GPG key (`DEB_SIGNING_KEY` + `DEB_SIGNING_KEY_PASSWORD`) added to a repo signing step when apt hosting exists.
+- No signing step may block the release when its secrets are absent, and no signing secret may ever be printed into build logs.
 - No packaging step may introduce a background helper process that outlives the GUI binary.
 
 ## Release Process
