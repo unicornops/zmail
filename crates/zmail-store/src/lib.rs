@@ -18,11 +18,11 @@ use zmail_core::{
     AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, CachePolicySummary,
     DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate,
     HydratedBody, IdentitySummary, MailboxSnapshot, MailboxSummary, MessageAttachment,
-    MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, OutboxJobState,
-    OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp,
-    PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, StoreStats,
-    SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget, ThreadMessage,
-    ThreadSnapshot, ThreadSummary, ThreadView,
+    MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, OAuth2TargetConfig,
+    OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage,
+    PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit,
+    StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget,
+    ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -40,6 +40,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0007_pending_op_states", PENDING_OP_STATES_SCHEMA),
     ("0008_account_auth_kind", ACCOUNT_AUTH_KIND_SCHEMA),
     ("0009_message_attachments", MESSAGE_ATTACHMENTS_SCHEMA),
+    ("0010_account_oauth2_client", ACCOUNT_OAUTH2_CLIENT_SCHEMA),
 ];
 
 const PHASE2_SCHEMA: &str = r#"
@@ -273,6 +274,34 @@ CREATE TABLE IF NOT EXISTS message_attachments (
 );
 CREATE INDEX IF NOT EXISTS idx_message_attachments_message
 ON message_attachments(message_id, id);
+"#;
+
+const ACCOUNT_OAUTH2_CLIENT_SCHEMA: &str = r#"
+ALTER TABLE accounts ADD COLUMN oauth2_token_endpoint TEXT;
+ALTER TABLE accounts ADD COLUMN oauth2_client_id TEXT;
+ALTER TABLE accounts ADD COLUMN oauth2_access_expires_at INTEGER;
+"#;
+
+/// Rebuilds the full-text search document of one thread from stored rows.
+///
+/// Shared by the account-wide index refresh and per-thread hydration so a
+/// single document row is always derived the same way.
+const THREAD_SEARCH_DOCUMENT_INSERT: &str = r#"
+INSERT INTO search_documents(account_id, mailbox_id, thread_id, mailbox_name, subject, participants, preview, body)
+SELECT
+    mailboxes.account_id,
+    mailboxes.id,
+    threads.id,
+    mailboxes.name,
+    threads.subject,
+    threads.participants,
+    threads.preview,
+    COALESCE(GROUP_CONCAT(COALESCE(messages.body_text, messages.sanitized_html, messages.body_preview), ' '), '')
+FROM threads
+JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+LEFT JOIN messages ON messages.thread_id = threads.id
+WHERE threads.id = ?1
+GROUP BY threads.id
 "#;
 
 const PENDING_OP_STATES_SCHEMA: &str = r#"
@@ -584,7 +613,10 @@ impl LocalStore {
                     endpoint,
                     username,
                     cache_policy_name,
-                    cache_policy_description
+                    cache_policy_description,
+                    oauth2_token_endpoint,
+                    oauth2_client_id,
+                    oauth2_access_expires_at
                 FROM accounts
                 WHERE id = ?1
                 "#,
@@ -599,6 +631,9 @@ impl LocalStore {
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<i64>>(10)?,
                     ))
                 },
             )
@@ -614,6 +649,9 @@ impl LocalStore {
             username,
             policy_name,
             policy_description,
+            oauth2_token_endpoint,
+            oauth2_client_id,
+            oauth2_access_expires_at,
         )) = account
         else {
             return Ok(None);
@@ -644,7 +682,56 @@ impl LocalStore {
             },
             identities,
             checkpoint,
+            oauth2: match (auth, oauth2_token_endpoint, oauth2_client_id) {
+                (AuthKind::OAuth2, Some(token_endpoint), Some(client_id)) => {
+                    Some(OAuth2TargetConfig {
+                        token_endpoint,
+                        client_id,
+                        access_token_expires_at: oauth2_access_expires_at,
+                    })
+                }
+                _ => None,
+            },
         }))
+    }
+
+    /// Persists the OAuth2 client configuration a background refresh needs.
+    ///
+    /// The provider client secret is deliberately not stored here; it lives
+    /// in the secret store alongside the granted tokens.
+    pub fn save_account_oauth2_client(
+        &self,
+        account_id: i64,
+        token_endpoint: &str,
+        client_id: &str,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE accounts SET oauth2_token_endpoint = ?2, oauth2_client_id = ?3, \
+             updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![account_id, token_endpoint, client_id],
+        )
+        .with_context(|| format!("failed to save the OAuth2 client for account {account_id}"))?;
+        Ok(())
+    }
+
+    /// Records when the current OAuth2 access token expires.
+    ///
+    /// `None` clears the recorded expiry, used when the provider does not
+    /// report a token lifetime.
+    pub fn set_account_oauth2_expiry(
+        &self,
+        account_id: i64,
+        expires_at: Option<i64>,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE accounts SET oauth2_access_expires_at = ?2, \
+             updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![account_id, expires_at],
+        )
+        .with_context(|| format!("failed to record the token expiry for account {account_id}"))?;
+        Ok(())
     }
 
     /// Returns all sync targets in account order.
@@ -1321,7 +1408,9 @@ impl LocalStore {
     /// Persists a fetched body (and attachments) for one stored message.
     ///
     /// Existing attachment rows for the message are replaced, so a repeated
-    /// hydration cannot duplicate metadata.
+    /// hydration cannot duplicate metadata. The thread's full-text search
+    /// document is rebuilt in the same transaction, so the body text becomes
+    /// searchable as soon as it is stored.
     pub fn hydrate_message_body(&self, message_id: i64, hydration: &HydratedBody) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
@@ -1390,6 +1479,7 @@ impl LocalStore {
             "UPDATE threads SET has_attachments = MAX(has_attachments, ?2) WHERE id = ?1",
             params![thread_id, has_attachments],
         )?;
+        refresh_thread_search_index(&transaction, thread_id)?;
         transaction
             .commit()
             .context("failed to commit the hydration transaction")
@@ -2940,25 +3030,7 @@ impl LocalStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to enumerate threads for search indexing")?;
 
-        let mut insert_statement = conn.prepare(
-            r#"
-            INSERT INTO search_documents(account_id, mailbox_id, thread_id, mailbox_name, subject, participants, preview, body)
-            SELECT
-                mailboxes.account_id,
-                mailboxes.id,
-                threads.id,
-                mailboxes.name,
-                threads.subject,
-                threads.participants,
-                threads.preview,
-                COALESCE(GROUP_CONCAT(COALESCE(messages.body_text, messages.sanitized_html, messages.body_preview), ' '), '')
-            FROM threads
-            JOIN mailboxes ON mailboxes.id = threads.mailbox_id
-            LEFT JOIN messages ON messages.thread_id = threads.id
-            WHERE threads.id = ?1
-            GROUP BY threads.id
-            "#,
-        )?;
+        let mut insert_statement = conn.prepare(THREAD_SEARCH_DOCUMENT_INSERT)?;
 
         for thread_id in thread_ids {
             insert_statement.execute(params![thread_id])?;
@@ -3005,7 +3077,8 @@ impl LocalStore {
                     accounts.submission_port,
                     accounts.submission_security,
                     accounts.submission_username,
-                    accounts.submission_hello_name
+                    accounts.submission_hello_name,
+                    accounts.auth_kind
                 FROM outbox_jobs
                 JOIN drafts ON drafts.id = outbox_jobs.draft_id
                 JOIN accounts ON accounts.id = outbox_jobs.account_id
@@ -3031,6 +3104,7 @@ impl LocalStore {
                         },
                     )
                     .map_err(to_from_sql_error)?;
+                    let auth = auth_kind_from_db(row.get::<_, String>(21)?)?;
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, usize>(1)?,
@@ -3039,6 +3113,7 @@ impl LocalStore {
                             draft_id: row.get(2)?,
                             identity_id: row.get(3)?,
                             protocol,
+                            auth,
                             endpoint,
                             username,
                             identity_name: row.get(4)?,
@@ -3430,6 +3505,21 @@ fn thread_location(conn: &Connection, thread_id: i64) -> Result<Option<ThreadLoc
     )
     .optional()
     .context("failed to load thread location")
+}
+
+/// Rebuilds the full-text search document for a single thread.
+///
+/// Hydration calls this in its own transaction so a lazily fetched body
+/// becomes searchable without re-indexing the rest of the account.
+fn refresh_thread_search_index(conn: &Connection, thread_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM search_documents WHERE thread_id = ?1",
+        params![thread_id],
+    )
+    .with_context(|| format!("failed to drop the search document for thread {thread_id}"))?;
+    conn.execute(THREAD_SEARCH_DOCUMENT_INSERT, params![thread_id])
+        .with_context(|| format!("failed to index thread {thread_id} for search"))?;
+    Ok(())
 }
 
 fn mailbox_identity(conn: &Connection, mailbox_id: i64) -> Result<Option<MailboxIdentity>> {
@@ -4545,6 +4635,86 @@ mod tests {
             .expect("the sync target should load")
             .expect("the sync target should exist");
         assert_eq!(target.auth, AuthKind::Password);
+    }
+
+    #[test]
+    fn oauth2_client_config_and_expiry_round_trip_through_sync_targets() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .insert_account(&NewAccount {
+                display_name: "OAuth2 Account".to_owned(),
+                protocol: ProtocolKind::Imap,
+                auth: AuthKind::OAuth2,
+                endpoint: "imaps://mail.example.com:993".to_owned(),
+                username: "user@example.com".to_owned(),
+                cache_policy: CachePolicySummary::performance_first(),
+                outgoing: None,
+                identities: vec![NewIdentity {
+                    display_name: "OAuth2 Account".to_owned(),
+                    email_address: "user@example.com".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }],
+            })
+            .expect("the account should be inserted");
+
+        // Before any client is saved the target carries no OAuth2 config.
+        let target = store
+            .sync_target(account_id)
+            .expect("the sync target should load")
+            .expect("the sync target should exist");
+        assert!(target.oauth2.is_none(), "no client saved yet");
+
+        store
+            .save_account_oauth2_client(account_id, "https://oauth2.example.test/token", "client-1")
+            .expect("the client should save");
+        store
+            .set_account_oauth2_expiry(account_id, Some(1_700_000_000))
+            .expect("the expiry should save");
+
+        let target = store
+            .sync_target(account_id)
+            .expect("the sync target should load")
+            .expect("the sync target should exist");
+        let config = target
+            .oauth2
+            .as_ref()
+            .expect("the saved client should load on the target");
+        assert_eq!(config.token_endpoint, "https://oauth2.example.test/token");
+        assert_eq!(config.client_id, "client-1");
+        assert_eq!(config.access_token_expires_at, Some(1_700_000_000));
+
+        store
+            .set_account_oauth2_expiry(account_id, None)
+            .expect("the expiry should clear");
+        let target = store
+            .sync_target(account_id)
+            .expect("the sync target should load")
+            .expect("the sync target should exist");
+        assert_eq!(
+            target
+                .oauth2
+                .as_ref()
+                .expect("the client should still be saved")
+                .access_token_expires_at,
+            None
+        );
+
+        // Password accounts never surface an OAuth2 config, even with columns set.
+        let legacy = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("the demo account should be created");
+        store
+            .save_account_oauth2_client(legacy, "https://oauth2.example.test/token", "client-1")
+            .expect("the client should save");
+        let target = store
+            .sync_target(legacy)
+            .expect("the sync target should load")
+            .expect("the sync target should exist");
+        assert!(
+            target.oauth2.is_none(),
+            "password accounts do not carry OAuth2 config"
+        );
     }
 
     #[test]
@@ -5698,6 +5868,89 @@ mod tests {
             "syncs must keep the hydrated preview"
         );
     }
+
+    #[test]
+    fn hydrated_bodies_become_searchable() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        // Header-only snapshot, as the lazy IMAP adapter sends it: the
+        // searchable body is the placeholder, so the real body text cannot
+        // match yet.
+        let mut snapshot = merge_test_snapshot(
+            "Searchable subject",
+            "The lazy cormorant body",
+            "thread-searchable",
+            "message-searchable",
+            None,
+        );
+        snapshot.mailboxes[0].threads[0].messages[0].body_text = None;
+        snapshot.mailboxes[0].threads[0].messages[0].sanitized_html = None;
+        snapshot.mailboxes[0].threads[0].messages[0].body_preview =
+            "Body not downloaded.".to_owned();
+        snapshot.mailboxes[0].threads[0].preview = "Body not downloaded.".to_owned();
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+
+        assert!(
+            store
+                .search_threads(account_id, "cormorant", 10)
+                .expect("search should run")
+                .is_empty(),
+            "a body that was never fetched cannot match"
+        );
+
+        let mailbox_id = mailbox_id_by_name(&store, account_id, "Inbox");
+        let threads = store
+            .list_threads(mailbox_id, 0..10)
+            .expect("threads should load");
+        let missing = store
+            .messages_missing_bodies(threads[0].id)
+            .expect("missing bodies should load")
+            .expect("the thread should exist");
+        assert_eq!(missing.len(), 1);
+
+        store
+            .hydrate_message_body(
+                missing[0].0,
+                &HydratedBody {
+                    body_text: Some("The lazy cormorant body".to_owned()),
+                    sanitized_html: None,
+                    has_remote_content: false,
+                    body_preview: "The lazy cormorant body".to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .expect("hydration should persist");
+
+        let hits = store
+            .search_threads(account_id, "cormorant", 10)
+            .expect("search should run");
+        assert_eq!(hits.len(), 1, "the hydrated body must match");
+        assert_eq!(hits[0].subject, "Searchable subject");
+
+        // A repeated hydration must not duplicate the document row.
+        store
+            .hydrate_message_body(
+                missing[0].0,
+                &HydratedBody {
+                    body_text: Some("The lazy cormorant body".to_owned()),
+                    sanitized_html: None,
+                    has_remote_content: false,
+                    body_preview: "The lazy cormorant body".to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .expect("repeated hydration should persist");
+        let hits = store
+            .search_threads(account_id, "cormorant", 10)
+            .expect("search should run");
+        assert_eq!(hits.len(), 1, "re-hydration keeps a single search document");
+    }
+
     #[test]
     fn mbox_export_writes_message_entries() {
         let store = LocalStore::open_ephemeral().expect("store should open");
@@ -6038,6 +6291,7 @@ mod tests {
             .expect("job should exist");
         assert_eq!(claimed.job_id, job_id);
         assert_eq!(claimed.message.subject, "Queued draft");
+        assert_eq!(claimed.target.auth, AuthKind::Password);
 
         store
             .record_outbox_retry(job_id, "offline", Duration::from_secs(30))
@@ -6067,5 +6321,54 @@ mod tests {
             .expect("draft should exist");
         assert_eq!(sent.state, DraftState::Sent);
         assert!(sent.sent_at.is_some());
+    }
+
+    #[test]
+    fn outbox_jobs_carry_the_account_auth_kind() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .insert_account(&NewAccount {
+                display_name: "OAuth2 Sender".to_owned(),
+                protocol: ProtocolKind::Imap,
+                auth: AuthKind::OAuth2,
+                endpoint: "imaps://imap.gmail.com:993".to_owned(),
+                username: "user@gmail.example".to_owned(),
+                cache_policy: CachePolicySummary::performance_first(),
+                outgoing: None,
+                identities: vec![NewIdentity {
+                    display_name: "OAuth2 Sender".to_owned(),
+                    email_address: "user@gmail.example".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }],
+            })
+            .expect("the account should be inserted");
+        let identity = store
+            .list_identities(account_id)
+            .expect("identities should load")
+            .into_iter()
+            .next()
+            .expect("the account should have an identity");
+
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id: identity.id,
+                to: vec!["recipient@example.test".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "OAuth2 draft".to_owned(),
+                body: "OAuth2 body".to_owned(),
+            })
+            .expect("draft should be created");
+        store.queue_draft(draft_id).expect("draft should queue");
+
+        let claimed = store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("job should claim")
+            .expect("job should exist");
+        // The claimed target tells the SMTP adapter to use AUTH XOAUTH2
+        // with the account's refreshed access token.
+        assert_eq!(claimed.target.auth, AuthKind::OAuth2);
     }
 }

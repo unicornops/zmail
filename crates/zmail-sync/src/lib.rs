@@ -18,11 +18,11 @@ use tokio::{
     time::sleep,
 };
 use zmail_core::{
-    MailboxSnapshot, PendingOutboxJob, ProtocolKind, RuntimeSummary, SubmissionKind, SyncPhase,
-    SyncTarget,
+    AuthKind, MailboxSnapshot, PendingOutboxJob, ProtocolKind, RuntimeSummary, SubmissionKind,
+    SyncPhase, SyncTarget,
 };
 use zmail_notify::{NewMailArrival, NewMailBatch, Notifier};
-use zmail_security::SecretStore;
+use zmail_security::{SecretSlot, SecretStore};
 use zmail_smtp::SubmissionConfig;
 use zmail_store::LocalStore;
 
@@ -31,6 +31,9 @@ const OUTBOX_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
 const MAX_OUTBOX_ATTEMPTS: usize = 3;
 const MAIL_WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_PENDING_OP_ATTEMPTS: i64 = 5;
+/// Refreshed tokens are recorded as expiring this many seconds early so a
+/// connection attempt never races the true expiry.
+const OAUTH2_REFRESH_MARGIN_SECS: i64 = 60;
 
 /// Dedicated Tokio runtime host for background tasks.
 #[derive(Debug)]
@@ -227,6 +230,120 @@ impl SyncService {
             .map_err(anyhow::Error::msg)
     }
 
+    /// Resolves the secret a protocol adapter should use to connect.
+    ///
+    /// Password accounts return the stored password. OAuth2 accounts return
+    /// the current access token, refreshing it first when the recorded
+    /// expiry has passed, so sessions survive access-token expiry without
+    /// user interaction. Access tokens stored in the legacy single-secret
+    /// slot by the token-paste flow are honored as a fallback.
+    pub async fn connect_secret(&self, target: &SyncTarget) -> Result<String> {
+        if target.auth != AuthKind::OAuth2 {
+            return self
+                .inner
+                .secrets
+                .get_account_secret(target.id)
+                .with_context(|| {
+                    format!(
+                        "missing or inaccessible credentials for account {}",
+                        target.id
+                    )
+                });
+        }
+
+        let refresh_token = self
+            .inner
+            .secrets
+            .get_account_secret_from_slot(target.id, SecretSlot::RefreshToken)
+            .ok()
+            .filter(|token| !token.is_empty());
+        if let Some(refresh_token) = refresh_token {
+            // The recorded expiry is the provider's true expiry; the margin
+            // keeps refreshes ahead of it so a connection attempt never
+            // races a token boundary.
+            let expired = target
+                .oauth2
+                .as_ref()
+                .and_then(|config| config.access_token_expires_at)
+                .is_some_and(|expires_at| expires_at - OAUTH2_REFRESH_MARGIN_SECS <= unix_now());
+            if expired {
+                self.refresh_oauth2_token(target, &refresh_token)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to refresh the OAuth2 access token for account {}",
+                            target.id
+                        )
+                    })?;
+            }
+        }
+
+        self.inner
+            .secrets
+            .get_account_secret_from_slot(target.id, SecretSlot::AccessToken)
+            .or_else(|_| self.inner.secrets.get_account_secret(target.id))
+            .with_context(|| format!("missing OAuth2 access token for account {}", target.id))
+    }
+
+    /// Exchanges the refresh token for a new access token and persists the
+    /// resulting grant (access token, rotated refresh token, expiry).
+    async fn refresh_oauth2_token(&self, target: &SyncTarget, refresh_token: &str) -> Result<()> {
+        let config = target.oauth2.as_ref().with_context(|| {
+            format!(
+                "account {} has no stored OAuth2 client configuration",
+                target.id
+            )
+        })?;
+        let client_secret = self
+            .inner
+            .secrets
+            .get_account_secret_from_slot(target.id, SecretSlot::ClientSecret)
+            .ok()
+            .filter(|secret| !secret.is_empty());
+
+        // The provider's token endpoint is reached with a blocking client on
+        // a dedicated thread; the blocking HTTP runtime must not run inside
+        // the sync runtime's async workers.
+        let endpoint = config.token_endpoint.clone();
+        let client_id = config.client_id.clone();
+        let token = refresh_token.to_owned();
+        let (tx, rx) = oneshot::channel();
+        thread::Builder::new()
+            .name("zmail-oauth2-refresh".to_owned())
+            .spawn(move || {
+                let _ = tx.send(zmail_auth::refresh_access_token(
+                    &endpoint,
+                    &client_id,
+                    client_secret.as_deref(),
+                    &token,
+                ));
+            })
+            .context("failed to spawn the OAuth2 refresh thread")?;
+        let tokens = rx
+            .await
+            .context("the OAuth2 refresh thread exited before returning")??;
+
+        self.inner.secrets.set_account_secret_in_slot(
+            target.id,
+            SecretSlot::AccessToken,
+            &tokens.access_token,
+        )?;
+        if let Some(refresh_token) = tokens.refresh_token.filter(|token| !token.is_empty()) {
+            self.inner.secrets.set_account_secret_in_slot(
+                target.id,
+                SecretSlot::RefreshToken,
+                &refresh_token,
+            )?;
+        }
+        let expires_at = tokens
+            .expires_in
+            .map(|lifetime| unix_now() + lifetime as i64);
+        self.inner
+            .store
+            .set_account_oauth2_expiry(target.id, expires_at)?;
+        Ok(())
+    }
+
     /// Fetches and stores the bodies of a thread's not-yet-hydrated messages.
     ///
     /// Returns `false` when the protocol has no lazy body path (JMAP syncs
@@ -273,9 +390,8 @@ impl SyncService {
             .thread_view(thread_id)?
             .with_context(|| format!("thread {thread_id} does not exist"))?;
         let secret = self
-            .inner
-            .secrets
-            .get_account_secret(account_id)
+            .connect_secret(&target)
+            .await
             .with_context(|| format!("missing credentials for account {account_id}"))?;
 
         let uids = missing
@@ -372,15 +488,22 @@ impl SyncService {
             if !self.mark_watched(target.id) {
                 continue;
             }
-            let Ok(secret) = self.inner.secrets.get_account_secret(target.id) else {
+            // Only spawn watchers for accounts with resolvable credentials;
+            // a later `sync_watchers` call retries accounts whose secrets
+            // appear afterwards.
+            let has_secret = self.inner.secrets.get_account_secret(target.id).is_ok()
+                || self
+                    .inner
+                    .secrets
+                    .get_account_secret_from_slot(target.id, SecretSlot::AccessToken)
+                    .is_ok();
+            if !has_secret {
                 self.unwatch_account(target.id);
                 continue;
-            };
+            }
             let service = self.clone();
             self.inner.handle.spawn(async move {
-                service
-                    .run_mail_watcher(target, secret, poll_interval)
-                    .await;
+                service.run_mail_watcher(target, poll_interval).await;
             });
             started += 1;
         }
@@ -410,7 +533,10 @@ impl SyncService {
 
     /// Waits for server-side changes for one account and syncs until the
     /// account disappears.
-    async fn run_mail_watcher(&self, target: SyncTarget, secret: String, poll_interval: Duration) {
+    ///
+    /// Credentials are re-resolved on every reconnect so OAuth2 accounts
+    /// pick up refreshed access tokens without restarting the watcher.
+    async fn run_mail_watcher(&self, target: SyncTarget, poll_interval: Duration) {
         let mut reconnect_backoff = Duration::from_secs(1);
         loop {
             // Stop watching accounts that no longer exist so the watcher
@@ -426,6 +552,17 @@ impl SyncService {
                 self.unwatch_account(target.id);
                 return;
             }
+
+            let Ok(secret) = self.connect_secret(&target).await else {
+                // A transient refresh failure (for example an offline token
+                // endpoint) backs off and retries like a dropped connection;
+                // permanent account deletion is caught by the check above.
+                sleep(reconnect_backoff).await;
+                reconnect_backoff = reconnect_backoff
+                    .saturating_mul(2)
+                    .min(Duration::from_secs(60));
+                continue;
+            };
 
             match target.protocol {
                 ProtocolKind::Imap => {
@@ -590,13 +727,9 @@ impl SyncService {
         let Some(target) = self.inner.store.sync_target(account_id)? else {
             bail!("account {account_id} no longer exists");
         };
-        let secret = self
-            .inner
-            .secrets
-            .get_account_secret(account_id)
-            .with_context(|| {
-                format!("missing or inaccessible credentials for account {account_id}")
-            })?;
+        let secret = self.connect_secret(&target).await.with_context(|| {
+            format!("missing or inaccessible credentials for account {account_id}")
+        })?;
         let existing_mailboxes = self
             .inner
             .store
@@ -763,16 +896,25 @@ impl SyncService {
     }
 
     async fn deliver_outbox_job(&self, job: &PendingOutboxJob) -> Result<()> {
-        let secret = self
+        // The full sync target carries the auth kind and OAuth2 client
+        // config, so OAuth2 accounts deliver with a freshly refreshed access
+        // token (`connect_secret`) instead of the empty password slot.
+        let target = self
             .inner
-            .secrets
-            .get_account_secret(job.target.account_id)
+            .store
+            .sync_target(job.target.account_id)?
             .with_context(|| {
                 format!(
-                    "missing or inaccessible credentials for account {}",
-                    job.target.account_id
+                    "account {} for outbox job {} no longer exists",
+                    job.target.account_id, job.job_id
                 )
             })?;
+        let secret = self.connect_secret(&target).await.with_context(|| {
+            format!(
+                "missing or inaccessible credentials for account {}",
+                job.target.account_id
+            )
+        })?;
 
         match job.target.outgoing.kind {
             SubmissionKind::Smtp => {
@@ -798,6 +940,7 @@ impl SyncService {
                     port,
                     username: username.clone(),
                     secret: username.map(|_| secret),
+                    auth: target.auth,
                     security,
                     hello_name: job.target.outgoing.hello_name.clone(),
                 };
@@ -856,6 +999,65 @@ fn collect_arrivals(
     arrivals
 }
 
+/// Current wall-clock time in seconds since the Unix epoch.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// Persists a granted OAuth2 token set for an account.
+///
+/// The access token, rotated refresh token, and provider client secret go
+/// into the secret store's slots; the client configuration (token endpoint,
+/// client id) and the token expiry go into the local store, so background
+/// sync can refresh the grant without user interaction. Shared by the CLI
+/// and the UI account setup flows.
+pub fn persist_oauth2_grant(
+    store: &LocalStore,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    client: &zmail_auth::OAuth2Client,
+    tokens: &zmail_auth::TokenSet,
+) -> Result<()> {
+    secrets
+        .set_account_secret_in_slot(account_id, SecretSlot::AccessToken, &tokens.access_token)
+        .with_context(|| format!("failed to store the access token for account {account_id}"))?;
+    if let Some(refresh_token) = tokens
+        .refresh_token
+        .as_ref()
+        .filter(|token| !token.is_empty())
+    {
+        secrets
+            .set_account_secret_in_slot(account_id, SecretSlot::RefreshToken, refresh_token)
+            .with_context(|| {
+                format!("failed to store the refresh token for account {account_id}")
+            })?;
+    }
+    if let Some(client_secret) = client
+        .client_secret
+        .as_ref()
+        .filter(|secret| !secret.is_empty())
+    {
+        secrets
+            .set_account_secret_in_slot(account_id, SecretSlot::ClientSecret, client_secret)
+            .with_context(|| {
+                format!("failed to store the client secret for account {account_id}")
+            })?;
+    }
+    store
+        .save_account_oauth2_client(account_id, &client.token_endpoint, &client.client_id)
+        .with_context(|| format!("failed to save the OAuth2 client for account {account_id}"))?;
+    let expires_at = tokens
+        .expires_in
+        .map(|lifetime| unix_now() + lifetime as i64);
+    store
+        .set_account_oauth2_expiry(account_id, expires_at)
+        .with_context(|| format!("failed to record the token expiry for account {account_id}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -867,11 +1069,32 @@ mod tests {
     use super::{BackgroundRuntime, SyncService, collect_arrivals};
     use anyhow::{Result, anyhow};
     use zmail_core::{
-        AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, ProtocolKind, SyncPhase,
-        ThreadSnapshot,
+        AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxSnapshot, MessageSnapshot,
+        NewAccount, NewIdentity, ProtocolKind, SyncPhase, ThreadSnapshot,
     };
-    use zmail_security::{InMemorySecretStore, SecretStore};
+    use zmail_security::{InMemorySecretStore, SecretSlot, SecretStore};
     use zmail_store::LocalStore;
+
+    /// Inserts a minimal account with the given auth kind and returns its id.
+    pub(super) fn insert_account(store: &LocalStore, auth: AuthKind) -> i64 {
+        store
+            .insert_account(&NewAccount {
+                display_name: "Test Account".to_owned(),
+                protocol: ProtocolKind::Imap,
+                auth,
+                endpoint: "imaps://mail.example.com:993".to_owned(),
+                username: "user@example.com".to_owned(),
+                cache_policy: CachePolicySummary::performance_first(),
+                outgoing: None,
+                identities: vec![NewIdentity {
+                    display_name: "Test Account".to_owned(),
+                    email_address: "user@example.com".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }],
+            })
+            .expect("the account should be inserted")
+    }
 
     #[derive(Debug)]
     struct SlowSecretStore {
@@ -889,6 +1112,27 @@ mod tests {
         }
 
         fn delete_account_secret(&self, _account_id: i64) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_account_secret_in_slot(
+            &self,
+            _account_id: i64,
+            _slot: SecretSlot,
+            _secret: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_account_secret_from_slot(
+            &self,
+            _account_id: i64,
+            _slot: SecretSlot,
+        ) -> Result<String> {
+            Err(anyhow!("synthetic slot lookup"))
+        }
+
+        fn delete_account_secret_in_slot(&self, _account_id: i64, _slot: SecretSlot) -> Result<()> {
             Ok(())
         }
     }
@@ -1121,5 +1365,223 @@ mod tests {
             role: Some("inbox".to_owned()),
             threads,
         }
+    }
+}
+
+#[cfg(test)]
+mod oauth2_refresh_tests {
+    use std::sync::Arc;
+
+    use super::{SyncService, unix_now};
+    use zmail_core::AuthKind;
+    use zmail_security::{InMemorySecretStore, SecretSlot, SecretStore};
+    use zmail_store::LocalStore;
+
+    use super::tests::insert_account;
+
+    #[test]
+    fn persist_oauth2_grant_stores_the_full_grant() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let secrets = InMemorySecretStore::shared();
+        let account_id = insert_account(&store, AuthKind::OAuth2);
+        let client = zmail_auth::OAuth2Client {
+            client_id: "client-1".to_owned(),
+            client_secret: Some("client-secret-1".to_owned()),
+            authorization_endpoint: "https://provider.test/authorize".to_owned(),
+            token_endpoint: "https://provider.test/token".to_owned(),
+            scopes: Vec::new(),
+            redirect_port: 8357,
+            extra_authorize_params: Vec::new(),
+        };
+        let tokens = zmail_auth::TokenSet {
+            access_token: "access-1".to_owned(),
+            refresh_token: Some("refresh-1".to_owned()),
+            expires_in: Some(3600),
+        };
+
+        super::persist_oauth2_grant(&store, secrets.as_ref(), account_id, &client, &tokens)
+            .expect("the grant should persist");
+
+        assert_eq!(
+            secrets
+                .get_account_secret_from_slot(account_id, SecretSlot::AccessToken)
+                .expect("the access token should load"),
+            "access-1"
+        );
+        assert_eq!(
+            secrets
+                .get_account_secret_from_slot(account_id, SecretSlot::RefreshToken)
+                .expect("the refresh token should load"),
+            "refresh-1"
+        );
+        assert_eq!(
+            secrets
+                .get_account_secret_from_slot(account_id, SecretSlot::ClientSecret)
+                .expect("the client secret should load"),
+            "client-secret-1"
+        );
+        let target = store
+            .sync_target(account_id)
+            .expect("the target should load")
+            .expect("the target should exist");
+        let config = target
+            .oauth2
+            .as_ref()
+            .expect("the client config should load on the target");
+        assert_eq!(config.token_endpoint, "https://provider.test/token");
+        assert_eq!(config.client_id, "client-1");
+        let expires_at = config
+            .access_token_expires_at
+            .expect("the expiry should be recorded");
+        assert!(
+            expires_at > unix_now(),
+            "the recorded expiry must lie in the future"
+        );
+        assert!(
+            expires_at <= unix_now() + 3600,
+            "the recorded expiry must match the granted lifetime"
+        );
+    }
+
+    fn service() -> (Arc<LocalStore>, Arc<InMemorySecretStore>, SyncService) {
+        // The tests below never reach the network; a plain Tokio test
+        // runtime is enough because the refresh runs on a dedicated thread.
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let secrets = InMemorySecretStore::shared();
+        (
+            store.clone(),
+            secrets.clone(),
+            SyncService::new(tokio::runtime::Handle::current().clone(), store, secrets),
+        )
+    }
+
+    #[tokio::test]
+    async fn connect_secret_returns_the_password_for_password_accounts() {
+        let (store, secrets, service) = service();
+        let account_id = insert_account(&store, AuthKind::Password);
+        secrets
+            .set_account_secret(account_id, "app-password")
+            .expect("the password should store");
+
+        let target = store
+            .sync_target(account_id)
+            .expect("the target should load")
+            .expect("the target should exist");
+        assert_eq!(
+            service
+                .connect_secret(&target)
+                .await
+                .expect("the password should resolve"),
+            "app-password"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_secret_returns_a_live_access_token_without_refreshing() {
+        let (store, secrets, service) = service();
+        let account_id = insert_account(&store, AuthKind::OAuth2);
+        store
+            .save_account_oauth2_client(account_id, "https://oauth2.example.test/token", "client-1")
+            .expect("the client should save");
+        // A far-future expiry: the token must be returned as stored, with no
+        // refresh attempt (there is no refresh token anyway).
+        store
+            .set_account_oauth2_expiry(account_id, Some(unix_now() + 3600))
+            .expect("the expiry should save");
+        secrets
+            .set_account_secret_in_slot(account_id, SecretSlot::AccessToken, "live-token")
+            .expect("the access token should store");
+
+        let target = store
+            .sync_target(account_id)
+            .expect("the target should load")
+            .expect("the target should exist");
+        assert_eq!(
+            service
+                .connect_secret(&target)
+                .await
+                .expect("the token should resolve"),
+            "live-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_secret_honors_legacy_pasted_tokens() {
+        let (store, secrets, service) = service();
+        let account_id = insert_account(&store, AuthKind::OAuth2);
+        // No access token in the slot: the token-paste flow stored the
+        // access token in the legacy single-secret slot.
+        secrets
+            .set_account_secret(account_id, "pasted-token")
+            .expect("the pasted token should store");
+
+        let target = store
+            .sync_target(account_id)
+            .expect("the target should load")
+            .expect("the target should exist");
+        assert_eq!(
+            service
+                .connect_secret(&target)
+                .await
+                .expect("the pasted token should resolve"),
+            "pasted-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_secret_refreshes_expired_tokens_and_persists_the_new_grant() {
+        let (store, secrets, service) = service();
+        let account_id = insert_account(&store, AuthKind::OAuth2);
+        store
+            .save_account_oauth2_client(account_id, "https://oauth2.example.test/token", "client-1")
+            .expect("the client should save");
+        store
+            .set_account_oauth2_expiry(account_id, Some(unix_now() - 1))
+            .expect("the expired timestamp should save");
+        secrets
+            .set_account_secret_in_slot(account_id, SecretSlot::AccessToken, "stale-token")
+            .expect("the stale token should store");
+        secrets
+            .set_account_secret_in_slot(account_id, SecretSlot::RefreshToken, "refresh-1")
+            .expect("the refresh token should store");
+
+        let target = store
+            .sync_target(account_id)
+            .expect("the target should load")
+            .expect("the target should exist");
+        let error = service
+            .connect_secret(&target)
+            .await
+            .expect_err("the refresh must run against the unreachable endpoint");
+        assert!(
+            format!("{error:#}").contains("failed to refresh the OAuth2 access token"),
+            "the error should mention the refresh: {error:#}"
+        );
+        // The failed refresh must not clobber the stored grant.
+        assert_eq!(
+            secrets
+                .get_account_secret_from_slot(account_id, SecretSlot::AccessToken)
+                .expect("the stale token should still be stored"),
+            "stale-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_secret_without_any_token_reports_missing_credentials() {
+        let (store, _secrets, service) = service();
+        let account_id = insert_account(&store, AuthKind::OAuth2);
+
+        let target = store
+            .sync_target(account_id)
+            .expect("the target should load")
+            .expect("the target should exist");
+        let error = service
+            .connect_secret(&target)
+            .await
+            .expect_err("no token is stored");
+        assert!(
+            format!("{error:#}").contains("missing OAuth2 access token"),
+            "the error should mention the missing token: {error:#}"
+        );
     }
 }
