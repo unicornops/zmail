@@ -3077,7 +3077,8 @@ impl LocalStore {
                     accounts.submission_port,
                     accounts.submission_security,
                     accounts.submission_username,
-                    accounts.submission_hello_name
+                    accounts.submission_hello_name,
+                    accounts.auth_kind
                 FROM outbox_jobs
                 JOIN drafts ON drafts.id = outbox_jobs.draft_id
                 JOIN accounts ON accounts.id = outbox_jobs.account_id
@@ -3103,6 +3104,7 @@ impl LocalStore {
                         },
                     )
                     .map_err(to_from_sql_error)?;
+                    let auth = auth_kind_from_db(row.get::<_, String>(21)?)?;
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, usize>(1)?,
@@ -3111,6 +3113,7 @@ impl LocalStore {
                             draft_id: row.get(2)?,
                             identity_id: row.get(3)?,
                             protocol,
+                            auth,
                             endpoint,
                             username,
                             identity_name: row.get(4)?,
@@ -6288,6 +6291,7 @@ mod tests {
             .expect("job should exist");
         assert_eq!(claimed.job_id, job_id);
         assert_eq!(claimed.message.subject, "Queued draft");
+        assert_eq!(claimed.target.auth, AuthKind::Password);
 
         store
             .record_outbox_retry(job_id, "offline", Duration::from_secs(30))
@@ -6317,5 +6321,54 @@ mod tests {
             .expect("draft should exist");
         assert_eq!(sent.state, DraftState::Sent);
         assert!(sent.sent_at.is_some());
+    }
+
+    #[test]
+    fn outbox_jobs_carry_the_account_auth_kind() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .insert_account(&NewAccount {
+                display_name: "OAuth2 Sender".to_owned(),
+                protocol: ProtocolKind::Imap,
+                auth: AuthKind::OAuth2,
+                endpoint: "imaps://imap.gmail.com:993".to_owned(),
+                username: "user@gmail.example".to_owned(),
+                cache_policy: CachePolicySummary::performance_first(),
+                outgoing: None,
+                identities: vec![NewIdentity {
+                    display_name: "OAuth2 Sender".to_owned(),
+                    email_address: "user@gmail.example".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }],
+            })
+            .expect("the account should be inserted");
+        let identity = store
+            .list_identities(account_id)
+            .expect("identities should load")
+            .into_iter()
+            .next()
+            .expect("the account should have an identity");
+
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id: identity.id,
+                to: vec!["recipient@example.test".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "OAuth2 draft".to_owned(),
+                body: "OAuth2 body".to_owned(),
+            })
+            .expect("draft should be created");
+        store.queue_draft(draft_id).expect("draft should queue");
+
+        let claimed = store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("job should claim")
+            .expect("job should exist");
+        // The claimed target tells the SMTP adapter to use AUTH XOAUTH2
+        // with the account's refreshed access token.
+        assert_eq!(claimed.target.auth, AuthKind::OAuth2);
     }
 }

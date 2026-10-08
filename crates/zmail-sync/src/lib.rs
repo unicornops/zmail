@@ -896,16 +896,25 @@ impl SyncService {
     }
 
     async fn deliver_outbox_job(&self, job: &PendingOutboxJob) -> Result<()> {
-        let secret = self
+        // The full sync target carries the auth kind and OAuth2 client
+        // config, so OAuth2 accounts deliver with a freshly refreshed access
+        // token (`connect_secret`) instead of the empty password slot.
+        let target = self
             .inner
-            .secrets
-            .get_account_secret(job.target.account_id)
+            .store
+            .sync_target(job.target.account_id)?
             .with_context(|| {
                 format!(
-                    "missing or inaccessible credentials for account {}",
-                    job.target.account_id
+                    "account {} for outbox job {} no longer exists",
+                    job.target.account_id, job.job_id
                 )
             })?;
+        let secret = self.connect_secret(&target).await.with_context(|| {
+            format!(
+                "missing or inaccessible credentials for account {}",
+                job.target.account_id
+            )
+        })?;
 
         match job.target.outgoing.kind {
             SubmissionKind::Smtp => {
@@ -931,6 +940,7 @@ impl SyncService {
                     port,
                     username: username.clone(),
                     secret: username.map(|_| secret),
+                    auth: target.auth,
                     security,
                     hello_name: job.target.outgoing.hello_name.clone(),
                 };

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use mail_send::{
     Credentials, SmtpClientBuilder, mail_builder::MessageBuilder, smtp::message::Message,
 };
-use zmail_core::OutgoingMessage;
+use zmail_core::{AuthKind, OutgoingMessage};
 
 pub use zmail_core::SubmissionSecurity;
 
@@ -23,8 +23,11 @@ pub struct SubmissionConfig {
     pub port: u16,
     /// Optional username for SMTP AUTH.
     pub username: Option<String>,
-    /// Optional password or app password for SMTP AUTH.
+    /// Optional password or app password for SMTP AUTH; for OAuth2 accounts
+    /// this is the current access token.
     pub secret: Option<String>,
+    /// Authentication method used for SMTP AUTH.
+    pub auth: AuthKind,
     /// Transport security mode.
     pub security: SubmissionSecurity,
     /// EHLO hostname sent by the client.
@@ -54,8 +57,31 @@ impl SubmissionConfig {
             port,
             username: None,
             secret: None,
+            auth: AuthKind::Password,
             security: SubmissionSecurity::Plain,
             hello_name: "localhost".to_owned(),
+        }
+    }
+
+    /// Builds the SASL credentials the SMTP AUTH exchange uses, if any.
+    ///
+    /// Password accounts authenticate with `AUTH PLAIN`; OAuth2 accounts
+    /// authenticate with `AUTH XOAUTH2` using the current access token as
+    /// the bearer secret.
+    fn sasl_credentials(&self) -> Result<Option<Credentials<String>>> {
+        match (&self.username, &self.secret) {
+            (Some(username), Some(secret)) => Ok(Some(match self.auth {
+                AuthKind::Password => Credentials::Plain {
+                    username: username.clone(),
+                    secret: secret.clone(),
+                },
+                AuthKind::OAuth2 => Credentials::XOauth2 {
+                    username: username.clone(),
+                    secret: secret.clone(),
+                },
+            })),
+            (None, None) => Ok(None),
+            _ => bail!("SMTP credentials must include both username and secret"),
         }
     }
 }
@@ -92,15 +118,8 @@ pub async fn submit_outgoing_message(
     let mut builder = SmtpClientBuilder::new(config.host.clone(), config.port)
         .helo_host(config.hello_name.clone());
 
-    match (&config.username, &config.secret) {
-        (Some(username), Some(secret)) => {
-            builder = builder.credentials(Credentials::Plain {
-                username: username.clone(),
-                secret: secret.clone(),
-            });
-        }
-        (None, None) => {}
-        _ => bail!("SMTP credentials must include both username and secret"),
+    if let Some(credentials) = config.sasl_credentials()? {
+        builder = builder.credentials(credentials);
     }
 
     let recipients = all_recipients(message);
@@ -204,7 +223,71 @@ fn ensure_rustls_provider() {
 #[cfg(test)]
 mod tests {
     use super::{SubmittedMessage, render_rfc822_message};
-    use zmail_core::{OutgoingAttachment, OutgoingMessage};
+    use mail_send::Credentials;
+    use zmail_core::{AuthKind, OutgoingAttachment, OutgoingMessage, SubmissionSecurity};
+
+    use super::SubmissionConfig;
+
+    fn config(auth: AuthKind) -> SubmissionConfig {
+        SubmissionConfig {
+            host: "smtp.example.test".to_owned(),
+            port: 587,
+            username: Some("user@example.test".to_owned()),
+            secret: Some("the-secret".to_owned()),
+            auth,
+            security: SubmissionSecurity::StartTls,
+            hello_name: "localhost".to_owned(),
+        }
+    }
+
+    #[test]
+    fn sasl_credentials_pick_the_mechanism_from_the_auth_kind() {
+        // Password accounts authenticate with AUTH PLAIN.
+        let credentials = config(AuthKind::Password)
+            .sasl_credentials()
+            .expect("password credentials should build")
+            .expect("credentials should be present");
+        assert!(matches!(
+            credentials,
+            Credentials::Plain { username, secret }
+                if username == "user@example.test" && secret == "the-secret"
+        ));
+
+        // OAuth2 accounts authenticate with AUTH XOAUTH2, using the current
+        // access token as the bearer secret.
+        let credentials = config(AuthKind::OAuth2)
+            .sasl_credentials()
+            .expect("OAuth2 credentials should build")
+            .expect("credentials should be present");
+        assert!(matches!(
+            credentials,
+            Credentials::XOauth2 { username, secret }
+                if username == "user@example.test" && secret == "the-secret"
+        ));
+    }
+
+    #[test]
+    fn sasl_credentials_require_both_username_and_secret() {
+        let mut partial = config(AuthKind::Password);
+        partial.secret = None;
+        assert!(
+            partial.sasl_credentials().is_err(),
+            "a username without a secret must be rejected"
+        );
+
+        let anonymous = SubmissionConfig {
+            username: None,
+            secret: None,
+            ..config(AuthKind::OAuth2)
+        };
+        assert!(
+            anonymous
+                .sasl_credentials()
+                .expect("no credentials is a valid state")
+                .is_none(),
+            "an anonymous submission carries no credentials"
+        );
+    }
 
     #[test]
     fn renders_basic_rfc822_headers() {

@@ -191,7 +191,7 @@ pub(crate) fn render_account_setup_detail(
                                 .text_sm()
                                 .text_color(rgb(colors.muted))
                                 .child(
-                                    "Submitting opens the provider's authorization page in the browser; the account syncs once the grant returns. Mail sync uses the OAuth2 access token (XOAUTH2).",
+                                    "Submitting opens the provider's authorization page in the browser; the account syncs once the grant returns. Mail sync and SMTP submission use the OAuth2 access token (XOAUTH2), refreshed in the background.",
                                 ),
                         ),
                 ]

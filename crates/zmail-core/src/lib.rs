@@ -800,6 +800,9 @@ pub struct DeliveryTarget {
     pub identity_id: i64,
     /// Current account protocol.
     pub protocol: ProtocolKind,
+    /// Authentication method used for submission (SMTP `XOAUTH2` vs
+    /// password); mirrors the account's auth kind.
+    pub auth: AuthKind,
     /// Canonical account endpoint.
     pub endpoint: String,
     /// Account username.

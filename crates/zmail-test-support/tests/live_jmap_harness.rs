@@ -185,6 +185,7 @@ fn submit_harness_message(subject: &str, body: &str) -> Result<()> {
                 port: MAIL_HARNESS_JMAP_SMTP_PORT,
                 username: None,
                 secret: None,
+                auth: AuthKind::Password,
                 security: SubmissionSecurity::Plain,
                 hello_name: "localhost".to_owned(),
             },
