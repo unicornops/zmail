@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.0](https://github.com/unicornops/zmail/compare/v0.3.0...v0.4.0) (2026-10-08)
+
+
+### Features
+
+* **auth:** run the OAuth2 browser flow with PKCE and provider presets ([#73](https://github.com/unicornops/zmail/issues/73)) ([fb46145](https://github.com/unicornops/zmail/commit/fb46145c84cacf7adb41c0ff167124522337863c))
+* persist and save received attachments ([#64](https://github.com/unicornops/zmail/issues/64)) ([33fac5b](https://github.com/unicornops/zmail/commit/33fac5b5530ef034f50e38a6abe27a2a411872d8))
+* **release:** build a Windows MSI installer and scaffold opt-in signing ([#74](https://github.com/unicornops/zmail/issues/74)) ([a16b00a](https://github.com/unicornops/zmail/commit/a16b00ac62da5ae252e22c694e16f1deb08799ba))
+
+
+### Bug Fixes
+
+* **release:** repair the Linux deb asset path and screenshot GPU stack ([#70](https://github.com/unicornops/zmail/issues/70)) ([4bac30f](https://github.com/unicornops/zmail/commit/4bac30f0086adf4ef5f806eff9b7492844bb0d0a))
+* **release:** repair the WiX binary path and rewind the 0.4.0 cut ([#77](https://github.com/unicornops/zmail/issues/77)) ([ec793f6](https://github.com/unicornops/zmail/commit/ec793f6d01bfa07ec82c5dcccdcdb9b6606781fc))
+* **release:** use legal WiX identifiers and split the shortcut group ([#79](https://github.com/unicornops/zmail/issues/79)) ([749489b](https://github.com/unicornops/zmail/commit/749489b43f1962ae4a1fb64fe8f8cfd8091a3f13))
+
 ## [0.3.0](https://github.com/unicornops/zmail/compare/v0.2.0...v0.3.0) (2026-10-07)
 
 
