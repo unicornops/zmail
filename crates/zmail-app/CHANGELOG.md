@@ -1,21 +1,5 @@
 # Changelog
 
-## [0.4.0](https://github.com/unicornops/zmail/compare/v0.3.0...v0.4.0) (2026-10-08)
-
-
-### Features
-
-* **auth:** run the OAuth2 browser flow with PKCE and provider presets ([#73](https://github.com/unicornops/zmail/issues/73)) ([fb46145c84cacf7adb41c0ff167124522337863c](https://github.com/unicornops/zmail/commit/fb46145c84cacf7adb41c0ff167124522337863c))
-* hydrate message bodies lazily on open ([#66](https://github.com/unicornops/zmail/issues/66)) ([1fb3b4a55d83a9881ad49fb74cc753c49bf44b05](https://github.com/unicornops/zmail/commit/1fb3b4a55d83a9881ad49fb74cc753c49bf44b05)), closes [#46](https://github.com/unicornops/zmail/issues/46)
-* persist and save received attachments ([#64](https://github.com/unicornops/zmail/issues/64)) ([33fac5b5530ef034f50e38a6abe27a2a411872d8](https://github.com/unicornops/zmail/commit/33fac5b5530ef034f50e38a6abe27a2a411872d8)), closes [#43](https://github.com/unicornops/zmail/issues/43)
-* raise OS notifications for new mail ([#65](https://github.com/unicornops/zmail/issues/65)) ([5680334d43424a9be45a18992af3d9b6c753637a](https://github.com/unicornops/zmail/commit/5680334d43424a9be45a18992af3d9b6c753637a)), closes [#44](https://github.com/unicornops/zmail/issues/44)
-* **release:** build a Windows MSI installer and scaffold opt-in signing ([#74](https://github.com/unicornops/zmail/issues/74)) ([a16b00ac62da5ae252e22c694e16f1deb08799ba](https://github.com/unicornops/zmail/commit/a16b00ac62da5ae252e22c694e16f1deb08799ba))
-* sync flags through CONDSTORE CHANGEDSINCE ([#72](https://github.com/unicornops/zmail/issues/72)) ([7cf67d863adc93080476cb1bf3563b84275a47d2](https://github.com/unicornops/zmail/commit/7cf67d863adc93080476cb1bf3563b84275a47d2)), closes [#45](https://github.com/unicornops/zmail/issues/45)
-
-### Bug Fixes
-
-* **deps:** bump rand to the RUSTSEC-2026-0097/0186 patched releases ([#75](https://github.com/unicornops/zmail/issues/75)) ([f0b407411633eb530c1b4bd72c1a238ad1409df5](https://github.com/unicornops/zmail/commit/f0b407411633eb530c1b4bd72c1a238ad1409df5))
-* **release:** repair the Linux deb asset path and screenshot GPU stack ([#70](https://github.com/unicornops/zmail/issues/70)) ([4bac30f0086adf4ef5f806eff9b7492844bb0d0a](https://github.com/unicornops/zmail/commit/4bac30f0086adf4ef5f806eff9b7492844bb0d0a))
 ## [0.3.0](https://github.com/unicornops/zmail/compare/v0.2.0...v0.3.0) (2026-10-07)
 
 
