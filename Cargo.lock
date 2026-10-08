@@ -8278,6 +8278,7 @@ dependencies = [
  "url",
  "winresource",
  "zmail-assets",
+ "zmail-auth",
  "zmail-core",
  "zmail-imap",
  "zmail-security",
@@ -8299,6 +8300,13 @@ dependencies = [
 [[package]]
 name = "zmail-auth"
 version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "rand 0.8.6",
+ "reqwest",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "zmail-core"
