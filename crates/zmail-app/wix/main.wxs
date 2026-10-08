@@ -9,7 +9,7 @@
     <Product Id="*"
              Name="Zmail"
              Language="1033"
-             Version="!(bind.fileVersion.zmail-app.exe)"
+             Version="!(bind.fileVersion.zmail_app_exe)"
              Manufacturer="UnicornOps"
              UpgradeCode="7A8AFF84-FB5F-4920-8320-5DD02BCD7EFB">
         <Package InstallerVersion="200"
@@ -25,6 +25,7 @@
                  Level="1"
                  Absent="disallow">
             <ComponentGroupRef Id="ProductComponents" />
+            <ComponentGroupRef Id="StartMenuComponents" />
         </Feature>
     </Product>
 
@@ -35,7 +36,7 @@
                     <Component Id="zmail_app.exe"
                                Guid="1E8E9408-EA69-4F6A-B7A8-7D489BF5AF53"
                                Win64="yes">
-                        <File Id="zmail-app.exe"
+                        <File Id="zmail_app_exe"
                               Name="zmail-app.exe"
                               Source="$(var.CargoTargetDir)\release\zmail-app.exe"
                               KeyPath="yes" />
@@ -73,9 +74,10 @@
         <ComponentGroup Id="ProductComponents" Directory="APPLICATIONFOLDER">
             <ComponentRef Id="zmail_app.exe" />
             <ComponentRef Id="mailto_registration" />
+        </ComponentGroup>
+        <ComponentGroup Id="StartMenuComponents" Directory="ApplicationProgramsFolder">
             <Component Id="start_menu_shortcut"
-                       Guid="4792AC98-B099-4175-ACF2-739E500B649D"
-                       Directory="ApplicationProgramsFolder">
+                       Guid="4792AC98-B099-4175-ACF2-739E500B649D">
                 <Shortcut Id="ZmailStartMenuShortcut"
                           Name="Zmail"
                           Description="Zmail desktop email client"
