@@ -282,6 +282,28 @@ ALTER TABLE accounts ADD COLUMN oauth2_client_id TEXT;
 ALTER TABLE accounts ADD COLUMN oauth2_access_expires_at INTEGER;
 "#;
 
+/// Rebuilds the full-text search document of one thread from stored rows.
+///
+/// Shared by the account-wide index refresh and per-thread hydration so a
+/// single document row is always derived the same way.
+const THREAD_SEARCH_DOCUMENT_INSERT: &str = r#"
+INSERT INTO search_documents(account_id, mailbox_id, thread_id, mailbox_name, subject, participants, preview, body)
+SELECT
+    mailboxes.account_id,
+    mailboxes.id,
+    threads.id,
+    mailboxes.name,
+    threads.subject,
+    threads.participants,
+    threads.preview,
+    COALESCE(GROUP_CONCAT(COALESCE(messages.body_text, messages.sanitized_html, messages.body_preview), ' '), '')
+FROM threads
+JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+LEFT JOIN messages ON messages.thread_id = threads.id
+WHERE threads.id = ?1
+GROUP BY threads.id
+"#;
+
 const PENDING_OP_STATES_SCHEMA: &str = r#"
 ALTER TABLE pending_ops ADD COLUMN state TEXT NOT NULL DEFAULT 'pending';
 CREATE INDEX IF NOT EXISTS idx_pending_ops_state ON pending_ops(account_id, state);
@@ -1386,7 +1408,9 @@ impl LocalStore {
     /// Persists a fetched body (and attachments) for one stored message.
     ///
     /// Existing attachment rows for the message are replaced, so a repeated
-    /// hydration cannot duplicate metadata.
+    /// hydration cannot duplicate metadata. The thread's full-text search
+    /// document is rebuilt in the same transaction, so the body text becomes
+    /// searchable as soon as it is stored.
     pub fn hydrate_message_body(&self, message_id: i64, hydration: &HydratedBody) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
@@ -1455,6 +1479,7 @@ impl LocalStore {
             "UPDATE threads SET has_attachments = MAX(has_attachments, ?2) WHERE id = ?1",
             params![thread_id, has_attachments],
         )?;
+        refresh_thread_search_index(&transaction, thread_id)?;
         transaction
             .commit()
             .context("failed to commit the hydration transaction")
@@ -3005,25 +3030,7 @@ impl LocalStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to enumerate threads for search indexing")?;
 
-        let mut insert_statement = conn.prepare(
-            r#"
-            INSERT INTO search_documents(account_id, mailbox_id, thread_id, mailbox_name, subject, participants, preview, body)
-            SELECT
-                mailboxes.account_id,
-                mailboxes.id,
-                threads.id,
-                mailboxes.name,
-                threads.subject,
-                threads.participants,
-                threads.preview,
-                COALESCE(GROUP_CONCAT(COALESCE(messages.body_text, messages.sanitized_html, messages.body_preview), ' '), '')
-            FROM threads
-            JOIN mailboxes ON mailboxes.id = threads.mailbox_id
-            LEFT JOIN messages ON messages.thread_id = threads.id
-            WHERE threads.id = ?1
-            GROUP BY threads.id
-            "#,
-        )?;
+        let mut insert_statement = conn.prepare(THREAD_SEARCH_DOCUMENT_INSERT)?;
 
         for thread_id in thread_ids {
             insert_statement.execute(params![thread_id])?;
@@ -3495,6 +3502,21 @@ fn thread_location(conn: &Connection, thread_id: i64) -> Result<Option<ThreadLoc
     )
     .optional()
     .context("failed to load thread location")
+}
+
+/// Rebuilds the full-text search document for a single thread.
+///
+/// Hydration calls this in its own transaction so a lazily fetched body
+/// becomes searchable without re-indexing the rest of the account.
+fn refresh_thread_search_index(conn: &Connection, thread_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM search_documents WHERE thread_id = ?1",
+        params![thread_id],
+    )
+    .with_context(|| format!("failed to drop the search document for thread {thread_id}"))?;
+    conn.execute(THREAD_SEARCH_DOCUMENT_INSERT, params![thread_id])
+        .with_context(|| format!("failed to index thread {thread_id} for search"))?;
+    Ok(())
 }
 
 fn mailbox_identity(conn: &Connection, mailbox_id: i64) -> Result<Option<MailboxIdentity>> {
@@ -5843,6 +5865,89 @@ mod tests {
             "syncs must keep the hydrated preview"
         );
     }
+
+    #[test]
+    fn hydrated_bodies_become_searchable() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        // Header-only snapshot, as the lazy IMAP adapter sends it: the
+        // searchable body is the placeholder, so the real body text cannot
+        // match yet.
+        let mut snapshot = merge_test_snapshot(
+            "Searchable subject",
+            "The lazy cormorant body",
+            "thread-searchable",
+            "message-searchable",
+            None,
+        );
+        snapshot.mailboxes[0].threads[0].messages[0].body_text = None;
+        snapshot.mailboxes[0].threads[0].messages[0].sanitized_html = None;
+        snapshot.mailboxes[0].threads[0].messages[0].body_preview =
+            "Body not downloaded.".to_owned();
+        snapshot.mailboxes[0].threads[0].preview = "Body not downloaded.".to_owned();
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+
+        assert!(
+            store
+                .search_threads(account_id, "cormorant", 10)
+                .expect("search should run")
+                .is_empty(),
+            "a body that was never fetched cannot match"
+        );
+
+        let mailbox_id = mailbox_id_by_name(&store, account_id, "Inbox");
+        let threads = store
+            .list_threads(mailbox_id, 0..10)
+            .expect("threads should load");
+        let missing = store
+            .messages_missing_bodies(threads[0].id)
+            .expect("missing bodies should load")
+            .expect("the thread should exist");
+        assert_eq!(missing.len(), 1);
+
+        store
+            .hydrate_message_body(
+                missing[0].0,
+                &HydratedBody {
+                    body_text: Some("The lazy cormorant body".to_owned()),
+                    sanitized_html: None,
+                    has_remote_content: false,
+                    body_preview: "The lazy cormorant body".to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .expect("hydration should persist");
+
+        let hits = store
+            .search_threads(account_id, "cormorant", 10)
+            .expect("search should run");
+        assert_eq!(hits.len(), 1, "the hydrated body must match");
+        assert_eq!(hits[0].subject, "Searchable subject");
+
+        // A repeated hydration must not duplicate the document row.
+        store
+            .hydrate_message_body(
+                missing[0].0,
+                &HydratedBody {
+                    body_text: Some("The lazy cormorant body".to_owned()),
+                    sanitized_html: None,
+                    has_remote_content: false,
+                    body_preview: "The lazy cormorant body".to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .expect("repeated hydration should persist");
+        let hits = store
+            .search_threads(account_id, "cormorant", 10)
+            .expect("search should run");
+        assert_eq!(hits.len(), 1, "re-hydration keeps a single search document");
+    }
+
     #[test]
     fn mbox_export_writes_message_entries() {
         let store = LocalStore::open_ephemeral().expect("store should open");
