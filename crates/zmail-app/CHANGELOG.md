@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/unicornops/zmail/compare/v0.4.0...v0.5.0) (2026-10-09)
+
+
+### Features
+
+* JMAP attachment blobs in the reader, and a required release changelog audit ([#85](https://github.com/unicornops/zmail/issues/85)) ([8bdf250](https://github.com/unicornops/zmail/commit/8bdf250f3ea1a5fb7753a9cbf31522adb659808d))
+* OAuth2 token lifecycle, settings-dialog setup, and searchable hydrated bodies ([#83](https://github.com/unicornops/zmail/issues/83)) ([fa265c4](https://github.com/unicornops/zmail/commit/fa265c42af7643cd6cda0362c7f947c58ea4ccfd))
+
+### Bug Fixes
+
+* **release:** match cargo-wix's hyphenated MSI output name ([#82](https://github.com/unicornops/zmail/issues/82)) ([60c77bf](https://github.com/unicornops/zmail/commit/60c77bf74e7c7ad8e6aaba689344f921dde973f6))
+
 ## [0.4.0](https://github.com/unicornops/zmail/compare/v0.3.0...v0.4.0) (2026-10-08)
 
 
