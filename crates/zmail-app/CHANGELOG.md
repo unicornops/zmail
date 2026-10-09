@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/unicornops/zmail/compare/v0.4.0...v0.5.0) (2026-10-09)
+
+
+### Features
+
+* OAuth2 token lifecycle, settings-dialog setup, and searchable hydrated bodies ([#83](https://github.com/unicornops/zmail/issues/83)) ([fa265c4](https://github.com/unicornops/zmail/commit/fa265c42af7643cd6cda0362c7f947c58ea4ccfd))
+
 ## [0.4.0](https://github.com/unicornops/zmail/compare/v0.3.0...v0.4.0) (2026-10-08)
 
 
