@@ -20,9 +20,9 @@ use jmap_client::{
 use serde::{Deserialize, Serialize};
 use url::Url;
 use zmail_core::{
-    AccountSyncSnapshot, MailboxSnapshot, MessageAttachment, MessageSnapshot, NewIdentity,
-    OpApplyReport, OutgoingMessage, PendingOp, PendingOpKind, ProtocolKind, SyncTarget,
-    ThreadSnapshot,
+    AccountSyncSnapshot, AuthKind, MailboxSnapshot, MessageAttachment, MessageSnapshot,
+    NewIdentity, OpApplyReport, OutgoingMessage, PendingOp, PendingOpKind, ProtocolKind,
+    SyncTarget, ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
 use zmail_smtp::render_rfc822_message;
@@ -60,7 +60,7 @@ pub async fn discover_and_sync(
         bail!("JMAP endpoints should be absolute HTTP or HTTPS URLs");
     }
 
-    let client = connect_client(&target.endpoint, &target.username, secret).await?;
+    let client = connect_client(&target.endpoint, &target.username, secret, target.auth).await?;
 
     let checkpoint = JmapCheckpoint::from_json(target.checkpoint.as_deref())?;
     let mut identities = fetch_identities(&client).await.unwrap_or_default();
@@ -131,7 +131,7 @@ pub async fn wait_for_mail_changes(
         bail!("JMAP adapter received a non-JMAP sync target");
     }
 
-    let client = connect_client(&target.endpoint, &target.username, secret).await?;
+    let client = connect_client(&target.endpoint, &target.username, secret, target.auth).await?;
     let mut notifications = client
         .event_source(
             Some([DataType::Email, DataType::Mailbox]),
@@ -166,7 +166,7 @@ pub async fn apply_pending_ops(
         bail!("JMAP adapter received a non-JMAP sync target");
     }
 
-    let client = connect_client(&target.endpoint, &target.username, secret).await?;
+    let client = connect_client(&target.endpoint, &target.username, secret, target.auth).await?;
     let mut report = OpApplyReport::default();
 
     let needs_mailbox_map = ops.iter().any(|op| matches!(op.kind, PendingOpKind::Move));
@@ -248,6 +248,7 @@ pub async fn submit_outgoing_message(
     endpoint: &str,
     username: &str,
     secret: &str,
+    auth: AuthKind,
     identity_email: &str,
     message: &OutgoingMessage,
 ) -> Result<()> {
@@ -255,7 +256,7 @@ pub async fn submit_outgoing_message(
         bail!("JMAP submission requires at least one recipient");
     }
 
-    let client = connect_client(endpoint, username, secret).await?;
+    let client = connect_client(endpoint, username, secret, auth).await?;
     let identity_id = resolve_identity_id(&client, identity_email)
         .await?
         .with_context(|| format!("no JMAP identity matches {identity_email}"))?;
@@ -350,8 +351,30 @@ impl JmapCheckpoint {
     }
 }
 
-async fn connect_client(endpoint: &str, username: &str, secret: &str) -> Result<Client> {
-    let mut client_builder = Client::new().credentials((username, secret));
+/// Builds the session credentials for the target's auth kind.
+///
+/// Password accounts authenticate with HTTP Basic; OAuth2 accounts
+/// authenticate with the bearer access token in the `Authorization` header
+/// (RFC 7628 bearer usage), which `jmap-client` sends for `Bearer`
+/// credentials.
+fn jmap_credentials(
+    auth: AuthKind,
+    username: &str,
+    secret: &str,
+) -> jmap_client::client::Credentials {
+    match auth {
+        AuthKind::Password => jmap_client::client::Credentials::basic(username, secret),
+        AuthKind::OAuth2 => jmap_client::client::Credentials::bearer(secret.to_owned()),
+    }
+}
+
+async fn connect_client(
+    endpoint: &str,
+    username: &str,
+    secret: &str,
+    auth: AuthKind,
+) -> Result<Client> {
+    let mut client_builder = Client::new().credentials(jmap_credentials(auth, username, secret));
     if let Some(host) = Url::parse(endpoint)
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
@@ -902,7 +925,25 @@ fn timestamp_to_rfc3339(timestamp: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{JmapCheckpoint, format_jmap_addresses, sanitize_component, timestamp_to_rfc3339};
+    use super::{
+        JmapCheckpoint, format_jmap_addresses, jmap_credentials, sanitize_component,
+        timestamp_to_rfc3339,
+    };
+    use zmail_core::AuthKind;
+
+    #[test]
+    fn jmap_credentials_follow_the_auth_kind() {
+        assert_eq!(
+            jmap_credentials(AuthKind::Password, "user@example.test", "app-password"),
+            jmap_client::client::Credentials::basic("user@example.test", "app-password"),
+            "password accounts authenticate with HTTP Basic"
+        );
+        assert_eq!(
+            jmap_credentials(AuthKind::OAuth2, "user@example.test", "access-token"),
+            jmap_client::client::Credentials::bearer("access-token"),
+            "OAuth2 accounts authenticate with a bearer token"
+        );
+    }
 
     #[test]
     fn attachment_filenames_sanitize_to_safe_components() {

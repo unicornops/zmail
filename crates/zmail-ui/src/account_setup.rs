@@ -38,6 +38,9 @@ pub(crate) struct AccountSetupState {
     pub(crate) password: UiBuffer,
     pub(crate) oauth_client_id: UiBuffer,
     pub(crate) oauth_client_secret: UiBuffer,
+    pub(crate) oauth_authorization_endpoint: UiBuffer,
+    pub(crate) oauth_token_endpoint: UiBuffer,
+    pub(crate) oauth_scopes: UiBuffer,
     pub(crate) identity_name: UiBuffer,
     pub(crate) identity_email: UiBuffer,
     pub(crate) signature: UiBuffer,
@@ -76,6 +79,11 @@ impl Default for AccountSetupState {
             password: UiBuffer::secret(String::new()),
             oauth_client_id: UiBuffer::single_line(String::new()),
             oauth_client_secret: UiBuffer::secret(String::new()),
+            // Custom provider endpoints, used by JMAP accounts: no consumer
+            // provider presets offer JMAP.
+            oauth_authorization_endpoint: UiBuffer::single_line(String::new()),
+            oauth_token_endpoint: UiBuffer::single_line(String::new()),
+            oauth_scopes: UiBuffer::single_line("email"),
             identity_name: UiBuffer::single_line(String::new()),
             identity_email: UiBuffer::single_line(String::new()),
             signature: UiBuffer::multiline("Regards,"),
@@ -120,15 +128,13 @@ pub(crate) fn render_account_setup_detail(
                     .gap_2()
                     .children(account_protocol_buttons(form.protocol, colors, cx)),
             )
-            .children(if form.protocol == ProtocolKind::Imap {
-                vec![div()
+            .child(
+                div()
                     .flex()
                     .flex_wrap()
                     .gap_2()
-                    .children(account_auth_buttons(form, colors, cx))]
-            } else {
-                Vec::new()
-            })
+                    .children(account_auth_buttons(form, colors, cx)),
+            )
             .children(if form.auth == AuthKind::OAuth2 && form.protocol == ProtocolKind::Imap {
                 vec![
                     div()
@@ -136,49 +142,7 @@ pub(crate) fn render_account_setup_detail(
                         .flex_wrap()
                         .gap_2()
                         .children(account_oauth_provider_buttons(form, colors, cx)),
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(
-                            div().flex_1().child(
-                                input_card(
-                                    "account-oauth-client-id-field",
-                                    "OAuth2 Client Id",
-                                    "Provider application client id",
-                                    &form.oauth_client_id,
-                                    active_field == Some(EditorField::AccountOauthClientId),
-                                    false,
-                                    colors,
-                                )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.set_active_field(
-                                        EditorField::AccountOauthClientId,
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                            ),
-                        )
-                        .child(
-                            div().flex_1().child(
-                                input_card(
-                                    "account-oauth-client-secret-field",
-                                    "OAuth2 Client Secret",
-                                    "Optional for public clients",
-                                    &form.oauth_client_secret,
-                                    active_field == Some(EditorField::AccountOauthClientSecret),
-                                    false,
-                                    colors,
-                                )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.set_active_field(
-                                        EditorField::AccountOauthClientSecret,
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                            ),
-                        ),
+                    oauth_client_fields(form, active_field, colors, cx),
                     div()
                         .rounded_md()
                         .bg(rgb(colors.background))
@@ -192,6 +156,82 @@ pub(crate) fn render_account_setup_detail(
                                 .text_color(rgb(colors.muted))
                                 .child(
                                     "Submitting opens the provider's authorization page in the browser; the account syncs once the grant returns. Mail sync and SMTP submission use the OAuth2 access token (XOAUTH2), refreshed in the background.",
+                                ),
+                        ),
+                ]
+            } else if form.auth == AuthKind::OAuth2 && form.protocol == ProtocolKind::Jmap {
+                vec![
+                    oauth_client_fields(form, active_field, colors, cx),
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(
+                            div().flex_1().child(
+                                input_card(
+                                    "account-oauth-authorization-endpoint-field",
+                                    "Authorization Endpoint",
+                                    "https://provider.example.test/authorize",
+                                    &form.oauth_authorization_endpoint,
+                                    active_field == Some(EditorField::AccountOauthAuthorizationEndpoint),
+                                    false,
+                                    colors,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.set_active_field(
+                                        EditorField::AccountOauthAuthorizationEndpoint,
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                            ),
+                        )
+                        .child(
+                            div().flex_1().child(
+                                input_card(
+                                    "account-oauth-token-endpoint-field",
+                                    "Token Endpoint",
+                                    "https://provider.example.test/token",
+                                    &form.oauth_token_endpoint,
+                                    active_field == Some(EditorField::AccountOauthTokenEndpoint),
+                                    false,
+                                    colors,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.set_active_field(
+                                        EditorField::AccountOauthTokenEndpoint,
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                            ),
+                        ),
+                    div().child(
+                        input_card(
+                            "account-oauth-scopes-field",
+                            "Scopes",
+                            "Space-separated, for example: email",
+                            &form.oauth_scopes,
+                            active_field == Some(EditorField::AccountOauthScopes),
+                            false,
+                            colors,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.set_active_field(EditorField::AccountOauthScopes, window, cx);
+                        })),
+                    ),
+                    div()
+                        .rounded_md()
+                        .bg(rgb(colors.background))
+                        .border_1()
+                        .border_color(rgb(colors.border))
+                        .px_3()
+                        .py_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(colors.muted))
+                                .child(
+                                    "No consumer presets offer JMAP, so the provider's own OAuth2 endpoints are entered here. The account authenticates with the bearer access token, refreshed in the background.",
                                 ),
                         ),
                 ]
@@ -474,9 +514,8 @@ pub(crate) fn account_protocol_buttons(
             colors.foreground,
             cx.listener(|this: &mut WorkspaceView, _, _, cx| {
                 this.account_setup.protocol = ProtocolKind::Jmap;
-                // JMAP bearer-token auth is not wired yet; password is the
-                // only supported auth kind for JMAP accounts.
-                this.account_setup.auth = AuthKind::Password;
+                // Provider presets carry IMAP endpoints and SMTP submission
+                // defaults; they do not apply to JMAP accounts.
                 this.account_setup.oauth_preset = None;
                 cx.notify();
             }),
@@ -488,6 +527,50 @@ pub(crate) fn account_protocol_buttons(
 // ---------------------------------------------------------------------------
 // account_auth_buttons / account_oauth_provider_buttons
 // ---------------------------------------------------------------------------
+
+/// Renders the shared OAuth2 client id and optional client secret inputs.
+fn oauth_client_fields(
+    form: &AccountSetupState,
+    active_field: Option<EditorField>,
+    colors: &UiColors,
+    cx: &mut Context<WorkspaceView>,
+) -> gpui::Div {
+    div()
+        .flex()
+        .gap_3()
+        .child(
+            div().flex_1().child(
+                input_card(
+                    "account-oauth-client-id-field",
+                    "OAuth2 Client Id",
+                    "Provider application client id",
+                    &form.oauth_client_id,
+                    active_field == Some(EditorField::AccountOauthClientId),
+                    false,
+                    colors,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_active_field(EditorField::AccountOauthClientId, window, cx);
+                })),
+            ),
+        )
+        .child(
+            div().flex_1().child(
+                input_card(
+                    "account-oauth-client-secret-field",
+                    "OAuth2 Client Secret",
+                    "Optional for public clients",
+                    &form.oauth_client_secret,
+                    active_field == Some(EditorField::AccountOauthClientSecret),
+                    false,
+                    colors,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_active_field(EditorField::AccountOauthClientSecret, window, cx);
+                })),
+            ),
+        )
+}
 
 /// Build the auth-kind toggle buttons ("Password" / "OAuth2") rendered
 /// inside the connection section for IMAP accounts.
