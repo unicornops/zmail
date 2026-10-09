@@ -9,7 +9,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use tokio::runtime::Builder;
 use zmail_core::{
-    AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutgoingConfig, ProtocolKind,
+    AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutgoingAttachment, OutgoingConfig,
+    OutgoingMessage, ProtocolKind,
 };
 use zmail_security::{InMemorySecretStore, SecretStore};
 use zmail_smtp::{SubmissionConfig, SubmissionSecurity, SubmittedMessage, submit_text_message};
@@ -116,6 +117,101 @@ fn syncs_mail_from_a_live_jmap_server() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn downloads_jmap_attachment_blobs_into_the_store() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_JMAP_PASSWORD)?;
+
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+
+    // Prime the account once so the attachment sync is incremental.
+    sync_service.sync_account_and_wait(account_id)?;
+
+    let blob = b"JMAP attachment round trip payload.\n".to_vec();
+    submit_harness_attachment_message(
+        "Phase 2b JMAP attachment",
+        "This message carries an attachment blob.",
+        "notes.txt",
+        blob.clone(),
+    )?;
+
+    let thread_id = sync_until_subject(
+        &sync_service,
+        &store,
+        account_id,
+        "Phase 2b JMAP attachment",
+        12,
+    )?;
+    let view = store
+        .thread_view(thread_id)?
+        .context("the attachment thread should load")?;
+    assert!(
+        view.has_attachments,
+        "the JMAP thread should carry the attachment flag"
+    );
+    let message = view
+        .messages
+        .iter()
+        .find(|message| !message.attachments.is_empty())
+        .context("the JMAP message should list its downloaded attachment")?;
+    let attachment = &message.attachments[0];
+    assert_eq!(attachment.filename, "notes.txt");
+    assert_eq!(attachment.size_bytes, blob.len() as u64);
+
+    let destination =
+        std::env::temp_dir().join(format!("zmail-jmap-attachment-save-{}", std::process::id()));
+    let saved = store.save_attachment(attachment.id, &destination)?;
+    let written = std::fs::read(&saved).context("the saved blob should read back")?;
+    assert_eq!(written, blob, "save-as writes the original bytes");
+    let _ = std::fs::remove_dir_all(&destination);
+
+    Ok(())
+}
+
+fn submit_harness_attachment_message(
+    subject: &str,
+    body: &str,
+    filename: &str,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    let smtp_runtime = Builder::new_current_thread().enable_all().build()?;
+    smtp_runtime.block_on(async {
+        zmail_smtp::submit_outgoing_message(
+            &SubmissionConfig {
+                host: MAIL_HARNESS_HOST.to_owned(),
+                port: MAIL_HARNESS_JMAP_SMTP_PORT,
+                username: None,
+                secret: None,
+                auth: AuthKind::Password,
+                security: SubmissionSecurity::Plain,
+                hello_name: "localhost".to_owned(),
+            },
+            &OutgoingMessage {
+                from_email: "external-sender@phase2b.test".to_owned(),
+                from_name: Some("External Sender".to_owned()),
+                to: vec![MAIL_HARNESS_JMAP_ACCOUNT.to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: subject.to_owned(),
+                text_body: body.to_owned(),
+                attachments: vec![OutgoingAttachment {
+                    filename: filename.to_owned(),
+                    content_type: "text/plain".to_owned(),
+                    bytes,
+                }],
+            },
+        )
+        .await
+    })
 }
 
 #[test]

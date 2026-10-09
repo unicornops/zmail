@@ -60,3 +60,16 @@ This document records the Phase 5 hardening work that is present in-repo today a
 - Contributors should use Conventional Commit prefixes such as `feat:`, `fix:`, or `deps:` so Release Please can compute the next version and changelog.
 - The release workflow builds release archives on all supported desktop platforms and uploads them to the GitHub release.
 - A separate release-triggered workflow captures a Linux screenshot from the live mail harness and uploads the PNG to the same GitHub release without writing back to `main`.
+
+### Changelog audit (required before merging a release PR)
+
+Release Please's `cargo-workspace` plugin counts only commits that touch the released package path (`crates/zmail-app`) when it builds the changelog, so features that live entirely in sub-crates (`zmail-store`, `zmail-sync`, `zmail-imap`, `zmail-jmap`, `zmail-ui`, and others) ship in the binary but are silently dropped from the generated changelog (issue #67). Upstream has no `additional-paths` option for this.
+
+Until a structural fix replaces the generated changelog, every release PR must be audited before merging:
+
+1. List the changes since the previous tag: `git log --oneline vPREVIOUS..main`.
+2. Open the release PR's `CHANGELOG.md` diff and compare it against that log.
+3. For every user-facing commit missing from the generated changelog, add the entry by hand on the release-please branch, keeping the existing changelog formatting and commit attributions.
+4. Merge the release PR only after the changelog covers the full log.
+
+This audit was required for the 0.3.0 and 0.4.0 releases (see the `chore: complete the ... changelog with workspace-wide changes` commits on the release-please branches). The structural alternatives — widening the release unit to the whole workspace or adopting a conventional-log renderer such as `release-plz` — remain tracked in issue #67.
