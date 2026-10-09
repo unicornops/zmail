@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/unicornops/zmail/compare/v0.5.0...v0.6.0) (2026-10-09)
+
+
+### Features
+
+* **jmap:** authenticate with OAuth2 bearer tokens ([#86](https://github.com/unicornops/zmail/issues/86)) ([2720f52](https://github.com/unicornops/zmail/commit/2720f52b60256dca16d7f358c31a432152ce5c74))
+
 ## [0.5.0](https://github.com/unicornops/zmail/compare/v0.4.0...v0.5.0) (2026-10-09)
 
 
