@@ -41,7 +41,7 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 - Preserve the modular boundary between UI, store, sync, and protocol crates.
 - Treat IMAP and JMAP as first-class supported protocols.
 - Keep security defaults strict. Do not weaken TLS, remote-content blocking, or message sanitization casually.
-- Do not describe Phase 5 as fully complete without noting that native installers and signing are still open work. The repo currently ships raw release archives.
+- Release packaging ships platform archives plus native installers (Linux `.deb`, macOS `.app`, Windows MSI); code signing and macOS notarization remain opt-in pending work. Do not describe signing or notarization as complete.
 
 ## Commands
 
