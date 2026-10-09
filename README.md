@@ -11,6 +11,9 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - SQLite-backed local mirror with migrations, paging, and persisted sync state
 - local mailbox operations for read or unread, flag, move, archive, delete, and full-text search
 - real IMAP and JMAP account sync behind a dedicated Tokio background runtime
+- OAuth2 account setup in the settings dialog with provider presets (Gmail, Microsoft 365), background access-token refresh, and XOAUTH2 for IMAP sync, SMTP submission, and JMAP bearer authentication
+- received attachment download and save-as for IMAP and JMAP accounts
+- full-text search that indexes lazily hydrated bodies as they are opened
 - compose, autosave, attachment handling, outbox retry, SMTP submission, and JMAP submission support
 - multiple identities from day one, with JMAP identity discovery and manual identity setup for generic accounts
 - OS keychain-backed credential storage
@@ -19,7 +22,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - coalesced UI refresh polling so background sync and outbox jobs do not flood the GUI thread
 - multi-platform GitHub Actions builds plus Release Please automation starting at `0.0.1`
 - Tagged releases also attach a Linux screenshot captured from the live mail harness by the Release Please workflow chain
-- release archives currently ship raw platform binaries; native installers and signing remain pending release work
+- release archives ship platform binaries plus a Linux `.deb`, a macOS `.app` bundle, and a Windows MSI installer; code signing and macOS notarization remain opt-in pending work
 - Phase 5 hardening and release policy documentation
 
 ## Workspace
