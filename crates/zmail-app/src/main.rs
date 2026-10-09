@@ -1126,7 +1126,13 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, AccountSecret)>
                 AuthKind::Password
             }
         }
-        ProtocolKind::Jmap => AuthKind::Password,
+        ProtocolKind::Jmap => {
+            if prompt_yes_no("Authenticate with an OAuth2 bearer token?", false)? {
+                AuthKind::OAuth2
+            } else {
+                AuthKind::Password
+            }
+        }
     };
     let secret = match auth {
         AuthKind::Password => AccountSecret::Password(
@@ -1135,7 +1141,7 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, AccountSecret)>
         ),
         AuthKind::OAuth2 => {
             if prompt_yes_no("Run the browser authorization flow (PKCE)?", true)? {
-                let client = prompt_oauth2_client()?;
+                let client = prompt_oauth2_client(protocol)?;
                 let tokens = client.authorize_interactively()?;
                 println!(
                     "Received an access token{}.",
@@ -1204,7 +1210,13 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, AccountSecret)>
 
 /// Prompts for the OAuth2 client configuration used by the browser flow,
 /// with Gmail and Microsoft 365 presets pre-filling the endpoints.
-fn prompt_oauth2_client() -> Result<zmail_auth::OAuth2Client> {
+fn prompt_oauth2_client(protocol: ProtocolKind) -> Result<zmail_auth::OAuth2Client> {
+    // No consumer provider presets offer JMAP; JMAP accounts always use
+    // custom provider endpoints.
+    if protocol == ProtocolKind::Jmap {
+        return prompt_custom_oauth2_client();
+    }
+
     let preset = prompt_with_default(
         "Provider (1 = Gmail, 2 = Microsoft 365, 3 = custom endpoints)",
         "3",
@@ -1230,23 +1242,40 @@ fn prompt_oauth2_client() -> Result<zmail_auth::OAuth2Client> {
         }
         _ => {
             let client_id = prompt("OAuth2 client id")?;
-            let authorization_endpoint = prompt("Authorization endpoint URL")?;
-            let token_endpoint = prompt("Token endpoint URL")?;
-            let scopes = prompt_with_default("Scopes (space-separated)", "email")?
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
+            let client_secret = prompt_optional("Client secret (public clients leave this empty)")?;
+            let client = prompt_custom_oauth2_client()?;
             Ok(zmail_auth::OAuth2Client {
                 client_id,
-                client_secret: None,
-                authorization_endpoint,
-                token_endpoint,
-                scopes,
-                redirect_port,
-                extra_authorize_params: Vec::new(),
+                client_secret,
+                ..client
             })
         }
     }
+}
+
+/// Prompts for a provider-agnostic OAuth2 client configuration, used by JMAP
+/// accounts (no consumer presets offer JMAP) and the custom-endpoint choice.
+fn prompt_custom_oauth2_client() -> Result<zmail_auth::OAuth2Client> {
+    let redirect_port: u16 = prompt_with_default("Local redirect port", "8357")?
+        .parse()
+        .context("the redirect port must be a number")?;
+    let client_id = prompt("OAuth2 client id")?;
+    let client_secret = prompt_optional("Client secret (public clients leave this empty)")?;
+    let authorization_endpoint = prompt("Authorization endpoint URL")?;
+    let token_endpoint = prompt("Token endpoint URL")?;
+    let scopes = prompt_with_default("Scopes (space-separated)", "email")?
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    Ok(zmail_auth::OAuth2Client {
+        client_id,
+        client_secret,
+        authorization_endpoint,
+        token_endpoint,
+        scopes,
+        redirect_port,
+        extra_authorize_params: Vec::new(),
+    })
 }
 
 fn fixture_imap_account(endpoint: &str, username: &str, email: &str) -> NewAccount {

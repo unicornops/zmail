@@ -951,6 +951,7 @@ impl SyncService {
                     &job.target.endpoint,
                     &job.target.username,
                     &secret,
+                    target.auth,
                     &job.target.identity_email,
                     &job.message,
                 )

@@ -1050,11 +1050,20 @@ impl WorkspaceView {
 
         // JMAP accounts authenticate with a password; bearer-token auth for
         // JMAP is not wired yet.
+        // JMAP accounts can authenticate with a password or an OAuth2
+        // bearer token; no consumer presets offer JMAP, so OAuth2 uses the
+        // provider's own endpoints entered in the form.
         let (auth, secret) = if form.protocol == ProtocolKind::Jmap {
-            (
-                AuthKind::Password,
-                AccountSetupSecret::Password(required_text("Password", &form.password.text)?),
-            )
+            match form.auth {
+                AuthKind::Password => (
+                    AuthKind::Password,
+                    AccountSetupSecret::Password(required_text("Password", &form.password.text)?),
+                ),
+                AuthKind::OAuth2 => {
+                    let client = custom_oauth2_client_from_form(form)?;
+                    (AuthKind::OAuth2, AccountSetupSecret::OAuth2(client))
+                }
+            }
         } else {
             match form.auth {
                 AuthKind::Password => (
@@ -1066,12 +1075,7 @@ impl WorkspaceView {
                         .oauth_preset
                         .context("Choose an OAuth2 provider (Gmail or Microsoft 365)")?;
                     let client_id = required_text("OAuth2 client id", &form.oauth_client_id.text)?;
-                    let client_secret = form.oauth_client_secret.text.trim();
-                    let client_secret = if client_secret.is_empty() {
-                        None
-                    } else {
-                        Some(client_secret.to_owned())
-                    };
+                    let client_secret = trimmed_or_none(&form.oauth_client_secret.text);
                     let client = preset.client(client_id, client_secret, OAUTH2_REDIRECT_PORT);
                     (AuthKind::OAuth2, AccountSetupSecret::OAuth2(client))
                 }
@@ -1176,6 +1180,13 @@ impl WorkspaceView {
             EditorField::AccountOauthClientSecret => {
                 Some(&mut self.account_setup.oauth_client_secret)
             }
+            EditorField::AccountOauthAuthorizationEndpoint => {
+                Some(&mut self.account_setup.oauth_authorization_endpoint)
+            }
+            EditorField::AccountOauthTokenEndpoint => {
+                Some(&mut self.account_setup.oauth_token_endpoint)
+            }
+            EditorField::AccountOauthScopes => Some(&mut self.account_setup.oauth_scopes),
             EditorField::AccountIdentityName => Some(&mut self.account_setup.identity_name),
             EditorField::AccountIdentityEmail => Some(&mut self.account_setup.identity_email),
             EditorField::AccountSignature => Some(&mut self.account_setup.signature),
@@ -1273,6 +1284,43 @@ pub(crate) enum AccountSetupSecret {
     Password(String),
     /// The OAuth2 client whose browser flow runs after the account is stored.
     OAuth2(zmail_auth::OAuth2Client),
+}
+
+/// Returns the trimmed text, or `None` when it is empty or whitespace-only.
+fn trimmed_or_none(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+/// Builds the provider-agnostic OAuth2 client for JMAP accounts from the
+/// form's custom endpoint fields.
+fn custom_oauth2_client_from_form(form: &AccountSetupState) -> Result<zmail_auth::OAuth2Client> {
+    let client_id = required_text("OAuth2 client id", &form.oauth_client_id.text)?;
+    let client_secret = trimmed_or_none(&form.oauth_client_secret.text);
+    let authorization_endpoint = required_text(
+        "OAuth2 authorization endpoint",
+        &form.oauth_authorization_endpoint.text,
+    )?;
+    let token_endpoint = required_text("OAuth2 token endpoint", &form.oauth_token_endpoint.text)?;
+    let scopes = form
+        .oauth_scopes
+        .text
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    Ok(zmail_auth::OAuth2Client {
+        client_id,
+        client_secret,
+        authorization_endpoint,
+        token_endpoint,
+        scopes,
+        redirect_port: OAUTH2_REDIRECT_PORT,
+        extra_authorize_params: Vec::new(),
+    })
 }
 
 /// Return `Ok(trimmed)` or an error if `value` is empty or whitespace-only.
@@ -1411,7 +1459,47 @@ fn normalize_contact(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_contact, prefixed_subject, split_contact_summary};
+    use super::{
+        AccountSetupState, custom_oauth2_client_from_form, normalize_contact, prefixed_subject,
+        split_contact_summary,
+    };
+
+    #[test]
+    fn custom_oauth2_client_from_form_validates_and_builds() {
+        let mut form = AccountSetupState::default();
+        form.oauth_client_id.text = "client-1".to_owned();
+
+        // Missing provider endpoints are rejected with a clear label.
+        let error = custom_oauth2_client_from_form(&form)
+            .expect_err("the authorization endpoint should be required");
+        assert!(
+            format!("{error}").contains("OAuth2 authorization endpoint"),
+            "the error should name the missing field: {error}"
+        );
+
+        form.oauth_authorization_endpoint.text = "https://provider.test/authorize".to_owned();
+        let error = custom_oauth2_client_from_form(&form)
+            .expect_err("the token endpoint should be required");
+        assert!(
+            format!("{error}").contains("OAuth2 token endpoint"),
+            "the error should name the missing field: {error}"
+        );
+
+        form.oauth_token_endpoint.text = "https://provider.test/token".to_owned();
+        form.oauth_scopes.text = "email profile".to_owned();
+        let client = custom_oauth2_client_from_form(&form).expect("the custom client should build");
+        assert_eq!(client.client_id, "client-1");
+        assert_eq!(
+            client.authorization_endpoint,
+            "https://provider.test/authorize"
+        );
+        assert_eq!(client.token_endpoint, "https://provider.test/token");
+        assert_eq!(
+            client.scopes,
+            vec!["email".to_owned(), "profile".to_owned()]
+        );
+        assert!(client.client_secret.is_none());
+    }
 
     #[test]
     fn prefixed_subject_avoids_duplicate_reply_prefix() {
