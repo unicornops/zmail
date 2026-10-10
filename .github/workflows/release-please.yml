@@ -65,6 +65,11 @@ jobs:
         run: cargo build -p zmail-app --release --locked
 
       - name: Capture Linux screenshot
+        env:
+          # Optional Docker Hub credentials for the harness image pulls
+          # (issue #88); the script logs in only when both are set.
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: xvfb-run -a --server-args="-screen 0 1600x1000x24" bash scripts/capture-release-screenshot.sh artifacts/zmail-linux-screenshot.png
 
       - name: Upload capture logs

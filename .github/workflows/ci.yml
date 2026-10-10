@@ -121,9 +121,18 @@ jobs:
               run: cargo test --workspace --locked
 
             - name: Live Mail Harness Test
+              # DOCKERHUB_* are optional: the harness script logs in when they
+              # are configured, so image pulls use a personal quota instead
+              # of the shared anonymous one (issue #88).
+              env:
+                DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
               run: cargo test -p zmail-test-support --test live_mail_harness -- --ignored --nocapture
 
             - name: Live JMAP Harness Test
+              env:
+                DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
               run: cargo test -p zmail-test-support --test live_jmap_harness -- --ignored --nocapture
 
     build:

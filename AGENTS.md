@@ -68,6 +68,13 @@ cargo test -p zmail-test-support --test live_jmap_harness -- --ignored --nocaptu
 scripts/mail-harness.sh down
 ```
 
+Harness image pulls: the script pre-pulls the three Docker Hub images with
+retries, and logs in with `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` when those
+environment variables (repository secrets in CI) are configured, so pulls use
+a personal quota instead of the shared anonymous one that exhausts on busy
+GitHub runner pools (issue #88). Without credentials the pulls stay anonymous
+and simply retry.
+
 Dependency policy:
 
 ```bash

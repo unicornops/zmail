@@ -57,9 +57,40 @@ run_compose() {
   docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
 }
 
+# The harness images live on Docker Hub, whose shared anonymous pull quota
+# exhausts on busy GitHub runner pools (issue #88). Optional DOCKERHUB_USERNAME
+# and DOCKERHUB_TOKEN environment variables switch the pulls to a personal
+# quota, and the pre-pull retries below keep a transient registry hiccup from
+# failing the run.
+pull_images() {
+  if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+    echo "${DOCKERHUB_TOKEN}" | docker login --username "${DOCKERHUB_USERNAME}" --password-stdin
+  fi
+  local images=(
+    "greenmail/standalone:2.1.8"
+    "apache/james:memory-3.9.0"
+    "nginx:1.27-alpine"
+  )
+  local image attempt
+  for image in "${images[@]}"; do
+    for attempt in 1 2 3; do
+      if docker pull "$image" >/dev/null 2>&1; then
+        break
+      fi
+      echo "pull attempt ${attempt} for ${image} failed" >&2
+      sleep $((attempt * 20))
+      if [ "$attempt" -eq 3 ]; then
+        echo "could not pull ${image}" >&2
+        return 1
+      fi
+    done
+  done
+}
+
 case "${1:-up}" in
   up)
     ensure_james_keystore
+    pull_images
     run_compose up -d --remove-orphans
     provision_jmap_accounts
     ;;
@@ -68,6 +99,7 @@ case "${1:-up}" in
     ;;
   reset)
     ensure_james_keystore
+    pull_images
     run_compose down -v --remove-orphans
     run_compose up -d --remove-orphans
     provision_jmap_accounts
