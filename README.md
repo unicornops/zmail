@@ -22,7 +22,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - coalesced UI refresh polling so background sync and outbox jobs do not flood the GUI thread
 - multi-platform GitHub Actions builds plus Release Please automation starting at `0.0.1`
 - Tagged releases also attach a Linux screenshot captured from the live mail harness by the Release Please workflow chain
-- release archives ship platform binaries plus a Linux `.deb`, a macOS `.app` bundle, and a Windows MSI installer; code signing and macOS notarization remain opt-in pending work
+- release archives ship platform binaries plus a Linux `.deb`, a macOS DMG (Developer ID signed and notarized when the org-wide Apple credentials are present), and a Windows MSI installer; Windows code signing remains opt-in pending work
 - Phase 5 hardening and release policy documentation
 
 ## Workspace
