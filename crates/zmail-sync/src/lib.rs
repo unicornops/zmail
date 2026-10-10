@@ -831,6 +831,13 @@ impl SyncService {
             .store
             .record_sync_success(account_id, &snapshot.detail, &snapshot.checkpoint)?;
         self.notify_new_mail(&target, &existing_mailboxes, &snapshot);
+        // A configured disk budget evicts the oldest hydrated bodies and
+        // attachment blobs after each sync, so the local mirror never grows
+        // past the budget; the run stays on the background runtime, off the
+        // GUI thread.
+        if let Some(budget) = self.inner.store.account_disk_budget_bytes(account_id)? {
+            self.inner.store.evict_account_blobs(account_id, budget)?;
+        }
         let _ = self.process_outbox(Some(account_id));
 
         Ok(())

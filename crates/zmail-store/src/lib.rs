@@ -41,6 +41,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0008_account_auth_kind", ACCOUNT_AUTH_KIND_SCHEMA),
     ("0009_message_attachments", MESSAGE_ATTACHMENTS_SCHEMA),
     ("0010_account_oauth2_client", ACCOUNT_OAUTH2_CLIENT_SCHEMA),
+    ("0011_account_disk_budget", ACCOUNT_DISK_BUDGET_SCHEMA),
 ];
 
 const PHASE2_SCHEMA: &str = r#"
@@ -280,6 +281,10 @@ const ACCOUNT_OAUTH2_CLIENT_SCHEMA: &str = r#"
 ALTER TABLE accounts ADD COLUMN oauth2_token_endpoint TEXT;
 ALTER TABLE accounts ADD COLUMN oauth2_client_id TEXT;
 ALTER TABLE accounts ADD COLUMN oauth2_access_expires_at INTEGER;
+"#;
+
+const ACCOUNT_DISK_BUDGET_SCHEMA: &str = r#"
+ALTER TABLE accounts ADD COLUMN cache_policy_disk_budget_mb INTEGER;
 "#;
 
 /// Rebuilds the full-text search document of one thread from stored rows.
@@ -732,6 +737,156 @@ impl LocalStore {
         )
         .with_context(|| format!("failed to record the token expiry for account {account_id}"))?;
         Ok(())
+    }
+
+    /// Sets the account's disk budget in MiB; `None` disables the budget.
+    pub fn set_account_disk_budget(&self, account_id: i64, budget_mb: Option<u64>) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE accounts SET cache_policy_disk_budget_mb = ?2, \
+             updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![account_id, budget_mb.map(|budget| budget as i64),],
+        )
+        .with_context(|| format!("failed to set the disk budget for account {account_id}"))?;
+        Ok(())
+    }
+
+    /// Returns the account's configured disk budget in bytes, when set.
+    ///
+    /// The budget covers hydrated message bodies and downloaded attachment
+    /// blobs; a missing budget means unlimited.
+    pub fn account_disk_budget_bytes(&self, account_id: i64) -> Result<Option<u64>> {
+        let conn = self.connection()?;
+        let budget = conn
+            .query_row(
+                "SELECT cache_policy_disk_budget_mb FROM accounts WHERE id = ?1",
+                params![account_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .context("failed to load the disk budget")?
+            .flatten();
+        Ok(budget.map(|budget| budget.max(0) as u64 * 1024 * 1024))
+    }
+
+    /// Returns the disk usage of hydrated bodies and attachment blobs in
+    /// bytes for the account.
+    ///
+    /// Body sizes are the character lengths of the stored text columns, so
+    /// the usage is an approximation that matches what the eviction pass
+    /// frees.
+    pub fn account_blob_usage(&self, account_id: i64) -> Result<u64> {
+        account_blob_usage(&self.connection()?, account_id)
+    }
+
+    /// Evicts the oldest hydrated bodies and attachment blobs until the
+    /// account's blob usage fits its budget, returning the freed bytes.
+    ///
+    /// Eviction follows the local-first design: a cleared body falls back to
+    /// preview rendering and re-hydrates on open like a never-opened
+    /// message, and a removed attachment returns to metadata-only. Oldest
+    /// messages go first; nothing is deleted from the server.
+    pub fn evict_account_blobs(&self, account_id: i64, budget_bytes: u64) -> Result<u64> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the eviction transaction")?;
+        let mut usage = account_blob_usage(&transaction, account_id)?;
+        if usage <= budget_bytes {
+            return Ok(0);
+        }
+
+        let mut freed: u64 = 0;
+        // Hydrated bodies first: they are cheap to refetch on open.
+        let mut body_statement = transaction
+            .prepare(
+                r#"
+                SELECT m.id, m.thread_id,
+                       LENGTH(COALESCE(m.body_text, '')) +
+                       LENGTH(COALESCE(m.sanitized_html, ''))
+                FROM messages m
+                JOIN threads t ON t.id = m.thread_id
+                JOIN mailboxes b ON b.id = t.mailbox_id
+                WHERE b.account_id = ?1
+                  AND (m.body_text IS NOT NULL OR m.sanitized_html IS NOT NULL)
+                ORDER BY m.received_at ASC, m.id ASC
+                "#,
+            )
+            .context("failed to prepare the body eviction query")?;
+        while usage > budget_bytes {
+            let Some((message_id, thread_id, size)) = body_statement
+                .query_row(params![account_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .optional()
+                .context("failed to load the next eviction candidate")?
+            else {
+                break;
+            };
+            transaction
+                .execute(
+                    "UPDATE messages SET body_text = NULL, sanitized_html = NULL, \
+                     has_remote_content = 0 WHERE id = ?1",
+                    params![message_id],
+                )
+                .with_context(|| format!("failed to evict the body of message {message_id}"))?;
+            refresh_thread_search_index(&transaction, thread_id)?;
+            freed += size.max(0) as u64;
+            usage = usage.saturating_sub(size.max(0) as u64);
+        }
+        drop(body_statement);
+
+        // Attachment blobs next, oldest message first.
+        let mut attachment_statement = transaction
+            .prepare(
+                r#"
+                SELECT a.id, a.storage_path, a.size_bytes, m.thread_id
+                FROM message_attachments a
+                JOIN messages m ON m.id = a.message_id
+                JOIN threads t ON t.id = m.thread_id
+                JOIN mailboxes b ON b.id = t.mailbox_id
+                WHERE b.account_id = ?1
+                ORDER BY m.received_at ASC, a.id ASC
+                "#,
+            )
+            .context("failed to prepare the attachment eviction query")?;
+        while usage > budget_bytes {
+            let Some((attachment_id, storage_path, size, thread_id)) = attachment_statement
+                .query_row(params![account_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
+                .optional()
+                .context("failed to load the next eviction candidate")?
+            else {
+                break;
+            };
+            transaction
+                .execute(
+                    "DELETE FROM message_attachments WHERE id = ?1",
+                    params![attachment_id],
+                )
+                .with_context(|| format!("failed to evict attachment {attachment_id}"))?;
+            refresh_thread_search_index(&transaction, thread_id)?;
+            // The blob file may already be gone; eviction must not fail on it.
+            let _ = std::fs::remove_file(self.attachment_storage_dir().join(&storage_path));
+            freed += size.max(0) as u64;
+            usage = usage.saturating_sub(size.max(0) as u64);
+        }
+        drop(attachment_statement);
+
+        transaction
+            .commit()
+            .context("failed to commit the eviction transaction")?;
+        Ok(freed)
     }
 
     /// Returns all sync targets in account order.
@@ -3522,6 +3677,40 @@ fn refresh_thread_search_index(conn: &Connection, thread_id: i64) -> Result<()> 
     Ok(())
 }
 
+/// Measures the account's blob usage from stored rows: the character
+/// lengths of hydrated bodies plus the recorded attachment blob sizes.
+fn account_blob_usage(conn: &Connection, account_id: i64) -> Result<u64> {
+    let bodies = conn
+        .query_row(
+            r#"
+            SELECT COALESCE(SUM(LENGTH(COALESCE(m.body_text, '')) +
+                                LENGTH(COALESCE(m.sanitized_html, ''))), 0)
+            FROM messages m
+            JOIN threads t ON t.id = m.thread_id
+            JOIN mailboxes b ON b.id = t.mailbox_id
+            WHERE b.account_id = ?1
+            "#,
+            params![account_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .context("failed to measure the hydrated body usage")?;
+    let attachments = conn
+        .query_row(
+            r#"
+            SELECT COALESCE(SUM(a.size_bytes), 0)
+            FROM message_attachments a
+            JOIN messages m ON m.id = a.message_id
+            JOIN threads t ON t.id = m.thread_id
+            JOIN mailboxes b ON b.id = t.mailbox_id
+            WHERE b.account_id = ?1
+            "#,
+            params![account_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .context("failed to measure the attachment blob usage")?;
+    Ok((bodies + attachments).max(0) as u64)
+}
+
 fn mailbox_identity(conn: &Connection, mailbox_id: i64) -> Result<Option<MailboxIdentity>> {
     conn.query_row(
         "SELECT id, account_id, role FROM mailboxes WHERE id = ?1",
@@ -4715,6 +4904,164 @@ mod tests {
             target.oauth2.is_none(),
             "password accounts do not carry OAuth2 config"
         );
+    }
+
+    #[test]
+    fn disk_budgets_evict_the_oldest_blobs_first() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+
+        // Budget round trip: MiB in, bytes out; missing means unlimited.
+        assert_eq!(
+            store
+                .account_disk_budget_bytes(account_id)
+                .expect("the budget should load"),
+            None,
+            "a fresh account has no budget"
+        );
+        store
+            .set_account_disk_budget(account_id, Some(1))
+            .expect("the budget should set");
+        assert_eq!(
+            store
+                .account_disk_budget_bytes(account_id)
+                .expect("the budget should load"),
+            Some(1024 * 1024),
+            "the budget converts MiB to bytes"
+        );
+
+        // Two hydrated threads; the older one (merged first) also carries
+        // an attachment blob on disk.
+        let mut old = merge_test_snapshot(
+            "Old budget subject",
+            "oldbody",
+            "thread-budget-old",
+            "message-budget-old",
+            None,
+        );
+        old.mailboxes[0].threads[0].messages[0].attachments = vec![MessageAttachment {
+            filename: "report.bin".to_owned(),
+            content_type: "application/octet-stream".to_owned(),
+            size_bytes: 10,
+            storage_path: "incoming-budget-report.bin".to_owned(),
+        }];
+        let blob = store
+            .attachment_storage_dir()
+            .join("incoming-budget-report.bin");
+        std::fs::write(&blob, b"0123456789").expect("the blob should write");
+        // Both threads merge in one snapshot: a later snapshot is
+        // server-authoritative, so separate merges would drop the first
+        // thread.
+        let newer = merge_test_snapshot(
+            "New budget subject",
+            "newbody",
+            "thread-budget-new",
+            "message-budget-new",
+            None,
+        );
+        old.mailboxes[0]
+            .threads
+            .push(newer.mailboxes[0].threads[0].clone());
+        store
+            .replace_account_snapshot(account_id, &old)
+            .expect("the snapshot should apply");
+
+        // Usage covers both bodies (7 chars each) and the 10-byte blob.
+        assert_eq!(
+            store
+                .account_blob_usage(account_id)
+                .expect("the usage should measure"),
+            24
+        );
+
+        // A budget of 17 evicts exactly the oldest body.
+        let freed = store
+            .evict_account_blobs(account_id, 17)
+            .expect("eviction should run");
+        assert_eq!(freed, 7, "only the oldest body is evicted");
+        assert_eq!(
+            store
+                .account_blob_usage(account_id)
+                .expect("the usage should measure"),
+            17
+        );
+        let mailbox_id = mailbox_id_by_name(&store, account_id, "Inbox");
+        let threads = store
+            .list_threads(mailbox_id, 0..10)
+            .expect("threads should load");
+        let old_thread = threads
+            .iter()
+            .find(|thread| thread.subject == "Old budget subject")
+            .expect("the old thread should exist");
+        let new_thread = threads
+            .iter()
+            .find(|thread| thread.subject == "New budget subject")
+            .expect("the new thread should exist");
+        let old_view = store
+            .thread_view(old_thread.id)
+            .expect("the old view should load")
+            .expect("the old view should exist");
+        assert_eq!(
+            old_view.messages[0].render_mode,
+            MessageRenderMode::PreviewOnly,
+            "the evicted message falls back to preview rendering"
+        );
+        assert!(
+            !store
+                .messages_missing_bodies(old_thread.id)
+                .expect("missing bodies should load")
+                .expect("the old thread should exist")
+                .is_empty(),
+            "the evicted message re-hydrates on open"
+        );
+        let new_view = store
+            .thread_view(new_thread.id)
+            .expect("the new view should load")
+            .expect("the new view should exist");
+        assert_eq!(
+            new_view.messages[0].render_mode,
+            MessageRenderMode::PlainText,
+            "the newer message keeps its body"
+        );
+        assert_eq!(
+            new_view.messages[0].attachments.len(),
+            0,
+            "the newer message has no attachments"
+        );
+
+        // A tighter budget evicts the remaining body and the blob.
+        let freed = store
+            .evict_account_blobs(account_id, 4)
+            .expect("eviction should run");
+        assert_eq!(freed, 17, "the remaining body and blob are evicted");
+        assert_eq!(
+            store
+                .account_blob_usage(account_id)
+                .expect("the usage should measure"),
+            0
+        );
+        assert!(
+            !blob.exists(),
+            "the attachment blob file is removed from disk"
+        );
+        let old_view = store
+            .thread_view(old_thread.id)
+            .expect("the old view should load")
+            .expect("the old view should exist");
+        assert_eq!(
+            old_view.messages[0].attachments.len(),
+            0,
+            "the attachment returns to metadata-only"
+        );
+        let _ = std::fs::remove_file(&blob);
+
+        // An under-budget eviction is a no-op.
+        let freed = store
+            .evict_account_blobs(account_id, 1024)
+            .expect("eviction should run");
+        assert_eq!(freed, 0, "nothing is evicted below the budget");
     }
 
     #[test]

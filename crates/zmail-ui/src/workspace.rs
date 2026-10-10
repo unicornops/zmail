@@ -938,6 +938,27 @@ impl WorkspaceView {
         match self.build_account_from_form() {
             Ok((account, secret)) => match self.store.insert_account(&account) {
                 Ok(account_id) => {
+                    // The optional disk budget applies after the account
+                    // exists; parse failures surface like any other form
+                    // error.
+                    match parse_disk_budget_mb(&self.account_setup.disk_budget_mb.text) {
+                        Ok(Some(budget_mb)) => {
+                            if let Err(error) = self
+                                .store
+                                .set_account_disk_budget(account_id, Some(budget_mb))
+                            {
+                                self.store_error = Some(error.to_string());
+                                cx.notify();
+                                return;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            self.store_error = Some(error.to_string());
+                            cx.notify();
+                            return;
+                        }
+                    }
                     let oauth2_flow = match secret {
                         AccountSetupSecret::Password(secret) => {
                             if let Err(error) = self.secrets.set_account_secret(account_id, &secret)
@@ -1187,6 +1208,7 @@ impl WorkspaceView {
                 Some(&mut self.account_setup.oauth_token_endpoint)
             }
             EditorField::AccountOauthScopes => Some(&mut self.account_setup.oauth_scopes),
+            EditorField::AccountDiskBudget => Some(&mut self.account_setup.disk_budget_mb),
             EditorField::AccountIdentityName => Some(&mut self.account_setup.identity_name),
             EditorField::AccountIdentityEmail => Some(&mut self.account_setup.identity_email),
             EditorField::AccountSignature => Some(&mut self.account_setup.signature),
@@ -1284,6 +1306,17 @@ pub(crate) enum AccountSetupSecret {
     Password(String),
     /// The OAuth2 client whose browser flow runs after the account is stored.
     OAuth2(zmail_auth::OAuth2Client),
+}
+
+/// Parses the account setup form's disk budget: empty means unlimited.
+fn parse_disk_budget_mb(value: &str) -> Result<Option<u64>> {
+    match value.trim() {
+        "" => Ok(None),
+        trimmed => trimmed
+            .parse::<u64>()
+            .map(Some)
+            .context("the disk budget must be a whole number of MiB"),
+    }
 }
 
 /// Returns the trimmed text, or `None` when it is empty or whitespace-only.
@@ -1460,9 +1493,24 @@ fn normalize_contact(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountSetupState, custom_oauth2_client_from_form, normalize_contact, prefixed_subject,
-        split_contact_summary,
+        AccountSetupState, custom_oauth2_client_from_form, normalize_contact, parse_disk_budget_mb,
+        prefixed_subject, split_contact_summary,
     };
+
+    #[test]
+    fn disk_budget_parses_empty_as_unlimited() {
+        assert_eq!(parse_disk_budget_mb("").expect("empty parses"), None);
+        assert_eq!(parse_disk_budget_mb("  ").expect("blank parses"), None);
+        assert_eq!(
+            parse_disk_budget_mb(" 512 ").expect("a number parses"),
+            Some(512)
+        );
+        assert!(parse_disk_budget_mb("512x").is_err(), "garbage is rejected");
+        assert!(
+            parse_disk_budget_mb("-1").is_err(),
+            "negatives are rejected"
+        );
+    }
 
     #[test]
     fn custom_oauth2_client_from_form_validates_and_builds() {
