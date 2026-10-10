@@ -41,7 +41,7 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 - Preserve the modular boundary between UI, store, sync, and protocol crates.
 - Treat IMAP and JMAP as first-class supported protocols.
 - Keep security defaults strict. Do not weaken TLS, remote-content blocking, or message sanitization casually.
-- Release packaging ships platform archives plus native installers (Linux `.deb`, macOS `.app`, Windows MSI); code signing and macOS notarization remain opt-in pending work. Do not describe signing or notarization as complete.
+- Release packaging ships platform archives plus native installers (Linux `.deb`, macOS DMG, Windows MSI); macOS releases are Developer ID signed and notarized when the org-wide Apple credentials (`APPLE_CERTIFICATE_BASE64` and friends, shared with the other UnicornOps macOS apps) are present, otherwise ad-hoc signed. Do not describe Windows code signing or `.deb` signing as complete.
 
 ## Commands
 

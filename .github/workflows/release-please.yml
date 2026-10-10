@@ -5,6 +5,16 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag or branch to build (e.g. v0.6.0) - skips release-please and runs the asset build only"
+        required: true
+        type: string
+      dry_run:
+        description: "Build, sign, notarize, and create the DMG without uploading anything (for testing release changes)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -13,6 +23,7 @@ permissions:
 
 jobs:
   release_please:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs['crates/zmail-app--release_created'] }}
@@ -73,7 +84,10 @@ jobs:
 
   build_release_assets:
     needs: release_please
-    if: needs.release_please.outputs.release_created == 'true'
+    if: |
+      always() &&
+      (needs.release_please.outputs.release_created == 'true' ||
+       github.event_name == 'workflow_dispatch')
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -97,7 +111,9 @@ jobs:
       - name: Checkout release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.release_please.outputs.release_sha }}
+          # A manual run builds the tag it was started with; otherwise the
+          # release tag's commit.
+          ref: ${{ needs.release_please.outputs.release_sha || inputs.tag_name }}
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -157,6 +173,52 @@ jobs:
           cargo deb -p zmail-app --locked
           mv target/debian/*.deb zmail-linux-x86_64.deb
 
+      - name: Set up macOS code signing
+        if: runner.os == 'macOS'
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CERTIFICATE_BASE64" ]; then
+            # No certificate configured: fall back to an ad-hoc signature
+            # (see docs/phase5-hardening.md). The release must never block
+            # on absent signing credentials.
+            echo "SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "::notice::No Developer ID certificate configured; the macOS bundle falls back to an ad-hoc signature."
+            exit 0
+          fi
+
+          KEYCHAIN_NAME="zmail-build.keychain"
+          KEYCHAIN_PASSWORD="temporary_password_$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+          security set-keychain-settings "$KEYCHAIN_NAME"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+          security list-keychains -d user -s "$KEYCHAIN_NAME" $(security list-keychains -d user | sed s/\"//g)
+
+          CERTIFICATE_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_NAME" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+
+          IDENTITY_COUNT=$(security find-identity -v -p codesigning "$KEYCHAIN_NAME" | grep -c "Developer ID Application" || echo "0")
+          if [ "$IDENTITY_COUNT" -eq "0" ]; then
+            echo "::error::No Developer ID Application certificate found after import"
+            exit 1
+          fi
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_NAME" | grep "Developer ID Application" | head -1 | sed -n 's/.*"\(.*\)".*/\1/p')
+
+          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_NAME=$KEYCHAIN_NAME" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
+          echo "Developer ID certificate installed"
+
       - name: Create macOS app bundle
         if: runner.os == 'macOS'
         run: |
@@ -185,10 +247,107 @@ jobs:
           </dict>
           </plist>
           PLIST
-          # Ad-hoc signature for local execution; Developer ID signing and
-          # notarization remain repository-controlled release work.
-          codesign --force --sign - "${bundle}" || true
+          # Developer ID signature with the hardened runtime and a secure
+          # timestamp so the bundle can notarize; an ad-hoc signature only
+          # when no certificate is configured.
+          if [ -n "${SIGNING_IDENTITY:-}" ] && [ "${SIGNING_IDENTITY}" != "-" ]; then
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+            codesign --force --sign "$SIGNING_IDENTITY" --keychain "$KEYCHAIN_NAME" --options runtime --timestamp "${bundle}"
+            codesign -vvv --deep --strict "${bundle}"
+          else
+            codesign --force --sign - "${bundle}" || true
+          fi
           ditto -c -k --sequesterRsrc --keepParent "${bundle}" zmail-macos.app.zip
+
+      - name: Notarize the macOS app
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_IDENTITY:-}" ] || [ "${SIGNING_IDENTITY}" = "-" ]; then
+            echo "::notice::Skipping notarization: the bundle has no Developer ID signature."
+            exit 0
+          fi
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_PASSWORD" ] || [ -z "$TEAM_ID" ]; then
+            echo "::notice::Skipping notarization: APPLE_DEVELOPER_ID, APPLE_APP_PASSWORD, or APPLE_TEAM_ID is not configured."
+            exit 0
+          fi
+
+          bundle="Zmail.app"
+          ditto -c -k --keepParent "$bundle" NotarizeApp.zip
+          AUTH=(--apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APPLE_PASSWORD")
+
+          # Apple's notary service drops the odd request, and
+          # `notarytool submit --wait` gives up on the first one; submit with
+          # retries and poll the submission's status, tolerating failed polls.
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              echo "::warning::Notarization attempt $attempt failed: $*"
+              sleep $((attempt * 30))
+            done
+            return 1
+          }
+          submit() {
+            xcrun notarytool submit NotarizeApp.zip "${AUTH[@]}" --output-format json > submission.json
+          }
+
+          retry submit
+          SUBMISSION_ID=$(jq -r '.id' submission.json)
+          echo "Notarization submission: $SUBMISSION_ID"
+
+          DEADLINE=$((SECONDS + 45 * 60))
+          while true; do
+            if xcrun notarytool info "$SUBMISSION_ID" "${AUTH[@]}" --output-format json > result.json; then
+              STATUS=$(jq -r '.status' result.json)
+              echo "Notarization status: $STATUS"
+              [ "$STATUS" != "In Progress" ] && break
+            else
+              echo "::warning::Couldn't fetch the notarization status; trying again"
+            fi
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "::error::Notarization still not finished after 45 minutes (submission $SUBMISSION_ID)"
+              exit 1
+            fi
+            sleep 30
+          done
+
+          if [ "$STATUS" != "Accepted" ]; then
+            xcrun notarytool log "$SUBMISSION_ID" "${AUTH[@]}" || true
+            echo "::error::Notarization finished with status $STATUS"
+            exit 1
+          fi
+
+          retry xcrun stapler staple "$bundle"
+          xcrun stapler validate "$bundle"
+          spctl -a -vv "$bundle"
+          rm NotarizeApp.zip submission.json result.json
+          echo "App notarized and stapled"
+
+      - name: Create macOS DMG
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          bundle="Zmail.app"
+          staging="$RUNNER_TEMP/dmg-staging"
+          rm -rf "$staging"
+          mkdir -p "$staging"
+          cp -R "$bundle" "$staging/"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname "Zmail" -srcfolder "$staging" -ov -format UDZO zmail-macos.dmg
+          rm -rf "$staging"
+          ls -lh zmail-macos.dmg
+
+      - name: Clean up the macOS keychain
+        if: always() && runner.os == 'macOS'
+        run: |
+          if [ -n "${KEYCHAIN_NAME:-}" ] && [ -n "${SIGNING_IDENTITY:-}" ] && [ "${SIGNING_IDENTITY}" != "-" ]; then
+            security delete-keychain "$KEYCHAIN_NAME" 2>/dev/null || true
+          fi
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -198,8 +357,10 @@ jobs:
             ${{ matrix.artifact_path }}
             zmail-linux-x86_64.deb
             zmail-macos.app.zip
+            zmail-macos.dmg
 
       - name: Upload release asset
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -209,7 +370,7 @@ jobs:
             assets="$assets zmail-linux-x86_64.deb"
           fi
           if [[ "${{ runner.os }}" == "macOS" && -f zmail-macos.app.zip ]]; then
-            assets="$assets zmail-macos.app.zip"
+            assets="$assets zmail-macos.app.zip zmail-macos.dmg"
           fi
           if [[ "${{ runner.os }}" == "Windows" && -f zmail-windows-x86_64.msi ]]; then
             assets="$assets zmail-windows-x86_64.msi"
