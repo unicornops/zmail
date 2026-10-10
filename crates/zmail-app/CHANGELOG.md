@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/unicornops/zmail/compare/v0.6.0...v0.7.0) (2026-10-10)
+
+
+### Features
+
+* cache eviction with configurable per-account disk budgets ([#96](https://github.com/unicornops/zmail/issues/96)) ([ce2464d](https://github.com/unicornops/zmail/commit/ce2464de62ded724a265e649fc486ea145148b67))
+
 ## [0.6.0](https://github.com/unicornops/zmail/compare/v0.5.0...v0.6.0) (2026-10-09)
 
 
