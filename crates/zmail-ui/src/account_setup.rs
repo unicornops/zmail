@@ -41,6 +41,7 @@ pub(crate) struct AccountSetupState {
     pub(crate) oauth_authorization_endpoint: UiBuffer,
     pub(crate) oauth_token_endpoint: UiBuffer,
     pub(crate) oauth_scopes: UiBuffer,
+    pub(crate) disk_budget_mb: UiBuffer,
     pub(crate) identity_name: UiBuffer,
     pub(crate) identity_email: UiBuffer,
     pub(crate) signature: UiBuffer,
@@ -84,6 +85,9 @@ impl Default for AccountSetupState {
             oauth_authorization_endpoint: UiBuffer::single_line(String::new()),
             oauth_token_endpoint: UiBuffer::single_line(String::new()),
             oauth_scopes: UiBuffer::single_line("email"),
+            // Empty means unlimited; a number is the budget in MiB that
+            // the post-sync eviction pass enforces.
+            disk_budget_mb: UiBuffer::single_line(String::new()),
             identity_name: UiBuffer::single_line(String::new()),
             identity_email: UiBuffer::single_line(String::new()),
             signature: UiBuffer::multiline("Regards,"),
@@ -305,6 +309,20 @@ pub(crate) fn render_account_setup_detail(
                         Vec::new()
                     }),
             ),
+        )
+        .child(
+            input_card(
+                "account-disk-budget-field",
+                "Disk Budget (MiB)",
+                "Empty for unlimited",
+                &form.disk_budget_mb,
+                active_field == Some(EditorField::AccountDiskBudget),
+                false,
+                colors,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.set_active_field(EditorField::AccountDiskBudget, window, cx);
+            })),
         )
         .child(
             section_card(

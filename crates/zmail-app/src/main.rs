@@ -64,6 +64,10 @@ fn main() -> Result<()> {
         Command::RetryOp(op_id) => retry_dead_op(op_id),
         Command::DiscardOp(op_id) => discard_dead_op(op_id),
         Command::EmptyTrash(account_id) => empty_trash(account_id),
+        Command::CacheBudget {
+            account_id,
+            budget_mb,
+        } => set_cache_budget(account_id, budget_mb),
         Command::Help => {
             print_help();
             Ok(())
@@ -89,6 +93,10 @@ enum Command {
     RetryOp(i64),
     DiscardOp(i64),
     EmptyTrash(i64),
+    CacheBudget {
+        account_id: i64,
+        budget_mb: Option<u64>,
+    },
     ExportAccount {
         account_id: i64,
         path: String,
@@ -341,6 +349,21 @@ impl Command {
                     .parse::<i64>()
                     .context("account id must be an integer")?,
             )),
+            "cache-budget" => Ok(Self::CacheBudget {
+                account_id: args
+                    .next()
+                    .context("cache-budget requires an account id")?
+                    .parse::<i64>()
+                    .context("account id must be an integer")?,
+                budget_mb: match args.next().as_deref() {
+                    None | Some("unlimited") => None,
+                    Some(value) => Some(
+                        value
+                            .parse::<u64>()
+                            .context("the budget must be a number of MiB or 'unlimited'")?,
+                    ),
+                },
+            }),
             "export-account" => Ok(Self::ExportAccount {
                 account_id: args
                     .next()
@@ -542,6 +565,16 @@ fn add_account(protocol: ProtocolKind) -> Result<()> {
     let (account, secret) = prompt_account(protocol)?;
     let account_id = store.insert_account(&account)?;
     secret.store(store.as_ref(), secrets.as_ref(), account_id)?;
+    let budget_mb = prompt_optional("Disk budget in MiB (empty for unlimited)")?
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .context("the disk budget must be a number of MiB")
+        })
+        .transpose()?;
+    if let Some(budget_mb) = budget_mb {
+        store.set_account_disk_budget(account_id, Some(budget_mb))?;
+    }
 
     let runtime = BackgroundRuntime::start(4)?;
     let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
@@ -1014,6 +1047,29 @@ fn discard_dead_op(op_id: i64) -> Result<()> {
     let store = open_store().context("failed to open the local store")?;
     store.discard_dead_op(op_id)?;
     println!("Operation {op_id} discarded.");
+    Ok(())
+}
+
+/// Sets (or clears) an account's disk budget and applies it immediately.
+fn set_cache_budget(account_id: i64, budget_mb: Option<u64>) -> Result<()> {
+    let store = open_store().context("failed to open the local store")?;
+    store
+        .sync_target(account_id)?
+        .with_context(|| format!("account {account_id} no longer exists"))?;
+    store.set_account_disk_budget(account_id, budget_mb)?;
+    match budget_mb {
+        Some(budget_mb) => {
+            // Apply right away so the new budget takes effect without
+            // waiting for the next sync.
+            let freed = store.evict_account_blobs(account_id, budget_mb * 1024 * 1024)?;
+            println!(
+                "Disk budget for account {account_id} set to {budget_mb} MiB; freed {freed} byte(s)."
+            );
+        }
+        None => {
+            println!("Disk budget for account {account_id} removed; blobs are kept without limit.")
+        }
+    }
     Ok(())
 }
 
