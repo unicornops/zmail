@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/unicornops/zmail/compare/v0.7.0...v0.7.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* run IMAP body hydration on the background Tokio runtime ([#98](https://github.com/unicornops/zmail/issues/98)) ([afc4493](https://github.com/unicornops/zmail/commit/afc4493c358bd2bb98f08848f74781134199bd48))
+
 ## [0.7.0](https://github.com/unicornops/zmail/compare/v0.6.0...v0.7.0) (2026-10-10)
 
 
