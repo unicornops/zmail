@@ -351,10 +351,7 @@ impl SyncService {
     pub fn hydrate_thread_body(&self, account_id: i64, thread_id: i64) -> Result<bool> {
         let service = self.clone();
         self.inner.handle.spawn(async move {
-            if let Err(error) = service
-                .hydrate_thread_body_and_wait(account_id, thread_id)
-                .await
-            {
+            if let Err(error) = service.hydrate_thread_body_job(account_id, thread_id).await {
                 // Offline opens keep the stored preview; hydration failures are
                 // not surfaced as errors.
                 let _ = error;
@@ -365,11 +362,29 @@ impl SyncService {
 
     /// Fetches and stores the bodies of a thread's not-yet-hydrated messages,
     /// blocking until the fetch completes. Returns the number hydrated.
+    ///
+    /// The protocol work runs on the background runtime so its Tokio timers
+    /// stay valid; awaiting this from a non-Tokio executor (such as the GUI
+    /// executor) only waits for the spawned job and never polls it in place.
     pub async fn hydrate_thread_body_and_wait(
         &self,
         account_id: i64,
         thread_id: i64,
     ) -> Result<usize> {
+        let service = self.clone();
+        self.inner
+            .handle
+            .spawn(async move { service.hydrate_thread_body_job(account_id, thread_id).await })
+            .await
+            .context("the hydration worker exited before returning a result")?
+    }
+
+    /// Fetches and stores the bodies of a thread's not-yet-hydrated messages.
+    ///
+    /// Must be polled from the background Tokio runtime; use
+    /// [`SyncService::hydrate_thread_body`] or
+    /// [`SyncService::hydrate_thread_body_and_wait`] from other executors.
+    async fn hydrate_thread_body_job(&self, account_id: i64, thread_id: i64) -> Result<usize> {
         let Some(target) = self.inner.store.sync_target(account_id)? else {
             bail!("account {account_id} no longer exists");
         };
