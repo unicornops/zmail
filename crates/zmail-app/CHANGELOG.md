@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/unicornops/zmail/compare/v0.7.1...v0.8.0) (2026-10-12)
+
+
+### Features
+
+* **release:** app icon and Shuffleboard-style DMG with versioned filename ([#100](https://github.com/unicornops/zmail/issues/100)) ([50c1739](https://github.com/unicornops/zmail/commit/50c1739a9ec086d561ed081965da3a37c82735fc))
+
 ## [0.7.1](https://github.com/unicornops/zmail/compare/v0.7.0...v0.7.1) (2026-10-11)
 
 
