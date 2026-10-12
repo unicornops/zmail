@@ -44,6 +44,8 @@ This document records the Phase 5 hardening work that is present in-repo today a
 - GitHub Actions produces release archives for Linux, macOS, and Windows from the same tagged source.
 - The current packaging target is the compiled `zmail-app` binary in a platform archive.
 - Tagged releases additionally produce a Linux `.deb` package (via `cargo-deb`), a macOS `.app` bundle (ad-hoc signed), and a macOS DMG with an `/Applications` symlink, each attached with a `SHA256SUMS` manifest.
+- The macOS `.app` bundle carries a generated application icon: `assets/icons/app-icon.svg` is rendered to `Zmail.icns` by `scripts/generate-app-icon.sh` (the same rsvg-convert + `sips` + `iconutil` pipeline Shuffleboard uses) and registered through `CFBundleIconFile`.
+- The macOS DMG follows the Shuffleboard release layout (`scripts/create-dmg.sh`): a Finder icon view with large icons, the app and the `Applications` alias side by side. Its filename carries the version (`Zmail-<version>.dmg`) so downloads are identifiable on disk.
 - When the org-wide Apple credentials are present, the macOS bundle is signed with the Developer ID Application certificate (hardened runtime, secure timestamp), notarized by Apple (`notarytool`, stapled and `spctl`-verified) before the DMG is created; without them the bundle falls back to an ad-hoc signature and the release never blocks. The org-wide secrets, shared with the other UnicornOps macOS apps (see `unicornops/shuffleboard`):
   - `APPLE_CERTIFICATE_BASE64` — the Developer ID Application certificate as base64-encoded P12.
   - `APPLE_CERTIFICATE_PASSWORD` — the P12 passphrase for the certificate above.
