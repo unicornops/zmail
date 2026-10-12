@@ -1,0 +1,19 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Zmail application icon: the app's navy tile with the accent-blue
+       envelope. Colors come from themes/phase0-dark.json so the icon and
+       the UI stay on-brand. Rendered to Zmail.icns by
+       scripts/generate-app-icon.sh during release packaging. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#24334F"/>
+      <stop offset="1" stop-color="#0F1626"/>
+    </linearGradient>
+    <linearGradient id="envelope" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6FB1F9"/>
+      <stop offset="1" stop-color="#4A90E8"/>
+    </linearGradient>
+  </defs>
+  <rect x="112" y="112" width="800" height="800" rx="184" fill="url(#tile)"/>
+  <rect x="252" y="352" width="520" height="320" rx="48" fill="url(#envelope)"/>
+  <path d="M252 396 L512 570 L772 396 L772 452 L512 626 L252 452 Z" fill="#162033"/>
+</svg>

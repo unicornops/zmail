@@ -224,13 +224,25 @@ jobs:
           echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
           echo "Developer ID certificate installed"
 
+      - name: Install the icon generation dependency
+        if: runner.os == 'macOS'
+        run: brew install librsvg
+
+      - name: Generate the app icon
+        if: runner.os == 'macOS'
+        run: scripts/generate-app-icon.sh target/Zmail.icns
+
       - name: Create macOS app bundle
         if: runner.os == 'macOS'
         run: |
+          set -euo pipefail
           bundle="Zmail.app"
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zmail-app/Cargo.toml | head -n 1)
+          echo "Bundling Zmail ${VERSION}"
           mkdir -p "${bundle}/Contents/MacOS" "${bundle}/Contents/Resources"
           cp "target/release/${{ matrix.binary_name }}" "${bundle}/Contents/MacOS/Zmail"
-          cat > "${bundle}/Contents/Info.plist" <<'PLIST'
+          cp target/Zmail.icns "${bundle}/Contents/Resources/Zmail.icns"
+          cat > "${bundle}/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -239,7 +251,8 @@ jobs:
             <key>CFBundleIdentifier</key><string>ie.unicornops.zmail</string>
             <key>CFBundleName</key><string>Zmail</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>${{ needs.release_please.outputs.tag_name }}</string>
+            <key>CFBundleIconFile</key><string>Zmail</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>CFBundleDocumentTypes</key>
             <array>
@@ -337,15 +350,8 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          bundle="Zmail.app"
-          staging="$RUNNER_TEMP/dmg-staging"
-          rm -rf "$staging"
-          mkdir -p "$staging"
-          cp -R "$bundle" "$staging/"
-          ln -s /Applications "$staging/Applications"
-          hdiutil create -volname "Zmail" -srcfolder "$staging" -ov -format UDZO zmail-macos.dmg
-          rm -rf "$staging"
-          ls -lh zmail-macos.dmg
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zmail-app/Cargo.toml | head -n 1)
+          scripts/create-dmg.sh "Zmail.app" "Zmail-${VERSION}.dmg" "Zmail ${VERSION}"
 
       - name: Clean up the macOS keychain
         if: always() && runner.os == 'macOS'
@@ -362,7 +368,7 @@ jobs:
             ${{ matrix.artifact_path }}
             zmail-linux-x86_64.deb
             zmail-macos.app.zip
-            zmail-macos.dmg
+            Zmail-*.dmg
 
       - name: Upload release asset
         if: ${{ !inputs.dry_run }}
@@ -375,7 +381,7 @@ jobs:
             assets="$assets zmail-linux-x86_64.deb"
           fi
           if [[ "${{ runner.os }}" == "macOS" && -f zmail-macos.app.zip ]]; then
-            assets="$assets zmail-macos.app.zip zmail-macos.dmg"
+            assets="$assets zmail-macos.app.zip Zmail-*.dmg"
           fi
           if [[ "${{ runner.os }}" == "Windows" && -f zmail-windows-x86_64.msi ]]; then
             assets="$assets zmail-windows-x86_64.msi"
