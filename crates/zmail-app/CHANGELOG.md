@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/unicornops/zmail/compare/v0.8.0...v0.8.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **release:** cover workspace commits outside zmail-app in release PRs ([#102](https://github.com/unicornops/zmail/issues/102)) ([9a3c043](https://github.com/unicornops/zmail/commit/9a3c043f761ccab6f9db59e63912af38826aa7ed))
+
 ## [0.8.0](https://github.com/unicornops/zmail/compare/v0.7.1...v0.8.0) (2026-10-12)
 
 
