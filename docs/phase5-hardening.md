@@ -68,15 +68,16 @@ This document records the Phase 5 hardening work that is present in-repo today a
 - The release workflow builds release archives on all supported desktop platforms and uploads them to the GitHub release.
 - A separate release-triggered workflow captures a Linux screenshot from the live mail harness and uploads the PNG to the same GitHub release without writing back to `main`.
 
-### Changelog audit (required before merging a release PR)
+### Changelog coverage for workspace changes
 
-Release Please's `cargo-workspace` plugin counts only commits that touch the released package path (`crates/zmail-app`) when it builds the changelog, so features that live entirely in sub-crates (`zmail-store`, `zmail-sync`, `zmail-imap`, `zmail-jmap`, `zmail-ui`, and others) ship in the binary but are silently dropped from the generated changelog (issue #67). Upstream has no `additional-paths` option for this.
+Release Please's `cargo-workspace` plugin counts only commits that touch the released package path (`crates/zmail-app`) when it builds the changelog, so features that live entirely in sub-crates (`zmail-store`, `zmail-sync`, `zmail-imap`, `zmail-jmap`, `zmail-ui`, and others) ship in the binary but are silently dropped from the generated changelog and never trigger a release PR at all (issue #67). Upstream has no `additional-paths` option for this, and the earlier root-release attempts (#22, #27, #33) showed the plugin synthesizes a second, unwanted release unit when the workspace is widened.
 
-Until a structural fix replaces the generated changelog, every release PR must be audited before merging:
+The gap is closed by the **Complete Release Changelog** job in the release workflow, which runs `scripts/render-release-pr.sh` after Release Please on every push to `main`:
 
-1. List the changes since the previous tag: `git log --oneline vPREVIOUS..main`.
-2. Open the release PR's `CHANGELOG.md` diff and compare it against that log.
-3. For every user-facing commit missing from the generated changelog, add the entry by hand on the release-please branch, keeping the existing changelog formatting and commit attributions.
-4. Merge the release PR only after the changelog covers the full log.
+1. When Release Please has a release PR open, the job regenerates the pending changelog section from every conventional `feat`/`fix` commit in the release window — app-crate and sub-crate alike — and pushes the completion to the release-please branch.
+2. When no release PR is open but the window holds unreleased conventional commits, the job bootstraps the release PR exactly as Release Please would (version bump, manifest, `Cargo.lock`, changelog, `autorelease: pending` label).
+3. Otherwise it is a no-op.
 
-This audit was required for the 0.3.0 and 0.4.0 releases (see the `chore: complete the ... changelog with workspace-wide changes` commits on the release-please branches). The structural alternatives — widening the release unit to the whole workspace or adopting a conventional-log renderer such as `release-plz` — remain tracked in issue #67.
+Merging the bootstrapped PR is recognized by Release Please through the label, which keeps tagging, release notes, and asset builds unchanged. The manual per-release audit is no longer required; reviewing the release PR before merging remains possible and encouraged.
+
+The hand-audit ritual this automation replaced was required for the 0.3.0 and 0.4.0 releases (see the `chore: complete the ... changelog with workspace-wide changes` commits on the release-please branches) and the 0.7.1/0.8.0 hand-cut releases.
