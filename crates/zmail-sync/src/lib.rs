@@ -1367,6 +1367,7 @@ mod tests {
                     remote_id: format!("{remote_id}-{index}"),
                     identity_email: "user@example.test".to_owned(),
                     sender: "sender@example.test".to_owned(),
+                    reply_to: None,
                     recipients: "user@example.test".to_owned(),
                     subject: subject.to_owned(),
                     body_preview: "preview".to_owned(),

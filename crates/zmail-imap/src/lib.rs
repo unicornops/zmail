@@ -1124,6 +1124,7 @@ fn accumulate_fetch(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "(no subject)".to_owned());
     let sender = first_address(message.from()).unwrap_or_else(|| "Unknown sender".to_owned());
+    let reply_to = first_address(message.reply_to());
     let recipients = format_recipients(message.to(), identity_email);
     let (body_text, sanitized_html, has_remote_content, preview_source) = hydrate_bodies(&message);
     let preview = excerpt(&preview_source, 180);
@@ -1143,6 +1144,7 @@ fn accumulate_fetch(
         remote_id,
         identity_email: identity_email.to_owned(),
         sender,
+        reply_to,
         recipients,
         subject,
         body_preview: preview,
@@ -1570,6 +1572,7 @@ mod tests {
             remote_id: "1".to_owned(),
             identity_email: "me@example.com".to_owned(),
             sender: "Older Sender".to_owned(),
+            reply_to: None,
             recipients: "me@example.com".to_owned(),
             subject: "Older subject".to_owned(),
             body_preview: "older preview".to_owned(),
@@ -1585,6 +1588,7 @@ mod tests {
             remote_id: "2".to_owned(),
             identity_email: "me@example.com".to_owned(),
             sender: "Newer Sender".to_owned(),
+            reply_to: None,
             recipients: "me@example.com".to_owned(),
             subject: "Newer subject".to_owned(),
             body_preview: "newer preview".to_owned(),

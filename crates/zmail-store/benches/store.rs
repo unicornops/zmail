@@ -28,6 +28,7 @@ fn synthetic_snapshot(thread_count: usize) -> AccountSyncSnapshot {
                 remote_id: format!("bench-message-{index}"),
                 identity_email: "bench@example.com".to_owned(),
                 sender: "Bench Sender".to_owned(),
+                reply_to: None,
                 recipients: "recipient@example.com".to_owned(),
                 subject: format!("Benchmark subject {index}"),
                 body_preview: format!("Benchmark body {index}"),
