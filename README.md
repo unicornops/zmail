@@ -28,8 +28,9 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 ## Workspace
 
 - [`PLAN.md`](./PLAN.md): master delivery plan
-- [`docs/upstream/zed.md`](./docs/upstream/zed.md): Zed and GPUI upstream pin record
+- [`docs/upstream/zed.md`](./docs/upstream/zed.md): Zed and GPUI upstream pin record (GPUI is pinned to a Zed stable release tag and bumped by a weekly workflow)
 - [`docs/adr/0001-jmap-client-strategy.md`](./docs/adr/0001-jmap-client-strategy.md): JMAP implementation decision
+- [`docs/adr/0003-gpui-zed-stable-pin.md`](./docs/adr/0003-gpui-zed-stable-pin.md): GPUI pinned to Zed stable release tags
 - [`docs/phase5-hardening.md`](./docs/phase5-hardening.md): accessibility, performance, crash policy, packaging, and release process
 - [`themes/phase0-dark.json`](./themes/phase0-dark.json): sample unchanged Zed-format theme file
 
@@ -136,6 +137,10 @@ On Linux, the desktop dependency stack also needs D-Bus, Fontconfig, and FreeTyp
 ```bash
 sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
 ```
+
+GPUI draws through wgpu, which needs a Vulkan driver (the `libvulkan1` loader plus Mesa or a vendor driver) or, as a fallback, EGL/OpenGL at runtime. Desktop distributions ship these already; headless runs such as the release screenshot use Mesa's lavapipe software driver (`mesa-vulkan-drivers`).
+
+The Rust toolchain in [`rust-toolchain.toml`](./rust-toolchain.toml) follows the one Zed pins for the GPUI release tag, so rustup selects it automatically.
 
 ## Licensing
 

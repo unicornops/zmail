@@ -16,7 +16,7 @@ Zmail is not yet usable without a pointer or with a screen reader. This section 
 
 ### Screen readers
 
-- GPUI 0.2.2 exposes no accessibility tree, so screen readers announce nothing in the window. Support needs the GPUI upgrade (AccessKit) tracked for UI plan Phase 1/8.
+- The pinned GPUI (a Zed stable release, see `docs/upstream/zed.md`) ships AccessKit, and Zmail starts it with accessibility enabled. Zmail's views do not set roles or labels yet, so screen readers still announce almost nothing in the window. That work is UI plan Phase 8.
 
 ### Visual
 
