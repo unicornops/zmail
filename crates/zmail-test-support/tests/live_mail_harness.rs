@@ -475,21 +475,7 @@ fn syncs_flags_incrementally_through_condstore() -> Result<()> {
     ))?;
     other_client.command("LOGOUT")?;
 
-    let account_id = store.insert_account(&NewAccount {
-        display_name: "Dovecot Harness".to_owned(),
-        protocol: ProtocolKind::Imap,
-        auth: AuthKind::Password,
-        endpoint: MAIL_HARNESS_DOVECOT_ENDPOINT.to_owned(),
-        username: MAIL_HARNESS_DOVECOT_LOGIN.to_owned(),
-        cache_policy: CachePolicySummary::performance_first(),
-        outgoing: None,
-        identities: vec![NewIdentity {
-            display_name: "Dovecot Recipient".to_owned(),
-            email_address: "mailuser@example.test".to_owned(),
-            signature: String::new(),
-            is_primary: true,
-        }],
-    })?;
+    let account_id = store.insert_account(&dovecot_account())?;
 
     let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
     secrets.set_account_secret(account_id, MAIL_HARNESS_DOVECOT_PASSWORD)?;
@@ -577,6 +563,99 @@ fn syncs_flags_incrementally_through_condstore() -> Result<()> {
 
     harness.down()?;
     Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn hydrates_html_only_mail_through_the_sanitizer() -> Result<()> {
+    use zmail_core::MessageRenderMode;
+
+    let _harness_lock = live_harness_lock();
+    let harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+
+    // An HTML-only newsletter with a remote tracking image (issue #112).
+    let mut other_client = RawImap::connect(
+        3243,
+        MAIL_HARNESS_DOVECOT_LOGIN,
+        MAIL_HARNESS_DOVECOT_PASSWORD,
+    )?;
+    other_client.append(concat!(
+        "From: news@example.test\r\n",
+        "Subject: HTML-only probe\r\n",
+        "To: mailuser@example.test\r\n",
+        "Message-ID: <html-only-probe@example.test>\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: text/html; charset=utf-8\r\n",
+        "\r\n",
+        "<html><body><h1>Your new dashboard</h1><p>Faster exports</p>",
+        "<img src=\"https://tracker.example.test/open.gif\">",
+        "<table><tr><td>Plan</td><td>Price</td></tr>",
+        "<tr><td>Starter</td><td>EUR 9</td></tr></table></body></html>\r\n",
+    ))?;
+    other_client.command("LOGOUT")?;
+
+    let account_id = store.insert_account(&dovecot_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_DOVECOT_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.sync_account_and_wait(account_id)?;
+
+    let thread_id = store
+        .list_threads(inbox_id(&store, account_id)?, 0..10)?
+        .iter()
+        .find(|thread| thread.subject == "HTML-only probe")
+        .map(|thread| thread.id)
+        .context("the HTML-only message should sync")?;
+    let hydrated = runtime
+        .handle()
+        .block_on(sync_service.hydrate_thread_body_and_wait(account_id, thread_id))?;
+    assert_eq!(hydrated, 1, "the HTML-only body should hydrate");
+
+    let view = store
+        .thread_view(thread_id)?
+        .context("the HTML-only thread should load")?;
+    let message = &view.messages[0];
+    assert_eq!(message.render_mode, MessageRenderMode::SanitizedHtml);
+    assert!(message.body_text.is_none());
+    let sanitized_html = message
+        .sanitized_html
+        .as_deref()
+        .context("the sanitized HTML should be stored")?;
+    assert!(sanitized_html.contains("blocked://tracker.example.test/open.gif"));
+    assert!(
+        message.has_remote_content,
+        "the remote image must be reported"
+    );
+    assert!(
+        message
+            .rendered_body
+            .contains("Your new dashboard\nFaster exports\nPlan Price\nStarter EUR 9"),
+        "block elements and table cells keep their separators: {:?}",
+        message.rendered_body
+    );
+
+    harness.down()?;
+    Ok(())
+}
+
+fn dovecot_account() -> NewAccount {
+    NewAccount {
+        display_name: "Dovecot Harness".to_owned(),
+        protocol: ProtocolKind::Imap,
+        auth: AuthKind::Password,
+        endpoint: MAIL_HARNESS_DOVECOT_ENDPOINT.to_owned(),
+        username: MAIL_HARNESS_DOVECOT_LOGIN.to_owned(),
+        cache_policy: CachePolicySummary::performance_first(),
+        outgoing: None,
+        identities: vec![NewIdentity {
+            display_name: "Dovecot Recipient".to_owned(),
+            email_address: "mailuser@example.test".to_owned(),
+            signature: String::new(),
+            is_primary: true,
+        }],
+    }
 }
 
 fn imap_account() -> NewAccount {

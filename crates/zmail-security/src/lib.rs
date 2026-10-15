@@ -305,15 +305,71 @@ fn redact_remote_urls(input: &str) -> String {
         .replace("http://", "blocked://")
 }
 
+/// Tags whose start or end begins a new line of readable text.
+const BLOCK_TAGS: &[&str] = &[
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "br",
+    "caption",
+    "center",
+    "dd",
+    "div",
+    "dl",
+    "dt",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "table",
+    "tbody",
+    "tfoot",
+    "thead",
+    "tr",
+    "ul",
+];
+
+/// Inline formatting tags that can sit inside a word, so they add no
+/// separator ("<b>dash</b>board" reads "dashboard"). Every other tag, such
+/// as a table cell or an image, separates its neighbours with a space.
+const INLINE_TAGS: &[&str] = &[
+    "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "del", "dfn", "em", "font", "i", "ins",
+    "kbd", "mark", "q", "s", "samp", "small", "span", "strike", "strong", "sub", "sup", "time",
+    "tt", "u", "var", "wbr",
+];
+
 fn html_to_text(input: &str) -> String {
+    // The document title is metadata, not message text.
+    let input = strip_tag_block(input, "title");
     let mut text = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     let mut inside_tag = false;
 
     while let Some(ch) = chars.next() {
         match ch {
-            '<' => {
+            '<' if !inside_tag => {
                 inside_tag = true;
+                // Closing tags separate text exactly like opening ones, so
+                // "<td>Plan</td><td>Price</td>" never reads "PlanPrice".
+                if chars.peek() == Some(&'/') {
+                    let _ = chars.next();
+                }
                 let mut tag_name = String::new();
                 while let Some(next) = chars.peek().copied() {
                     if next == '>' || next.is_whitespace() || next == '/' {
@@ -322,37 +378,15 @@ fn html_to_text(input: &str) -> String {
                     tag_name.push(next.to_ascii_lowercase());
                     let _ = chars.next();
                 }
-                if matches!(
-                    tag_name.as_str(),
-                    "br" | "p" | "div" | "li" | "tr" | "table"
-                ) {
+                if BLOCK_TAGS.contains(&tag_name.as_str()) {
                     text.push('\n');
+                } else if !INLINE_TAGS.contains(&tag_name.as_str()) {
+                    text.push(' ');
                 }
             }
-            '>' => {
-                inside_tag = false;
-                text.push(' ');
-            }
+            '>' if inside_tag => inside_tag = false,
             _ if inside_tag => {}
-            '&' => {
-                let mut entity = String::new();
-                while let Some(next) = chars.peek().copied() {
-                    entity.push(next);
-                    let _ = chars.next();
-                    if next == ';' || entity.len() >= 10 {
-                        break;
-                    }
-                }
-                text.push_str(match entity.as_str() {
-                    "amp;" => "&",
-                    "lt;" => "<",
-                    "gt;" => ">",
-                    "nbsp;" => " ",
-                    "quot;" => "\"",
-                    "#39;" => "'",
-                    _ => " ",
-                });
-            }
+            '&' => push_character_reference(&mut text, &mut chars),
             _ => text.push(ch),
         }
     }
@@ -362,6 +396,71 @@ fn html_to_text(input: &str) -> String {
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Decodes one character reference after a consumed `&`.
+///
+/// Text that is not a well-formed reference, such as a bare "AT&T", is kept
+/// as written instead of being swallowed.
+fn push_character_reference(
+    text: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) {
+    let mut reference = String::new();
+    let mut terminated = false;
+    while let Some(next) = chars.peek().copied() {
+        if next == ';' {
+            let _ = chars.next();
+            terminated = true;
+            break;
+        }
+        if !(next.is_ascii_alphanumeric() || next == '#') || reference.len() >= 10 {
+            break;
+        }
+        reference.push(next);
+        let _ = chars.next();
+    }
+
+    if terminated {
+        // Unknown references (often invisible spacers such as "&zwnj;")
+        // read as whitespace rather than as raw entity names.
+        text.push(decode_character_reference(&reference).unwrap_or(' '));
+    } else {
+        text.push('&');
+        text.push_str(&reference);
+    }
+}
+
+fn decode_character_reference(reference: &str) -> Option<char> {
+    let named = match reference {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "nbsp" => Some(' '),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "lsquo" => Some('\u{2018}'),
+        "rsquo" => Some('\u{2019}'),
+        "ldquo" => Some('\u{201c}'),
+        "rdquo" => Some('\u{201d}'),
+        "ndash" => Some('\u{2013}'),
+        "mdash" => Some('\u{2014}'),
+        "hellip" => Some('\u{2026}'),
+        "euro" => Some('\u{20ac}'),
+        "copy" => Some('\u{a9}'),
+        _ => None,
+    };
+    if named.is_some() {
+        return named;
+    }
+
+    let numeric = reference.strip_prefix('#')?;
+    let value = match numeric.strip_prefix(['x', 'X']) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+        None => numeric.parse::<u32>().ok()?,
+    };
+    // Control characters become plain spaces so they cannot disturb layout.
+    char::from_u32(value).map(|ch| if ch.is_control() { ' ' } else { ch })
 }
 
 #[cfg(test)]
@@ -459,5 +558,36 @@ mod tests {
         assert!(!sanitized.html.contains("<script"));
         assert!(sanitized.html.contains("blocked://example.test/a.png"));
         assert!(sanitized.text.contains("Hello"));
+    }
+
+    #[test]
+    fn readable_text_separates_block_elements_and_table_cells() {
+        let sanitized = sanitize_html_for_display(concat!(
+            "<html><head><title>Newsletter</title></head><body>",
+            "<h1>Welcome</h1><p>Your new <b>dash</b>board</p>",
+            "<h2>Faster exports</h2>",
+            "<table><tr><th>Plan</th><th>Price</th></tr>",
+            "<tr><td>Starter</td><td>EUR&nbsp;9</td></tr>",
+            "<tr><td>Team</td><td>EUR 29</td></tr></table>",
+            "<ul><li>One</li><li>Two</li></ul>",
+            "</body></html>",
+        ));
+
+        assert_eq!(
+            sanitized.text,
+            "Welcome\nYour new dashboard\nFaster exports\nPlan Price\nStarter EUR 9\nTeam EUR 29\nOne\nTwo"
+        );
+    }
+
+    #[test]
+    fn readable_text_decodes_character_references_and_keeps_bare_ampersands() {
+        let sanitized = sanitize_html_for_display(
+            "<p>AT&T &amp; friends &#8212; it&#x2019;s &lt;fine&gt;&zwnj;!</p>",
+        );
+
+        assert_eq!(
+            sanitized.text,
+            "AT&T & friends \u{2014} it\u{2019}s <fine> !"
+        );
     }
 }
