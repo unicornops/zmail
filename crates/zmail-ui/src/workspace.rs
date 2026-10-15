@@ -241,6 +241,17 @@ impl WorkspaceView {
             .store
             .list_outbox_jobs(self.selected_account_id)
             .unwrap_or_default();
+        // Re-run the shown search so read state, flags and moves made since
+        // it ran show up in the results.
+        if matches!(self.list_mode, ListMode::Search)
+            && !self.search_results_query.is_empty()
+            && let Some(account_id) = self.selected_account_id
+            && let Ok(results) =
+                self.store
+                    .search_threads(account_id, &self.search_results_query, 100)
+        {
+            self.search_results = results;
+        }
         self.pending_op_count = self
             .selected_account_id
             .and_then(|account_id| self.store.pending_op_count(account_id).ok())
