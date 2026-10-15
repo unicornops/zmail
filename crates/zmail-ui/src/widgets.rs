@@ -149,6 +149,8 @@ pub(crate) fn empty_state(
 /// [preview (truncated)]
 /// [meta (muted)]
 /// ```
+///
+/// Empty `preview` and `meta` lines are omitted.
 pub(crate) fn list_row(
     title: &str,
     trailing: &str,
@@ -183,13 +185,17 @@ pub(crate) fn list_row(
                 .truncate()
                 .child(subtitle.to_owned()),
         )
-        .child(div().text_sm().truncate().child(preview.to_owned()))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(colors.muted))
-                .child(meta.to_owned()),
-        )
+        .when(!preview.is_empty(), |this| {
+            this.child(div().text_sm().truncate().child(preview.to_owned()))
+        })
+        .when(!meta.is_empty(), |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(colors.muted))
+                    .child(meta.to_owned()),
+            )
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -262,8 +268,8 @@ pub(crate) fn input_card(
 // section_card
 // ---------------------------------------------------------------------------
 
-/// Render a rounded content card with a title and muted supporting text.
-pub(crate) fn section_card(title: &str, detail: &str, colors: &UiColors) -> gpui::Div {
+/// Render a rounded content card with a section title.
+pub(crate) fn section_card(title: &str, colors: &UiColors) -> gpui::Div {
     div()
         .flex()
         .flex_col()
@@ -276,21 +282,29 @@ pub(crate) fn section_card(title: &str, detail: &str, colors: &UiColors) -> gpui
         .py_4()
         .child(
             div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(title.to_owned()),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(colors.muted))
-                        .child(detail.to_owned()),
-                ),
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title.to_owned()),
         )
+}
+
+// ---------------------------------------------------------------------------
+// format_size
+// ---------------------------------------------------------------------------
+
+/// Formats a byte count with one fractional digit and a binary unit.
+pub(crate) fn format_size(size_bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = size_bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{size_bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 // ---------------------------------------------------------------------------

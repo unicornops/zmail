@@ -1,89 +1,28 @@
 //! Top toolbar render method for [`WorkspaceView`].
 //!
 //! This module defines a single `impl WorkspaceView` block containing
-//! [`WorkspaceView::render_toolbar`], which produces the combined header-info
-//! strip and action-button bar that spans the full width at the top of the
-//! window.
+//! [`WorkspaceView::render_toolbar`], which produces the action-button bar
+//! that spans the full width at the top of the window.
 
 use gpui::{Context, IntoElement, StatefulInteractiveElement, div, prelude::*, px, rgb};
-use zmail_core::{APP_NAME, PHASE_LABEL, ThemeAppearance};
+use zmail_core::ThemeAppearance;
 
 use super::{DetailMode, ListMode, WorkspaceView};
 use crate::input::EditorField;
 use crate::styles::{TOOLBAR_HEIGHT, UiColors};
-use crate::widgets::{input_card, short_sha, toolbar_button, toolbar_button_id};
+use crate::widgets::{input_card, toolbar_button, toolbar_button_id};
 
 impl WorkspaceView {
-    /// Render the top section of the workspace: a header info strip followed
-    /// by the action-button bar (including the inline search field).
+    /// Render the top section of the workspace: the action-button bar,
+    /// including the inline search field.
     ///
-    /// The returned element is a `flex_col` wrapper containing both rows so
-    /// it slots in as a single `.child()` of the root column.
+    /// Internal diagnostics that used to sit above the buttons live in
+    /// [`crate::diagnostics`] until the Settings → About page exists.
     pub(crate) fn render_toolbar(
         &self,
         colors: &UiColors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // ---- Precomputed strings ----------------------------------------
-
-        let account_name = self
-            .selected_account()
-            .map(|a| a.display_name.clone())
-            .unwrap_or_else(|| "No account selected".to_owned());
-
-        let account_detail = self
-            .selected_account()
-            .map(|a| {
-                format!(
-                    "{} • {} identities • {}",
-                    a.protocol, a.identity_count, a.cache_policy.name
-                )
-            })
-            .unwrap_or_else(|| "Add an IMAP or JMAP account to begin.".to_owned());
-
-        let header_detail = format!(
-            "{} accounts • {} mailboxes • {} threads • {} messages",
-            self.stats.account_count,
-            self.stats.mailbox_count,
-            self.stats.thread_count,
-            self.stats.message_count
-        );
-
-        let upstream_detail = format!(
-            "GPUI {} • Zed {} • {} Tokio workers",
-            self.bootstrap.upstream.gpui_version,
-            short_sha(&self.bootstrap.upstream.zed_commit),
-            self.bootstrap.runtime.worker_threads
-        );
-
-        let queued_detail = format!(
-            "{} queued mailbox op(s) • {} outbox job(s)",
-            self.pending_op_count,
-            self.outbox_jobs.len()
-        );
-        let dead_detail = (self.dead_op_count > 0).then(|| {
-            format!(
-                "{} dead-lettered op(s) (zmail-app dead-ops)",
-                self.dead_op_count
-            )
-        });
-
-        let sync_error = self.selected_account().and_then(|account| {
-            if account.sync_status.failure_count > 0 {
-                Some(format!(
-                    "Sync failed {} time(s): {}",
-                    account.sync_status.failure_count,
-                    account
-                        .sync_status
-                        .last_error_message
-                        .as_deref()
-                        .unwrap_or("unknown error"),
-                ))
-            } else {
-                None
-            }
-        });
-
         let add_account_id = toolbar_button_id("Add Account");
         let compose_id = toolbar_button_id("Compose");
         let mail_id = toolbar_button_id("Mail");
@@ -105,68 +44,6 @@ impl WorkspaceView {
         div()
             .flex()
             .flex_col()
-            // ---- Header info strip ----------------------------------------
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(rgb(colors.border))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(format!("{APP_NAME} {PHASE_LABEL}"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(colors.muted))
-                                    .child(account_name),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(colors.muted))
-                                    .child(account_detail),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_end()
-                            .gap_1()
-                            .child(div().text_sm().child(header_detail))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(colors.muted))
-                                    .child(upstream_detail),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(colors.muted))
-                                    .child(queued_detail),
-                            )
-                            .children(dead_detail.map(|message| {
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(colors.danger))
-                                    .child(message)
-                            }))
-                            .children(sync_error.map(|message| {
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(colors.danger))
-                                    .child(message)
-                            })),
-                    ),
-            )
             // ---- Toolbar action buttons + search field -------------------
             .child(
                 div()

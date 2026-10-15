@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+pub mod text;
+
 /// Static application metadata.
 pub const APP_NAME: &str = "Zmail";
 

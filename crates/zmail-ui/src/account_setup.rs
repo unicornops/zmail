@@ -120,11 +120,7 @@ pub(crate) fn render_account_setup_detail(
         .flex_col()
         .gap_4()
         .child(
-            section_card(
-                "Connection",
-                "Select the mail protocol, then enter the endpoint and authentication used to build the local mirror.",
-                colors,
-            )
+            section_card("Connection", colors)
             .child(
                 div()
                     .flex()
@@ -159,7 +155,7 @@ pub(crate) fn render_account_setup_detail(
                                 .text_sm()
                                 .text_color(rgb(colors.muted))
                                 .child(
-                                    "Submitting opens the provider's authorization page in the browser; the account syncs once the grant returns. Mail sync and SMTP submission use the OAuth2 access token (XOAUTH2), refreshed in the background.",
+                                    "Saving opens the provider's sign-in page in your browser. The account syncs once you approve access.",
                                 ),
                         ),
                 ]
@@ -235,7 +231,7 @@ pub(crate) fn render_account_setup_detail(
                                 .text_sm()
                                 .text_color(rgb(colors.muted))
                                 .child(
-                                    "No consumer presets offer JMAP, so the provider's own OAuth2 endpoints are entered here. The account authenticates with the bearer access token, refreshed in the background.",
+                                    "Saving opens the provider's sign-in page in your browser. Enter the provider's own OAuth2 endpoints above.",
                                 ),
                         ),
                 ]
@@ -325,11 +321,7 @@ pub(crate) fn render_account_setup_detail(
             })),
         )
         .child(
-            section_card(
-                "Identity",
-                "Set the default sender name, address, aliases, and signature used for new drafts.",
-                colors,
-            )
+            section_card("Identity", colors)
             .child(
                 div()
                     .flex()
@@ -396,13 +388,10 @@ pub(crate) fn render_account_setup_detail(
                 })),
             ),
         )
-        .child(
-            section_card(
-                "Outgoing Mail (SMTP)",
-                "Configure submission for IMAP accounts. JMAP accounts submit through the server endpoint instead.",
-                colors,
-            )
-            .child(if form.protocol == ProtocolKind::Imap {
+        // JMAP submits through the account's own endpoint, so the SMTP
+        // section only appears for IMAP accounts.
+        .when(form.protocol == ProtocolKind::Imap, |this| {
+            this.child(section_card("Outgoing Mail (SMTP)", colors).child(
                 div()
                     .flex()
                     .flex_col()
@@ -471,25 +460,9 @@ pub(crate) fn render_account_setup_detail(
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.set_active_field(EditorField::AccountSmtpUsername, window, cx);
                         })),
-                    )
-            } else {
-                div()
-                    .rounded_md()
-                    .bg(rgb(colors.background))
-                    .border_1()
-                    .border_color(rgb(colors.border))
-                    .px_3()
-                    .py_3()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(colors.muted))
-                            .child(
-                                "JMAP handles message submission directly, so no separate SMTP settings are required here.",
-                            ),
-                    )
-            }),
-        )
+                    ),
+            ))
+        })
 }
 
 // ---------------------------------------------------------------------------

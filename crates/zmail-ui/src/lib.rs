@@ -8,11 +8,12 @@
 //! | `input` | `UiBuffer`, `EditorField`, `InputOutcome` |
 //! | `widgets` | `toolbar_button`, `input_card`, `list_row`, `icon`, … |
 //! | `workspace` | `impl WorkspaceView` — all business-logic methods |
-//! | `toolbar` | `render_toolbar()` — header strip + action buttons |
+//! | `toolbar` | `render_toolbar()` — action buttons + search |
+//! | `diagnostics` | internal counters kept for the future Settings → About page |
 //! | `sidebar` | `render_sidebar()` — accounts + mailbox list |
 //! | `message_list` | `render_message_list()` — threads / search / drafts / outbox |
 //! | `reader` | `render_reader_detail()`, `reader_action_buttons()` |
-//! | `compose` | `ComposeState`, `render_compose_detail()`, `compose_focus_buttons()` |
+//! | `compose` | `ComposeState`, `render_compose_detail()`, `compose_action_buttons()` |
 //! | `account_setup` | `AccountSetupState`, `render_account_setup_detail()`, `account_protocol_buttons()` |
 
 use std::sync::Arc;
@@ -24,7 +25,7 @@ use gpui::{
 };
 use zmail_core::{
     APP_NAME, AccountOverview, AccountSummary, AppBootstrap, DraftSummary, IdentitySummary,
-    MailboxSummary, OutboxJobSummary, PHASE_LABEL, SearchHit, StoreStats,
+    MailboxSummary, OutboxJobSummary, SearchHit, StoreStats,
 };
 use zmail_security::SecretStore;
 use zmail_store::LocalStore;
@@ -40,7 +41,7 @@ mod widgets;
 use crate::widgets::{status_banner, toolbar_button};
 
 mod compose;
-use crate::compose::{ComposeState, compose_focus_buttons, render_compose_detail};
+use crate::compose::{ComposeState, compose_action_buttons, render_compose_detail};
 
 mod account_setup;
 use crate::account_setup::{AccountSetupState, render_account_setup_detail};
@@ -48,6 +49,7 @@ use crate::account_setup::{AccountSetupState, render_account_setup_detail};
 mod reader;
 use crate::reader::{reader_move_buttons, reader_primary_action_buttons, render_reader_detail};
 
+mod diagnostics;
 mod message_list;
 mod sidebar;
 mod toolbar;
@@ -81,7 +83,7 @@ pub fn run(
             if let Err(error) = cx.open_window(
                 WindowOptions {
                     titlebar: Some(TitlebarOptions {
-                        title: Some(format!("{APP_NAME} {PHASE_LABEL}").into()),
+                        title: Some(APP_NAME.into()),
                         ..Default::default()
                     }),
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -157,6 +159,9 @@ struct WorkspaceView {
     /// on the selected account.
     dead_op_count: usize,
     search_results: Vec<SearchHit>,
+    /// The query that produced `search_results`, shown in the list header
+    /// (the search field itself may have been edited since).
+    search_results_query: String,
     selected_account_id: Option<i64>,
     selected_mailbox_id: Option<i64>,
     selected_thread_id: Option<i64>,
@@ -186,7 +191,6 @@ impl Render for WorkspaceView {
 
         // Mutable store queries must complete before immutable borrows below.
         let selected_thread = self.selected_thread_view();
-        let selected_account = self.selected_account().cloned();
 
         div()
             .size_full()
@@ -212,12 +216,7 @@ impl Render for WorkspaceView {
                             // Centre: thread/search/draft/outbox list
                             .child(self.render_message_list(&colors, cx))
                             // Right: detail pane
-                            .child(self.render_detail_pane(
-                                &colors,
-                                selected_thread,
-                                selected_account,
-                                cx,
-                            )),
+                            .child(self.render_detail_pane(&colors, selected_thread, cx)),
                     )
                     // ---- Status / error banners at the bottom ----------------
                     .when_some(self.status_message.clone(), |this, message| {
@@ -253,7 +252,6 @@ impl WorkspaceView {
         &self,
         colors: &UiColors,
         selected_thread: Option<zmail_core::ThreadView>,
-        selected_account: Option<AccountSummary>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
@@ -295,12 +293,7 @@ impl WorkspaceView {
                     .overflow_y_scroll()
                     .px_4()
                     .py_4()
-                    .child(self.render_detail_content(
-                        colors,
-                        &selected_thread,
-                        &selected_account,
-                        cx,
-                    )),
+                    .child(self.render_detail_content(colors, &selected_thread, cx)),
             )
             // ---- Action buttons bar at the bottom ------------------------
             .child(
@@ -327,7 +320,7 @@ impl WorkspaceView {
                         DetailMode::Compose => div()
                             .flex()
                             .gap_2()
-                            .children(compose_focus_buttons(colors, cx)),
+                            .children(compose_action_buttons(self.compose.is_some(), colors, cx)),
                         DetailMode::AccountSetup => div().flex().gap_2().child(toolbar_button(
                             "Save Account",
                             Some("check-circle"),
@@ -347,19 +340,11 @@ impl WorkspaceView {
         &self,
         colors: &UiColors,
         selected_thread: &Option<zmail_core::ThreadView>,
-        selected_account: &Option<AccountSummary>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match self.detail_mode {
             // ---- Reader ---------------------------------------------------
-            DetailMode::Reader => render_reader_detail(
-                selected_thread.as_ref(),
-                selected_account.as_ref(),
-                &self.mailboxes,
-                &self.identities,
-                colors,
-                cx,
-            ),
+            DetailMode::Reader => render_reader_detail(selected_thread.as_ref(), colors),
 
             // ---- Compose -------------------------------------------------
             DetailMode::Compose => render_compose_detail(

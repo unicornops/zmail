@@ -12,6 +12,8 @@ use gpui::{
     prelude::*, px, rgb, uniform_list,
 };
 
+use zmail_core::{DraftState, DraftSummary, text::count_noun};
+
 use super::{DetailMode, ListMode, WorkspaceView};
 use crate::styles::{
     AVATAR_SIZE, ICON_SIZE_SM, LIST_ITEM_HEIGHT, MESSAGE_LIST_WIDTH, UNREAD_INDICATOR_SIZE,
@@ -39,32 +41,42 @@ impl WorkspaceView {
             .as_ref()
             .map(|mailbox| mailbox.total_threads)
             .unwrap_or_default();
-        let thread_header = selected_mailbox
-            .as_ref()
-            .map(|mailbox| {
-                format!(
-                    "{} • {} threads • {} unread",
-                    mailbox.name, mailbox.total_threads, mailbox.unread_threads
-                )
-            })
-            .unwrap_or_else(|| "No mailbox selected".to_owned());
-
         let list_title = match self.list_mode {
-            ListMode::Mail => "Threads",
-            ListMode::Search => "Search Results",
-            ListMode::Drafts => "Drafts",
-            ListMode::Outbox => "Outbox",
+            ListMode::Mail => selected_mailbox
+                .as_ref()
+                .map(|mailbox| mailbox.name.clone())
+                .unwrap_or_else(|| "Mail".to_owned()),
+            ListMode::Search => "Search".to_owned(),
+            ListMode::Drafts => "Drafts".to_owned(),
+            ListMode::Outbox => "Outbox".to_owned(),
         };
 
         let list_subtitle = match self.list_mode {
-            ListMode::Mail => thread_header,
+            ListMode::Mail => selected_mailbox
+                .as_ref()
+                .map(|mailbox| {
+                    if mailbox.unread_threads > 0 {
+                        format!(
+                            "{} • {} unread",
+                            count_noun(mailbox.total_threads, "conversation", "conversations"),
+                            mailbox.unread_threads
+                        )
+                    } else {
+                        count_noun(mailbox.total_threads, "conversation", "conversations")
+                    }
+                })
+                .unwrap_or_else(|| "No mailbox selected".to_owned()),
             ListMode::Search => format!(
-                "{} result(s) for {:?}",
-                self.search_results.len(),
-                self.search_query.text
+                "{} for \u{201c}{}\u{201d}",
+                count_noun(self.search_results.len(), "result", "results"),
+                self.search_results_query
             ),
-            ListMode::Drafts => format!("{} draft(s) visible", self.drafts.len()),
-            ListMode::Outbox => format!("{} outbox job(s)", self.outbox_jobs.len()),
+            ListMode::Drafts => count_noun(self.drafts.len(), "draft", "drafts"),
+            ListMode::Outbox => count_noun(
+                self.outbox_jobs.len(),
+                "message waiting to send",
+                "messages waiting to send",
+            ),
         };
 
         div()
@@ -315,14 +327,11 @@ impl WorkspaceView {
                                         }
                                     }))
                                     .child(list_row(
-                                        &draft.subject,
+                                        display_subject(&draft.subject),
                                         &draft.updated_at,
-                                        &draft.identity_name,
-                                        &draft.recipient_summary,
-                                        &format!(
-                                            "{} • {} attachment(s)",
-                                            draft.state, draft.attachment_count
-                                        ),
+                                        &recipient_line(&draft.recipient_summary),
+                                        "",
+                                        &draft_meta(draft),
                                         &colors,
                                     ))
                             }))
@@ -372,18 +381,28 @@ impl WorkspaceView {
                                             this.set_hovered_element(row_id.clone(), *hovered, cx);
                                         }
                                     }))
-                                    .child(list_row(
-                                        &format!("Draft {}", job.draft_id),
-                                        job.next_attempt_at
-                                            .as_deref()
-                                            .unwrap_or("no retry scheduled"),
-                                        &format!("{} • attempts={}", job.state, job.attempt_count),
-                                        job.last_error_message
-                                            .as_deref()
-                                            .unwrap_or("Ready to send or retry."),
-                                        &format!("Job {}", job.id),
-                                        &colors,
-                                    ))
+                                    .child({
+                                        let draft = self
+                                            .drafts
+                                            .iter()
+                                            .find(|draft| draft.id == job.draft_id);
+                                        list_row(
+                                            display_subject(
+                                                draft
+                                                    .map(|draft| draft.subject.as_str())
+                                                    .unwrap_or(""),
+                                            ),
+                                            job.next_attempt_at.as_deref().unwrap_or(""),
+                                            &recipient_line(
+                                                draft
+                                                    .map(|draft| draft.recipient_summary.as_str())
+                                                    .unwrap_or(""),
+                                            ),
+                                            job.last_error_message.as_deref().unwrap_or(""),
+                                            job.state.label(),
+                                            &colors,
+                                        )
+                                    })
                             }))
                             .into_any_element()
                     }
@@ -391,6 +410,41 @@ impl WorkspaceView {
             })
             .into_any_element()
     }
+}
+
+/// The subject to show for a draft or queued message.
+fn display_subject(subject: &str) -> &str {
+    if subject.trim().is_empty() {
+        "(no subject)"
+    } else {
+        subject
+    }
+}
+
+/// "To: …" line for a draft or queued message.
+fn recipient_line(recipients: &str) -> String {
+    if recipients.trim().is_empty() {
+        "No recipients yet".to_owned()
+    } else {
+        format!("To: {}", recipients.trim())
+    }
+}
+
+/// Status line for a draft row: only states that need attention and a
+/// non-zero attachment count are shown.
+fn draft_meta(draft: &DraftSummary) -> String {
+    let mut parts = Vec::new();
+    if draft.state != DraftState::Editing {
+        parts.push(draft.state.label().to_owned());
+    }
+    if draft.attachment_count > 0 {
+        parts.push(count_noun(
+            draft.attachment_count,
+            "attachment",
+            "attachments",
+        ));
+    }
+    parts.join(" • ")
 }
 
 fn conversation_list_row(row: ConversationRow<'_>, colors: &UiColors) -> gpui::Div {

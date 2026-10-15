@@ -6,37 +6,24 @@
 //! move-to-mailbox actions at the bottom of the detail pane.
 
 use gpui::{AnyElement, Context, FontWeight, IntoElement, div, prelude::*, rgb};
-use zmail_core::{
-    AccountSummary, IdentitySummary, MailboxSummary, MessageRenderMode, ThreadMessage, ThreadView,
-};
+use zmail_core::{MailboxSummary, ThreadMessage, ThreadView, text::count_noun};
 
 use super::WorkspaceView;
 use crate::styles::{AVATAR_SIZE, UiColors};
 use crate::widgets::{
-    action_divider, avatar, empty_state, label_chip, message_avatar_background, toolbar_button,
+    action_divider, avatar, empty_state, format_size, label_chip, message_avatar_background,
+    toolbar_button,
 };
 
-/// Render the full thread reader: subject, metadata, conversation cards, sync
-/// status, and identity list. Returns an [`AnyElement`] ready to be placed
+/// Render the full thread reader: subject, metadata, and conversation
+/// cards. Returns an [`AnyElement`] ready to be placed
 /// inside a scrollable container.
 pub(crate) fn render_reader_detail(
     selected_thread: Option<&ThreadView>,
-    selected_account: Option<&AccountSummary>,
-    _mailboxes: &[MailboxSummary],
-    identities: &[IdentitySummary],
     colors: &UiColors,
-    _cx: &mut Context<WorkspaceView>,
 ) -> AnyElement {
     match selected_thread {
         Some(thread) => {
-            let sync_detail = selected_account
-                .map(|account| {
-                    format!(
-                        "{} • {}",
-                        account.sync_status.phase, account.sync_status.detail
-                    )
-                })
-                .unwrap_or_else(|| "No sync state".to_owned());
             let latest_message_at = thread
                 .messages
                 .last()
@@ -78,12 +65,9 @@ pub(crate) fn render_reader_detail(
                                                 .children(thread_header_badges(thread, colors)),
                                         ),
                                 )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(colors.muted))
-                                        .child(format!("{} messages", thread.message_count)),
-                                ),
+                                .child(div().text_sm().text_color(rgb(colors.muted)).child(
+                                    count_noun(thread.message_count, "message", "messages"),
+                                )),
                         )
                         .child(
                             div().flex().flex_wrap().gap_4().children([
@@ -120,84 +104,11 @@ pub(crate) fn render_reader_detail(
                                 )),
                         ),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child("Sync Status"))
-                        .child(
-                            div()
-                                .rounded_md()
-                                .bg(rgb(colors.surface))
-                                .border_1()
-                                .border_color(rgb(colors.border))
-                                .px_4()
-                                .py_3()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(colors.muted))
-                                        .child(sync_detail),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child("Identities"))
-                        .children(identities.iter().map(|identity| {
-                            let primary = if identity.is_primary {
-                                Some(
-                                    label_chip(
-                                        "Primary",
-                                        Some("check-circle"),
-                                        colors.button_background,
-                                        colors.success,
-                                    )
-                                    .into_any_element(),
-                                )
-                            } else {
-                                None
-                            };
-
-                            div()
-                                .rounded_md()
-                                .bg(rgb(colors.surface))
-                                .border_1()
-                                .border_color(rgb(colors.border))
-                                .px_4()
-                                .py_3()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .justify_between()
-                                        .items_center()
-                                        .gap_3()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap_1()
-                                                .child(identity.display_name.clone())
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(rgb(colors.muted))
-                                                        .child(identity.email_address.clone()),
-                                                ),
-                                        )
-                                        .when_some(primary, |this, badge| this.child(badge)),
-                                )
-                        })),
-                )
                 .into_any_element()
         }
         None => empty_state(
             "No message selected",
-            "Select a thread, search result, or draft-related item to inspect it here.",
+            "Select a conversation to read it here.",
             "mail-open",
             None,
             colors,
@@ -417,6 +328,7 @@ pub(crate) fn reader_move_buttons(
 fn render_thread_message(index: usize, message: &ThreadMessage, colors: &UiColors) -> gpui::Div {
     let avatar_color = message_avatar_background(&message.sender, colors);
     let (sender_name, sender_email) = sender_identity(&message.sender);
+    let status_badges = message_status_badges(message, colors);
 
     div()
         .px_4()
@@ -485,13 +397,9 @@ fn render_thread_message(index: usize, message: &ThreadMessage, colors: &UiColor
                                         .child(message.received_at.clone()),
                                 ),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap_2()
-                                .children(message_status_badges(message, colors)),
-                        )
+                        .when(!status_badges.is_empty(), |this| {
+                            this.child(div().flex().flex_wrap().gap_2().children(status_badges))
+                        })
                         .when(!message.attachments.is_empty(), |this| {
                             this.child(
                                 div()
@@ -581,36 +489,10 @@ fn message_attachments(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyEle
         .collect()
 }
 
-/// Formats a byte count with one fractional digit and a binary unit.
-fn format_size(size_bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = size_bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{size_bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
 fn message_status_badges(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyElement> {
-    let mut badges = vec![
-        label_chip(
-            match message.render_mode {
-                MessageRenderMode::PlainText => "Plain text",
-                MessageRenderMode::SanitizedHtml => "Sanitized HTML",
-                MessageRenderMode::PreviewOnly => "Preview only",
-            },
-            Some("file-text"),
-            colors.button_background,
-            colors.foreground,
-        )
-        .into_any_element(),
-    ];
+    // The render mode (plain text, sanitized HTML, preview) is an internal
+    // detail; it stays on `ThreadMessage` for diagnostics but is not shown.
+    let mut badges = Vec::new();
 
     if !message.is_read {
         badges.push(
