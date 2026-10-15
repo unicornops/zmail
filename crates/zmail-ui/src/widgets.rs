@@ -18,9 +18,29 @@ use zmail_core::SyncPhase;
 use crate::input::UiBuffer;
 use crate::styles::{
     ACTION_DIVIDER_HEIGHT, ACTION_DIVIDER_WIDTH, BADGE_SIZE, EMPTY_STATE_ICON_FRAME_SIZE,
-    ICON_SIZE_LG, ICON_SIZE_SM, INPUT_HEIGHT_MULTILINE, INPUT_HEIGHT_SINGLE,
+    ICON_SIZE_LG, ICON_SIZE_SM, INPUT_HEIGHT_MULTILINE, INPUT_HEIGHT_SINGLE, SEARCH_FIELD_WIDTH,
     STATUS_BANNER_STRIP_WIDTH, TOOLBAR_BUTTON_HEIGHT, UiColors,
 };
+
+// ---------------------------------------------------------------------------
+// EllipsisExt
+// ---------------------------------------------------------------------------
+
+/// Single-line text that ends in an ellipsis when it does not fit.
+///
+/// GPUI 0.2.2's `truncate()` (`whitespace_nowrap` + `text_ellipsis`) caches
+/// the first measured size of no-wrap text, which taffy takes before the
+/// final width is known, so the text is clipped mid-glyph instead of
+/// ending in "…". Clamping wrapping text to one line keys the cache on the
+/// wrap width, so the ellipsis is computed for the real width.
+pub(crate) trait EllipsisExt: Styled + Sized {
+    /// Clamp to one line and end overflowing text with an ellipsis.
+    fn ellipsis(self) -> Self {
+        self.line_clamp(1).text_ellipsis()
+    }
+}
+
+impl<T: Styled> EllipsisExt for T {}
 
 // ---------------------------------------------------------------------------
 // toolbar_button
@@ -66,6 +86,8 @@ pub(crate) fn toolbar_button(
     div()
         .id(button_id)
         .flex()
+        .flex_none()
+        .whitespace_nowrap()
         .items_center()
         .gap_2()
         .min_h(px(TOOLBAR_BUTTON_HEIGHT))
@@ -109,6 +131,9 @@ pub(crate) fn empty_state(
                 .flex_col()
                 .items_center()
                 .gap_3()
+                // Full width so the title and detail wrap inside the pane.
+                .w_full()
+                .min_w_0()
                 .child(
                     div()
                         .flex()
@@ -122,12 +147,14 @@ pub(crate) fn empty_state(
                 )
                 .child(
                     div()
+                        .w_full()
                         .text_xl()
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(title.to_owned()),
                 )
                 .child(
                     div()
+                        .w_full()
                         .text_sm()
                         .text_color(rgb(colors.muted))
                         .child(detail.to_owned()),
@@ -164,15 +191,19 @@ pub(crate) fn list_row(
         .flex_col()
         .gap_1()
         .w_full()
+        .min_w_0()
         .child(
             div()
                 .flex()
                 .justify_between()
                 .items_center()
+                .gap_2()
                 .w_full()
-                .child(div().truncate().child(title.to_owned()))
+                .child(div().flex_1().min_w_0().ellipsis().child(title.to_owned()))
                 .child(
                     div()
+                        .flex_none()
+                        .whitespace_nowrap()
                         .text_sm()
                         .text_color(rgb(colors.muted))
                         .child(trailing.to_owned()),
@@ -182,11 +213,11 @@ pub(crate) fn list_row(
             div()
                 .text_sm()
                 .text_color(rgb(colors.muted))
-                .truncate()
+                .ellipsis()
                 .child(subtitle.to_owned()),
         )
         .when(!preview.is_empty(), |this| {
-            this.child(div().text_sm().truncate().child(preview.to_owned()))
+            this.child(div().text_sm().ellipsis().child(preview.to_owned()))
         })
         .when(!meta.is_empty(), |this| {
             this.child(
@@ -243,6 +274,8 @@ pub(crate) fn input_card(
         .flex()
         .flex_col()
         .gap_2()
+        .w_full()
+        .min_w_0()
         .child(
             div()
                 .text_sm()
@@ -260,7 +293,70 @@ pub(crate) fn input_card(
                 .bg(rgb(card_background))
                 .border_1()
                 .border_color(rgb(card_border))
-                .child(div().text_color(rgb(text_color)).child(display_text)),
+                .min_w_0()
+                .child(
+                    div()
+                        .text_color(rgb(text_color))
+                        // Single-line fields never grow to fit their text
+                        // or placeholder; multiline fields wrap.
+                        .when(!multiline, |this| this.ellipsis())
+                        .child(display_text),
+                ),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// search_field
+// ---------------------------------------------------------------------------
+
+/// A compact fixed-width search box for the toolbar.
+///
+/// The width is fixed ([`SEARCH_FIELD_WIDTH`]) so typing never resizes the
+/// field or shifts the buttons beside it; long queries truncate.
+pub(crate) fn search_field(
+    id: &'static str,
+    placeholder: &str,
+    buffer: &UiBuffer,
+    active: bool,
+    colors: &UiColors,
+) -> Stateful<gpui::Div> {
+    let is_placeholder = !active && buffer.text.is_empty();
+    let display_text = if is_placeholder {
+        placeholder.to_owned()
+    } else {
+        buffer.display_text(active)
+    };
+
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_2()
+        .w(px(SEARCH_FIELD_WIDTH))
+        .h(px(TOOLBAR_BUTTON_HEIGHT))
+        .px_3()
+        .rounded_md()
+        .bg(rgb(if active {
+            colors.background
+        } else {
+            colors.surface
+        }))
+        .border_1()
+        .border_color(rgb(if active { colors.accent } else { colors.border }))
+        .cursor_text()
+        .child(icon("search", ICON_SIZE_SM, colors.muted).flex_none())
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .ellipsis()
+                .text_color(rgb(if is_placeholder {
+                    colors.muted
+                } else {
+                    colors.foreground
+                }))
+                .child(display_text),
         )
 }
 
@@ -273,6 +369,7 @@ pub(crate) fn section_card(title: &str, colors: &UiColors) -> gpui::Div {
     div()
         .flex()
         .flex_col()
+        .w_full()
         .gap_3()
         .rounded_lg()
         .bg(rgb(colors.surface))
@@ -318,6 +415,7 @@ pub(crate) fn format_size(size_bytes: u64) -> String {
 pub(crate) fn icon(name: &str, size: f32, color: u32) -> Svg {
     svg()
         .path(format!("icons/{name}.svg"))
+        .flex_none()
         .size(px(size))
         .text_color(rgb(color))
 }
@@ -330,6 +428,7 @@ pub(crate) fn icon(name: &str, size: f32, color: u32) -> Svg {
 pub(crate) fn badge(count: usize, bg_color: u32, text_color: u32) -> gpui::Div {
     div()
         .flex()
+        .flex_none()
         .items_center()
         .justify_center()
         .min_w(px(BADGE_SIZE))
@@ -388,6 +487,7 @@ pub(crate) fn avatar(name: &str, size: f32, bg_color: u32, colors: &UiColors) ->
 
     div()
         .flex()
+        .flex_none()
         .items_center()
         .justify_center()
         .w(px(size))

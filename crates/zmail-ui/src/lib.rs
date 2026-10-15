@@ -32,7 +32,9 @@ use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
 mod styles;
-use crate::styles::{UiColors, WINDOW_HEIGHT, WINDOW_WIDTH};
+use crate::styles::{
+    DETAIL_MIN_WIDTH, UiColors, WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_WIDTH,
+};
 
 mod input;
 use crate::input::{EditorField, UiBuffer};
@@ -58,6 +60,10 @@ mod workspace;
 // ---------------------------------------------------------------------------
 // Top-level entry point
 // ---------------------------------------------------------------------------
+
+/// Application id used for the Linux window class / Wayland app id. It
+/// matches the macOS bundle identifier and the packaged desktop entry name.
+pub const APP_ID: &str = "ie.unicornops.zmail";
 
 /// Runs the native Phase 4 shell.
 pub fn run(
@@ -87,6 +93,11 @@ pub fn run(
                         ..Default::default()
                     }),
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
+                    // Matches the macOS bundle id and the packaged
+                    // `ie.unicornops.zmail.desktop`, so Linux docks
+                    // (StartupWMClass / Wayland app id) find the window.
+                    app_id: Some(APP_ID.to_owned()),
                     ..Default::default()
                 },
                 move |window, cx| {
@@ -256,6 +267,9 @@ impl WorkspaceView {
     ) -> impl IntoElement {
         div()
             .flex_1()
+            // Long subjects, addresses and bodies wrap or truncate inside
+            // the pane instead of widening it past the window edge.
+            .min_w(px(DETAIL_MIN_WIDTH))
             .flex()
             .flex_col()
             .bg(rgb(colors.background))
@@ -290,6 +304,11 @@ impl WorkspaceView {
                 div()
                     .id("detail-scroll")
                     .flex_1()
+                    // A flex column stretches its content to the pane width,
+                    // so form fields and long text size to the pane rather
+                    // than to their own content.
+                    .flex()
+                    .flex_col()
                     .overflow_y_scroll()
                     .px_4()
                     .py_4()
@@ -299,6 +318,7 @@ impl WorkspaceView {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap_2()
                     .px_4()
                     .py_3()

@@ -13,7 +13,7 @@ use zmail_core::{AuthKind, ProtocolKind};
 use super::WorkspaceView;
 use crate::input::{EditorField, UiBuffer};
 use crate::styles::UiColors;
-use crate::widgets::{input_card, section_card, toolbar_button};
+use crate::widgets::{EllipsisExt, input_card, section_card, toolbar_button};
 
 // ---------------------------------------------------------------------------
 // AccountSetupState
@@ -119,6 +119,8 @@ pub(crate) fn render_account_setup_detail(
         .flex()
         .flex_col()
         .gap_4()
+        .w_full()
+        .min_w_0()
         .child(
             section_card("Connection", colors)
             .child(
@@ -144,6 +146,7 @@ pub(crate) fn render_account_setup_detail(
                         .children(account_oauth_provider_buttons(form, colors, cx)),
                     oauth_client_fields(form, active_field, colors, cx),
                     div()
+                        .w_full()
                         .rounded_md()
                         .bg(rgb(colors.background))
                         .border_1()
@@ -151,11 +154,18 @@ pub(crate) fn render_account_setup_detail(
                         .px_3()
                         .py_2()
                         .child(
+                            // One line on purpose: multi-line wrapped text in
+                            // this form makes GPUI 0.2.2 size the card from a
+                            // stale text measurement (the card grows by
+                            // hundreds of pixels). Revisit after the GPUI
+                            // upgrade.
                             div()
+                                .w_full()
+                                .ellipsis()
                                 .text_sm()
                                 .text_color(rgb(colors.muted))
                                 .child(
-                                    "Saving opens the provider's sign-in page in your browser. The account syncs once you approve access.",
+                                    "Saving opens your provider's sign-in page in the browser.",
                                 ),
                         ),
                 ]
@@ -166,7 +176,7 @@ pub(crate) fn render_account_setup_detail(
                         .flex()
                         .gap_3()
                         .child(
-                            div().flex_1().child(
+                            div().flex_1().min_w_0().child(
                                 input_card(
                                     "account-oauth-authorization-endpoint-field",
                                     "Authorization Endpoint",
@@ -186,7 +196,7 @@ pub(crate) fn render_account_setup_detail(
                             ),
                         )
                         .child(
-                            div().flex_1().child(
+                            div().flex_1().min_w_0().child(
                                 input_card(
                                     "account-oauth-token-endpoint-field",
                                     "Token Endpoint",
@@ -220,6 +230,7 @@ pub(crate) fn render_account_setup_detail(
                         })),
                     ),
                     div()
+                        .w_full()
                         .rounded_md()
                         .bg(rgb(colors.background))
                         .border_1()
@@ -227,11 +238,18 @@ pub(crate) fn render_account_setup_detail(
                         .px_3()
                         .py_2()
                         .child(
+                            // One line on purpose: multi-line wrapped text in
+                            // this form makes GPUI 0.2.2 size the card from a
+                            // stale text measurement (the card grows by
+                            // hundreds of pixels). Revisit after the GPUI
+                            // upgrade.
                             div()
+                                .w_full()
+                                .ellipsis()
                                 .text_sm()
                                 .text_color(rgb(colors.muted))
                                 .child(
-                                    "Saving opens the provider's sign-in page in your browser. Enter the provider's own OAuth2 endpoints above.",
+                                    "Saving opens your provider's sign-in page in the browser.",
                                 ),
                         ),
                 ]
@@ -271,7 +289,7 @@ pub(crate) fn render_account_setup_detail(
                     .flex()
                     .gap_3()
                     .child(
-                        div().flex_1().child(
+                        div().flex_1().min_w_0().child(
                             input_card(
                                 "account-username-field",
                                 "Username",
@@ -287,7 +305,7 @@ pub(crate) fn render_account_setup_detail(
                         ),
                     )
                     .children(if form.auth == AuthKind::Password {
-                        vec![div().flex_1().child(
+                        vec![div().flex_1().min_w_0().child(
                             input_card(
                                 "account-password-field",
                                 "Password",
@@ -327,7 +345,7 @@ pub(crate) fn render_account_setup_detail(
                     .flex()
                     .gap_3()
                     .child(
-                        div().flex_1().child(
+                        div().flex_1().min_w_0().child(
                             input_card(
                                 "account-identity-name-field",
                                 "Primary Identity Name",
@@ -343,7 +361,7 @@ pub(crate) fn render_account_setup_detail(
                         ),
                     )
                     .child(
-                        div().flex_1().child(
+                        div().flex_1().min_w_0().child(
                             input_card(
                                 "account-identity-email-field",
                                 "Primary Identity Email",
@@ -415,7 +433,7 @@ pub(crate) fn render_account_setup_detail(
                             .flex()
                             .gap_3()
                             .child(
-                                div().flex_1().child(
+                                div().flex_1().min_w_0().child(
                                     input_card(
                                         "account-smtp-port-field",
                                         "SMTP Port",
@@ -431,7 +449,7 @@ pub(crate) fn render_account_setup_detail(
                                 ),
                             )
                             .child(
-                                div().flex_1().child(
+                                div().flex_1().min_w_0().child(
                                     input_card(
                                         "account-smtp-security-field",
                                         "SMTP Security",
@@ -530,7 +548,7 @@ fn oauth_client_fields(
         .flex()
         .gap_3()
         .child(
-            div().flex_1().child(
+            div().flex_1().min_w_0().child(
                 input_card(
                     "account-oauth-client-id-field",
                     "OAuth2 Client Id",
@@ -546,7 +564,7 @@ fn oauth_client_fields(
             ),
         )
         .child(
-            div().flex_1().child(
+            div().flex_1().min_w_0().child(
                 input_card(
                     "account-oauth-client-secret-field",
                     "OAuth2 Client Secret",

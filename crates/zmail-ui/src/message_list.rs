@@ -16,11 +16,13 @@ use zmail_core::{DraftState, DraftSummary, text::count_noun};
 
 use super::{DetailMode, ListMode, WorkspaceView};
 use crate::styles::{
-    AVATAR_SIZE, ICON_SIZE_SM, LIST_ITEM_HEIGHT, MESSAGE_LIST_WIDTH, UNREAD_INDICATOR_SIZE,
+    AVATAR_SIZE, ICON_SIZE_SM, LIST_ITEM_HEIGHT, MESSAGE_LIST_WIDTH, ROW_LINE_GAP, ROW_PADDING_Y,
+    ROW_PREVIEW_LINE_HEIGHT, ROW_SENDER_LINE_HEIGHT, ROW_TITLE_LINE_HEIGHT, UNREAD_INDICATOR_SIZE,
     UiColors,
 };
 use crate::widgets::{
-    avatar, badge, empty_state, icon, list_row, message_avatar_background, toolbar_button,
+    EllipsisExt, avatar, badge, empty_state, icon, list_row, message_avatar_background,
+    toolbar_button,
 };
 
 impl WorkspaceView {
@@ -81,6 +83,7 @@ impl WorkspaceView {
 
         div()
             .w(px(MESSAGE_LIST_WIDTH))
+            .flex_none()
             .flex()
             .flex_col()
             .bg(rgb(colors.surface))
@@ -174,7 +177,7 @@ impl WorkspaceView {
                                                     .w_full()
                                                     .h(px(LIST_ITEM_HEIGHT))
                                                     .px_3()
-                                                    .py_2()
+                                                    .py(px(ROW_PADDING_Y))
                                                     .cursor_pointer()
                                                     .border_b_1()
                                                     .border_color(rgb(colors.border))
@@ -247,7 +250,7 @@ impl WorkspaceView {
                                     .id(row_id.clone())
                                     .h(px(LIST_ITEM_HEIGHT))
                                     .px_3()
-                                    .py_2()
+                                    .py(px(ROW_PADDING_Y))
                                     .cursor_pointer()
                                     .border_b_1()
                                     .border_color(rgb(colors.border))
@@ -447,6 +450,17 @@ fn draft_meta(draft: &DraftSummary) -> String {
     parts.join(" • ")
 }
 
+/// Three fixed-height lines beside a `flex_none` avatar:
+///
+/// ```text
+/// [avatar] [dot] [subject...] [flag] [clip]   [date]
+///                [sender...]                  [badge]
+///                [preview...]
+/// ```
+///
+/// Every line has an explicit height and truncates, so a row never grows
+/// past [`LIST_ITEM_HEIGHT`] and long text never pushes the date or badge
+/// out of view.
 fn conversation_list_row(row: ConversationRow<'_>, colors: &UiColors) -> gpui::Div {
     let avatar_color = message_avatar_background(row.avatar_seed, colors);
 
@@ -455,45 +469,44 @@ fn conversation_list_row(row: ConversationRow<'_>, colors: &UiColors) -> gpui::D
         .items_start()
         .gap_3()
         .h_full()
+        .w_full()
         .child(avatar(row.avatar_seed, AVATAR_SIZE, avatar_color, colors))
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .flex()
                 .flex_col()
-                .justify_center()
-                .gap_1()
+                .gap(px(ROW_LINE_GAP))
                 .child(
                     div()
                         .flex()
-                        .justify_between()
-                        .items_start()
+                        .items_center()
                         .gap_2()
                         .w_full()
+                        .h(px(ROW_TITLE_LINE_HEIGHT))
+                        .line_height(px(ROW_TITLE_LINE_HEIGHT))
+                        .child(unread_indicator(row.unread_count > 0, colors))
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
                                 .flex_1()
-                                .child(unread_indicator(row.unread_count > 0, colors))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .when(row.unread_count > 0, |this| {
-                                            this.font_weight(FontWeight::SEMIBOLD)
-                                        })
-                                        .child(row.subject.to_owned()),
-                                )
-                                .when(row.is_flagged, |this| {
-                                    this.child(icon("star", ICON_SIZE_SM, colors.warning))
+                                .min_w_0()
+                                .ellipsis()
+                                .when(row.unread_count > 0, |this| {
+                                    this.font_weight(FontWeight::SEMIBOLD)
                                 })
-                                .when(row.has_attachments, |this| {
-                                    this.child(icon("paperclip", ICON_SIZE_SM, colors.muted))
-                                }),
+                                .child(row.subject.to_owned()),
                         )
+                        .when(row.is_flagged, |this| {
+                            this.child(icon("star", ICON_SIZE_SM, colors.warning).flex_none())
+                        })
+                        .when(row.has_attachments, |this| {
+                            this.child(icon("paperclip", ICON_SIZE_SM, colors.muted).flex_none())
+                        })
                         .child(
                             div()
+                                .flex_none()
+                                .whitespace_nowrap()
                                 .text_sm()
                                 .text_color(rgb(colors.muted))
                                 .child(row.trailing.to_owned()),
@@ -502,26 +515,35 @@ fn conversation_list_row(row: ConversationRow<'_>, colors: &UiColors) -> gpui::D
                 .child(
                     div()
                         .flex()
-                        .justify_between()
                         .items_center()
                         .gap_2()
                         .w_full()
+                        .h(px(ROW_SENDER_LINE_HEIGHT))
+                        .line_height(px(ROW_SENDER_LINE_HEIGHT))
                         .child(
                             div()
+                                .flex_1()
+                                .min_w_0()
                                 .text_sm()
                                 .text_color(rgb(colors.muted))
-                                .truncate()
+                                .ellipsis()
                                 .child(row.sender_line.to_owned()),
                         )
                         .when(row.unread_count > 1, |this| {
-                            this.child(badge(row.unread_count, colors.accent, colors.background))
+                            this.child(
+                                badge(row.unread_count, colors.accent, colors.background)
+                                    .flex_none(),
+                            )
                         }),
                 )
                 .child(
                     div()
+                        .w_full()
+                        .h(px(ROW_PREVIEW_LINE_HEIGHT))
+                        .line_height(px(ROW_PREVIEW_LINE_HEIGHT))
                         .text_sm()
                         .text_color(rgb(colors.muted))
-                        .truncate()
+                        .ellipsis()
                         .child(row.preview.to_owned()),
                 ),
         )
@@ -540,6 +562,7 @@ struct ConversationRow<'a> {
 
 fn unread_indicator(is_unread: bool, colors: &UiColors) -> gpui::Div {
     div()
+        .flex_none()
         .w(px(UNREAD_INDICATOR_SIZE))
         .h(px(UNREAD_INDICATOR_SIZE))
         .rounded_full()
