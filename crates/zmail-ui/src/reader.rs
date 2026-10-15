@@ -5,11 +5,18 @@
 //! list shown above the scroll area, while [`reader_move_buttons`] keeps the
 //! move-to-mailbox actions at the bottom of the detail pane.
 
+use chrono::{DateTime, Local};
 use gpui::{AnyElement, Context, FontWeight, IntoElement, div, prelude::*, rgb};
-use zmail_core::{MailboxSummary, ThreadMessage, ThreadView, text::count_noun};
+use zmail_core::{
+    MailboxSummary, ThreadMessage, ThreadView,
+    participants::{parse_address_list, sender_identity},
+    text::count_noun,
+    time::{HourCycle, format_full_date, format_list_date},
+};
 
 use super::WorkspaceView;
 use crate::styles::{AVATAR_SIZE, UiColors};
+use crate::tooltip::text_tooltip;
 use crate::widgets::{
     EllipsisExt, action_divider, avatar, empty_state, format_size, label_chip,
     message_avatar_background, toolbar_button,
@@ -20,15 +27,19 @@ use crate::widgets::{
 /// inside a scrollable container.
 pub(crate) fn render_reader_detail(
     selected_thread: Option<&ThreadView>,
+    hour_cycle: HourCycle,
+    own_addresses: &[String],
     colors: &UiColors,
 ) -> AnyElement {
     match selected_thread {
         Some(thread) => {
+            let now = chrono::Local::now();
             let latest_message_at = thread
                 .messages
                 .last()
-                .map(|message| message.received_at.as_str())
-                .unwrap_or("No local messages");
+                .map(|message| format_full_date(&message.received_at, &now.timezone(), hour_cycle))
+                .unwrap_or_else(|| "No local messages".to_owned());
+            let participants = participant_names(&thread.participants, own_addresses);
 
             div()
                 .flex()
@@ -66,8 +77,8 @@ pub(crate) fn render_reader_detail(
                                 .gap_1()
                                 .w_full()
                                 .min_w_0()
-                                .child(metadata_pair("Participants", &thread.participants, colors))
-                                .child(metadata_pair("Latest", latest_message_at, colors))
+                                .child(metadata_pair("Participants", &participants, colors))
+                                .child(metadata_pair("Latest", &latest_message_at, colors))
                                 .child(metadata_pair(
                                     "Mailbox",
                                     &format!(
@@ -97,8 +108,15 @@ pub(crate) fn render_reader_detail(
                                 .border_color(rgb(colors.border))
                                 .children(thread.messages.iter().enumerate().map(
                                     |(index, message)| {
-                                        render_thread_message(index, message, colors)
-                                            .into_any_element()
+                                        render_thread_message(
+                                            index,
+                                            message,
+                                            &now,
+                                            hour_cycle,
+                                            own_addresses,
+                                            colors,
+                                        )
+                                        .into_any_element()
                                     },
                                 )),
                         ),
@@ -324,9 +342,19 @@ pub(crate) fn reader_move_buttons(
     buttons
 }
 
-fn render_thread_message(index: usize, message: &ThreadMessage, colors: &UiColors) -> gpui::Div {
-    let avatar_color = message_avatar_background(&message.sender, colors);
+fn render_thread_message(
+    index: usize,
+    message: &ThreadMessage,
+    now: &DateTime<Local>,
+    hour_cycle: HourCycle,
+    own_addresses: &[String],
+    colors: &UiColors,
+) -> gpui::Div {
     let (sender_name, sender_email) = sender_identity(&message.sender);
+    let avatar_color = message_avatar_background(&sender_name, colors);
+    let recipients = participant_names(&message.recipients, own_addresses);
+    let date = format_list_date(&message.received_at, now, hour_cycle);
+    let full_date = format_full_date(&message.received_at, &now.timezone(), hour_cycle);
     let status_badges = message_status_badges(message, colors);
 
     div()
@@ -340,7 +368,7 @@ fn render_thread_message(index: usize, message: &ThreadMessage, colors: &UiColor
                 .flex()
                 .items_start()
                 .gap_3()
-                .child(avatar(&message.sender, AVATAR_SIZE, avatar_color, colors))
+                .child(avatar(&sender_name, AVATAR_SIZE, avatar_color, colors))
                 .child(
                     div()
                         .flex_1()
@@ -378,26 +406,25 @@ fn render_thread_message(index: usize, message: &ThreadMessage, colors: &UiColor
                                                     .child(email),
                                             )
                                         })
-                                        .when(!message.recipients.trim().is_empty(), |this| {
+                                        .when(!recipients.is_empty(), |this| {
                                             this.child(
                                                 div()
                                                     .text_sm()
                                                     .text_color(rgb(colors.muted))
                                                     .ellipsis()
-                                                    .child(format!(
-                                                        "To: {}",
-                                                        message.recipients.trim()
-                                                    )),
+                                                    .child(format!("To: {recipients}")),
                                             )
                                         }),
                                 )
                                 .child(
                                     div()
+                                        .id(("reader-message-date", message.id as u64))
                                         .flex_none()
                                         .whitespace_nowrap()
                                         .text_sm()
                                         .text_color(rgb(colors.muted))
-                                        .child(message.received_at.clone()),
+                                        .tooltip(text_tooltip(full_date, *colors))
+                                        .child(date),
                                 ),
                         )
                         .when(!status_badges.is_empty(), |this| {
@@ -608,25 +635,23 @@ fn metadata_pair(label: &str, value: &str, colors: &UiColors) -> gpui::Div {
         )
 }
 
-fn sender_identity(sender: &str) -> (String, Option<String>) {
-    let trimmed = sender.trim();
-
-    let Some(start) = trimmed.rfind('<') else {
-        return (trimmed.to_owned(), None);
-    };
-    let Some(end) = trimmed.rfind('>') else {
-        return (trimmed.to_owned(), None);
-    };
-    if start >= end {
-        return (trimmed.to_owned(), None);
-    }
-
-    let name = trimmed[..start].trim().trim_matches('"');
-    let email = trimmed[start + 1..end].trim();
-
-    if name.is_empty() {
-        (email.to_owned(), Some(email.to_owned()))
-    } else {
-        (name.to_owned(), Some(email.to_owned()))
-    }
+/// Display names from an address list, with the user's own addresses
+/// shown as "me": `Alice Johnson, me`.
+fn participant_names(addresses: &str, own_addresses: &[String]) -> String {
+    parse_address_list(addresses)
+        .iter()
+        .map(|participant| {
+            let is_me = participant.email.as_deref().is_some_and(|email| {
+                own_addresses
+                    .iter()
+                    .any(|own| own.eq_ignore_ascii_case(email.trim()))
+            });
+            if is_me {
+                "me".to_owned()
+            } else {
+                participant.display_name().to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }

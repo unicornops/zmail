@@ -8554,6 +8554,7 @@ name = "zmail-ui"
 version = "0.0.2"
 dependencies = [
  "anyhow",
+ "chrono",
  "gpui",
  "url",
  "zmail-auth",

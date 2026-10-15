@@ -12,7 +12,12 @@ use gpui::{
     prelude::*, px, rgb, uniform_list,
 };
 
-use zmail_core::{DraftState, DraftSummary, text::count_noun};
+use zmail_core::{
+    DraftState, DraftSummary,
+    participants::{participant_summary, sender_display_name},
+    text::count_noun,
+    time::{format_full_date, format_list_date},
+};
 
 use super::{DetailMode, ListMode, WorkspaceView};
 use crate::styles::{
@@ -20,6 +25,7 @@ use crate::styles::{
     ROW_PREVIEW_LINE_HEIGHT, ROW_SENDER_LINE_HEIGHT, ROW_TITLE_LINE_HEIGHT, UNREAD_INDICATOR_SIZE,
     UiColors,
 };
+use crate::tooltip::text_tooltip;
 use crate::widgets::{
     EllipsisExt, avatar, badge, empty_state, icon, list_row, message_avatar_background,
     toolbar_button,
@@ -37,6 +43,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = *colors;
+        let now = chrono::Local::now();
 
         let selected_mailbox = self.selected_mailbox().cloned();
         let thread_count = selected_mailbox
@@ -157,10 +164,30 @@ impl WorkspaceView {
                                                 }
                                             };
 
+                                        let now = chrono::Local::now();
+                                        let hour_cycle = this.hour_cycle;
+                                        let own_addresses = this.own_addresses();
+                                        let own_addresses = own_addresses
+                                            .iter()
+                                            .map(String::as_str)
+                                            .collect::<Vec<_>>();
                                         threads
                                             .into_iter()
                                             .map(|thread| {
                                                 let thread_id = thread.id;
+                                                let sender_name =
+                                                    sender_display_name(&thread.latest_sender);
+                                                let sender_line = if thread.message_count > 1
+                                                    && !thread.participants.trim().is_empty()
+                                                {
+                                                    participant_summary(
+                                                        &thread.participants,
+                                                        thread.message_count,
+                                                        &own_addresses,
+                                                    )
+                                                } else {
+                                                    sender_name.clone()
+                                                };
                                                 let row_id = thread_row_id(thread_id);
                                                 let is_selected =
                                                     Some(thread_id) == this.selected_thread_id;
@@ -199,11 +226,21 @@ impl WorkspaceView {
                                                     }))
                                                     .child(conversation_list_row(
                                                         ConversationRow {
+                                                            id: row_id.clone(),
                                                             subject: &thread.subject,
-                                                            sender_line: &thread.latest_sender,
+                                                            sender_line: &sender_line,
                                                             preview: &thread.preview,
-                                                            trailing: &thread.latest_message_at,
-                                                            avatar_seed: &thread.latest_sender,
+                                                            date: format_list_date(
+                                                                &thread.latest_message_at,
+                                                                &now,
+                                                                hour_cycle,
+                                                            ),
+                                                            date_tooltip: format_full_date(
+                                                                &thread.latest_message_at,
+                                                                &now.timezone(),
+                                                                hour_cycle,
+                                                            ),
+                                                            avatar_seed: &sender_name,
                                                             unread_count: thread.unread_count,
                                                             is_flagged: thread.is_flagged,
                                                             has_attachments: thread.has_attachments,
@@ -235,6 +272,7 @@ impl WorkspaceView {
                             .flex_1()
                             .overflow_y_scroll()
                             .children(self.search_results.iter().map(|hit| {
+                                let sender_name = sender_display_name(&hit.latest_sender);
                                 let mailbox_id = hit.mailbox_id;
                                 let thread_id = hit.thread_id;
                                 let row_id = search_row_id(thread_id);
@@ -266,14 +304,24 @@ impl WorkspaceView {
                                     }))
                                     .child(conversation_list_row(
                                         ConversationRow {
+                                            id: row_id.clone(),
                                             subject: &hit.subject,
                                             sender_line: &format!(
-                                                "{} • {}",
-                                                hit.mailbox_name, hit.latest_sender
+                                                "{} \u{2022} {}",
+                                                hit.mailbox_name, sender_name
                                             ),
                                             preview: &hit.preview,
-                                            trailing: &hit.latest_message_at,
-                                            avatar_seed: &hit.latest_sender,
+                                            date: format_list_date(
+                                                &hit.latest_message_at,
+                                                &now,
+                                                self.hour_cycle,
+                                            ),
+                                            date_tooltip: format_full_date(
+                                                &hit.latest_message_at,
+                                                &now.timezone(),
+                                                self.hour_cycle,
+                                            ),
+                                            avatar_seed: &sender_name,
                                             unread_count: hit.unread_count,
                                             is_flagged: hit.is_flagged,
                                             has_attachments: hit.has_attachments,
@@ -331,7 +379,7 @@ impl WorkspaceView {
                                     }))
                                     .child(list_row(
                                         display_subject(&draft.subject),
-                                        &draft.updated_at,
+                                        &format_list_date(&draft.updated_at, &now, self.hour_cycle),
                                         &recipient_line(&draft.recipient_summary),
                                         "",
                                         &draft_meta(draft),
@@ -395,7 +443,15 @@ impl WorkspaceView {
                                                     .map(|draft| draft.subject.as_str())
                                                     .unwrap_or(""),
                                             ),
-                                            job.next_attempt_at.as_deref().unwrap_or(""),
+                                            &job.next_attempt_at
+                                                .as_deref()
+                                                .map(|at| {
+                                                    format!(
+                                                        "Retry {}",
+                                                        format_list_date(at, &now, self.hour_cycle)
+                                                    )
+                                                })
+                                                .unwrap_or_default(),
                                             &recipient_line(
                                                 draft
                                                     .map(|draft| draft.recipient_summary.as_str())
@@ -505,11 +561,13 @@ fn conversation_list_row(row: ConversationRow<'_>, colors: &UiColors) -> gpui::D
                         })
                         .child(
                             div()
+                                .id(SharedString::from(format!("{}-date", row.id)))
                                 .flex_none()
                                 .whitespace_nowrap()
                                 .text_sm()
                                 .text_color(rgb(colors.muted))
-                                .child(row.trailing.to_owned()),
+                                .tooltip(text_tooltip(row.date_tooltip, *colors))
+                                .child(row.date),
                         ),
                 )
                 .child(
@@ -550,10 +608,15 @@ fn conversation_list_row(row: ConversationRow<'_>, colors: &UiColors) -> gpui::D
 }
 
 struct ConversationRow<'a> {
+    /// Element id of the row; the date's tooltip id derives from it.
+    id: SharedString,
     subject: &'a str,
     sender_line: &'a str,
     preview: &'a str,
-    trailing: &'a str,
+    /// Short relative date ("10:42", "Yesterday", "12 Oct").
+    date: String,
+    /// Full timestamp shown when hovering the date.
+    date_tooltip: String,
     avatar_seed: &'a str,
     unread_count: usize,
     is_flagged: bool,
