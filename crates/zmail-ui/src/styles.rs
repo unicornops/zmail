@@ -152,6 +152,8 @@ pub mod dark {
     pub const WARNING_BACKGROUND: u32 = 0x253550;
     /// Background tint for success / info status bars.
     pub const SUCCESS_BACKGROUND: u32 = 0x162B20;
+    /// Background tint for error banners.
+    pub const DANGER_BACKGROUND: u32 = 0x3B1F2B;
     /// Danger / error semantic colour (text / icon).
     pub const DANGER: u32 = 0xF87171;
     /// Warning semantic colour (text / icon).
@@ -191,6 +193,8 @@ pub mod light {
     pub const WARNING_BACKGROUND: u32 = 0xFEF3C7;
     /// Background tint for success / info status bars.
     pub const SUCCESS_BACKGROUND: u32 = 0xDCFCE7;
+    /// Background tint for error banners.
+    pub const DANGER_BACKGROUND: u32 = 0xFEE2E2;
     /// Danger / error semantic colour (text / icon).
     pub const DANGER: u32 = 0xEF4444;
     /// Warning semantic colour (text / icon).
@@ -208,8 +212,7 @@ pub mod light {
 /// A fully-resolved set of UI colours derived from a [`ThemeSummary`].
 ///
 /// Construct once at the top of `render()` via [`UiColors::from_theme`] and
-/// pass a reference down to every sub-render function, replacing the previous
-/// pattern of ad-hoc `let background = hex_to_rgb(...)` locals.
+/// pass a reference down to every sub-render function.
 ///
 /// All fields are plain `u32` ARGB values compatible with GPUI's `rgb()`.
 /// The struct is `Copy` so closures can capture it by value without cloning.
@@ -237,6 +240,8 @@ pub struct UiColors {
     pub warning_background: u32,
     /// Tinted background for success / info status banners.
     pub success_background: u32,
+    /// Tinted background for error banners.
+    pub danger_background: u32,
     /// Danger / error foreground colour for icons and text.
     pub danger: u32,
     /// Warning foreground colour for icons and text.
@@ -250,153 +255,118 @@ pub struct UiColors {
 impl UiColors {
     /// Resolve a complete [`UiColors`] from a [`ThemeSummary`], falling back
     /// to the light or dark palette constants that match the theme
-    /// appearance for any token that is absent.
+    /// appearance for any token that is absent or unparseable.
+    ///
+    /// Zed themes mostly use `#RRGGBBAA`. Translucent tokens are blended
+    /// over what they are drawn on: the app background for the background
+    /// itself, panes and text; the surface for row and button fills.
     pub fn from_theme(theme: &ThemeSummary) -> Self {
         let is_light = matches!(theme.appearance, ThemeAppearance::Light);
-        let background = hex_to_rgb(
+        let pick = |light: u32, dark: u32| if is_light { light } else { dark };
+
+        let fallback_background = pick(light::BACKGROUND, dark::BACKGROUND);
+        let background = theme_color(
             theme.background.as_deref(),
-            if is_light {
-                light::BACKGROUND
-            } else {
-                dark::BACKGROUND
-            },
+            fallback_background,
+            fallback_background,
         );
-        let surface = hex_to_rgb(
-            theme.surface.as_deref(),
-            if is_light {
-                light::SURFACE
-            } else {
-                dark::SURFACE
-            },
-        );
-        let border = hex_to_rgb(
-            theme.border.as_deref(),
-            if is_light {
-                light::BORDER
-            } else {
-                dark::BORDER
-            },
-        );
-        let foreground = hex_to_rgb(
-            theme.foreground.as_deref(),
-            if is_light {
-                light::FOREGROUND
-            } else {
-                dark::FOREGROUND
-            },
-        );
-        let muted = hex_to_rgb(
-            theme.muted_foreground.as_deref(),
-            if is_light { light::MUTED } else { dark::MUTED },
-        );
-        let accent = hex_to_rgb(
-            theme.accent.as_deref(),
-            if is_light {
-                light::ACCENT
-            } else {
-                dark::ACCENT
-            },
-        );
-        let selected_background = hex_to_rgb(
-            theme.selected_background.as_deref(),
-            if is_light {
-                light::SELECTED_BACKGROUND
-            } else {
-                dark::SELECTED_BACKGROUND
-            },
-        );
-        let hover_background = hex_to_rgb(
-            theme.hover_background.as_deref(),
-            if is_light {
-                light::HOVER_BACKGROUND
-            } else {
-                dark::HOVER_BACKGROUND
-            },
-        );
-
-        let button_background = if is_light {
-            light::BUTTON_BACKGROUND
-        } else {
-            dark::BUTTON_BACKGROUND
+        let over_background = |token: &Option<String>, light: u32, dark: u32| {
+            theme_color(token.as_deref(), pick(light, dark), background)
         };
-        let warning_background = if is_light {
-            light::WARNING_BACKGROUND
-        } else {
-            dark::WARNING_BACKGROUND
+        let surface = over_background(&theme.surface, light::SURFACE, dark::SURFACE);
+        let over_surface = |token: &Option<String>, light: u32, dark: u32| {
+            theme_color(token.as_deref(), pick(light, dark), surface)
         };
-        let success_background = if is_light {
-            light::SUCCESS_BACKGROUND
-        } else {
-            dark::SUCCESS_BACKGROUND
-        };
-
-        let danger = hex_to_rgb(
-            theme.danger.as_deref(),
-            if is_light {
-                light::DANGER
-            } else {
-                dark::DANGER
-            },
-        );
-        let warning = hex_to_rgb(
-            theme.warning.as_deref(),
-            if is_light {
-                light::WARNING
-            } else {
-                dark::WARNING
-            },
-        );
-        let success = hex_to_rgb(
-            theme.success.as_deref(),
-            if is_light {
-                light::SUCCESS
-            } else {
-                dark::SUCCESS
-            },
-        );
-        let info = hex_to_rgb(
-            theme.info.as_deref(),
-            if is_light { light::INFO } else { dark::INFO },
-        );
 
         Self {
             background,
             surface,
-            border,
-            foreground,
-            muted,
-            accent,
-            selected_background,
-            hover_background,
-            button_background,
-            warning_background,
-            success_background,
-            danger,
-            warning,
-            success,
-            info,
+            border: over_background(&theme.border, light::BORDER, dark::BORDER),
+            foreground: over_background(&theme.foreground, light::FOREGROUND, dark::FOREGROUND),
+            muted: over_background(&theme.muted_foreground, light::MUTED, dark::MUTED),
+            accent: over_background(&theme.accent, light::ACCENT, dark::ACCENT),
+            selected_background: over_surface(
+                &theme.selected_background,
+                light::SELECTED_BACKGROUND,
+                dark::SELECTED_BACKGROUND,
+            ),
+            hover_background: over_surface(
+                &theme.hover_background,
+                light::HOVER_BACKGROUND,
+                dark::HOVER_BACKGROUND,
+            ),
+            button_background: over_surface(
+                &theme.button_background,
+                light::BUTTON_BACKGROUND,
+                dark::BUTTON_BACKGROUND,
+            ),
+            warning_background: over_background(
+                &theme.warning_background,
+                light::WARNING_BACKGROUND,
+                dark::WARNING_BACKGROUND,
+            ),
+            success_background: over_background(
+                &theme.success_background,
+                light::SUCCESS_BACKGROUND,
+                dark::SUCCESS_BACKGROUND,
+            ),
+            danger_background: over_background(
+                &theme.danger_background,
+                light::DANGER_BACKGROUND,
+                dark::DANGER_BACKGROUND,
+            ),
+            danger: over_background(&theme.danger, light::DANGER, dark::DANGER),
+            warning: over_background(&theme.warning, light::WARNING, dark::WARNING),
+            success: over_background(&theme.success, light::SUCCESS, dark::SUCCESS),
+            info: over_background(&theme.info, light::INFO, dark::INFO),
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Colour parsing helper
+// Colour parsing helpers
 // ---------------------------------------------------------------------------
 
-/// Parse a CSS hex colour string such as `"#RRGGBB"` into the `u32` ARGB
-/// value that GPUI's `rgb()` macro expects.
-///
-/// Returns `fallback` for any input that is `None`, not six hex digits, or
-/// otherwise unparseable.
-pub fn hex_to_rgb(hex: Option<&str>, fallback: u32) -> u32 {
-    let Some(hex) = hex else {
-        return fallback;
-    };
-    let trimmed = hex.trim_start_matches('#');
-    if trimmed.len() != 6 {
-        return fallback;
+/// Parse a CSS hex colour (`#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`) into
+/// its `0xRRGGBB` value and alpha byte.
+pub fn parse_hex_color(hex: &str) -> Option<(u32, u8)> {
+    let digits = hex.trim().strip_prefix('#')?;
+    if !digits.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
     }
-    u32::from_str_radix(trimmed, 16).unwrap_or(fallback)
+    let expanded: String = match digits.len() {
+        3 | 4 => digits.chars().flat_map(|ch| [ch, ch]).collect(),
+        6 | 8 => digits.to_owned(),
+        _ => return None,
+    };
+    let rgb = u32::from_str_radix(&expanded[..6], 16).ok()?;
+    let alpha = match expanded.get(6..8) {
+        Some(alpha) => u8::from_str_radix(alpha, 16).ok()?,
+        None => 0xFF,
+    };
+    Some((rgb, alpha))
+}
+
+/// Composite `rgb` at `alpha` over the opaque colour `base`.
+pub fn blend_over(rgb: u32, alpha: u8, base: u32) -> u32 {
+    let alpha = u32::from(alpha);
+    let channel = |shift: u32| {
+        let top = (rgb >> shift) & 0xFF;
+        let bottom = (base >> shift) & 0xFF;
+        // Round to nearest.
+        ((top * alpha + bottom * (255 - alpha) + 127) / 255) << shift
+    };
+    channel(16) | channel(8) | channel(0)
+}
+
+/// Resolve a theme token to an opaque `0xRRGGBB` colour for GPUI's `rgb()`:
+/// translucent colours are blended over `base`, and missing or invalid
+/// tokens use `fallback`.
+pub fn theme_color(hex: Option<&str>, fallback: u32, base: u32) -> u32 {
+    match hex.and_then(parse_hex_color) {
+        Some((rgb, alpha)) => blend_over(rgb, alpha, base),
+        None => fallback,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +395,10 @@ mod tests {
             warning: None,
             success: None,
             info: None,
+            button_background: None,
+            danger_background: None,
+            warning_background: None,
+            success_background: None,
         }
     }
 
@@ -445,6 +419,10 @@ mod tests {
             warning: None,
             success: None,
             info: None,
+            button_background: None,
+            danger_background: None,
+            warning_background: None,
+            success_background: None,
         }
     }
 
@@ -483,20 +461,79 @@ mod tests {
     }
 
     #[test]
-    fn hex_to_rgb_parses_valid_hex() {
-        assert_eq!(hex_to_rgb(Some("#111827"), 0), 0x111827);
-        assert_eq!(hex_to_rgb(Some("#5BA3F5"), 0), 0x5BA3F5);
+    fn parses_opaque_and_translucent_hex() {
+        assert_eq!(parse_hex_color("#111827"), Some((0x111827, 0xFF)));
+        assert_eq!(parse_hex_color("#5ba3f5"), Some((0x5BA3F5, 0xFF)));
+        assert_eq!(parse_hex_color("#282c33ff"), Some((0x282C33, 0xFF)));
+        assert_eq!(parse_hex_color("#d072771a"), Some((0xD07277, 0x1A)));
+        assert_eq!(parse_hex_color("#FFF"), Some((0xFFFFFF, 0xFF)));
+        assert_eq!(parse_hex_color("#0F08"), Some((0x00FF00, 0x88)));
     }
 
     #[test]
-    fn hex_to_rgb_uses_fallback_for_none() {
-        assert_eq!(hex_to_rgb(None, 0xDEADBE), 0xDEADBE);
+    fn rejects_malformed_hex() {
+        assert_eq!(parse_hex_color("not-a-color"), None);
+        assert_eq!(parse_hex_color("111827"), None);
+        assert_eq!(parse_hex_color("#12345"), None);
+        assert_eq!(parse_hex_color("#GGGGGG"), None);
+        assert_eq!(theme_color(Some("#12345"), 0xDEADBE, 0), 0xDEADBE);
+        assert_eq!(theme_color(None, 0xDEADBE, 0), 0xDEADBE);
     }
 
     #[test]
-    fn hex_to_rgb_uses_fallback_for_invalid() {
-        assert_eq!(hex_to_rgb(Some("not-a-color"), 0xDEADBE), 0xDEADBE);
-        assert_eq!(hex_to_rgb(Some("#FFF"), 0xDEADBE), 0xDEADBE);
+    fn blends_alpha_over_the_base() {
+        assert_eq!(blend_over(0xFFFFFF, 0xFF, 0x000000), 0xFFFFFF);
+        assert_eq!(blend_over(0xFFFFFF, 0x00, 0x123456), 0x123456);
+        // 50% white over black is mid grey.
+        assert_eq!(blend_over(0xFFFFFF, 0x80, 0x000000), 0x808080);
+        assert_eq!(theme_color(Some("#FF000080"), 0, 0x0000FF), 0x80007F);
+    }
+
+    #[test]
+    fn real_zed_theme_tokens_resolve_instead_of_falling_back() {
+        // Values from Zed's One Dark: every token carries an alpha byte.
+        let theme = ThemeSummary {
+            background: Some("#282c33ff".to_owned()),
+            surface: Some("#2f343eff".to_owned()),
+            border: Some("#464b57ff".to_owned()),
+            foreground: Some("#dce0e5ff".to_owned()),
+            muted_foreground: Some("#a9afbcff".to_owned()),
+            accent: Some("#74ade8ff".to_owned()),
+            selected_background: Some("#454a56ff".to_owned()),
+            hover_background: Some("#363c4600".to_owned()),
+            danger: Some("#d07277ff".to_owned()),
+            danger_background: Some("#d072771a".to_owned()),
+            ..minimal_theme()
+        };
+        let colors = UiColors::from_theme(&theme);
+        assert_eq!(colors.background, 0x282C33);
+        assert_eq!(colors.surface, 0x2F343E);
+        assert_eq!(colors.foreground, 0xDCE0E5);
+        assert_eq!(colors.accent, 0x74ADE8);
+        assert_eq!(colors.danger, 0xD07277);
+        // A fully transparent hover leaves the surface showing.
+        assert_eq!(colors.hover_background, colors.surface);
+        // 10% red over the background is a faint red tint.
+        assert_eq!(
+            colors.danger_background,
+            blend_over(0xD07277, 0x1A, 0x282C33)
+        );
+    }
+
+    #[test]
+    fn status_backgrounds_come_from_the_theme() {
+        let theme = ThemeSummary {
+            button_background: Some("#101010".to_owned()),
+            warning_background: Some("#202020".to_owned()),
+            success_background: Some("#303030".to_owned()),
+            danger_background: Some("#404040".to_owned()),
+            ..minimal_theme()
+        };
+        let colors = UiColors::from_theme(&theme);
+        assert_eq!(colors.button_background, 0x101010);
+        assert_eq!(colors.warning_background, 0x202020);
+        assert_eq!(colors.success_background, 0x303030);
+        assert_eq!(colors.danger_background, 0x404040);
     }
 
     #[test]

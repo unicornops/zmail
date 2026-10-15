@@ -16,7 +16,7 @@
         "border": "#E2E8F0",
         "border.variant": "#CBD5E1",
         "editor.foreground": "#1E293B",
-        "element.background": "#F8FAFC",
+        "element.background": "#E2E8F0",
         "element.selected": "#DBEAFE",
         "element.hover": "#F1F5F9",
         "text": "#1E293B",
@@ -24,7 +24,10 @@
         "error": "#EF4444",
         "warning": "#D97706",
         "success": "#16A34A",
-        "info": "#2563EB"
+        "info": "#2563EB",
+        "error.background": "#FEE2E2",
+        "warning.background": "#FEF3C7",
+        "success.background": "#DCFCE7"
       }
     }
   ]

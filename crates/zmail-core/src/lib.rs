@@ -63,6 +63,14 @@ pub struct ThemeSummary {
     pub success: Option<String>,
     /// Info semantic color.
     pub info: Option<String>,
+    /// Button / interactive element background color.
+    pub button_background: Option<String>,
+    /// Error banner background color.
+    pub danger_background: Option<String>,
+    /// Warning banner background color.
+    pub warning_background: Option<String>,
+    /// Success banner background color.
+    pub success_background: Option<String>,
 }
 
 /// Local cache policy recorded for an account.

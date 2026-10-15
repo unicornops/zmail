@@ -10,12 +10,12 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
-use gpui::{Context, KeyDownEvent, Timer, Window};
+use gpui::{Context, KeyDownEvent, Timer, Window, WindowAppearance};
 use url::Url;
 use zmail_core::{
     AccountSummary, AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, IdentitySummary,
     MailboxSummary, NewAccount, NewDraft, NewIdentity, OutgoingConfig, ProtocolKind, StoreStats,
-    SubmissionSecurity, SyncPhase, ThreadMessage, ThreadView,
+    SubmissionSecurity, SyncPhase, ThemeAppearance, ThreadMessage, ThreadView,
     text::count_noun,
     time::{HourCycle, format_full_date, next_local_midnight},
 };
@@ -88,6 +88,7 @@ impl WorkspaceView {
             store_error: None,
             status_message: None,
             refresh_scheduled: false,
+            theme_overridden: false,
             hour_cycle: HourCycle::from_env(),
             thread_view_cache: None,
             status_generation: 0,
@@ -100,6 +101,20 @@ impl WorkspaceView {
             window,
             |this: &mut WorkspaceView, window: &mut Window, _cx: &mut Context<Self>| {
                 this.notifier.set_quiet(window.is_window_active());
+            },
+        )
+        .detach();
+
+        // Start in the system's light or dark appearance and follow changes
+        // until the user picks a theme with the toolbar toggle.
+        view.follow_system_appearance(window.appearance());
+        cx.observe_window_appearance(
+            window,
+            |this: &mut WorkspaceView, window: &mut Window, cx: &mut Context<Self>| {
+                if !this.theme_overridden {
+                    this.follow_system_appearance(window.appearance());
+                    cx.notify();
+                }
             },
         )
         .detach();
@@ -396,9 +411,27 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Switch to the bundled theme variant that matches the system
+    /// appearance, if it is not active already.
+    pub(crate) fn follow_system_appearance(&mut self, appearance: WindowAppearance) {
+        let wanted = match appearance {
+            WindowAppearance::Light | WindowAppearance::VibrantLight => ThemeAppearance::Light,
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => ThemeAppearance::Dark,
+        };
+        if self.bootstrap.theme.appearance != wanted
+            && self.bootstrap.alternate_theme.appearance == wanted
+        {
+            std::mem::swap(
+                &mut self.bootstrap.theme,
+                &mut self.bootstrap.alternate_theme,
+            );
+        }
+    }
+
     /// Swap the active theme with the bundled alternate variant and trigger
     /// a rerender so all colours and icons update immediately.
     pub(crate) fn toggle_theme(&mut self, cx: &mut Context<Self>) {
+        self.theme_overridden = true;
         std::mem::swap(
             &mut self.bootstrap.theme,
             &mut self.bootstrap.alternate_theme,
