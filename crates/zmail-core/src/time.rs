@@ -159,6 +159,18 @@ pub fn next_local_midnight<Tz: TimeZone>(now: &DateTime<Tz>) -> DateTime<Tz> {
         .unwrap_or_else(|| now.clone() + chrono::Duration::hours(24))
 }
 
+/// Formats seconds since the Unix epoch as a UTC RFC 3339 timestamp,
+/// `2026-10-15T10:42:00Z`, the form the local store writes for its own
+/// rows. Strings in this form sort chronologically.
+pub fn utc_timestamp(seconds_since_epoch: u64) -> String {
+    i64::try_from(seconds_since_epoch)
+        .ok()
+        .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+        .unwrap_or_default()
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
 fn format_time<Tz: TimeZone>(local: &DateTime<Tz>, hour_cycle: HourCycle) -> String
 where
     Tz::Offset: std::fmt::Display,
@@ -382,6 +394,14 @@ mod tests {
         let midnight = next_local_midnight(&now);
         assert_eq!(midnight.to_rfc3339(), "2027-01-01T00:00:00+01:00");
         assert_eq!((midnight - now).num_seconds(), 30);
+    }
+
+    #[test]
+    fn utc_timestamps_are_real_dates() {
+        assert_eq!(super::utc_timestamp(0), "1970-01-01T00:00:00Z");
+        assert_eq!(super::utc_timestamp(1_791_888_120), "2026-10-13T10:42:00Z");
+        // Lexical order matches time order across a month boundary.
+        assert!(super::utc_timestamp(1_790_812_799) < super::utc_timestamp(1_790_812_800));
     }
 
     #[test]
