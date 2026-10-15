@@ -515,6 +515,7 @@ fn launch_gui() -> Result<()> {
 }
 
 fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
+    install_panic_log();
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(open_store().context("failed to open the Phase 4 local store")?);
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
@@ -536,6 +537,7 @@ fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
 }
 
 fn launch_imap_fixture(endpoint: &str, username: &str, secret: &str, email: &str) -> Result<()> {
+    install_panic_log();
     validate_endpoint(ProtocolKind::Imap, endpoint)?;
 
     let runtime = BackgroundRuntime::start(4)?;
@@ -1696,6 +1698,162 @@ fn data_dir() -> Result<PathBuf> {
     )
 }
 
+/// Environment variable that overrides the crash-log directory for tests.
+const LOG_DIR_ENV: &str = "ZMAIL_LOG_DIR";
+
+/// Name of the crash log file inside the crash-log directory.
+const CRASH_LOG_FILE_NAME: &str = "crash.log";
+
+/// Installs a panic hook that appends crash reports to a log file.
+///
+/// GUI launches lose stderr: when the app is started from Finder or the
+/// Dock there is no console attached, so a panic leaves no trace at all
+/// and the crash only surfaces as a macOS abort report. The hook keeps
+/// the default stderr behavior and additionally appends a line per panic
+/// to the platform's crash-log directory, per the crash policy in
+/// `docs/phase5-hardening.md`. Nothing is uploaded.
+pub(crate) fn install_panic_log() {
+    let log_dir = match panic_log_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("warning: no crash log will be kept: {error:#}");
+            return;
+        }
+    };
+    if let Err(error) = std::fs::create_dir_all(&log_dir) {
+        eprintln!(
+            "warning: no crash log will be kept: failed to create {}: {error}",
+            log_dir.display()
+        );
+        return;
+    }
+    let log_path = log_dir.join(CRASH_LOG_FILE_NAME);
+    rotate_crash_log(&log_path);
+    install_panic_hook(&log_path);
+
+    eprintln!("Crash reports append to {}", log_path.display());
+}
+
+/// Installs the crash-log hook for an already resolved log file.
+fn install_panic_hook(log_path: &std::path::Path) {
+    let log_path = log_path.to_owned();
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("panic with a non-string payload");
+        let location = info
+            .location()
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
+            .unwrap_or_else(|| "unknown location".to_owned());
+        let thread = std::thread::current()
+            .name()
+            .map(str::to_owned)
+            .unwrap_or_else(|| "unnamed".to_owned());
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut file| {
+                std::io::Write::write_all(
+                    &mut file,
+                    format!("{timestamp} thread '{thread}' panicked at {location}: {message}\n")
+                        .as_bytes(),
+                )
+            });
+    }));
+}
+
+/// Returns the directory that receives crash log files.
+fn panic_log_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os(LOG_DIR_ENV)
+        && !dir.is_empty()
+    {
+        return Ok(PathBuf::from(dir));
+    }
+
+    resolve_platform_log_dir(
+        std::env::var_os("HOME"),
+        std::env::var_os("XDG_STATE_HOME"),
+        std::env::var_os("LOCALAPPDATA"),
+    )
+}
+
+/// Renames an oversized crash log aside so a single file never grows
+/// unboundedly; the previous content stays available as `crash.log.old`.
+fn rotate_crash_log(log_path: &std::path::Path) {
+    const CRASH_LOG_MAX_BYTES: u64 = 1024 * 1024;
+    let Ok(metadata) = std::fs::metadata(log_path) else {
+        return;
+    };
+    if metadata.len() > CRASH_LOG_MAX_BYTES {
+        let rotated = log_path.with_extension("log.old");
+        let _ = std::fs::rename(log_path, rotated);
+    }
+}
+
+/// The unused parameters keep a single signature across platforms so the
+/// resolution rules stay testable without mutating process environment.
+#[cfg(target_os = "macos")]
+fn resolve_platform_log_dir(
+    home: Option<std::ffi::OsString>,
+    _xdg_state_home: Option<std::ffi::OsString>,
+    _localappdata: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    let home = home.context("the HOME environment variable is not set")?;
+    Ok(PathBuf::from(home)
+        .join("Library")
+        .join("Logs")
+        .join("zmail"))
+}
+
+/// The unused parameters keep a single signature across platforms so the
+/// resolution rules stay testable without mutating process environment.
+#[cfg(target_os = "windows")]
+fn resolve_platform_log_dir(
+    _home: Option<std::ffi::OsString>,
+    _xdg_state_home: Option<std::ffi::OsString>,
+    localappdata: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    let localappdata = localappdata.context("the LOCALAPPDATA environment variable is not set")?;
+    Ok(PathBuf::from(localappdata).join("zmail").join("logs"))
+}
+
+/// The unused parameters keep a single signature across platforms so the
+/// resolution rules stay testable without mutating process environment.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn resolve_platform_log_dir(
+    home: Option<std::ffi::OsString>,
+    xdg_state_home: Option<std::ffi::OsString>,
+    _localappdata: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    if let Some(xdg) = xdg_state_home
+        && !xdg.is_empty()
+        && PathBuf::from(&xdg).is_absolute()
+    {
+        return Ok(PathBuf::from(xdg).join("zmail"));
+    }
+
+    let home = home.context("neither XDG_STATE_HOME nor HOME is set")?;
+    Ok(PathBuf::from(home)
+        .join(".local")
+        .join("state")
+        .join("zmail"))
+}
+
 /// Moves a legacy store directory to the platform data directory.
 fn migrate_legacy_store(legacy: &PathBuf, target: &std::path::Path) -> Result<()> {
     if target.exists() {
@@ -1872,6 +2030,65 @@ mod tests {
             resolve_platform_data_dir(Some("/home/tester".into()), Some("relative".into()), None)
                 .expect("resolution should succeed");
         assert_eq!(dir, PathBuf::from("/home/tester/.local/share/zmail"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn log_dir_prefers_absolute_xdg_state_home() {
+        let dir = resolve_platform_log_dir(None, Some("/custom/state".into()), None)
+            .expect("resolution should succeed");
+        assert_eq!(dir, PathBuf::from("/custom/state/zmail"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn log_dir_falls_back_to_home_state() {
+        let dir =
+            resolve_platform_log_dir(Some("/home/tester".into()), Some("relative".into()), None)
+                .expect("resolution should succeed");
+        assert_eq!(dir, PathBuf::from("/home/tester/.local/state/zmail"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_log_dir_uses_library_logs() {
+        let dir = resolve_platform_log_dir(Some("/Users/tester".into()), None, None)
+            .expect("resolution should succeed");
+        assert_eq!(dir, PathBuf::from("/Users/tester/Library/Logs/zmail"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_log_dir_uses_localappdata() {
+        let dir =
+            resolve_platform_log_dir(None, None, Some("C:\\Users\\tester\\AppData\\Local".into()))
+                .expect("resolution should succeed");
+        assert_eq!(
+            dir,
+            PathBuf::from("C:\\Users\\tester\\AppData\\Local")
+                .join("zmail")
+                .join("logs")
+        );
+    }
+
+    #[test]
+    fn panic_hook_appends_to_the_crash_log() {
+        let log_dir = temp_dir("crash-log");
+        let previous_hook = std::panic::take_hook();
+        install_panic_hook(&log_dir.join(CRASH_LOG_FILE_NAME));
+
+        std::thread::Builder::new()
+            .name("crash-probe".to_string())
+            .spawn(|| panic!("crash-log probe"))
+            .expect("failed to spawn the probe thread")
+            .join()
+            .expect_err("the probe thread should panic");
+        std::panic::set_hook(previous_hook);
+
+        let report = std::fs::read_to_string(log_dir.join(CRASH_LOG_FILE_NAME))
+            .expect("the crash log should exist");
+        assert!(report.contains("thread 'crash-probe' panicked"), "{report}");
+        assert!(report.contains("crash-log probe"), "{report}");
     }
 
     #[cfg(target_os = "macos")]
