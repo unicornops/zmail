@@ -5,7 +5,13 @@
 
 ### Features
 
+* warn about lookalike sender domains and Reply-To mismatches ([#108](https://github.com/unicornops/zmail/issues/108)) ([6967868](https://github.com/unicornops/zmail/commit/69678681624b04fb09cf62bb93d1ba7964d7bfef))
 * keep a crash log for GUI launches ([#105](https://github.com/unicornops/zmail/issues/105)) ([f5f38d1](https://github.com/unicornops/zmail/commit/f5f38d1b0512c8dd9b3bb545b91bbf82b3534fc2))
+
+### Bug Fixes
+
+* **release:** configure git identity before complete-mode commits ([#110](https://github.com/unicornops/zmail/issues/110)) ([1228b66](https://github.com/unicornops/zmail/commit/1228b6626193d223eecb83a5f3b9c2df90d9b57d))
+* **deps:** bump the mail and TLS stacks past the 2026 advisories ([#104](https://github.com/unicornops/zmail/issues/104)) ([636555a](https://github.com/unicornops/zmail/commit/636555a368b98804859a88f1447a7185ce9fb994))
 
 ## [0.8.1](https://github.com/unicornops/zmail/compare/v0.8.0...v0.8.1) (2026-10-14)
 
