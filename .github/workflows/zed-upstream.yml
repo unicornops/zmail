@@ -1,0 +1,100 @@
+name: Zed Upstream
+
+# Keeps the GPUI git pin on the latest Zed stable release (issue #113).
+# When Zed ships a newer stable release than the tag in Cargo.toml, this
+# opens - or updates - a single pull request that bumps the pin, the Rust
+# toolchain, the mirrored patches and Cargo.lock. See docs/upstream/zed.md.
+on:
+  schedule:
+    # Mondays, 06:17 UTC.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Zed stable tag to pin (e.g. v1.25.0); empty means the latest stable release"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: zed-upstream
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump Zed GPUI
+    runs-on: ubuntu-latest
+    env:
+      BRANCH: chore/zed-gpui-bump
+      # Pull requests opened with the default GITHUB_TOKEN do not trigger CI;
+      # RELEASE_PLEASE_TOKEN, when configured, does (as in release-please.yml).
+      PUSH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN != '' && secrets.RELEASE_PLEASE_TOKEN || github.token }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ env.PUSH_TOKEN }}
+
+      - name: Read the pinned Rust toolchain
+        id: toolchain
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Cache Cargo git dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/git/db
+          key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-git-${{ runner.os }}-
+
+      - name: Bump the pin when Zed has a newer stable release
+        id: bump
+        env:
+          # Read-only calls against the public Zed repository.
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          PR_BODY_FILE: ${{ runner.temp }}/zed-upstream-pr-body.md
+          # The bump may move rust-toolchain.toml to a newer channel.
+          RUSTUP_AUTO_INSTALL: "1"
+        run: scripts/bump-zed-gpui.sh "${INPUT_TAG}"
+
+      - name: Open or update the bump pull request
+        if: steps.bump.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ env.PUSH_TOKEN }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          BODY_FILE: ${{ steps.bump.outputs.body_file }}
+        run: |
+          set -euo pipefail
+          title="chore(deps): bump Zed GPUI to ${TAG}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Skip the push when the open PR branch already carries exactly
+          # this result, so a weekly re-run does not restart its CI.
+          if git fetch --quiet origin "${BRANCH}" 2>/dev/null \
+            && git diff --quiet FETCH_HEAD -- . ; then
+            echo "The ${BRANCH} branch is already up to date."
+          else
+            git checkout -B "${BRANCH}"
+            git commit --all --message "${title}"
+            git push --force origin "HEAD:${BRANCH}"
+          fi
+
+          number="$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number // ""')"
+          if [[ -n "${number}" ]]; then
+            gh pr edit "${number}" --title "${title}" --body-file "${BODY_FILE}"
+            echo "Updated pull request #${number}"
+          else
+            gh pr create --base main --head "${BRANCH}" --title "${title}" --body-file "${BODY_FILE}"
+          fi
