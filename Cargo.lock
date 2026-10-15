@@ -8429,6 +8429,9 @@ dependencies = [
 [[package]]
 name = "zmail-core"
 version = "0.0.1"
+dependencies = [
+ "chrono",
+]
 
 [[package]]
 name = "zmail-imap"

@@ -2,7 +2,9 @@
 
 use std::fmt;
 
+pub mod participants;
 pub mod text;
+pub mod time;
 
 /// Static application metadata.
 pub const APP_NAME: &str = "Zmail";
