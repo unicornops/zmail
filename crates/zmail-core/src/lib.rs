@@ -924,6 +924,8 @@ pub struct ThreadMessage {
     pub id: i64,
     /// Sender display string.
     pub sender: String,
+    /// Reply-To header value, when the message carries one.
+    pub reply_to: Option<String>,
     /// Recipient summary.
     pub recipients: String,
     /// Subject line.
@@ -1196,6 +1198,8 @@ pub struct MessageSnapshot {
     pub identity_email: String,
     /// Sender display string.
     pub sender: String,
+    /// Reply-To header value, when the message carries one.
+    pub reply_to: Option<String>,
     /// Recipient summary line.
     pub recipients: String,
     /// Subject line.

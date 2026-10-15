@@ -42,6 +42,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0009_message_attachments", MESSAGE_ATTACHMENTS_SCHEMA),
     ("0010_account_oauth2_client", ACCOUNT_OAUTH2_CLIENT_SCHEMA),
     ("0011_account_disk_budget", ACCOUNT_DISK_BUDGET_SCHEMA),
+    ("0012_message_reply_to", MESSAGE_REPLY_TO_SCHEMA),
 ];
 
 const PHASE2_SCHEMA: &str = r#"
@@ -285,6 +286,10 @@ ALTER TABLE accounts ADD COLUMN oauth2_access_expires_at INTEGER;
 
 const ACCOUNT_DISK_BUDGET_SCHEMA: &str = r#"
 ALTER TABLE accounts ADD COLUMN cache_policy_disk_budget_mb INTEGER;
+"#;
+
+const MESSAGE_REPLY_TO_SCHEMA: &str = r#"
+ALTER TABLE messages ADD COLUMN reply_to TEXT;
 "#;
 
 /// Rebuilds the full-text search document of one thread from stored rows.
@@ -1154,6 +1159,7 @@ impl LocalStore {
                             COALESCE(messages.remote_id, ''),
                             identities.email_address,
                             messages.sender,
+                            messages.reply_to,
                             messages.recipients,
                             messages.subject,
                             messages.body_preview,
@@ -1174,15 +1180,16 @@ impl LocalStore {
                             remote_id: row.get(0)?,
                             identity_email: row.get(1)?,
                             sender: row.get(2)?,
-                            recipients: row.get(3)?,
-                            subject: row.get(4)?,
-                            body_preview: row.get(5)?,
-                            body_text: row.get(6)?,
-                            sanitized_html: row.get(7)?,
-                            has_remote_content: row.get::<_, bool>(8)?,
-                            is_read: row.get::<_, bool>(9)?,
-                            is_flagged: row.get::<_, bool>(10)?,
-                            received_at: row.get(11)?,
+                            reply_to: row.get(3)?,
+                            recipients: row.get(4)?,
+                            subject: row.get(5)?,
+                            body_preview: row.get(6)?,
+                            body_text: row.get(7)?,
+                            sanitized_html: row.get(8)?,
+                            has_remote_content: row.get::<_, bool>(9)?,
+                            is_read: row.get::<_, bool>(10)?,
+                            is_flagged: row.get::<_, bool>(11)?,
+                            received_at: row.get(12)?,
                             attachments: Vec::new(),
                         })
                     })?
@@ -1376,6 +1383,7 @@ impl LocalStore {
             SELECT
                 messages.id,
                 messages.sender,
+                messages.reply_to,
                 messages.recipients,
                 messages.subject,
                 messages.body_preview,
@@ -1393,9 +1401,9 @@ impl LocalStore {
 
         let mut messages = statement
             .query_map(params![thread_id], |row| {
-                let body_preview = row.get::<_, String>(4)?;
-                let body_text = row.get::<_, Option<String>>(5)?;
-                let sanitized_html = row.get::<_, Option<String>>(6)?;
+                let body_preview = row.get::<_, String>(5)?;
+                let body_text = row.get::<_, Option<String>>(6)?;
+                let sanitized_html = row.get::<_, Option<String>>(7)?;
                 let (rendered_body, render_mode) = renderable_body(
                     &body_preview,
                     body_text.as_deref(),
@@ -1405,17 +1413,18 @@ impl LocalStore {
                 Ok(ThreadMessage {
                     id: row.get(0)?,
                     sender: row.get(1)?,
-                    recipients: row.get(2)?,
-                    subject: row.get(3)?,
+                    reply_to: row.get(2)?,
+                    recipients: row.get(3)?,
+                    subject: row.get(4)?,
                     body_preview,
                     body_text,
                     sanitized_html,
                     rendered_body,
                     render_mode,
-                    is_read: row.get::<_, bool>(7)?,
-                    is_flagged: row.get::<_, bool>(8)?,
-                    has_remote_content: row.get::<_, bool>(9)?,
-                    received_at: row.get(10)?,
+                    is_read: row.get::<_, bool>(8)?,
+                    is_flagged: row.get::<_, bool>(9)?,
+                    has_remote_content: row.get::<_, bool>(10)?,
+                    received_at: row.get(11)?,
                     attachments: Vec::new(),
                 })
             })?
@@ -4182,6 +4191,7 @@ fn merge_mailbox_threads(
                     remote_id,
                     identity_id,
                     sender,
+                    reply_to,
                     recipients,
                     subject,
                     body_preview,
@@ -4192,13 +4202,14 @@ fn merge_mailbox_threads(
                     is_flagged,
                     received_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                 "#,
                     params![
                         thread_row_id,
                         message.remote_id,
                         identity_id,
                         message.sender,
+                        message.reply_to,
                         message.recipients,
                         message.subject,
                         message.body_preview,
@@ -4302,6 +4313,7 @@ fn stored_thread_matches(
         if incoming_has_body {
             if stored.identity_id != *identity_id
                 || stored.sender != message.sender
+                || stored.reply_to != message.reply_to
                 || stored.recipients != message.recipients
                 || stored.subject != message.subject
                 || stored.body_preview != message.body_preview
@@ -4316,6 +4328,7 @@ fn stored_thread_matches(
             }
         } else if stored.identity_id != *identity_id
             || stored.sender != message.sender
+            || stored.reply_to != message.reply_to
             || stored.recipients != message.recipients
             || stored.subject != message.subject
             || stored.is_read != *is_read
@@ -4416,6 +4429,7 @@ struct StoredMessage {
     remote_id: String,
     identity_id: i64,
     sender: String,
+    reply_to: Option<String>,
     recipients: String,
     subject: String,
     body_preview: String,
@@ -4465,7 +4479,7 @@ fn load_stored_messages(
 ) -> Result<Vec<StoredMessage>> {
     let mut statement = transaction.prepare(
         r#"
-        SELECT id, COALESCE(remote_id, ''), identity_id, sender, recipients, subject,
+        SELECT id, COALESCE(remote_id, ''), identity_id, sender, reply_to, recipients, subject,
                body_preview, body_text, sanitized_html, has_remote_content,
                is_read, is_flagged, received_at
         FROM messages
@@ -4478,15 +4492,16 @@ fn load_stored_messages(
             remote_id: row.get(1)?,
             identity_id: row.get(2)?,
             sender: row.get(3)?,
-            recipients: row.get(4)?,
-            subject: row.get(5)?,
-            body_preview: row.get(6)?,
-            body_text: row.get(7)?,
-            sanitized_html: row.get(8)?,
-            has_remote_content: row.get(9)?,
-            is_read: row.get(10)?,
-            is_flagged: row.get(11)?,
-            received_at: row.get(12)?,
+            reply_to: row.get(4)?,
+            recipients: row.get(5)?,
+            subject: row.get(6)?,
+            body_preview: row.get(7)?,
+            body_text: row.get(8)?,
+            sanitized_html: row.get(9)?,
+            has_remote_content: row.get(10)?,
+            is_read: row.get(11)?,
+            is_flagged: row.get(12)?,
+            received_at: row.get(13)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -5096,6 +5111,7 @@ mod tests {
                         remote_id: "message-1".to_owned(),
                         identity_email: primary_identity,
                         sender: "Kai Santos".to_owned(),
+                        reply_to: None,
                         recipients: target.username.clone(),
                         subject: "Phase 2 review".to_owned(),
                         body_preview: "The background supervisor now persists sync state."
@@ -5138,6 +5154,82 @@ mod tests {
             .expect("preview should exist");
         assert_eq!(preview.mailbox_name, "Inbox");
         assert_eq!(preview.subject, "Phase 2 review");
+    }
+
+    #[test]
+    fn reply_to_survives_the_snapshot_roundtrip() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let target = store
+            .sync_target(account_id)
+            .expect("target should load")
+            .expect("account should exist");
+        let primary_identity = target.identities[0].email_address.clone();
+
+        let snapshot = AccountSyncSnapshot {
+            checkpoint: "imap:1".to_owned(),
+            detail: "sync complete".to_owned(),
+            identities: None,
+            mailboxes: vec![MailboxSnapshot {
+                name: "Inbox".to_owned(),
+                role: Some("inbox".to_owned()),
+                threads: vec![ThreadSnapshot {
+                    remote_thread_id: "thread-1".to_owned(),
+                    subject: "Check your account".to_owned(),
+                    participants: "Security <security@paypa1.com>".to_owned(),
+                    preview: "Urgent: verify your account now.".to_owned(),
+                    is_flagged: false,
+                    has_attachments: false,
+                    unread_count: 1,
+                    latest_message_at: "2026-10-15T09:00:00Z".to_owned(),
+                    messages: vec![MessageSnapshot {
+                        remote_id: "message-1".to_owned(),
+                        identity_email: primary_identity,
+                        sender: "Security <security@paypa1.com>".to_owned(),
+                        reply_to: Some("evil <attacker@evil.example>".to_owned()),
+                        recipients: target.username.clone(),
+                        subject: "Check your account".to_owned(),
+                        body_preview: "Urgent: verify your account now.".to_owned(),
+                        body_text: Some("Urgent: verify your account now.".to_owned()),
+                        sanitized_html: None,
+                        has_remote_content: false,
+                        is_read: false,
+                        is_flagged: false,
+                        received_at: "2026-10-15T09:00:00Z".to_owned(),
+                        attachments: Vec::new(),
+                    }],
+                }],
+            }],
+        };
+
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+
+        let mailboxes = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes should load");
+        let threads = store
+            .list_threads(mailboxes[0].id, 0..50)
+            .expect("threads should load");
+        let view = store
+            .thread_view(threads[0].id)
+            .expect("thread should load")
+            .expect("thread should exist");
+        assert_eq!(
+            view.messages[0].reply_to.as_deref(),
+            Some("evil <attacker@evil.example>")
+        );
+
+        // The stored Reply-To participates in the sender-safety analysis.
+        let report = zmail_security::sender_safety::analyze_sender_identity(
+            &view.messages[0].sender,
+            view.messages[0].reply_to.as_deref(),
+        );
+        assert_eq!(report.lookalike_of, Some("paypal.com".to_owned()));
+        assert_eq!(report.reply_to_mismatch, Some("evil.example".to_owned()));
     }
 
     #[test]
@@ -5198,6 +5290,7 @@ mod tests {
                             .map(str::to_owned)
                             .unwrap_or_else(|| "phase2@localhost".to_owned()),
                         sender: "Kai Santos".to_owned(),
+                        reply_to: None,
                         recipients: "phase2@localhost".to_owned(),
                         subject: subject.to_owned(),
                         body_preview: body.to_owned(),
@@ -5741,6 +5834,7 @@ mod tests {
                         remote_id: "message-1".to_owned(),
                         identity_email: original_target.identities[0].email_address.clone(),
                         sender: "Kai Santos".to_owned(),
+                        reply_to: None,
                         recipients: original_target.username.clone(),
                         subject: "Initial message".to_owned(),
                         body_preview: "Initial body preview".to_owned(),
@@ -5785,6 +5879,7 @@ mod tests {
                         remote_id: "message-1".to_owned(),
                         identity_email: refreshed_identity.email_address.clone(),
                         sender: "James User".to_owned(),
+                        reply_to: None,
                         recipients: refreshed_identity.email_address.clone(),
                         subject: "Updated message".to_owned(),
                         body_preview: "Updated body preview".to_owned(),
@@ -5854,6 +5949,7 @@ mod tests {
                         remote_id: "message-2".to_owned(),
                         identity_email,
                         sender: "Kai Santos".to_owned(),
+                        reply_to: None,
                         recipients: target.username.clone(),
                         subject: "Searchable incident".to_owned(),
                         body_preview: "Fallback preview".to_owned(),
@@ -6416,6 +6512,7 @@ mod tests {
                             remote_id: "message-3".to_owned(),
                             identity_email: identity_email.clone(),
                             sender: "Ops".to_owned(),
+                            reply_to: None,
                             recipients: target.username.clone(),
                             subject: "Inbox task".to_owned(),
                             body_preview: "Handle mailbox ops".to_owned(),

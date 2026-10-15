@@ -1,5 +1,7 @@
 //! Secret storage and security defaults for Zmail.
 
+pub mod sender_safety;
+
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},

@@ -501,6 +501,7 @@ fn render_thread_message(index: usize, message: &ThreadMessage, colors: &UiColor
                                     .children(message_attachments(message, colors)),
                             )
                         })
+                        .children(sender_safety_banner(message, colors))
                         .child(div().text_sm().child(message.rendered_body.clone())),
                 ),
         )
@@ -648,6 +649,46 @@ fn message_status_badges(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyE
     }
 
     badges
+}
+
+/// Renders the inline phishing-warning banner for a message's sender
+/// identity (issue #91): lookalike From domains and Reply-To mismatches.
+/// Information-first and non-blocking, matching the remote-content
+/// stance in docs/phase5-hardening.md.
+fn sender_safety_banner(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyElement> {
+    let report = zmail_security::sender_safety::analyze_sender_identity(
+        &message.sender,
+        message.reply_to.as_deref(),
+    );
+    if report.is_safe() {
+        return Vec::new();
+    }
+
+    vec![
+        div()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(colors.warning))
+            .bg(rgb(colors.warning_background))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .children(
+                report
+                    .warnings()
+                    .into_iter()
+                    .map(|warning| {
+                        div()
+                            .text_sm()
+                            .text_color(rgb(colors.warning))
+                            .child(warning)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .into_any_element(),
+    ]
 }
 
 fn metadata_pair(label: &str, value: &str, colors: &UiColors) -> gpui::Div {
