@@ -10,7 +10,7 @@ description = "Zmail desktop email client"
 [package.metadata.deb]
 maintainer = "UnicornOps <noreply@unicornops.ie>"
 copyright = "2026, UnicornOps"
-depends = "libxkbcommon0, libdbus-1-3, libasound2t64 | libasound2, libfontconfig1, libfreetype6"
+depends = "libxkbcommon0, libxkbcommon-x11-0, libdbus-1-3, libasound2t64 | libasound2, libfontconfig1, libfreetype6, libvulkan1 | libegl1"
 section = "mail"
 priority = "optional"
 assets = [

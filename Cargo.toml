@@ -22,7 +22,7 @@ resolver = "3"
 edition = "2024"
 license = "GPL-3.0-only"
 publish = false
-rust-version = "1.94"
+rust-version = "1.98"
 version = "0.0.1"
 
 [workspace.dependencies]
@@ -30,7 +30,11 @@ anyhow = "1"
 async-imap = { version = "0.11.2", default-features = false, features = ["runtime-tokio"] }
 chrono = "0.4"
 futures-util = "0.3"
-gpui = { version = "0.2.2" }
+# GPUI is pinned to a Zed stable release tag; see docs/upstream/zed.md. The
+# weekly `zed-upstream` workflow bumps every `tag = "v..."` on these lines
+# together, so keep them on the same tag.
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
 jmap-client = { version = "0.4.0", default-features = false, features = ["async", "rustls"] }
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 mail-send = "0.6.2"
@@ -57,3 +61,15 @@ unsafe_code = "forbid"
 dbg_macro = "deny"
 todo = "deny"
 unwrap_used = "deny"
+
+# Zed's root Cargo.toml patches these crates.io crates, but `[patch]` sections
+# only apply to the workspace that declares them, so a git consumer of GPUI
+# gets the unpatched crates.io releases unless it repeats the patches. We
+# mirror the two that change GPUI's own runtime behaviour: the async-task
+# executor (gpui) and the calloop event loop's idle budgeting (gpui_linux).
+# Zed's other patches (tree-sitter, livekit, notify, async-process's macOS
+# PID adoption, windows-capture) cover crates this build does not compile.
+# The `zed-upstream` workflow re-syncs these revisions from the pinned tag.
+[patch.crates-io]
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }

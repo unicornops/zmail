@@ -19,9 +19,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Application, AssetSource, Bounds, Context, FocusHandle, IntoElement, Render,
-    Styled, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size,
+    AnyElement, App, AssetSource, Bounds, Context, FocusHandle, IntoElement, Render, Styled,
+    TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions, div, prelude::*,
+    px, rgb, size,
 };
 use zmail_core::{
     APP_NAME, AccountOverview, AccountSummary, AppBootstrap, DraftSummary, IdentitySummary,
@@ -78,7 +78,10 @@ pub fn run(
 ) {
     let notifier = Arc::new(zmail_notify::NewMailNotifier::os_backed());
     sync_service.set_notifier(notifier.clone());
-    Application::new()
+    // `gpui_platform::application()` picks the OS backend (macOS, Windows,
+    // or Linux Wayland/X11) and leaves AccessKit enabled; never switch to
+    // `Application::new_inaccessible`, which turns screen readers off.
+    gpui_platform::application()
         .with_assets(asset_source)
         .run(move |cx: &mut App| {
             let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);

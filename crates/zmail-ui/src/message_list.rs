@@ -239,7 +239,7 @@ impl WorkspaceView {
                                             .collect()
                                     }),
                                 )
-                                .track_scroll(self.thread_scroll.clone())
+                                .track_scroll(&self.thread_scroll)
                                 .h_full(),
                             )
                             .into_any_element()

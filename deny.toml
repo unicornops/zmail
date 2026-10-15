@@ -4,15 +4,8 @@ all-features = true
 [advisories]
 version = 2
 ignore = [
-    { id = "RUSTSEC-2025-0052", reason = "async-std is pulled transitively by the pinned GPUI stack and has no safe repo-local replacement yet" },
-    { id = "RUSTSEC-2024-0384", reason = "instant is pulled transitively by the pinned GPUI stack and has no safe repo-local replacement yet" },
-    { id = "RUSTSEC-2024-0436", reason = "paste is pulled transitively by the pinned GPUI stack and has no safe repo-local replacement yet" },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is pulled transitively by the pinned GPUI stack and has no safe repo-local replacement yet" },
-    { id = "RUSTSEC-2026-0105", reason = "core2 is pulled transitively by the rav1e/ravif image stack and has no safe repo-local replacement yet" },
-    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is pulled transitively by the pinned GPUI stack and has no safe repo-local replacement yet" },
+    { id = "RUSTSEC-2024-0436", reason = "paste is pulled transitively by the pinned GPUI macOS stack (metal) and has no safe repo-local replacement yet" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser is pulled transitively by the pinned GPUI font stack and has no safe repo-local replacement yet" },
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml is pinned below 0.41 by the wayland/GPUI stack and has no safe repo-local replacement yet" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml is pinned below 0.41 by the wayland/GPUI stack and has no safe repo-local replacement yet" },
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz is pulled transitively by the pinned GPUI font stack and has no safe repo-local replacement yet" },
 ]
 
@@ -46,3 +39,17 @@ allow-wildcard-paths = true
 [sources]
 unknown-git = "deny"
 unknown-registry = "deny"
+# Exactly the git repositories the pinned GPUI needs (docs/upstream/zed.md).
+# Each revision is fixed by Cargo.lock; keep this list in step with Zed.
+allow-git = [
+    # GPUI and its platform crates, pinned to a Zed stable release tag.
+    "https://github.com/zed-industries/zed",
+    # Zed forks GPUI depends on directly (Linux/Windows fonts, X11 input
+    # methods, and wasm threads for gpui_web/scheduler on wasm targets).
+    "https://github.com/zed-industries/font-kit",
+    "https://github.com/zed-industries/xim-rs.git",
+    "https://github.com/zed-industries/wasm_thread",
+    # Mirrors of the [patch.crates-io] entries in Zed's root Cargo.toml.
+    "https://github.com/smol-rs/async-task.git",
+    "https://github.com/zed-industries/calloop",
+]

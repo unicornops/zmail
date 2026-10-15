@@ -1239,7 +1239,7 @@ pub struct MessageSnapshot {
 pub struct UpstreamPins {
     /// Zed commit used as the recorded reference point.
     pub zed_commit: String,
-    /// GPUI crate version used in the workspace.
+    /// Zed release tag the workspace's GPUI git dependency is pinned to.
     pub gpui_version: String,
 }
 
