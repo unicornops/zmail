@@ -206,8 +206,11 @@ rewrite_changelog() {
 
 # -----------------------------------------------------------------------------
 # Mode selection: an open release PR completes its changelog; otherwise
-# bootstrap the release PR from main.
+# bootstrap the release PR from main. Both modes commit, so identity is
+# configured for the checkout first; CI runners have no global git user.
 # -----------------------------------------------------------------------------
+git config user.name "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 OPEN_PR_NUMBER="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // ""')"
 
 if [ -n "$OPEN_PR_NUMBER" ]; then
@@ -237,8 +240,6 @@ if [ -n "$OPEN_PR_NUMBER" ]; then
 fi
 
 echo "Bootstrapping the ${NEXT_VERSION} release PR"
-git config user.name "github-actions[bot]"
-git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git checkout -B "$BRANCH" origin/main
 
 sed -i "s/^version = \"${PREV_VERSION}\"/version = \"${NEXT_VERSION}\"/" "${PACKAGE_PATH}/Cargo.toml"
