@@ -1012,9 +1012,17 @@ fn collect_arrivals(
                 Some(existing) => thread.messages.len() > existing.messages.len(),
             };
             if gained {
+                // The notification names whoever sent the newest message,
+                // not every participant in the thread.
+                let sender = thread
+                    .messages
+                    .iter()
+                    .max_by(|left, right| left.received_at.cmp(&right.received_at))
+                    .map(|message| zmail_core::participants::sender_display_name(&message.sender))
+                    .unwrap_or_else(|| thread.participants.clone());
                 arrivals.push(NewMailArrival {
                     subject: thread.subject.clone(),
-                    sender: thread.participants.clone(),
+                    sender,
                 });
             }
         }
@@ -1331,6 +1339,10 @@ mod tests {
         assert_eq!(arrivals.len(), 2, "only new and grown threads arrive");
         assert_eq!(arrivals[0].subject, "Grown subject");
         assert_eq!(arrivals[1].subject, "New subject");
+        assert_eq!(
+            arrivals[1].sender, "Sam Sender",
+            "the notification names the newest message's sender"
+        );
     }
 
     #[test]
@@ -1366,7 +1378,7 @@ mod tests {
                 .map(|index| MessageSnapshot {
                     remote_id: format!("{remote_id}-{index}"),
                     identity_email: "user@example.test".to_owned(),
-                    sender: "sender@example.test".to_owned(),
+                    sender: "Sam Sender <sender@example.test>".to_owned(),
                     reply_to: None,
                     recipients: "user@example.test".to_owned(),
                     subject: subject.to_owned(),

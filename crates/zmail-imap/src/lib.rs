@@ -1029,8 +1029,8 @@ fn recompute_thread_aggregates(thread: &mut ThreadSnapshot) {
         thread.latest_message_at = newest.received_at.clone();
         thread.subject = newest.subject.clone();
         thread.preview = newest.body_preview.clone();
-        thread.participants = format!("{} -> {}", newest.sender, newest.recipients);
     }
+    thread.participants = zmail_core::participants::thread_participants(&thread.messages);
     thread.unread_count = thread
         .messages
         .iter()
@@ -1044,7 +1044,6 @@ fn recompute_thread_aggregates(thread: &mut ThreadSnapshot) {
 struct ImapThreadAccumulator {
     remote_thread_id: String,
     subject: String,
-    participants: String,
     preview: String,
     is_flagged: bool,
     has_attachments: bool,
@@ -1061,7 +1060,6 @@ impl ImapThreadAccumulator {
             self.latest_message_at = message.received_at.clone();
             self.subject = message.subject.clone();
             self.preview = message.body_preview.clone();
-            self.participants = format!("{} -> {}", message.sender, message.recipients);
         }
         self.is_flagged |= message.is_flagged;
         self.unread_count += usize::from(!message.is_read);
@@ -1163,10 +1161,6 @@ fn accumulate_fetch(
         std::collections::btree_map::Entry::Vacant(entry) => entry.insert(ImapThreadAccumulator {
             remote_thread_id: key,
             subject: message_snapshot.subject.clone(),
-            participants: format!(
-                "{} -> {}",
-                message_snapshot.sender, message_snapshot.recipients
-            ),
             preview: message_snapshot.body_preview.clone(),
             is_flagged: false,
             has_attachments: false,
@@ -1263,7 +1257,7 @@ impl ImapThreadAccumulator {
         ThreadSnapshot {
             remote_thread_id: self.remote_thread_id,
             subject: self.subject,
-            participants: self.participants,
+            participants: zmail_core::participants::thread_participants(&self.messages),
             preview: self.preview,
             is_flagged: self.is_flagged,
             has_attachments: self.has_attachments,
@@ -1768,6 +1762,10 @@ mod tests {
         assert_eq!(thread.latest_message_at, "2026-02-01T00:00:00Z");
         assert_eq!(thread.unread_count, 1, "the older message stays unread");
         assert!(thread.is_flagged);
+        assert_eq!(
+            thread.participants, "Older Sender, Newer Sender",
+            "participants list every sender, oldest first"
+        );
     }
 
     #[test]
