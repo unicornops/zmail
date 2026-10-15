@@ -36,6 +36,7 @@ This document records the Phase 5 hardening work that is present in-repo today a
 
 - Zmail does not upload crash reports or telemetry automatically.
 - Errors stay local to the terminal, local logs, and GitHub issues opened by users.
+- GUI installs a panic hook that appends one line per panic (timestamp, thread, location, message) to a crash log in the platform's state directory — `~/Library/Logs/zmail/crash.log` on macOS, `$XDG_STATE_HOME/zmail/crash.log` (default `~/.local/state/zmail/`) on Linux, and `%LOCALAPPDATA%\zmail\logs\crash.log` on Windows — because GUI launches from Finder, the Dock, or installers have no stderr to print to. The log rotates at 1 MiB (`crash.log.old` keeps the previous content) and `ZMAIL_LOG_DIR` overrides the directory for tests.
 - Secrets must never be written to crash output, debug logs, or release notes.
 - Dependency advisories are enforced in CI with `cargo audit` and `cargo deny`.
 

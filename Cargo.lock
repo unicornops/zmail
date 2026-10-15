@@ -8391,6 +8391,7 @@ name = "zmail-app"
 version = "0.8.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "rpassword",
  "url",
  "winresource",
