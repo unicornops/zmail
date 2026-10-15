@@ -33,7 +33,7 @@ futures-util = "0.3"
 gpui = { version = "0.2.2" }
 jmap-client = { version = "0.4.0", default-features = false, features = ["async", "rustls"] }
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
-mail-send = "0.5.2"
+mail-send = "0.6.2"
 mail-parser = "0.11.2"
 notify-rust = "4"
 rand = "0.8"
