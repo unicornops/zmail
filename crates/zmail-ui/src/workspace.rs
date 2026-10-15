@@ -10,7 +10,7 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
-use gpui::{Context, KeyDownEvent, SharedString, Timer, Window};
+use gpui::{Context, KeyDownEvent, Timer, Window};
 use url::Url;
 use zmail_core::{
     AccountSummary, AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, IdentitySummary,
@@ -28,7 +28,6 @@ use super::{DetailMode, ListMode, WorkspaceView};
 use crate::account_setup::AccountSetupState;
 use crate::compose::ComposeState;
 use crate::input::{EditorField, InputOutcome, UiBuffer};
-use crate::styles::UiColors;
 
 impl WorkspaceView {
     // -----------------------------------------------------------------------
@@ -88,9 +87,10 @@ impl WorkspaceView {
             account_setup: AccountSetupState::default(),
             store_error: None,
             status_message: None,
-            hovered_element: None,
             refresh_scheduled: false,
             hour_cycle: HourCycle::from_env(),
+            thread_view_cache: None,
+            status_generation: 0,
         };
 
         // New mail only notifies while the window is unfocused: the quiet
@@ -108,6 +108,7 @@ impl WorkspaceView {
         if view.accounts.is_empty() {
             view.detail_mode = DetailMode::AccountSetup;
             view.active_field = Some(EditorField::AccountDisplayName);
+            view.account_setup.notice = Some("Add your first mail account to get started.");
         }
 
         // A mailto launch pre-selects the draft's account and opens the
@@ -177,10 +178,12 @@ impl WorkspaceView {
     /// Clears `refresh_scheduled` so the debounce guard is reset.
     pub(crate) fn refresh_from_store(&mut self) {
         self.refresh_scheduled = false;
+        // The selected thread may have changed (hydrated bodies, flags,
+        // read state); the next render reloads it once.
+        self.thread_view_cache = None;
         match self.store.list_accounts() {
             Ok(accounts) => {
                 self.accounts = accounts;
-                self.store_error = None;
             }
             Err(error) => {
                 self.accounts.clear();
@@ -317,9 +320,16 @@ impl WorkspaceView {
     /// mutates the error field as a side effect.
     pub(crate) fn selected_thread_view(&mut self) -> Option<ThreadView> {
         let thread_id = self.selected_thread_id?;
+        if let Some(cached) = self
+            .thread_view_cache
+            .as_ref()
+            .filter(|cached| cached.id == thread_id)
+        {
+            return Some(cached.clone());
+        }
         match self.store.thread_view(thread_id) {
             Ok(thread) => {
-                self.store_error = None;
+                self.thread_view_cache = thread.clone();
                 thread
             }
             Err(error) => {
@@ -329,52 +339,61 @@ impl WorkspaceView {
         }
     }
 
-    /// Track whether a specific interactive element is hovered.
-    pub(crate) fn set_hovered_element(
-        &mut self,
-        element_id: SharedString,
-        hovered: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let changed = if hovered {
-            if self.hovered_element.as_ref() == Some(&element_id) {
-                false
-            } else {
-                self.hovered_element = Some(element_id);
-                true
-            }
-        } else if self.hovered_element.as_ref() == Some(&element_id) {
-            self.hovered_element = None;
-            true
-        } else {
-            false
-        };
-
-        if changed {
-            cx.notify();
-        }
+    /// Show a status message that dismisses itself after
+    /// [`STATUS_TOAST_DURATION`]. A newer message restarts the timer.
+    pub(crate) fn show_status(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.status_message = Some(message.into());
+        self.status_generation = self.status_generation.wrapping_add(1);
+        let generation = self.status_generation;
+        cx.spawn(async move |this, cx| {
+            Timer::after(STATUS_TOAST_DURATION).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.status_generation == generation {
+                    view.status_message = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
-    /// Whether the given element is the currently-hovered item.
-    pub(crate) fn is_hovered(&self, element_id: &SharedString) -> bool {
-        self.hovered_element.as_ref() == Some(element_id)
+    /// Dismiss the error banner. Errors stay until the user does this.
+    pub(crate) fn dismiss_error(&mut self, cx: &mut Context<Self>) {
+        self.store_error = None;
+        cx.notify();
     }
 
-    /// Resolve the background for a selectable / hoverable surface.
-    pub(crate) fn interactive_background(
-        &self,
-        element_id: &SharedString,
-        selected: bool,
-        base_background: u32,
-        colors: &UiColors,
-    ) -> u32 {
-        if selected {
-            colors.selected_background
-        } else if self.is_hovered(element_id) {
-            colors.hover_background
-        } else {
-            base_background
+    /// Marks the thread read once it has stayed open for
+    /// [`MARK_READ_DELAY`], through the same local-first store path (and
+    /// write-back queue) as the Mark Read button.
+    fn schedule_mark_read(&mut self, thread_id: i64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            Timer::after(MARK_READ_DELAY).await;
+            let _ = this.update(cx, |view, cx| {
+                view.mark_read_if_still_open(thread_id, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn mark_read_if_still_open(&mut self, thread_id: i64, cx: &mut Context<Self>) {
+        if self.selected_thread_id != Some(thread_id)
+            || !matches!(self.detail_mode, DetailMode::Reader)
+        {
+            return;
         }
+        let has_unread = self
+            .selected_thread_view()
+            .is_some_and(|thread| thread.unread_count > 0);
+        if !has_unread {
+            return;
+        }
+        match self.store.set_thread_read(thread_id, true) {
+            Ok(()) => self.refresh_from_store(),
+            Err(error) => self.store_error = Some(error.to_string()),
+        }
+        cx.notify();
     }
 
     /// Swap the active theme with the bundled alternate variant and trigger
@@ -408,10 +427,7 @@ impl WorkspaceView {
     pub(crate) fn select_mailbox(&mut self, mailbox_id: i64, cx: &mut Context<Self>) {
         self.selected_mailbox_id = Some(mailbox_id);
         self.selected_thread_id = match self.store.first_thread_id(mailbox_id) {
-            Ok(thread_id) => {
-                self.store_error = None;
-                thread_id
-            }
+            Ok(thread_id) => thread_id,
             Err(error) => {
                 self.store_error = Some(error.to_string());
                 None
@@ -433,6 +449,7 @@ impl WorkspaceView {
         self.selected_thread_id = Some(thread_id);
         self.detail_mode = DetailMode::Reader;
         self.hydrate_selected_thread_bodies(cx);
+        self.schedule_mark_read(thread_id, cx);
         cx.notify();
     }
 
@@ -486,7 +503,7 @@ impl WorkspaceView {
             .unwrap_or_default();
         match self.sync_service.sync_account(account_id) {
             Ok(_) => {
-                self.status_message = Some(format!("Syncing {account_name}…"));
+                self.show_status(format!("Syncing {account_name}…"), cx);
                 self.refresh_from_store();
                 self.schedule_refresh(window, cx);
             }
@@ -499,10 +516,10 @@ impl WorkspaceView {
     pub(crate) fn sync_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.sync_service.sync_all() {
             Ok(started) => {
-                self.status_message = Some(format!(
-                    "Syncing {}…",
-                    count_noun(started, "account", "accounts")
-                ));
+                self.show_status(
+                    format!("Syncing {}…", count_noun(started, "account", "accounts")),
+                    cx,
+                );
                 self.refresh_from_store();
                 self.schedule_refresh(window, cx);
             }
@@ -536,7 +553,6 @@ impl WorkspaceView {
                 self.search_results_query = query.to_owned();
                 self.list_mode = ListMode::Search;
                 self.detail_mode = DetailMode::Reader;
-                self.store_error = None;
             }
             Err(error) => self.store_error = Some(error.to_string()),
         }
@@ -550,7 +566,11 @@ impl WorkspaceView {
     /// Open the compose pane for a new draft, creating the draft in the store.
     pub(crate) fn open_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(account_id) = self.selected_account_id else {
-            self.open_account_setup(window, cx);
+            self.open_account_setup_with_notice(
+                Some("Add a mail account first. You can write messages once it is set up."),
+                window,
+                cx,
+            );
             return;
         };
         let Some(identity) = self
@@ -610,11 +630,14 @@ impl WorkspaceView {
                 self.list_mode = ListMode::Drafts;
                 self.detail_mode = DetailMode::Compose;
                 self.active_field = Some(EditorField::ComposeBody);
-                self.status_message = Some(if reply_all {
-                    "Reply-all draft ready.".to_owned()
-                } else {
-                    "Reply draft ready.".to_owned()
-                });
+                self.show_status(
+                    if reply_all {
+                        "Reply-all draft ready.".to_owned()
+                    } else {
+                        "Reply draft ready.".to_owned()
+                    },
+                    cx,
+                );
                 self.refresh_from_store();
                 window.focus(&self.focus_handle);
             }
@@ -657,12 +680,14 @@ impl WorkspaceView {
         } else if saved == 0 {
             self.store_error = Some("The selected thread has no attachments.".to_owned());
         } else {
-            self.store_error = None;
-            self.status_message = Some(format!(
-                "Saved {} to {}.",
-                count_noun(saved, "attachment", "attachments"),
-                destination.display()
-            ));
+            self.show_status(
+                format!(
+                    "Saved {} to {}.",
+                    count_noun(saved, "attachment", "attachments"),
+                    destination.display()
+                ),
+                cx,
+            );
         }
         cx.notify();
     }
@@ -681,7 +706,7 @@ impl WorkspaceView {
                 self.list_mode = ListMode::Drafts;
                 self.detail_mode = DetailMode::Compose;
                 self.active_field = Some(EditorField::ComposeTo);
-                self.status_message = Some("Forward draft ready.".to_owned());
+                self.show_status("Forward draft ready.".to_owned(), cx);
                 self.refresh_from_store();
                 window.focus(&self.focus_handle);
             }
@@ -796,7 +821,6 @@ impl WorkspaceView {
                 self.compose = Some(ComposeState::from_draft(draft));
                 self.selected_draft_id = Some(draft_id);
                 self.detail_mode = DetailMode::Compose;
-                self.store_error = None;
             }
             Ok(None) => self.store_error = Some("This draft no longer exists.".to_owned()),
             Err(error) => self.store_error = Some(error.to_string()),
@@ -828,9 +852,8 @@ impl WorkspaceView {
 
         match self.save_compose() {
             Ok(()) => {
-                self.store_error = None;
                 if let Some(draft_id) = draft_id {
-                    self.status_message = Some("Draft saved.".to_owned());
+                    self.show_status("Draft saved.".to_owned(), cx);
                     self.load_draft_into_compose(draft_id);
                     self.refresh_from_store();
                 }
@@ -857,7 +880,7 @@ impl WorkspaceView {
 
         match self.sync_service.queue_draft_and_send(draft_id) {
             Ok(_job_id) => {
-                self.status_message = Some("Message queued for sending.".to_owned());
+                self.show_status("Message queued for sending.".to_owned(), cx);
                 let _ = self.sync_service.process_outbox(Some(
                     self.compose
                         .as_ref()
@@ -954,7 +977,7 @@ impl WorkspaceView {
         match self.store.retry_outbox_job(job_id) {
             Ok(()) => {
                 let _ = self.sync_service.process_outbox(self.selected_account_id);
-                self.status_message = Some("Message queued for another send attempt.".to_owned());
+                self.show_status("Message queued for another send attempt.".to_owned(), cx);
                 self.refresh_from_store();
                 self.schedule_refresh(window, cx);
             }
@@ -969,6 +992,18 @@ impl WorkspaceView {
 
     /// Switch to the account setup detail pane.
     pub(crate) fn open_account_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_account_setup_with_notice(None, window, cx);
+    }
+
+    /// Switch to the account setup pane, explaining why it opened when the
+    /// user did not ask for it.
+    pub(crate) fn open_account_setup_with_notice(
+        &mut self,
+        notice: Option<&'static str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.account_setup.notice = notice;
         self.detail_mode = DetailMode::AccountSetup;
         self.active_field = Some(EditorField::AccountDisplayName);
         window.focus(&self.focus_handle);
@@ -978,6 +1013,14 @@ impl WorkspaceView {
     /// Validate and submit the account setup form, inserting the account into
     /// the store and triggering an initial sync.
     pub(crate) fn submit_account_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let errors = validate_account_form(&self.account_setup);
+        self.account_setup.errors = errors.into_iter().collect();
+        if let Some(first) = self.account_setup.errors.keys().next().copied() {
+            // Errors show under their fields; focus the first one.
+            self.active_field = Some(first);
+            cx.notify();
+            return;
+        }
         match self.build_account_from_form() {
             Ok((account, secret)) => match self.store.insert_account(&account) {
                 Ok(account_id) => {
@@ -1032,14 +1075,14 @@ impl WorkspaceView {
                     self.list_mode = ListMode::Mail;
                     self.account_setup = AccountSetupState::default();
                     self.active_field = None;
-                    self.status_message = Some(if oauth2_flow.is_some() {
+                    self.show_status(if oauth2_flow.is_some() {
                         format!(
                             "{} added. Finish signing in in your browser; the account syncs once you approve access.",
                             account.display_name
                         )
                     } else {
                         format!("{} added.", account.display_name)
-                    });
+                    }, cx);
                     // OAuth2 accounts sync from the authorization thread,
                     // once the grant is stored; syncing here would only
                     // record a missing-credentials failure.
@@ -1284,6 +1327,7 @@ impl WorkspaceView {
         let active_field = self.active_field.expect("active field is set");
         match outcome {
             InputOutcome::Changed => {
+                self.account_setup.errors.remove(&active_field);
                 if matches!(
                     active_field,
                     EditorField::ComposeTo
@@ -1339,6 +1383,13 @@ pub(crate) fn split_addresses(value: &str) -> Vec<String> {
         .map(str::to_owned)
         .collect()
 }
+
+/// How long a status message stays before it dismisses itself.
+const STATUS_TOAST_DURATION: Duration = Duration::from_secs(4);
+
+/// How long a thread stays open before it is marked read, so skimming
+/// past a message with the mouse does not mark it read.
+const MARK_READ_DELAY: Duration = Duration::from_millis(1500);
 
 /// Loopback port the UI OAuth2 flow listens on for the provider redirect,
 /// matching the CLI default.
@@ -1398,6 +1449,112 @@ fn custom_oauth2_client_from_form(form: &AccountSetupState) -> Result<zmail_auth
         redirect_port: OAUTH2_REDIRECT_PORT,
         extra_authorize_params: Vec::new(),
     })
+}
+
+/// Checks the account setup form and returns an error message for each
+/// field that needs fixing, so the form can show them beside the fields.
+/// It mirrors the checks in `build_account_from_form`.
+pub(crate) fn validate_account_form(form: &AccountSetupState) -> Vec<(EditorField, String)> {
+    let mut errors = Vec::new();
+    let mut require = |field: EditorField, value: &str, message: &str| {
+        if value.trim().is_empty() {
+            errors.push((field, message.to_owned()));
+            false
+        } else {
+            true
+        }
+    };
+
+    require(
+        EditorField::AccountDisplayName,
+        &form.display_name.text,
+        "Enter a name for this account.",
+    );
+    let has_endpoint = require(
+        EditorField::AccountEndpoint,
+        &form.endpoint.text,
+        match form.protocol {
+            ProtocolKind::Imap => {
+                "Enter the IMAP server, for example imaps://mail.example.com:993."
+            }
+            ProtocolKind::Jmap => "Enter the JMAP session URL.",
+        },
+    );
+    require(
+        EditorField::AccountUsername,
+        &form.username.text,
+        "Enter the username you sign in with.",
+    );
+    match form.auth {
+        AuthKind::Password => {
+            require(
+                EditorField::AccountPassword,
+                &form.password.text,
+                "Enter the password or app password.",
+            );
+        }
+        AuthKind::OAuth2 => {
+            require(
+                EditorField::AccountOauthClientId,
+                &form.oauth_client_id.text,
+                "Enter the OAuth2 client id.",
+            );
+            if form.protocol == ProtocolKind::Jmap {
+                require(
+                    EditorField::AccountOauthAuthorizationEndpoint,
+                    &form.oauth_authorization_endpoint.text,
+                    "Enter the authorization endpoint.",
+                );
+                require(
+                    EditorField::AccountOauthTokenEndpoint,
+                    &form.oauth_token_endpoint.text,
+                    "Enter the token endpoint.",
+                );
+            }
+        }
+    }
+    if form.protocol == ProtocolKind::Imap {
+        require(
+            EditorField::AccountSmtpHost,
+            &form.smtp_host.text,
+            "Enter the SMTP server.",
+        );
+    }
+
+    if has_endpoint && let Err(error) = validate_endpoint(form.protocol, form.endpoint.text.trim())
+    {
+        errors.push((EditorField::AccountEndpoint, error.to_string()));
+    }
+    if form.auth == AuthKind::OAuth2
+        && form.protocol == ProtocolKind::Imap
+        && form.oauth_preset.is_none()
+    {
+        errors.push((
+            EditorField::AccountOauthClientId,
+            "Choose Gmail or Microsoft 365 above.".to_owned(),
+        ));
+    }
+    if parse_disk_budget_mb(&form.disk_budget_mb.text).is_err() {
+        errors.push((
+            EditorField::AccountDiskBudget,
+            "Enter a whole number of MiB, or leave it empty.".to_owned(),
+        ));
+    }
+    if form.protocol == ProtocolKind::Imap {
+        if form.smtp_port.text.trim().parse::<u16>().is_err() {
+            errors.push((
+                EditorField::AccountSmtpPort,
+                "Enter a port number, for example 587.".to_owned(),
+            ));
+        }
+        if parse_submission_security(&form.smtp_security.text).is_err() {
+            errors.push((
+                EditorField::AccountSmtpSecurity,
+                "Use plain, starttls or implicit_tls.".to_owned(),
+            ));
+        }
+    }
+    errors
 }
 
 /// Return `Ok(trimmed)` or an error if `value` is empty or whitespace-only.
@@ -1538,8 +1695,51 @@ fn normalize_contact(value: &str) -> String {
 mod tests {
     use super::{
         AccountSetupState, custom_oauth2_client_from_form, normalize_contact, parse_disk_budget_mb,
-        prefixed_subject, split_contact_summary,
+        prefixed_subject, split_contact_summary, validate_account_form,
     };
+    use crate::input::EditorField;
+
+    #[test]
+    fn validate_account_form_reports_errors_per_field() {
+        let form = AccountSetupState::default();
+        let errors = validate_account_form(&form);
+        let fields = errors.iter().map(|(field, _)| *field).collect::<Vec<_>>();
+        assert!(fields.contains(&EditorField::AccountDisplayName));
+        assert!(fields.contains(&EditorField::AccountEndpoint));
+        assert!(fields.contains(&EditorField::AccountUsername));
+        assert!(fields.contains(&EditorField::AccountPassword));
+        assert!(fields.contains(&EditorField::AccountSmtpHost));
+
+        let mut form = AccountSetupState::default();
+        form.display_name.text = "Work".to_owned();
+        form.endpoint.text = "https://wrong.example.com".to_owned();
+        form.username.text = "me@example.com".to_owned();
+        form.password.text = "secret".to_owned();
+        form.smtp_host.text = "smtp.example.com".to_owned();
+        form.smtp_port.text = "not-a-port".to_owned();
+        let errors = validate_account_form(&form);
+        assert_eq!(
+            errors.iter().map(|(field, _)| *field).collect::<Vec<_>>(),
+            vec![EditorField::AccountEndpoint, EditorField::AccountSmtpPort],
+            "only the wrong scheme and the bad port are reported: {errors:?}"
+        );
+
+        form.endpoint.text = "imaps://mail.example.com:993".to_owned();
+        form.smtp_port.text = "587".to_owned();
+        assert!(validate_account_form(&form).is_empty());
+
+        // JMAP accounts need no SMTP settings.
+        let mut form = AccountSetupState {
+            protocol: zmail_core::ProtocolKind::Jmap,
+            ..AccountSetupState::default()
+        };
+        form.display_name.text = "Fastmail".to_owned();
+        form.endpoint.text = "https://api.example.com/.well-known/jmap".to_owned();
+        form.username.text = "me@example.com".to_owned();
+        form.password.text = "secret".to_owned();
+        form.smtp_port.text = String::new();
+        assert!(validate_account_form(&form).is_empty());
+    }
 
     #[test]
     fn disk_budget_parses_empty_as_unlimited() {

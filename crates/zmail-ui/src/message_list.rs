@@ -27,8 +27,8 @@ use crate::styles::{
 };
 use crate::tooltip::text_tooltip;
 use crate::widgets::{
-    EllipsisExt, avatar, badge, empty_state, icon, list_row, message_avatar_background,
-    toolbar_button,
+    EllipsisExt, HoverExt, avatar, badge, empty_state, icon, interactive_background, list_row,
+    message_avatar_background, toolbar_button,
 };
 
 impl WorkspaceView {
@@ -154,10 +154,9 @@ impl WorkspaceView {
                                         };
                                         let threads =
                                             match this.store.list_threads(mailbox_id, range) {
-                                                Ok(threads) => {
-                                                    this.store_error = None;
-                                                    threads
-                                                }
+                                                // Rendering never clears an error; only the
+                                                // user dismisses it.
+                                                Ok(threads) => threads,
                                                 Err(error) => {
                                                     this.store_error = Some(error.to_string());
                                                     Vec::new()
@@ -191,13 +190,11 @@ impl WorkspaceView {
                                                 let row_id = thread_row_id(thread_id);
                                                 let is_selected =
                                                     Some(thread_id) == this.selected_thread_id;
-                                                let background_color = rgb(this
-                                                    .interactive_background(
-                                                        &row_id,
-                                                        is_selected,
-                                                        colors.surface,
-                                                        &colors,
-                                                    ));
+                                                let background_color = rgb(interactive_background(
+                                                    is_selected,
+                                                    colors.surface,
+                                                    &colors,
+                                                ));
 
                                                 div()
                                                     .id(row_id.clone())
@@ -214,16 +211,7 @@ impl WorkspaceView {
                                                             thread_id, mailbox_id, cx,
                                                         );
                                                     }))
-                                                    .on_hover(cx.listener({
-                                                        let row_id = row_id.clone();
-                                                        move |this, hovered, _, cx| {
-                                                            this.set_hovered_element(
-                                                                row_id.clone(),
-                                                                *hovered,
-                                                                cx,
-                                                            );
-                                                        }
-                                                    }))
+                                                    .hover_bg(is_selected, &colors)
                                                     .child(conversation_list_row(
                                                         ConversationRow {
                                                             id: row_id.clone(),
@@ -277,8 +265,7 @@ impl WorkspaceView {
                                 let thread_id = hit.thread_id;
                                 let row_id = search_row_id(thread_id);
                                 let is_selected = Some(thread_id) == self.selected_thread_id;
-                                let background_color = rgb(self.interactive_background(
-                                    &row_id,
+                                let background_color = rgb(interactive_background(
                                     is_selected,
                                     colors.surface,
                                     &colors,
@@ -296,12 +283,7 @@ impl WorkspaceView {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.select_thread(thread_id, mailbox_id, cx);
                                     }))
-                                    .on_hover(cx.listener({
-                                        let row_id = row_id.clone();
-                                        move |this, hovered, _, cx| {
-                                            this.set_hovered_element(row_id.clone(), *hovered, cx);
-                                        }
-                                    }))
+                                    .hover_bg(is_selected, &colors)
                                     .child(conversation_list_row(
                                         ConversationRow {
                                             id: row_id.clone(),
@@ -350,8 +332,7 @@ impl WorkspaceView {
                                 let draft_id = draft.id;
                                 let row_id = draft_row_id(draft_id);
                                 let is_selected = Some(draft_id) == self.selected_draft_id;
-                                let background_color = rgb(self.interactive_background(
-                                    &row_id,
+                                let background_color = rgb(interactive_background(
                                     is_selected,
                                     colors.surface,
                                     &colors,
@@ -371,12 +352,7 @@ impl WorkspaceView {
                                         this.detail_mode = DetailMode::Compose;
                                         cx.notify();
                                     }))
-                                    .on_hover(cx.listener({
-                                        let row_id = row_id.clone();
-                                        move |this, hovered, _, cx| {
-                                            this.set_hovered_element(row_id.clone(), *hovered, cx);
-                                        }
-                                    }))
+                                    .hover_bg(is_selected, &colors)
                                     .child(list_row(
                                         display_subject(&draft.subject),
                                         &format_list_date(&draft.updated_at, &now, self.hour_cycle),
@@ -407,8 +383,7 @@ impl WorkspaceView {
                                 let job_id = job.id;
                                 let row_id = outbox_row_id(job_id);
                                 let is_selected = Some(job_id) == self.selected_outbox_job_id;
-                                let background_color = rgb(self.interactive_background(
-                                    &row_id,
+                                let background_color = rgb(interactive_background(
                                     is_selected,
                                     colors.surface,
                                     &colors,
@@ -426,12 +401,7 @@ impl WorkspaceView {
                                         this.selected_outbox_job_id = Some(job_id);
                                         cx.notify();
                                     }))
-                                    .on_hover(cx.listener({
-                                        let row_id = row_id.clone();
-                                        move |this, hovered, _, cx| {
-                                            this.set_hovered_element(row_id.clone(), *hovered, cx);
-                                        }
-                                    }))
+                                    .hover_bg(is_selected, &colors)
                                     .child({
                                         let draft = self
                                             .drafts
@@ -629,11 +599,9 @@ fn unread_indicator(is_unread: bool, colors: &UiColors) -> gpui::Div {
         .w(px(UNREAD_INDICATOR_SIZE))
         .h(px(UNREAD_INDICATOR_SIZE))
         .rounded_full()
-        .bg(rgb(if is_unread {
-            colors.accent
-        } else {
-            colors.surface
-        }))
+        // Read rows keep the space but draw nothing, so the dot does not
+        // show up against selected or hovered backgrounds.
+        .when(is_unread, |this| this.bg(rgb(colors.accent)))
 }
 
 fn thread_row_id(thread_id: i64) -> SharedString {

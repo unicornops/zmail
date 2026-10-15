@@ -6,14 +6,18 @@
 //! and [`account_protocol_buttons`] produces the toggle buttons used for
 //! selecting IMAP+SMTP vs JMAP.
 
-use gpui::{AnyElement, Context, IntoElement, StatefulInteractiveElement, div, prelude::*, rgb};
+use std::collections::BTreeMap;
+
+use gpui::{
+    AnyElement, Context, IntoElement, Stateful, StatefulInteractiveElement, div, prelude::*, rgb,
+};
 use zmail_auth::OAuth2Preset;
 use zmail_core::{AuthKind, ProtocolKind};
 
 use super::WorkspaceView;
 use crate::input::{EditorField, UiBuffer};
-use crate::styles::UiColors;
-use crate::widgets::{EllipsisExt, input_card, section_card, toolbar_button};
+use crate::styles::{ICON_SIZE_SM, UiColors};
+use crate::widgets::{EllipsisExt, icon, input_card, section_card, toolbar_button};
 
 // ---------------------------------------------------------------------------
 // AccountSetupState
@@ -50,6 +54,20 @@ pub(crate) struct AccountSetupState {
     pub(crate) smtp_port: UiBuffer,
     pub(crate) smtp_security: UiBuffer,
     pub(crate) smtp_username: UiBuffer,
+    /// Validation errors shown under their fields; editing a field clears
+    /// its error.
+    pub(crate) errors: BTreeMap<EditorField, String>,
+    /// Why the form opened when the user did not ask for it, for example
+    /// Compose with no account.
+    pub(crate) notice: Option<&'static str>,
+}
+
+/// Endpoint placeholder for the selected protocol.
+pub(crate) fn endpoint_placeholder(protocol: ProtocolKind) -> &'static str {
+    match protocol {
+        ProtocolKind::Imap => "imaps://mail.example.com:993",
+        ProtocolKind::Jmap => "https://mail.example.com/.well-known/jmap",
+    }
 }
 
 /// The IMAP endpoint a provider preset uses.
@@ -75,7 +93,9 @@ impl Default for AccountSetupState {
             auth: AuthKind::Password,
             oauth_preset: None,
             display_name: UiBuffer::single_line(String::new()),
-            endpoint: UiBuffer::single_line("imaps://mail.example.com:993"),
+            // Empty, so the protocol-specific placeholder shows instead of
+            // an IMAP URL that JMAP accounts would have to delete.
+            endpoint: UiBuffer::single_line(String::new()),
             username: UiBuffer::single_line(String::new()),
             password: UiBuffer::secret(String::new()),
             oauth_client_id: UiBuffer::single_line(String::new()),
@@ -92,10 +112,12 @@ impl Default for AccountSetupState {
             identity_email: UiBuffer::single_line(String::new()),
             signature: UiBuffer::multiline("Regards,"),
             alias_emails: UiBuffer::single_line(String::new()),
-            smtp_host: UiBuffer::single_line("smtp.example.com"),
+            smtp_host: UiBuffer::single_line(String::new()),
             smtp_port: UiBuffer::single_line("587"),
             smtp_security: UiBuffer::single_line("starttls"),
             smtp_username: UiBuffer::single_line(String::new()),
+            errors: BTreeMap::new(),
+            notice: None,
         }
     }
 }
@@ -121,24 +143,42 @@ pub(crate) fn render_account_setup_detail(
         .gap_4()
         .w_full()
         .min_w_0()
+        .when_some(form.notice, |this, notice| {
+            this.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .rounded_md()
+                    .bg(rgb(colors.surface))
+                    .border_1()
+                    .border_color(rgb(colors.info))
+                    .child(icon("user-plus", ICON_SIZE_SM, colors.info))
+                    .child(div().flex_1().min_w_0().ellipsis().child(notice)),
+            )
+        })
         .child(
             section_card("Connection", colors)
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .children(account_protocol_buttons(form.protocol, colors, cx)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .children(account_auth_buttons(form, colors, cx)),
-            )
-            .children(if form.auth == AuthKind::OAuth2 && form.protocol == ProtocolKind::Imap {
-                vec![
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .children(account_protocol_buttons(form.protocol, colors, cx)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .children(account_auth_buttons(form, colors, cx)),
+                )
+                .children(
+                    if form.auth == AuthKind::OAuth2 && form.protocol == ProtocolKind::Imap {
+                        vec![
                     div()
                         .flex()
                         .flex_wrap()
@@ -169,65 +209,57 @@ pub(crate) fn render_account_setup_detail(
                                 ),
                         ),
                 ]
-            } else if form.auth == AuthKind::OAuth2 && form.protocol == ProtocolKind::Jmap {
-                vec![
+                    } else if form.auth == AuthKind::OAuth2 && form.protocol == ProtocolKind::Jmap {
+                        vec![
                     oauth_client_fields(form, active_field, colors, cx),
                     div()
                         .flex()
                         .gap_3()
                         .child(
                             div().flex_1().min_w_0().child(
-                                input_card(
-                                    "account-oauth-authorization-endpoint-field",
-                                    "Authorization Endpoint",
-                                    "https://provider.example.test/authorize",
-                                    &form.oauth_authorization_endpoint,
-                                    active_field == Some(EditorField::AccountOauthAuthorizationEndpoint),
-                                    false,
-                                    colors,
-                                )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.set_active_field(
-                                        EditorField::AccountOauthAuthorizationEndpoint,
-                                        window,
-                                        cx,
-                                    );
-                                })),
+                                account_input(
+ form,
+ active_field,
+ EditorField::AccountOauthAuthorizationEndpoint,
+ "account-oauth-authorization-endpoint-field",
+ "Authorization Endpoint",
+ "https://provider.example.test/authorize",
+ &form.oauth_authorization_endpoint,
+ false,
+ colors,
+ cx,
+),
                             ),
                         )
                         .child(
                             div().flex_1().min_w_0().child(
-                                input_card(
-                                    "account-oauth-token-endpoint-field",
-                                    "Token Endpoint",
-                                    "https://provider.example.test/token",
-                                    &form.oauth_token_endpoint,
-                                    active_field == Some(EditorField::AccountOauthTokenEndpoint),
-                                    false,
-                                    colors,
-                                )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.set_active_field(
-                                        EditorField::AccountOauthTokenEndpoint,
-                                        window,
-                                        cx,
-                                    );
-                                })),
+                                account_input(
+ form,
+ active_field,
+ EditorField::AccountOauthTokenEndpoint,
+ "account-oauth-token-endpoint-field",
+ "Token Endpoint",
+ "https://provider.example.test/token",
+ &form.oauth_token_endpoint,
+ false,
+ colors,
+ cx,
+),
                             ),
                         ),
                     div().child(
-                        input_card(
-                            "account-oauth-scopes-field",
-                            "Scopes",
-                            "Space-separated, for example: email",
-                            &form.oauth_scopes,
-                            active_field == Some(EditorField::AccountOauthScopes),
-                            false,
-                            colors,
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_active_field(EditorField::AccountOauthScopes, window, cx);
-                        })),
+                        account_input(
+ form,
+ active_field,
+ EditorField::AccountOauthScopes,
+ "account-oauth-scopes-field",
+ "Scopes",
+ "Space-separated, for example: email",
+ &form.oauth_scopes,
+ false,
+ colors,
+ cx,
+),
                     ),
                     div()
                         .w_full()
@@ -253,233 +285,200 @@ pub(crate) fn render_account_setup_detail(
                                 ),
                         ),
                 ]
-            } else {
-                Vec::new()
-            })
-            .child(
-                input_card(
+                    } else {
+                        Vec::new()
+                    },
+                )
+                .child(account_input(
+                    form,
+                    active_field,
+                    EditorField::AccountDisplayName,
                     "account-display-name-field",
                     "Display Name",
                     "Work Mail",
                     &form.display_name,
-                    active_field == Some(EditorField::AccountDisplayName),
                     false,
                     colors,
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.set_active_field(EditorField::AccountDisplayName, window, cx);
-                })),
-            )
-            .child(
-                input_card(
+                    cx,
+                ))
+                .child(account_input(
+                    form,
+                    active_field,
+                    EditorField::AccountEndpoint,
                     "account-endpoint-field",
                     "Endpoint",
-                    "imaps://mail.example.com:993 or https://jmap.example.com/.well-known/jmap",
+                    endpoint_placeholder(form.protocol),
                     &form.endpoint,
-                    active_field == Some(EditorField::AccountEndpoint),
                     false,
                     colors,
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.set_active_field(EditorField::AccountEndpoint, window, cx);
-                })),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            input_card(
-                                "account-username-field",
-                                "Username",
-                                "name@example.com",
-                                &form.username,
-                                active_field == Some(EditorField::AccountUsername),
-                                false,
-                                colors,
-                            )
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.set_active_field(EditorField::AccountUsername, window, cx);
-                            })),
-                        ),
-                    )
-                    .children(if form.auth == AuthKind::Password {
-                        vec![div().flex_1().min_w_0().child(
-                            input_card(
+                    cx,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(div().flex_1().min_w_0().child(account_input(
+                            form,
+                            active_field,
+                            EditorField::AccountUsername,
+                            "account-username-field",
+                            "Username",
+                            "name@example.com",
+                            &form.username,
+                            false,
+                            colors,
+                            cx,
+                        )))
+                        .children(if form.auth == AuthKind::Password {
+                            vec![div().flex_1().min_w_0().child(account_input(
+                                form,
+                                active_field,
+                                EditorField::AccountPassword,
                                 "account-password-field",
                                 "Password",
                                 "App password or account secret",
                                 &form.password,
-                                active_field == Some(EditorField::AccountPassword),
                                 false,
                                 colors,
-                            )
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.set_active_field(EditorField::AccountPassword, window, cx);
-                            })),
-                        )]
-                    } else {
-                        Vec::new()
-                    }),
-            ),
+                                cx,
+                            ))]
+                        } else {
+                            Vec::new()
+                        }),
+                ),
         )
-        .child(
-            input_card(
-                "account-disk-budget-field",
-                "Disk Budget (MiB)",
-                "Empty for unlimited",
-                &form.disk_budget_mb,
-                active_field == Some(EditorField::AccountDiskBudget),
-                false,
-                colors,
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.set_active_field(EditorField::AccountDiskBudget, window, cx);
-            })),
-        )
+        .child(account_input(
+            form,
+            active_field,
+            EditorField::AccountDiskBudget,
+            "account-disk-budget-field",
+            "Disk Budget (MiB)",
+            "Empty for unlimited",
+            &form.disk_budget_mb,
+            false,
+            colors,
+            cx,
+        ))
         .child(
             section_card("Identity", colors)
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            input_card(
-                                "account-identity-name-field",
-                                "Primary Identity Name",
-                                "Jane Doe",
-                                &form.identity_name,
-                                active_field == Some(EditorField::AccountIdentityName),
-                                false,
-                                colors,
-                            )
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.set_active_field(EditorField::AccountIdentityName, window, cx);
-                            })),
-                        ),
-                    )
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            input_card(
-                                "account-identity-email-field",
-                                "Primary Identity Email",
-                                "jane@example.com",
-                                &form.identity_email,
-                                active_field == Some(EditorField::AccountIdentityEmail),
-                                false,
-                                colors,
-                            )
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.set_active_field(EditorField::AccountIdentityEmail, window, cx);
-                            })),
-                        ),
-                    ),
-            )
-            .child(
-                input_card(
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(div().flex_1().min_w_0().child(account_input(
+                            form,
+                            active_field,
+                            EditorField::AccountIdentityName,
+                            "account-identity-name-field",
+                            "Primary Identity Name",
+                            "Jane Doe",
+                            &form.identity_name,
+                            false,
+                            colors,
+                            cx,
+                        )))
+                        .child(div().flex_1().min_w_0().child(account_input(
+                            form,
+                            active_field,
+                            EditorField::AccountIdentityEmail,
+                            "account-identity-email-field",
+                            "Primary Identity Email",
+                            "jane@example.com",
+                            &form.identity_email,
+                            false,
+                            colors,
+                            cx,
+                        ))),
+                )
+                .child(account_input(
+                    form,
+                    active_field,
+                    EditorField::AccountAliasEmails,
                     "account-alias-emails-field",
                     "Additional Identity Emails",
                     "alias@example.com, billing@example.com",
                     &form.alias_emails,
-                    active_field == Some(EditorField::AccountAliasEmails),
                     false,
                     colors,
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.set_active_field(EditorField::AccountAliasEmails, window, cx);
-                })),
-            )
-            .child(
-                input_card(
+                    cx,
+                ))
+                .child(account_input(
+                    form,
+                    active_field,
+                    EditorField::AccountSignature,
                     "account-signature-field",
                     "Signature",
                     "Regards,\nJane",
                     &form.signature,
-                    active_field == Some(EditorField::AccountSignature),
                     true,
                     colors,
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.set_active_field(EditorField::AccountSignature, window, cx);
-                })),
-            ),
+                    cx,
+                )),
         )
         // JMAP submits through the account's own endpoint, so the SMTP
         // section only appears for IMAP accounts.
         .when(form.protocol == ProtocolKind::Imap, |this| {
-            this.child(section_card("Outgoing Mail (SMTP)", colors).child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        input_card(
+            this.child(
+                section_card("Outgoing Mail (SMTP)", colors).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(account_input(
+                            form,
+                            active_field,
+                            EditorField::AccountSmtpHost,
                             "account-smtp-host-field",
                             "SMTP Host",
                             "smtp.example.com",
                             &form.smtp_host,
-                            active_field == Some(EditorField::AccountSmtpHost),
                             false,
                             colors,
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .gap_3()
+                                .child(div().flex_1().min_w_0().child(account_input(
+                                    form,
+                                    active_field,
+                                    EditorField::AccountSmtpPort,
+                                    "account-smtp-port-field",
+                                    "SMTP Port",
+                                    "587",
+                                    &form.smtp_port,
+                                    false,
+                                    colors,
+                                    cx,
+                                )))
+                                .child(div().flex_1().min_w_0().child(account_input(
+                                    form,
+                                    active_field,
+                                    EditorField::AccountSmtpSecurity,
+                                    "account-smtp-security-field",
+                                    "SMTP Security",
+                                    "plain, starttls, or implicit_tls",
+                                    &form.smtp_security,
+                                    false,
+                                    colors,
+                                    cx,
+                                ))),
                         )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_active_field(EditorField::AccountSmtpHost, window, cx);
-                        })),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_3()
-                            .child(
-                                div().flex_1().min_w_0().child(
-                                    input_card(
-                                        "account-smtp-port-field",
-                                        "SMTP Port",
-                                        "587",
-                                        &form.smtp_port,
-                                        active_field == Some(EditorField::AccountSmtpPort),
-                                        false,
-                                        colors,
-                                    )
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.set_active_field(EditorField::AccountSmtpPort, window, cx);
-                                    })),
-                                ),
-                            )
-                            .child(
-                                div().flex_1().min_w_0().child(
-                                    input_card(
-                                        "account-smtp-security-field",
-                                        "SMTP Security",
-                                        "plain, starttls, or implicit_tls",
-                                        &form.smtp_security,
-                                        active_field == Some(EditorField::AccountSmtpSecurity),
-                                        false,
-                                        colors,
-                                    )
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.set_active_field(EditorField::AccountSmtpSecurity, window, cx);
-                                    })),
-                                ),
-                            ),
-                    )
-                    .child(
-                        input_card(
+                        .child(account_input(
+                            form,
+                            active_field,
+                            EditorField::AccountSmtpUsername,
                             "account-smtp-username-field",
                             "SMTP Username",
                             "Optional override for SMTP auth",
                             &form.smtp_username,
-                            active_field == Some(EditorField::AccountSmtpUsername),
                             false,
                             colors,
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_active_field(EditorField::AccountSmtpUsername, window, cx);
-                        })),
-                    ),
-            ))
+                            cx,
+                        )),
+                ),
+            )
         })
 }
 
@@ -503,7 +502,11 @@ pub(crate) fn account_protocol_buttons(
             } else {
                 colors.button_background
             },
-            colors.border,
+            if protocol == ProtocolKind::Imap {
+                colors.accent
+            } else {
+                colors.border
+            },
             colors.foreground,
             cx.listener(|this: &mut WorkspaceView, _, _, cx| {
                 this.account_setup.protocol = ProtocolKind::Imap;
@@ -519,7 +522,11 @@ pub(crate) fn account_protocol_buttons(
             } else {
                 colors.button_background
             },
-            colors.border,
+            if protocol == ProtocolKind::Jmap {
+                colors.accent
+            } else {
+                colors.border
+            },
             colors.foreground,
             cx.listener(|this: &mut WorkspaceView, _, _, cx| {
                 this.account_setup.protocol = ProtocolKind::Jmap;
@@ -547,38 +554,30 @@ fn oauth_client_fields(
     div()
         .flex()
         .gap_3()
-        .child(
-            div().flex_1().min_w_0().child(
-                input_card(
-                    "account-oauth-client-id-field",
-                    "OAuth2 Client Id",
-                    "Provider application client id",
-                    &form.oauth_client_id,
-                    active_field == Some(EditorField::AccountOauthClientId),
-                    false,
-                    colors,
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.set_active_field(EditorField::AccountOauthClientId, window, cx);
-                })),
-            ),
-        )
-        .child(
-            div().flex_1().min_w_0().child(
-                input_card(
-                    "account-oauth-client-secret-field",
-                    "OAuth2 Client Secret",
-                    "Optional for public clients",
-                    &form.oauth_client_secret,
-                    active_field == Some(EditorField::AccountOauthClientSecret),
-                    false,
-                    colors,
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.set_active_field(EditorField::AccountOauthClientSecret, window, cx);
-                })),
-            ),
-        )
+        .child(div().flex_1().min_w_0().child(account_input(
+            form,
+            active_field,
+            EditorField::AccountOauthClientId,
+            "account-oauth-client-id-field",
+            "OAuth2 Client Id",
+            "Provider application client id",
+            &form.oauth_client_id,
+            false,
+            colors,
+            cx,
+        )))
+        .child(div().flex_1().min_w_0().child(account_input(
+            form,
+            active_field,
+            EditorField::AccountOauthClientSecret,
+            "account-oauth-client-secret-field",
+            "OAuth2 Client Secret",
+            "Optional for public clients",
+            &form.oauth_client_secret,
+            false,
+            colors,
+            cx,
+        )))
 }
 
 /// Build the auth-kind toggle buttons ("Password" / "OAuth2") rendered
@@ -597,7 +596,11 @@ pub(crate) fn account_auth_buttons(
             } else {
                 colors.button_background
             },
-            colors.border,
+            if form.auth == AuthKind::Password {
+                colors.accent
+            } else {
+                colors.border
+            },
             colors.foreground,
             cx.listener(|this: &mut WorkspaceView, _, _, cx| {
                 this.account_setup.auth = AuthKind::Password;
@@ -614,7 +617,11 @@ pub(crate) fn account_auth_buttons(
             } else {
                 colors.button_background
             },
-            colors.border,
+            if form.auth == AuthKind::OAuth2 {
+                colors.accent
+            } else {
+                colors.border
+            },
             colors.foreground,
             cx.listener(|this: &mut WorkspaceView, _, _, cx| {
                 this.account_setup.auth = AuthKind::OAuth2;
@@ -645,7 +652,11 @@ pub(crate) fn account_oauth_provider_buttons(
                 } else {
                     colors.button_background
                 },
-                colors.border,
+                if form.oauth_preset == Some(preset) {
+                    colors.accent
+                } else {
+                    colors.border
+                },
                 colors.foreground,
                 cx.listener(move |this: &mut WorkspaceView, _, _, cx| {
                     this.account_setup.oauth_preset = Some(preset);
@@ -661,4 +672,45 @@ pub(crate) fn account_oauth_provider_buttons(
             .into_any_element()
         })
         .collect()
+}
+
+/// An account-setup input with its click-to-focus handler and, when the
+/// last submit found a problem with it, the error underneath.
+// The label, placeholder and buffer are what make each field distinct.
+#[allow(clippy::too_many_arguments)]
+fn account_input(
+    form: &AccountSetupState,
+    active_field: Option<EditorField>,
+    field: EditorField,
+    id: &'static str,
+    label: &str,
+    placeholder: &str,
+    buffer: &UiBuffer,
+    multiline: bool,
+    colors: &UiColors,
+    cx: &mut Context<WorkspaceView>,
+) -> Stateful<gpui::Div> {
+    let danger = colors.danger;
+    input_card(
+        id,
+        label,
+        placeholder,
+        buffer,
+        active_field == Some(field),
+        multiline,
+        colors,
+    )
+    .on_click(cx.listener(move |this, _, window, cx| {
+        this.set_active_field(field, window, cx);
+    }))
+    .when_some(form.errors.get(&field).cloned(), move |this, error| {
+        this.child(
+            div()
+                .w_full()
+                .text_sm()
+                .text_color(rgb(danger))
+                .ellipsis()
+                .child(error),
+        )
+    })
 }

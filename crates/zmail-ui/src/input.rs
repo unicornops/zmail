@@ -14,7 +14,7 @@ use gpui::KeyDownEvent;
 
 /// Identifies which logical text field within [`WorkspaceView`] currently
 /// receives keyboard input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum EditorField {
     SearchQuery,
     ComposeTo,

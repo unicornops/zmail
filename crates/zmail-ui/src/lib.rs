@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Application, AssetSource, Bounds, Context, FocusHandle, IntoElement, Render,
-    SharedString, Styled, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    Styled, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions, div,
+    prelude::*, px, rgb, size,
 };
 use zmail_core::{
     APP_NAME, AccountOverview, AccountSummary, AppBootstrap, DraftSummary, IdentitySummary,
@@ -33,14 +33,15 @@ use zmail_sync::SyncService;
 
 mod styles;
 use crate::styles::{
-    DETAIL_MIN_WIDTH, UiColors, WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_WIDTH,
+    DETAIL_MIN_WIDTH, ICON_SIZE_SM, UiColors, WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+    WINDOW_WIDTH,
 };
 
 mod input;
 use crate::input::{EditorField, UiBuffer};
 
 mod widgets;
-use crate::widgets::{status_banner, toolbar_button};
+use crate::widgets::{HoverExt, icon, status_banner, toolbar_button};
 
 mod compose;
 use crate::compose::{ComposeState, compose_action_buttons, render_compose_detail};
@@ -187,9 +188,17 @@ struct WorkspaceView {
     search_query: UiBuffer,
     compose: Option<ComposeState>,
     account_setup: AccountSetupState,
+    /// The last error. It stays until the user dismisses it.
     store_error: Option<String>,
+    /// A transient status message; [`WorkspaceView::show_status`] clears it
+    /// after a few seconds.
     status_message: Option<String>,
-    hovered_element: Option<SharedString>,
+    /// Bumped by every status message so only the latest one's timer
+    /// clears it.
+    status_generation: u64,
+    /// The selected thread's view, loaded once per selection or store
+    /// refresh instead of on every frame.
+    thread_view_cache: Option<zmail_core::ThreadView>,
     refresh_scheduled: bool,
     /// 12- or 24-hour clock for list and reader dates, from the locale.
     hour_cycle: zmail_core::time::HourCycle,
@@ -243,13 +252,30 @@ impl Render for WorkspaceView {
                         ))
                     })
                     .when_some(self.store_error.clone(), |this, error| {
-                        this.child(status_banner(
-                            &format!("Issue: {error}"),
-                            "alert-circle",
-                            colors.danger,
-                            colors.warning_background,
-                            &colors,
-                        ))
+                        this.child(
+                            status_banner(
+                                &error,
+                                "alert-circle",
+                                colors.danger,
+                                colors.warning_background,
+                                &colors,
+                            )
+                            .child(
+                                div()
+                                    .id("dismiss-error")
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .justify_center()
+                                    .px_4()
+                                    .cursor_pointer()
+                                    .hover_bg(false, &colors)
+                                    .on_click(cx.listener(|this: &mut Self, _, _, cx| {
+                                        this.dismiss_error(cx);
+                                    }))
+                                    .child(icon("x", ICON_SIZE_SM, colors.muted)),
+                            ),
+                        )
                     }),
             )
     }
