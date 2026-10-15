@@ -116,6 +116,7 @@ pub async fn submit_outgoing_message(
     }
 
     let mut builder = SmtpClientBuilder::new(config.host.clone(), config.port)
+        .map_err(anyhow::Error::msg)?
         .helo_host(config.hello_name.clone());
 
     if let Some(credentials) = config.sasl_credentials()? {

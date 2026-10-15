@@ -107,13 +107,11 @@ jobs:
             - name: Advisory audit
               # If an advisory has no upstream fix reachable in the lock,
               # silence it inline with --ignore and link the reason here.
-              # hickory-proto is pinned at the 0.26.0-alpha required by
-              # the mail-auth/mail-send stack (0118, 0119); quick-xml is
-              # pinned below 0.41 by that same stack (0194, 0195).
+              # quick-xml is pinned below 0.41 by the wayland/GPUI stack
+              # (0194, 0195); the other pinned-stack advisories are listed
+              # in deny.toml, which cargo audit runs alongside in Policy.
               run: >-
                 cargo audit
-                --ignore RUSTSEC-2026-0118
-                --ignore RUSTSEC-2026-0119
                 --ignore RUSTSEC-2026-0194
                 --ignore RUSTSEC-2026-0195
 
