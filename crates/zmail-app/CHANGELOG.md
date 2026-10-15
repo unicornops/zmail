@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/unicornops/zmail/compare/v0.8.1...v0.9.0) (2026-10-15)
+
+
+### Features
+
+* keep a crash log for GUI launches ([#105](https://github.com/unicornops/zmail/issues/105)) ([f5f38d1](https://github.com/unicornops/zmail/commit/f5f38d1b0512c8dd9b3bb545b91bbf82b3534fc2))
+
 ## [0.8.1](https://github.com/unicornops/zmail/compare/v0.8.0...v0.8.1) (2026-10-14)
 
 
