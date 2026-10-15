@@ -15,7 +15,7 @@ section = "mail"
 priority = "optional"
 assets = [
     ["target/release/zmail-app", "usr/bin/", "755"],
-    ["zmail.desktop", "usr/share/applications/", "644"],
+    ["ie.unicornops.zmail.desktop", "usr/share/applications/", "644"],
 ]
 extended-description = "Zmail is a fast, standards-compliant desktop email client built with GPUI."
 
