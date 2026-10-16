@@ -11,8 +11,8 @@ use zmail_core::{MailboxSummary, ThreadMessage, ThreadView, text::count_noun};
 use super::WorkspaceView;
 use crate::styles::{AVATAR_SIZE, UiColors};
 use crate::widgets::{
-    action_divider, avatar, empty_state, format_size, label_chip, message_avatar_background,
-    toolbar_button,
+    EllipsisExt, action_divider, avatar, empty_state, format_size, label_chip,
+    message_avatar_background, toolbar_button,
 };
 
 /// Render the full thread reader: subject, metadata, and conversation
@@ -34,50 +34,49 @@ pub(crate) fn render_reader_detail(
                 .flex()
                 .flex_col()
                 .gap_5()
+                .w_full()
+                .min_w_0()
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_3()
+                        .w_full()
+                        .min_w_0()
+                        // The subject gets the full pane width so it wraps
+                        // at the pane edge.
+                        .child(
+                            div()
+                                .w_full()
+                                .text_xl()
+                                .font_weight(FontWeight::BOLD)
+                                .child(thread.subject.clone()),
+                        )
                         .child(
                             div()
                                 .flex()
-                                .justify_between()
-                                .items_start()
-                                .gap_4()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_3()
-                                        .child(
-                                            div()
-                                                .text_xl()
-                                                .font_weight(FontWeight::BOLD)
-                                                .child(thread.subject.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_wrap()
-                                                .gap_2()
-                                                .children(thread_header_badges(thread, colors)),
-                                        ),
-                                )
-                                .child(div().text_sm().text_color(rgb(colors.muted)).child(
-                                    count_noun(thread.message_count, "message", "messages"),
-                                )),
+                                .flex_wrap()
+                                .gap_2()
+                                .children(thread_header_badges(thread, colors)),
                         )
                         .child(
-                            div().flex().flex_wrap().gap_4().children([
-                                metadata_pair("Participants", &thread.participants, colors)
-                                    .into_any_element(),
-                                metadata_pair("Latest", latest_message_at, colors)
-                                    .into_any_element(),
-                                metadata_pair("Mailbox", &thread.mailbox_name, colors)
-                                    .into_any_element(),
-                            ]),
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .w_full()
+                                .min_w_0()
+                                .child(metadata_pair("Participants", &thread.participants, colors))
+                                .child(metadata_pair("Latest", latest_message_at, colors))
+                                .child(metadata_pair(
+                                    "Mailbox",
+                                    &format!(
+                                        "{} \u{2022} {}",
+                                        thread.mailbox_name,
+                                        count_noun(thread.message_count, "message", "messages")
+                                    ),
+                                    colors,
+                                )),
                         ),
                 )
                 .child(
@@ -345,6 +344,7 @@ fn render_thread_message(index: usize, message: &ThreadMessage, colors: &UiColor
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -357,41 +357,44 @@ fn render_thread_message(index: usize, message: &ThreadMessage, colors: &UiColor
                                 .child(
                                     div()
                                         .flex_1()
+                                        .min_w_0()
                                         .flex()
                                         .flex_col()
                                         .gap_1()
                                         .child(
                                             div()
-                                                .flex()
-                                                .flex_wrap()
-                                                .items_center()
-                                                .gap_2()
-                                                .child(
-                                                    div()
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .child(sender_name),
-                                                )
-                                                .when_some(sender_email, |this, email| {
-                                                    this.child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(rgb(colors.muted))
-                                                            .child(email),
-                                                    )
-                                                }),
+                                                .w_full()
+                                                .ellipsis()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(sender_name),
                                         )
+                                        .when_some(sender_email, |this, email| {
+                                            this.child(
+                                                div()
+                                                    .w_full()
+                                                    .ellipsis()
+                                                    .text_sm()
+                                                    .text_color(rgb(colors.muted))
+                                                    .child(email),
+                                            )
+                                        })
                                         .when(!message.recipients.trim().is_empty(), |this| {
                                             this.child(
                                                 div()
                                                     .text_sm()
                                                     .text_color(rgb(colors.muted))
-                                                    .truncate()
-                                                    .child(message.recipients.clone()),
+                                                    .ellipsis()
+                                                    .child(format!(
+                                                        "To: {}",
+                                                        message.recipients.trim()
+                                                    )),
                                             )
                                         }),
                                 )
                                 .child(
                                     div()
+                                        .flex_none()
+                                        .whitespace_nowrap()
                                         .text_sm()
                                         .text_color(rgb(colors.muted))
                                         .child(message.received_at.clone()),
@@ -410,7 +413,13 @@ fn render_thread_message(index: usize, message: &ThreadMessage, colors: &UiColor
                             )
                         })
                         .children(sender_safety_banner(message, colors))
-                        .child(div().text_sm().child(message.rendered_body.clone())),
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .text_sm()
+                                .child(message.rendered_body.clone()),
+                        ),
                 ),
         )
 }
@@ -573,18 +582,30 @@ fn sender_safety_banner(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyEl
     ]
 }
 
+/// One "Label: value" line; the value ends in an ellipsis when it does not
+/// fit the pane.
 fn metadata_pair(label: &str, value: &str, colors: &UiColors) -> gpui::Div {
     div()
         .flex()
         .items_center()
         .gap_2()
+        .w_full()
+        .min_w_0()
         .child(
             div()
+                .flex_none()
                 .text_xs()
                 .text_color(rgb(colors.muted))
                 .child(format!("{label}:")),
         )
-        .child(div().text_sm().child(value.to_owned()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .ellipsis()
+                .child(value.to_owned()),
+        )
 }
 
 fn sender_identity(sender: &str) -> (String, Option<String>) {

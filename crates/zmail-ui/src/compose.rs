@@ -15,8 +15,8 @@ use super::WorkspaceView;
 use crate::input::{EditorField, UiBuffer};
 use crate::styles::{ICON_BUTTON_SIZE, ICON_SIZE_SM, UiColors};
 use crate::widgets::{
-    empty_state, format_size, icon, input_card, label_chip, section_card, status_banner,
-    toolbar_button,
+    EllipsisExt, empty_state, format_size, icon, input_card, label_chip, section_card,
+    status_banner, toolbar_button,
 };
 
 // ---------------------------------------------------------------------------
@@ -110,6 +110,8 @@ pub(crate) fn render_compose_detail(
         .flex()
         .flex_col()
         .gap_4()
+        .w_full()
+        .min_w_0()
         .child(
             div()
                 .flex()
@@ -482,6 +484,7 @@ fn render_attachment_card(
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .flex()
                         .items_start()
                         .gap_3()
@@ -489,12 +492,14 @@ fn render_attachment_card(
                         .child(
                             div()
                                 .flex()
+                                .flex_1()
+                                .min_w_0()
                                 .flex_col()
                                 .gap_1()
                                 .child(
                                     div()
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .truncate()
+                                        .ellipsis()
                                         .child(attachment.filename.clone()),
                                 )
                                 .child(div().text_sm().text_color(rgb(colors.muted)).child(
@@ -510,6 +515,7 @@ fn render_attachment_card(
                     div()
                         .id(("compose-attachment-remove", attachment.id as u64))
                         .flex()
+                        .flex_none()
                         .items_center()
                         .justify_center()
                         .w(px(ICON_BUTTON_SIZE))

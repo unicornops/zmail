@@ -7,3 +7,4 @@ Exec=zmail-app %u
 Terminal=false
 Categories=Network;Email;
 MimeType=x-scheme-handler/mailto;
+StartupWMClass=ie.unicornops.zmail

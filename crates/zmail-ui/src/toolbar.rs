@@ -10,7 +10,7 @@ use zmail_core::ThemeAppearance;
 use super::{DetailMode, ListMode, WorkspaceView};
 use crate::input::EditorField;
 use crate::styles::{TOOLBAR_HEIGHT, UiColors};
-use crate::widgets::{input_card, toolbar_button, toolbar_button_id};
+use crate::widgets::{search_field, toolbar_button, toolbar_button_id};
 
 impl WorkspaceView {
     /// Render the top section of the workspace: the action-button bar,
@@ -29,10 +29,9 @@ impl WorkspaceView {
         let drafts_id = toolbar_button_id("Drafts");
         let outbox_id = toolbar_button_id("Outbox");
         let retry_outbox_id = toolbar_button_id("Retry Outbox");
-        let run_search_id = toolbar_button_id("Run Search");
+        let run_search_id = toolbar_button_id("Search");
         let sync_selected_id = toolbar_button_id("Sync Selected");
         let sync_all_id = toolbar_button_id("Sync All");
-        let refresh_id = toolbar_button_id("Refresh");
         let theme_toggle_id = toolbar_button_id("Theme");
         let theme_toggle_icon = match self.bootstrap.theme.appearance {
             ThemeAppearance::Dark => "sun",
@@ -48,10 +47,14 @@ impl WorkspaceView {
             .child(
                 div()
                     .flex()
+                    // Wrap onto a second row instead of running off the
+                    // right edge in narrow windows (the toolbar redesign is
+                    // Phase 2 of the UI plan).
+                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .px_4()
-                    .py_3()
+                    .py_2()
                     .min_h(px(TOOLBAR_HEIGHT))
                     .border_b_1()
                     .border_color(rgb(colors.border))
@@ -204,26 +207,20 @@ impl WorkspaceView {
                         },
                     )
                     .child(
-                        div().flex_1().child(
-                            input_card(
-                                "search-query-field",
-                                "Search",
-                                "Search cached mail",
-                                &self.search_query,
-                                self.active_field == Some(EditorField::SearchQuery),
-                                false,
-                                colors,
-                            )
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.set_active_field(EditorField::SearchQuery, window, cx);
-                                },
-                            )),
-                        ),
+                        search_field(
+                            "search-query-field",
+                            "Search mail",
+                            &self.search_query,
+                            self.active_field == Some(EditorField::SearchQuery),
+                            colors,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.set_active_field(EditorField::SearchQuery, window, cx);
+                        })),
                     )
                     .child(
                         toolbar_button(
-                            "Run Search",
+                            "Search",
                             Some("search"),
                             self.interactive_background(
                                 &run_search_id,
@@ -287,30 +284,6 @@ impl WorkspaceView {
                             let sync_all_id = sync_all_id.clone();
                             move |this, hovered, _, cx| {
                                 this.set_hovered_element(sync_all_id.clone(), *hovered, cx);
-                            }
-                        })),
-                    )
-                    .child(
-                        toolbar_button(
-                            "Refresh",
-                            Some("refresh-cw"),
-                            self.interactive_background(
-                                &refresh_id,
-                                false,
-                                colors.button_background,
-                                colors,
-                            ),
-                            colors.border,
-                            colors.foreground,
-                            cx.listener(|this: &mut Self, _, _, cx| {
-                                this.refresh_from_store();
-                                cx.notify();
-                            }),
-                        )
-                        .on_hover(cx.listener({
-                            let refresh_id = refresh_id.clone();
-                            move |this, hovered, _, cx| {
-                                this.set_hovered_element(refresh_id.clone(), *hovered, cx);
                             }
                         })),
                     )

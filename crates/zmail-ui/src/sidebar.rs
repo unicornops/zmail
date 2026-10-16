@@ -13,8 +13,10 @@ use gpui::{
 };
 
 use super::WorkspaceView;
-use crate::styles::{AVATAR_SIZE, ICON_SIZE_SM, MAILBOX_ITEM_HEIGHT, SIDEBAR_WIDTH, UiColors};
-use crate::widgets::{avatar, badge, icon, message_avatar_background, sync_badge};
+use crate::styles::{
+    AVATAR_SIZE, ICON_SIZE_SM, MAILBOX_ITEM_HEIGHT, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, UiColors,
+};
+use crate::widgets::{EllipsisExt, avatar, badge, icon, message_avatar_background, sync_badge};
 
 impl WorkspaceView {
     /// Render the left sidebar pane: accounts header, account items, mailboxes
@@ -29,6 +31,10 @@ impl WorkspaceView {
 
         div()
             .w(px(SIDEBAR_WIDTH))
+            // The sidebar gives up width before the reader does when the
+            // window is too narrow for all three panes.
+            .flex_shrink()
+            .min_w(px(SIDEBAR_MIN_WIDTH))
             .flex()
             .flex_col()
             .bg(rgb(colors.surface))
@@ -91,6 +97,8 @@ impl WorkspaceView {
                                     .child(
                                         div()
                                             .flex()
+                                            .flex_1()
+                                            .min_w_0()
                                             .items_start()
                                             .gap_3()
                                             .child(avatar(
@@ -102,14 +110,20 @@ impl WorkspaceView {
                                             .child(
                                                 div()
                                                     .flex()
+                                                    .flex_1()
+                                                    .min_w_0()
                                                     .flex_col()
                                                     .gap_1()
-                                                    .child(account.display_name.clone())
+                                                    .child(
+                                                        div()
+                                                            .ellipsis()
+                                                            .child(account.display_name.clone()),
+                                                    )
                                                     .child(
                                                         div()
                                                             .text_sm()
                                                             .text_color(rgb(colors.muted))
-                                                            .truncate()
+                                                            .ellipsis()
                                                             .child(account.username.clone()),
                                                     )
                                                     .children(
@@ -118,7 +132,7 @@ impl WorkspaceView {
                                                                 div()
                                                                     .text_sm()
                                                                     .text_color(rgb(colors.danger))
-                                                                    .truncate()
+                                                                    .ellipsis()
                                                                     .child(format!(
                                                                         "Sync error: {}",
                                                                         account
@@ -134,6 +148,7 @@ impl WorkspaceView {
                                     .child(
                                         div()
                                             .flex()
+                                            .flex_none()
                                             .items_center()
                                             .gap_1()
                                             .px_2()
@@ -218,6 +233,7 @@ impl WorkspaceView {
                                                         .items_center()
                                                         .gap_2()
                                                         .flex_1()
+                                                        .min_w_0()
                                                         .child(icon(
                                                             icon_name,
                                                             ICON_SIZE_SM,
@@ -225,7 +241,7 @@ impl WorkspaceView {
                                                         ))
                                                         .child(
                                                             div()
-                                                                .truncate()
+                                                                .ellipsis()
                                                                 .child(mailbox.name.clone()),
                                                         ),
                                                 )

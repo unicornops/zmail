@@ -37,18 +37,51 @@ pub const SPACE_8: f32 = 32.0;
 
 /// Width of the left sidebar pane (accounts + mailboxes).
 pub const SIDEBAR_WIDTH: f32 = 280.0;
-/// Width of the message/thread list pane.
+/// Narrowest the sidebar shrinks to when the window is too narrow for all
+/// three panes at their natural width.
+pub const SIDEBAR_MIN_WIDTH: f32 = 200.0;
+/// Width of the message/thread list pane. The pane never shrinks.
 pub const MESSAGE_LIST_WIDTH: f32 = 380.0;
+/// Narrowest the reader / compose pane gets before the sidebar gives up
+/// width.
+pub const DETAIL_MIN_WIDTH: f32 = 300.0;
+/// Width of the toolbar search field. Fixed so typing never shifts the
+/// toolbar buttons.
+pub const SEARCH_FIELD_WIDTH: f32 = 240.0;
 /// Default application window width.
 pub const WINDOW_WIDTH: f32 = 1440.0;
 /// Default application window height.
 pub const WINDOW_HEIGHT: f32 = 920.0;
+/// Minimum application window width.
+pub const WINDOW_MIN_WIDTH: f32 = 720.0;
+/// Minimum application window height.
+pub const WINDOW_MIN_HEIGHT: f32 = 480.0;
 /// Height of the top toolbar strip.
 pub const TOOLBAR_HEIGHT: f32 = 48.0;
 /// Minimum height of a toolbar or action button.
 pub const TOOLBAR_BUTTON_HEIGHT: f32 = 32.0;
-/// Height of a single message-list row.
-pub const LIST_ITEM_HEIGHT: f32 = 72.0;
+/// Line height of the first (subject) line of a message-list row. The
+/// line holds body-size text plus the unread dot and 16px icons.
+pub const ROW_TITLE_LINE_HEIGHT: f32 = 20.0;
+/// Line height of the second (sender) line of a message-list row. It also
+/// holds the unread-count badge, so it is as tall as the badge.
+pub const ROW_SENDER_LINE_HEIGHT: f32 = BADGE_SIZE;
+/// Line height of the third (preview) line of a message-list row.
+pub const ROW_PREVIEW_LINE_HEIGHT: f32 = 18.0;
+/// Vertical gap between the lines of a message-list row.
+pub const ROW_LINE_GAP: f32 = 2.0;
+/// Top and bottom padding of a message-list row.
+pub const ROW_PADDING_Y: f32 = 10.0;
+/// Width of the divider drawn under each message-list row.
+pub const ROW_BORDER_WIDTH: f32 = 1.0;
+/// Height of a single message-list row, derived from its three lines so
+/// the content always fits (see the `thread_row_content_fits` test).
+pub const LIST_ITEM_HEIGHT: f32 = ROW_PADDING_Y * 2.0
+    + ROW_TITLE_LINE_HEIGHT
+    + ROW_SENDER_LINE_HEIGHT
+    + ROW_PREVIEW_LINE_HEIGHT
+    + ROW_LINE_GAP * 2.0
+    + ROW_BORDER_WIDTH;
 /// Height of a single mailbox row in the sidebar.
 pub const MAILBOX_ITEM_HEIGHT: f32 = 40.0;
 /// Diameter of a sender avatar circle.
@@ -413,6 +446,40 @@ mod tests {
             success: None,
             info: None,
         }
+    }
+
+    /// GPUI's default line height is the golden ratio times the font size,
+    /// which is what made the old 72px rows overflow (~79px of content).
+    /// Rows now set explicit line heights; this checks they hold the text
+    /// and the inline elements, and that the derived height adds up.
+    #[test]
+    fn thread_row_content_fits() {
+        // Root font size (1rem) in the shell.
+        const REM: f32 = 16.0;
+        // Smallest line height that does not clip glyphs at a font size.
+        let min_line = |font_size: f32| font_size * 1.2;
+
+        // Line 1: body text, unread dot and 16px flag/attachment icons.
+        assert!(ROW_TITLE_LINE_HEIGHT >= min_line(REM));
+        const { assert!(ROW_TITLE_LINE_HEIGHT >= ICON_SIZE_SM) };
+        const { assert!(ROW_TITLE_LINE_HEIGHT >= UNREAD_INDICATOR_SIZE) };
+        // Line 2: `text_sm` sender plus the unread-count badge.
+        assert!(ROW_SENDER_LINE_HEIGHT >= min_line(REM * 0.875));
+        const { assert!(ROW_SENDER_LINE_HEIGHT >= BADGE_SIZE) };
+        // Line 3: `text_sm` preview.
+        assert!(ROW_PREVIEW_LINE_HEIGHT >= min_line(REM * 0.875));
+
+        let content = ROW_TITLE_LINE_HEIGHT
+            + ROW_SENDER_LINE_HEIGHT
+            + ROW_PREVIEW_LINE_HEIGHT
+            + ROW_LINE_GAP * 2.0;
+        let available = LIST_ITEM_HEIGHT - ROW_PADDING_Y * 2.0 - ROW_BORDER_WIDTH;
+        assert!(
+            content <= available,
+            "row content ({content}px) must fit the row ({available}px available)"
+        );
+        // The avatar sits beside the three lines.
+        assert!(AVATAR_SIZE <= available);
     }
 
     #[test]
