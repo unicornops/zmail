@@ -24,7 +24,7 @@ use zmail_security::SecretStore;
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
-use super::{DetailMode, ListMode, WorkspaceView};
+use super::{DetailMode, InitialView, ListMode, WorkspaceView};
 use crate::account_setup::AccountSetupState;
 use crate::compose::ComposeState;
 use crate::input::{EditorField, InputOutcome, UiBuffer};
@@ -44,7 +44,7 @@ impl WorkspaceView {
         sync_service: SyncService,
         secrets: Arc<dyn SecretStore>,
         notifier: Arc<NewMailNotifier<OsNotificationSink>>,
-        initial_draft_id: Option<i64>,
+        initial_view: InitialView,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -126,13 +126,29 @@ impl WorkspaceView {
             view.account_setup.notice = Some("Add your first mail account to get started.");
         }
 
-        // A mailto launch pre-selects the draft's account and opens the
-        // compose pane on the pre-filled draft.
-        if let Some(draft_id) = initial_draft_id
-            && let Ok(Some(draft)) = view.store.draft_detail(draft_id)
-        {
-            view.select_account(draft.account_id, cx);
-            view.load_draft_into_compose(draft_id);
+        match initial_view {
+            InitialView::Inbox => {}
+            // A mailto launch pre-selects the draft's account and opens the
+            // compose pane on the pre-filled draft.
+            InitialView::Draft(draft_id) => {
+                if let Ok(Some(draft)) = view.store.draft_detail(draft_id) {
+                    view.select_account(draft.account_id, cx);
+                    view.load_draft_into_compose(draft_id);
+                }
+            }
+            // Selected directly rather than through `select_thread`, which
+            // would mark the thread read after a delay.
+            InitialView::Thread(thread_id) => {
+                if let Ok(Some(thread)) = view.store.thread_view(thread_id) {
+                    view.selected_mailbox_id = Some(thread.mailbox_id);
+                    view.selected_thread_id = Some(thread_id);
+                    view.refresh_from_store();
+                }
+            }
+            InitialView::AccountSetup => {
+                view.detail_mode = DetailMode::AccountSetup;
+                view.active_field = Some(EditorField::AccountDisplayName);
+            }
         }
 
         // New mail synced in the background by the mail watcher appears

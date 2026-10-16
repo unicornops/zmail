@@ -10,12 +10,15 @@ use anyhow::{Context, Result, bail};
 use zmail_assets::ZmailAssets;
 use zmail_core::{
     AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, NewAccount, NewDraft, NewIdentity,
-    OutgoingConfig, ProtocolKind, SubmissionSecurity, ThemeSummary, UpstreamPins,
+    OutgoingConfig, ProtocolKind, SubmissionSecurity, ThemeAppearance, ThemeSummary, UpstreamPins,
 };
 use zmail_security::{InMemorySecretStore, KeyringSecretStore, SecretSlot, SecretStore};
 use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
 use zmail_theme::ThemeFamily;
+use zmail_ui::InitialView;
+
+mod ui_fixture;
 
 const PHASE0_DARK_THEME: &str = zmail_theme::bundled::DARK;
 const PHASE0_LIGHT_THEME: &str = zmail_theme::bundled::LIGHT;
@@ -34,6 +37,7 @@ fn main() -> Result<()> {
             secret,
             email,
         } => launch_imap_fixture(&endpoint, &username, &secret, &email),
+        Command::LaunchUiFixture { view, theme } => launch_ui_fixture(view, theme),
         Command::AddImap => add_account(ProtocolKind::Imap),
         Command::AddJmap => add_account(ProtocolKind::Jmap),
         Command::ListAccounts => list_accounts(),
@@ -85,6 +89,10 @@ enum Command {
         username: String,
         secret: String,
         email: String,
+    },
+    LaunchUiFixture {
+        view: ui_fixture::FixtureView,
+        theme: Option<ThemeAppearance>,
     },
     Backup {
         directory: Option<String>,
@@ -154,6 +162,13 @@ impl Command {
                     .next()
                     .context("launch-imap-fixture requires a primary identity email")?,
             }),
+            "launch-ui-fixture" => {
+                let view = ui_fixture::FixtureView::parse(
+                    &args.next().context("launch-ui-fixture requires a view")?,
+                )?;
+                let theme = ui_fixture::parse_theme(args.next().as_deref())?;
+                Ok(Self::LaunchUiFixture { view, theme })
+            }
             "add-imap" => Ok(Self::AddImap),
             "add-jmap" => Ok(Self::AddJmap),
             "list-accounts" => Ok(Self::ListAccounts),
@@ -526,13 +541,14 @@ fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
     let _ = sync_service.start_mail_watcher();
 
     let bootstrap = build_bootstrap(runtime.summary())?;
+    let initial_view = initial_draft_id.map_or(InitialView::Inbox, InitialView::Draft);
     zmail_ui::run(
         ZmailAssets,
         bootstrap,
         store,
         sync_service,
         secrets,
-        initial_draft_id,
+        initial_view,
     );
     drop(runtime);
     Ok(())
@@ -558,7 +574,49 @@ fn launch_imap_fixture(endpoint: &str, username: &str, secret: &str, email: &str
         .with_context(|| format!("failed to sync the IMAP fixture account {account_id}"))?;
 
     let bootstrap = build_bootstrap(runtime.summary())?;
-    zmail_ui::run(ZmailAssets, bootstrap, store, sync_service, secrets, None);
+    zmail_ui::run(
+        ZmailAssets,
+        bootstrap,
+        store,
+        sync_service,
+        secrets,
+        InitialView::Inbox,
+    );
+    drop(runtime);
+    Ok(())
+}
+
+/// Opens the window in one seeded UI state for the screenshot matrix.
+///
+/// The store is in memory and seeded with synthetic mail, secrets stay in
+/// memory and nothing syncs, so the launch needs no network or keychain.
+/// `theme` pins the light or dark variant instead of following the system
+/// appearance.
+fn launch_ui_fixture(view: ui_fixture::FixtureView, theme: Option<ThemeAppearance>) -> Result<()> {
+    install_panic_log();
+    let runtime = BackgroundRuntime::start(4)?;
+    let store = Arc::new(LocalStore::open_ephemeral().context("failed to open the fixture store")?);
+    let initial_view = ui_fixture::seed(&store, view, ui_fixture::anchor_time())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
+
+    let mut bootstrap = build_bootstrap(runtime.summary())?;
+    if let Some(appearance) = theme {
+        if bootstrap.theme.appearance != appearance {
+            std::mem::swap(&mut bootstrap.theme, &mut bootstrap.alternate_theme);
+        }
+        // With both slots on the same variant, following the system
+        // appearance has nothing to switch to.
+        bootstrap.alternate_theme = bootstrap.theme.clone();
+    }
+    zmail_ui::run(
+        ZmailAssets,
+        bootstrap,
+        store,
+        sync_service,
+        secrets,
+        initial_view,
+    );
     drop(runtime);
     Ok(())
 }
@@ -1583,6 +1641,9 @@ fn print_help() {
     println!("Zmail commands:");
     println!("  zmail-app                 Launch the desktop app");
     println!("  zmail-app launch-imap-fixture ENDPOINT USERNAME SECRET EMAIL");
+    println!("  zmail-app launch-ui-fixture VIEW [dark|light|system]");
+    println!("                            Open a seeded UI state for screenshots: empty,");
+    println!("                            inbox, reader, compose or account-setup");
     println!("  zmail-app add-imap        Add and sync a real IMAP account");
     println!("  zmail-app add-jmap        Add and sync a real JMAP account");
     println!("  zmail-app list-accounts   Show configured accounts");
