@@ -133,7 +133,7 @@ pub(crate) fn render_compose_detail(
                 &format!("Last send error: {error}"),
                 "alert-circle",
                 colors.danger,
-                colors.warning_background,
+                colors.danger_background,
                 colors,
             ))
         })

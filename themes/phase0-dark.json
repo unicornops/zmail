@@ -16,10 +16,18 @@
         "border": "#2D3B55",
         "border.variant": "#22304A",
         "editor.foreground": "#E5EEF9",
-        "element.background": "#162033",
+        "element.background": "#1C2E4B",
         "element.selected": "#203559",
         "text": "#E5EEF9",
-        "text.muted": "#9FB0C7"
+        "text.muted": "#9FB0C7",
+        "element.hover": "#1C2E4B",
+        "error": "#F87171",
+        "error.background": "#3B1F2B",
+        "warning": "#F59E0B",
+        "warning.background": "#253550",
+        "success": "#34D399",
+        "success.background": "#162B20",
+        "info": "#60A5FA"
       }
     }
   ]

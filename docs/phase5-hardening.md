@@ -4,10 +4,31 @@ This document records the Phase 5 hardening work that is present in-repo today a
 
 ## Accessibility
 
-- The GPUI shell keeps all primary flows keyboard reachable.
-- Focus remains anchored inside the workspace after account creation, compose, sync, and outbox actions.
-- Text-first reader rendering remains the default fallback for message content.
-- Remote content stays blocked by default and attachments still require explicit user action.
+Zmail is not yet usable without a pointer or with a screen reader. This section records what is true today, so nobody relies on support that does not exist. The work to close the gaps is in the UI plan (`UI_PLAN.md`): Phase 1 (actions, key bindings, per-pane focus, a real text input) and Phase 8 (screen readers, text scaling, reduced motion, high contrast).
+
+### Keyboard
+
+- There are no key bindings. The shell defines no GPUI actions or `KeyBinding`s, has no per-pane focus, and has no Tab order.
+- The whole workspace has a single focus handle. Every key press goes to whichever text field was clicked last: the search field, a compose field, or an account-setup field. This holds even after clicking a thread or a mailbox.
+- Enter submits single-line fields: it runs the search, adds the typed attachment path, and saves the account from the last account-setup fields. Nothing else responds to the keyboard.
+- Choosing an account, mailbox, thread, draft or outbox job, and every toolbar, reader and compose button, needs a pointer. So the primary flows (read, reply, send, set up an account) are **not** keyboard reachable.
+- Text fields are drawn labels with an inserted cursor, not an editor. There is no selection, copy, cut, undo, key repeat or IME. Paste uses GPUI's platform modifier, which is Cmd on macOS but not Ctrl on Linux or Windows. The cursor is a byte index, so editing next to a non-ASCII character can panic.
+
+### Screen readers
+
+- GPUI 0.2.2 exposes no accessibility tree, so screen readers announce nothing in the window. Support needs the GPUI upgrade (AccessKit) tracked for UI plan Phase 1/8.
+
+### Visual
+
+- The theme follows the system light/dark appearance until the toolbar toggle is used; the choice is not persisted yet.
+- Dates in lists are relative ("10:42", "Yesterday"), with the full timestamp in a tooltip. The tooltip needs a pointer to hover; there is no keyboard equivalent yet.
+- Text size follows GPUI's fixed 16px root size. There is no text scaling, high-contrast mode or reduced-motion handling.
+- Status messages dismiss themselves after four seconds, so they can be missed. Errors stay until dismissed with the banner's close button, which needs a pointer.
+
+### Content
+
+- The reader renders message bodies as text, and HTML is converted to text before display.
+- Remote content stays blocked by default, and attachments are only saved on explicit user action.
 
 ## Performance
 

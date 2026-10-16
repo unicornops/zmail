@@ -97,6 +97,14 @@ pub struct SemanticTheme {
     pub success: Option<String>,
     /// Info semantic color.
     pub info: Option<String>,
+    /// Background for buttons and other interactive elements.
+    pub button_background: Option<String>,
+    /// Background tint for error banners.
+    pub danger_background: Option<String>,
+    /// Background tint for warning banners.
+    pub warning_background: Option<String>,
+    /// Background tint for success banners.
+    pub success_background: Option<String>,
 }
 
 impl SemanticTheme {
@@ -133,25 +141,14 @@ impl SemanticTheme {
 
         let hover_background = theme.style.color("element.hover").map(ToOwned::to_owned);
 
-        let danger = theme
-            .style
-            .color("status_bar.error_background")
-            .or_else(|| theme.style.color("error"))
-            .map(ToOwned::to_owned);
-
-        let warning = theme
-            .style
-            .color("status_bar.warning_background")
-            .or_else(|| theme.style.color("warning"))
-            .map(ToOwned::to_owned);
-
-        let success = theme
-            .style
-            .color("status_bar.info_background")
-            .or_else(|| theme.style.color("success"))
-            .map(ToOwned::to_owned);
-
-        let info = theme.style.color("info").map(ToOwned::to_owned);
+        // Text and icon colours come from Zed's status foreground tokens;
+        // the `status_bar.*_background` tokens are fills for Zed's status
+        // bar, not foreground colours.
+        let color = |key: &str| theme.style.color(key).map(ToOwned::to_owned);
+        let danger = color("error");
+        let warning = color("warning");
+        let success = color("success");
+        let info = color("info");
 
         Self {
             background: theme.style.color("background").map(ToOwned::to_owned),
@@ -166,6 +163,10 @@ impl SemanticTheme {
             warning,
             success,
             info,
+            button_background: color("element.background"),
+            danger_background: color("error.background"),
+            warning_background: color("warning.background"),
+            success_background: color("success.background"),
         }
     }
 }
@@ -206,5 +207,45 @@ mod tests {
         assert_eq!(semantic.background.as_deref(), Some("#FFFFFF"));
         assert_eq!(semantic.hover_background.as_deref(), Some("#F1F5F9"));
         assert_eq!(semantic.accent.as_deref(), Some("#2563EB"));
+    }
+
+    #[test]
+    fn status_colours_come_from_foreground_tokens() {
+        let family = ThemeFamily::from_json_str(
+            r##"{
+              "name": "Zed-like",
+              "author": "test",
+              "themes": [{
+                "name": "Zed-like Dark",
+                "appearance": "dark",
+                "style": {
+                  "background": "#282c33ff",
+                  "element.background": "#2e343eff",
+                  "error": "#d07277ff",
+                  "error.background": "#d072771a",
+                  "warning": "#dec184ff",
+                  "warning.background": "#dec1841a",
+                  "success": "#a1c181ff",
+                  "success.background": "#a1c1811a",
+                  "info": "#74ade8ff",
+                  "status_bar.error_background": "#000000ff",
+                  "status_bar.warning_background": "#000000ff",
+                  "status_bar.info_background": "#000000ff"
+                }
+              }]
+            }"##,
+        )
+        .expect("theme family should parse");
+        let theme = family.default_theme().expect("theme exists");
+        let semantic = SemanticTheme::from_theme(theme);
+
+        assert_eq!(semantic.danger.as_deref(), Some("#d07277ff"));
+        assert_eq!(semantic.warning.as_deref(), Some("#dec184ff"));
+        assert_eq!(semantic.success.as_deref(), Some("#a1c181ff"));
+        assert_eq!(semantic.info.as_deref(), Some("#74ade8ff"));
+        assert_eq!(semantic.button_background.as_deref(), Some("#2e343eff"));
+        assert_eq!(semantic.danger_background.as_deref(), Some("#d072771a"));
+        assert_eq!(semantic.warning_background.as_deref(), Some("#dec1841a"));
+        assert_eq!(semantic.success_background.as_deref(), Some("#a1c1811a"));
     }
 }

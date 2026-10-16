@@ -200,6 +200,10 @@ struct WorkspaceView {
     /// refresh instead of on every frame.
     thread_view_cache: Option<zmail_core::ThreadView>,
     refresh_scheduled: bool,
+    /// Set once the user toggles the theme; until then the theme follows
+    /// the system light/dark appearance. (Persisting the choice is part of
+    /// the Phase 1 UI preferences.)
+    theme_overridden: bool,
     /// 12- or 24-hour clock for list and reader dates, from the locale.
     hour_cycle: zmail_core::time::HourCycle,
 }
@@ -257,7 +261,7 @@ impl Render for WorkspaceView {
                                 &error,
                                 "alert-circle",
                                 colors.danger,
-                                colors.warning_background,
+                                colors.danger_background,
                                 &colors,
                             )
                             .child(

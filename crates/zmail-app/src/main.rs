@@ -1454,6 +1454,10 @@ fn load_theme_summary(theme_json: &str, variant_label: &str) -> Result<ThemeSumm
         warning: semantic.warning,
         success: semantic.success,
         info: semantic.info,
+        button_background: semantic.button_background,
+        danger_background: semantic.danger_background,
+        warning_background: semantic.warning_background,
+        success_background: semantic.success_background,
     })
 }
 
