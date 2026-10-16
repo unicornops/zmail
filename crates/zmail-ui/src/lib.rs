@@ -5,7 +5,7 @@
 //! | Module | Content |
 //! |--------|---------|
 //! | `styles` | Design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
-//! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, … and the gallery |
+//! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, `TextInput`, … and the gallery |
 //! | `input` | `UiBuffer`, `EditorField`, `InputOutcome` |
 //! | `widgets` | `toolbar_button`, `input_card`, `list_row`, `icon`, … |
 //! | `workspace` | `impl WorkspaceView` — all business-logic methods |
@@ -110,6 +110,7 @@ pub fn run(
         .with_assets(asset_source)
         .run(move |cx: &mut App| {
             components::init(cx);
+            components::text_input::init(cx);
             let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
             let bootstrap = bootstrap.clone();
             let store = store.clone();

@@ -17,6 +17,7 @@ pub(crate) mod skeleton;
 pub(crate) mod split_handle;
 #[cfg(test)]
 mod test_support;
+pub(crate) mod text_input;
 pub(crate) mod theme;
 pub(crate) mod toast;
 pub(crate) mod tooltip;
@@ -33,5 +34,6 @@ pub(crate) use scrollbar::Scrollbar;
 pub(crate) use select::{Select, SelectEvent};
 pub(crate) use skeleton::SkeletonRow;
 pub(crate) use split_handle::{PaneSide, SplitHandle};
+pub(crate) use text_input::{TextInput, TextInputEvent};
 pub(crate) use theme::ComponentTheme;
 pub(crate) use toast::{Toast, ToastHost, ToastKind};

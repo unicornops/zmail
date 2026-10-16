@@ -414,6 +414,39 @@ impl UiColors {
     }
 }
 
+impl UiColors {
+    /// The bundled dark palette, for components drawn before the workspace
+    /// has published the active theme's colours (for example in tests).
+    pub fn fallback() -> Self {
+        Self::from_theme(&ThemeSummary {
+            family_name: String::new(),
+            theme_name: String::new(),
+            appearance: ThemeAppearance::Dark,
+            background: None,
+            surface: None,
+            border: None,
+            foreground: None,
+            muted_foreground: None,
+            accent: None,
+            selected_background: None,
+            hover_background: None,
+            danger: None,
+            warning: None,
+            success: None,
+            info: None,
+            button_background: None,
+            danger_background: None,
+            warning_background: None,
+            success_background: None,
+        })
+    }
+}
+
+/// The workspace publishes the active palette as a GPUI global so
+/// components that are their own entities (such as `TextInput`) draw with
+/// the current theme.
+impl gpui::Global for UiColors {}
+
 // ---------------------------------------------------------------------------
 // Colour parsing helpers
 // ---------------------------------------------------------------------------
