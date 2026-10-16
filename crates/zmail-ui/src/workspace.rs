@@ -15,7 +15,7 @@ use url::Url;
 use zmail_core::{
     AccountSummary, AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, IdentitySummary,
     MailboxSummary, NewAccount, NewDraft, NewIdentity, OutgoingConfig, ProtocolKind, StoreStats,
-    SubmissionSecurity, SyncPhase, ThreadMessage, ThreadView,
+    SubmissionSecurity, SyncPhase, ThreadMessage, ThreadView, text::count_noun,
 };
 use zmail_notify::{NewMailNotifier, OsNotificationSink};
 use zmail_security::SecretStore;
@@ -70,6 +70,7 @@ impl WorkspaceView {
             pending_op_count: 0,
             dead_op_count: 0,
             search_results: Vec::new(),
+            search_results_query: String::new(),
             selected_account_id: None,
             selected_mailbox_id: None,
             selected_thread_id: None,
@@ -448,9 +449,13 @@ impl WorkspaceView {
             return;
         };
 
+        let account_name = self
+            .selected_account()
+            .map(|account| account.display_name.clone())
+            .unwrap_or_default();
         match self.sync_service.sync_account(account_id) {
             Ok(_) => {
-                self.status_message = Some(format!("Sync started for account {account_id}."));
+                self.status_message = Some(format!("Syncing {account_name}…"));
                 self.refresh_from_store();
                 self.schedule_refresh(window, cx);
             }
@@ -463,7 +468,10 @@ impl WorkspaceView {
     pub(crate) fn sync_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.sync_service.sync_all() {
             Ok(started) => {
-                self.status_message = Some(format!("Started {started} account sync job(s)."));
+                self.status_message = Some(format!(
+                    "Syncing {}…",
+                    count_noun(started, "account", "accounts")
+                ));
                 self.refresh_from_store();
                 self.schedule_refresh(window, cx);
             }
@@ -494,6 +502,7 @@ impl WorkspaceView {
         match self.store.search_threads(account_id, query, 100) {
             Ok(results) => {
                 self.search_results = results;
+                self.search_results_query = query.to_owned();
                 self.list_mode = ListMode::Search;
                 self.detail_mode = DetailMode::Reader;
                 self.store_error = None;
@@ -520,7 +529,9 @@ impl WorkspaceView {
             .or_else(|| self.identities.first())
             .cloned()
         else {
-            self.store_error = Some(format!("Account {account_id} has no identities."));
+            self.store_error = Some(
+                "This account has no sending identity. Add one in the account settings.".to_owned(),
+            );
             cx.notify();
             return;
         };
@@ -569,9 +580,9 @@ impl WorkspaceView {
                 self.detail_mode = DetailMode::Compose;
                 self.active_field = Some(EditorField::ComposeBody);
                 self.status_message = Some(if reply_all {
-                    format!("Reply-all draft {draft_id} ready.")
+                    "Reply-all draft ready.".to_owned()
                 } else {
-                    format!("Reply draft {draft_id} ready.")
+                    "Reply draft ready.".to_owned()
                 });
                 self.refresh_from_store();
                 window.focus(&self.focus_handle);
@@ -617,7 +628,8 @@ impl WorkspaceView {
         } else {
             self.store_error = None;
             self.status_message = Some(format!(
-                "Saved {saved} attachment(s) to {}.",
+                "Saved {} to {}.",
+                count_noun(saved, "attachment", "attachments"),
                 destination.display()
             ));
         }
@@ -638,7 +650,7 @@ impl WorkspaceView {
                 self.list_mode = ListMode::Drafts;
                 self.detail_mode = DetailMode::Compose;
                 self.active_field = Some(EditorField::ComposeTo);
-                self.status_message = Some(format!("Forward draft {draft_id} ready."));
+                self.status_message = Some("Forward draft ready.".to_owned());
                 self.refresh_from_store();
                 window.focus(&self.focus_handle);
             }
@@ -755,7 +767,7 @@ impl WorkspaceView {
                 self.detail_mode = DetailMode::Compose;
                 self.store_error = None;
             }
-            Ok(None) => self.store_error = Some(format!("Draft {draft_id} no longer exists.")),
+            Ok(None) => self.store_error = Some("This draft no longer exists.".to_owned()),
             Err(error) => self.store_error = Some(error.to_string()),
         }
     }
@@ -787,7 +799,7 @@ impl WorkspaceView {
             Ok(()) => {
                 self.store_error = None;
                 if let Some(draft_id) = draft_id {
-                    self.status_message = Some(format!("Draft {draft_id} saved."));
+                    self.status_message = Some("Draft saved.".to_owned());
                     self.load_draft_into_compose(draft_id);
                     self.refresh_from_store();
                 }
@@ -813,8 +825,8 @@ impl WorkspaceView {
         };
 
         match self.sync_service.queue_draft_and_send(draft_id) {
-            Ok(job_id) => {
-                self.status_message = Some(format!("Draft {draft_id} queued as job {job_id}."));
+            Ok(_job_id) => {
+                self.status_message = Some("Message queued for sending.".to_owned());
                 let _ = self.sync_service.process_outbox(Some(
                     self.compose
                         .as_ref()
@@ -903,7 +915,7 @@ impl WorkspaceView {
     /// Retry the currently-selected outbox job.
     pub(crate) fn retry_selected_outbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(job_id) = self.selected_outbox_job_id else {
-            self.store_error = Some("Select an outbox job first.".to_owned());
+            self.store_error = Some("Select a message in the outbox first.".to_owned());
             cx.notify();
             return;
         };
@@ -911,7 +923,7 @@ impl WorkspaceView {
         match self.store.retry_outbox_job(job_id) {
             Ok(()) => {
                 let _ = self.sync_service.process_outbox(self.selected_account_id);
-                self.status_message = Some(format!("Outbox job {job_id} requeued."));
+                self.status_message = Some("Message queued for another send attempt.".to_owned());
                 self.refresh_from_store();
                 self.schedule_refresh(window, cx);
             }
@@ -991,10 +1003,11 @@ impl WorkspaceView {
                     self.active_field = None;
                     self.status_message = Some(if oauth2_flow.is_some() {
                         format!(
-                            "Account {account_id} added. Finish the authorization in the opened browser page; the account syncs once it completes."
+                            "{} added. Finish signing in in your browser; the account syncs once you approve access.",
+                            account.display_name
                         )
                     } else {
-                        format!("Account {account_id} added.")
+                        format!("{} added.", account.display_name)
                     });
                     // OAuth2 accounts sync from the authorization thread,
                     // once the grant is stored; syncing here would only

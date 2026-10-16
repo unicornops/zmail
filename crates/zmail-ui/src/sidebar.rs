@@ -41,13 +41,7 @@ impl WorkspaceView {
                     .py_3()
                     .border_b_1()
                     .border_color(rgb(colors.border))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Accounts"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(colors.muted))
-                            .child("Account setup, mailbox selection, and manual sync live here."),
-                    ),
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Accounts")),
             )
             // ---- Account items -------------------------------------------
             .child(
@@ -115,27 +109,8 @@ impl WorkspaceView {
                                                         div()
                                                             .text_sm()
                                                             .text_color(rgb(colors.muted))
-                                                            .child(format!(
-                                                                "{} • {} identities",
-                                                                account.protocol,
-                                                                account.identity_count
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(rgb(colors.muted))
                                                             .truncate()
-                                                            .child(account.endpoint.clone()),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(rgb(colors.muted))
-                                                            .truncate()
-                                                            .child(
-                                                                account.sync_status.detail.clone(),
-                                                            ),
+                                                            .child(account.username.clone()),
                                                     )
                                                     .children(
                                                         (account.sync_status.failure_count > 0)
@@ -183,13 +158,7 @@ impl WorkspaceView {
                     .py_3()
                     .border_b_1()
                     .border_color(rgb(colors.border))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Mailboxes"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(colors.muted))
-                            .child("Local mirror for the selected account."),
-                    ),
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Mailboxes")),
             )
             // ---- Virtualised mailbox list --------------------------------
             .child(
@@ -260,29 +229,13 @@ impl WorkspaceView {
                                                                 .child(mailbox.name.clone()),
                                                         ),
                                                 )
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_2()
-                                                        .child(
-                                                            div()
-                                                                .text_sm()
-                                                                .text_color(rgb(colors.muted))
-                                                                .child(
-                                                                    mailbox
-                                                                        .total_threads
-                                                                        .to_string(),
-                                                                ),
-                                                        )
-                                                        .when(mailbox.unread_threads > 0, |this| {
-                                                            this.child(badge(
-                                                                mailbox.unread_threads,
-                                                                colors.accent,
-                                                                colors.background,
-                                                            ))
-                                                        }),
-                                                ),
+                                                .when(mailbox.unread_threads > 0, |this| {
+                                                    this.child(badge(
+                                                        mailbox.unread_threads,
+                                                        colors.accent,
+                                                        colors.background,
+                                                    ))
+                                                }),
                                         ),
                                 );
                             }

@@ -2,20 +2,21 @@
 //!
 //! [`ComposeState`] holds the in-memory form backing a draft being edited.
 //! [`render_compose_detail`] produces the scroll content for the compose pane.
-//! [`compose_focus_buttons`] produces the action-bar button list shown at the
-//! bottom of the detail pane when composing.
+//! [`compose_action_buttons`] produces the Send / Save Draft buttons shown at
+//! the bottom of the detail pane when composing.
 
 use gpui::{
     AnyElement, Context, FontWeight, IntoElement, StatefulInteractiveElement, div, prelude::*, px,
     rgb,
 };
-use zmail_core::{DraftAttachment, DraftDetail, IdentitySummary};
+use zmail_core::{DraftAttachment, DraftDetail, DraftState, IdentitySummary};
 
-use super::{ListMode, WorkspaceView};
+use super::WorkspaceView;
 use crate::input::{EditorField, UiBuffer};
 use crate::styles::{ICON_BUTTON_SIZE, ICON_SIZE_SM, UiColors};
 use crate::widgets::{
-    empty_state, icon, input_card, label_chip, section_card, status_banner, toolbar_button,
+    empty_state, format_size, icon, input_card, label_chip, section_card, status_banner,
+    toolbar_button,
 };
 
 // ---------------------------------------------------------------------------
@@ -40,7 +41,7 @@ pub(crate) struct ComposeState {
     pub(crate) body: UiBuffer,
     pub(crate) attachment_path: UiBuffer,
     pub(crate) attachments: Vec<DraftAttachment>,
-    pub(crate) state_label: String,
+    pub(crate) state: DraftState,
     pub(crate) last_error_message: Option<String>,
 }
 
@@ -59,7 +60,7 @@ impl ComposeState {
             body: UiBuffer::multiline(draft.body),
             attachment_path: UiBuffer::single_line(String::new()),
             attachments: draft.attachments,
-            state_label: draft.state.to_string(),
+            state: draft.state,
             last_error_message: draft.last_error_message,
         }
     }
@@ -89,6 +90,22 @@ pub(crate) fn render_compose_detail(
         );
     };
 
+    let title = if compose.subject.text.trim().is_empty() {
+        "New message".to_owned()
+    } else {
+        compose.subject.text.trim().to_owned()
+    };
+    // "Editing" is the normal state of an open draft; only call out the
+    // states that need attention.
+    let state_chip = (compose.state != DraftState::Editing).then(|| {
+        label_chip(
+            compose.state.label(),
+            Some("file-text"),
+            colors.button_background,
+            colors.info,
+        )
+    });
+
     div()
         .flex()
         .flex_col()
@@ -102,27 +119,12 @@ pub(crate) fn render_compose_detail(
                 .child(
                     div()
                         .flex_1()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_xl()
-                                .font_weight(FontWeight::BOLD)
-                                .child(format!("Draft {}", compose.draft_id)),
-                        )
-                        .child(div().text_sm().text_color(rgb(colors.muted)).child(format!(
-                            "{} • {} attachment(s)",
-                            compose.identity_email,
-                            compose.attachments.len()
-                        ))),
+                        .min_w_0()
+                        .text_xl()
+                        .font_weight(FontWeight::BOLD)
+                        .child(title),
                 )
-                .child(label_chip(
-                    compose.state_label.clone(),
-                    Some("file-text"),
-                    colors.button_background,
-                    colors.info,
-                )),
+                .children(state_chip),
         )
         .when_some(compose.last_error_message.as_ref(), |this, error| {
             this.child(status_banner(
@@ -146,69 +148,41 @@ pub(crate) fn render_compose_detail(
 }
 
 // ---------------------------------------------------------------------------
-// compose_focus_buttons
+// compose_action_buttons
 // ---------------------------------------------------------------------------
 
-/// Build the action-bar button list shown at the bottom of the detail pane
-/// when the compose view is active.
-pub(crate) fn compose_focus_buttons(
+/// Build the action-bar buttons shown at the bottom of the detail pane while
+/// composing: save and send stay visible however long the draft is.
+///
+/// Returns an empty [`Vec`] when no draft is open.
+pub(crate) fn compose_action_buttons(
+    draft_open: bool,
     colors: &UiColors,
     cx: &mut Context<WorkspaceView>,
 ) -> Vec<AnyElement> {
+    if !draft_open {
+        return Vec::new();
+    }
     vec![
         toolbar_button(
-            "Focus To",
-            Some("mail"),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
+            "Send",
+            Some("send"),
+            colors.accent,
+            colors.accent,
+            colors.background,
             cx.listener(|this: &mut WorkspaceView, _, window, cx| {
-                this.set_active_field(EditorField::ComposeTo, window, cx);
+                this.send_current_draft(window, cx);
             }),
         )
         .into_any_element(),
         toolbar_button(
-            "Focus Subject",
+            "Save Draft",
             Some("file-text"),
             colors.button_background,
             colors.border,
             colors.foreground,
-            cx.listener(|this: &mut WorkspaceView, _, window, cx| {
-                this.set_active_field(EditorField::ComposeSubject, window, cx);
-            }),
-        )
-        .into_any_element(),
-        toolbar_button(
-            "Focus Body",
-            Some("pen-square"),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
-            cx.listener(|this: &mut WorkspaceView, _, window, cx| {
-                this.set_active_field(EditorField::ComposeBody, window, cx);
-            }),
-        )
-        .into_any_element(),
-        toolbar_button(
-            "Focus Attachments",
-            Some("paperclip"),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
-            cx.listener(|this: &mut WorkspaceView, _, window, cx| {
-                this.set_active_field(EditorField::ComposeAttachmentPath, window, cx);
-            }),
-        )
-        .into_any_element(),
-        toolbar_button(
-            "Show Outbox",
-            Some("send"),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
             cx.listener(|this: &mut WorkspaceView, _, _, cx| {
-                this.list_mode = ListMode::Outbox;
-                cx.notify();
+                this.save_current_draft(cx);
             }),
         )
         .into_any_element(),
@@ -231,112 +205,108 @@ fn render_identity_section(
         .map(|identity| identity.email_address.clone())
         .unwrap_or_else(|| compose.identity_email.clone());
 
-    section_card(
-        "Identity",
-        "Choose which sender identity the draft will use when it enters the outbox.",
-        colors,
-    )
-    .child(
-        div()
-            .rounded_md()
-            .bg(rgb(colors.background))
-            .border_1()
-            .border_color(rgb(colors.border))
-            .px_3()
-            .py_3()
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(icon("user", ICON_SIZE_SM, colors.accent))
-                            .child(
-                                div().flex().flex_col().gap_1().child(selected_label).child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(colors.muted))
-                                        .child(selected_email),
-                                ),
-                            ),
-                    )
-                    .child(icon("chevron-down", ICON_SIZE_SM, colors.muted)),
-            ),
-    )
-    .child(
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .children(identities.iter().map(|identity| {
-                let identity_id = identity.id;
-                let selected = identity.id == compose.identity_id;
-
-                div()
-                    .id(("compose-identity", identity.id as u64))
-                    .rounded_md()
-                    .bg(rgb(if selected {
-                        colors.selected_background
-                    } else {
-                        colors.background
-                    }))
-                    .border_1()
-                    .border_color(rgb(if selected {
-                        colors.accent
-                    } else {
-                        colors.border
-                    }))
-                    .px_3()
-                    .py_3()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_compose_identity(identity_id, cx);
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .child(icon(
-                                        "user",
-                                        ICON_SIZE_SM,
-                                        if selected {
-                                            colors.accent
-                                        } else {
-                                            colors.muted
-                                        },
-                                    ))
-                                    .child(
+    section_card("Identity", colors)
+        .child(
+            div()
+                .rounded_md()
+                .bg(rgb(colors.background))
+                .border_1()
+                .border_color(rgb(colors.border))
+                .px_3()
+                .py_3()
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(icon("user", ICON_SIZE_SM, colors.accent))
+                                .child(
+                                    div().flex().flex_col().gap_1().child(selected_label).child(
                                         div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .child(identity.display_name.clone())
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(rgb(colors.muted))
-                                                    .child(identity.email_address.clone()),
-                                            ),
+                                            .text_sm()
+                                            .text_color(rgb(colors.muted))
+                                            .child(selected_email),
                                     ),
-                            )
-                            .when(selected, |this| {
-                                this.child(icon("check-circle", ICON_SIZE_SM, colors.success))
-                            }),
-                    )
-            })),
-    )
+                                ),
+                        )
+                        .child(icon("chevron-down", ICON_SIZE_SM, colors.muted)),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .children(identities.iter().map(|identity| {
+                    let identity_id = identity.id;
+                    let selected = identity.id == compose.identity_id;
+
+                    div()
+                        .id(("compose-identity", identity.id as u64))
+                        .rounded_md()
+                        .bg(rgb(if selected {
+                            colors.selected_background
+                        } else {
+                            colors.background
+                        }))
+                        .border_1()
+                        .border_color(rgb(if selected {
+                            colors.accent
+                        } else {
+                            colors.border
+                        }))
+                        .px_3()
+                        .py_3()
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_compose_identity(identity_id, cx);
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_3()
+                                        .child(icon(
+                                            "user",
+                                            ICON_SIZE_SM,
+                                            if selected {
+                                                colors.accent
+                                            } else {
+                                                colors.muted
+                                            },
+                                        ))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .child(identity.display_name.clone())
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(colors.muted))
+                                                        .child(identity.email_address.clone()),
+                                                ),
+                                        ),
+                                )
+                                .when(selected, |this| {
+                                    this.child(icon("check-circle", ICON_SIZE_SM, colors.success))
+                                }),
+                        )
+                })),
+        )
 }
 
 fn render_recipients_section(
@@ -345,67 +315,63 @@ fn render_recipients_section(
     colors: &UiColors,
     cx: &mut Context<WorkspaceView>,
 ) -> gpui::Div {
-    section_card(
-        "Recipients",
-        "Headers and subject stay local until you save or queue this draft.",
-        colors,
-    )
-    .child(
-        input_card(
-            "compose-to-field",
-            "To",
-            "alice@example.com, bob@example.com",
-            &compose.to,
-            active_field == Some(EditorField::ComposeTo),
-            false,
-            colors,
+    section_card("Recipients", colors)
+        .child(
+            input_card(
+                "compose-to-field",
+                "To",
+                "alice@example.com, bob@example.com",
+                &compose.to,
+                active_field == Some(EditorField::ComposeTo),
+                false,
+                colors,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.set_active_field(EditorField::ComposeTo, window, cx);
+            })),
         )
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.set_active_field(EditorField::ComposeTo, window, cx);
-        })),
-    )
-    .child(
-        input_card(
-            "compose-cc-field",
-            "Cc",
-            "Optional carbon copy recipients",
-            &compose.cc,
-            active_field == Some(EditorField::ComposeCc),
-            false,
-            colors,
+        .child(
+            input_card(
+                "compose-cc-field",
+                "Cc",
+                "Optional carbon copy recipients",
+                &compose.cc,
+                active_field == Some(EditorField::ComposeCc),
+                false,
+                colors,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.set_active_field(EditorField::ComposeCc, window, cx);
+            })),
         )
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.set_active_field(EditorField::ComposeCc, window, cx);
-        })),
-    )
-    .child(
-        input_card(
-            "compose-bcc-field",
-            "Bcc",
-            "Optional blind copy recipients",
-            &compose.bcc,
-            active_field == Some(EditorField::ComposeBcc),
-            false,
-            colors,
+        .child(
+            input_card(
+                "compose-bcc-field",
+                "Bcc",
+                "Optional blind copy recipients",
+                &compose.bcc,
+                active_field == Some(EditorField::ComposeBcc),
+                false,
+                colors,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.set_active_field(EditorField::ComposeBcc, window, cx);
+            })),
         )
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.set_active_field(EditorField::ComposeBcc, window, cx);
-        })),
-    )
-    .child(
-        input_card(
-            "compose-subject-field",
-            "Subject",
-            "Message subject",
-            &compose.subject,
-            active_field == Some(EditorField::ComposeSubject),
-            false,
-            colors,
+        .child(
+            input_card(
+                "compose-subject-field",
+                "Subject",
+                "Message subject",
+                &compose.subject,
+                active_field == Some(EditorField::ComposeSubject),
+                false,
+                colors,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.set_active_field(EditorField::ComposeSubject, window, cx);
+            })),
         )
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.set_active_field(EditorField::ComposeSubject, window, cx);
-        })),
-    )
 }
 
 fn render_body_section(
@@ -414,12 +380,7 @@ fn render_body_section(
     colors: &UiColors,
     cx: &mut Context<WorkspaceView>,
 ) -> gpui::Div {
-    section_card(
-        "Message",
-        "Write the body exactly as it will be stored and later submitted.",
-        colors,
-    )
-    .child(
+    section_card("Message", colors).child(
         input_card(
             "compose-body-field",
             "Body",
@@ -441,89 +402,61 @@ fn render_attachments_section(
     colors: &UiColors,
     cx: &mut Context<WorkspaceView>,
 ) -> gpui::Div {
-    section_card(
-        "Attachments",
-        "Add local files by path, then save or send when the draft is ready.",
-        colors,
-    )
-    .child(
-        input_card(
-            "compose-attachment-field",
-            "Attachment Path",
-            "/path/to/attachment.pdf",
-            &compose.attachment_path,
-            active_field == Some(EditorField::ComposeAttachmentPath),
-            false,
-            colors,
-        )
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.set_active_field(EditorField::ComposeAttachmentPath, window, cx);
-        })),
-    )
-    .child(
-        div()
-            .flex()
-            .flex_wrap()
-            .gap_2()
-            .child(toolbar_button(
-                "Add Attachment",
-                Some("paperclip"),
-                colors.button_background,
-                colors.border,
-                colors.foreground,
-                cx.listener(|this: &mut WorkspaceView, _, _, cx| {
-                    this.add_current_attachment(cx);
-                }),
-            ))
-            .child(toolbar_button(
-                "Save Draft",
-                Some("file-text"),
-                colors.button_background,
-                colors.border,
-                colors.foreground,
-                cx.listener(|this: &mut WorkspaceView, _, _, cx| {
-                    this.save_current_draft(cx);
-                }),
-            ))
-            .child(toolbar_button(
-                "Send",
-                Some("send"),
-                colors.accent,
-                colors.accent,
-                colors.background,
-                cx.listener(|this: &mut WorkspaceView, _, window, cx| {
-                    this.send_current_draft(window, cx);
-                }),
-            )),
-    )
-    .child(if compose.attachments.is_empty() {
-        div()
-            .rounded_md()
-            .bg(rgb(colors.background))
-            .border_1()
-            .border_color(rgb(colors.border))
-            .px_3()
-            .py_3()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(icon("paperclip", ICON_SIZE_SM, colors.muted))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(colors.muted))
-                            .child("No attachments added yet."),
-                    ),
+    section_card("Attachments", colors)
+        .child(
+            input_card(
+                "compose-attachment-field",
+                "Attachment Path",
+                "/path/to/attachment.pdf",
+                &compose.attachment_path,
+                active_field == Some(EditorField::ComposeAttachmentPath),
+                false,
+                colors,
             )
-    } else {
-        div().flex().flex_col().gap_2().children(
-            compose.attachments.iter().map(|attachment| {
-                render_attachment_card(attachment, colors, cx).into_any_element()
-            }),
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.set_active_field(EditorField::ComposeAttachmentPath, window, cx);
+            })),
         )
-    })
+        .child(div().flex().flex_wrap().gap_2().child(toolbar_button(
+            "Add Attachment",
+            Some("paperclip"),
+            colors.button_background,
+            colors.border,
+            colors.foreground,
+            cx.listener(|this: &mut WorkspaceView, _, _, cx| {
+                this.add_current_attachment(cx);
+            }),
+        )))
+        .child(if compose.attachments.is_empty() {
+            div()
+                .rounded_md()
+                .bg(rgb(colors.background))
+                .border_1()
+                .border_color(rgb(colors.border))
+                .px_3()
+                .py_3()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(icon("paperclip", ICON_SIZE_SM, colors.muted))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(colors.muted))
+                                .child("No attachments added yet."),
+                        ),
+                )
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .children(compose.attachments.iter().map(|attachment| {
+                    render_attachment_card(attachment, colors, cx).into_any_element()
+                }))
+        })
 }
 
 fn render_attachment_card(
@@ -566,8 +499,9 @@ fn render_attachment_card(
                                 )
                                 .child(div().text_sm().text_color(rgb(colors.muted)).child(
                                     format!(
-                                        "{} • {} bytes",
-                                        attachment.content_type, attachment.size_bytes
+                                        "{} • {}",
+                                        attachment.content_type,
+                                        format_size(attachment.size_bytes)
                                     ),
                                 )),
                         ),
