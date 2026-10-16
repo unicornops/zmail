@@ -14,7 +14,7 @@ use async_imap::{
     types::{Fetch, Flag, Mailbox, Name, NameAttribute},
 };
 use futures_util::TryStreamExt;
-use mail_parser::{Address, MessageParser, MimeHeaders};
+use mail_parser::{Address, MessageParser, MimeHeaders, PartType};
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -1316,28 +1316,49 @@ fn format_addr(address: &mail_parser::Addr<'_>) -> String {
     }
 }
 
+/// Splits a parsed message into the stored body fields.
+///
+/// mail-parser fills `text_body` and `html_body` for every message: when
+/// one alternative is missing it points at the other one and converts it
+/// on the fly in `body_text` / `body_html`. Only parts that really are
+/// `text/plain` or `text/html` are used here, so an HTML-only message goes
+/// through the sanitizer (and remote-content detection) instead of being
+/// shown as mail-parser's flattened text conversion (issue #112).
 fn hydrate_bodies(
     message: &mail_parser::Message<'_>,
 ) -> (Option<String>, Option<String>, bool, String) {
-    let body_text = message
-        .body_text(0)
-        .map(|value| value.into_owned())
-        .filter(|value| !value.trim().is_empty());
+    let body_text = match message.text_part(0).map(|part| &part.body) {
+        Some(PartType::Text(text)) => Some(text.as_ref()),
+        _ => None,
+    }
+    .filter(|value| !value.trim().is_empty());
     // Header-only parses get a synthesized "<html><body></body></html>"
     // shell from mail-parser; it carries no visible text and must surface as
     // an un-hydrated message rather than as an (empty) HTML body.
-    let html = message
-        .body_html(0)
-        .map(|value| value.into_owned())
-        .filter(|value| html_has_visible_text(value));
+    let html = match message.html_part(0).map(|part| &part.body) {
+        Some(PartType::Html(html)) => Some(html.as_ref()),
+        _ => None,
+    }
+    .filter(|value| html_has_visible_text(value));
 
     if let Some(body_text) = body_text {
-        let normalized = normalize_body_text(&body_text);
-        return (Some(normalized.clone()), None, false, normalized);
+        let normalized = normalize_body_text(body_text);
+        // multipart/alternative: the plain-text alternative is displayed,
+        // but the HTML alternative still decides whether the message
+        // references remote content. Like the JMAP adapter, only the
+        // displayed alternative is stored.
+        let has_remote_content =
+            html.is_some_and(|html| sanitize_html_for_display(html).has_remote_content);
+        return (
+            Some(normalized.clone()),
+            None,
+            has_remote_content,
+            normalized,
+        );
     }
 
     if let Some(html) = html {
-        let sanitized = sanitize_html_for_display(&html);
+        let sanitized = sanitize_html_for_display(html);
         return (
             None,
             Some(sanitized.html),
@@ -1488,6 +1509,136 @@ mod tests {
         assert!(!has_remote_content);
         assert_eq!(preview, "Body not downloaded.");
     }
+
+    fn hydrate_raw(raw: &str) -> (Option<String>, Option<String>, bool, String) {
+        let message = mail_parser::MessageParser::default()
+            .parse(raw.as_bytes())
+            .expect("the message should parse");
+        hydrate_bodies(&message)
+    }
+
+    const NEWSLETTER_HTML: &str = concat!(
+        "<html><body>",
+        "<h1>Your new dashboard</h1>",
+        "<p>Faster exports</p>",
+        "<img src=\"https://tracker.example.test/open.gif\">",
+        "<table><tr><td>Plan</td><td>Price</td></tr>",
+        "<tr><td>Starter</td><td>EUR 9</td></tr>",
+        "<tr><td>Team</td><td>EUR 29</td></tr></table>",
+        "</body></html>",
+    );
+
+    #[test]
+    fn html_only_messages_are_sanitized_and_flag_remote_content() {
+        let raw = format!(
+            concat!(
+                "From: sender@example.test\r\n",
+                "To: rcpt@example.test\r\n",
+                "Subject: html only\r\n",
+                "Content-Type: text/html; charset=utf-8\r\n",
+                "\r\n",
+                "{}\r\n",
+            ),
+            NEWSLETTER_HTML
+        );
+        let (body_text, sanitized_html, has_remote_content, preview) = hydrate_raw(&raw);
+
+        assert!(
+            body_text.is_none(),
+            "an HTML-only message must not store mail-parser's text conversion"
+        );
+        let sanitized_html = sanitized_html.expect("the HTML body should be stored sanitized");
+        assert!(sanitized_html.contains("blocked://tracker.example.test/open.gif"));
+        assert!(!sanitized_html.contains("https://"));
+        assert!(has_remote_content);
+        assert_eq!(
+            preview,
+            "Your new dashboard\nFaster exports\nPlan Price\nStarter EUR 9\nTeam EUR 29"
+        );
+    }
+
+    #[test]
+    fn html_only_messages_without_remote_references_are_not_flagged() {
+        let raw = concat!(
+            "From: sender@example.test\r\n",
+            "To: rcpt@example.test\r\n",
+            "Subject: html only, local\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "\r\n",
+            "<p>Hello</p><p>No remote images here.</p>\r\n",
+        );
+        let (body_text, sanitized_html, has_remote_content, preview) = hydrate_raw(raw);
+
+        assert!(body_text.is_none());
+        assert!(sanitized_html.is_some());
+        assert!(!has_remote_content);
+        assert_eq!(preview, "Hello\nNo remote images here.");
+    }
+
+    #[test]
+    fn multipart_alternative_keeps_plain_text_and_flags_remote_html() {
+        let raw = format!(
+            concat!(
+                "From: sender@example.test\r\n",
+                "To: rcpt@example.test\r\n",
+                "Subject: alternative\r\n",
+                "Content-Type: multipart/alternative; boundary=\"ALT\"\r\n",
+                "\r\n",
+                "--ALT\r\n",
+                "Content-Type: text/plain; charset=utf-8\r\n",
+                "\r\n",
+                "Your new dashboard   \r\n",
+                "Faster exports\r\n",
+                "--ALT\r\n",
+                "Content-Type: text/html; charset=utf-8\r\n",
+                "\r\n",
+                "{}\r\n",
+                "--ALT--\r\n",
+            ),
+            NEWSLETTER_HTML
+        );
+        let (body_text, sanitized_html, has_remote_content, preview) = hydrate_raw(&raw);
+
+        assert_eq!(
+            body_text.as_deref(),
+            Some("Your new dashboard\nFaster exports")
+        );
+        assert!(
+            sanitized_html.is_none(),
+            "only the displayed alternative is stored, matching the JMAP adapter"
+        );
+        assert!(
+            has_remote_content,
+            "the HTML alternative's remote image must still be reported"
+        );
+        assert_eq!(preview, "Your new dashboard\nFaster exports");
+    }
+
+    #[test]
+    fn plain_text_only_messages_keep_their_text_body() {
+        let raw = concat!(
+            "From: sender@example.test\r\n",
+            "To: rcpt@example.test\r\n",
+            "Subject: plain\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "Line one\r\n",
+            "Visit https://example.test/ for <b>details</b>.\r\n",
+        );
+        let (body_text, sanitized_html, has_remote_content, preview) = hydrate_raw(raw);
+
+        assert_eq!(
+            body_text.as_deref(),
+            Some("Line one\nVisit https://example.test/ for <b>details</b>.")
+        );
+        assert!(sanitized_html.is_none());
+        assert!(!has_remote_content);
+        assert_eq!(
+            preview,
+            "Line one\nVisit https://example.test/ for <b>details</b>."
+        );
+    }
+
     #[test]
     fn parses_imap_endpoints() {
         let endpoint = parse_endpoint("imaps://mail.example.test:993").expect("valid endpoint");
