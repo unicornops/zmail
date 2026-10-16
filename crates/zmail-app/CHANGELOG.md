@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.10.0](https://github.com/unicornops/zmail/compare/v0.9.0...v0.10.0) (2026-10-16)
+
+
+### Features
+
+* move GPUI to the Zed v1.24.2 stable release ([#125](https://github.com/unicornops/zmail/issues/125)) ([a943d26](https://github.com/unicornops/zmail/commit/a943d26c167a6c353aed0ae714b7adc2f0622cd2))
+* **ui:** read real Zed theme colours and follow the system appearance ([#129](https://github.com/unicornops/zmail/issues/129)) ([a1ce599](https://github.com/unicornops/zmail/commit/a1ce599527ba32822d1c13d13a91c437076c2152))
+
+
+### Bug Fixes
+
+* **ui:** stop rows, panes and forms from overflowing ([#126](https://github.com/unicornops/zmail/issues/126)) ([bd26cfc](https://github.com/unicornops/zmail/commit/bd26cfc8cfe942a684339377930428ed7a3e229c))
+
 ## [0.9.0](https://github.com/unicornops/zmail/compare/v0.8.1...v0.9.0) (2026-10-15)
 
 
