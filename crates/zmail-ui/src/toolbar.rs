@@ -202,8 +202,9 @@ impl WorkspaceView {
                             interactive_background(false, colors.button_background, colors),
                             colors.border,
                             colors.foreground,
-                            cx.listener(|this: &mut Self, _, _, cx| {
+                            cx.listener(|this: &mut Self, _, window, cx| {
                                 this.toggle_theme(cx);
+                                this.persist_theme_choice(window.appearance());
                             }),
                         )
                         .hover_bg(false, colors),

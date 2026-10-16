@@ -4,7 +4,7 @@
 //!
 //! | Module | Content |
 //! |--------|---------|
-//! | `styles` | Design tokens, `UiColors`, colour helpers |
+//! | `styles` | Design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
 //! | `input` | `UiBuffer`, `EditorField`, `InputOutcome` |
 //! | `widgets` | `toolbar_button`, `input_card`, `list_row`, `icon`, … |
 //! | `workspace` | `impl WorkspaceView` — all business-logic methods |
@@ -15,6 +15,7 @@
 //! | `reader` | `render_reader_detail()`, `reader_action_buttons()` |
 //! | `compose` | `ComposeState`, `render_compose_detail()`, `compose_action_buttons()` |
 //! | `account_setup` | `AccountSetupState`, `render_account_setup_detail()`, `account_protocol_buttons()` |
+//! | `preferences` | loading and saving the persisted UI preferences (theme mode so far) |
 
 use std::sync::Arc;
 
@@ -54,6 +55,7 @@ use crate::reader::{reader_move_buttons, reader_primary_action_buttons, render_r
 
 mod diagnostics;
 mod message_list;
+mod preferences;
 mod sidebar;
 mod toolbar;
 mod tooltip;
@@ -203,9 +205,8 @@ struct WorkspaceView {
     /// refresh instead of on every frame.
     thread_view_cache: Option<zmail_core::ThreadView>,
     refresh_scheduled: bool,
-    /// Set once the user toggles the theme; until then the theme follows
-    /// the system light/dark appearance. (Persisting the choice is part of
-    /// the Phase 1 UI preferences.)
+    /// Set while the user's saved theme mode forces light or dark; while
+    /// unset the theme follows the system light/dark appearance.
     theme_overridden: bool,
     /// 12- or 24-hour clock for list and reader dates, from the locale.
     hour_cycle: zmail_core::time::HourCycle,
