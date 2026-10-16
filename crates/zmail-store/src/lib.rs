@@ -325,6 +325,22 @@ static EPHEMERAL_COUNTER: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone)]
 pub struct LocalStore {
     path: Arc<PathBuf>,
+    /// Private directory of an ephemeral store, removed when the last handle
+    /// drops. `None` for persistent stores.
+    ephemeral_dir: Option<Arc<EphemeralDir>>,
+}
+
+/// Owns an ephemeral store's directory (database, WAL files and attachment
+/// blobs) and deletes it on drop.
+#[derive(Debug)]
+struct EphemeralDir(PathBuf);
+
+impl Drop for EphemeralDir {
+    fn drop(&mut self) {
+        // Best effort: on Windows a file still held open elsewhere can make
+        // this fail, and a leftover temp directory is harmless.
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 impl LocalStore {
@@ -338,6 +354,7 @@ impl LocalStore {
 
         let store = Self {
             path: Arc::new(path),
+            ephemeral_dir: None,
         };
         store.apply_migrations()?;
         Ok(store)
@@ -348,15 +365,25 @@ impl LocalStore {
         &self.path
     }
 
-    /// Opens an ephemeral store in the OS temp directory for tests.
+    /// Opens an ephemeral store in its own directory under the OS temp
+    /// directory, for tests and fixtures.
+    ///
+    /// Each ephemeral store gets a private directory so its attachment blobs
+    /// (stored next to the database) never mix with another store's. The
+    /// directory is deleted when the last clone of the handle drops.
     pub fn open_ephemeral() -> Result<Self> {
         let sequence = EPHEMERAL_COUNTER.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("zmail-{nanos}-{sequence}.sqlite3"));
-        Self::open(path)
+        let directory =
+            std::env::temp_dir().join(format!("zmail-{nanos}-{}-{sequence}", std::process::id()));
+        // Created before opening so a failed open still cleans up.
+        let guard = Arc::new(EphemeralDir(directory.clone()));
+        let mut store = Self::open(directory.join("store.sqlite3"))?;
+        store.ephemeral_dir = Some(guard);
+        Ok(store)
     }
 
     /// Returns `true` when the store has no configured accounts yet.
@@ -4918,6 +4945,38 @@ mod tests {
     }
 
     #[test]
+    fn ephemeral_stores_keep_attachments_apart_and_clean_up() {
+        let first = LocalStore::open_ephemeral().expect("store should open");
+        let second = LocalStore::open_ephemeral().expect("store should open");
+        assert_ne!(
+            first.attachment_storage_dir(),
+            second.attachment_storage_dir(),
+            "parallel tests must not share an attachments directory"
+        );
+
+        let directory = first
+            .path()
+            .parent()
+            .expect("an ephemeral store has a parent directory")
+            .to_path_buf();
+        let blobs = first.attachment_storage_dir();
+        fs::create_dir_all(&blobs).expect("the attachments directory should be created");
+        fs::write(blobs.join("blob.bin"), b"blob").expect("the blob should write");
+
+        let clone = first.clone();
+        drop(first);
+        assert!(
+            directory.exists(),
+            "the directory lives while any handle remains"
+        );
+        drop(clone);
+        assert!(
+            !directory.exists(),
+            "the directory is removed with the last handle"
+        );
+    }
+
+    #[test]
     fn disk_budgets_evict_the_oldest_blobs_first() {
         let store = LocalStore::open_ephemeral().expect("store should open");
         let account_id = store
@@ -4958,9 +5017,9 @@ mod tests {
             size_bytes: 10,
             storage_path: "incoming-budget-report.bin".to_owned(),
         }];
-        let blob = store
-            .attachment_storage_dir()
-            .join("incoming-budget-report.bin");
+        let blob_dir = store.attachment_storage_dir();
+        std::fs::create_dir_all(&blob_dir).expect("the attachments directory should be created");
+        let blob = blob_dir.join("incoming-budget-report.bin");
         std::fs::write(&blob, b"0123456789").expect("the blob should write");
         // Both threads merge in one snapshot: a later snapshot is
         // server-authoritative, so separate merges would drop the first
