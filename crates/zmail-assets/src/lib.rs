@@ -19,7 +19,7 @@ struct Icons;
 /// Pass an instance to [`gpui::Application::with_assets`] before calling `.run()`:
 ///
 /// ```rust,ignore
-/// Application::new()
+/// gpui_platform::application()
 ///     .with_assets(ZmailAssets)
 ///     .run(|cx| { /* … */ });
 /// ```

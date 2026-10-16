@@ -36,7 +36,7 @@ impl WorkspaceView {
             .w(px(SIDEBAR_WIDTH))
             // The sidebar gives up width before the reader does when the
             // window is too narrow for all three panes.
-            .flex_shrink()
+            .flex_shrink(1.)
             .min_w(px(SIDEBAR_MIN_WIDTH))
             .flex()
             .flex_col()
@@ -245,7 +245,7 @@ impl WorkspaceView {
                             items
                         }),
                     )
-                    .track_scroll(self.mailbox_scroll.clone())
+                    .track_scroll(&self.mailbox_scroll)
                     .h_full(),
                 ),
             )

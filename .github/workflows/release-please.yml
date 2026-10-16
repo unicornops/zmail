@@ -73,13 +73,28 @@ jobs:
         with:
           ref: ${{ needs.release_please.outputs.release_sha }}
 
+      # GPUI renders through wgpu, which loads the Vulkan loader (libvulkan1)
+      # and, failing that, EGL/GL at runtime; mesa-vulkan-drivers supplies
+      # the lavapipe software Vulkan driver the headless capture uses.
       - name: Install Linux build and capture dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev libgl1 libegl1 libgl1-mesa-dri mesa-vulkan-drivers xvfb openbox xdotool imagemagick
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev libvulkan1 libgl1 libegl1 libgl1-mesa-dri mesa-vulkan-drivers xvfb openbox xdotool imagemagick
+
+      - name: Read the pinned Rust toolchain
+        id: toolchain
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
-          toolchain: 1.94.0
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Cache Cargo git dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/git/db
+          key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-git-${{ runner.os }}-
 
       - name: Build release binary
         run: cargo build -p zmail-app --release --locked
@@ -144,10 +159,22 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
 
+      - name: Read the pinned Rust toolchain
+        id: toolchain
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
-          toolchain: 1.94.0
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Cache Cargo git dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/git/db
+          key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-git-${{ runner.os }}-
 
       - name: Build release binary
         run: cargo build -p zmail-app --release --locked

@@ -10,7 +10,7 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
-use gpui::{Context, KeyDownEvent, Timer, Window, WindowAppearance};
+use gpui::{Context, KeyDownEvent, Window, WindowAppearance};
 use url::Url;
 use zmail_core::{
     AccountSummary, AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, IdentitySummary,
@@ -137,11 +137,13 @@ impl WorkspaceView {
 
         // New mail synced in the background by the mail watcher appears
         // without user interaction; the refresh reads local state only.
-        let entity = cx.entity();
+        // A weak handle: strong `Entity::update` no longer reports a released
+        // entity, so the weak update's error is what ends the loop.
+        let entity = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
                 loop {
-                    Timer::after(Duration::from_secs(5)).await;
+                    cx.background_executor().timer(Duration::from_secs(5)).await;
                     let refreshed = entity.update(cx, |this, cx| {
                         this.refresh_from_store();
                         cx.notify();
@@ -155,7 +157,7 @@ impl WorkspaceView {
 
         // Relative dates ("10:42", "Yesterday") change at midnight even when
         // nothing else does, so re-render at each local midnight.
-        let entity = cx.entity();
+        let entity = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
                 loop {
@@ -163,7 +165,9 @@ impl WorkspaceView {
                     let until_midnight = (next_local_midnight(&now) - now)
                         .to_std()
                         .unwrap_or(Duration::from_secs(60));
-                    Timer::after(until_midnight + Duration::from_secs(1)).await;
+                    cx.background_executor()
+                        .timer(until_midnight + Duration::from_secs(1))
+                        .await;
                     if entity.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
@@ -306,10 +310,12 @@ impl WorkspaceView {
             return;
         }
         self.refresh_scheduled = true;
-        let view = cx.entity();
+        let view = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
-                Timer::after(Duration::from_millis(900)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(900))
+                    .await;
                 let _ = view.update(cx, |this, cx| {
                     this.refresh_from_store();
                     cx.notify();
@@ -372,7 +378,7 @@ impl WorkspaceView {
         self.status_generation = self.status_generation.wrapping_add(1);
         let generation = self.status_generation;
         cx.spawn(async move |this, cx| {
-            Timer::after(STATUS_TOAST_DURATION).await;
+            cx.background_executor().timer(STATUS_TOAST_DURATION).await;
             let _ = this.update(cx, |view, cx| {
                 if view.status_generation == generation {
                     view.status_message = None;
@@ -395,7 +401,7 @@ impl WorkspaceView {
     /// write-back queue) as the Mark Read button.
     fn schedule_mark_read(&mut self, thread_id: i64, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            Timer::after(MARK_READ_DELAY).await;
+            cx.background_executor().timer(MARK_READ_DELAY).await;
             let _ = this.update(cx, |view, cx| {
                 view.mark_read_if_still_open(thread_id, cx);
             });
@@ -647,7 +653,7 @@ impl WorkspaceView {
                 self.detail_mode = DetailMode::Compose;
                 self.active_field = Some(EditorField::ComposeTo);
                 self.refresh_from_store();
-                window.focus(&self.focus_handle);
+                window.focus(&self.focus_handle, cx);
             }
             Err(error) => self.store_error = Some(error.to_string()),
         }
@@ -683,7 +689,7 @@ impl WorkspaceView {
                     cx,
                 );
                 self.refresh_from_store();
-                window.focus(&self.focus_handle);
+                window.focus(&self.focus_handle, cx);
             }
             Err(error) => self.store_error = Some(error.to_string()),
         }
@@ -752,7 +758,7 @@ impl WorkspaceView {
                 self.active_field = Some(EditorField::ComposeTo);
                 self.show_status("Forward draft ready.".to_owned(), cx);
                 self.refresh_from_store();
-                window.focus(&self.focus_handle);
+                window.focus(&self.focus_handle, cx);
             }
             Err(error) => self.store_error = Some(error.to_string()),
         }
@@ -1050,7 +1056,7 @@ impl WorkspaceView {
         self.account_setup.notice = notice;
         self.detail_mode = DetailMode::AccountSetup;
         self.active_field = Some(EditorField::AccountDisplayName);
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
@@ -1308,7 +1314,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.active_field = Some(field);
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 

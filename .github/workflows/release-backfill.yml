@@ -23,10 +23,17 @@ jobs:
               with:
                   ref: ${{ inputs.release_tag }}
 
+            # The tag's own rust-toolchain.toml names the toolchain it was
+            # released with.
+            - name: Read the pinned Rust toolchain
+              id: toolchain
+              shell: bash
+              run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
             - name: Install Rust
               uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
               with:
-                  toolchain: 1.94.0
+                  toolchain: ${{ steps.toolchain.outputs.channel }}
 
             - name: Build release binary
               run: cargo build -p zmail-app --release --locked

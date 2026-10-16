@@ -83,11 +83,28 @@ jobs:
             - name: Install Linux build dependencies
               run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
 
+            # rust-toolchain.toml follows the toolchain Zed pins for the GPUI
+            # tag (docs/upstream/zed.md), so CI reads it instead of
+            # repeating the version here.
+            - name: Read the pinned Rust toolchain
+              id: toolchain
+              shell: bash
+              run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
             - name: Install Rust
               uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
               with:
-                  toolchain: 1.94.0
+                  toolchain: ${{ steps.toolchain.outputs.channel }}
                   components: rustfmt, clippy
+
+            # The GPUI git dependency clones the whole Zed repository
+            # (~400 MB); keep Cargo's git database between runs.
+            - name: Cache Cargo git dependencies
+              uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: ~/.cargo/git/db
+                  key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-git-${{ runner.os }}-
 
             - name: Install cargo-deny
               run: cargo install cargo-deny --locked
@@ -107,13 +124,10 @@ jobs:
             - name: Advisory audit
               # If an advisory has no upstream fix reachable in the lock,
               # silence it inline with --ignore and link the reason here.
-              # quick-xml is pinned below 0.41 by the wayland/GPUI stack
-              # (0194, 0195); the other pinned-stack advisories are listed
-              # in deny.toml, which cargo audit runs alongside in Policy.
-              run: >-
-                cargo audit
-                --ignore RUSTSEC-2026-0194
-                --ignore RUSTSEC-2026-0195
+              # The pinned-stack advisories (all "unmaintained" warnings,
+              # which cargo audit does not fail on) are listed in deny.toml,
+              # which cargo deny enforces alongside in Policy.
+              run: cargo audit
 
             - name: Workspace tests
               run: cargo test --workspace --locked
@@ -162,10 +176,22 @@ jobs:
               if: runner.os == 'Linux'
               run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
 
+            - name: Read the pinned Rust toolchain
+              id: toolchain
+              shell: bash
+              run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
             - name: Install Rust
               uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
               with:
-                  toolchain: 1.94.0
+                  toolchain: ${{ steps.toolchain.outputs.channel }}
+
+            - name: Cache Cargo git dependencies
+              uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: ~/.cargo/git/db
+                  key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-git-${{ runner.os }}-
 
             - name: Build release binary
               run: cargo build -p zmail-app --release --locked

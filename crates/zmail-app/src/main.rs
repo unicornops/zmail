@@ -19,8 +19,10 @@ use zmail_theme::{Appearance, SemanticTheme, ThemeFamily};
 
 const PHASE0_DARK_THEME: &str = include_str!("../../../themes/phase0-dark.json");
 const PHASE0_LIGHT_THEME: &str = include_str!("../../../themes/phase0-light.json");
-const ZED_UPSTREAM_COMMIT: &str = "30ceb9176cb751b0f4f60516a3248f4ded99b082";
-const GPUI_VERSION: &str = "0.2.2";
+/// Zed commit GPUI is built from, read from `Cargo.lock` by `build.rs`.
+const ZED_UPSTREAM_COMMIT: &str = env!("ZMAIL_ZED_COMMIT");
+/// Zed stable release tag GPUI is pinned to (see docs/upstream/zed.md).
+const GPUI_VERSION: &str = env!("ZMAIL_ZED_TAG");
 
 fn main() -> Result<()> {
     match Command::from_env()? {
