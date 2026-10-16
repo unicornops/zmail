@@ -15,6 +15,7 @@ pub(crate) mod skeleton;
 #[cfg(test)]
 mod test_support;
 pub(crate) mod theme;
+pub(crate) mod toast;
 pub(crate) mod tooltip;
 
 pub(crate) use actions::init;
@@ -28,3 +29,4 @@ pub(crate) use popover::{overlay_at, popover_below};
 pub(crate) use select::{Select, SelectEvent};
 pub(crate) use skeleton::SkeletonRow;
 pub(crate) use theme::ComponentTheme;
+pub(crate) use toast::{Toast, ToastHost, ToastKind};
