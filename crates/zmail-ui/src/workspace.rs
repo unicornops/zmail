@@ -10,7 +10,7 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
-use gpui::{Context, KeyDownEvent, Window, WindowAppearance};
+use gpui::{App, AppContext as _, Context, Entity, Subscription, Window, WindowAppearance};
 use url::Url;
 use zmail_core::{
     AccountSummary, AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, IdentitySummary,
@@ -25,9 +25,9 @@ use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
 use super::{DetailMode, InitialView, ListMode, WorkspaceView};
-use crate::account_setup::AccountSetupState;
+use crate::account_setup::{AccountField, AccountFormValues, AccountSetupState};
+use crate::components::{TextInput, TextInputEvent};
 use crate::compose::ComposeState;
-use crate::input::{EditorField, InputOutcome, UiBuffer};
 
 impl WorkspaceView {
     // -----------------------------------------------------------------------
@@ -49,6 +49,20 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> Self {
         use gpui::UniformListScrollHandle;
+        let search_query = cx.new(|cx| {
+            TextInput::new(cx)
+                .compact()
+                .leading_icon("search")
+                .label("Search mail")
+                .placeholder("Search mail")
+        });
+        let search_subscription = cx.subscribe(&search_query, |this, _, event, cx| {
+            if *event == TextInputEvent::Submitted {
+                this.run_search(cx);
+            }
+        });
+        let mut account_setup = AccountSetupState::new(cx);
+        account_setup.subscriptions = Self::watch_account_setup(&account_setup, window, cx);
         let mut view = Self {
             bootstrap,
             store,
@@ -81,10 +95,10 @@ impl WorkspaceView {
             thread_scroll: UniformListScrollHandle::new(),
             list_mode: ListMode::Mail,
             detail_mode: DetailMode::Reader,
-            active_field: None,
-            search_query: UiBuffer::single_line(String::new()),
+            search_query,
+            _search_subscription: search_subscription,
             compose: None,
-            account_setup: AccountSetupState::default(),
+            account_setup,
             store_error: None,
             status_message: None,
             refresh_scheduled: false,
@@ -122,7 +136,11 @@ impl WorkspaceView {
         view.refresh_from_store();
         if view.accounts.is_empty() {
             view.detail_mode = DetailMode::AccountSetup;
-            view.active_field = Some(EditorField::AccountDisplayName);
+            focus_input(
+                view.account_setup.input(AccountField::DisplayName),
+                window,
+                cx,
+            );
             view.account_setup.notice = Some("Add your first mail account to get started.");
         }
 
@@ -133,7 +151,7 @@ impl WorkspaceView {
             InitialView::Draft(draft_id) => {
                 if let Ok(Some(draft)) = view.store.draft_detail(draft_id) {
                     view.select_account(draft.account_id, cx);
-                    view.load_draft_into_compose(draft_id);
+                    view.load_draft_into_compose(draft_id, window, cx);
                 }
             }
             // Selected directly rather than through `select_thread`, which
@@ -147,7 +165,11 @@ impl WorkspaceView {
             }
             InitialView::AccountSetup => {
                 view.detail_mode = DetailMode::AccountSetup;
-                view.active_field = Some(EditorField::AccountDisplayName);
+                focus_input(
+                    view.account_setup.input(AccountField::DisplayName),
+                    window,
+                    cx,
+                );
             }
         }
 
@@ -311,10 +333,12 @@ impl WorkspaceView {
             .filter(|selected_id| self.outbox_jobs.iter().any(|job| job.id == *selected_id))
             .or_else(|| self.outbox_jobs.first().map(|job| job.id));
 
-        if let Some(compose) = self.compose.as_ref()
+        // Only the store-owned parts of the open draft refresh: the text
+        // inputs keep the user's text, cursor and undo history.
+        if let Some(compose) = self.compose.as_mut()
             && let Ok(Some(draft)) = self.store.draft_detail(compose.draft_id)
         {
-            self.compose = Some(ComposeState::from_draft(draft));
+            compose.update_from_draft(draft);
         }
     }
 
@@ -605,7 +629,8 @@ impl WorkspaceView {
             cx.notify();
             return;
         };
-        let query = self.search_query.text.trim();
+        let query = self.search_query.read(cx).text().trim().to_owned();
+        let query = query.as_str();
         if query.is_empty() {
             self.search_results.clear();
             self.list_mode = ListMode::Mail;
@@ -664,12 +689,13 @@ impl WorkspaceView {
         }) {
             Ok(draft_id) => {
                 self.selected_draft_id = Some(draft_id);
-                self.load_draft_into_compose(draft_id);
+                self.load_draft_into_compose(draft_id, window, cx);
                 self.list_mode = ListMode::Drafts;
                 self.detail_mode = DetailMode::Compose;
-                self.active_field = Some(EditorField::ComposeTo);
+                if let Some(compose) = self.compose.as_ref() {
+                    focus_input(&compose.to, window, cx);
+                }
                 self.refresh_from_store();
-                window.focus(&self.focus_handle, cx);
             }
             Err(error) => self.store_error = Some(error.to_string()),
         }
@@ -692,10 +718,16 @@ impl WorkspaceView {
 
         match self.create_reply_draft(&thread, reply_all) {
             Ok(draft_id) => {
-                self.load_draft_into_compose(draft_id);
+                self.load_draft_into_compose(draft_id, window, cx);
                 self.list_mode = ListMode::Drafts;
                 self.detail_mode = DetailMode::Compose;
-                self.active_field = Some(EditorField::ComposeBody);
+                // The reply starts above the quoted message.
+                if let Some(compose) = self.compose.as_ref() {
+                    compose
+                        .body
+                        .update(cx, |body, cx| body.select_range(0..0, cx));
+                    focus_input(&compose.body, window, cx);
+                }
                 self.show_status(
                     if reply_all {
                         "Reply-all draft ready.".to_owned()
@@ -705,7 +737,6 @@ impl WorkspaceView {
                     cx,
                 );
                 self.refresh_from_store();
-                window.focus(&self.focus_handle, cx);
             }
             Err(error) => self.store_error = Some(error.to_string()),
         }
@@ -768,13 +799,14 @@ impl WorkspaceView {
 
         match self.create_forward_draft(&thread) {
             Ok(draft_id) => {
-                self.load_draft_into_compose(draft_id);
+                self.load_draft_into_compose(draft_id, window, cx);
                 self.list_mode = ListMode::Drafts;
                 self.detail_mode = DetailMode::Compose;
-                self.active_field = Some(EditorField::ComposeTo);
+                if let Some(compose) = self.compose.as_ref() {
+                    focus_input(&compose.to, window, cx);
+                }
                 self.show_status("Forward draft ready.".to_owned(), cx);
                 self.refresh_from_store();
-                window.focus(&self.focus_handle, cx);
             }
             Err(error) => self.store_error = Some(error.to_string()),
         }
@@ -880,11 +912,26 @@ impl WorkspaceView {
             .context("select or configure an account identity before composing")
     }
 
-    /// Load a draft from the store into the compose state.
-    pub(crate) fn load_draft_into_compose(&mut self, draft_id: i64) {
+    /// Load a draft from the store into the compose state. Re-opening the
+    /// draft that is already open keeps its inputs, so the cursor stays put.
+    pub(crate) fn load_draft_into_compose(
+        &mut self,
+        draft_id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match self.store.draft_detail(draft_id) {
             Ok(Some(draft)) => {
-                self.compose = Some(ComposeState::from_draft(draft));
+                match self.compose.as_mut() {
+                    Some(compose) if compose.draft_id == draft_id => {
+                        compose.update_from_draft(draft);
+                    }
+                    _ => {
+                        let mut compose = ComposeState::from_draft(draft, cx);
+                        compose.subscriptions = Self::watch_compose(&compose, window, cx);
+                        self.compose = Some(compose);
+                    }
+                }
                 self.selected_draft_id = Some(draft_id);
                 self.detail_mode = DetailMode::Compose;
             }
@@ -893,34 +940,45 @@ impl WorkspaceView {
         }
     }
 
-    /// Flush the current compose buffers back to the store.
-    pub(crate) fn save_compose(&mut self) -> Result<()> {
+    /// Flush the current compose inputs back to the store.
+    pub(crate) fn save_compose(&self, cx: &App) -> Result<()> {
         let Some(compose) = self.compose.as_ref() else {
             return Ok(());
         };
+        let text = |input: &Entity<TextInput>| input.read(cx).text().to_owned();
         self.store.update_draft(
             compose.draft_id,
             &DraftUpdate {
                 identity_id: compose.identity_id,
-                to: split_addresses(&compose.to.text),
-                cc: split_addresses(&compose.cc.text),
-                bcc: split_addresses(&compose.bcc.text),
-                subject: compose.subject.text.clone(),
-                body: compose.body.text.clone(),
+                to: split_addresses(&text(&compose.to)),
+                cc: split_addresses(&text(&compose.cc)),
+                bcc: split_addresses(&text(&compose.bcc)),
+                subject: text(&compose.subject),
+                body: text(&compose.body),
             },
         )?;
         Ok(())
     }
 
+    /// Saves the open draft after an edit. The drafts list refreshes a
+    /// moment later; the refresh only updates the store-owned parts of the
+    /// compose state, so the cursor stays where it is.
+    pub(crate) fn autosave_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.save_compose(cx) {
+            Ok(()) => self.schedule_refresh(window, cx),
+            Err(error) => self.store_error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
     /// Persist the currently-open draft and surface a status banner.
     pub(crate) fn save_current_draft(&mut self, cx: &mut Context<Self>) {
-        let draft_id = self.compose.as_ref().map(|compose| compose.draft_id);
+        let draft_open = self.compose.is_some();
 
-        match self.save_compose() {
+        match self.save_compose(cx) {
             Ok(()) => {
-                if let Some(draft_id) = draft_id {
+                if draft_open {
                     self.show_status("Draft saved.".to_owned(), cx);
-                    self.load_draft_into_compose(draft_id);
                     self.refresh_from_store();
                 }
             }
@@ -932,7 +990,7 @@ impl WorkspaceView {
 
     /// Save and submit the current draft to the outbox.
     pub(crate) fn send_current_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(error) = self.save_compose() {
+        if let Err(error) = self.save_compose(cx) {
             self.store_error = Some(error.to_string());
             cx.notify();
             return;
@@ -961,19 +1019,19 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Add the file at the path currently in the attachment-path buffer.
+    /// Add the file at the path currently in the attachment-path input.
     pub(crate) fn add_current_attachment(&mut self, cx: &mut Context<Self>) {
         let Some((draft_id, path)) = self.compose.as_ref().map(|compose| {
             (
                 compose.draft_id,
-                compose.attachment_path.text.trim().to_owned(),
+                compose.attachment_path.read(cx).text().trim().to_owned(),
             )
         }) else {
             self.store_error = Some("No draft is open.".to_owned());
             cx.notify();
             return;
         };
-        if let Err(error) = self.save_compose() {
+        if let Err(error) = self.save_compose(cx) {
             self.store_error = Some(error.to_string());
             cx.notify();
             return;
@@ -986,10 +1044,11 @@ impl WorkspaceView {
 
         match self.store.add_draft_attachment(draft_id, &path) {
             Ok(_) => {
-                if let Some(compose) = self.compose.as_mut() {
-                    compose.attachment_path.set(String::new());
+                if let Some(compose) = self.compose.as_ref() {
+                    compose
+                        .attachment_path
+                        .update(cx, |input, cx| input.set_text("", cx));
                 }
-                self.load_draft_into_compose(draft_id);
                 self.refresh_from_store();
             }
             Err(error) => self.store_error = Some(error.to_string()),
@@ -1000,12 +1059,7 @@ impl WorkspaceView {
     /// Remove an attachment by its store ID.
     pub(crate) fn remove_current_attachment(&mut self, attachment_id: i64, cx: &mut Context<Self>) {
         match self.store.remove_draft_attachment(attachment_id) {
-            Ok(()) => {
-                if let Some(draft_id) = self.compose.as_ref().map(|compose| compose.draft_id) {
-                    self.load_draft_into_compose(draft_id);
-                }
-                self.refresh_from_store();
-            }
+            Ok(()) => self.refresh_from_store(),
             Err(error) => self.store_error = Some(error.to_string()),
         }
         cx.notify();
@@ -1024,7 +1078,7 @@ impl WorkspaceView {
         {
             compose.identity_email = identity.email_address.clone();
         }
-        if let Err(error) = self.save_compose() {
+        if let Err(error) = self.save_compose(cx) {
             self.store_error = Some(error.to_string());
         } else {
             self.refresh_from_store();
@@ -1071,29 +1125,33 @@ impl WorkspaceView {
     ) {
         self.account_setup.notice = notice;
         self.detail_mode = DetailMode::AccountSetup;
-        self.active_field = Some(EditorField::AccountDisplayName);
-        window.focus(&self.focus_handle, cx);
+        focus_input(
+            self.account_setup.input(AccountField::DisplayName),
+            window,
+            cx,
+        );
         cx.notify();
     }
 
     /// Validate and submit the account setup form, inserting the account into
     /// the store and triggering an initial sync.
     pub(crate) fn submit_account_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let errors = validate_account_form(&self.account_setup);
+        let form = self.account_setup.values(cx);
+        let errors = validate_account_form(&form);
         self.account_setup.errors = errors.into_iter().collect();
         if let Some(first) = self.account_setup.errors.keys().next().copied() {
             // Errors show under their fields; focus the first one.
-            self.active_field = Some(first);
+            focus_input(self.account_setup.input(first), window, cx);
             cx.notify();
             return;
         }
-        match self.build_account_from_form() {
+        match build_account_from_form(&form) {
             Ok((account, secret)) => match self.store.insert_account(&account) {
                 Ok(account_id) => {
                     // The optional disk budget applies after the account
                     // exists; parse failures surface like any other form
                     // error.
-                    match parse_disk_budget_mb(&self.account_setup.disk_budget_mb.text) {
+                    match parse_disk_budget_mb(&form.disk_budget_mb) {
                         Ok(Some(budget_mb)) => {
                             if let Err(error) = self
                                 .store
@@ -1139,8 +1197,9 @@ impl WorkspaceView {
                     self.selected_account_id = Some(account_id);
                     self.detail_mode = DetailMode::Reader;
                     self.list_mode = ListMode::Mail;
-                    self.account_setup = AccountSetupState::default();
-                    self.active_field = None;
+                    self.account_setup = AccountSetupState::new(cx);
+                    self.account_setup.subscriptions =
+                        Self::watch_account_setup(&self.account_setup, window, cx);
                     self.show_status(if oauth2_flow.is_some() {
                         format!(
                             "{} added. Finish signing in in your browser; the account syncs once you approve access.",
@@ -1214,214 +1273,71 @@ impl WorkspaceView {
         }
     }
 
-    /// Build a [`NewAccount`] plus the form's credential plan.
-    pub(crate) fn build_account_from_form(&self) -> Result<(NewAccount, AccountSetupSecret)> {
-        let form = &self.account_setup;
-        let display_name = required_text("Display name", &form.display_name.text)?;
-        let endpoint = required_text("Endpoint", &form.endpoint.text)?;
-        validate_endpoint(form.protocol, &endpoint)?;
-        let username = required_text("Username", &form.username.text)?;
+    // -----------------------------------------------------------------------
+    // Input events
+    // -----------------------------------------------------------------------
 
-        // JMAP accounts authenticate with a password; bearer-token auth for
-        // JMAP is not wired yet.
-        // JMAP accounts can authenticate with a password or an OAuth2
-        // bearer token; no consumer presets offer JMAP, so OAuth2 uses the
-        // provider's own endpoints entered in the form.
-        let (auth, secret) = if form.protocol == ProtocolKind::Jmap {
-            match form.auth {
-                AuthKind::Password => (
-                    AuthKind::Password,
-                    AccountSetupSecret::Password(required_text("Password", &form.password.text)?),
-                ),
-                AuthKind::OAuth2 => {
-                    let client = custom_oauth2_client_from_form(form)?;
-                    (AuthKind::OAuth2, AccountSetupSecret::OAuth2(client))
-                }
-            }
-        } else {
-            match form.auth {
-                AuthKind::Password => (
-                    AuthKind::Password,
-                    AccountSetupSecret::Password(required_text("Password", &form.password.text)?),
-                ),
-                AuthKind::OAuth2 => {
-                    let preset = form
-                        .oauth_preset
-                        .context("Choose an OAuth2 provider (Gmail or Microsoft 365)")?;
-                    let client_id = required_text("OAuth2 client id", &form.oauth_client_id.text)?;
-                    let client_secret = trimmed_or_none(&form.oauth_client_secret.text);
-                    let client = preset.client(client_id, client_secret, OAUTH2_REDIRECT_PORT);
-                    (AuthKind::OAuth2, AccountSetupSecret::OAuth2(client))
-                }
-            }
-        };
-        let identity_name = if form.identity_name.text.trim().is_empty() {
-            display_name.clone()
-        } else {
-            form.identity_name.text.trim().to_owned()
-        };
-        let identity_email = if form.identity_email.text.trim().is_empty() {
-            username.clone()
-        } else {
-            form.identity_email.text.trim().to_owned()
-        };
-        let mut identities = vec![NewIdentity {
-            display_name: identity_name.clone(),
-            email_address: identity_email,
-            signature: form.signature.text.clone(),
-            is_primary: true,
-        }];
-        for (index, alias) in split_addresses(&form.alias_emails.text)
+    /// Subscribes to the account setup inputs: editing a field clears its
+    /// error, and Enter in the last field of a section submits the form.
+    fn watch_account_setup(
+        form: &AccountSetupState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        AccountField::ALL
             .into_iter()
-            .enumerate()
-        {
-            identities.push(NewIdentity {
-                display_name: format!("{identity_name} Alias {}", index + 1),
-                email_address: alias,
-                signature: String::new(),
-                is_primary: false,
-            });
-        }
-
-        let outgoing = match form.protocol {
-            ProtocolKind::Imap => {
-                let mut outgoing = OutgoingConfig::smtp_default(derive_host(&endpoint));
-                outgoing.host = Some(required_text("SMTP host", &form.smtp_host.text)?);
-                outgoing.port = Some(
-                    required_text("SMTP port", &form.smtp_port.text)?
-                        .parse::<u16>()
-                        .context("SMTP port must be an integer")?,
-                );
-                outgoing.security = Some(parse_submission_security(&form.smtp_security.text)?);
-                outgoing.username = Some(if form.smtp_username.text.trim().is_empty() {
-                    username.clone()
-                } else {
-                    form.smtp_username.text.trim().to_owned()
-                });
-                outgoing
-            }
-            ProtocolKind::Jmap => OutgoingConfig::jmap_default(),
-        };
-
-        Ok((
-            NewAccount {
-                display_name,
-                protocol: form.protocol,
-                auth,
-                endpoint,
-                username,
-                cache_policy: CachePolicySummary::performance_first(),
-                outgoing: Some(outgoing),
-                identities,
-            },
-            secret,
-        ))
+            .map(|field| {
+                cx.subscribe_in(
+                    form.input(field),
+                    window,
+                    move |this: &mut Self, _, event: &TextInputEvent, window, cx| match event {
+                        TextInputEvent::Changed => {
+                            if this.account_setup.errors.remove(&field).is_some() {
+                                cx.notify();
+                            }
+                        }
+                        TextInputEvent::Submitted => {
+                            if field.submits_form() {
+                                this.submit_account_setup(window, cx);
+                            }
+                        }
+                    },
+                )
+            })
+            .collect()
     }
 
-    // -----------------------------------------------------------------------
-    // Input routing
-    // -----------------------------------------------------------------------
-
-    /// Set the active editor field and give keyboard focus to the workspace.
-    pub(crate) fn set_active_field(
-        &mut self,
-        field: EditorField,
+    /// Subscribes to the compose inputs: edits autosave the draft, and
+    /// Enter in the attachment path adds the attachment.
+    fn watch_compose(
+        compose: &ComposeState,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        self.active_field = Some(field);
-        window.focus(&self.focus_handle, cx);
-        cx.notify();
-    }
-
-    /// Return a mutable reference to the buffer for the currently-active field.
-    pub(crate) fn active_buffer_mut(&mut self) -> Option<&mut UiBuffer> {
-        match self.active_field? {
-            EditorField::SearchQuery => Some(&mut self.search_query),
-            EditorField::ComposeTo => self.compose.as_mut().map(|c| &mut c.to),
-            EditorField::ComposeCc => self.compose.as_mut().map(|c| &mut c.cc),
-            EditorField::ComposeBcc => self.compose.as_mut().map(|c| &mut c.bcc),
-            EditorField::ComposeSubject => self.compose.as_mut().map(|c| &mut c.subject),
-            EditorField::ComposeBody => self.compose.as_mut().map(|c| &mut c.body),
-            EditorField::ComposeAttachmentPath => {
-                self.compose.as_mut().map(|c| &mut c.attachment_path)
-            }
-            EditorField::AccountDisplayName => Some(&mut self.account_setup.display_name),
-            EditorField::AccountEndpoint => Some(&mut self.account_setup.endpoint),
-            EditorField::AccountUsername => Some(&mut self.account_setup.username),
-            EditorField::AccountPassword => Some(&mut self.account_setup.password),
-            EditorField::AccountOauthClientId => Some(&mut self.account_setup.oauth_client_id),
-            EditorField::AccountOauthClientSecret => {
-                Some(&mut self.account_setup.oauth_client_secret)
-            }
-            EditorField::AccountOauthAuthorizationEndpoint => {
-                Some(&mut self.account_setup.oauth_authorization_endpoint)
-            }
-            EditorField::AccountOauthTokenEndpoint => {
-                Some(&mut self.account_setup.oauth_token_endpoint)
-            }
-            EditorField::AccountOauthScopes => Some(&mut self.account_setup.oauth_scopes),
-            EditorField::AccountDiskBudget => Some(&mut self.account_setup.disk_budget_mb),
-            EditorField::AccountIdentityName => Some(&mut self.account_setup.identity_name),
-            EditorField::AccountIdentityEmail => Some(&mut self.account_setup.identity_email),
-            EditorField::AccountSignature => Some(&mut self.account_setup.signature),
-            EditorField::AccountAliasEmails => Some(&mut self.account_setup.alias_emails),
-            EditorField::AccountSmtpHost => Some(&mut self.account_setup.smtp_host),
-            EditorField::AccountSmtpPort => Some(&mut self.account_setup.smtp_port),
-            EditorField::AccountSmtpSecurity => Some(&mut self.account_setup.smtp_security),
-            EditorField::AccountSmtpUsername => Some(&mut self.account_setup.smtp_username),
-        }
-    }
-
-    /// GPUI key-down handler: route events to the active buffer and react to
-    /// the outcome.
-    pub(crate) fn handle_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let pasted = cx.read_from_clipboard().and_then(|item| item.text());
-        let Some(buffer) = self.active_buffer_mut() else {
-            return;
-        };
-        let outcome = buffer.handle_key(event, pasted.as_deref());
-        if matches!(outcome, InputOutcome::Ignored) {
-            return;
-        }
-
-        let active_field = self.active_field.expect("active field is set");
-        match outcome {
-            InputOutcome::Changed => {
-                self.account_setup.errors.remove(&active_field);
-                if matches!(
-                    active_field,
-                    EditorField::ComposeTo
-                        | EditorField::ComposeCc
-                        | EditorField::ComposeBcc
-                        | EditorField::ComposeSubject
-                        | EditorField::ComposeBody
-                ) {
-                    if let Err(error) = self.save_compose() {
-                        self.store_error = Some(error.to_string());
-                    } else {
-                        self.refresh_from_store();
-                    }
+    ) -> Vec<Subscription> {
+        let mut subscriptions: Vec<Subscription> = compose
+            .draft_inputs()
+            .into_iter()
+            .map(|input| {
+                cx.subscribe_in(
+                    input,
+                    window,
+                    |this: &mut Self, _, event: &TextInputEvent, window, cx| {
+                        if *event == TextInputEvent::Changed {
+                            this.autosave_compose(window, cx);
+                        }
+                    },
+                )
+            })
+            .collect();
+        subscriptions.push(cx.subscribe(
+            &compose.attachment_path,
+            |this: &mut Self, _, event: &TextInputEvent, cx| {
+                if *event == TextInputEvent::Submitted {
+                    this.add_current_attachment(cx);
                 }
-                cx.notify();
-            }
-            InputOutcome::Submitted => match active_field {
-                EditorField::SearchQuery => self.run_search(cx),
-                EditorField::ComposeAttachmentPath => self.add_current_attachment(cx),
-                EditorField::AccountPassword
-                | EditorField::AccountOauthClientSecret
-                | EditorField::AccountSignature
-                | EditorField::AccountAliasEmails
-                | EditorField::AccountSmtpUsername => self.submit_account_setup(window, cx),
-                _ => cx.notify(),
             },
-            InputOutcome::Ignored => {}
-        }
+        ));
+        subscriptions
     }
 
     /// Switch the list panel mode.  Switching to [`ListMode::Mail`] also
@@ -1438,6 +1354,113 @@ impl WorkspaceView {
 // ---------------------------------------------------------------------------
 // Private utility functions
 // ---------------------------------------------------------------------------
+
+/// Moves keyboard focus to a text input.
+fn focus_input(input: &Entity<TextInput>, window: &mut Window, cx: &mut App) {
+    input.update(cx, |input, cx| input.focus(window, cx));
+}
+
+/// Build a [`NewAccount`] plus the form's credential plan.
+pub(crate) fn build_account_from_form(
+    form: &AccountFormValues,
+) -> Result<(NewAccount, AccountSetupSecret)> {
+    let display_name = required_text("Display name", &form.display_name)?;
+    let endpoint = required_text("Endpoint", &form.endpoint)?;
+    validate_endpoint(form.protocol, &endpoint)?;
+    let username = required_text("Username", &form.username)?;
+
+    // JMAP accounts authenticate with a password; bearer-token auth for
+    // JMAP is not wired yet.
+    // JMAP accounts can authenticate with a password or an OAuth2
+    // bearer token; no consumer presets offer JMAP, so OAuth2 uses the
+    // provider's own endpoints entered in the form.
+    let (auth, secret) = if form.protocol == ProtocolKind::Jmap {
+        match form.auth {
+            AuthKind::Password => (
+                AuthKind::Password,
+                AccountSetupSecret::Password(required_text("Password", &form.password)?),
+            ),
+            AuthKind::OAuth2 => {
+                let client = custom_oauth2_client_from_form(form)?;
+                (AuthKind::OAuth2, AccountSetupSecret::OAuth2(client))
+            }
+        }
+    } else {
+        match form.auth {
+            AuthKind::Password => (
+                AuthKind::Password,
+                AccountSetupSecret::Password(required_text("Password", &form.password)?),
+            ),
+            AuthKind::OAuth2 => {
+                let preset = form
+                    .oauth_preset
+                    .context("Choose an OAuth2 provider (Gmail or Microsoft 365)")?;
+                let client_id = required_text("OAuth2 client id", &form.oauth_client_id)?;
+                let client_secret = trimmed_or_none(&form.oauth_client_secret);
+                let client = preset.client(client_id, client_secret, OAUTH2_REDIRECT_PORT);
+                (AuthKind::OAuth2, AccountSetupSecret::OAuth2(client))
+            }
+        }
+    };
+    let identity_name = if form.identity_name.trim().is_empty() {
+        display_name.clone()
+    } else {
+        form.identity_name.trim().to_owned()
+    };
+    let identity_email = if form.identity_email.trim().is_empty() {
+        username.clone()
+    } else {
+        form.identity_email.trim().to_owned()
+    };
+    let mut identities = vec![NewIdentity {
+        display_name: identity_name.clone(),
+        email_address: identity_email,
+        signature: form.signature.clone(),
+        is_primary: true,
+    }];
+    for (index, alias) in split_addresses(&form.alias_emails).into_iter().enumerate() {
+        identities.push(NewIdentity {
+            display_name: format!("{identity_name} Alias {}", index + 1),
+            email_address: alias,
+            signature: String::new(),
+            is_primary: false,
+        });
+    }
+
+    let outgoing = match form.protocol {
+        ProtocolKind::Imap => {
+            let mut outgoing = OutgoingConfig::smtp_default(derive_host(&endpoint));
+            outgoing.host = Some(required_text("SMTP host", &form.smtp_host)?);
+            outgoing.port = Some(
+                required_text("SMTP port", &form.smtp_port)?
+                    .parse::<u16>()
+                    .context("SMTP port must be an integer")?,
+            );
+            outgoing.security = Some(parse_submission_security(&form.smtp_security)?);
+            outgoing.username = Some(if form.smtp_username.trim().is_empty() {
+                username.clone()
+            } else {
+                form.smtp_username.trim().to_owned()
+            });
+            outgoing
+        }
+        ProtocolKind::Jmap => OutgoingConfig::jmap_default(),
+    };
+
+    Ok((
+        NewAccount {
+            display_name,
+            protocol: form.protocol,
+            auth,
+            endpoint,
+            username,
+            cache_policy: CachePolicySummary::performance_first(),
+            outgoing: Some(outgoing),
+            identities,
+        },
+        secret,
+    ))
+}
 
 /// Split a comma-separated address string into individual trimmed addresses,
 /// discarding empty entries.
@@ -1492,17 +1515,16 @@ fn trimmed_or_none(value: &str) -> Option<String> {
 
 /// Builds the provider-agnostic OAuth2 client for JMAP accounts from the
 /// form's custom endpoint fields.
-fn custom_oauth2_client_from_form(form: &AccountSetupState) -> Result<zmail_auth::OAuth2Client> {
-    let client_id = required_text("OAuth2 client id", &form.oauth_client_id.text)?;
-    let client_secret = trimmed_or_none(&form.oauth_client_secret.text);
+fn custom_oauth2_client_from_form(form: &AccountFormValues) -> Result<zmail_auth::OAuth2Client> {
+    let client_id = required_text("OAuth2 client id", &form.oauth_client_id)?;
+    let client_secret = trimmed_or_none(&form.oauth_client_secret);
     let authorization_endpoint = required_text(
         "OAuth2 authorization endpoint",
-        &form.oauth_authorization_endpoint.text,
+        &form.oauth_authorization_endpoint,
     )?;
-    let token_endpoint = required_text("OAuth2 token endpoint", &form.oauth_token_endpoint.text)?;
+    let token_endpoint = required_text("OAuth2 token endpoint", &form.oauth_token_endpoint)?;
     let scopes = form
         .oauth_scopes
-        .text
         .split_whitespace()
         .map(str::to_owned)
         .collect::<Vec<_>>();
@@ -1519,10 +1541,10 @@ fn custom_oauth2_client_from_form(form: &AccountSetupState) -> Result<zmail_auth
 
 /// Checks the account setup form and returns an error message for each
 /// field that needs fixing, so the form can show them beside the fields.
-/// It mirrors the checks in `build_account_from_form`.
-pub(crate) fn validate_account_form(form: &AccountSetupState) -> Vec<(EditorField, String)> {
+/// It mirrors the checks in [`build_account_from_form`].
+pub(crate) fn validate_account_form(form: &AccountFormValues) -> Vec<(AccountField, String)> {
     let mut errors = Vec::new();
-    let mut require = |field: EditorField, value: &str, message: &str| {
+    let mut require = |field: AccountField, value: &str, message: &str| {
         if value.trim().is_empty() {
             errors.push((field, message.to_owned()));
             false
@@ -1532,13 +1554,13 @@ pub(crate) fn validate_account_form(form: &AccountSetupState) -> Vec<(EditorFiel
     };
 
     require(
-        EditorField::AccountDisplayName,
-        &form.display_name.text,
+        AccountField::DisplayName,
+        &form.display_name,
         "Enter a name for this account.",
     );
     let has_endpoint = require(
-        EditorField::AccountEndpoint,
-        &form.endpoint.text,
+        AccountField::Endpoint,
+        &form.endpoint,
         match form.protocol {
             ProtocolKind::Imap => {
                 "Enter the IMAP server, for example imaps://mail.example.com:993."
@@ -1547,33 +1569,33 @@ pub(crate) fn validate_account_form(form: &AccountSetupState) -> Vec<(EditorFiel
         },
     );
     require(
-        EditorField::AccountUsername,
-        &form.username.text,
+        AccountField::Username,
+        &form.username,
         "Enter the username you sign in with.",
     );
     match form.auth {
         AuthKind::Password => {
             require(
-                EditorField::AccountPassword,
-                &form.password.text,
+                AccountField::Password,
+                &form.password,
                 "Enter the password or app password.",
             );
         }
         AuthKind::OAuth2 => {
             require(
-                EditorField::AccountOauthClientId,
-                &form.oauth_client_id.text,
+                AccountField::OauthClientId,
+                &form.oauth_client_id,
                 "Enter the OAuth2 client id.",
             );
             if form.protocol == ProtocolKind::Jmap {
                 require(
-                    EditorField::AccountOauthAuthorizationEndpoint,
-                    &form.oauth_authorization_endpoint.text,
+                    AccountField::OauthAuthorizationEndpoint,
+                    &form.oauth_authorization_endpoint,
                     "Enter the authorization endpoint.",
                 );
                 require(
-                    EditorField::AccountOauthTokenEndpoint,
-                    &form.oauth_token_endpoint.text,
+                    AccountField::OauthTokenEndpoint,
+                    &form.oauth_token_endpoint,
                     "Enter the token endpoint.",
                 );
             }
@@ -1581,41 +1603,40 @@ pub(crate) fn validate_account_form(form: &AccountSetupState) -> Vec<(EditorFiel
     }
     if form.protocol == ProtocolKind::Imap {
         require(
-            EditorField::AccountSmtpHost,
-            &form.smtp_host.text,
+            AccountField::SmtpHost,
+            &form.smtp_host,
             "Enter the SMTP server.",
         );
     }
 
-    if has_endpoint && let Err(error) = validate_endpoint(form.protocol, form.endpoint.text.trim())
-    {
-        errors.push((EditorField::AccountEndpoint, error.to_string()));
+    if has_endpoint && let Err(error) = validate_endpoint(form.protocol, form.endpoint.trim()) {
+        errors.push((AccountField::Endpoint, error.to_string()));
     }
     if form.auth == AuthKind::OAuth2
         && form.protocol == ProtocolKind::Imap
         && form.oauth_preset.is_none()
     {
         errors.push((
-            EditorField::AccountOauthClientId,
+            AccountField::OauthClientId,
             "Choose Gmail or Microsoft 365 above.".to_owned(),
         ));
     }
-    if parse_disk_budget_mb(&form.disk_budget_mb.text).is_err() {
+    if parse_disk_budget_mb(&form.disk_budget_mb).is_err() {
         errors.push((
-            EditorField::AccountDiskBudget,
+            AccountField::DiskBudget,
             "Enter a whole number of MiB, or leave it empty.".to_owned(),
         ));
     }
     if form.protocol == ProtocolKind::Imap {
-        if form.smtp_port.text.trim().parse::<u16>().is_err() {
+        if form.smtp_port.trim().parse::<u16>().is_err() {
             errors.push((
-                EditorField::AccountSmtpPort,
+                AccountField::SmtpPort,
                 "Enter a port number, for example 587.".to_owned(),
             ));
         }
-        if parse_submission_security(&form.smtp_security.text).is_err() {
+        if parse_submission_security(&form.smtp_security).is_err() {
             errors.push((
-                EditorField::AccountSmtpSecurity,
+                AccountField::SmtpSecurity,
                 "Use plain, starttls or implicit_tls.".to_owned(),
             ));
         }
@@ -1760,50 +1781,52 @@ fn normalize_contact(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountSetupState, custom_oauth2_client_from_form, normalize_contact, parse_disk_budget_mb,
-        prefixed_subject, split_contact_summary, validate_account_form,
+        custom_oauth2_client_from_form, normalize_contact, parse_disk_budget_mb, prefixed_subject,
+        split_contact_summary, validate_account_form,
     };
-    use crate::input::EditorField;
+    use crate::account_setup::{AccountField, AccountFormValues};
 
     #[test]
     fn validate_account_form_reports_errors_per_field() {
-        let form = AccountSetupState::default();
+        let form = AccountFormValues::default();
         let errors = validate_account_form(&form);
         let fields = errors.iter().map(|(field, _)| *field).collect::<Vec<_>>();
-        assert!(fields.contains(&EditorField::AccountDisplayName));
-        assert!(fields.contains(&EditorField::AccountEndpoint));
-        assert!(fields.contains(&EditorField::AccountUsername));
-        assert!(fields.contains(&EditorField::AccountPassword));
-        assert!(fields.contains(&EditorField::AccountSmtpHost));
+        assert!(fields.contains(&AccountField::DisplayName));
+        assert!(fields.contains(&AccountField::Endpoint));
+        assert!(fields.contains(&AccountField::Username));
+        assert!(fields.contains(&AccountField::Password));
+        assert!(fields.contains(&AccountField::SmtpHost));
 
-        let mut form = AccountSetupState::default();
-        form.display_name.text = "Work".to_owned();
-        form.endpoint.text = "https://wrong.example.com".to_owned();
-        form.username.text = "me@example.com".to_owned();
-        form.password.text = "secret".to_owned();
-        form.smtp_host.text = "smtp.example.com".to_owned();
-        form.smtp_port.text = "not-a-port".to_owned();
+        let mut form = AccountFormValues {
+            display_name: "Work".to_owned(),
+            endpoint: "https://wrong.example.com".to_owned(),
+            username: "me@example.com".to_owned(),
+            password: "secret".to_owned(),
+            smtp_host: "smtp.example.com".to_owned(),
+            smtp_port: "not-a-port".to_owned(),
+            ..AccountFormValues::default()
+        };
         let errors = validate_account_form(&form);
         assert_eq!(
             errors.iter().map(|(field, _)| *field).collect::<Vec<_>>(),
-            vec![EditorField::AccountEndpoint, EditorField::AccountSmtpPort],
+            vec![AccountField::Endpoint, AccountField::SmtpPort],
             "only the wrong scheme and the bad port are reported: {errors:?}"
         );
 
-        form.endpoint.text = "imaps://mail.example.com:993".to_owned();
-        form.smtp_port.text = "587".to_owned();
+        form.endpoint = "imaps://mail.example.com:993".to_owned();
+        form.smtp_port = "587".to_owned();
         assert!(validate_account_form(&form).is_empty());
 
         // JMAP accounts need no SMTP settings.
-        let mut form = AccountSetupState {
+        let form = AccountFormValues {
             protocol: zmail_core::ProtocolKind::Jmap,
-            ..AccountSetupState::default()
+            display_name: "Fastmail".to_owned(),
+            endpoint: "https://api.example.com/.well-known/jmap".to_owned(),
+            username: "me@example.com".to_owned(),
+            password: "secret".to_owned(),
+            smtp_port: String::new(),
+            ..AccountFormValues::default()
         };
-        form.display_name.text = "Fastmail".to_owned();
-        form.endpoint.text = "https://api.example.com/.well-known/jmap".to_owned();
-        form.username.text = "me@example.com".to_owned();
-        form.password.text = "secret".to_owned();
-        form.smtp_port.text = String::new();
         assert!(validate_account_form(&form).is_empty());
     }
 
@@ -1824,8 +1847,10 @@ mod tests {
 
     #[test]
     fn custom_oauth2_client_from_form_validates_and_builds() {
-        let mut form = AccountSetupState::default();
-        form.oauth_client_id.text = "client-1".to_owned();
+        let mut form = AccountFormValues {
+            oauth_client_id: "client-1".to_owned(),
+            ..AccountFormValues::default()
+        };
 
         // Missing provider endpoints are rejected with a clear label.
         let error = custom_oauth2_client_from_form(&form)
@@ -1835,7 +1860,7 @@ mod tests {
             "the error should name the missing field: {error}"
         );
 
-        form.oauth_authorization_endpoint.text = "https://provider.test/authorize".to_owned();
+        form.oauth_authorization_endpoint = "https://provider.test/authorize".to_owned();
         let error = custom_oauth2_client_from_form(&form)
             .expect_err("the token endpoint should be required");
         assert!(
@@ -1843,8 +1868,8 @@ mod tests {
             "the error should name the missing field: {error}"
         );
 
-        form.oauth_token_endpoint.text = "https://provider.test/token".to_owned();
-        form.oauth_scopes.text = "email profile".to_owned();
+        form.oauth_token_endpoint = "https://provider.test/token".to_owned();
+        form.oauth_scopes = "email profile".to_owned();
         let client = custom_oauth2_client_from_form(&form).expect("the custom client should build");
         assert_eq!(client.client_id, "client-1");
         assert_eq!(

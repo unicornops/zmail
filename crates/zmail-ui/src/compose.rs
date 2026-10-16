@@ -6,13 +6,13 @@
 //! the bottom of the detail pane when composing.
 
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, StatefulInteractiveElement, div, prelude::*, px,
-    rgb,
+    AnyElement, App, AppContext as _, Context, Entity, FontWeight, IntoElement,
+    StatefulInteractiveElement, Subscription, div, prelude::*, px, rgb,
 };
 use zmail_core::{DraftAttachment, DraftDetail, DraftState, IdentitySummary};
 
 use super::WorkspaceView;
-use crate::input::{EditorField, UiBuffer};
+use crate::components::TextInput;
 use crate::styles::{ICON_BUTTON_SIZE, ICON_SIZE_SM, UiColors};
 use crate::widgets::{
     EllipsisExt, empty_state, format_size, icon, input_card, label_chip, section_card,
@@ -25,44 +25,100 @@ use crate::widgets::{
 
 /// In-memory form state for a draft being actively composed.
 ///
-/// All fields mirror the underlying [`DraftDetail`] from the store, but are
-/// kept as [`UiBuffer`]s so the user's cursor position and edits-in-flight are
-/// preserved across refreshes.
-#[derive(Debug, Clone)]
+/// The text fields are [`TextInput`] entities that own the text the user is
+/// editing, with its cursor, selection and undo history. Store refreshes
+/// only update the store-owned fields ([`ComposeState::update_from_draft`]),
+/// so autosave and the background refresh never move the cursor or clear a
+/// half-typed attachment path.
 pub(crate) struct ComposeState {
     pub(crate) draft_id: i64,
     pub(crate) account_id: i64,
     pub(crate) identity_id: i64,
     pub(crate) identity_email: String,
-    pub(crate) to: UiBuffer,
-    pub(crate) cc: UiBuffer,
-    pub(crate) bcc: UiBuffer,
-    pub(crate) subject: UiBuffer,
-    pub(crate) body: UiBuffer,
-    pub(crate) attachment_path: UiBuffer,
+    pub(crate) to: Entity<TextInput>,
+    pub(crate) cc: Entity<TextInput>,
+    pub(crate) bcc: Entity<TextInput>,
+    pub(crate) subject: Entity<TextInput>,
+    pub(crate) body: Entity<TextInput>,
+    pub(crate) attachment_path: Entity<TextInput>,
     pub(crate) attachments: Vec<DraftAttachment>,
     pub(crate) state: DraftState,
     pub(crate) last_error_message: Option<String>,
+    /// The workspace's subscriptions to the inputs' events.
+    pub(crate) subscriptions: Vec<Subscription>,
 }
 
 impl ComposeState {
-    /// Construct a [`ComposeState`] from a store-fetched [`DraftDetail`].
-    pub(crate) fn from_draft(draft: DraftDetail) -> Self {
+    /// Construct a [`ComposeState`] from a store-fetched [`DraftDetail`],
+    /// creating its inputs.
+    pub(crate) fn from_draft(draft: DraftDetail, cx: &mut App) -> Self {
+        let single_line =
+            |cx: &mut App, label: &'static str, placeholder: &'static str, text: String| {
+                cx.new(|cx| {
+                    TextInput::new(cx)
+                        .label(label)
+                        .placeholder(placeholder)
+                        .with_text(text)
+                })
+            };
         Self {
             draft_id: draft.id,
             account_id: draft.account_id,
             identity_id: draft.identity_id,
             identity_email: draft.identity_email,
-            to: UiBuffer::single_line(draft.to.join(", ")),
-            cc: UiBuffer::single_line(draft.cc.join(", ")),
-            bcc: UiBuffer::single_line(draft.bcc.join(", ")),
-            subject: UiBuffer::single_line(draft.subject),
-            body: UiBuffer::multiline(draft.body),
-            attachment_path: UiBuffer::single_line(String::new()),
+            to: single_line(
+                cx,
+                "To",
+                "alice@example.com, bob@example.com",
+                draft.to.join(", "),
+            ),
+            cc: single_line(
+                cx,
+                "Cc",
+                "Optional carbon copy recipients",
+                draft.cc.join(", "),
+            ),
+            bcc: single_line(
+                cx,
+                "Bcc",
+                "Optional blind copy recipients",
+                draft.bcc.join(", "),
+            ),
+            subject: single_line(cx, "Subject", "Message subject", draft.subject),
+            body: cx.new(|cx| {
+                TextInput::new(cx)
+                    .multiline()
+                    .rows(10, 30)
+                    .label("Body")
+                    .placeholder("Write your message...")
+                    .with_text(draft.body)
+            }),
+            attachment_path: single_line(
+                cx,
+                "Attachment Path",
+                "/path/to/attachment.pdf",
+                String::new(),
+            ),
             attachments: draft.attachments,
             state: draft.state,
             last_error_message: draft.last_error_message,
+            subscriptions: Vec::new(),
         }
+    }
+
+    /// Refresh the store-owned fields (identity, attachments, send state)
+    /// from the store without touching the text being edited.
+    pub(crate) fn update_from_draft(&mut self, draft: DraftDetail) {
+        self.identity_id = draft.identity_id;
+        self.identity_email = draft.identity_email;
+        self.attachments = draft.attachments;
+        self.state = draft.state;
+        self.last_error_message = draft.last_error_message;
+    }
+
+    /// The inputs whose text is part of the saved draft.
+    pub(crate) fn draft_inputs(&self) -> [&Entity<TextInput>; 5] {
+        [&self.to, &self.cc, &self.bcc, &self.subject, &self.body]
     }
 }
 
@@ -76,7 +132,6 @@ impl ComposeState {
 pub(crate) fn render_compose_detail(
     compose: Option<&ComposeState>,
     identities: &[IdentitySummary],
-    active_field: Option<EditorField>,
     colors: &UiColors,
     cx: &mut Context<WorkspaceView>,
 ) -> AnyElement {
@@ -90,10 +145,11 @@ pub(crate) fn render_compose_detail(
         );
     };
 
-    let title = if compose.subject.text.trim().is_empty() {
+    let subject = compose.subject.read(cx).text().trim().to_owned();
+    let title = if subject.is_empty() {
         "New message".to_owned()
     } else {
-        compose.subject.text.trim().to_owned()
+        subject
     };
     // "Editing" is the normal state of an open draft; only call out the
     // states that need attention.
@@ -138,14 +194,9 @@ pub(crate) fn render_compose_detail(
             ))
         })
         .child(render_identity_section(compose, identities, colors, cx))
-        .child(render_recipients_section(compose, active_field, colors, cx))
-        .child(render_body_section(compose, active_field, colors, cx))
-        .child(render_attachments_section(
-            compose,
-            active_field,
-            colors,
-            cx,
-        ))
+        .child(render_recipients_section(compose, colors))
+        .child(render_body_section(compose, colors))
+        .child(render_attachments_section(compose, colors, cx))
         .into_any_element()
 }
 
@@ -290,114 +341,29 @@ fn identity_row(name: &str, email: &str, selected: bool, colors: &UiColors) -> g
         )
 }
 
-fn render_recipients_section(
-    compose: &ComposeState,
-    active_field: Option<EditorField>,
-    colors: &UiColors,
-    cx: &mut Context<WorkspaceView>,
-) -> gpui::Div {
+fn render_recipients_section(compose: &ComposeState, colors: &UiColors) -> gpui::Div {
     section_card("Recipients", colors)
-        .child(
-            input_card(
-                "compose-to-field",
-                "To",
-                "alice@example.com, bob@example.com",
-                &compose.to,
-                active_field == Some(EditorField::ComposeTo),
-                false,
-                colors,
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.set_active_field(EditorField::ComposeTo, window, cx);
-            })),
-        )
-        .child(
-            input_card(
-                "compose-cc-field",
-                "Cc",
-                "Optional carbon copy recipients",
-                &compose.cc,
-                active_field == Some(EditorField::ComposeCc),
-                false,
-                colors,
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.set_active_field(EditorField::ComposeCc, window, cx);
-            })),
-        )
-        .child(
-            input_card(
-                "compose-bcc-field",
-                "Bcc",
-                "Optional blind copy recipients",
-                &compose.bcc,
-                active_field == Some(EditorField::ComposeBcc),
-                false,
-                colors,
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.set_active_field(EditorField::ComposeBcc, window, cx);
-            })),
-        )
-        .child(
-            input_card(
-                "compose-subject-field",
-                "Subject",
-                "Message subject",
-                &compose.subject,
-                active_field == Some(EditorField::ComposeSubject),
-                false,
-                colors,
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.set_active_field(EditorField::ComposeSubject, window, cx);
-            })),
-        )
+        .child(input_card("To", &compose.to, colors))
+        .child(input_card("Cc", &compose.cc, colors))
+        .child(input_card("Bcc", &compose.bcc, colors))
+        .child(input_card("Subject", &compose.subject, colors))
 }
 
-fn render_body_section(
-    compose: &ComposeState,
-    active_field: Option<EditorField>,
-    colors: &UiColors,
-    cx: &mut Context<WorkspaceView>,
-) -> gpui::Div {
-    section_card("Message", colors).child(
-        input_card(
-            "compose-body-field",
-            "Body",
-            "Write your message...",
-            &compose.body,
-            active_field == Some(EditorField::ComposeBody),
-            true,
-            colors,
-        )
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.set_active_field(EditorField::ComposeBody, window, cx);
-        })),
-    )
+fn render_body_section(compose: &ComposeState, colors: &UiColors) -> gpui::Div {
+    section_card("Message", colors).child(input_card("Body", &compose.body, colors))
 }
 
 fn render_attachments_section(
     compose: &ComposeState,
-    active_field: Option<EditorField>,
     colors: &UiColors,
     cx: &mut Context<WorkspaceView>,
 ) -> gpui::Div {
     section_card("Attachments", colors)
-        .child(
-            input_card(
-                "compose-attachment-field",
-                "Attachment Path",
-                "/path/to/attachment.pdf",
-                &compose.attachment_path,
-                active_field == Some(EditorField::ComposeAttachmentPath),
-                false,
-                colors,
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.set_active_field(EditorField::ComposeAttachmentPath, window, cx);
-            })),
-        )
+        .child(input_card(
+            "Attachment Path",
+            &compose.attachment_path,
+            colors,
+        ))
         .child(div().flex().flex_wrap().gap_2().child(toolbar_button(
             "Add Attachment",
             Some("paperclip"),
