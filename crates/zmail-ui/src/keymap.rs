@@ -1,0 +1,186 @@
+//! Loads key bindings from a keymap file.
+//!
+//! The format is the subset of Zed's keymap format Zmail needs: a JSON
+//! array of sections, each with an optional `context` predicate and a
+//! `bindings` object mapping keystrokes to action names:
+//!
+//! ```json
+//! [
+//!   { "context": "MessageList", "bindings": { "down": "zmail::SelectNext" } }
+//! ]
+//! ```
+//!
+//! Keystrokes use GPUI syntax. `secondary-` means Cmd on macOS and Ctrl on
+//! Linux and Windows, so one keymap serves every platform. An action can
+//! also be written as `["zmail::Name", { ...arguments }]` for actions that
+//! take arguments.
+//!
+//! The default keymap ships inside the binary. A user keymap and a
+//! Gmail-style keymap are Phase 7 of the UI plan.
+
+use std::rc::Rc;
+
+use anyhow::{Context as _, Result, anyhow, bail};
+use gpui::{App, KeyBinding, KeyBindingContextPredicate};
+use serde_json::Value;
+
+/// The keymap bundled with the app.
+pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../keymaps/default.json");
+
+/// Parses a keymap file into bindings. Every action must be registered and
+/// every keystroke and context must parse; the first problem is an error,
+/// so a broken keymap fails loudly in tests rather than dropping keys.
+pub(crate) fn parse_keymap(source: &str, cx: &App) -> Result<Vec<KeyBinding>> {
+    let sections: Value = serde_json::from_str(source).context("the keymap is not valid JSON")?;
+    let sections = sections
+        .as_array()
+        .context("the keymap must be a JSON array of sections")?;
+
+    let mut bindings = Vec::new();
+    for (index, section) in sections.iter().enumerate() {
+        let section = section
+            .as_object()
+            .with_context(|| format!("keymap section {index} is not an object"))?;
+        let context = match section.get("context") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(context)) => Some(Rc::new(
+                KeyBindingContextPredicate::parse(context)
+                    .with_context(|| format!("keymap section {index}: bad context {context:?}"))?,
+            )),
+            Some(other) => bail!("keymap section {index}: context must be a string, not {other}"),
+        };
+        let entries = section
+            .get("bindings")
+            .and_then(Value::as_object)
+            .with_context(|| format!("keymap section {index} has no bindings object"))?;
+
+        for (keystrokes, target) in entries {
+            let (name, arguments) = match target {
+                Value::String(name) => (name.as_str(), None),
+                Value::Array(parts) => match parts.as_slice() {
+                    [Value::String(name), arguments] => (name.as_str(), Some(arguments.clone())),
+                    _ => bail!(
+                        "keymap section {index}, {keystrokes:?}: expected [\"action\", {{arguments}}]"
+                    ),
+                },
+                other => bail!("keymap section {index}, {keystrokes:?}: bad action {other}"),
+            };
+            let action = cx.build_action(name, arguments).map_err(|error| {
+                anyhow!("keymap section {index}, {keystrokes:?}: action {name}: {error}")
+            })?;
+            let binding = KeyBinding::load(
+                keystrokes,
+                action,
+                context.clone(),
+                false,
+                None,
+                cx.keyboard_mapper().as_ref(),
+            )
+            .map_err(|error| anyhow!("keymap section {index}, {keystrokes:?}: {error}"))?;
+            bindings.push(binding);
+        }
+    }
+    Ok(bindings)
+}
+
+/// Binds the default keymap. A parse failure is a bug in the bundled file
+/// (the tests load it), so it is logged rather than stopping the app.
+pub(crate) fn bind_default_keymap(cx: &mut App) {
+    match parse_keymap(DEFAULT_KEYMAP, cx) {
+        Ok(bindings) => cx.bind_keys(bindings),
+        Err(error) => eprintln!("zmail: the default keymap did not load: {error:#}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use gpui::TestAppContext;
+
+    use super::{DEFAULT_KEYMAP, parse_keymap};
+    use crate::actions::ACTIONS_WITHOUT_KEYS;
+
+    #[gpui::test]
+    fn the_default_keymap_loads(cx: &mut TestAppContext) {
+        let bindings = cx
+            .update(|cx| parse_keymap(DEFAULT_KEYMAP, cx))
+            .expect("the bundled keymap parses");
+        assert!(!bindings.is_empty());
+    }
+
+    #[gpui::test]
+    fn every_action_has_a_default_binding(cx: &mut TestAppContext) {
+        let (bound, registered) = cx.update(|cx| {
+            let bindings = parse_keymap(DEFAULT_KEYMAP, cx).expect("the keymap parses");
+            let bound = bindings
+                .iter()
+                .map(|binding| binding.action().name())
+                .collect::<BTreeSet<_>>();
+            let registered = cx
+                .all_action_names()
+                .iter()
+                .copied()
+                .filter(|name| name.starts_with("zmail::"))
+                .collect::<BTreeSet<_>>();
+            (bound, registered)
+        });
+        let unbound = registered
+            .iter()
+            .filter(|name| {
+                !bound.contains(*name)
+                    && !ACTIONS_WITHOUT_KEYS
+                        .iter()
+                        .any(|(unbound, _)| unbound == *name)
+            })
+            .collect::<Vec<_>>();
+        assert!(unbound.is_empty(), "actions without a key: {unbound:?}");
+    }
+
+    #[gpui::test]
+    fn plain_keys_are_only_bound_inside_panes(cx: &mut TestAppContext) {
+        // A key without Cmd/Ctrl/Alt bound at the Workspace level would
+        // fire while typing in the search field. Only navigation keys that
+        // text fields do not type may live there.
+        const WORKSPACE_PLAIN_KEYS: &[&str] = &["tab", "f5", "f6", "escape"];
+        let bindings = cx
+            .update(|cx| parse_keymap(DEFAULT_KEYMAP, cx))
+            .expect("the keymap parses");
+        for binding in &bindings {
+            let context = binding
+                .predicate()
+                .map(|predicate| predicate.to_string())
+                .unwrap_or_default();
+            if context != "Workspace" {
+                continue;
+            }
+            for keystroke in binding.keystrokes() {
+                let modifiers = keystroke.modifiers();
+                let chord = modifiers.platform || modifiers.control || modifiers.alt;
+                assert!(
+                    chord || WORKSPACE_PLAIN_KEYS.contains(&keystroke.key()),
+                    "{keystroke:?} is a plain key bound at the Workspace level"
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn bad_keymaps_are_reported(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            for (source, expected) in [
+                ("{}", "JSON array"),
+                (r#"[{"bindings": {"x": "zmail::Nope"}}]"#, "zmail::Nope"),
+                (r#"[{"context": "A &&", "bindings": {}}]"#, "bad context"),
+                (r#"[{"context": "Workspace"}]"#, "no bindings"),
+                (r#"[{"bindings": {"x": 3}}]"#, "bad action"),
+            ] {
+                let error = parse_keymap(source, cx).expect_err(source);
+                assert!(
+                    format!("{error:#}").contains(expected),
+                    "{source}: {error:#}"
+                );
+            }
+        });
+    }
+}

@@ -1,0 +1,83 @@
+[
+  {
+    "context": "Workspace",
+    "bindings": {
+      "secondary-n": "zmail::NewMessage",
+      "secondary-shift-a": "zmail::AddAccount",
+      "secondary-1": "zmail::ShowMail",
+      "secondary-2": "zmail::ShowDrafts",
+      "secondary-3": "zmail::ShowOutbox",
+      "secondary-shift-o": "zmail::RetryOutbox",
+      "secondary-f": "zmail::FocusSearch",
+      "f5": "zmail::SyncAccount",
+      "shift-f5": "zmail::SyncAll",
+      "secondary-shift-n": "zmail::SyncAll",
+      "secondary-shift-t": "zmail::ToggleTheme",
+      "tab": "zmail::FocusNextPane",
+      "shift-tab": "zmail::FocusPreviousPane",
+      "f6": "zmail::FocusNextPane",
+      "shift-f6": "zmail::FocusPreviousPane",
+      "escape": "zmail::Cancel"
+    }
+  },
+  {
+    "context": "Sidebar",
+    "bindings": {
+      "down": "zmail::SelectNext",
+      "up": "zmail::SelectPrevious",
+      "home": "zmail::SelectFirst",
+      "end": "zmail::SelectLast",
+      "enter": "zmail::OpenSelected",
+      "secondary-z": "zmail::Undo"
+    }
+  },
+  {
+    "context": "MessageList",
+    "bindings": {
+      "down": "zmail::SelectNext",
+      "up": "zmail::SelectPrevious",
+      "home": "zmail::SelectFirst",
+      "end": "zmail::SelectLast",
+      "enter": "zmail::OpenSelected",
+      "secondary-z": "zmail::Undo"
+    }
+  },
+  {
+    "context": "MessageList || Reader",
+    "bindings": {
+      "secondary-r": "zmail::Reply",
+      "secondary-shift-r": "zmail::ReplyAll",
+      "secondary-shift-f": "zmail::Forward",
+      "secondary-e": "zmail::Archive",
+      "delete": "zmail::Delete",
+      "backspace": "zmail::Delete",
+      "secondary-backspace": "zmail::Delete",
+      "secondary-shift-l": "zmail::ToggleFlag",
+      "secondary-shift-u": "zmail::ToggleRead",
+      "secondary-shift-s": "zmail::SaveAttachments"
+    }
+  },
+  {
+    "context": "Reader",
+    "bindings": {
+      "up": "zmail::ScrollUp",
+      "down": "zmail::ScrollDown",
+      "pageup": "zmail::PageUp",
+      "pagedown": "zmail::PageDown",
+      "secondary-z": "zmail::Undo"
+    }
+  },
+  {
+    "context": "Compose",
+    "bindings": {
+      "secondary-enter": "zmail::Send",
+      "secondary-s": "zmail::SaveDraft"
+    }
+  },
+  {
+    "context": "AccountSetup",
+    "bindings": {
+      "secondary-enter": "zmail::SaveAccount"
+    }
+  }
+]

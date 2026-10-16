@@ -52,9 +52,11 @@ use crate::account_setup::{AccountSetupState, render_account_setup_detail};
 mod reader;
 use crate::reader::{reader_move_buttons, reader_primary_action_buttons, render_reader_detail};
 
+mod actions;
 mod components;
 pub use components::gallery::run_gallery;
 mod diagnostics;
+mod keymap;
 mod mail_actions;
 mod message_list;
 mod preferences;
@@ -112,6 +114,7 @@ pub fn run(
         .run(move |cx: &mut App| {
             components::init(cx);
             components::text_input::init(cx);
+            keymap::bind_default_keymap(cx);
             let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
             let bootstrap = bootstrap.clone();
             let store = store.clone();
