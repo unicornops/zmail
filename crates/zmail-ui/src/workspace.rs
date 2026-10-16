@@ -15,7 +15,9 @@ use url::Url;
 use zmail_core::{
     AccountSummary, AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, IdentitySummary,
     MailboxSummary, NewAccount, NewDraft, NewIdentity, OutgoingConfig, ProtocolKind, StoreStats,
-    SubmissionSecurity, SyncPhase, ThreadMessage, ThreadView, text::count_noun,
+    SubmissionSecurity, SyncPhase, ThreadMessage, ThreadView,
+    text::count_noun,
+    time::{HourCycle, format_full_date, next_local_midnight},
 };
 use zmail_notify::{NewMailNotifier, OsNotificationSink};
 use zmail_security::SecretStore;
@@ -88,6 +90,7 @@ impl WorkspaceView {
             status_message: None,
             hovered_element: None,
             refresh_scheduled: false,
+            hour_cycle: HourCycle::from_env(),
         };
 
         // New mail only notifies while the window is unfocused: the quiet
@@ -134,7 +137,35 @@ impl WorkspaceView {
             })
             .detach();
 
+        // Relative dates ("10:42", "Yesterday") change at midnight even when
+        // nothing else does, so re-render at each local midnight.
+        let entity = cx.entity();
+        window
+            .spawn(cx, async move |cx| {
+                loop {
+                    let now = chrono::Local::now();
+                    let until_midnight = (next_local_midnight(&now) - now)
+                        .to_std()
+                        .unwrap_or(Duration::from_secs(60));
+                    Timer::after(until_midnight + Duration::from_secs(1)).await;
+                    if entity.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+
         view
+    }
+
+    /// The lowercased addresses of the selected account's identities, used
+    /// to show the user as "me" in participant lists.
+    pub(crate) fn own_addresses(&self) -> Vec<String> {
+        self.identities
+            .iter()
+            .map(|identity| identity.email_address.trim().to_ascii_lowercase())
+            .filter(|address| !address.is_empty())
+            .collect()
     }
 
     // -----------------------------------------------------------------------
@@ -708,7 +739,7 @@ impl WorkspaceView {
             to,
             cc,
             prefixed_subject("Re", &thread.subject),
-            quoted_reply_body(latest_message),
+            quoted_reply_body(latest_message, self.hour_cycle),
         )
     }
 
@@ -722,7 +753,7 @@ impl WorkspaceView {
             Vec::new(),
             Vec::new(),
             prefixed_subject("Fwd", &thread.subject),
-            forwarded_body(latest_message),
+            forwarded_body(latest_message, self.hour_cycle),
         )
     }
 
@@ -1426,20 +1457,20 @@ fn prefixed_subject(prefix: &str, subject: &str) -> String {
     }
 }
 
-fn quoted_reply_body(message: &ThreadMessage) -> String {
+fn quoted_reply_body(message: &ThreadMessage, hour_cycle: HourCycle) -> String {
     format!(
-        "\n\nOn {}, {}, wrote:\n{}",
-        message.received_at,
+        "\n\nOn {}, {} wrote:\n{}",
+        format_full_date(&message.received_at, &chrono::Local, hour_cycle),
         message.sender,
         quote_text(&message.rendered_body)
     )
 }
 
-fn forwarded_body(message: &ThreadMessage) -> String {
+fn forwarded_body(message: &ThreadMessage, hour_cycle: HourCycle) -> String {
     format!(
         "\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {}\nTo: {}\nSubject: {}\n\n{}",
         message.sender,
-        message.received_at,
+        format_full_date(&message.received_at, &chrono::Local, hour_cycle),
         if message.recipients.trim().is_empty() {
             "(unknown)"
         } else {

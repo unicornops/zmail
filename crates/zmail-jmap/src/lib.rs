@@ -728,7 +728,6 @@ fn group_mailboxes(
                 .or_insert_with(|| ThreadAccumulator {
                     remote_thread_id: email.thread_id.clone(),
                     subject: email.subject.clone(),
-                    participants: format!("{} -> {}", email.from, email.recipients),
                     preview: email.preview.clone(),
                     is_flagged: false,
                     has_attachments: false,
@@ -740,7 +739,6 @@ fn group_mailboxes(
                 entry.latest_message_at = email.received_at.clone();
                 entry.preview = email.preview.clone();
                 entry.subject = email.subject.clone();
-                entry.participants = format!("{} -> {}", email.from, email.recipients);
             }
             entry.is_flagged |= email.flagged;
             entry.has_attachments |= email.has_attachments;
@@ -777,7 +775,9 @@ fn group_mailboxes(
                     ThreadSnapshot {
                         remote_thread_id: thread.remote_thread_id,
                         subject: thread.subject,
-                        participants: thread.participants,
+                        participants: zmail_core::participants::thread_participants(
+                            &thread.messages,
+                        ),
                         preview: thread.preview,
                         is_flagged: thread.is_flagged,
                         has_attachments: thread.has_attachments,
@@ -814,7 +814,6 @@ struct MailboxAccumulator {
 struct ThreadAccumulator {
     remote_thread_id: String,
     subject: String,
-    participants: String,
     preview: String,
     is_flagged: bool,
     has_attachments: bool,

@@ -427,7 +427,7 @@ impl LocalStore {
                     .outgoing
                     .as_ref()
                     .map(|outgoing| outgoing.hello_name.as_str()),
-                pseudo_now_timestamp(),
+                utc_now_timestamp(),
             ],
         )?;
         let account_id = transaction.last_insert_rowid();
@@ -1727,7 +1727,7 @@ impl LocalStore {
                 account_id,
                 phase.as_str(),
                 detail.as_ref(),
-                pseudo_now_timestamp()
+                utc_now_timestamp()
             ],
         )
         .with_context(|| format!("failed to update sync phase for account {account_id}"))?;
@@ -1879,7 +1879,7 @@ impl LocalStore {
         checkpoint: impl AsRef<str>,
     ) -> Result<()> {
         let conn = self.connection()?;
-        let now = pseudo_now_timestamp();
+        let now = utc_now_timestamp();
         conn.execute(
             r#"
             UPDATE sync_state
@@ -2328,7 +2328,7 @@ impl LocalStore {
                 draft.identity_id, draft.account_id
             )
         })?;
-        let now = pseudo_now_timestamp();
+        let now = utc_now_timestamp();
         let body = apply_default_signature(&draft.body, &identity.signature);
         transaction.execute(
             r#"
@@ -2516,7 +2516,7 @@ impl LocalStore {
                     update.identity_id, account_id
                 )
             })?;
-        let now = pseudo_now_timestamp();
+        let now = utc_now_timestamp();
         let next_body = if update.body.trim().is_empty() {
             apply_default_signature(&update.body, &identity.signature)
         } else {
@@ -2606,7 +2606,7 @@ impl LocalStore {
             .optional()?
             .with_context(|| format!("draft {draft_id} does not exist"))?;
         ensure_draft_is_editable(state)?;
-        let now = pseudo_now_timestamp();
+        let now = utc_now_timestamp();
         transaction.execute(
             r#"
             INSERT INTO draft_attachments(
@@ -2680,7 +2680,7 @@ impl LocalStore {
             return Ok(());
         };
         ensure_draft_is_editable(state)?;
-        let now = pseudo_now_timestamp();
+        let now = utc_now_timestamp();
         transaction.execute(
             "DELETE FROM draft_attachments WHERE id = ?1",
             params![attachment_id],
@@ -2741,7 +2741,7 @@ impl LocalStore {
             bail!("draft {draft_id} has no recipients");
         }
 
-        let now = pseudo_now_timestamp();
+        let now = utc_now_timestamp();
         transaction.execute(
             r#"
             INSERT INTO outbox_jobs(
@@ -2828,7 +2828,7 @@ impl LocalStore {
         let transaction = conn
             .transaction()
             .context("failed to begin the outbox claim transaction")?;
-        let now = pseudo_now_timestamp();
+        let now = utc_now_timestamp();
         let job_id = transaction
             .query_row(
                 r#"
@@ -2906,8 +2906,8 @@ impl LocalStore {
             )
             .optional()?
             .with_context(|| format!("outbox job {job_id} does not exist"))?;
-        let now = pseudo_now_timestamp();
-        let next_attempt_at = pseudo_timestamp_after(retry_after);
+        let now = utc_now_timestamp();
+        let next_attempt_at = utc_timestamp_after(retry_after);
         transaction.execute(
             r#"
             UPDATE outbox_jobs
@@ -2956,7 +2956,7 @@ impl LocalStore {
             )
             .optional()?
             .with_context(|| format!("outbox job {job_id} does not exist"))?;
-        let now = pseudo_now_timestamp();
+        let now = utc_now_timestamp();
         transaction.execute(
             r#"
             UPDATE outbox_jobs
@@ -2999,7 +2999,7 @@ impl LocalStore {
             )
             .optional()?
             .with_context(|| format!("outbox job {job_id} does not exist"))?;
-        let now = pseudo_now_timestamp();
+        let now = utc_now_timestamp();
         transaction.execute(
             r#"
             UPDATE outbox_jobs
@@ -3052,7 +3052,7 @@ impl LocalStore {
             bail!("outbox job {job_id} cannot be requeued from state {state}");
         }
 
-        let now = pseudo_now_timestamp();
+        let now = utc_now_timestamp();
         transaction.execute(
             r#"
             UPDATE outbox_jobs
@@ -3131,7 +3131,7 @@ impl LocalStore {
         error: impl AsRef<str>,
     ) -> Result<()> {
         let conn = self.connection()?;
-        let now = pseudo_now_timestamp();
+        let now = utc_now_timestamp();
         conn.execute(
             r#"
             UPDATE sync_state
@@ -3602,21 +3602,17 @@ fn extract_host(endpoint: &str) -> Option<String> {
         })
 }
 
-fn pseudo_timestamp_after(duration: Duration) -> String {
+fn utc_timestamp_after(duration: Duration) -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
         .saturating_add(duration.as_secs());
-    pseudo_timestamp_from_epoch(seconds)
+    utc_timestamp_from_epoch(seconds)
 }
 
-fn pseudo_timestamp_from_epoch(seconds: u64) -> String {
-    let day = (seconds / 86_400 % 28) + 1;
-    let hour = (seconds / 3_600) % 24;
-    let minute = (seconds / 60) % 60;
-    let second = seconds % 60;
-    format!("2026-03-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+fn utc_timestamp_from_epoch(seconds: u64) -> String {
+    zmail_core::time::utc_timestamp(seconds)
 }
 
 fn to_from_sql_error(error: anyhow::Error) -> rusqlite::Error {
@@ -4766,12 +4762,12 @@ fn sync_phase_from_db(value: String) -> rusqlite::Result<SyncPhase> {
     })
 }
 
-fn pseudo_now_timestamp() -> String {
+fn utc_now_timestamp() -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    pseudo_timestamp_from_epoch(seconds)
+    utc_timestamp_from_epoch(seconds)
 }
 
 #[cfg(test)]

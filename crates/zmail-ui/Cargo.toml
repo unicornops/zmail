@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 gpui.workspace = true
 url.workspace = true
 zmail-auth = { path = "../zmail-auth" }

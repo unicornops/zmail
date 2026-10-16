@@ -55,6 +55,7 @@ mod diagnostics;
 mod message_list;
 mod sidebar;
 mod toolbar;
+mod tooltip;
 mod workspace;
 
 // ---------------------------------------------------------------------------
@@ -190,6 +191,8 @@ struct WorkspaceView {
     status_message: Option<String>,
     hovered_element: Option<SharedString>,
     refresh_scheduled: bool,
+    /// 12- or 24-hour clock for list and reader dates, from the locale.
+    hour_cycle: zmail_core::time::HourCycle,
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +367,12 @@ impl WorkspaceView {
     ) -> AnyElement {
         match self.detail_mode {
             // ---- Reader ---------------------------------------------------
-            DetailMode::Reader => render_reader_detail(selected_thread.as_ref(), colors),
+            DetailMode::Reader => render_reader_detail(
+                selected_thread.as_ref(),
+                self.hour_cycle,
+                &self.own_addresses(),
+                colors,
+            ),
 
             // ---- Compose -------------------------------------------------
             DetailMode::Compose => render_compose_detail(
