@@ -55,6 +55,7 @@ mod reader;
 use crate::reader::{reader_move_buttons, reader_primary_action_buttons, render_reader_detail};
 
 mod components;
+pub use components::gallery::run_gallery;
 mod diagnostics;
 mod message_list;
 mod preferences;

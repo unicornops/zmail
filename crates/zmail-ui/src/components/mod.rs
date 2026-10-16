@@ -6,6 +6,7 @@ pub(crate) mod actions;
 pub(crate) mod avatar;
 pub(crate) mod badge;
 pub(crate) mod button;
+pub(crate) mod gallery;
 pub(crate) mod kbd;
 pub(crate) mod menu;
 pub(crate) mod modal;
