@@ -37,7 +37,9 @@ gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
 jmap-client = { version = "0.4.0", default-features = false, features = ["async", "rustls"] }
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
-mail-send = "0.6.2"
+# DKIM signing is the sending server's job; leaving out mail-send's default `dkim`
+# feature drops mail-auth and its report-parsing dependencies (zip, hickory DNS).
+mail-send = { version = "0.6.2", default-features = false, features = ["builder", "cram-md5", "digest-md5", "aws_lc_rs", "tls12"] }
 mail-parser = "0.11.2"
 notify-rust = "4"
 rand = "0.8"
