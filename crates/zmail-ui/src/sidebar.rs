@@ -12,11 +12,14 @@ use gpui::{
     px, rgb, uniform_list,
 };
 
-use super::WorkspaceView;
+use super::{ListMode, WorkspaceView};
 use crate::styles::{
     AVATAR_SIZE, ICON_SIZE_SM, MAILBOX_ITEM_HEIGHT, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, UiColors,
 };
-use crate::widgets::{EllipsisExt, avatar, badge, icon, message_avatar_background, sync_badge};
+use crate::widgets::{
+    EllipsisExt, HoverExt, avatar, badge, icon, interactive_background, message_avatar_background,
+    sync_badge,
+};
 
 impl WorkspaceView {
     /// Render the left sidebar pane: accounts header, account items, mailboxes
@@ -60,12 +63,8 @@ impl WorkspaceView {
                         let account_id = account.id;
                         let is_selected = Some(account_id) == self.selected_account_id;
                         let element_id = account_row_id(account_id);
-                        let background_color = rgb(self.interactive_background(
-                            &element_id,
-                            is_selected,
-                            colors.surface,
-                            &colors,
-                        ));
+                        let background_color =
+                            rgb(interactive_background(is_selected, colors.surface, &colors));
                         let (badge_icon, badge_color, badge_text) =
                             sync_badge(account.sync_status.phase, &colors);
                         let avatar_color =
@@ -82,12 +81,7 @@ impl WorkspaceView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_account(account_id, cx);
                             }))
-                            .on_hover(cx.listener({
-                                let element_id = element_id.clone();
-                                move |this, hovered, _, cx| {
-                                    this.set_hovered_element(element_id.clone(), *hovered, cx);
-                                }
-                            }))
+                            .hover_bg(is_selected, &colors)
                             .child(
                                 div()
                                     .flex()
@@ -187,10 +181,12 @@ impl WorkspaceView {
                                 let Some(mailbox) = this.mailboxes.get(index).cloned() else {
                                     continue;
                                 };
-                                let is_selected = Some(mailbox.id) == this.selected_mailbox_id;
+                                // Drafts, Outbox and Search are not a mailbox view, so no
+                                // mailbox is highlighted while they are shown.
+                                let is_selected = Some(mailbox.id) == this.selected_mailbox_id
+                                    && matches!(this.list_mode, ListMode::Mail);
                                 let element_id = mailbox_row_id(mailbox.id);
-                                let background_color = rgb(this.interactive_background(
-                                    &element_id,
+                                let background_color = rgb(interactive_background(
                                     is_selected,
                                     colors.surface,
                                     &colors,
@@ -211,16 +207,7 @@ impl WorkspaceView {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.select_mailbox(mailbox.id, cx);
                                         }))
-                                        .on_hover(cx.listener({
-                                            let element_id = element_id.clone();
-                                            move |this, hovered, _, cx| {
-                                                this.set_hovered_element(
-                                                    element_id.clone(),
-                                                    *hovered,
-                                                    cx,
-                                                );
-                                            }
-                                        }))
+                                        .hover_bg(is_selected, &colors)
                                         .child(
                                             div()
                                                 .flex()

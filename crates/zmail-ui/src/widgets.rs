@@ -10,8 +10,8 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, ClickEvent, FontWeight, IntoElement, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Svg, Window, div, prelude::*, px, rgb, svg,
+    AnyElement, App, ClickEvent, FontWeight, InteractiveElement, IntoElement, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, Svg, Window, div, prelude::*, px, rgb, svg,
 };
 use zmail_core::SyncPhase;
 
@@ -41,6 +41,36 @@ pub(crate) trait EllipsisExt: Styled + Sized {
 }
 
 impl<T: Styled> EllipsisExt for T {}
+
+// ---------------------------------------------------------------------------
+// Hover and selection backgrounds
+// ---------------------------------------------------------------------------
+
+/// The resting background of a selectable surface: the selection colour
+/// when selected, otherwise `base`.
+pub(crate) fn interactive_background(selected: bool, base: u32, colors: &UiColors) -> u32 {
+    if selected {
+        colors.selected_background
+    } else {
+        base
+    }
+}
+
+/// Hover feedback as a GPUI style refinement, so hovering repaints only
+/// the hovered element instead of notifying the whole workspace.
+pub(crate) trait HoverExt: InteractiveElement + Sized {
+    /// Show the hover background unless the element is selected.
+    fn hover_bg(self, selected: bool, colors: &UiColors) -> Self {
+        if selected {
+            self
+        } else {
+            let hover = colors.hover_background;
+            self.hover(move |style| style.bg(rgb(hover)))
+        }
+    }
+}
+
+impl<T: InteractiveElement> HoverExt for T {}
 
 // ---------------------------------------------------------------------------
 // toolbar_button

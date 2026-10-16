@@ -191,123 +191,102 @@ pub(crate) fn compose_action_buttons(
     ]
 }
 
+/// The sender identity. With one identity it is a plain "From" line; with
+/// several, each is a selectable row and the chosen one is marked. Either
+/// way each identity appears once.
 fn render_identity_section(
     compose: &ComposeState,
     identities: &[IdentitySummary],
     colors: &UiColors,
     cx: &mut Context<WorkspaceView>,
 ) -> gpui::Div {
-    let selected_identity = identities
-        .iter()
-        .find(|identity| identity.id == compose.identity_id);
-    let selected_label = selected_identity
-        .map(|identity| identity.display_name.clone())
-        .unwrap_or_else(|| "Selected identity".to_owned());
-    let selected_email = selected_identity
-        .map(|identity| identity.email_address.clone())
-        .unwrap_or_else(|| compose.identity_email.clone());
+    if identities.len() <= 1 {
+        let (name, email) = identities
+            .first()
+            .map(|identity| {
+                (
+                    identity.display_name.clone(),
+                    identity.email_address.clone(),
+                )
+            })
+            .unwrap_or_else(|| (String::new(), compose.identity_email.clone()));
+        return section_card("From", colors).child(identity_row(&name, &email, false, colors));
+    }
 
-    section_card("Identity", colors)
-        .child(
+    section_card("From", colors).child(div().flex().flex_col().gap_2().children(
+        identities.iter().map(|identity| {
+            let identity_id = identity.id;
+            let selected = identity.id == compose.identity_id;
+
             div()
+                .id(("compose-identity", identity.id as u64))
+                .cursor_pointer()
                 .rounded_md()
-                .bg(rgb(colors.background))
-                .border_1()
-                .border_color(rgb(colors.border))
-                .px_3()
-                .py_3()
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(icon("user", ICON_SIZE_SM, colors.accent))
-                                .child(
-                                    div().flex().flex_col().gap_1().child(selected_label).child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(colors.muted))
-                                            .child(selected_email),
-                                    ),
-                                ),
-                        )
-                        .child(icon("chevron-down", ICON_SIZE_SM, colors.muted)),
-                ),
-        )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_compose_identity(identity_id, cx);
+                }))
+                .child(identity_row(
+                    &identity.display_name,
+                    &identity.email_address,
+                    selected,
+                    colors,
+                ))
+        }),
+    ))
+}
+
+/// One identity: name and address, highlighted and ticked when selected.
+fn identity_row(name: &str, email: &str, selected: bool, colors: &UiColors) -> gpui::Div {
+    div()
+        .rounded_md()
+        .bg(rgb(if selected {
+            colors.selected_background
+        } else {
+            colors.background
+        }))
+        .border_1()
+        .border_color(rgb(if selected {
+            colors.accent
+        } else {
+            colors.border
+        }))
+        .px_3()
+        .py_3()
         .child(
             div()
                 .flex()
-                .flex_col()
-                .gap_2()
-                .children(identities.iter().map(|identity| {
-                    let identity_id = identity.id;
-                    let selected = identity.id == compose.identity_id;
-
+                .items_center()
+                .gap_3()
+                .child(icon(
+                    "user",
+                    ICON_SIZE_SM,
+                    if selected {
+                        colors.accent
+                    } else {
+                        colors.muted
+                    },
+                ))
+                .child(
                     div()
-                        .id(("compose-identity", identity.id as u64))
-                        .rounded_md()
-                        .bg(rgb(if selected {
-                            colors.selected_background
-                        } else {
-                            colors.background
-                        }))
-                        .border_1()
-                        .border_color(rgb(if selected {
-                            colors.accent
-                        } else {
-                            colors.border
-                        }))
-                        .px_3()
-                        .py_3()
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_compose_identity(identity_id, cx);
-                        }))
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .when(!name.is_empty(), |this| {
+                            this.child(div().ellipsis().child(name.to_owned()))
+                        })
                         .child(
                             div()
-                                .flex()
-                                .justify_between()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_3()
-                                        .child(icon(
-                                            "user",
-                                            ICON_SIZE_SM,
-                                            if selected {
-                                                colors.accent
-                                            } else {
-                                                colors.muted
-                                            },
-                                        ))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap_1()
-                                                .child(identity.display_name.clone())
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(rgb(colors.muted))
-                                                        .child(identity.email_address.clone()),
-                                                ),
-                                        ),
-                                )
-                                .when(selected, |this| {
-                                    this.child(icon("check-circle", ICON_SIZE_SM, colors.success))
-                                }),
-                        )
-                })),
+                                .text_sm()
+                                .text_color(rgb(colors.muted))
+                                .ellipsis()
+                                .child(email.to_owned()),
+                        ),
+                )
+                .when(selected, |this| {
+                    this.child(icon("check-circle", ICON_SIZE_SM, colors.success))
+                }),
         )
 }
 
