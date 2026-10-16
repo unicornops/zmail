@@ -14,10 +14,6 @@
 //! the inverse operations are recorded now so that work only adds UI.
 //! [`MailActions::undo`] already applies them.
 
-// Wired into the workspace by the pane split; until then only the tests
-// use it.
-#![allow(dead_code)]
-
 use std::{collections::VecDeque, path::Path, sync::Arc};
 
 use anyhow::{Context as _, Result, bail};
@@ -103,12 +99,15 @@ impl MailActions {
         }
     }
 
-    /// The recorded undo entries, oldest first.
+    /// The recorded undo entries, oldest first. (The undo toast in Phase 3
+    /// reads these.)
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn undo_entries(&self) -> impl ExactSizeIterator<Item = &UndoEntry> {
         self.undo_stack.iter()
     }
 
     /// The entry [`Self::undo`] would reverse next.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn last_undo(&self) -> Option<&UndoEntry> {
         self.undo_stack.back()
     }

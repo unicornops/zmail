@@ -1,12 +1,17 @@
-//! Thread reader pane and reader action buttons.
+//! The reader pane: the open conversation and its actions.
 //!
-//! [`render_reader_detail`] produces the scroll content for the reader detail
-//! pane. [`reader_primary_action_buttons`] produces the main action-bar button
-//! list shown above the scroll area, while [`reader_move_buttons`] keeps the
-//! move-to-mailbox actions at the bottom of the detail pane.
+//! [`ReaderView`] is its own entity with its own focus handle and the
+//! `Reader` key context. The shell pushes the selected thread (loaded once
+//! per selection or store refresh, never per frame) with
+//! [`ReaderView::set_state`]. Its buttons dispatch the same actions as the
+//! key bindings; the shell handles them, because replying and moving need
+//! the selection and the account.
 
 use chrono::{DateTime, Local};
-use gpui::{AnyElement, Context, FontWeight, IntoElement, div, prelude::*, rgb};
+use gpui::{
+    Action, AnyElement, App, Context, FocusHandle, Focusable, FontWeight, IntoElement, Render,
+    ScrollHandle, Window, div, point, prelude::*, px, rgb,
+};
 use zmail_core::{
     MailboxSummary, ThreadMessage, ThreadView,
     participants::{parse_address_list, sender_identity},
@@ -14,7 +19,11 @@ use zmail_core::{
     time::{HourCycle, format_full_date, format_list_date},
 };
 
-use super::WorkspaceView;
+use crate::actions::{
+    Archive, Delete, Forward, MoveToMailbox, PageDown, PageUp, Reply, ReplyAll, SaveAttachments,
+    ScrollDown, ScrollUp, ToggleFlag, ToggleRead,
+};
+use crate::pane::pane_focus_indicator;
 use crate::styles::{AVATAR_SIZE, UiColors};
 use crate::tooltip::text_tooltip;
 use crate::widgets::{
@@ -22,10 +31,179 @@ use crate::widgets::{
     message_avatar_background, toolbar_button,
 };
 
+/// The key context the reader sets.
+pub(crate) const KEY_CONTEXT: &str = "Reader";
+
+/// How far one arrow key scrolls the conversation.
+const SCROLL_STEP: f32 = 48.;
+
+/// What the shell shows in the reader.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ReaderState {
+    pub(crate) thread: Option<ThreadView>,
+    /// The account's mailboxes, for the move buttons.
+    pub(crate) mailboxes: Vec<MailboxSummary>,
+    /// The user's own addresses, shown as "me".
+    pub(crate) own_addresses: Vec<String>,
+}
+
+pub(crate) struct ReaderView {
+    focus_handle: FocusHandle,
+    hour_cycle: HourCycle,
+    state: ReaderState,
+    scroll_handle: ScrollHandle,
+    /// Test instrumentation: renders.
+    #[cfg(test)]
+    pub(crate) counters: crate::pane::RenderCounters,
+}
+
+impl Focusable for ReaderView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl ReaderView {
+    pub(crate) fn new(hour_cycle: HourCycle, cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            hour_cycle,
+            state: ReaderState::default(),
+            scroll_handle: ScrollHandle::new(),
+            #[cfg(test)]
+            counters: Default::default(),
+        }
+    }
+
+    /// Replaces what the reader shows; re-renders only when it changed. A
+    /// different thread starts at the top.
+    pub(crate) fn set_state(&mut self, state: ReaderState, cx: &mut Context<Self>) {
+        if self.state == state {
+            return;
+        }
+        let thread_changed = self.state.thread.as_ref().map(|thread| thread.id)
+            != state.thread.as_ref().map(|thread| thread.id);
+        self.state = state;
+        if thread_changed {
+            self.scroll_handle.set_offset(point(px(0.), px(0.)));
+        }
+        cx.notify();
+    }
+
+    fn scroll_by(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let offset = self.scroll_handle.offset();
+        let max = self.scroll_handle.max_offset().y;
+        // Offsets grow negative as the content scrolls up.
+        let y = (offset.y - px(delta)).clamp(-max, px(0.));
+        self.scroll_handle.set_offset(point(offset.x, y));
+        cx.notify();
+    }
+
+    fn page_height(&self) -> f32 {
+        let height: f32 = self.scroll_handle.bounds().size.height.into();
+        (height - SCROLL_STEP).max(SCROLL_STEP)
+    }
+
+    fn scroll_up(&mut self, _: &ScrollUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_by(-SCROLL_STEP, cx);
+    }
+
+    fn scroll_down(&mut self, _: &ScrollDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_by(SCROLL_STEP, cx);
+    }
+
+    fn page_up(&mut self, _: &PageUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_by(-self.page_height(), cx);
+    }
+
+    fn page_down(&mut self, _: &PageDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_by(self.page_height(), cx);
+    }
+}
+
+impl Render for ReaderView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.counters.renders += 1;
+        }
+        let colors = *cx.global::<UiColors>();
+        let focused = self.focus_handle.contains_focused(window, cx);
+        let thread = self.state.thread.as_ref();
+        let primary_actions = reader_primary_action_buttons(thread, &self.focus_handle, &colors);
+        let move_actions =
+            reader_move_buttons(thread, &self.state.mailboxes, &self.focus_handle, &colors);
+
+        div()
+            .id("reader")
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::scroll_up))
+            .on_action(cx.listener(Self::scroll_down))
+            .on_action(cx.listener(Self::page_up))
+            .on_action(cx.listener(Self::page_down))
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(colors.background))
+            .child(
+                pane_focus_indicator(
+                    div()
+                        .px_4()
+                        .py_3()
+                        .border_b_1()
+                        .border_color(rgb(colors.border)),
+                    focused,
+                    &colors,
+                )
+                .child("Reader"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(colors.border))
+                    .children(primary_actions),
+            )
+            .child(
+                div()
+                    .id("reader-scroll")
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
+                    .px_4()
+                    .py_4()
+                    .child(render_reader_detail(
+                        thread,
+                        self.hour_cycle,
+                        &self.state.own_addresses,
+                        &colors,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .px_4()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(rgb(colors.border))
+                    .children(move_actions),
+            )
+    }
+}
+
 /// Render the full thread reader: subject, metadata, and conversation
 /// cards. Returns an [`AnyElement`] ready to be placed
 /// inside a scrollable container.
-pub(crate) fn render_reader_detail(
+fn render_reader_detail(
     selected_thread: Option<&ThreadView>,
     hour_cycle: HourCycle,
     own_addresses: &[String],
@@ -133,141 +311,51 @@ pub(crate) fn render_reader_detail(
     }
 }
 
-/// Build the main reader actions rendered above the scrollable detail pane.
+/// The main reader actions shown above the conversation. Each button
+/// dispatches its action from the reader, so it does exactly what the key
+/// binding does.
 ///
 /// Returns an empty [`Vec`] when no thread is selected.
-pub(crate) fn reader_primary_action_buttons(
-    selected_thread: &Option<ThreadView>,
+fn reader_primary_action_buttons(
+    thread: Option<&ThreadView>,
+    focus_handle: &FocusHandle,
     colors: &UiColors,
-    cx: &mut Context<WorkspaceView>,
 ) -> Vec<AnyElement> {
-    let Some(thread) = selected_thread.as_ref() else {
+    let Some(thread) = thread else {
         return Vec::new();
     };
 
-    let thread_has_unread = thread.unread_count > 0;
-    let thread_is_flagged = thread.is_flagged;
+    let button = |label: &'static str, icon: &'static str, action: Box<dyn Action>| {
+        let focus_handle = focus_handle.clone();
+        toolbar_button(
+            label,
+            Some(icon),
+            colors.button_background,
+            colors.border,
+            colors.foreground,
+            move |_, window, cx| focus_handle.dispatch_action(action.as_ref(), window, cx),
+        )
+        .into_any_element()
+    };
 
     let mut buttons = vec![
-        toolbar_button(
-            "Reply",
-            Some("reply"),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
-            cx.listener(|this: &mut WorkspaceView, _, window, cx| {
-                this.reply_to_selected_thread(false, window, cx);
-            }),
-        )
-        .into_any_element(),
-        toolbar_button(
-            "Reply All",
-            Some("reply-all"),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
-            cx.listener(|this: &mut WorkspaceView, _, window, cx| {
-                this.reply_to_selected_thread(true, window, cx);
-            }),
-        )
-        .into_any_element(),
-        toolbar_button(
-            "Forward",
-            Some("forward"),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
-            cx.listener(|this: &mut WorkspaceView, _, window, cx| {
-                this.forward_selected_thread(window, cx);
-            }),
-        )
-        .into_any_element(),
+        button("Reply", "reply", Box::new(Reply)),
+        button("Reply All", "reply-all", Box::new(ReplyAll)),
+        button("Forward", "forward", Box::new(Forward)),
         action_divider(colors).into_any_element(),
-        toolbar_button(
-            "Archive",
-            Some("archive"),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
-            cx.listener(|this: &mut WorkspaceView, _, _, cx| {
-                let result = this
-                    .selected_thread_id
-                    .map(|thread_id| this.store.archive_thread(thread_id))
-                    .unwrap_or_else(|| Ok(()));
-                if let Err(error) = result {
-                    this.store_error = Some(error.to_string());
-                } else {
-                    this.refresh_from_store();
-                }
-                cx.notify();
-            }),
-        )
-        .into_any_element(),
-        toolbar_button(
-            "Delete",
-            Some("trash-2"),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
-            cx.listener(|this: &mut WorkspaceView, _, _, cx| {
-                let result = this
-                    .selected_thread_id
-                    .map(|thread_id| this.store.delete_thread(thread_id))
-                    .unwrap_or_else(|| Ok(()));
-                if let Err(error) = result {
-                    this.store_error = Some(error.to_string());
-                } else {
-                    this.refresh_from_store();
-                }
-                cx.notify();
-            }),
-        )
-        .into_any_element(),
+        button("Archive", "archive", Box::new(Archive)),
+        button("Delete", "trash-2", Box::new(Delete)),
         action_divider(colors).into_any_element(),
-        toolbar_button(
-            if thread_is_flagged { "Unflag" } else { "Flag" },
-            Some("flag"),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
-            cx.listener(move |this: &mut WorkspaceView, _, _, cx| {
-                let result = this
-                    .selected_thread_id
-                    .map(|thread_id| this.store.set_thread_flagged(thread_id, !thread_is_flagged))
-                    .unwrap_or_else(|| Ok(()));
-                if let Err(error) = result {
-                    this.store_error = Some(error.to_string());
-                } else {
-                    this.refresh_from_store();
-                }
-                cx.notify();
-            }),
-        )
-        .into_any_element(),
-        toolbar_button(
-            if thread_has_unread {
-                "Mark Read"
-            } else {
-                "Mark Unread"
-            },
-            Some(if thread_has_unread { "eye" } else { "eye-off" }),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
-            cx.listener(move |this: &mut WorkspaceView, _, _, cx| {
-                let result = this
-                    .selected_thread_id
-                    .map(|thread_id| this.store.set_thread_read(thread_id, thread_has_unread))
-                    .unwrap_or_else(|| Ok(()));
-                if let Err(error) = result {
-                    this.store_error = Some(error.to_string());
-                } else {
-                    this.refresh_from_store();
-                }
-                cx.notify();
-            }),
-        )
-        .into_any_element(),
+        button(
+            if thread.is_flagged { "Unflag" } else { "Flag" },
+            "flag",
+            Box::new(ToggleFlag),
+        ),
+        if thread.unread_count > 0 {
+            button("Mark Read", "eye", Box::new(ToggleRead))
+        } else {
+            button("Mark Unread", "eye-off", Box::new(ToggleRead))
+        },
     ];
 
     let thread_has_attachments = thread
@@ -275,71 +363,48 @@ pub(crate) fn reader_primary_action_buttons(
         .iter()
         .any(|message| !message.attachments.is_empty());
     if thread_has_attachments {
-        buttons.push(
-            toolbar_button(
-                "Save attachments",
-                Some("save"),
-                colors.button_background,
-                colors.border,
-                colors.foreground,
-                cx.listener(|this: &mut WorkspaceView, _, _, cx| {
-                    this.save_selected_thread_attachments(cx);
-                }),
-            )
-            .into_any_element(),
-        );
+        buttons.push(button(
+            "Save attachments",
+            "save",
+            Box::new(SaveAttachments),
+        ));
     }
 
     buttons
 }
 
-/// Build the move-to-mailbox buttons rendered at the bottom of the reader pane.
+/// The move-to-mailbox buttons shown at the bottom of the reader.
 ///
 /// Returns an empty [`Vec`] when no thread is selected.
-pub(crate) fn reader_move_buttons(
-    selected_thread: &Option<ThreadView>,
+fn reader_move_buttons(
+    thread: Option<&ThreadView>,
     mailboxes: &[MailboxSummary],
+    focus_handle: &FocusHandle,
     colors: &UiColors,
-    cx: &mut Context<WorkspaceView>,
 ) -> Vec<AnyElement> {
-    let Some(thread) = selected_thread.as_ref() else {
+    let Some(thread) = thread else {
         return Vec::new();
     };
 
-    let mut buttons = Vec::new();
-
-    for mailbox in mailboxes
+    mailboxes
         .iter()
         .filter(|mailbox| mailbox.id != thread.mailbox_id)
-    {
-        let mailbox_id = mailbox.id;
-        let mailbox_name = mailbox.name.clone();
-        buttons.push(
+        .map(|mailbox| {
+            let action = MoveToMailbox {
+                mailbox_id: mailbox.id,
+            };
+            let focus_handle = focus_handle.clone();
             toolbar_button(
-                format!("Move: {mailbox_name}"),
+                format!("Move: {}", mailbox.name),
                 Some("folder"),
                 colors.button_background,
                 colors.border,
                 colors.foreground,
-                cx.listener(move |this: &mut WorkspaceView, _, _, cx| {
-                    let result = this
-                        .selected_thread_id
-                        .map(|thread_id| this.store.move_thread(thread_id, mailbox_id))
-                        .unwrap_or_else(|| Ok(()));
-                    if let Err(error) = result {
-                        this.store_error = Some(error.to_string());
-                    } else {
-                        this.selected_mailbox_id = Some(mailbox_id);
-                        this.refresh_from_store();
-                    }
-                    cx.notify();
-                }),
+                move |_, window, cx| focus_handle.dispatch_action(&action, window, cx),
             )
-            .into_any_element(),
-        );
-    }
-
-    buttons
+            .into_any_element()
+        })
+        .collect()
 }
 
 fn render_thread_message(

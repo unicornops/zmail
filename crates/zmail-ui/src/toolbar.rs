@@ -1,13 +1,19 @@
-//! Top toolbar render method for [`WorkspaceView`].
+//! The shell's toolbar: command buttons and the search field.
 //!
-//! This module defines a single `impl WorkspaceView` block containing
-//! [`WorkspaceView::render_toolbar`], which produces the action-button bar
-//! that spans the full width at the top of the window.
+//! Every button dispatches its action from the window root, exactly like
+//! its key binding. Clicking the toolbar leaves keyboard focus where it
+//! was (only the search field takes focus), so Sync or Theme do not pull
+//! focus out of the message list.
 
-use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, MouseButton, div, prelude::*, px, rgb};
 use zmail_core::ThemeAppearance;
 
-use super::{DetailMode, ListMode, WorkspaceView};
+use super::{ListMode, WorkspaceView};
+use crate::actions::{
+    AddAccount, NewMessage, RetryOutbox, RunSearch, ShowDrafts, ShowMail, ShowOutbox, SyncAccount,
+    SyncAll, ToggleTheme,
+};
+use crate::pane::dispatch_from;
 use crate::styles::{SEARCH_FIELD_WIDTH, TOOLBAR_HEIGHT, UiColors};
 use crate::widgets::{HoverExt, interactive_background, toolbar_button};
 
@@ -20,7 +26,7 @@ impl WorkspaceView {
     pub(crate) fn render_toolbar(
         &self,
         colors: &UiColors,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme_toggle_icon = match self.bootstrap.theme.appearance {
             ThemeAppearance::Dark => "sun",
@@ -45,6 +51,9 @@ impl WorkspaceView {
                     .px_4()
                     .py_2()
                     .min_h(px(TOOLBAR_HEIGHT))
+                    // Buttons here do not take keyboard focus; the search
+                    // field focuses itself before this runs.
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .border_b_1()
                     .border_color(rgb(colors.border))
                     .child(
@@ -54,9 +63,7 @@ impl WorkspaceView {
                             interactive_background(false, colors.button_background, colors),
                             colors.border,
                             colors.foreground,
-                            cx.listener(|this: &mut Self, _, window, cx| {
-                                this.open_account_setup(window, cx);
-                            }),
+                            dispatch_from(&self.focus_handle, AddAccount),
                         )
                         .hover_bg(false, colors),
                     )
@@ -67,9 +74,7 @@ impl WorkspaceView {
                             interactive_background(false, colors.button_background, colors),
                             colors.border,
                             colors.foreground,
-                            cx.listener(|this: &mut Self, _, window, cx| {
-                                this.open_compose(window, cx);
-                            }),
+                            dispatch_from(&self.focus_handle, NewMessage),
                         )
                         .hover_bg(false, colors),
                     )
@@ -84,9 +89,7 @@ impl WorkspaceView {
                             ),
                             colors.border,
                             colors.foreground,
-                            cx.listener(|this: &mut Self, _, _, cx| {
-                                this.set_list_mode(ListMode::Mail, cx);
-                            }),
+                            dispatch_from(&self.focus_handle, ShowMail),
                         )
                         .hover_bg(matches!(self.list_mode, ListMode::Mail), colors),
                     )
@@ -101,10 +104,7 @@ impl WorkspaceView {
                             ),
                             colors.border,
                             colors.foreground,
-                            cx.listener(|this: &mut Self, _, _, cx| {
-                                this.set_list_mode(ListMode::Drafts, cx);
-                                this.detail_mode = DetailMode::Compose;
-                            }),
+                            dispatch_from(&self.focus_handle, ShowDrafts),
                         )
                         .hover_bg(matches!(self.list_mode, ListMode::Drafts), colors),
                     )
@@ -119,9 +119,7 @@ impl WorkspaceView {
                             ),
                             colors.border,
                             colors.foreground,
-                            cx.listener(|this: &mut Self, _, _, cx| {
-                                this.set_list_mode(ListMode::Outbox, cx);
-                            }),
+                            dispatch_from(&self.focus_handle, ShowOutbox),
                         )
                         .hover_bg(matches!(self.list_mode, ListMode::Outbox), colors),
                     )
@@ -135,9 +133,7 @@ impl WorkspaceView {
                                     interactive_background(false, colors.button_background, colors),
                                     colors.border,
                                     colors.foreground,
-                                    cx.listener(|this: &mut Self, _, window, cx| {
-                                        this.retry_selected_outbox(window, cx);
-                                    }),
+                                    dispatch_from(&self.focus_handle, RetryOutbox),
                                 )
                                 .hover_bg(false, colors),
                             )
@@ -158,9 +154,7 @@ impl WorkspaceView {
                             interactive_background(false, colors.button_background, colors),
                             colors.border,
                             colors.foreground,
-                            cx.listener(|this: &mut Self, _, _, cx| {
-                                this.run_search(cx);
-                            }),
+                            dispatch_from(&self.focus_handle, RunSearch),
                         )
                         .hover_bg(false, colors),
                     )
@@ -171,9 +165,7 @@ impl WorkspaceView {
                             interactive_background(false, colors.button_background, colors),
                             colors.border,
                             colors.foreground,
-                            cx.listener(|this: &mut Self, _, window, cx| {
-                                this.sync_selected_account(window, cx);
-                            }),
+                            dispatch_from(&self.focus_handle, SyncAccount),
                         )
                         .hover_bg(false, colors),
                     )
@@ -184,9 +176,7 @@ impl WorkspaceView {
                             interactive_background(false, colors.button_background, colors),
                             colors.border,
                             colors.foreground,
-                            cx.listener(|this: &mut Self, _, window, cx| {
-                                this.sync_all(window, cx);
-                            }),
+                            dispatch_from(&self.focus_handle, SyncAll),
                         )
                         .hover_bg(false, colors),
                     )
@@ -197,10 +187,7 @@ impl WorkspaceView {
                             interactive_background(false, colors.button_background, colors),
                             colors.border,
                             colors.foreground,
-                            cx.listener(|this: &mut Self, _, window, cx| {
-                                this.toggle_theme(cx);
-                                this.persist_theme_choice(window.appearance());
-                            }),
+                            dispatch_from(&self.focus_handle, ToggleTheme),
                         )
                         .hover_bg(false, colors),
                     ),

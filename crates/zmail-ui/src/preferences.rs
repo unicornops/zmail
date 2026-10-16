@@ -28,7 +28,9 @@ impl WorkspaceView {
                 self.follow_system_appearance(window_appearance(appearance));
                 self.theme_overridden = true;
             }
-            None => self.follow_system_appearance(system),
+            None => {
+                self.follow_system_appearance(system);
+            }
         }
     }
 

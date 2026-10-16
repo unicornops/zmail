@@ -1,28 +1,34 @@
-//! Native GPUI shell for Zmail through Phase 4.
+//! Native GPUI shell for Zmail.
 //!
-//! This crate is organised as a set of focused modules:
+//! The window is one [`WorkspaceView`] shell that owns a pane entity per
+//! area of the screen. Each pane has its own focus handle and key context,
+//! re-renders on its own, and talks to the shell through events; every
+//! command is a GPUI action (see [`actions`]) bound in the default keymap.
 //!
 //! | Module | Content |
 //! |--------|---------|
-//! | `styles` | Design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
+//! | `workspace` | the shell: store refresh, selection, pane coordination, action handlers |
+//! | `toolbar` | the shell's toolbar and search field |
+//! | `sidebar` | `SidebarView`: accounts and mailboxes |
+//! | `message_list` | `MessageListView`: threads, search results, drafts, outbox |
+//! | `reader` | `ReaderView`: the open conversation and its actions |
+//! | `compose` | `ComposeView`: the open draft |
+//! | `account_setup` | `AccountSetupView`: the new-account form |
+//! | `mail_actions` | `MailActions`: store writes, `MailEvent`s and undo |
+//! | `actions` | every command as a GPUI action |
+//! | `keymap` | loads `keymaps/default.json` |
+//! | `pane` | pane focus order and the focused-pane indicator |
 //! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, `TextInput`, … and the gallery |
-//! | `widgets` | `toolbar_button`, `input_card`, `list_row`, `icon`, … |
-//! | `workspace` | `impl WorkspaceView` — all business-logic methods |
-//! | `toolbar` | `render_toolbar()` — action buttons + search |
-//! | `diagnostics` | internal counters kept for the future Settings → About page |
-//! | `sidebar` | `render_sidebar()` — accounts + mailbox list |
-//! | `message_list` | `render_message_list()` — threads / search / drafts / outbox |
-//! | `reader` | `render_reader_detail()`, `reader_action_buttons()` |
-//! | `compose` | `ComposeState`, `render_compose_detail()`, `compose_action_buttons()` |
-//! | `account_setup` | `AccountSetupState`, `render_account_setup_detail()`, `account_protocol_buttons()` |
+//! | `styles` | design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
 //! | `preferences` | loading and saving the persisted UI preferences (theme mode so far) |
+//! | `widgets` | `toolbar_button`, `input_card`, `list_row`, `icon`, … |
+//! | `diagnostics` | internal counters kept for the future Settings → About page |
 
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AssetSource, Bounds, Context, Entity, FocusHandle, IntoElement, Render,
-    Styled, Subscription, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    App, AppContext as _, AssetSource, Bounds, Entity, FocusHandle, Subscription, TitlebarOptions,
+    WindowBounds, WindowOptions, px, size,
 };
 use zmail_core::{
     APP_NAME, AccountOverview, AccountSummary, AppBootstrap, DraftSummary, IdentitySummary,
@@ -33,39 +39,36 @@ use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
 mod styles;
-use crate::styles::{
-    DETAIL_MIN_WIDTH, ICON_SIZE_SM, UiColors, WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
-    WINDOW_WIDTH,
-};
+use crate::styles::{WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_WIDTH};
 
-use crate::components::TextInput;
-
-mod widgets;
-use crate::widgets::{HoverExt, icon, status_banner, toolbar_button};
-
-mod compose;
-use crate::compose::{ComposeState, compose_action_buttons, render_compose_detail};
-
-mod account_setup;
-use crate::account_setup::{AccountSetupState, render_account_setup_detail};
-
-mod reader;
-use crate::reader::{reader_move_buttons, reader_primary_action_buttons, render_reader_detail};
-
-mod actions;
 mod components;
 pub use components::gallery::run_gallery;
+use crate::components::TextInput;
+
+mod account_setup;
+mod actions;
+mod compose;
 mod diagnostics;
 mod keymap;
 mod mail_actions;
 mod message_list;
+mod pane;
 mod preferences;
+mod reader;
 mod sidebar;
 mod toolbar;
 mod tooltip;
 #[cfg(test)]
 mod view_tests;
+mod widgets;
 mod workspace;
+
+use crate::account_setup::AccountSetupView;
+use crate::compose::ComposeView;
+use crate::mail_actions::MailActions;
+use crate::message_list::MessageListView;
+use crate::reader::ReaderView;
+use crate::sidebar::SidebarView;
 
 // ---------------------------------------------------------------------------
 // Top-level entry point
@@ -141,7 +144,7 @@ pub fn run(
                     let sync_service = sync_service.clone();
                     let secrets = secrets.clone();
                     let notifier = notifier.clone();
-                    cx.new(|cx| {
+                            cx.new(|cx| {
                         WorkspaceView::new(
                             bootstrap,
                             store,
@@ -165,7 +168,7 @@ pub fn run(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ListMode {
+pub(crate) enum ListMode {
     Mail,
     Search,
     Drafts,
@@ -173,23 +176,35 @@ enum ListMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DetailMode {
+pub(crate) enum DetailMode {
     Reader,
     Compose,
     AccountSetup,
 }
 
 // ---------------------------------------------------------------------------
-// WorkspaceView — the single GPUI entity for the entire workspace
+// WorkspaceView — the shell that owns the panes
 // ---------------------------------------------------------------------------
 
+/// The window's root view. It reads the local store, keeps the selection,
+/// pushes what each pane shows into it, and handles the commands that span
+/// panes (replying needs the selected thread and the account's identities,
+/// for example). See `workspace.rs`.
 struct WorkspaceView {
     bootstrap: AppBootstrap,
     store: Arc<LocalStore>,
     sync_service: SyncService,
-    secrets: Arc<dyn SecretStore>,
     notifier: Arc<zmail_notify::NewMailNotifier<zmail_notify::OsNotificationSink>>,
+    /// The root focus handle (`Workspace` key context).
     focus_handle: FocusHandle,
+    mail_actions: Entity<MailActions>,
+    sidebar: Entity<SidebarView>,
+    message_list: Entity<MessageListView>,
+    reader: Entity<ReaderView>,
+    compose: Entity<ComposeView>,
+    account_setup: Entity<AccountSetupView>,
+    /// The toolbar search field.
+    search_query: Entity<TextInput>,
     account: Option<AccountOverview>,
     accounts: Vec<AccountSummary>,
     identities: Vec<IdentitySummary>,
@@ -212,16 +227,8 @@ struct WorkspaceView {
     selected_thread_id: Option<i64>,
     selected_draft_id: Option<i64>,
     selected_outbox_job_id: Option<i64>,
-    mailbox_scroll: UniformListScrollHandle,
-    thread_scroll: UniformListScrollHandle,
     list_mode: ListMode,
     detail_mode: DetailMode,
-    /// The toolbar search field.
-    search_query: Entity<TextInput>,
-    /// Keeps the workspace subscribed to the search field's events.
-    _search_subscription: Subscription,
-    compose: Option<ComposeState>,
-    account_setup: AccountSetupState,
     /// The last error. It stays until the user dismisses it.
     store_error: Option<String>,
     /// A transient status message; [`WorkspaceView::show_status`] clears it
@@ -239,219 +246,5 @@ struct WorkspaceView {
     theme_overridden: bool,
     /// 12- or 24-hour clock for list and reader dates, from the locale.
     hour_cycle: zmail_core::time::HourCycle,
-}
-
-// ---------------------------------------------------------------------------
-// Render
-// ---------------------------------------------------------------------------
-
-impl Render for WorkspaceView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = UiColors::from_theme(&self.bootstrap.theme);
-        // Components read the theme from a global; keep it in step.
-        components::ComponentTheme::sync(&self.bootstrap.theme, cx);
-        // Text inputs (their own entities) read the palette from this
-        // global; they render after this view.
-        if cx.try_global::<UiColors>() != Some(&colors) {
-            cx.set_global(colors);
-        }
-
-        // Mutable store queries must complete before immutable borrows below.
-        let selected_thread = self.selected_thread_view();
-
-        div()
-            .size_full()
-            .track_focus(&self.focus_handle)
-            .bg(rgb(colors.background))
-            .text_color(rgb(colors.foreground))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .size_full()
-                    // ---- Top section: header info strip + toolbar buttons ----
-                    .child(self.render_toolbar(&colors, cx))
-                    // ---- Three-column content area ---------------------------
-                    .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .overflow_hidden()
-                            // Left: accounts + mailboxes
-                            .child(self.render_sidebar(&colors, cx))
-                            // Centre: thread/search/draft/outbox list
-                            .child(self.render_message_list(&colors, cx))
-                            // Right: detail pane
-                            .child(self.render_detail_pane(&colors, selected_thread, cx)),
-                    )
-                    // ---- Status / error banners at the bottom ----------------
-                    .when_some(self.status_message.clone(), |this, message| {
-                        this.child(status_banner(
-                            &message,
-                            "check-circle",
-                            colors.success,
-                            colors.success_background,
-                            &colors,
-                        ))
-                    })
-                    .when_some(self.store_error.clone(), |this, error| {
-                        this.child(
-                            status_banner(
-                                &error,
-                                "alert-circle",
-                                colors.danger,
-                                colors.danger_background,
-                                &colors,
-                            )
-                            .child(
-                                div()
-                                    .id("dismiss-error")
-                                    .flex()
-                                    .flex_none()
-                                    .items_center()
-                                    .justify_center()
-                                    .px_4()
-                                    .cursor_pointer()
-                                    .hover_bg(false, &colors)
-                                    .on_click(cx.listener(|this: &mut Self, _, _, cx| {
-                                        this.dismiss_error(cx);
-                                    }))
-                                    .child(icon("x", ICON_SIZE_SM, colors.muted)),
-                            ),
-                        )
-                    }),
-            )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Detail pane — coordinates reader / compose / account-setup sub-views
-// ---------------------------------------------------------------------------
-
-impl WorkspaceView {
-    /// Render the right-hand detail pane, dispatching to the appropriate
-    /// sub-view based on [`DetailMode`].
-    fn render_detail_pane(
-        &self,
-        colors: &UiColors,
-        selected_thread: Option<zmail_core::ThreadView>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .flex_1()
-            // Long subjects, addresses and bodies wrap or truncate inside
-            // the pane instead of widening it past the window edge.
-            .min_w(px(DETAIL_MIN_WIDTH))
-            .flex()
-            .flex_col()
-            .bg(rgb(colors.background))
-            // ---- Mode header label ----------------------------------------
-            .child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(rgb(colors.border))
-                    .child(match self.detail_mode {
-                        DetailMode::Reader => "Reader",
-                        DetailMode::Compose => "Compose",
-                        DetailMode::AccountSetup => "Account Setup",
-                    }),
-            )
-            .when(matches!(self.detail_mode, DetailMode::Reader), |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .px_4()
-                        .py_3()
-                        .border_b_1()
-                        .border_color(rgb(colors.border))
-                        .children(reader_primary_action_buttons(&selected_thread, colors, cx)),
-                )
-            })
-            // ---- Scrollable content area ----------------------------------
-            .child(
-                div()
-                    .id("detail-scroll")
-                    .flex_1()
-                    // A flex column stretches its content to the pane width,
-                    // so form fields and long text size to the pane rather
-                    // than to their own content.
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .px_4()
-                    .py_4()
-                    .child(self.render_detail_content(colors, &selected_thread, cx)),
-            )
-            // ---- Action buttons bar at the bottom ------------------------
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(rgb(colors.border))
-                    .child(match self.detail_mode {
-                        DetailMode::Reader => {
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap_2()
-                                .children(reader_move_buttons(
-                                    &selected_thread,
-                                    &self.mailboxes,
-                                    colors,
-                                    cx,
-                                ))
-                        }
-                        DetailMode::Compose => div()
-                            .flex()
-                            .gap_2()
-                            .children(compose_action_buttons(self.compose.is_some(), colors, cx)),
-                        DetailMode::AccountSetup => div().flex().gap_2().child(toolbar_button(
-                            "Save Account",
-                            Some("check-circle"),
-                            colors.button_background,
-                            colors.border,
-                            colors.foreground,
-                            cx.listener(|this: &mut Self, _, window, cx| {
-                                this.submit_account_setup(window, cx);
-                            }),
-                        )),
-                    }),
-            )
-    }
-
-    /// Render the scrollable content inside the detail pane.
-    fn render_detail_content(
-        &self,
-        colors: &UiColors,
-        selected_thread: &Option<zmail_core::ThreadView>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        match self.detail_mode {
-            // ---- Reader ---------------------------------------------------
-            DetailMode::Reader => render_reader_detail(
-                selected_thread.as_ref(),
-                self.hour_cycle,
-                &self.own_addresses(),
-                colors,
-            ),
-
-            // ---- Compose -------------------------------------------------
-            DetailMode::Compose => {
-                render_compose_detail(self.compose.as_ref(), &self.identities, colors, cx)
-            }
-
-            // ---- Account Setup -------------------------------------------
-            DetailMode::AccountSetup => {
-                render_account_setup_detail(&self.account_setup, colors, cx).into_any_element()
-            }
-        }
-    }
+    _subscriptions: Vec<Subscription>,
 }
