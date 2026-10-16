@@ -13,7 +13,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use zmail_core::{
     AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, CachePolicySummary,
     DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate,
@@ -22,7 +22,7 @@ use zmail_core::{
     OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage,
     PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit,
     StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget,
-    ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
+    ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView, preferences::UiPreferences,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -43,6 +43,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0010_account_oauth2_client", ACCOUNT_OAUTH2_CLIENT_SCHEMA),
     ("0011_account_disk_budget", ACCOUNT_DISK_BUDGET_SCHEMA),
     ("0012_message_reply_to", MESSAGE_REPLY_TO_SCHEMA),
+    ("0013_app_settings", APP_SETTINGS_SCHEMA),
 ];
 
 const PHASE2_SCHEMA: &str = r#"
@@ -291,6 +292,19 @@ ALTER TABLE accounts ADD COLUMN cache_policy_disk_budget_mb INTEGER;
 const MESSAGE_REPLY_TO_SCHEMA: &str = r#"
 ALTER TABLE messages ADD COLUMN reply_to TEXT;
 "#;
+
+/// App-wide settings as one JSON document per key (for example the UI
+/// preferences under [`UI_PREFERENCES_KEY`]).
+const APP_SETTINGS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"#;
+
+/// `app_settings` key holding the serialised [`UiPreferences`].
+const UI_PREFERENCES_KEY: &str = "ui_preferences";
 
 /// Rebuilds the full-text search document of one thread from stored rows.
 ///
@@ -754,6 +768,43 @@ impl LocalStore {
         )
         .with_context(|| format!("failed to set the disk budget for account {account_id}"))?;
         Ok(())
+    }
+
+    /// Returns the saved UI preferences, or the defaults when none were
+    /// saved yet. Records written by older or newer versions load with
+    /// per-field defaults (see [`UiPreferences`]).
+    pub fn ui_preferences(&self) -> Result<UiPreferences> {
+        let conn = self.connection()?;
+        load_ui_preferences(&conn)
+    }
+
+    /// Saves the UI preferences, replacing any previous record.
+    pub fn save_ui_preferences(&self, preferences: &UiPreferences) -> Result<()> {
+        let conn = self.connection()?;
+        store_ui_preferences(&conn, preferences)
+    }
+
+    /// Loads the UI preferences, applies `change` and saves the result in
+    /// one transaction, returning the saved preferences. Use this for
+    /// single-field changes so concurrent windows do not overwrite each
+    /// other's fields.
+    pub fn update_ui_preferences(
+        &self,
+        change: impl FnOnce(&mut UiPreferences),
+    ) -> Result<UiPreferences> {
+        let mut conn = self.connection()?;
+        // Immediate: take the write lock before reading so two concurrent
+        // updates serialise instead of one failing to upgrade its lock.
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin the UI preferences transaction")?;
+        let mut preferences = load_ui_preferences(&transaction)?;
+        change(&mut preferences);
+        store_ui_preferences(&transaction, &preferences)?;
+        transaction
+            .commit()
+            .context("failed to commit the UI preferences")?;
+        Ok(preferences)
     }
 
     /// Returns the account's configured disk budget in bytes, when set.
@@ -4770,6 +4821,30 @@ fn utc_now_timestamp() -> String {
     utc_timestamp_from_epoch(seconds)
 }
 
+fn load_ui_preferences(conn: &Connection) -> Result<UiPreferences> {
+    let stored = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![UI_PREFERENCES_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("failed to load the UI preferences")?;
+    Ok(stored
+        .map(|json| UiPreferences::from_json(&json))
+        .unwrap_or_default())
+}
+
+fn store_ui_preferences(conn: &Connection, preferences: &UiPreferences) -> Result<()> {
+    conn.execute(
+        "INSERT INTO app_settings(key, value, updated_at) VALUES (?1, ?2, CURRENT_TIMESTAMP) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        params![UI_PREFERENCES_KEY, preferences.to_json()],
+    )
+    .context("failed to save the UI preferences")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, time::Duration};
@@ -6810,5 +6885,77 @@ mod tests {
         // The claimed target tells the SMTP adapter to use AUTH XOAUTH2
         // with the account's refreshed access token.
         assert_eq!(claimed.target.auth, AuthKind::OAuth2);
+    }
+
+    #[test]
+    fn ui_preferences_default_until_saved() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        assert_eq!(
+            store.ui_preferences().expect("preferences should load"),
+            zmail_core::preferences::UiPreferences::default()
+        );
+    }
+
+    #[test]
+    fn ui_preferences_round_trip_through_the_store() {
+        use zmail_core::preferences::{
+            Density, KeymapName, MailboxRef, PaneWidths, ReadingPanePosition, ThemeMode,
+            UiPreferences,
+        };
+
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let preferences = UiPreferences {
+            theme_mode: ThemeMode::Light,
+            density: Density::Compact,
+            reading_pane: ReadingPanePosition::Off,
+            pane_widths: PaneWidths {
+                sidebar: Some(220.0),
+                message_list: None,
+            },
+            sidebar_collapsed: true,
+            last_mailbox: Some(MailboxRef {
+                account_id: 1,
+                mailbox_id: 7,
+            }),
+            keymap: KeymapName::Gmail,
+            undo_send_delay_secs: 5,
+        };
+        store
+            .save_ui_preferences(&preferences)
+            .expect("preferences should save");
+        // A second handle on the same file sees the saved record.
+        let reopened = LocalStore::open(store.path()).expect("store should reopen");
+        assert_eq!(
+            reopened.ui_preferences().expect("preferences should load"),
+            preferences
+        );
+
+        let updated = store
+            .update_ui_preferences(|preferences| preferences.theme_mode = ThemeMode::Dark)
+            .expect("preferences should update");
+        assert_eq!(updated.theme_mode, ThemeMode::Dark);
+        assert_eq!(updated.density, Density::Compact, "other fields are kept");
+        assert_eq!(store.ui_preferences().expect("load"), updated);
+    }
+
+    #[test]
+    fn ui_preferences_from_an_older_record_load_with_defaults() {
+        use zmail_core::preferences::{ThemeMode, UiPreferences};
+
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        // A record written before most preference fields existed.
+        let conn = store.connection().expect("connection");
+        conn.execute(
+            "INSERT INTO app_settings(key, value) VALUES ('ui_preferences', '{\"theme_mode\":\"dark\"}')",
+            [],
+        )
+        .expect("legacy record should insert");
+        assert_eq!(
+            store.ui_preferences().expect("preferences should load"),
+            UiPreferences {
+                theme_mode: ThemeMode::Dark,
+                ..UiPreferences::default()
+            }
+        );
     }
 }

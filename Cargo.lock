@@ -8080,6 +8080,8 @@ name = "zmail-core"
 version = "0.0.1"
 dependencies = [
  "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -8196,6 +8198,7 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
+ "zmail-core",
 ]
 
 [[package]]
@@ -8213,6 +8216,7 @@ dependencies = [
  "zmail-security",
  "zmail-store",
  "zmail-sync",
+ "zmail-theme",
 ]
 
 [[package]]

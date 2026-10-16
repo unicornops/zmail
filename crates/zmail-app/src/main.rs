@@ -10,15 +10,15 @@ use anyhow::{Context, Result, bail};
 use zmail_assets::ZmailAssets;
 use zmail_core::{
     AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, NewAccount, NewDraft, NewIdentity,
-    OutgoingConfig, ProtocolKind, SubmissionSecurity, ThemeAppearance, ThemeSummary, UpstreamPins,
+    OutgoingConfig, ProtocolKind, SubmissionSecurity, ThemeSummary, UpstreamPins,
 };
 use zmail_security::{InMemorySecretStore, KeyringSecretStore, SecretSlot, SecretStore};
 use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
-use zmail_theme::{Appearance, SemanticTheme, ThemeFamily};
+use zmail_theme::ThemeFamily;
 
-const PHASE0_DARK_THEME: &str = include_str!("../../../themes/phase0-dark.json");
-const PHASE0_LIGHT_THEME: &str = include_str!("../../../themes/phase0-light.json");
+const PHASE0_DARK_THEME: &str = zmail_theme::bundled::DARK;
+const PHASE0_LIGHT_THEME: &str = zmail_theme::bundled::LIGHT;
 /// Zed commit GPUI is built from, read from `Cargo.lock` by `build.rs`.
 const ZED_UPSTREAM_COMMIT: &str = env!("ZMAIL_ZED_COMMIT");
 /// Zed stable release tag GPUI is pinned to (see docs/upstream/zed.md).
@@ -1435,32 +1435,7 @@ fn load_theme_summary(theme_json: &str, variant_label: &str) -> Result<ThemeSumm
     let theme = theme_family
         .default_theme()
         .with_context(|| format!("the bundled {variant_label} theme family is empty"))?;
-    let semantic = SemanticTheme::from_theme(theme);
-
-    Ok(ThemeSummary {
-        family_name: theme_family.name.clone(),
-        theme_name: theme.name.clone(),
-        appearance: match theme.appearance {
-            Appearance::Light => ThemeAppearance::Light,
-            Appearance::Dark => ThemeAppearance::Dark,
-        },
-        background: semantic.background,
-        surface: semantic.surface,
-        border: semantic.border,
-        foreground: semantic.foreground,
-        muted_foreground: semantic.muted_foreground,
-        accent: semantic.accent,
-        selected_background: semantic.selected_background,
-        hover_background: semantic.hover_background,
-        danger: semantic.danger,
-        warning: semantic.warning,
-        success: semantic.success,
-        info: semantic.info,
-        button_background: semantic.button_background,
-        danger_background: semantic.danger_background,
-        warning_background: semantic.warning_background,
-        success_background: semantic.success_background,
-    })
+    Ok(theme_family.summary(theme))
 }
 
 fn prompt(label: &str) -> Result<String> {

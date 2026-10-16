@@ -105,9 +105,9 @@ impl WorkspaceView {
         )
         .detach();
 
-        // Start in the system's light or dark appearance and follow changes
-        // until the user picks a theme with the toolbar toggle.
-        view.follow_system_appearance(window.appearance());
+        // Start in the saved theme mode (system, light or dark) and follow
+        // system changes unless the user has picked a theme.
+        view.apply_theme_preference(window.appearance());
         cx.observe_window_appearance(
             window,
             |this: &mut WorkspaceView, window: &mut Window, cx: &mut Context<Self>| {

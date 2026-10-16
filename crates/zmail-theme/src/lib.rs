@@ -4,6 +4,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zmail_core::{ThemeAppearance, ThemeSummary};
+
+/// The bundled theme families, in unchanged Zed theme JSON.
+pub mod bundled {
+    /// The bundled dark theme family.
+    pub const DARK: &str = include_str!("../../../themes/phase0-dark.json");
+    /// The bundled light theme family.
+    pub const LIGHT: &str = include_str!("../../../themes/phase0-light.json");
+}
 
 /// A serialized Zed theme family.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -25,6 +34,35 @@ impl ThemeFamily {
     /// Returns the first theme variant, which is enough for Phase 0 bootstrap work.
     pub fn default_theme(&self) -> Option<&Theme> {
         self.themes.first()
+    }
+
+    /// The UI-facing summary of `theme`, a variant of this family.
+    pub fn summary(&self, theme: &Theme) -> ThemeSummary {
+        let semantic = SemanticTheme::from_theme(theme);
+        ThemeSummary {
+            family_name: self.name.clone(),
+            theme_name: theme.name.clone(),
+            appearance: match theme.appearance {
+                Appearance::Light => ThemeAppearance::Light,
+                Appearance::Dark => ThemeAppearance::Dark,
+            },
+            background: semantic.background,
+            surface: semantic.surface,
+            border: semantic.border,
+            foreground: semantic.foreground,
+            muted_foreground: semantic.muted_foreground,
+            accent: semantic.accent,
+            selected_background: semantic.selected_background,
+            hover_background: semantic.hover_background,
+            danger: semantic.danger,
+            warning: semantic.warning,
+            success: semantic.success,
+            info: semantic.info,
+            button_background: semantic.button_background,
+            danger_background: semantic.danger_background,
+            warning_background: semantic.warning_background,
+            success_background: semantic.success_background,
+        }
     }
 }
 
@@ -175,8 +213,7 @@ impl SemanticTheme {
 mod tests {
     use super::{Appearance, SemanticTheme, ThemeFamily};
 
-    const SAMPLE_THEME: &str = include_str!("../../../themes/phase0-dark.json");
-    const SAMPLE_LIGHT_THEME: &str = include_str!("../../../themes/phase0-light.json");
+    use super::bundled::{DARK as SAMPLE_THEME, LIGHT as SAMPLE_LIGHT_THEME};
 
     #[test]
     fn parses_an_unchanged_zed_theme_file() {
@@ -206,7 +243,7 @@ mod tests {
         assert_eq!(theme.appearance, Appearance::Light);
         assert_eq!(semantic.background.as_deref(), Some("#FFFFFF"));
         assert_eq!(semantic.hover_background.as_deref(), Some("#F1F5F9"));
-        assert_eq!(semantic.accent.as_deref(), Some("#2563EB"));
+        assert_eq!(semantic.accent.as_deref(), Some("#1D4ED8"));
     }
 
     #[test]
