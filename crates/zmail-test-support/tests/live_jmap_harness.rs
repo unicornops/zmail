@@ -1,6 +1,8 @@
 //! Live JMAP sync test for the Docker mail harness.
 
 use std::{
+    io::{BufRead, BufReader, Write},
+    net::TcpStream,
     sync::Arc,
     thread,
     time::{Duration, Instant},
@@ -272,6 +274,81 @@ fn event_source_pushes_new_mail_before_the_timeout() -> Result<()> {
     Ok(())
 }
 
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn syncs_html_only_mail_through_the_sanitizer() -> Result<()> {
+    use zmail_core::MessageRenderMode;
+
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_JMAP_PASSWORD)?;
+
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+
+    // An HTML-only newsletter with a remote tracking image (issue #130).
+    // RFC 8621 lists its text/html part in textBody, so the adapter must
+    // decide by part type rather than by list.
+    submit_raw_harness_message(concat!(
+        "From: News <news@phase2b.test>\r\n",
+        "To: jmap@localhost\r\n",
+        "Subject: Phase 2b JMAP HTML-only\r\n",
+        "Message-ID: <jmap-html-only-probe@phase2b.test>\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: text/html; charset=utf-8\r\n",
+        "\r\n",
+        "<html><body><h1>Your new dashboard</h1><p>Faster exports</p>",
+        "<img src=\"https://tracker.example.test/open.gif\">",
+        "<table><tr><td>Plan</td><td>Price</td></tr>",
+        "<tr><td>Starter</td><td>EUR 9</td></tr></table></body></html>\r\n",
+    ))?;
+
+    let thread_id = sync_until_subject(
+        &sync_service,
+        &store,
+        account_id,
+        "Phase 2b JMAP HTML-only",
+        12,
+    )?;
+    let view = store
+        .thread_view(thread_id)?
+        .context("the HTML-only thread should load")?;
+    let message = &view.messages[0];
+    assert_eq!(message.render_mode, MessageRenderMode::SanitizedHtml);
+    assert!(
+        message.body_text.is_none(),
+        "HTML must never be stored as plain text and shown raw"
+    );
+    let sanitized_html = message
+        .sanitized_html
+        .as_deref()
+        .context("the sanitized HTML should be stored")?;
+    assert!(sanitized_html.contains("blocked://tracker.example.test/open.gif"));
+    assert!(!sanitized_html.contains("https://"));
+    assert!(
+        message.has_remote_content,
+        "the remote image must be reported"
+    );
+    assert!(
+        message
+            .rendered_body
+            .contains("Your new dashboard\nFaster exports\nPlan Price\nStarter EUR 9"),
+        "block elements and table cells keep their separators: {:?}",
+        message.rendered_body
+    );
+    assert!(
+        !message.rendered_body.contains('<'),
+        "no markup reaches the reader: {:?}",
+        message.rendered_body
+    );
+
+    Ok(())
+}
+
 fn submit_harness_message(subject: &str, body: &str) -> Result<()> {
     let smtp_runtime = Builder::new_current_thread().enable_all().build()?;
     smtp_runtime.block_on(async {
@@ -295,6 +372,52 @@ fn submit_harness_message(subject: &str, body: &str) -> Result<()> {
         )
         .await
     })
+}
+
+/// Submits a prebuilt RFC 5322 message over plain SMTP.
+///
+/// `zmail-smtp` only renders text/plain mail, so HTML-only fixtures are
+/// sent through a minimal SMTP dialogue instead. Lines in `message` must
+/// already end in CRLF and must not start with a dot.
+fn submit_raw_harness_message(message: &str) -> Result<()> {
+    let stream = TcpStream::connect((MAIL_HARNESS_HOST, MAIL_HARNESS_JMAP_SMTP_PORT))
+        .context("the JMAP harness SMTP port should accept connections")?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    let mut writer = stream.try_clone()?;
+    let mut reader = BufReader::new(stream);
+
+    expect_smtp_reply(&mut reader, "220")?;
+    for (command, code) in [
+        ("EHLO localhost".to_owned(), "250"),
+        ("MAIL FROM:<news@phase2b.test>".to_owned(), "250"),
+        (format!("RCPT TO:<{MAIL_HARNESS_JMAP_ACCOUNT}>"), "250"),
+        ("DATA".to_owned(), "354"),
+    ] {
+        write!(writer, "{command}\r\n")?;
+        expect_smtp_reply(&mut reader, code)?;
+    }
+    writer.write_all(message.as_bytes())?;
+    writer.write_all(b".\r\n")?;
+    expect_smtp_reply(&mut reader, "250")?;
+    writer.write_all(b"QUIT\r\n")?;
+    Ok(())
+}
+
+/// Reads one (possibly multi-line) SMTP reply and checks its status code.
+fn expect_smtp_reply(reader: &mut impl BufRead, code: &str) -> Result<()> {
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            bail!("the SMTP server closed the connection while {code} was expected");
+        }
+        if !line.starts_with(code) {
+            bail!("expected SMTP {code}, got {:?}", line.trim_end());
+        }
+        // "250-" continues a multi-line reply; "250 " ends it.
+        if line.as_bytes().get(3) != Some(&b'-') {
+            return Ok(());
+        }
+    }
 }
 
 fn sync_until_subject(

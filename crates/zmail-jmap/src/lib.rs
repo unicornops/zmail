@@ -822,18 +822,43 @@ struct ThreadAccumulator {
     messages: Vec<MessageSnapshot>,
 }
 
+/// Splits a JMAP email into the stored body fields.
+///
+/// RFC 8621 section 4.1.4 lists the `text/html` part in `textBody` when a
+/// message has no `text/plain` alternative, and may list `text/plain` parts
+/// in `htmlBody`. The list a part came from therefore says nothing about
+/// its content: each part's `type` decides whether it is displayed as plain
+/// text or goes through the sanitizer (issue #130, the JMAP twin of #112).
+///
+/// This mirrors the IMAP adapter's `hydrate_bodies`: a real `text/plain`
+/// part is displayed when there is one, and for `multipart/alternative` the
+/// HTML alternative still decides `has_remote_content`. Otherwise the HTML
+/// part is stored sanitized and its remote references are flagged. HTML is
+/// never stored as `body_text`, so it is never shown raw.
 fn extract_renderable_bodies(
     email: &jmap_client::email::Email,
 ) -> (Option<String>, Option<String>, bool, Option<String>) {
-    let text_body = body_value(email.text_body(), email)
+    let text_parts = email.text_body().unwrap_or_default();
+    let html_parts = email.html_body().unwrap_or_default();
+
+    let text_body = body_value_of_type(text_parts.iter().chain(html_parts), email, "text/plain")
         .map(normalize_body_text)
         .filter(|value| !value.is_empty());
+    let html_body = body_value_of_type(html_parts.iter().chain(text_parts), email, "text/html")
+        .filter(|value| !value.trim().is_empty());
+
     if let Some(text_body) = text_body {
+        // multipart/alternative: the plain-text alternative is displayed,
+        // but the HTML alternative still decides whether the message
+        // references remote content. Only the displayed alternative is
+        // stored, matching the IMAP adapter.
+        let has_remote_content = html_body
+            .as_deref()
+            .is_some_and(|html| sanitize_html_for_display(html).has_remote_content);
         let preview = excerpt(&text_body, 180);
-        return (Some(text_body), None, false, Some(preview));
+        return (Some(text_body), None, has_remote_content, Some(preview));
     }
 
-    let html_body = body_value(email.html_body(), email).filter(|value| !value.is_empty());
     if let Some(html_body) = html_body {
         let sanitized = sanitize_html_for_display(&html_body);
         let preview = excerpt(&sanitized.text, 180);
@@ -848,13 +873,27 @@ fn extract_renderable_bodies(
     (None, None, false, None)
 }
 
-fn body_value(
-    parts: Option<&[jmap_client::email::EmailBodyPart]>,
+/// Returns the fetched value of the first part whose media type is
+/// `media_type`.
+///
+/// A part without a `type` is `text/plain`, the MIME default (RFC 2045
+/// section 5.2). Parameters and letter case are ignored.
+fn body_value_of_type<'a>(
+    parts: impl IntoIterator<Item = &'a jmap_client::email::EmailBodyPart>,
     email: &jmap_client::email::Email,
+    media_type: &str,
 ) -> Option<String> {
     parts
         .into_iter()
-        .flatten()
+        .filter(|part| {
+            let content_type = part.content_type().unwrap_or("text/plain");
+            content_type
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .eq_ignore_ascii_case(media_type)
+        })
         .find_map(|part| part.part_id().and_then(|part_id| email.body_value(part_id)))
         .map(|value| value.value().to_owned())
 }
@@ -932,9 +971,10 @@ fn timestamp_to_rfc3339(timestamp: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        JmapCheckpoint, format_jmap_addresses, jmap_credentials, sanitize_component,
-        timestamp_to_rfc3339,
+        JmapCheckpoint, extract_renderable_bodies, format_jmap_addresses, jmap_credentials,
+        sanitize_component, timestamp_to_rfc3339,
     };
+    use serde_json::json;
     use zmail_core::AuthKind;
 
     #[test]
@@ -973,6 +1013,182 @@ mod tests {
     #[test]
     fn timestamps_render_to_rfc3339() {
         assert!(timestamp_to_rfc3339(1_700_000_000).contains('T'));
+    }
+
+    /// Same newsletter as the IMAP adapter's HTML-only fixture, so both
+    /// adapters are held to the same stored fields.
+    const NEWSLETTER_HTML: &str = concat!(
+        "<html><body>",
+        "<h1>Your new dashboard</h1>",
+        "<p>Faster exports</p>",
+        "<img src=\"https://tracker.example.test/open.gif\">",
+        "<table><tr><td>Plan</td><td>Price</td></tr>",
+        "<tr><td>Starter</td><td>EUR 9</td></tr>",
+        "<tr><td>Team</td><td>EUR 29</td></tr></table>",
+        "</body></html>",
+    );
+
+    /// Builds an Email/get result the way RFC 8621 servers shape it.
+    fn email(
+        text_body: serde_json::Value,
+        html_body: serde_json::Value,
+        body_values: serde_json::Value,
+    ) -> jmap_client::email::Email {
+        serde_json::from_value(json!({
+            "id": "M1",
+            "textBody": text_body,
+            "htmlBody": html_body,
+            "bodyValues": body_values,
+        }))
+        .expect("the Email/get fixture should deserialize")
+    }
+
+    fn part(part_id: &str, content_type: &str) -> serde_json::Value {
+        json!({ "partId": part_id, "type": content_type, "charset": "utf-8" })
+    }
+
+    fn value(text: &str) -> serde_json::Value {
+        json!({ "value": text, "isEncodingProblem": false, "isTruncated": false })
+    }
+
+    #[test]
+    fn html_only_bodies_listed_in_text_body_are_sanitized_and_flag_remote_content() {
+        // RFC 8621 4.1.4: with no text/plain alternative the HTML part is
+        // listed in textBody as well as htmlBody.
+        let email = email(
+            json!([part("1", "text/html")]),
+            json!([part("1", "text/html")]),
+            json!({ "1": value(NEWSLETTER_HTML) }),
+        );
+        let (body_text, sanitized_html, has_remote_content, preview) =
+            extract_renderable_bodies(&email);
+
+        assert!(
+            body_text.is_none(),
+            "HTML must never be stored as plain text and shown raw"
+        );
+        let sanitized_html = sanitized_html.expect("the HTML body should be stored sanitized");
+        assert!(sanitized_html.contains("blocked://tracker.example.test/open.gif"));
+        assert!(!sanitized_html.contains("https://"));
+        assert!(has_remote_content, "the remote image must be reported");
+        assert_eq!(
+            preview.as_deref(),
+            Some("Your new dashboard Faster exports Plan Price Starter EUR 9 Team EUR 29")
+        );
+    }
+
+    #[test]
+    fn html_only_bodies_without_remote_references_are_not_flagged() {
+        let email = email(
+            json!([part("1", "text/html")]),
+            json!([part("1", "text/html")]),
+            json!({ "1": value("<p>Hello</p><p>No remote images here.</p>") }),
+        );
+        let (body_text, sanitized_html, has_remote_content, preview) =
+            extract_renderable_bodies(&email);
+
+        assert!(body_text.is_none());
+        assert!(sanitized_html.is_some());
+        assert!(!has_remote_content);
+        assert_eq!(preview.as_deref(), Some("Hello No remote images here."));
+    }
+
+    #[test]
+    fn html_only_bodies_render_as_clean_text() {
+        let email = email(
+            json!([part("1", "TEXT/HTML; charset=utf-8")]),
+            json!([part("1", "TEXT/HTML; charset=utf-8")]),
+            json!({
+                "1": value(concat!(
+                    "<div><b>Fish</b> &amp; <i>chips</i> &lt;today&gt;</div>",
+                    "<p>Caf&#233; &quot;open&quot;</p>",
+                )),
+            }),
+        );
+        let (body_text, sanitized_html, has_remote_content, preview) =
+            extract_renderable_bodies(&email);
+
+        assert!(body_text.is_none());
+        assert!(sanitized_html.is_some());
+        assert!(!has_remote_content);
+        let preview = preview.expect("an HTML body has a preview");
+        assert_eq!(preview, "Fish & chips <today> Café \"open\"");
+        assert!(!preview.contains("<div>") && !preview.contains("&amp;"));
+    }
+
+    #[test]
+    fn multipart_alternative_keeps_plain_text_and_flags_remote_html() {
+        let email = email(
+            json!([part("1", "text/plain")]),
+            json!([part("2", "text/html")]),
+            json!({
+                "1": value("Your new dashboard   \r\nFaster exports\r\n"),
+                "2": value(NEWSLETTER_HTML),
+            }),
+        );
+        let (body_text, sanitized_html, has_remote_content, preview) =
+            extract_renderable_bodies(&email);
+
+        assert_eq!(
+            body_text.as_deref(),
+            Some("Your new dashboard\nFaster exports")
+        );
+        assert!(
+            sanitized_html.is_none(),
+            "only the displayed alternative is stored, matching the IMAP adapter"
+        );
+        assert!(
+            has_remote_content,
+            "the HTML alternative's remote image must still be reported"
+        );
+        assert_eq!(
+            preview.as_deref(),
+            Some("Your new dashboard Faster exports")
+        );
+    }
+
+    #[test]
+    fn plain_text_only_bodies_keep_their_text() {
+        // RFC 8621 4.1.4: with no HTML alternative the text/plain part is
+        // listed in htmlBody too. Markup inside plain text stays literal.
+        let email = email(
+            json!([part("1", "text/plain")]),
+            json!([part("1", "text/plain")]),
+            json!({ "1": value("Line one\r\nVisit https://example.test/ for <b>details</b>.\r\n") }),
+        );
+        let (body_text, sanitized_html, has_remote_content, preview) =
+            extract_renderable_bodies(&email);
+
+        assert_eq!(
+            body_text.as_deref(),
+            Some("Line one\nVisit https://example.test/ for <b>details</b>.")
+        );
+        assert!(sanitized_html.is_none());
+        assert!(!has_remote_content);
+        assert_eq!(
+            preview.as_deref(),
+            Some("Line one Visit https://example.test/ for <b>details</b>.")
+        );
+    }
+
+    #[test]
+    fn parts_without_a_type_default_to_plain_text() {
+        let email = email(
+            json!([{ "partId": "1" }]),
+            json!([{ "partId": "1" }]),
+            json!({ "1": value("Untyped body") }),
+        );
+        let (body_text, sanitized_html, has_remote_content, _) = extract_renderable_bodies(&email);
+
+        assert_eq!(body_text.as_deref(), Some("Untyped body"));
+        assert!(sanitized_html.is_none());
+        assert!(!has_remote_content);
+    }
+
+    #[test]
+    fn bodies_without_values_stay_unhydrated() {
+        let email = email(json!([]), json!([]), json!({}));
+        assert_eq!(extract_renderable_bodies(&email), (None, None, false, None));
     }
 
     #[test]
