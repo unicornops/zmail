@@ -5,6 +5,7 @@
 //! | Module | Content |
 //! |--------|---------|
 //! | `styles` | Design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
+//! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, … and the gallery |
 //! | `input` | `UiBuffer`, `EditorField`, `InputOutcome` |
 //! | `widgets` | `toolbar_button`, `input_card`, `list_row`, `icon`, … |
 //! | `workspace` | `impl WorkspaceView` — all business-logic methods |
@@ -53,6 +54,7 @@ use crate::account_setup::{AccountSetupState, render_account_setup_detail};
 mod reader;
 use crate::reader::{reader_move_buttons, reader_primary_action_buttons, render_reader_detail};
 
+mod components;
 mod diagnostics;
 mod message_list;
 mod preferences;
@@ -106,6 +108,7 @@ pub fn run(
     gpui_platform::application()
         .with_assets(asset_source)
         .run(move |cx: &mut App| {
+            components::init(cx);
             let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
             let bootstrap = bootstrap.clone();
             let store = store.clone();
@@ -237,6 +240,8 @@ struct WorkspaceView {
 impl Render for WorkspaceView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = UiColors::from_theme(&self.bootstrap.theme);
+        // Components read the theme from a global; keep it in step.
+        components::ComponentTheme::sync(&self.bootstrap.theme, cx);
 
         // Mutable store queries must complete before immutable borrows below.
         let selected_thread = self.selected_thread_view();
