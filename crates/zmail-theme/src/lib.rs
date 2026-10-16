@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(theme.appearance, Appearance::Light);
         assert_eq!(semantic.background.as_deref(), Some("#FFFFFF"));
         assert_eq!(semantic.hover_background.as_deref(), Some("#F1F5F9"));
-        assert_eq!(semantic.accent.as_deref(), Some("#2563EB"));
+        assert_eq!(semantic.accent.as_deref(), Some("#1D4ED8"));
     }
 
     #[test]

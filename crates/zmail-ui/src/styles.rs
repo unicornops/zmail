@@ -155,7 +155,7 @@ pub mod dark {
     /// Background tint for error banners.
     pub const DANGER_BACKGROUND: u32 = 0x3B1F2B;
     /// Danger / error semantic colour (text / icon).
-    pub const DANGER: u32 = 0xF87171;
+    pub const DANGER: u32 = 0xFCA5A5;
     /// Warning semantic colour (text / icon).
     pub const WARNING: u32 = 0xF59E0B;
     /// Success semantic colour (text / icon).
@@ -176,15 +176,15 @@ pub mod light {
     /// Surface colour for cards and secondary panes.
     pub const SURFACE: u32 = 0xF8FAFC;
     /// Border colour.
-    pub const BORDER: u32 = 0xE2E8F0;
+    pub const BORDER: u32 = 0xCBD5E1;
     /// Primary text colour.
     pub const FOREGROUND: u32 = 0x1E293B;
     /// Muted / secondary text colour.
-    pub const MUTED: u32 = 0x64748B;
+    pub const MUTED: u32 = 0x4B5768;
     /// Accent / highlight colour.
-    pub const ACCENT: u32 = 0x2563EB;
+    pub const ACCENT: u32 = 0x1D4ED8;
     /// Background for a selected list row.
-    pub const SELECTED_BACKGROUND: u32 = 0xDBEAFE;
+    pub const SELECTED_BACKGROUND: u32 = 0xBFDBFE;
     /// Background for a hovered interactive element.
     pub const HOVER_BACKGROUND: u32 = 0xF1F5F9;
     /// Background for non-selected toolbar / action buttons.
@@ -196,13 +196,13 @@ pub mod light {
     /// Background tint for error banners.
     pub const DANGER_BACKGROUND: u32 = 0xFEE2E2;
     /// Danger / error semantic colour (text / icon).
-    pub const DANGER: u32 = 0xEF4444;
+    pub const DANGER: u32 = 0xB91C1C;
     /// Warning semantic colour (text / icon).
-    pub const WARNING: u32 = 0xD97706;
+    pub const WARNING: u32 = 0x92400E;
     /// Success semantic colour (text / icon).
-    pub const SUCCESS: u32 = 0x16A34A;
+    pub const SUCCESS: u32 = 0x166534;
     /// Info semantic colour (text / icon).
-    pub const INFO: u32 = 0x2563EB;
+    pub const INFO: u32 = 0x1D4ED8;
 }
 
 // ---------------------------------------------------------------------------
