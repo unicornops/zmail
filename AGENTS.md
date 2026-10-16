@@ -75,6 +75,16 @@ a personal quota instead of the shared anonymous one that exhausts on busy
 GitHub runner pools (issue #88). Without credentials the pulls stay anonymous
 and simply retry.
 
+UI screenshot matrix (Linux, needs Xvfb, openbox, xdotool, ImageMagick and Mesa's lavapipe Vulkan driver, `mesa-vulkan-drivers`):
+
+```bash
+cargo build -p zmail-app --release --locked
+xvfb-run -a --server-args="-screen 0 2560x1440x24" \
+  scripts/capture-release-screenshot.sh --matrix artifacts/ui-screenshots
+```
+
+Each PNG is one UI state (empty, inbox, reader, compose, account setup) in dark and light, plus the reader at 900px and 1920px; `--list` prints the names and extra arguments capture only those. Each state is a `zmail-app launch-ui-fixture VIEW [dark|light]` launch: an in-memory store seeded with synthetic mail (`crates/zmail-app/src/ui_fixture.rs`), no sync, and the window opened on that view through `zmail_ui::InitialView`. CI runs it on pull requests that touch the UI, theme, assets or the capture script, and uploads the images as the `ui-screenshots` artefact of the CI run. Add new UI states to the fixture and the `MATRIX` list in the script.
+
 Dependency policy:
 
 ```bash

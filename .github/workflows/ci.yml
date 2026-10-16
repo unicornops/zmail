@@ -14,6 +14,7 @@ jobs:
         outputs:
             app_code: ${{ steps.detect.outputs.app_code }}
             workspace_checks: ${{ steps.detect.outputs.workspace_checks }}
+            ui: ${{ steps.detect.outputs.ui }}
 
         steps:
             - name: Checkout
@@ -29,13 +30,24 @@ jobs:
                   if [[ "${{ github.event_name }}" != "pull_request" ]]; then
                     echo "app_code=true" >> "$GITHUB_OUTPUT"
                     echo "workspace_checks=true" >> "$GITHUB_OUTPUT"
+                    echo "ui=true" >> "$GITHUB_OUTPUT"
                     exit 0
                   fi
 
                   app_code=false
                   workspace_checks=false
+                  ui=false
                   while IFS= read -r file; do
                     [[ -z "$file" ]] && continue
+
+                    # UI changes get the screenshot matrix (ui_screenshots).
+                    case "$file" in
+                      crates/zmail-ui/*|crates/zmail-theme/*|crates/zmail-assets/*|themes/*|assets/icons/*|crates/zmail-app/src/ui_fixture.rs|scripts/capture-release-screenshot.sh)
+                        if [[ "$file" != *.md ]]; then
+                          ui=true
+                        fi
+                        ;;
+                    esac
 
                     case "$file" in
                       docker/mail-harness/*)
@@ -46,20 +58,17 @@ jobs:
                       Cargo.toml|Cargo.lock|rust-toolchain.toml)
                         app_code=true
                         workspace_checks=true
-                        break
                         ;;
                       crates/*)
                         if [[ "$file" != *.md ]]; then
                           app_code=true
                           workspace_checks=true
-                          break
                         fi
                         ;;
                       themes/*)
                         if [[ "$file" != *.md ]]; then
                           app_code=true
                           workspace_checks=true
-                          break
                         fi
                         ;;
                       about.toml|deny.toml|scripts/mail-harness.sh)
@@ -70,6 +79,7 @@ jobs:
 
                   echo "app_code=$app_code" >> "$GITHUB_OUTPUT"
                   echo "workspace_checks=$workspace_checks" >> "$GITHUB_OUTPUT"
+                  echo "ui=$ui" >> "$GITHUB_OUTPUT"
 
     quality:
         needs: changes
@@ -201,3 +211,65 @@ jobs:
               with:
                   name: ${{ matrix.artifact_name }}
                   path: ${{ matrix.binary_path }}
+
+    # The UI screenshot matrix (UI_PLAN.md Phase 1.8): every UI state in
+    # light and dark plus 900px and 1920px windows, captured from seeded
+    # fixture data (no mail server) and uploaded as the ui-screenshots
+    # artefact. Pull requests only, and only when UI code changes.
+    ui_screenshots:
+        name: UI Screenshots
+        needs: changes
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && needs.changes.outputs.ui == 'true')
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            # GPUI renders through wgpu, which loads the Vulkan loader
+            # (libvulkan1) and, failing that, EGL/GL at runtime;
+            # mesa-vulkan-drivers supplies the lavapipe software Vulkan
+            # driver the headless capture uses.
+            - name: Install Linux build and capture dependencies
+              run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev libvulkan1 libgl1 libegl1 libgl1-mesa-dri mesa-vulkan-drivers xvfb openbox xdotool imagemagick
+
+            - name: Read the pinned Rust toolchain
+              id: toolchain
+              shell: bash
+              run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+              with:
+                  toolchain: ${{ steps.toolchain.outputs.channel }}
+
+            - name: Cache Cargo git dependencies
+              uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: ~/.cargo/git/db
+                  key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-git-${{ runner.os }}-
+
+            - name: Build release binary
+              run: cargo build -p zmail-app --release --locked
+
+            - name: Capture the screenshot matrix
+              env:
+                  ZMAIL_CAPTURE_LOG_DIR: ${{ runner.temp }}/ui-screenshot-logs
+              run: xvfb-run -a --server-args="-screen 0 2560x1440x24" bash scripts/capture-release-screenshot.sh --matrix artifacts/ui-screenshots
+
+            - name: Upload screenshots
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: ui-screenshots
+                  path: artifacts/ui-screenshots/*.png
+                  if-no-files-found: error
+                  retention-days: 30
+
+            - name: Upload capture logs
+              if: failure()
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: ui-screenshot-logs
+                  path: ${{ runner.temp }}/ui-screenshot-logs
+                  if-no-files-found: ignore
