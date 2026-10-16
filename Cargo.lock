@@ -8216,6 +8216,7 @@ dependencies = [
  "zmail-security",
  "zmail-store",
  "zmail-sync",
+ "zmail-theme",
 ]
 
 [[package]]

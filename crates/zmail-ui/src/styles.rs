@@ -5,17 +5,52 @@
 //! truth.  `UiColors` is the primary consumer: call `UiColors::from_theme` once
 //! at the top of `render()` and thread the result through every sub-function.
 //!
+//! Tokens 2.0 (UI plan §4, Phase 1 item 6) adds:
+//!
+//! - a rem-based type scale ([`TYPE_CAPTION`] … [`TYPE_HEADLINE`], applied
+//!   with [`TypeStyleExt::type_style`]);
+//! - the spacing (`SPACE_*`) and radius (`RADIUS_*`) scales below;
+//! - [`DensityTokens`] for comfortable and compact rows;
+//! - [`PlatformStyle`], the per-platform deltas from plan §2;
+//! - contrast-checked colour roles on [`UiColors`] (`control_border`,
+//!   `focus_ring`, `accent_foreground`, `selection_*`), with the WCAG
+//!   helpers in [`contrast`] and a test over both bundled themes.
+//!
 //! The token catalogue intentionally leads the visual rollout; later UI steps
 //! consume the remaining entries.
 
 #![allow(dead_code)]
 
+pub mod contrast;
+mod density;
+mod platform;
+mod typography;
+
+// Re-exported for the Phase 1 components and the per-pane views, which
+// are the first consumers; until they land some names are unused.
+#[allow(unused_imports)]
+pub use density::DensityTokens;
+#[allow(unused_imports)]
+pub use platform::{
+    Backdrop, MenuPlacement, Platform, PlatformStyle, PrimaryModifier, ScrollbarBehavior,
+    ScrollbarStyle, SearchFieldPlacement, SendButtonPlacement, UiFont,
+};
+#[allow(unused_imports)]
+pub use typography::{
+    TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TYPE_HEADLINE, TYPE_SCALE, TYPE_TITLE, TypeStyle,
+    TypeStyleExt,
+};
+
 use zmail_core::{ThemeAppearance, ThemeSummary};
+
+use self::contrast::{MIN_NON_TEXT_CONTRAST, ensure_contrast, readable_on};
 
 // ---------------------------------------------------------------------------
 // Spacing — 4-px grid
 // ---------------------------------------------------------------------------
 
+/// 2 px — hairline gaps, such as between the lines of a row.
+pub const SPACE_0_5: f32 = 2.0;
 /// 4 px
 pub const SPACE_1: f32 = 4.0;
 /// 8 px
@@ -30,6 +65,16 @@ pub const SPACE_5: f32 = 20.0;
 pub const SPACE_6: f32 = 24.0;
 /// 32 px
 pub const SPACE_8: f32 = 32.0;
+/// 40 px
+pub const SPACE_10: f32 = 40.0;
+/// 48 px
+pub const SPACE_12: f32 = 48.0;
+
+/// The spacing scale, smallest first. Paddings, gaps and margins use these
+/// values only.
+pub const SPACING_SCALE: [f32; 10] = [
+    SPACE_0_5, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_6, SPACE_8, SPACE_10, SPACE_12,
+];
 
 // ---------------------------------------------------------------------------
 // Layout dimensions
@@ -69,7 +114,7 @@ pub const ROW_SENDER_LINE_HEIGHT: f32 = BADGE_SIZE;
 /// Line height of the third (preview) line of a message-list row.
 pub const ROW_PREVIEW_LINE_HEIGHT: f32 = 18.0;
 /// Vertical gap between the lines of a message-list row.
-pub const ROW_LINE_GAP: f32 = 2.0;
+pub const ROW_LINE_GAP: f32 = SPACE_0_5;
 /// Top and bottom padding of a message-list row.
 pub const ROW_PADDING_Y: f32 = 10.0;
 /// Width of the divider drawn under each message-list row.
@@ -121,8 +166,23 @@ pub const RADIUS_SM: f32 = 4.0;
 pub const RADIUS_MD: f32 = 6.0;
 /// 8 px — larger panel rounding.
 pub const RADIUS_LG: f32 = 8.0;
+/// 12 px — sheets, popovers and other floating surfaces.
+pub const RADIUS_XL: f32 = 12.0;
 /// 9999 px — full pill / circle rounding.
 pub const RADIUS_FULL: f32 = 9999.0;
+
+// Window and control radii differ per platform: see
+// `PlatformStyle::window_radius` and `PlatformStyle::control_radius`.
+
+// ---------------------------------------------------------------------------
+// Focus ring
+// ---------------------------------------------------------------------------
+
+/// Width of the keyboard focus ring (WCAG 2.4.13: at least 2px, drawn in
+/// [`UiColors::focus_ring`], which is checked for 3:1 contrast).
+pub const FOCUS_RING_WIDTH: f32 = 2.0;
+/// Gap between a control's edge and its focus ring.
+pub const FOCUS_RING_OFFSET: f32 = 2.0;
 
 // ---------------------------------------------------------------------------
 // Dark fallback palette
@@ -250,6 +310,22 @@ pub struct UiColors {
     pub success: u32,
     /// Info foreground colour for icons and text.
     pub info: u32,
+    /// Boundary of buttons, inputs, checkboxes and other controls: at
+    /// least 3:1 against the background and surface. Derived from
+    /// `border`, darkened (or lightened) towards the foreground only as
+    /// far as needed. Decorative dividers keep using `border`.
+    pub control_border: u32,
+    /// Keyboard focus ring, drawn [`FOCUS_RING_WIDTH`] wide. The theme's
+    /// accent; the contrast test checks it reaches 3:1 on every fill.
+    pub focus_ring: u32,
+    /// Text and icons drawn on an `accent` fill (badges, primary buttons).
+    pub accent_foreground: u32,
+    /// Fill of a selected row while its list has keyboard focus (plan §2:
+    /// "a full accent row when the list has focus, grey when it doesn't").
+    /// The unfocused selection keeps `selected_background`.
+    pub selection_background: u32,
+    /// Text and icons on `selection_background`.
+    pub selection_foreground: u32,
 }
 
 impl UiColors {
@@ -278,13 +354,18 @@ impl UiColors {
             theme_color(token.as_deref(), pick(light, dark), surface)
         };
 
+        let border = over_background(&theme.border, light::BORDER, dark::BORDER);
+        let foreground = over_background(&theme.foreground, light::FOREGROUND, dark::FOREGROUND);
+        let accent = over_background(&theme.accent, light::ACCENT, dark::ACCENT);
+        let accent_foreground = readable_on(accent, &[background, foreground]);
+
         Self {
             background,
             surface,
-            border: over_background(&theme.border, light::BORDER, dark::BORDER),
-            foreground: over_background(&theme.foreground, light::FOREGROUND, dark::FOREGROUND),
+            border,
+            foreground,
             muted: over_background(&theme.muted_foreground, light::MUTED, dark::MUTED),
-            accent: over_background(&theme.accent, light::ACCENT, dark::ACCENT),
+            accent,
             selected_background: over_surface(
                 &theme.selected_background,
                 light::SELECTED_BACKGROUND,
@@ -319,6 +400,16 @@ impl UiColors {
             warning: over_background(&theme.warning, light::WARNING, dark::WARNING),
             success: over_background(&theme.success, light::SUCCESS, dark::SUCCESS),
             info: over_background(&theme.info, light::INFO, dark::INFO),
+            control_border: ensure_contrast(
+                border,
+                &[background, surface],
+                MIN_NON_TEXT_CONTRAST,
+                foreground,
+            ),
+            focus_ring: accent,
+            accent_foreground,
+            selection_background: accent,
+            selection_foreground: accent_foreground,
         }
     }
 }

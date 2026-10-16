@@ -19,5 +19,8 @@ zmail-security = { path = "../zmail-security" }
 zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }
 
+[dev-dependencies]
+zmail-theme = { path = "../zmail-theme" }
+
 [lints]
 workspace = true
