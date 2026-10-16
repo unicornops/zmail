@@ -1,31 +1,80 @@
 #!/usr/bin/env bash
+# Captures Linux screenshots of Zmail under an X server (normally Xvfb).
+#
+#   scripts/capture-release-screenshot.sh OUTPUT_PATH
+#       The release screenshot: starts the live mail harness (Docker),
+#       syncs its IMAP account and captures the main window.
+#
+#   scripts/capture-release-screenshot.sh --matrix OUTPUT_DIR [STATE...]
+#       The UI screenshot matrix: one PNG per UI state, named after the
+#       state, with no harness or network. Each state launches
+#       `zmail-app launch-ui-fixture VIEW THEME`, which opens an in-memory
+#       store seeded with synthetic mail in that view. Pass state names to
+#       capture only those; `--list` prints them.
+#
+# Both modes expect a running X server in DISPLAY with room for a
+# 1920x1080 window in matrix mode, for example:
+#
+#   cargo build -p zmail-app --release --locked
+#   xvfb-run -a --server-args="-screen 0 2560x1440x24" \
+#     scripts/capture-release-screenshot.sh --matrix artifacts/ui-screenshots
+#
+# Requires openbox, xdotool and ImageMagick's `import`. ZMAIL_APP_BINARY
+# overrides the binary (default target/release/zmail-app) and
+# ZMAIL_CAPTURE_LOG_DIR the directory for the app and openbox logs.
 set -euo pipefail
-
-if [[ $# -ne 1 ]]; then
-  echo "usage: scripts/capture-release-screenshot.sh OUTPUT_PATH" >&2
-  exit 1
-fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-APP_BINARY="${REPO_ROOT}/target/release/zmail-app"
-OUTPUT_PATH="$1"
+APP_BINARY="${ZMAIL_APP_BINARY:-${REPO_ROOT}/target/release/zmail-app}"
 WINDOW_TITLE="Zmail"
-APP_LOG="${TMPDIR:-/tmp}/zmail-release-screenshot-app.log"
-OPENBOX_LOG="${TMPDIR:-/tmp}/zmail-release-screenshot-openbox.log"
+LOG_DIR="${ZMAIL_CAPTURE_LOG_DIR:-${TMPDIR:-/tmp}}"
+APP_LOG="${LOG_DIR}/zmail-release-screenshot-app.log"
+OPENBOX_LOG="${LOG_DIR}/zmail-release-screenshot-openbox.log"
 APP_PID=""
 OPENBOX_PID=""
 HARNESS_STARTED=0
 
-cleanup() {
-  local exit_code=$?
+# The matrix: NAME VIEW THEME WIDTH HEIGHT. 1440x920 is the app's default
+# window size; the reader is also captured at a narrow and a wide window.
+MATRIX=(
+  "empty-dark empty dark 1440 920"
+  "empty-light empty light 1440 920"
+  "inbox-dark inbox dark 1440 920"
+  "inbox-light inbox light 1440 920"
+  "reader-dark reader dark 1440 920"
+  "reader-light reader light 1440 920"
+  "compose-dark compose dark 1440 920"
+  "compose-light compose light 1440 920"
+  "account-setup-dark account-setup dark 1440 920"
+  "account-setup-light account-setup light 1440 920"
+  "reader-dark-900 reader dark 900 720"
+  "reader-light-900 reader light 900 720"
+  "reader-dark-1920 reader dark 1920 1080"
+  "reader-light-1920 reader light 1920 1080"
+)
 
+usage() {
+  echo "usage: scripts/capture-release-screenshot.sh OUTPUT_PATH" >&2
+  echo "       scripts/capture-release-screenshot.sh --matrix OUTPUT_DIR [STATE...]" >&2
+  echo "       scripts/capture-release-screenshot.sh --list" >&2
+  exit 1
+}
+
+stop_app() {
   if [[ -n "${APP_PID}" ]] && kill -0 "${APP_PID}" 2>/dev/null; then
     kill "${APP_PID}" 2>/dev/null || true
   fi
   if [[ -n "${APP_PID}" ]]; then
     wait "${APP_PID}" 2>/dev/null || true
   fi
+  APP_PID=""
+}
+
+cleanup() {
+  local exit_code=$?
+
+  stop_app
 
   if [[ -n "${OPENBOX_PID}" ]] && kill -0 "${OPENBOX_PID}" 2>/dev/null; then
     kill "${OPENBOX_PID}" 2>/dev/null || true
@@ -41,59 +90,162 @@ cleanup() {
   exit "${exit_code}"
 }
 
+# Prints the id of the app's visible window once it is mapped, waiting up
+# to 90 seconds; fails if the app exits first.
+wait_for_window() {
+  local window_id=""
+  for _ in $(seq 1 90); do
+    if ! kill -0 "${APP_PID}" 2>/dev/null; then
+      echo "zmail-app exited before its window appeared" >&2
+      cat "${APP_LOG}" >&2
+      return 1
+    fi
+
+    window_id="$(xdotool search --onlyvisible --name "^${WINDOW_TITLE}\$" 2>/dev/null | head -n 1 || true)"
+    if [[ -n "${window_id}" ]]; then
+      echo "${window_id}"
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  echo "timed out waiting for the ${WINDOW_TITLE} window" >&2
+  cat "${APP_LOG}" >&2
+  return 1
+}
+
+start_session() {
+  mkdir -p "${LOG_DIR}"
+  : > "${APP_LOG}"
+  : > "${OPENBOX_LOG}"
+
+  export NO_AT_BRIDGE=1
+  export LIBGL_ALWAYS_SOFTWARE=1
+  export WINIT_UNIX_BACKEND=x11
+  export XDG_SESSION_TYPE=x11
+  unset WAYLAND_DISPLAY
+
+  openbox >"${OPENBOX_LOG}" 2>&1 &
+  OPENBOX_PID=$!
+}
+
+capture_release() {
+  local output_path="$1"
+  mkdir -p "$(dirname "${output_path}")"
+  start_session
+
+  "${REPO_ROOT}/scripts/mail-harness.sh" up
+  HARNESS_STARTED=1
+
+  "${APP_BINARY}" launch-imap-fixture \
+    "imap://127.0.0.1:3143" \
+    "phase2" \
+    "phase2-password" \
+    "phase2@localhost" \
+    >"${APP_LOG}" 2>&1 &
+  APP_PID=$!
+
+  local window_id
+  window_id="$(wait_for_window)"
+  xdotool windowactivate "${window_id}" >/dev/null 2>&1 || true
+  sleep 3
+  import -window "${window_id}" "${output_path}"
+}
+
+# Captures one matrix state into OUTPUT_DIR/NAME.png.
+capture_state() {
+  local output_dir="$1" name="$2" view="$3" theme="$4" width="$5" height="$6"
+  local output_path="${output_dir}/${name}.png"
+
+  echo "capturing ${name} (${view}, ${theme}, ${width}x${height})"
+  echo "=== ${name}" >> "${APP_LOG}"
+  "${APP_BINARY}" launch-ui-fixture "${view}" "${theme}" >>"${APP_LOG}" 2>&1 &
+  APP_PID=$!
+
+  local window_id
+  window_id="$(wait_for_window)"
+  xdotool windowactivate "${window_id}" >/dev/null 2>&1 || true
+  xdotool windowmove "${window_id}" 0 0 >/dev/null 2>&1 || true
+  xdotool windowsize "${window_id}" "${width}" "${height}"
+
+  # Wait for the window manager to apply the size, then for GPUI to draw
+  # the new frame.
+  local actual=""
+  for _ in $(seq 1 20); do
+    actual="$(xdotool getwindowgeometry "${window_id}" | sed -n 's/^ *Geometry: //p')"
+    [[ "${actual}" == "${width}x${height}" ]] && break
+    sleep 0.5
+  done
+  if [[ "${actual}" != "${width}x${height}" ]]; then
+    echo "the ${name} window is ${actual}, not ${width}x${height}" >&2
+    return 1
+  fi
+  sleep 3
+
+  import -window "${window_id}" "${output_path}"
+  stop_app
+  # Let the window unmap so the next state cannot find this one.
+  sleep 1
+}
+
+capture_matrix() {
+  local output_dir="$1"
+  shift
+  mkdir -p "${output_dir}"
+  start_session
+
+  local entry name selected
+  local captured=0
+  for entry in "${MATRIX[@]}"; do
+    read -r name _ <<< "${entry}"
+    if [[ $# -gt 0 ]]; then
+      selected=0
+      for wanted in "$@"; do
+        [[ "${wanted}" == "${name}" ]] && selected=1
+      done
+      [[ "${selected}" -eq 1 ]] || continue
+    fi
+    # shellcheck disable=SC2086 # Split the entry into its fields.
+    capture_state "${output_dir}" ${entry}
+    captured=$((captured + 1))
+  done
+
+  if [[ "${captured}" -eq 0 ]]; then
+    echo "no matrix state matched: $*" >&2
+    return 1
+  fi
+  echo "captured ${captured} screenshot(s) in ${output_dir}"
+}
+
+case "${1:-}" in
+  --list)
+    for entry in "${MATRIX[@]}"; do
+      echo "${entry%% *}"
+    done
+    exit 0
+    ;;
+  --matrix)
+    [[ $# -ge 2 ]] || usage
+    ;;
+  "" | -*)
+    usage
+    ;;
+  *)
+    [[ $# -eq 1 ]] || usage
+    ;;
+esac
+
 trap cleanup EXIT
 
 if [[ ! -x "${APP_BINARY}" ]]; then
-  echo "expected a release binary at ${APP_BINARY}" >&2
+  echo "expected a zmail-app binary at ${APP_BINARY}" >&2
   exit 1
 fi
 
-mkdir -p "$(dirname "${OUTPUT_PATH}")"
-: > "${APP_LOG}"
-: > "${OPENBOX_LOG}"
-
-export NO_AT_BRIDGE=1
-export LIBGL_ALWAYS_SOFTWARE=1
-export WINIT_UNIX_BACKEND=x11
-export XDG_SESSION_TYPE=x11
-unset WAYLAND_DISPLAY
-
-"${REPO_ROOT}/scripts/mail-harness.sh" up
-HARNESS_STARTED=1
-
-openbox >"${OPENBOX_LOG}" 2>&1 &
-OPENBOX_PID=$!
-
-"${APP_BINARY}" launch-imap-fixture \
-  "imap://127.0.0.1:3143" \
-  "phase2" \
-  "phase2-password" \
-  "phase2@localhost" \
-  >"${APP_LOG}" 2>&1 &
-APP_PID=$!
-
-WINDOW_ID=""
-for _ in $(seq 1 90); do
-  if ! kill -0 "${APP_PID}" 2>/dev/null; then
-    echo "zmail-app exited before the screenshot was captured" >&2
-    cat "${APP_LOG}" >&2
-    exit 1
-  fi
-
-  WINDOW_ID="$(xdotool search --onlyvisible --name "${WINDOW_TITLE}" 2>/dev/null | head -n 1 || true)"
-  if [[ -n "${WINDOW_ID}" ]]; then
-    break
-  fi
-
-  sleep 1
-done
-
-if [[ -z "${WINDOW_ID}" ]]; then
-  echo "timed out waiting for the ${WINDOW_TITLE} window" >&2
-  cat "${APP_LOG}" >&2
-  exit 1
+if [[ "$1" == "--matrix" ]]; then
+  shift
+  capture_matrix "$@"
+else
+  capture_release "$1"
 fi
-
-xdotool windowactivate "${WINDOW_ID}" >/dev/null 2>&1 || true
-sleep 3
-import -window "${WINDOW_ID}" "${OUTPUT_PATH}"

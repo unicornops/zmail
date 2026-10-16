@@ -69,6 +69,26 @@ mod workspace;
 /// matches the macOS bundle identifier and the packaged desktop entry name.
 pub const APP_ID: &str = "ie.unicornops.zmail";
 
+/// What the window shows when it first opens.
+///
+/// Normal launches use [`InitialView::Inbox`]; a `mailto:` launch opens its
+/// draft. The other variants exist for `zmail-app launch-ui-fixture`, which
+/// `scripts/capture-release-screenshot.sh --matrix` uses to put the window
+/// into each state of the UI screenshot matrix without clicking through it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InitialView {
+    /// The first mailbox of the first account, with its newest thread open
+    /// (or account setup when no account exists yet).
+    #[default]
+    Inbox,
+    /// The compose pane on this stored draft.
+    Draft(i64),
+    /// The reader on this thread, without marking it read.
+    Thread(i64),
+    /// The account setup pane, even when accounts already exist.
+    AccountSetup,
+}
+
 /// Runs the native Phase 4 shell.
 pub fn run(
     asset_source: impl AssetSource,
@@ -76,7 +96,7 @@ pub fn run(
     store: Arc<LocalStore>,
     sync_service: SyncService,
     secrets: Arc<dyn SecretStore>,
-    initial_draft_id: Option<i64>,
+    initial_view: InitialView,
 ) {
     let notifier = Arc::new(zmail_notify::NewMailNotifier::os_backed());
     sync_service.set_notifier(notifier.clone());
@@ -91,7 +111,6 @@ pub fn run(
             let store = store.clone();
             let sync_service = sync_service.clone();
             let secrets = secrets.clone();
-            let initial_draft_id = initial_draft_id;
 
             if let Err(error) = cx.open_window(
                 WindowOptions {
@@ -113,7 +132,6 @@ pub fn run(
                     let sync_service = sync_service.clone();
                     let secrets = secrets.clone();
                     let notifier = notifier.clone();
-                    let initial_draft_id = initial_draft_id;
                     cx.new(|cx| {
                         WorkspaceView::new(
                             bootstrap,
@@ -121,7 +139,7 @@ pub fn run(
                             sync_service,
                             secrets,
                             notifier,
-                            initial_draft_id,
+                            initial_view,
                             window,
                             cx,
                         )
