@@ -106,10 +106,21 @@ fn thread_snapshot(index: usize) -> ThreadSnapshot {
     }
 }
 
-/// Opens the workspace in a test window with the default keymap bound.
+/// Opens the workspace on the inbox in a test window with the default
+/// keymap bound.
 fn open_workspace(
     cx: &mut TestAppContext,
     setup: Setup,
+) -> (Entity<WorkspaceView>, &mut VisualTestContext, Harness) {
+    open_workspace_on(cx, setup, |_| InitialView::Inbox)
+}
+
+/// Like [`open_workspace`], opening the window on the view `initial_view`
+/// picks from the seeded store.
+fn open_workspace_on(
+    cx: &mut TestAppContext,
+    setup: Setup,
+    initial_view: impl FnOnce(&Harness) -> InitialView,
 ) -> (Entity<WorkspaceView>, &mut VisualTestContext, Harness) {
     cx.update(|cx| {
         components::init(cx);
@@ -204,6 +215,7 @@ fn open_workspace(
             gpui_version: String::new(),
         },
     };
+    let initial_view = initial_view(&harness);
     let (view, cx) = cx.add_window_view(move |window, cx| {
         WorkspaceView::new(
             bootstrap,
@@ -211,7 +223,7 @@ fn open_workspace(
             sync_service,
             secrets,
             notifier,
-            InitialView::Inbox,
+            initial_view,
             window,
             cx,
         )
@@ -793,4 +805,47 @@ fn hovering_a_row_re_renders_only_its_pane_without_querying_the_store(cx: &mut T
         "the sidebar did not"
     );
     assert_eq!(reader_after.renders, reader.renders, "the reader did not");
+}
+
+#[gpui::test]
+fn the_window_can_open_on_a_thread_without_marking_it_read(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace_on(cx, Setup::Mail, |harness| {
+        InitialView::Thread(harness.threads[2])
+    });
+    let third = harness.threads[2];
+    assert_eq!(selected_thread(&view, cx), Some(third));
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.detail_mode),
+        DetailMode::Reader
+    );
+    cx.executor().advance_clock(Duration::from_secs(5));
+    cx.run_until_parked();
+    let thread = harness
+        .store
+        .thread_view(third)
+        .expect("the thread loads")
+        .expect("the thread exists");
+    assert_eq!(
+        thread.unread_count, 1,
+        "opening on a thread leaves it unread"
+    );
+}
+
+#[gpui::test]
+fn the_window_can_open_on_account_setup(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace_on(cx, Setup::Mail, |_| InitialView::AccountSetup);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.detail_mode),
+        DetailMode::AccountSetup
+    );
+    // The first field has focus, ready to type.
+    cx.simulate_input("Work");
+    let display_name = cx.read_entity(&view, |view, cx| {
+        view.account_setup
+            .read(cx)
+            .form
+            .input(AccountField::DisplayName)
+            .clone()
+    });
+    assert_eq!(text(&display_name, cx), "Work");
 }

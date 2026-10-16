@@ -206,12 +206,11 @@ impl WorkspaceView {
                     view.open_draft(draft_id, window, cx);
                 }
             }
-            // Shown directly rather than through `select_thread`, which
-            // would mark the thread read after a delay.
+            // `show_thread`, not `select_thread`, which would mark the thread
+            // read after a delay.
             InitialView::Thread(thread_id) => {
                 if let Ok(Some(thread)) = view.store.thread_view(thread_id) {
-                    view.selected_mailbox_id = Some(thread.mailbox_id);
-                    view.selected_thread_id = Some(thread_id);
+                    view.show_thread(thread_id, thread.mailbox_id, cx);
                     view.refresh_from_store(cx);
                 }
             }
@@ -653,18 +652,25 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Select a specific thread (from the list or the search results).
+    /// Select a specific thread (from the list or the search results) and
+    /// mark it read once it has stayed open for a moment.
     pub(crate) fn select_thread(
         &mut self,
         thread_id: i64,
         mailbox_id: i64,
         cx: &mut Context<Self>,
     ) {
+        self.show_thread(thread_id, mailbox_id, cx);
+        self.schedule_mark_read(thread_id, cx);
+    }
+
+    /// Shows a thread in the list and reader without marking it read, for
+    /// example when the window opens on a given thread.
+    pub(crate) fn show_thread(&mut self, thread_id: i64, mailbox_id: i64, cx: &mut Context<Self>) {
         self.selected_mailbox_id = Some(mailbox_id);
         self.selected_thread_id = Some(thread_id);
         self.detail_mode = DetailMode::Reader;
         self.hydrate_selected_thread_bodies(cx);
-        self.schedule_mark_read(thread_id, cx);
         cx.notify();
     }
 

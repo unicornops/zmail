@@ -42,8 +42,8 @@ mod styles;
 use crate::styles::{WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_WIDTH};
 
 mod components;
-pub use components::gallery::run_gallery;
 use crate::components::TextInput;
+pub use components::gallery::run_gallery;
 
 mod account_setup;
 mod actions;
@@ -144,7 +144,7 @@ pub fn run(
                     let sync_service = sync_service.clone();
                     let secrets = secrets.clone();
                     let notifier = notifier.clone();
-                            cx.new(|cx| {
+                    cx.new(|cx| {
                         WorkspaceView::new(
                             bootstrap,
                             store,
