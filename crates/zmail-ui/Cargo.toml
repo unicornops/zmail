@@ -22,6 +22,7 @@ zmail-sync = { path = "../zmail-sync" }
 [dev-dependencies]
 # `#[gpui::test]`, `TestAppContext` and `VisualTestContext` for view tests.
 gpui = { workspace = true, features = ["test-support"] }
+tokio.workspace = true
 zmail-theme = { path = "../zmail-theme" }
 
 [lints]
