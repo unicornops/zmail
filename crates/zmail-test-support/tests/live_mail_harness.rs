@@ -19,7 +19,10 @@ use zmail_smtp::{
     submit_text_message,
 };
 use zmail_store::LocalStore;
-use zmail_sync::{BackgroundRuntime, SyncService};
+use zmail_sync::{
+    BackgroundRuntime, SyncService,
+    power::{PowerConditions, PowerMonitor},
+};
 use zmail_test_support::{
     DockerMailHarness, MAIL_HARNESS_DOVECOT_ENDPOINT, MAIL_HARNESS_DOVECOT_LOGIN,
     MAIL_HARNESS_DOVECOT_PASSWORD, MAIL_HARNESS_HOST, MAIL_HARNESS_IMAP_ENDPOINT,
@@ -638,6 +641,93 @@ fn hydrates_html_only_mail_through_the_sanitizer() -> Result<()> {
 
     harness.down()?;
     Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn background_indexing_makes_unopened_bodies_searchable() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&imap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_RECIPIENT_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    // Runners report no battery, but pin the conditions so the test never
+    // depends on the host.
+    sync_service.set_power_monitor(Arc::new(PluggedIn));
+
+    // Three messages whose bodies carry words found nowhere in the headers.
+    let words = ["cormorant", "kittiwake", "guillemot"];
+    let smtp_runtime = Builder::new_current_thread().enable_all().build()?;
+    for word in words {
+        smtp_runtime.block_on(submit_text_message(
+            &harness_submission(),
+            &SubmittedMessage {
+                envelope_from: MAIL_HARNESS_SENDER.to_owned(),
+                from_name: Some("Harness Sender".to_owned()),
+                recipients: vec![MAIL_HARNESS_RECIPIENT.to_owned()],
+                subject: format!("Indexing check {word}"),
+                text_body: format!("The body mentions the seabird {word}x only here."),
+            },
+        ))?;
+    }
+    sync_service.sync_account_and_wait(account_id)?;
+
+    for word in words {
+        assert!(
+            store
+                .search_threads(account_id, &format!("{word}x"), 10)?
+                .is_empty(),
+            "header-only sync cannot find body text yet"
+        );
+    }
+    let before = store.index_progress(account_id)?;
+    assert!(before.pending() >= words.len(), "{before:?}");
+
+    let report = sync_service.index_account_and_wait(account_id)?;
+    assert_eq!(report.paused, None);
+    assert!(report.indexed >= words.len(), "{report:?}");
+    let after = store.index_progress(account_id)?;
+    assert_eq!(after.pending(), 0, "{after:?}");
+    for word in words {
+        let hits = store.search_threads(account_id, &format!("{word}x"), 10)?;
+        assert_eq!(hits.len(), 1, "{word} should be searchable after indexing");
+        assert_eq!(hits[0].subject, format!("Indexing check {word}"));
+    }
+    // Indexing peeks: nothing it fetched was marked read on the server.
+    sync_service.sync_account_and_wait(account_id)?;
+    let unread = store.search_threads(account_id, "is:unread subject:indexing", 10)?;
+    assert_eq!(unread.len(), words.len());
+
+    // A second pass has nothing left to do.
+    assert_eq!(sync_service.index_account_and_wait(account_id)?.indexed, 0);
+    Ok(())
+}
+
+/// A power monitor for machines on mains power with an unmetered link.
+struct PluggedIn;
+
+impl PowerMonitor for PluggedIn {
+    fn conditions(&self) -> PowerConditions {
+        PowerConditions {
+            on_battery: Some(false),
+            metered: Some(false),
+        }
+    }
+}
+
+fn harness_submission() -> SubmissionConfig {
+    SubmissionConfig {
+        host: MAIL_HARNESS_HOST.to_owned(),
+        port: MAIL_HARNESS_SMTP_PORT,
+        username: Some(MAIL_HARNESS_SENDER_LOGIN.to_owned()),
+        secret: Some(MAIL_HARNESS_SENDER_PASSWORD.to_owned()),
+        auth: AuthKind::Password,
+        security: SubmissionSecurity::Plain,
+        hello_name: "localhost".to_owned(),
+    }
 }
 
 fn dovecot_account() -> NewAccount {

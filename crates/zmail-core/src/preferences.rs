@@ -89,6 +89,36 @@ pub struct MailboxRef {
     pub mailbox_id: i64,
 }
 
+/// When background body indexing runs (see `zmail_sync`'s indexer).
+///
+/// Indexing downloads message bodies so search can find mail that was never
+/// opened. It always stays within the account's disk budget; these switches
+/// decide whether it runs at all and whether it pauses on battery power or
+/// a metered connection, where the platform can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IndexingPreferences {
+    /// Whether background indexing runs.
+    #[serde(deserialize_with = "lenient_true")]
+    pub enabled: bool,
+    /// Keep indexing while running on battery power.
+    #[serde(deserialize_with = "lenient")]
+    pub on_battery: bool,
+    /// Keep indexing on a metered network connection.
+    #[serde(deserialize_with = "lenient")]
+    pub on_metered: bool,
+}
+
+impl Default for IndexingPreferences {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            on_battery: false,
+            on_metered: false,
+        }
+    }
+}
+
 /// Default undo-send delay, in seconds.
 pub const DEFAULT_UNDO_SEND_DELAY_SECS: u32 = 10;
 
@@ -125,6 +155,9 @@ pub struct UiPreferences {
     /// Read it through [`UiPreferences::undo_send_delay`], which clamps it.
     #[serde(deserialize_with = "lenient_undo_send_delay")]
     pub undo_send_delay_secs: u32,
+    /// Background body indexing switches.
+    #[serde(deserialize_with = "lenient")]
+    pub indexing: IndexingPreferences,
 }
 
 impl Default for UiPreferences {
@@ -138,6 +171,7 @@ impl Default for UiPreferences {
             last_mailbox: None,
             keymap: KeymapName::default(),
             undo_send_delay_secs: DEFAULT_UNDO_SEND_DELAY_SECS,
+            indexing: IndexingPreferences::default(),
         }
     }
 }
@@ -185,6 +219,15 @@ where
     Ok(u32::deserialize(value).unwrap_or(DEFAULT_UNDO_SEND_DELAY_SECS))
 }
 
+/// [`lenient`] for switches that default to on.
+fn lenient_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(bool::deserialize(value).unwrap_or(true))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +248,11 @@ mod tests {
             }),
             keymap: KeymapName::Gmail,
             undo_send_delay_secs: 20,
+            indexing: IndexingPreferences {
+                enabled: false,
+                on_battery: true,
+                on_metered: true,
+            },
         }
     }
 
@@ -219,6 +267,17 @@ mod tests {
         assert_eq!(prefs.last_mailbox, None);
         assert_eq!(prefs.keymap, KeymapName::Default);
         assert_eq!(prefs.undo_send_delay(), Duration::from_secs(10));
+        assert!(prefs.indexing.enabled);
+        assert!(!prefs.indexing.on_battery);
+        assert!(!prefs.indexing.on_metered);
+    }
+
+    #[test]
+    fn indexing_switches_fall_back_one_by_one() {
+        let prefs = UiPreferences::from_json(r#"{"indexing":{"enabled":"yes","on_battery":true}}"#);
+        assert!(prefs.indexing.enabled, "a bad value keeps indexing on");
+        assert!(prefs.indexing.on_battery);
+        assert!(!prefs.indexing.on_metered);
     }
 
     #[test]

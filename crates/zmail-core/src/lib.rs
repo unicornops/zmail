@@ -1186,6 +1186,38 @@ pub struct HydratedBody {
     pub attachments: Vec<MessageAttachment>,
 }
 
+/// A stored message whose body the background indexer should fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexCandidate {
+    /// Local message row id.
+    pub message_id: i64,
+    /// Server name of the mailbox holding the message.
+    pub mailbox_name: String,
+    /// Stable remote id of the message within the mailbox (the IMAP UID).
+    pub remote_id: String,
+}
+
+/// How far background body indexing has got for one account.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexProgress {
+    /// Messages in the local mirror.
+    pub messages: usize,
+    /// Messages whose body is stored and searchable.
+    pub indexed: usize,
+    /// Messages skipped after repeated fetch failures or for their size;
+    /// they still hydrate when opened and are found by server search.
+    pub skipped: usize,
+}
+
+impl IndexProgress {
+    /// Messages still waiting for a body.
+    pub fn pending(&self) -> usize {
+        self.messages
+            .saturating_sub(self.indexed)
+            .saturating_sub(self.skipped)
+    }
+}
+
 /// Received attachment surfaced to the reader.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedAttachment {

@@ -838,4 +838,134 @@ mod store_tests {
             vec!["Quarterly budget review"]
         );
     }
+
+    fn hydrate(store: &LocalStore, message_id: i64, bytes: usize) {
+        store
+            .hydrate_message_body(
+                message_id,
+                &zmail_core::HydratedBody {
+                    body_text: Some("x".repeat(bytes)),
+                    sanitized_html: None,
+                    has_remote_content: false,
+                    body_preview: "x".to_owned(),
+                    attachments: Vec::new(),
+                },
+            )
+            .expect("hydration should persist");
+    }
+
+    fn lazy_mail() -> Vec<Mail> {
+        [
+            ("m1", "2026-03-01T10:00:00Z"),
+            ("m2", "2026-03-02T10:00:00Z"),
+            ("m3", "2026-03-03T10:00:00Z"),
+            ("m4", "2026-03-04T10:00:00Z"),
+        ]
+        .into_iter()
+        .map(|(id, at)| Mail {
+            mailbox: "Inbox",
+            id,
+            from: "a@example.com",
+            to: "ops@zmail.dev",
+            subject: id,
+            body: None,
+            at,
+            unread: true,
+            flagged: false,
+            attachment: false,
+        })
+        .collect()
+    }
+
+    fn queue(store: &LocalStore, account: i64, budget: Option<u64>) -> Vec<String> {
+        store
+            .index_candidates(account, 10, budget)
+            .expect("queue should load")
+            .into_iter()
+            .map(|candidate| candidate.remote_id)
+            .collect()
+    }
+
+    #[test]
+    fn indexing_queue_is_newest_first_and_skips_failures() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        store
+            .replace_account_snapshot(account, &snapshot(&lazy_mail()))
+            .expect("snapshot should apply");
+        assert_eq!(queue(&store, account, None), vec!["m4", "m3", "m2", "m1"]);
+
+        let candidates = store
+            .index_candidates(account, 10, None)
+            .expect("queue should load");
+        hydrate(&store, candidates[0].message_id, 10);
+        // Transient failures retry until the limit; permanent ones skip at once.
+        for _ in 0..crate::MAX_BODY_FETCH_FAILURES {
+            assert!(queue(&store, account, None).contains(&"m3".to_owned()));
+            store
+                .record_body_fetch_failure(candidates[1].message_id, false)
+                .expect("failure should record");
+        }
+        store
+            .record_body_fetch_failure(candidates[2].message_id, true)
+            .expect("failure should record");
+        assert_eq!(queue(&store, account, None), vec!["m1"]);
+        assert_eq!(
+            store
+                .index_candidates(account, 0, None)
+                .expect("queue")
+                .len(),
+            0
+        );
+
+        let progress = store.index_progress(account).expect("progress should load");
+        assert_eq!(
+            progress,
+            zmail_core::IndexProgress {
+                messages: 4,
+                indexed: 1,
+                skipped: 2,
+            }
+        );
+        assert_eq!(progress.pending(), 1);
+
+        // Hydrated bodies make their threads searchable.
+        assert_eq!(search(&store, account, "xxxxx"), vec!["m4"]);
+    }
+
+    #[test]
+    fn a_full_budget_only_admits_mail_newer_than_the_oldest_body() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        store
+            .replace_account_snapshot(account, &snapshot(&lazy_mail()))
+            .expect("snapshot should apply");
+        let by_id = store
+            .index_candidates(account, 10, None)
+            .expect("queue should load")
+            .into_iter()
+            .map(|candidate| (candidate.remote_id, candidate.message_id))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        // m2 is stored and fills the budget: only m3 and m4 may displace it.
+        hydrate(&store, by_id["m2"], 100);
+        assert_eq!(queue(&store, account, Some(100)), vec!["m4", "m3"]);
+        // Below the budget everything is admitted.
+        assert_eq!(queue(&store, account, Some(1_000)), vec!["m4", "m3", "m1"]);
+
+        // Fetching m4 and evicting back to the budget drops m2, the oldest.
+        hydrate(&store, by_id["m4"], 100);
+        store
+            .evict_account_blobs(account, 100)
+            .expect("eviction should run");
+        assert!(!store.message_has_body(by_id["m2"]).expect("check"));
+        assert!(store.message_has_body(by_id["m4"]).expect("check"));
+        // m4 is now the oldest (and only) body, so nothing older is fetched
+        // again and the queue settles instead of churning.
+        assert!(queue(&store, account, Some(100)).is_empty());
+    }
 }

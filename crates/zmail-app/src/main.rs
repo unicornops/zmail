@@ -44,6 +44,7 @@ fn main() -> Result<()> {
         Command::SyncAll => sync_accounts(None),
         Command::SyncAccount(account_id) => sync_accounts(Some(account_id)),
         Command::Search(account_id, query) => search_threads(account_id, &query),
+        Command::IndexAccount(account_id) => index_account(account_id),
         Command::ReadThread(thread_id) => read_thread(thread_id),
         Command::ListAttachments(thread_id) => list_attachments(thread_id),
         Command::SaveAttachment {
@@ -117,6 +118,7 @@ enum Command {
     SyncAll,
     SyncAccount(i64),
     Search(i64, String),
+    IndexAccount(i64),
     ReadThread(i64),
     ListAttachments(i64),
     SaveAttachment {
@@ -199,6 +201,12 @@ impl Command {
                 }
                 Ok(Self::Search(account_id, query))
             }
+            "index" => Ok(Self::IndexAccount(
+                args.next()
+                    .context("index requires an account id")?
+                    .parse::<i64>()
+                    .context("index account id must be an integer")?,
+            )),
             "read" => Ok(Self::ReadThread(
                 args.next()
                     .context("read requires a thread id")?
@@ -539,6 +547,7 @@ fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
     let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
     let _ = sync_service.bootstrap_existing_accounts();
     let _ = sync_service.start_mail_watcher();
+    sync_service.start_background_indexing();
 
     let bootstrap = build_bootstrap(runtime.summary())?;
     let initial_view = initial_draft_id.map_or(InitialView::Inbox, InitialView::Draft);
@@ -686,6 +695,31 @@ fn sync_accounts(account_id: Option<i64>) -> Result<()> {
         println!("Finished syncing all configured accounts.");
     }
 
+    Ok(())
+}
+
+fn index_account(account_id: i64) -> Result<()> {
+    let runtime = BackgroundRuntime::start(4)?;
+    let store = Arc::new(open_store().context("failed to open the local store")?);
+    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+
+    let report = sync_service.index_account_and_wait(account_id)?;
+    let progress = store.index_progress(account_id)?;
+    println!(
+        "Indexed {} bodies, skipped {}, evicted {} bytes.",
+        report.indexed, report.skipped, report.evicted_bytes
+    );
+    if let Some(pause) = report.paused {
+        println!("Paused: {pause:?}.");
+    }
+    println!(
+        "Account {account_id}: {} of {} messages searchable, {} pending, {} skipped.",
+        progress.indexed,
+        progress.messages,
+        progress.pending(),
+        progress.skipped
+    );
     Ok(())
 }
 
@@ -1649,6 +1683,7 @@ fn print_help() {
     println!("  zmail-app list-accounts   Show configured accounts");
     println!("  zmail-app sync [all|ID]   Sync all accounts or one account by id");
     println!("  zmail-app search ID QUERY Search local mail for an account");
+    println!("  zmail-app index ID        Fetch and index message bodies for an account");
     println!("  zmail-app read THREAD     Print the hydrated thread reader view");
     println!("  zmail-app flag THREAD     Flag a thread locally");
     println!("  zmail-app unflag THREAD   Remove a local flag from a thread");
