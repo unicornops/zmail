@@ -166,7 +166,7 @@ pub async fn discover_and_sync(
             && previous.is_some()
             && let Some(existing_mailbox) = existing.get(name.as_str()).cloned()
         {
-            let last_seen_uid = previous.as_ref().and_then(|state| state.last_seen_uid);
+            let last_seen_uid = resume_uid(previous.as_ref(), &existing_mailbox);
             let new_uids = new_mailbox_uids(&mut session, last_seen_uid).await?;
             let previous_exists = previous.as_ref().map(|state| state.exists).unwrap_or(0);
             let previous_modseq = previous.as_ref().and_then(|state| state.highest_modseq);
@@ -193,7 +193,7 @@ pub async fn discover_and_sync(
                     && status.exists == previous_exists
                 {
                     mailboxes.push(existing_mailbox);
-                    mailbox_checkpoint.last_seen_uid = last_seen_uid;
+                    mailbox_checkpoint.last_seen_uid = Some(last_seen_uid);
                     mailbox_checkpoint.uid_flags = merged;
                     next_checkpoint.insert(name, mailbox_checkpoint);
                     condstore_skipped += 1;
@@ -205,7 +205,7 @@ pub async fn discover_and_sync(
                     && status.highest_modseq == Some(previous_modseq)
                 {
                     mailboxes.push(existing_mailbox);
-                    mailbox_checkpoint.last_seen_uid = last_seen_uid;
+                    mailbox_checkpoint.last_seen_uid = Some(last_seen_uid);
                     mailbox_checkpoint.uid_flags = previous
                         .as_ref()
                         .map(|state| state.uid_flags.clone())
@@ -239,7 +239,7 @@ pub async fn discover_and_sync(
             {
                 // Nothing changed server-side; the mirror is reused as is.
                 mailboxes.push(existing_mailbox);
-                mailbox_checkpoint.last_seen_uid = last_seen_uid;
+                mailbox_checkpoint.last_seen_uid = Some(last_seen_uid);
                 mailbox_checkpoint.uid_flags = flag_map;
                 next_checkpoint.insert(name, mailbox_checkpoint);
                 continue;
@@ -258,13 +258,8 @@ pub async fn discover_and_sync(
                 )
                 .await?;
             }
-            mailbox_checkpoint.last_seen_uid = Some(
-                new_uids
-                    .last()
-                    .copied()
-                    .unwrap_or(0)
-                    .max(last_seen_uid.unwrap_or(0)),
-            );
+            mailbox_checkpoint.last_seen_uid =
+                Some(new_uids.last().copied().unwrap_or(0).max(last_seen_uid));
             mailbox_checkpoint.uid_flags = flag_map;
             next_checkpoint.insert(name, mailbox_checkpoint);
             mailboxes.push(merged);
@@ -1179,12 +1174,8 @@ async fn fetch_changed_flags(
 
 async fn new_mailbox_uids(
     session: &mut Session<DynImapStream>,
-    last_seen_uid: Option<u32>,
+    last_seen: u32,
 ) -> Result<Vec<u32>> {
-    let Some(last_seen) = last_seen_uid else {
-        return Ok(Vec::new());
-    };
-
     let mut uids = session
         .uid_search(&format!("UID {}:*", last_seen.saturating_add(1)))
         .await
@@ -1196,6 +1187,31 @@ async fn new_mailbox_uids(
     uids.retain(|uid| *uid > last_seen);
     uids.sort_unstable();
     Ok(uids)
+}
+
+/// The highest UID the mirror already holds, above which new mail starts.
+///
+/// A mailbox that was empty at its last sync has no recorded UID; it then
+/// resumes from 0 so its first messages are fetched by the very next sync,
+/// which matters now that a single pushed change triggers a single sync.
+/// Checkpoints that predate `last_seen_uid` fall back to the highest UID in
+/// the flag map or the mirror, so nothing already stored is fetched twice.
+fn resume_uid(previous: Option<&ImapMailboxCheckpoint>, mailbox: &MailboxSnapshot) -> u32 {
+    previous
+        .and_then(|state| {
+            state
+                .last_seen_uid
+                .or_else(|| state.uid_flags.keys().last().copied())
+        })
+        .or_else(|| {
+            mailbox
+                .threads
+                .iter()
+                .flat_map(|thread| &thread.messages)
+                .filter_map(|message| message.remote_id.parse::<u32>().ok())
+                .max()
+        })
+        .unwrap_or(0)
 }
 
 /// Returns `true` when a message in the existing mirror is missing from
@@ -1714,9 +1730,9 @@ mod tests {
     use super::{
         ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, conversation_key, excerpt, guess_role,
         hydrate_bodies, parse_endpoint, persist_attachments, recompute_thread_aggregates,
-        xoauth2_response,
+        resume_uid, xoauth2_response,
     };
-    use zmail_core::{MessageSnapshot, ThreadSnapshot};
+    use zmail_core::{MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
 
     #[test]
     fn search_criteria_map_operators_onto_search_keys() {
@@ -2098,6 +2114,33 @@ mod tests {
             thread.participants, "Older Sender, Newer Sender",
             "participants list every sender, oldest first"
         );
+    }
+
+    #[test]
+    fn new_mail_resumes_after_the_highest_known_uid() {
+        let empty = MailboxSnapshot {
+            name: "Projects".to_owned(),
+            role: None,
+            threads: Vec::new(),
+        };
+        let checkpoint = |last_seen_uid, uids: &[u32]| ImapMailboxCheckpoint {
+            last_seen_uid,
+            uid_flags: uids.iter().map(|uid| (*uid, Vec::new())).collect(),
+            ..ImapMailboxCheckpoint::default()
+        };
+
+        assert_eq!(
+            resume_uid(Some(&checkpoint(None, &[])), &empty),
+            0,
+            "a mailbox that was empty fetches its first message next time"
+        );
+        assert_eq!(resume_uid(Some(&checkpoint(Some(7), &[3, 9])), &empty), 7);
+        assert_eq!(
+            resume_uid(Some(&checkpoint(None, &[3, 9])), &empty),
+            9,
+            "legacy checkpoints resume after the flag map"
+        );
+        assert_eq!(resume_uid(None, &empty), 0);
     }
 
     #[test]
