@@ -5,11 +5,11 @@
 //! element), and keyboard focus draws the shared 2px focus ring. Disabled
 //! buttons are dimmed, skipped by Tab and ignore clicks.
 
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    App, ClickEvent, ElementId, FocusHandle, FontWeight, IntoElement, RenderOnce, Role,
-    SharedString, Window, div, prelude::*, px, rgb,
+    Animation, AnimationExt, App, ClickEvent, ElementId, FocusHandle, FontWeight, IntoElement,
+    RenderOnce, Role, SharedString, Transformation, Window, div, percentage, prelude::*, px, rgb,
 };
 
 use crate::styles::{ICON_SIZE_MD, ICON_SIZE_SM, TYPE_BODY, TYPE_CAPTION, TypeStyleExt};
@@ -287,11 +287,15 @@ pub(crate) struct IconButton {
     size: ButtonSize,
     disabled: bool,
     selected: bool,
+    spinning: bool,
     shortcut: Option<SharedString>,
     focus_handle: Option<FocusHandle>,
     tab_index: isize,
     on_click: Option<ClickHandler>,
 }
+
+/// How long a spinning icon takes for one turn.
+const SPIN_PERIOD: Duration = Duration::from_millis(1200);
 
 impl IconButton {
     /// A ghost icon button showing `icon`, named `label`.
@@ -308,6 +312,7 @@ impl IconButton {
             size: ButtonSize::default(),
             disabled: false,
             selected: false,
+            spinning: false,
             shortcut: None,
             focus_handle: None,
             tab_index: 0,
@@ -336,6 +341,12 @@ impl IconButton {
     /// Show the button as toggled on.
     pub(crate) fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Keep the icon turning, for a progress indicator such as a loader.
+    pub(crate) fn spinning(mut self, spinning: bool) -> Self {
+        self.spinning = spinning;
         self
     }
 
@@ -381,7 +392,20 @@ impl RenderOnce for IconButton {
             },
         )
         .size(px(size))
-        .child(icon(self.icon, icon_size, colors.text))
+        .map(|this| {
+            let glyph = icon(self.icon, icon_size, colors.text);
+            if self.spinning {
+                this.child(glyph.with_animation(
+                    "spin",
+                    Animation::new(SPIN_PERIOD).repeat(),
+                    |glyph, delta| {
+                        glyph.with_transformation(Transformation::rotate(percentage(delta)))
+                    },
+                ))
+            } else {
+                this.child(glyph)
+            }
+        })
     }
 }
 

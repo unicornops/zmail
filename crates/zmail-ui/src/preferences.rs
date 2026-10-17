@@ -1,8 +1,8 @@
 //! Reads and writes the persisted [`UiPreferences`] for the workspace.
 //!
-//! Only the theme mode is wired up so far; density, pane widths, the
-//! reading pane and the rest are stored by `zmail-store` and get wired as
-//! the views that use them land.
+//! The theme mode and the sidebar's collapsed state are wired up so far;
+//! density, pane widths, the reading pane and the rest are stored by
+//! `zmail-store` and get wired as the views that use them land.
 
 use gpui::WindowAppearance;
 use zmail_core::{
@@ -31,6 +31,26 @@ impl WorkspaceView {
             None => {
                 self.follow_system_appearance(system);
             }
+        }
+    }
+
+    /// Applies the saved layout at startup: whether the sidebar is hidden.
+    pub(crate) fn apply_layout_preferences(&mut self) {
+        match self.store.ui_preferences() {
+            Ok(preferences) => self.sidebar_collapsed = preferences.sidebar_collapsed,
+            Err(error) => {
+                self.store_error = Some(format!("Could not load the UI preferences: {error:#}"));
+            }
+        }
+    }
+
+    /// Saves whether the sidebar is hidden.
+    pub(crate) fn persist_sidebar_collapsed(&mut self) {
+        let collapsed = self.sidebar_collapsed;
+        if let Err(error) = self.store.update_ui_preferences(|preferences| {
+            preferences.sidebar_collapsed = collapsed;
+        }) {
+            self.store_error = Some(format!("Could not save the layout: {error:#}"));
         }
     }
 

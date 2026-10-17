@@ -63,6 +63,8 @@ actions!(
         SyncAll,
         /// Switch between the light and dark theme.
         ToggleTheme,
+        /// Show or hide the sidebar.
+        ToggleSidebar,
         /// Move focus to the next pane (sidebar, list, detail).
         FocusNextPane,
         /// Move focus to the previous pane.

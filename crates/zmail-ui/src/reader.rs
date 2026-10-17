@@ -6,11 +6,17 @@
 //! [`ReaderView::set_state`]. Its buttons dispatch the same actions as the
 //! key bindings; the shell handles them, because replying and moving need
 //! the selection and the account.
+//!
+//! The actions are one row of icon buttons above the conversation. The
+//! More menu at its end holds Move to… (one entry per mailbox, until the
+//! Phase 4 folder picker) and, when the pane is narrow, the actions that
+//! no longer fit in the row.
 
 use chrono::{DateTime, Local};
 use gpui::{
-    Action, AnyElement, App, Context, FocusHandle, Focusable, FontWeight, IntoElement, Render,
-    ScrollHandle, Window, div, point, prelude::*, px, rgb,
+    Action, AnyElement, App, Context, DismissEvent, Entity, FocusHandle, Focusable, FontWeight,
+    IntoElement, MouseButton, Render, ScrollHandle, SharedString, Subscription, Window, div, point,
+    prelude::*, px, rgb,
 };
 use zmail_core::{
     MailboxSummary, ThreadMessage, ThreadView,
@@ -23,12 +29,13 @@ use crate::actions::{
     Archive, Delete, Forward, MoveToMailbox, PageDown, PageUp, Reply, ReplyAll, SaveAttachments,
     ScrollDown, ScrollUp, ToggleFlag, ToggleRead,
 };
+use crate::components::{IconButton, Menu, MenuEntry, popover_below};
 use crate::pane::pane_focus_indicator;
 use crate::styles::{AVATAR_SIZE, UiColors};
 use crate::tooltip::text_tooltip;
 use crate::widgets::{
     EllipsisExt, action_divider, avatar, empty_state, format_size, label_chip,
-    message_avatar_background, toolbar_button,
+    message_avatar_background,
 };
 
 /// The key context the reader sets.
@@ -45,6 +52,9 @@ pub(crate) struct ReaderState {
     pub(crate) mailboxes: Vec<MailboxSummary>,
     /// The user's own addresses, shown as "me".
     pub(crate) own_addresses: Vec<String>,
+    /// The pane is too narrow for every action button: only Reply,
+    /// Archive and Delete stay in the row, the rest move to More.
+    pub(crate) compact_actions: bool,
 }
 
 pub(crate) struct ReaderView {
@@ -52,6 +62,11 @@ pub(crate) struct ReaderView {
     hour_cycle: HourCycle,
     state: ReaderState,
     scroll_handle: ScrollHandle,
+    /// The open More menu and the subscription that closes it.
+    more_menu: Option<(Entity<Menu>, Subscription)>,
+    /// Set when a press on the More button closed the open menu, so the
+    /// click that follows does not reopen it.
+    swallow_more_click: bool,
     /// Test instrumentation: renders.
     #[cfg(test)]
     pub(crate) counters: crate::pane::RenderCounters,
@@ -70,6 +85,8 @@ impl ReaderView {
             hour_cycle,
             state: ReaderState::default(),
             scroll_handle: ScrollHandle::new(),
+            more_menu: None,
+            swallow_more_click: false,
             #[cfg(test)]
             counters: Default::default(),
         }
@@ -86,8 +103,81 @@ impl ReaderView {
         self.state = state;
         if thread_changed {
             self.scroll_handle.set_offset(point(px(0.), px(0.)));
+            self.more_menu = None;
         }
         cx.notify();
+    }
+
+    /// Whether the action bar is compact.
+    #[cfg(test)]
+    pub(crate) fn compact_actions(&self) -> bool {
+        self.state.compact_actions
+    }
+
+    /// Whether the More menu is open.
+    #[cfg(test)]
+    pub(crate) fn more_menu(&self) -> Option<Entity<Menu>> {
+        self.more_menu.as_ref().map(|(menu, _)| menu.clone())
+    }
+
+    /// Opens the More menu and gives it focus. Choosing an entry
+    /// dispatches its action from the reader, like the buttons do.
+    fn open_more_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let items = more_menu_items(self.state.thread.as_ref(), &self.state);
+        if items.is_empty() {
+            return;
+        }
+        let focus_handle = self.focus_handle.clone();
+        let menu = Menu::build(window, cx, |mut menu| {
+            for item in items {
+                menu = match item {
+                    MoreItem::Separator => menu.separator(),
+                    MoreItem::Header(title) => menu.header(title),
+                    MoreItem::Action(action) => {
+                        let focus_handle = focus_handle.clone();
+                        let mut entry = MenuEntry::new(action.label).icon(action.icon);
+                        if let Some(shortcut) = action.shortcut {
+                            entry = entry.shortcut(shortcut);
+                        }
+                        let command = action.action;
+                        menu.entry(entry.on_select(move |window, cx| {
+                            focus_handle.dispatch_action(command.as_ref(), window, cx);
+                        }))
+                    }
+                };
+            }
+            menu
+        });
+        let subscription = cx.subscribe_in(
+            &menu,
+            window,
+            |reader, menu, _: &DismissEvent, window, cx| {
+                // An entry that moved focus elsewhere (none do yet) keeps
+                // it; otherwise focus comes back to the reader.
+                let refocus = menu.focus_handle(cx).contains_focused(window, cx)
+                    || window.focused(cx).is_none();
+                reader.more_menu = None;
+                if refocus {
+                    window.focus(&reader.focus_handle, cx);
+                }
+                cx.notify();
+            },
+        );
+        window.focus(&menu.focus_handle(cx), cx);
+        self.more_menu = Some((menu, subscription));
+        cx.notify();
+    }
+
+    fn toggle_more_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.swallow_more_click) {
+            return;
+        }
+        if self.more_menu.take().is_some() {
+            window.focus(&self.focus_handle, cx);
+            cx.notify();
+        } else {
+            self.open_more_menu(window, cx);
+        }
     }
 
     fn scroll_by(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -130,9 +220,13 @@ impl Render for ReaderView {
         let colors = *cx.global::<UiColors>();
         let focused = self.focus_handle.contains_focused(window, cx);
         let thread = self.state.thread.as_ref();
-        let primary_actions = reader_primary_action_buttons(thread, &self.focus_handle, &colors);
-        let move_actions =
-            reader_move_buttons(thread, &self.state.mailboxes, &self.focus_handle, &colors);
+        let actions = action_bar_buttons(
+            thread,
+            self.state.compact_actions,
+            &self.focus_handle,
+            &colors,
+        );
+        let has_more = !more_menu_items(thread, &self.state).is_empty();
 
         div()
             .id("reader")
@@ -146,28 +240,50 @@ impl Render for ReaderView {
             .flex()
             .flex_col()
             .bg(rgb(colors.background))
+            // ---- Action bar: one row, never wrapping ---------------------
             .child(
                 pane_focus_indicator(
                     div()
-                        .px_4()
-                        .py_3()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_1()
+                        .min_h(px(ACTION_BAR_HEIGHT))
+                        .px_3()
+                        .overflow_hidden()
                         .border_b_1()
                         .border_color(rgb(colors.border)),
                     focused,
                     &colors,
                 )
-                .child("Reader"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(rgb(colors.border))
-                    .children(primary_actions),
+                .when(thread.is_none(), |this| {
+                    this.child(div().px_1().text_color(rgb(colors.muted)).child("Reader"))
+                })
+                .children(actions)
+                .when(has_more, |this| {
+                    this.child(div().flex_1()).child(
+                        div()
+                            .debug_selector(|| "reader-more".into())
+                            .relative()
+                            .flex_none()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|reader, _, _, _| {
+                                    reader.swallow_more_click = reader.more_menu.is_some();
+                                }),
+                            )
+                            .child(
+                                IconButton::new("reader-more", "ellipsis", "More actions")
+                                    .selected(self.more_menu.is_some())
+                                    .on_click(cx.listener(|reader, _, window, cx| {
+                                        reader.toggle_more_menu(window, cx);
+                                    })),
+                            )
+                            .when_some(self.more_menu.as_ref(), |this, (menu, _)| {
+                                this.child(popover_below(menu.clone()))
+                            }),
+                    )
+                }),
             )
             .child(
                 div()
@@ -186,19 +302,11 @@ impl Render for ReaderView {
                         &colors,
                     )),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(rgb(colors.border))
-                    .children(move_actions),
-            )
     }
 }
+
+/// Height of the reader's action bar.
+const ACTION_BAR_HEIGHT: f32 = 48.0;
 
 /// Render the full thread reader: subject, metadata, and conversation
 /// cards. Returns an [`AnyElement`] ready to be placed
@@ -311,100 +419,188 @@ fn render_reader_detail(
     }
 }
 
-/// The main reader actions shown above the conversation. Each button
-/// dispatches its action from the reader, so it does exactly what the key
-/// binding does.
-///
-/// Returns an empty [`Vec`] when no thread is selected.
-fn reader_primary_action_buttons(
-    thread: Option<&ThreadView>,
-    focus_handle: &FocusHandle,
-    colors: &UiColors,
-) -> Vec<AnyElement> {
-    let Some(thread) = thread else {
-        return Vec::new();
-    };
+/// One conversation command: its label, icon, shortcut and action.
+struct ReaderAction {
+    label: SharedString,
+    icon: &'static str,
+    /// The key binding, shown in tooltips and menus.
+    shortcut: Option<&'static str>,
+    action: Box<dyn Action>,
+    /// Whether the button stays in a compact action bar.
+    compact: bool,
+}
 
-    let button = |label: &'static str, icon: &'static str, action: Box<dyn Action>| {
-        let focus_handle = focus_handle.clone();
-        toolbar_button(
-            label,
-            Some(icon),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
-            move |_, window, cx| focus_handle.dispatch_action(action.as_ref(), window, cx),
-        )
-        .into_any_element()
-    };
+impl ReaderAction {
+    fn new(
+        label: &'static str,
+        icon: &'static str,
+        shortcut: &'static str,
+        action: impl Action,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            icon,
+            shortcut: Some(shortcut),
+            action: Box::new(action),
+            compact: false,
+        }
+    }
 
-    let mut buttons = vec![
-        button("Reply", "reply", Box::new(Reply)),
-        button("Reply All", "reply-all", Box::new(ReplyAll)),
-        button("Forward", "forward", Box::new(Forward)),
-        action_divider(colors).into_any_element(),
-        button("Archive", "archive", Box::new(Archive)),
-        button("Delete", "trash-2", Box::new(Delete)),
-        action_divider(colors).into_any_element(),
-        button(
+    /// Keep the button when the bar is compact.
+    fn keep_when_compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+}
+
+/// A group of [`ReaderAction`]s; groups are separated in the action bar
+/// and the More menu.
+type ActionGroup = Vec<ReaderAction>;
+
+/// The thread's commands, in order, grouped: respond, file, mark.
+fn reader_actions(thread: &ThreadView) -> [ActionGroup; 3] {
+    let mut mark = vec![
+        ReaderAction::new(
             if thread.is_flagged { "Unflag" } else { "Flag" },
             "flag",
-            Box::new(ToggleFlag),
+            "secondary-shift-l",
+            ToggleFlag,
         ),
         if thread.unread_count > 0 {
-            button("Mark Read", "eye", Box::new(ToggleRead))
+            ReaderAction::new("Mark Read", "eye", "secondary-shift-u", ToggleRead)
         } else {
-            button("Mark Unread", "eye-off", Box::new(ToggleRead))
+            ReaderAction::new("Mark Unread", "eye-off", "secondary-shift-u", ToggleRead)
         },
     ];
-
     let thread_has_attachments = thread
         .messages
         .iter()
         .any(|message| !message.attachments.is_empty());
     if thread_has_attachments {
-        buttons.push(button(
-            "Save attachments",
+        mark.push(ReaderAction::new(
+            "Save Attachments",
             "save",
-            Box::new(SaveAttachments),
+            "secondary-shift-s",
+            SaveAttachments,
         ));
     }
-
-    buttons
+    [
+        vec![
+            ReaderAction::new("Reply", "reply", "secondary-r", Reply).keep_when_compact(),
+            ReaderAction::new("Reply All", "reply-all", "secondary-shift-r", ReplyAll),
+            ReaderAction::new("Forward", "forward", "secondary-shift-f", Forward),
+        ],
+        vec![
+            ReaderAction::new("Archive", "archive", "secondary-e", Archive).keep_when_compact(),
+            ReaderAction::new("Delete", "trash-2", "secondary-backspace", Delete)
+                .keep_when_compact(),
+        ],
+        mark,
+    ]
 }
 
-/// The move-to-mailbox buttons shown at the bottom of the reader.
+/// The action bar's icon buttons, with dividers between the groups. Each
+/// button dispatches its action from the reader, so it does exactly what
+/// the key binding does.
 ///
 /// Returns an empty [`Vec`] when no thread is selected.
-fn reader_move_buttons(
+fn action_bar_buttons(
     thread: Option<&ThreadView>,
-    mailboxes: &[MailboxSummary],
+    compact: bool,
     focus_handle: &FocusHandle,
     colors: &UiColors,
 ) -> Vec<AnyElement> {
     let Some(thread) = thread else {
         return Vec::new();
     };
+    let mut elements = Vec::new();
+    for group in reader_actions(thread) {
+        let buttons: Vec<AnyElement> = group
+            .into_iter()
+            .filter(|action| !compact || action.compact)
+            .map(|action| {
+                let focus_handle = focus_handle.clone();
+                let command = action.action;
+                // Icons are unique within the bar, so they name the buttons.
+                let mut button =
+                    IconButton::new(format!("reader-{}", action.icon), action.icon, action.label)
+                        .selected(action.icon == "flag" && thread.is_flagged)
+                        .on_click(move |_, window, cx| {
+                            focus_handle.dispatch_action(command.as_ref(), window, cx)
+                        });
+                if let Some(shortcut) = action.shortcut {
+                    button = button.shortcut(shortcut);
+                }
+                button.into_any_element()
+            })
+            .collect();
+        if buttons.is_empty() {
+            continue;
+        }
+        if !elements.is_empty() {
+            elements.push(
+                div()
+                    .mx_1()
+                    .child(action_divider(colors))
+                    .into_any_element(),
+            );
+        }
+        elements.extend(buttons);
+    }
+    elements
+}
 
-    mailboxes
+/// One row of the More menu.
+enum MoreItem {
+    Action(ReaderAction),
+    Separator,
+    Header(String),
+}
+
+/// The More menu: the actions a compact bar leaves out, then Move to…
+/// with one entry per other mailbox. Empty when there is nothing to put
+/// in it (no thread, or a full bar and no other mailbox).
+fn more_menu_items(thread: Option<&ThreadView>, state: &ReaderState) -> Vec<MoreItem> {
+    let Some(thread) = thread else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    if state.compact_actions {
+        for group in reader_actions(thread) {
+            let hidden: Vec<ReaderAction> =
+                group.into_iter().filter(|action| !action.compact).collect();
+            if hidden.is_empty() {
+                continue;
+            }
+            if !items.is_empty() {
+                items.push(MoreItem::Separator);
+            }
+            items.extend(hidden.into_iter().map(MoreItem::Action));
+        }
+    }
+    let destinations: Vec<&MailboxSummary> = state
+        .mailboxes
         .iter()
         .filter(|mailbox| mailbox.id != thread.mailbox_id)
-        .map(|mailbox| {
-            let action = MoveToMailbox {
-                mailbox_id: mailbox.id,
-            };
-            let focus_handle = focus_handle.clone();
-            toolbar_button(
-                format!("Move: {}", mailbox.name),
-                Some("folder"),
-                colors.button_background,
-                colors.border,
-                colors.foreground,
-                move |_, window, cx| focus_handle.dispatch_action(&action, window, cx),
-            )
-            .into_any_element()
-        })
-        .collect()
+        .collect();
+    if !destinations.is_empty() {
+        if !items.is_empty() {
+            items.push(MoreItem::Separator);
+        }
+        items.push(MoreItem::Header("Move to".to_owned()));
+        items.extend(destinations.into_iter().map(|mailbox| {
+            MoreItem::Action(ReaderAction {
+                label: mailbox.name.clone().into(),
+                icon: "folder",
+                shortcut: None,
+                action: Box::new(MoveToMailbox {
+                    mailbox_id: mailbox.id,
+                }),
+                compact: false,
+            })
+        }));
+    }
+    items
 }
 
 fn render_thread_message(
