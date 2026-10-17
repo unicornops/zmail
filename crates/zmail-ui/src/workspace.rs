@@ -37,6 +37,7 @@ use crate::actions::{
     ShowDrafts, ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleFlag, ToggleRead, ToggleTheme,
     Undo,
 };
+use crate::app_menu::AppMenuButton;
 use crate::components::{self, TextInput, TextInputEvent};
 use crate::compose::{ComposeEvent, ComposeView};
 use crate::mail_actions::{MailActions, MailEvent};
@@ -45,7 +46,8 @@ use crate::pane::Pane;
 use crate::reader::{ReaderState, ReaderView};
 use crate::sidebar::{SidebarEvent, SidebarState, SidebarView};
 use crate::styles::{
-    DETAIL_MIN_WIDTH, ICON_SIZE_SM, MESSAGE_LIST_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, UiColors,
+    DETAIL_MIN_WIDTH, ICON_SIZE_SM, MESSAGE_LIST_WIDTH, PlatformStyle, SIDEBAR_MIN_WIDTH,
+    SIDEBAR_WIDTH, UiColors,
 };
 use crate::widgets::{HoverExt, icon, status_banner};
 
@@ -96,6 +98,9 @@ impl WorkspaceView {
                 .placeholder("Search mail")
         });
 
+        let focus_handle = cx.focus_handle();
+        let app_menu = cx.new(|_| AppMenuButton::new(focus_handle.clone()));
+
         let subscriptions = vec![
             cx.subscribe(&search_query, |this, _, event: &TextInputEvent, cx| {
                 if *event == TextInputEvent::Submitted {
@@ -116,7 +121,7 @@ impl WorkspaceView {
             store,
             sync_service,
             notifier,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             mail_actions,
             sidebar,
             message_list,
@@ -124,6 +129,7 @@ impl WorkspaceView {
             compose,
             account_setup,
             search_query,
+            app_menu,
             account: None,
             accounts: Vec::new(),
             identities: Vec::new(),
@@ -1553,6 +1559,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::save_attachments))
             .on_action(cx.listener(Self::move_to_mailbox))
             .size_full()
+            .font_family(PlatformStyle::current().ui_font.family())
             .bg(rgb(colors.background))
             .text_color(rgb(colors.foreground))
             .child(

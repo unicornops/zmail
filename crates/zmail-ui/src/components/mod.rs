@@ -16,7 +16,7 @@ pub(crate) mod select;
 pub(crate) mod skeleton;
 pub(crate) mod split_handle;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 pub(crate) mod text_input;
 pub(crate) mod theme;
 pub(crate) mod toast;
@@ -29,7 +29,7 @@ pub(crate) use button::{Button, ButtonSize, ButtonVariant, IconButton};
 pub(crate) use kbd::Kbd;
 pub(crate) use menu::{Menu, MenuEntry};
 pub(crate) use modal::{Modal, ModalState};
-pub(crate) use popover::{overlay_at, popover_below};
+pub(crate) use popover::{overlay_at, popover_below, popover_below_end};
 pub(crate) use scrollbar::Scrollbar;
 pub(crate) use select::{Select, SelectEvent};
 pub(crate) use skeleton::SkeletonRow;

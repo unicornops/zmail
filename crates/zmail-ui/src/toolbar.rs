@@ -14,7 +14,7 @@ use crate::actions::{
     SyncAll, ToggleTheme,
 };
 use crate::pane::dispatch_from;
-use crate::styles::{SEARCH_FIELD_WIDTH, TOOLBAR_HEIGHT, UiColors};
+use crate::styles::{MenuPlacement, PlatformStyle, SEARCH_FIELD_WIDTH, TOOLBAR_HEIGHT, UiColors};
 use crate::widgets::{HoverExt, interactive_background, toolbar_button};
 
 impl WorkspaceView {
@@ -190,6 +190,11 @@ impl WorkspaceView {
                             dispatch_from(&self.focus_handle, ToggleTheme),
                         )
                         .hover_bg(false, colors),
+                    )
+                    // The command menu (macOS has the menu bar instead).
+                    .when(
+                        PlatformStyle::current().menu != MenuPlacement::MenuBar,
+                        |this| this.child(div().ml_auto().child(self.app_menu.clone())),
                     ),
             )
     }

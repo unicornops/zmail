@@ -146,3 +146,5 @@ The Rust toolchain in [`rust-toolchain.toml`](./rust-toolchain.toml) follows the
 ## Licensing
 
 Zmail is licensed under GPL-3.0-only. Dependency policy is enforced through [`deny.toml`](./deny.toml) and prepared for `cargo-about` via [`about.toml`](./about.toml).
+
+Linux builds embed the [Inter](https://rsms.me/inter/) UI font (4.1, SIL Open Font License 1.1, [`assets/fonts/inter/LICENSE.txt`](./assets/fonts/inter/LICENSE.txt)); the `.deb` installs its licence under `/usr/share/doc/zmail-app/`. Bundled non-crate assets and ported source files are listed in [`about.toml`](./about.toml).

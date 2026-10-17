@@ -16,6 +16,9 @@ priority = "optional"
 assets = [
     ["target/release/zmail-app", "usr/bin/", "755"],
     ["ie.unicornops.zmail.desktop", "usr/share/applications/", "644"],
+    # The bundled Inter font is embedded in the binary; OFL-1.1 asks for
+    # its licence to travel with it.
+    ["../../assets/fonts/inter/LICENSE.txt", "usr/share/doc/zmail-app/Inter-LICENSE.txt", "644"],
 ]
 extended-description = "Zmail is a fast, standards-compliant desktop email client built with GPUI."
 
