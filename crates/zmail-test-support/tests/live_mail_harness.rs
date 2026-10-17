@@ -440,6 +440,29 @@ impl RawImap {
         Ok(transcript)
     }
 
+    /// Whether the logged-in session advertises `capability`.
+    fn has_capability(&mut self, capability: &str) -> Result<bool> {
+        let transcript = self.command("CAPABILITY")?;
+        Ok(transcript
+            .lines()
+            .filter(|line| line.starts_with("* CAPABILITY"))
+            .flat_map(str::split_whitespace)
+            .any(|token| token.eq_ignore_ascii_case(capability)))
+    }
+
+    /// The UID of the selected mailbox's message with this exact subject.
+    fn uid_for_subject(&mut self, subject: &str) -> Result<u32> {
+        let transcript = self.command(&format!("UID SEARCH SUBJECT \"{subject}\""))?;
+        transcript
+            .lines()
+            .find(|line| line.starts_with("* SEARCH"))
+            .and_then(|line| {
+                line.split_whitespace()
+                    .find_map(|token| token.parse::<u32>().ok())
+            })
+            .with_context(|| format!("no message with subject {subject:?}"))
+    }
+
     fn append(&mut self, message: &str) -> Result<()> {
         self.command(&format!("APPEND INBOX {{{}}}", message.len()))?;
         self.stream.write_all(format!("{message}\r\n").as_bytes())?;
@@ -476,6 +499,13 @@ fn syncs_flags_incrementally_through_condstore() -> Result<()> {
         "\r\n",
         "Peer flag change target.\r\n",
     ))?;
+    // Dovecot also offers QRESYNC, which takes precedence over the plain
+    // CONDSTORE skip; the unchanged-sync detail names whichever ran.
+    let skip_detail = if other_client.has_capability("QRESYNC")? {
+        "via QRESYNC"
+    } else {
+        "via CONDSTORE"
+    };
     other_client.command("LOGOUT")?;
 
     let account_id = store.insert_account(&dovecot_account())?;
@@ -523,8 +553,8 @@ fn syncs_flags_incrementally_through_condstore() -> Result<()> {
         .map(|account| account.sync_status.detail)
         .context("the account should load")?;
     assert!(
-        detail.contains("via CONDSTORE"),
-        "an unchanged sync should report the CONDSTORE skip: {detail}"
+        detail.contains(skip_detail),
+        "an unchanged sync should report the mod-sequence skip: {detail}"
     );
 
     // Another client flags the message; the next sync must see it.
@@ -548,7 +578,7 @@ fn syncs_flags_incrementally_through_condstore() -> Result<()> {
         .context("the probe thread should load")?;
     assert!(
         view.messages[0].is_flagged,
-        "a flag change by another client should arrive through CHANGEDSINCE"
+        "a flag change by another client should arrive through CHANGEDSINCE or QRESYNC"
     );
 
     // Steady state again: the merged flag map keeps the skip path working.
@@ -560,12 +590,107 @@ fn syncs_flags_incrementally_through_condstore() -> Result<()> {
         .map(|account| account.sync_status.detail)
         .context("the account should load")?;
     assert!(
-        detail.contains("via CONDSTORE"),
+        detail.contains(skip_detail),
         "the flag change should be absorbed into the checkpoint: {detail}"
     );
 
     harness.down()?;
     Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn resyncs_expunges_and_flags_through_qresync() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+
+    let mut other_client = RawImap::connect(
+        3243,
+        MAIL_HARNESS_DOVECOT_LOGIN,
+        MAIL_HARNESS_DOVECOT_PASSWORD,
+    )?;
+    if !other_client.has_capability("QRESYNC")? {
+        // Gate on the advertised capability instead of faking it; the
+        // CONDSTORE test still covers servers without QRESYNC.
+        println!("skipping: the Dovecot harness does not advertise QRESYNC");
+        harness.down()?;
+        return Ok(());
+    }
+    for subject in ["QRESYNC expunged", "QRESYNC flagged", "QRESYNC untouched"] {
+        other_client.append(&format!(
+            "From: peer@example.test\r\nSubject: {subject}\r\nTo: mailuser@example.test\r\n\r\n{subject} body.\r\n"
+        ))?;
+    }
+    other_client.command("LOGOUT")?;
+
+    let account_id = store.insert_account(&dovecot_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_DOVECOT_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.sync_account_and_wait(account_id)?;
+    sync_service.sync_account_and_wait(account_id)?;
+    assert!(
+        sync_detail(&store, account_id)?.contains("via QRESYNC"),
+        "an unchanged mailbox should resync through QRESYNC"
+    );
+
+    // Another client expunges one message and flags another. Without
+    // QRESYNC the expunge would force a full flag scan.
+    let mut other_client = RawImap::connect(
+        3243,
+        MAIL_HARNESS_DOVECOT_LOGIN,
+        MAIL_HARNESS_DOVECOT_PASSWORD,
+    )?;
+    other_client.command("SELECT INBOX")?;
+    let expunged = other_client.uid_for_subject("QRESYNC expunged")?;
+    let flagged = other_client.uid_for_subject("QRESYNC flagged")?;
+    other_client.command(&format!("UID STORE {expunged} +FLAGS (\\Deleted)"))?;
+    other_client.command("EXPUNGE")?;
+    other_client.command(&format!("UID STORE {flagged} +FLAGS (\\Seen \\Flagged)"))?;
+    other_client.command("LOGOUT")?;
+
+    sync_service.sync_account_and_wait(account_id)?;
+    let detail = sync_detail(&store, account_id)?;
+    assert!(
+        detail.contains("opened with QRESYNC"),
+        "the changes should arrive through the QRESYNC open: {detail}"
+    );
+    let threads = store.list_threads(inbox_id(&store, account_id)?, 0..20)?;
+    assert!(
+        !threads
+            .iter()
+            .any(|thread| thread.subject == "QRESYNC expunged"),
+        "VANISHED (EARLIER) should drop the expunged message"
+    );
+    let flagged_thread = threads
+        .iter()
+        .find(|thread| thread.subject == "QRESYNC flagged")
+        .context("the flagged message should remain")?;
+    assert!(flagged_thread.is_flagged);
+    assert_eq!(flagged_thread.unread_count, 0);
+    assert!(
+        threads
+            .iter()
+            .any(|thread| thread.subject == "QRESYNC untouched")
+    );
+
+    // The patched flag map is the new baseline.
+    sync_service.sync_account_and_wait(account_id)?;
+    assert!(sync_detail(&store, account_id)?.contains("via QRESYNC"));
+
+    harness.down()?;
+    Ok(())
+}
+
+fn sync_detail(store: &LocalStore, account_id: i64) -> Result<String> {
+    store
+        .list_accounts()?
+        .into_iter()
+        .find(|account| account.id == account_id)
+        .map(|account| account.sync_status.detail)
+        .context("the account should load")
 }
 
 #[test]
