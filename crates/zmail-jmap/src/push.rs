@@ -259,6 +259,27 @@ where
         .enable_push_ws(Some(PUSH_TYPES), Option::<String>::None)
         .await
         .context("failed to enable JMAP WebSocket push")?;
+    // The server does not acknowledge WebSocketPushEnable, but it handles
+    // messages in order, so the answer to a request sent after it shows the
+    // subscription is in place before the caller is told it is connected.
+    send_heartbeat(client).await?;
+    let confirmed = tokio::time::timeout(PUSH_CONNECT_TIMEOUT, async {
+        loop {
+            match stream.next().await {
+                Some(Ok(WebSocketMessage::Response(_))) => return Ok(()),
+                Some(Ok(_)) | Some(Err(jmap_client::Error::Parse(_))) => {}
+                Some(Err(error)) => {
+                    return Err(anyhow!(error).context("the JMAP WebSocket failed"));
+                }
+                None => bail!("the JMAP WebSocket closed before push was enabled"),
+            }
+        }
+    })
+    .await;
+    match confirmed {
+        Ok(result) => result?,
+        Err(_) => bail!("the JMAP WebSocket did not answer after enabling push"),
+    }
     on_event(PushEvent::Connected(PushTransport::WebSocket));
 
     // `jmap-client` hides WebSocket pings and pongs, so liveness is checked
@@ -294,15 +315,22 @@ where
                 if last_message.elapsed() > stall_timeout {
                     bail!("the JMAP WebSocket was silent for {}s", stall_timeout.as_secs());
                 }
-                let mut request = client.build();
-                request.get_mailbox().ids(Vec::<String>::new());
-                client
-                    .send_ws(request)
-                    .await
-                    .context("failed to send the JMAP WebSocket heartbeat")?;
+                send_heartbeat(client).await?;
             }
         }
     }
+}
+
+/// Sends a cheap request (`Mailbox/get` with no ids) whose response proves
+/// the WebSocket is alive and has processed everything sent before it.
+async fn send_heartbeat(client: &Client) -> Result<()> {
+    let mut request = client.build();
+    request.get_mailbox().ids(Vec::<String>::new());
+    client
+        .send_ws(request)
+        .await
+        .context("failed to send the JMAP WebSocket heartbeat")?;
+    Ok(())
 }
 
 fn ensure_rustls_provider() {

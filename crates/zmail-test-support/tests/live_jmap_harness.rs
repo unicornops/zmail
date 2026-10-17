@@ -266,7 +266,7 @@ fn assert_push_reports_new_mail(
     assert_eq!(first, PushEvent::Connected(transport));
     // Drop anything the server sends straight after connecting, so only a
     // push caused by the delivery below can pass.
-    while events.recv_timeout(Duration::from_secs(1)).is_ok() {}
+    while events.recv_timeout(Duration::from_secs(2)).is_ok() {}
 
     submit_harness_message(
         "Phase 2b JMAP push",
