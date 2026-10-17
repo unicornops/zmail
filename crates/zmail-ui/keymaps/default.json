@@ -19,6 +19,8 @@
       "secondary-shift-n": "zmail::SyncAll",
       "secondary-shift-t": "zmail::ToggleTheme",
       "secondary-b": "zmail::ToggleSidebar",
+      "secondary-[": "zmail::GoBack",
+      "alt-left": "zmail::GoBack",
       "tab": "zmail::FocusNextPane",
       "shift-tab": "zmail::FocusPreviousPane",
       "f6": "zmail::FocusNextPane",

@@ -65,6 +65,9 @@ actions!(
         ToggleTheme,
         /// Show or hide the sidebar.
         ToggleSidebar,
+        /// In the single-pane layout, go back from the detail pane to the
+        /// list.
+        GoBack,
         /// Move focus to the next pane (sidebar, list, detail).
         FocusNextPane,
         /// Move focus to the previous pane.

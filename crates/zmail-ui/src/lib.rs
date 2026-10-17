@@ -21,9 +21,10 @@
 //! | `app_menu` | `AppMenuButton`: the menu model behind a hamburger/overflow button (Windows, Linux) |
 //! | `fonts` | registers the bundled Inter font on Linux |
 //! | `pane` | pane focus order and the focused-pane indicator |
+//! | `layout` | the responsive pane layout: breakpoints and pane widths |
 //! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, `TextInput`, … and the gallery |
 //! | `styles` | design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
-//! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar) |
+//! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar, pane widths) |
 //! | `widgets` | `toolbar_button`, `input_card`, `list_row`, `icon`, … |
 //! | `diagnostics` | internal counters kept for the future Settings → About page |
 
@@ -56,6 +57,7 @@ mod compose;
 mod diagnostics;
 mod fonts;
 mod keymap;
+mod layout;
 mod mail_actions;
 mod menus;
 mod message_list;
@@ -104,6 +106,9 @@ pub enum InitialView {
     Thread(i64),
     /// The account setup pane, even when accounts already exist.
     AccountSetup,
+    /// The inbox with keyboard focus in the sidebar, which opens it as an
+    /// overlay in a window too narrow for the sidebar pane.
+    Sidebar,
 }
 
 /// Runs the native Phase 4 shell.
@@ -313,6 +318,17 @@ struct WorkspaceView {
     hour_cycle: zmail_core::time::HourCycle,
     /// Whether the user hid the sidebar (persisted in the UI preferences).
     sidebar_collapsed: bool,
+    /// The user's sidebar width (persisted); the layout clamps it to
+    /// what the window fits.
+    sidebar_width: f32,
+    /// The user's message-list width (persisted).
+    list_width: f32,
+    /// Bumped by every pane resize so only the last one's timer saves.
+    pane_widths_generation: u64,
+    /// Whether the sidebar is open as an overlay (when it is not a pane).
+    sidebar_overlay_open: bool,
+    /// The pane the single-pane layout shows.
+    single_pane: layout::SinglePane,
     /// The window's content width, which the pane layout follows.
     viewport_width: f32,
     _subscriptions: Vec<Subscription>,

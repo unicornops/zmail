@@ -36,7 +36,9 @@ OPENBOX_PID=""
 HARNESS_STARTED=0
 
 # The matrix: NAME VIEW THEME WIDTH HEIGHT. 1440x920 is the app's default
-# window size; the reader is also captured at a narrow and a wide window.
+# window size. The inbox and reader are also captured at each layout
+# breakpoint: 720 (one pane at a time), 900 (sidebar as an overlay) and
+# 1920 (wide); `sidebar` is the overlay open at 900.
 MATRIX=(
   "empty-dark empty dark 1440 920"
   "empty-light empty light 1440 920"
@@ -48,8 +50,18 @@ MATRIX=(
   "compose-light compose light 1440 920"
   "account-setup-dark account-setup dark 1440 920"
   "account-setup-light account-setup light 1440 920"
+  "inbox-dark-720 inbox dark 720 720"
+  "inbox-light-720 inbox light 720 720"
+  "reader-dark-720 reader dark 720 720"
+  "reader-light-720 reader light 720 720"
+  "inbox-dark-900 inbox dark 900 720"
+  "inbox-light-900 inbox light 900 720"
   "reader-dark-900 reader dark 900 720"
   "reader-light-900 reader light 900 720"
+  "sidebar-dark-900 sidebar dark 900 720"
+  "sidebar-light-900 sidebar light 900 720"
+  "inbox-dark-1920 inbox dark 1920 1080"
+  "inbox-light-1920 inbox light 1920 1080"
   "reader-dark-1920 reader dark 1920 1080"
   "reader-light-1920 reader light 1920 1080"
 )

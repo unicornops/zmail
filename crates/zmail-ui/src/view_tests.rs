@@ -14,7 +14,7 @@ use gpui::{
 use zmail_core::{
     AccountSyncSnapshot, AppBootstrap, AuthKind, CachePolicySummary, MailboxSnapshot,
     MessageSnapshot, NewAccount, NewIdentity, OutgoingConfig, ProtocolKind, RuntimeSummary,
-    ThemeAppearance, ThemeSummary, ThreadSnapshot, UpstreamPins,
+    ThemeAppearance, ThemeSummary, ThreadSnapshot, UpstreamPins, preferences::PaneWidths,
 };
 use zmail_security::{InMemorySecretStore, SecretStore};
 use zmail_store::LocalStore;
@@ -24,7 +24,9 @@ use crate::account_setup::AccountField;
 use crate::actions::SaveDraft;
 use crate::components::{self, TextInput, text_input};
 use crate::keymap;
+use crate::layout::{LayoutMode, SinglePane};
 use crate::pane::Pane;
+use crate::styles::{DETAIL_MIN_WIDTH, MESSAGE_LIST_WIDTH, SIDEBAR_WIDTH};
 use crate::{DetailMode, InitialView, ListMode, WorkspaceView};
 
 /// What the store holds when the window opens.
@@ -1023,7 +1025,10 @@ fn a_narrow_reader_moves_actions_into_more(cx: &mut TestAppContext) {
     };
     resize(1440., cx);
     assert!(!compact(cx));
+    // The overlay layout gives the reader the width beside the list.
     resize(1000., cx);
+    assert!(!compact(cx));
+    resize(800., cx);
     assert!(compact(cx));
 
     // Reply All is now the first entry of More.
@@ -1033,4 +1038,263 @@ fn a_narrow_reader_moves_actions_into_more(cx: &mut TestAppContext) {
         cx.read_entity(&view, |view, _| (view.list_mode, view.detail_mode)),
         (ListMode::Drafts, DetailMode::Compose)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Responsive layout (UI plan Phase 2)
+// ---------------------------------------------------------------------------
+
+fn layout_mode(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> LayoutMode {
+    cx.read_entity(view, |view, _| view.pane_layout().mode)
+}
+
+fn overlay_open(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> bool {
+    cx.read_entity(view, |view, _| view.sidebar_overlay_open)
+}
+
+#[gpui::test]
+fn the_layout_follows_the_window_width(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+
+    // Wide: sidebar, list and reader side by side.
+    resize(1440., cx);
+    assert_eq!(layout_mode(&view, cx), LayoutMode::Wide);
+    for selector in ["sidebar-drafts", "thread-row-0", "reader-more"] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector} at 1440");
+    }
+
+    // Overlay: the sidebar pane goes; list and reader stay.
+    resize(900., cx);
+    assert_eq!(layout_mode(&view, cx), LayoutMode::Overlay);
+    assert!(cx.debug_bounds("sidebar-drafts").is_none());
+    assert!(cx.debug_bounds("thread-row-0").is_some());
+    assert!(cx.debug_bounds("reader-more").is_some());
+
+    // Single: the list alone.
+    resize(720., cx);
+    assert_eq!(layout_mode(&view, cx), LayoutMode::Single);
+    assert!(cx.debug_bounds("thread-row-0").is_some());
+    assert!(cx.debug_bounds("reader-more").is_none());
+
+    // Back to wide: everything returns.
+    resize(1440., cx);
+    assert!(cx.debug_bounds("sidebar-drafts").is_some());
+}
+
+#[gpui::test]
+fn the_sidebar_overlay_opens_and_closes(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+    resize(900., cx);
+
+    // The toggle opens it with focus in it; Escape closes it.
+    keys("secondary-b", cx);
+    assert!(overlay_open(&view, cx));
+    assert!(cx.debug_bounds("sidebar-drafts").is_some());
+    assert_eq!(focused_pane(&view, cx), Some(Pane::Sidebar));
+    keys("escape", cx);
+    assert!(!overlay_open(&view, cx));
+    assert!(cx.debug_bounds("sidebar-drafts").is_none());
+    assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+
+    // A click beside it closes it.
+    click("toolbar-sidebar", cx);
+    assert!(overlay_open(&view, cx));
+    let scrim = cx
+        .debug_bounds("sidebar-scrim")
+        .expect("the scrim is drawn");
+    cx.simulate_click(
+        point(scrim.right() - px(20.), scrim.center().y),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(!overlay_open(&view, cx));
+
+    // Picking a view in it closes it and shows that view.
+    click("toolbar-sidebar", cx);
+    click("sidebar-drafts", cx);
+    assert!(!overlay_open(&view, cx));
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.list_mode),
+        ListMode::Drafts
+    );
+
+    // Tab reaches the sidebar through the overlay, and leaving it closes
+    // the overlay.
+    view.update_in(cx, |view, window, cx| {
+        view.focus_pane(Pane::Detail, window, cx)
+    });
+    keys("f6", cx);
+    assert!(overlay_open(&view, cx));
+    keys("f6", cx);
+    assert!(!overlay_open(&view, cx));
+    assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+
+    // Widening the window turns it back into a pane.
+    keys("secondary-b", cx);
+    resize(1440., cx);
+    assert!(!overlay_open(&view, cx));
+    assert!(cx.debug_bounds("sidebar-drafts").is_some());
+}
+
+#[gpui::test]
+fn the_single_pane_layout_goes_to_the_reader_and_back(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    resize(720., cx);
+    let showing_reader = |cx: &mut VisualTestContext| cx.debug_bounds("reader-more").is_some();
+
+    // Arrow keys move through the list without leaving it.
+    view.update_in(cx, |view, window, cx| {
+        view.focus_pane(Pane::MessageList, window, cx)
+    });
+    keys("down", cx);
+    assert_eq!(selected_thread(&view, cx), Some(harness.threads[1]));
+    assert!(!showing_reader(cx));
+
+    // A click opens the reader; the back button returns.
+    click("thread-row-2", cx);
+    assert!(showing_reader(cx));
+    assert_eq!(selected_thread(&view, cx), Some(harness.threads[2]));
+    assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
+    click("single-pane-back", cx);
+    assert!(!showing_reader(cx));
+    assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+
+    // Enter opens it; Escape and the back keys return.
+    for back in ["escape", "alt-left", "secondary-["] {
+        keys("enter", cx);
+        assert!(showing_reader(cx), "enter before {back}");
+        keys(back, cx);
+        assert!(!showing_reader(cx), "{back}");
+        assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+    }
+
+    // Compose shows the draft, and back returns to the list.
+    keys("secondary-n", cx);
+    assert!(cx.read_entity(&view, |view, _| {
+        view.single_pane == SinglePane::Detail && view.detail_mode == DetailMode::Compose
+    }));
+    click("single-pane-back", cx);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.single_pane),
+        SinglePane::List
+    );
+}
+
+#[gpui::test]
+fn narrowing_the_window_keeps_the_focused_pane_in_view(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+    resize(1440., cx);
+    view.update_in(cx, |view, window, cx| {
+        view.focus_pane(Pane::Detail, window, cx)
+    });
+    resize(720., cx);
+    assert!(cx.debug_bounds("reader-more").is_some());
+
+    resize(1440., cx);
+    view.update_in(cx, |view, window, cx| {
+        view.focus_pane(Pane::Sidebar, window, cx)
+    });
+    resize(900., cx);
+    assert!(overlay_open(&view, cx));
+}
+
+#[gpui::test]
+fn dragged_pane_widths_are_saved_and_restored(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    resize(1440., cx);
+    let widths = |cx: &mut VisualTestContext| {
+        cx.read_entity(&view, |view, _| {
+            let layout = view.pane_layout();
+            (layout.sidebar, layout.list)
+        })
+    };
+    assert_eq!(widths(cx), (Some(SIDEBAR_WIDTH), MESSAGE_LIST_WIDTH));
+
+    // Drag the sidebar's edge 40px right.
+    let edge = point(px(SIDEBAR_WIDTH), px(400.));
+    let button = Some(gpui::MouseButton::Left);
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: edge,
+        button: gpui::MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    for x in [SIDEBAR_WIDTH + 10., SIDEBAR_WIDTH + 40.] {
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: point(px(x), px(400.)),
+            pressed_button: button,
+            modifiers: Modifiers::none(),
+        });
+    }
+    cx.simulate_event(gpui::MouseUpEvent {
+        position: point(px(SIDEBAR_WIDTH + 40.), px(400.)),
+        button: gpui::MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    cx.run_until_parked();
+    assert_eq!(widths(cx), (Some(SIDEBAR_WIDTH + 40.), MESSAGE_LIST_WIDTH));
+
+    // Saved once the drag settles.
+    let saved = |harness: &Harness| {
+        harness
+            .store
+            .ui_preferences()
+            .expect("the preferences load")
+            .pane_widths
+    };
+    assert_eq!(saved(&harness).sidebar, None);
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(saved(&harness).sidebar, Some(SIDEBAR_WIDTH + 40.));
+    assert_eq!(saved(&harness).message_list, Some(MESSAGE_LIST_WIDTH));
+
+    // A narrower window clamps the panes without losing the saved width.
+    resize(1100., cx);
+    let (sidebar, list) = widths(cx);
+    assert_eq!(sidebar, Some(SIDEBAR_WIDTH + 40.));
+    assert!(1100. - SIDEBAR_WIDTH - 40. - list >= DETAIL_MIN_WIDTH);
+}
+
+#[gpui::test]
+fn saved_pane_widths_apply_at_startup(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Inbox,
+        |store| {
+            store
+                .update_ui_preferences(|preferences| {
+                    preferences.pane_widths = PaneWidths {
+                        sidebar: Some(240.),
+                        message_list: Some(460.),
+                    };
+                })
+                .expect("the preferences save");
+        },
+    );
+    resize(1440., cx);
+    let layout = cx.read_entity(&view, |view, _| view.pane_layout());
+    assert_eq!((layout.sidebar, layout.list), (Some(240.), 460.));
+}
+
+#[gpui::test]
+fn the_window_can_open_on_the_sidebar(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace_on(cx, Setup::Mail, |_| InitialView::Sidebar);
+    assert_eq!(focused_pane(&view, cx), Some(Pane::Sidebar));
+    resize(900., cx);
+    assert!(overlay_open(&view, cx));
+    assert!(cx.debug_bounds("sidebar-drafts").is_some());
+}
+
+#[gpui::test]
+fn a_window_opened_on_a_thread_keeps_the_reader_when_narrowed(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace_on(cx, Setup::Mail, |harness| {
+        InitialView::Thread(harness.threads[1])
+    });
+    assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
+    resize(720., cx);
+    assert!(cx.debug_bounds("reader-more").is_some());
+    assert!(cx.debug_bounds("single-pane-back").is_some());
 }

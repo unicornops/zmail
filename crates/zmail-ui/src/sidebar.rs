@@ -75,6 +75,9 @@ pub(crate) enum SidebarEvent {
     ShowOutbox,
     /// Enter: move on to the message list.
     Activate,
+    /// A mailbox, Drafts or Outbox row was clicked (after its select
+    /// event). The sidebar overlay closes on it.
+    RowClicked,
 }
 
 /// One keyboard stop in the sidebar: the accounts, the selected
@@ -467,6 +470,7 @@ impl SidebarView {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.cursor = Some(item);
                 cx.emit(event);
+                cx.emit(SidebarEvent::RowClicked);
             }))
             .hover_bg(is_selected, colors)
             .child(icon(icon_name, ICON_SIZE_SM, colors.muted))
@@ -507,6 +511,7 @@ impl SidebarView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.cursor = Some(SidebarItem::Mailbox(mailbox_id));
                         cx.emit(SidebarEvent::SelectMailbox(mailbox_id));
+                        cx.emit(SidebarEvent::RowClicked);
                     }))
                     .hover_bg(is_selected, colors)
                     .child(

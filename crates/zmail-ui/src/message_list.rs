@@ -98,6 +98,9 @@ pub(crate) enum MessageListEvent {
     SelectOutboxJob(i64),
     /// Enter: move on to the detail pane.
     Activate,
+    /// A thread, search result or draft row was clicked (after its open
+    /// event). The single-pane layout shows the detail pane on it.
+    RowClicked,
     /// Reading the rows failed.
     Error(String),
 }
@@ -613,6 +616,7 @@ impl MessageListView {
                             thread_id,
                             mailbox_id,
                         });
+                        cx.emit(MessageListEvent::RowClicked);
                         cx.notify();
                     }))
                     .hover_bg(is_selected, colors)
@@ -678,6 +682,7 @@ impl MessageListView {
                             thread_id,
                             mailbox_id,
                         });
+                        cx.emit(MessageListEvent::RowClicked);
                         cx.notify();
                     }))
                     .hover_bg(is_selected, colors)
@@ -736,6 +741,7 @@ impl MessageListView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.selected_draft_id = Some(draft_id);
                         cx.emit(MessageListEvent::OpenDraft(draft_id));
+                        cx.emit(MessageListEvent::RowClicked);
                         cx.notify();
                     }))
                     .hover_bg(is_selected, colors)
