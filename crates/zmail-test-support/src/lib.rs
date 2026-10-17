@@ -125,6 +125,19 @@ impl DockerMailHarness {
         self.compose(["down", "-v", "--remove-orphans"])
     }
 
+    /// Returns the last `tail` log lines of one harness service, for
+    /// diagnosing a failed live test.
+    pub fn logs(&self, service: &str, tail: usize) -> String {
+        match self.compose_output(["logs", "--no-color", "--tail", &tail.to_string(), service]) {
+            Ok(output) => format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Err(error) => format!("could not read the {service} logs: {error:#}"),
+        }
+    }
+
     fn wait_until_ready(&self, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
         let smtp = SocketAddr::from(([127, 0, 0, 1], MAIL_HARNESS_SMTP_PORT));

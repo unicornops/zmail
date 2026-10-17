@@ -1,5 +1,7 @@
 //! Background runtime bootstrap and sync supervision for Phase 3.
 
+mod backoff;
+
 use std::{
     collections::HashSet,
     sync::{
@@ -8,10 +10,11 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
+use backoff::Backoff;
 use tokio::{
     runtime::{Builder, Handle},
     sync::oneshot,
@@ -146,6 +149,10 @@ struct SyncServiceInner {
     store: Arc<LocalStore>,
     secrets: Arc<dyn SecretStore>,
     active_accounts: Mutex<HashSet<i64>>,
+    /// Accounts whose running sync must run once more when it finishes,
+    /// because a change was reported while it ran. Always locked after
+    /// `active_accounts`.
+    resync_requested: Mutex<HashSet<i64>>,
     outbox_supervisor_started: AtomicBool,
     watched_accounts: Mutex<HashSet<i64>>,
     watcher_poll_interval: Mutex<Option<Duration>>,
@@ -183,6 +190,7 @@ impl SyncService {
                 store,
                 secrets,
                 active_accounts: Mutex::new(HashSet::new()),
+                resync_requested: Mutex::new(HashSet::new()),
                 outbox_supervisor_started: AtomicBool::new(false),
                 watched_accounts: Mutex::new(HashSet::new()),
                 watcher_poll_interval: Mutex::new(None),
@@ -225,6 +233,33 @@ impl SyncService {
         });
 
         Ok(true)
+    }
+
+    /// Starts a sync for a change the server reported.
+    ///
+    /// Unlike [`SyncService::sync_account`], a request that arrives while a
+    /// sync is already running is not dropped: the running sync runs once
+    /// more when it finishes, so a change reported mid-sync always reaches
+    /// the store. Requests during one run coalesce into a single rerun.
+    pub fn request_sync(&self, account_id: i64) {
+        let mut active = self
+            .inner
+            .active_accounts
+            .lock()
+            .expect("active account tracking mutex should not be poisoned");
+        if active.insert(account_id) {
+            drop(active);
+            let service = self.clone();
+            self.inner.handle.spawn(async move {
+                let _ = service.run_sync_job(account_id).await;
+            });
+        } else {
+            self.inner
+                .resync_requested
+                .lock()
+                .expect("resync request mutex should not be poisoned")
+                .insert(account_id);
+        }
     }
 
     /// Runs a sync for a single account and blocks the caller until completion.
@@ -470,9 +505,9 @@ impl SyncService {
     /// returns the number started.
     ///
     /// IMAP accounts hold one IDLE connection and JMAP accounts hold one
-    /// event-source connection; both trigger a sync as soon as the server
-    /// reports a change and fall back to the poll interval when the server
-    /// lacks the capability or the connection drops.
+    /// push connection (event source, or WebSocket when only that opens);
+    /// both trigger a sync as soon as the server reports a change and fall
+    /// back to the poll interval when the server lacks the capability.
     pub fn start_mail_watcher(&self) -> Result<usize> {
         self.start_mail_watcher_with_interval(MAIL_WATCHER_POLL_INTERVAL)
     }
@@ -567,7 +602,7 @@ impl SyncService {
     /// Credentials are re-resolved on every reconnect so OAuth2 accounts
     /// pick up refreshed access tokens without restarting the watcher.
     async fn run_mail_watcher(&self, target: SyncTarget, poll_interval: Duration) {
-        let mut reconnect_backoff = Duration::from_secs(1);
+        let mut backoff = Backoff::reconnect();
         loop {
             // Stop watching accounts that no longer exist so the watcher
             // registry slot is free if the id is ever reused.
@@ -587,49 +622,69 @@ impl SyncService {
                 // A transient refresh failure (for example an offline token
                 // endpoint) backs off and retries like a dropped connection;
                 // permanent account deletion is caught by the check above.
-                sleep(reconnect_backoff).await;
-                reconnect_backoff = reconnect_backoff
-                    .saturating_mul(2)
-                    .min(Duration::from_secs(60));
+                sleep(backoff.next_delay()).await;
                 continue;
             };
 
             match target.protocol {
                 ProtocolKind::Imap => {
                     match zmail_imap::wait_for_mail_changes(&target, &secret, poll_interval).await {
-                        Ok(()) => {
-                            reconnect_backoff = Duration::from_secs(1);
-                        }
+                        Ok(()) => backoff.reset(),
                         Err(_) => {
                             // The IDLE connection dropped; wait with a
                             // bounded backoff before reconnecting.
-                            sleep(reconnect_backoff).await;
-                            reconnect_backoff = reconnect_backoff
-                                .saturating_mul(2)
-                                .min(Duration::from_secs(60));
+                            sleep(backoff.next_delay()).await;
                         }
                     }
+                    self.request_sync(target.id);
                 }
                 ProtocolKind::Jmap => {
-                    // Event-source push wakes the watcher as soon as the
-                    // server reports a change; errors (or servers without
-                    // the eventSource capability) back off and retry, so
-                    // the interval bounds worst-case latency.
-                    match zmail_jmap::wait_for_mail_changes(&target, &secret, poll_interval).await {
-                        Ok(()) => {
-                            reconnect_backoff = Duration::from_secs(1);
-                        }
-                        Err(_) => {
-                            sleep(reconnect_backoff).await;
-                            reconnect_backoff = reconnect_backoff
-                                .saturating_mul(2)
-                                .min(Duration::from_secs(60));
-                        }
-                    }
+                    self.watch_jmap_push(&target, &secret, poll_interval, &mut backoff)
+                        .await;
                 }
             }
+        }
+    }
 
-            let _ = self.sync_account(target.id);
+    /// Holds one JMAP push connection until it ends, syncing on connect
+    /// and on every reported mail change, then waits before the caller
+    /// reconnects.
+    ///
+    /// Servers without a usable push transport are polled at
+    /// `poll_interval` instead.
+    async fn watch_jmap_push(
+        &self,
+        target: &SyncTarget,
+        secret: &str,
+        poll_interval: Duration,
+        backoff: &mut Backoff,
+    ) {
+        let account_id = target.id;
+        let mut connected_at = None;
+        let result = zmail_jmap::watch_mail_changes(
+            target,
+            secret,
+            zmail_jmap::PushPreference::Auto,
+            |event| {
+                // Every connect resyncs: changes made while no stream was
+                // open are not replayed by the server.
+                if let zmail_jmap::PushEvent::Connected(_) = event {
+                    connected_at = Some(Instant::now());
+                }
+                self.request_sync(account_id);
+            },
+        )
+        .await;
+        match result {
+            Ok(zmail_jmap::PushEnd::Unsupported) => {
+                backoff.reset();
+                sleep(poll_interval).await;
+                self.request_sync(account_id);
+            }
+            Ok(zmail_jmap::PushEnd::Closed(_)) | Err(_) => {
+                let delay = backoff.after_disconnect(connected_at.map(|at: Instant| at.elapsed()));
+                sleep(delay).await;
+            }
         }
     }
 
@@ -709,13 +764,27 @@ impl SyncService {
     }
 
     async fn run_sync_job(self, account_id: i64) -> Result<()> {
-        let result = self.run_sync_with_retries(account_id).await;
-        self.inner
-            .active_accounts
-            .lock()
-            .expect("active account tracking mutex should not be poisoned")
-            .remove(&account_id);
-        result
+        loop {
+            let result = self.run_sync_with_retries(account_id).await;
+            // The rerun check and the release happen under the active lock,
+            // which `request_sync` also holds, so a request is either seen
+            // here or starts its own sync; it is never lost in between.
+            let mut active = self
+                .inner
+                .active_accounts
+                .lock()
+                .expect("active account tracking mutex should not be poisoned");
+            let rerun = self
+                .inner
+                .resync_requested
+                .lock()
+                .expect("resync request mutex should not be poisoned")
+                .remove(&account_id);
+            if !rerun {
+                active.remove(&account_id);
+                return result;
+            }
+        }
     }
 
     async fn run_sync_with_retries(&self, account_id: i64) -> Result<()> {
@@ -1281,6 +1350,87 @@ mod tests {
         assert!(
             started_at.elapsed() < Duration::from_millis(250),
             "scheduling sync should stay non-blocking for the caller"
+        );
+    }
+
+    /// Fails every credential lookup instantly and counts the lookups, one
+    /// per sync attempt.
+    #[derive(Debug, Default)]
+    struct CountingSecretStore {
+        lookups: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SecretStore for CountingSecretStore {
+        fn set_account_secret(&self, _account_id: i64, _secret: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_account_secret(&self, _account_id: i64) -> Result<String> {
+            self.lookups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow!("synthetic missing secret"))
+        }
+
+        fn delete_account_secret(&self, _account_id: i64) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_account_secret_in_slot(
+            &self,
+            _account_id: i64,
+            _slot: SecretSlot,
+            _secret: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_account_secret_from_slot(
+            &self,
+            _account_id: i64,
+            _slot: SecretSlot,
+        ) -> Result<String> {
+            Err(anyhow!("synthetic slot lookup"))
+        }
+
+        fn delete_account_secret_in_slot(&self, _account_id: i64, _slot: SecretSlot) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_requests_during_a_running_sync_coalesce_into_one_rerun() {
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let account_id = insert_account(&store, AuthKind::Password);
+        let secrets = Arc::new(CountingSecretStore::default());
+        let service = SyncService::new(
+            tokio::runtime::Handle::current().clone(),
+            store.clone(),
+            secrets.clone(),
+        );
+
+        // Each sync makes two attempts two seconds apart, one credential
+        // lookup each. The later requests arrive while the first sync runs.
+        service.request_sync(account_id);
+        service.request_sync(account_id);
+        service.request_sync(account_id);
+
+        let lookups = || secrets.lookups.load(std::sync::atomic::Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while lookups() < 4 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // Give a wrongly scheduled third run time to show up.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            lookups(),
+            4,
+            "two requests mid-sync coalesce into one rerun"
+        );
+        assert!(
+            service
+                .sync_account(account_id)
+                .expect("sync should be scheduled"),
+            "the account is released once the rerun finishes"
         );
     }
 
