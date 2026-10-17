@@ -128,6 +128,9 @@ pub(crate) fn toolbar_button(
         .border_color(rgb(border))
         .text_color(rgb(foreground))
         .cursor_pointer()
+        // Toolbar buttons sit in the title bar: a press must reach the
+        // button, not start a window drag (see `components::title_bar`).
+        .occlude()
         .on_click(on_click)
         .when_some(icon_name, |this, name| {
             this.child(icon(name, ICON_SIZE_SM, foreground))

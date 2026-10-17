@@ -5,7 +5,7 @@
 //! was (only the search field takes focus), so Sync or Theme do not pull
 //! focus out of the message list.
 
-use gpui::{Context, IntoElement, MouseButton, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, MouseButton, div, prelude::*, px};
 use zmail_core::ThemeAppearance;
 
 use super::{ListMode, WorkspaceView};
@@ -14,12 +14,15 @@ use crate::actions::{
     SyncAll, ToggleTheme,
 };
 use crate::pane::dispatch_from;
-use crate::styles::{MenuPlacement, PlatformStyle, SEARCH_FIELD_WIDTH, TOOLBAR_HEIGHT, UiColors};
+use crate::styles::{SEARCH_FIELD_WIDTH, TOOLBAR_HEIGHT, UiColors};
 use crate::widgets::{HoverExt, interactive_background, toolbar_button};
 
 impl WorkspaceView {
-    /// Render the top section of the workspace: the action-button bar,
-    /// including the inline search field.
+    /// Render the toolbar: the action buttons and the inline search
+    /// field. It sits inside the window's title bar (see
+    /// `components::title_bar`), which draws the background, the bottom
+    /// border and the app-menu button; every interactive element here
+    /// must `.occlude()` so a press on it is not a window drag.
     ///
     /// Internal diagnostics that used to sit above the buttons live in
     /// [`crate::diagnostics`] until the Settings → About page exists.
@@ -38,6 +41,8 @@ impl WorkspaceView {
         div()
             .flex()
             .flex_col()
+            .flex_1()
+            .min_w_0()
             // ---- Toolbar action buttons + search field -------------------
             .child(
                 div()
@@ -54,8 +59,6 @@ impl WorkspaceView {
                     // Buttons here do not take keyboard focus; the search
                     // field focuses itself before this runs.
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    .border_b_1()
-                    .border_color(rgb(colors.border))
                     .child(
                         toolbar_button(
                             "Add Account",
@@ -145,6 +148,7 @@ impl WorkspaceView {
                         div()
                             .flex_none()
                             .w(px(SEARCH_FIELD_WIDTH))
+                            .occlude()
                             .child(self.search_query.clone()),
                     )
                     .child(
@@ -190,11 +194,6 @@ impl WorkspaceView {
                             dispatch_from(&self.focus_handle, ToggleTheme),
                         )
                         .hover_bg(false, colors),
-                    )
-                    // The command menu (macOS has the menu bar instead).
-                    .when(
-                        PlatformStyle::current().menu != MenuPlacement::MenuBar,
-                        |this| this.child(div().ml_auto().child(self.app_menu.clone())),
                     ),
             )
     }

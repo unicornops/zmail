@@ -38,7 +38,7 @@ use crate::actions::{
     Undo,
 };
 use crate::app_menu::AppMenuButton;
-use crate::components::{self, TextInput, TextInputEvent};
+use crate::components::{self, TextInput, TextInputEvent, TitleBar};
 use crate::compose::{ComposeEvent, ComposeView};
 use crate::mail_actions::{MailActions, MailEvent};
 use crate::message_list::{MessageListEvent, MessageListState, MessageListView};
@@ -46,8 +46,8 @@ use crate::pane::Pane;
 use crate::reader::{ReaderState, ReaderView};
 use crate::sidebar::{SidebarEvent, SidebarState, SidebarView};
 use crate::styles::{
-    DETAIL_MIN_WIDTH, ICON_SIZE_SM, MESSAGE_LIST_WIDTH, PlatformStyle, SIDEBAR_MIN_WIDTH,
-    SIDEBAR_WIDTH, UiColors,
+    DETAIL_MIN_WIDTH, ICON_SIZE_SM, MESSAGE_LIST_WIDTH, MenuPlacement, PlatformStyle,
+    SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, UiColors,
 };
 use crate::widgets::{HoverExt, icon, status_banner};
 
@@ -1516,7 +1516,7 @@ fn detail_style() -> StyleRefinement {
 }
 
 impl Render for WorkspaceView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = UiColors::from_theme(&self.bootstrap.theme);
         // Components read the theme from a global; keep it in step.
         components::ComponentTheme::sync(&self.bootstrap.theme, cx);
@@ -1530,7 +1530,7 @@ impl Render for WorkspaceView {
             DetailMode::AccountSetup => self.account_setup.clone().into(),
         };
 
-        div()
+        let root = div()
             .id("workspace")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -1560,15 +1560,21 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::move_to_mailbox))
             .size_full()
             .font_family(PlatformStyle::current().ui_font.family())
-            .bg(rgb(colors.background))
             .text_color(rgb(colors.foreground))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .size_full()
-                    // ---- Toolbar -----------------------------------------------
-                    .child(self.render_toolbar(&colors, cx))
+                    // ---- Title bar, with the toolbar inside it ----------------
+                    .child(
+                        TitleBar::new("title-bar")
+                            .when(
+                                PlatformStyle::current().menu != MenuPlacement::MenuBar,
+                                |this| this.trailing(self.app_menu.clone()),
+                            )
+                            .child(self.render_toolbar(&colors, cx)),
+                    )
                     // ---- The three panes, each its own cached view ------------
                     .child(
                         div()
@@ -1615,7 +1621,10 @@ impl Render for WorkspaceView {
                             ),
                         )
                     }),
-            )
+            );
+        // The Linux client-side decoration frame (nothing elsewhere); it
+        // also paints the window background.
+        components::window_frame(root, window, cx)
     }
 }
 

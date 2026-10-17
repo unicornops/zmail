@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use gpui::{
     App, AppContext as _, AssetSource, Bounds, Entity, FocusHandle, Subscription, TitlebarOptions,
-    WindowBounds, WindowOptions, px, size,
+    WindowBounds, WindowDecorations, WindowOptions, point, px, size,
 };
 use zmail_core::{
     APP_NAME, AccountOverview, AccountSummary, AppBootstrap, DraftSummary, IdentitySummary,
@@ -46,6 +46,7 @@ use crate::styles::{WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_W
 
 mod components;
 use crate::components::TextInput;
+use crate::components::title_bar::TRAFFIC_LIGHT_POSITION;
 pub use components::gallery::run_gallery;
 
 mod account_setup;
@@ -137,10 +138,24 @@ pub fn run(
 
             if let Err(error) = cx.open_window(
                 WindowOptions {
+                    // Zmail draws its own title bar (`components::title_bar`)
+                    // with the toolbar inside it: transparent over the
+                    // traffic lights on macOS, custom caption buttons on
+                    // Windows, and a client-side header bar on Linux when
+                    // the compositor supports it.
                     titlebar: Some(TitlebarOptions {
                         title: Some(APP_NAME.into()),
-                        ..Default::default()
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(
+                            px(TRAFFIC_LIGHT_POSITION.0),
+                            px(TRAFFIC_LIGHT_POSITION.1),
+                        )),
                     }),
+                    // The title bar moves the window itself
+                    // (`start_window_move`), so AppKit must not also drag
+                    // it or delay its clicks (macOS only).
+                    app_owns_titlebar_drag: true,
+                    window_decorations: Some(window_decorations()),
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
                     // Matches the macOS bundle id and the packaged
@@ -172,6 +187,19 @@ pub fn run(
                 panic!("failed to open the Phase 4 window: {error:#}");
             }
         });
+}
+
+/// The decorations to ask the window system for. Client-side by default:
+/// GNOME on Wayland draws none of its own, and X11 without a compositor and
+/// KDE fall back to server-side anyway (`Window::window_decorations` says
+/// which the window got). `ZMAIL_WINDOW_DECORATIONS=server` forces the
+/// window manager's title bar, for desktops where the drawn one misbehaves.
+/// Only Linux reads this; macOS and Windows ignore it.
+fn window_decorations() -> WindowDecorations {
+    match std::env::var("ZMAIL_WINDOW_DECORATIONS").as_deref() {
+        Ok("server") => WindowDecorations::Server,
+        _ => WindowDecorations::Client,
+    }
 }
 
 // ---------------------------------------------------------------------------
