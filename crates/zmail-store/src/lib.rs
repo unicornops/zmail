@@ -368,7 +368,10 @@ END;
 
 /// Re-indexes every dirty thread: drops its document, rebuilds it from the
 /// stored rows (deleted threads simply get no new document) and clears the
-/// dirty set. Run inside the writer's transaction.
+/// dirty set. Run inside the writer's transaction. Messages are joined
+/// oldest first, so a document never depends on the query plan, and the
+/// `CROSS JOIN` keeps the dirty set as the outer loop: grouping by
+/// `threads.id` let the planner scan every thread to avoid a sort.
 const SEARCH_INDEX_FLUSH: &str = r#"
 DELETE FROM search_documents WHERE rowid IN (SELECT thread_id FROM search_dirty_threads);
 INSERT INTO search_documents(rowid, subject, participants, preview, body, senders, recipients)
@@ -377,13 +380,14 @@ SELECT
     threads.subject,
     threads.participants,
     threads.preview,
-    COALESCE(GROUP_CONCAT(COALESCE(messages.body_text, messages.sanitized_html, messages.body_preview), ' '), ''),
-    COALESCE(GROUP_CONCAT(messages.sender, ' '), ''),
-    COALESCE(GROUP_CONCAT(messages.recipients, ' '), '')
+    COALESCE(GROUP_CONCAT(COALESCE(messages.body_text, messages.sanitized_html, messages.body_preview), ' '
+        ORDER BY messages.received_at, messages.id), ''),
+    COALESCE(GROUP_CONCAT(messages.sender, ' ' ORDER BY messages.received_at, messages.id), ''),
+    COALESCE(GROUP_CONCAT(messages.recipients, ' ' ORDER BY messages.received_at, messages.id), '')
 FROM search_dirty_threads
-JOIN threads ON threads.id = search_dirty_threads.thread_id
+CROSS JOIN threads ON threads.id = search_dirty_threads.thread_id
 LEFT JOIN messages ON messages.thread_id = threads.id
-GROUP BY threads.id;
+GROUP BY search_dirty_threads.thread_id;
 DELETE FROM search_dirty_threads;
 "#;
 
