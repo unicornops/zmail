@@ -492,7 +492,7 @@ impl LocalStore {
 
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the account creation transaction")?;
 
         transaction.execute(
@@ -951,7 +951,7 @@ impl LocalStore {
     pub fn evict_account_blobs(&self, account_id: i64, budget_bytes: u64) -> Result<u64> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the eviction transaction")?;
         let mut usage = account_blob_usage(&transaction, account_id)?;
         if usage <= budget_bytes {
@@ -1861,7 +1861,7 @@ impl LocalStore {
     pub fn hydrate_message_body(&self, message_id: i64, hydration: &HydratedBody) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the hydration transaction")?;
         let thread_id: Option<i64> = transaction
             .query_row(
@@ -2049,7 +2049,7 @@ impl LocalStore {
     ) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the snapshot transaction")?;
 
         if let Some(identities) = &snapshot.identities {
@@ -2200,7 +2200,7 @@ impl LocalStore {
     pub fn set_thread_flagged(&self, thread_id: i64, flagged: bool) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the flag-state transaction")?;
         let Some(location) = thread_location(&transaction, thread_id)? else {
             return Ok(());
@@ -2243,7 +2243,7 @@ impl LocalStore {
     pub fn set_thread_read(&self, thread_id: i64, read: bool) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the read-state transaction")?;
         let Some(location) = thread_location(&transaction, thread_id)? else {
             return Ok(());
@@ -2287,7 +2287,7 @@ impl LocalStore {
     pub fn move_thread(&self, thread_id: i64, destination_mailbox_id: i64) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the move transaction")?;
         let Some(location) = thread_location(&transaction, thread_id)? else {
             return Ok(());
@@ -2348,7 +2348,7 @@ impl LocalStore {
     pub fn delete_thread(&self, thread_id: i64) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the delete transaction")?;
         let Some(location) = thread_location(&transaction, thread_id)? else {
             return Ok(());
@@ -2591,7 +2591,7 @@ impl LocalStore {
     pub fn create_draft(&self, draft: &NewDraft) -> Result<i64> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the draft creation transaction")?;
         let identity = load_identity_snapshot(&transaction, draft.account_id, draft.identity_id)?
             .with_context(|| {
@@ -2765,7 +2765,7 @@ impl LocalStore {
     pub fn update_draft(&self, draft_id: i64, update: &DraftUpdate) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the draft autosave transaction")?;
         let (account_id, state) = transaction
             .query_row(
@@ -2867,7 +2867,7 @@ impl LocalStore {
 
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the attachment transaction")?;
         let state = transaction
             .query_row(
@@ -2925,7 +2925,7 @@ impl LocalStore {
     pub fn remove_draft_attachment(&self, attachment_id: i64) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the attachment removal transaction")?;
         let attachment = transaction
             .query_row(
@@ -2978,7 +2978,7 @@ impl LocalStore {
     pub fn queue_draft(&self, draft_id: i64) -> Result<i64> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the outbox queue transaction")?;
         let draft = transaction
             .query_row(
@@ -3098,7 +3098,7 @@ impl LocalStore {
     ) -> Result<Option<PendingOutboxJob>> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the outbox claim transaction")?;
         let now = utc_now_timestamp();
         let job_id = transaction
@@ -3168,7 +3168,7 @@ impl LocalStore {
     ) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the outbox retry transaction")?;
         let draft_id = transaction
             .query_row(
@@ -3218,7 +3218,7 @@ impl LocalStore {
     pub fn record_outbox_failure(&self, job_id: i64, error: impl AsRef<str>) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the outbox failure transaction")?;
         let draft_id = transaction
             .query_row(
@@ -3261,7 +3261,7 @@ impl LocalStore {
     pub fn record_outbox_sent(&self, job_id: i64) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the outbox success transaction")?;
         let draft_id = transaction
             .query_row(
@@ -3305,7 +3305,7 @@ impl LocalStore {
     pub fn retry_outbox_job(&self, job_id: i64) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the outbox requeue transaction")?;
         let (draft_id, state) = transaction
             .query_row(
@@ -3376,7 +3376,7 @@ impl LocalStore {
             }
 
             let transaction = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .context("failed to begin the migration transaction")?;
             transaction
                 .execute_batch(sql)
@@ -3446,6 +3446,13 @@ impl LocalStore {
         .map_err(Into::into)
     }
 
+    /// Opens a connection to the store.
+    ///
+    /// Every write transaction begins `IMMEDIATE`, taking the write lock up
+    /// front. The UI and the sync runtime write from separate connections;
+    /// a deferred transaction that reads before writing fails at once with
+    /// "database is locked" if the other side commits in between, because
+    /// the busy timeout does not cover that upgrade.
     fn connection(&self) -> Result<Connection> {
         let conn = Connection::open(&*self.path)
             .with_context(|| format!("failed to open {}", self.path.display()))?;
@@ -6900,6 +6907,56 @@ mod tests {
                 .expect("search should work")
                 .is_empty()
         );
+    }
+
+    /// A write that starts while another connection (the sync runtime,
+    /// say) holds the write lock waits for it instead of failing with
+    /// "database is locked". A deferred transaction would read first, and
+    /// its later upgrade to a write fails at once once the other writer
+    /// has committed: the busy timeout does not apply to that.
+    #[test]
+    fn writes_wait_for_a_concurrent_writer() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity = store
+            .list_identities(account_id)
+            .expect("identities should load")
+            .into_iter()
+            .next()
+            .expect("demo account should have an identity");
+
+        let other = rusqlite::Connection::open(store.path()).expect("second connection opens");
+        other
+            .busy_timeout(Duration::from_secs(5))
+            .expect("busy timeout set");
+        other
+            .execute_batch("BEGIN IMMEDIATE; UPDATE accounts SET display_name = display_name;")
+            .expect("the other connection takes the write lock");
+
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                store.create_draft(&NewDraft {
+                    account_id,
+                    identity_id: identity.id,
+                    to: Vec::new(),
+                    cc: Vec::new(),
+                    bcc: Vec::new(),
+                    subject: "Concurrent".to_owned(),
+                    body: String::new(),
+                })
+            });
+            // Let the draft write start and block on the lock.
+            std::thread::sleep(Duration::from_millis(300));
+            other
+                .execute_batch("COMMIT")
+                .expect("the other writer commits");
+            writer
+                .join()
+                .expect("the writer thread finishes")
+                .expect("the draft is created once the lock is free");
+        });
     }
 
     #[test]

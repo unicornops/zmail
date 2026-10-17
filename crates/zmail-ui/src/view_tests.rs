@@ -696,12 +696,14 @@ fn every_toolbar_action_is_dispatchable_by_keybinding(cx: &mut TestAppContext) {
     keys("secondary-shift-t", cx);
     assert_ne!(appearance(cx), before);
 
-    // Sync Selected and Sync All.
+    // Sync All and Sync Selected. Sync All goes first: it starts the one
+    // account's sync, and Sync Selected reports the same whether that sync
+    // is still running or has already failed (it runs on real threads, so
+    // the test cannot know which).
+    keys("shift-f5", cx);
+    assert_eq!(status(cx), "Syncing 1 account…");
     keys("f5", cx);
     assert_eq!(status(cx), "Syncing Work…");
-    keys("shift-f5", cx);
-    // The account is already syncing, so Sync All starts nothing new.
-    assert_eq!(status(cx), "Syncing 0 accounts…");
 
     // Search (Enter in the field runs it; see search_field_enter_runs_the_search).
     keys("secondary-f", cx);
