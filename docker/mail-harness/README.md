@@ -31,7 +31,7 @@ The harness wrapper provisions the James JMAP users automatically on `up` and `r
 
 `live_mail_harness` starts the harness, syncs the preloaded IMAP mail, submits a message through SMTP, and confirms the next IMAP sync sees the new message.
 
-`live_jmap_harness` starts the harness, syncs mail from the proxied James JMAP endpoint, submits new mail through SMTP, and confirms the next JMAP sync sees the new message.
+`live_jmap_harness` starts the harness, syncs mail from the proxied James JMAP endpoint, submits new mail through SMTP, and confirms the next JMAP sync sees the new message. Its push tests open the James event source and WebSocket push (RFC 8620 section 7.3, RFC 8887) through the nginx proxy, which passes the WebSocket upgrade through and does not buffer, and check that a running mail watcher brings pushed mail and remote keyword changes into the store through `Email/changes` without a manual sync.
 
 ## Dovecot CONDSTORE service
 

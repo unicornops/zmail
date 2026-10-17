@@ -1,14 +1,15 @@
 //! Real JMAP adapter for Phase 2.
 
+mod changes;
+mod push;
+
 use std::collections::{BTreeMap, HashMap};
 
-use std::{fs, time::Duration};
+use std::fs;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
 use jmap_client::{
-    DataType,
     client::Client,
     core::{
         query::QueryResponse,
@@ -27,6 +28,10 @@ use zmail_core::{
 use zmail_security::sanitize_html_for_display;
 use zmail_smtp::render_rfc822_message;
 
+pub use push::{
+    PUSH_PING_INTERVAL, PushEnd, PushEvent, PushPreference, PushTransport, watch_mail_changes,
+};
+
 /// The Phase 0 decision for the first JMAP implementation spike.
 pub const IMPLEMENTATION_STRATEGY: &str =
     "Start behind an internal adapter boundary with a third-party JMAP client candidate.";
@@ -39,7 +44,7 @@ pub const MVP_SCOPE: &[&str] = &[
     "EmailSubmission",
 ];
 
-const QUERY_PAGE_SIZE: usize = 250;
+pub(crate) const QUERY_PAGE_SIZE: usize = 250;
 /// Maximum number of attachment blobs persisted per message, mirroring the
 /// IMAP adapter's cap.
 const MAX_ATTACHMENTS_PER_MESSAGE: usize = 25;
@@ -78,15 +83,67 @@ pub async fn discover_and_sync(
             .collect();
     }
     let (mailbox_details, mailbox_state) = fetch_mailboxes(&client).await?;
+    let mailbox_ids = changes::mailbox_id_map(&mailbox_details);
+
+    // Incremental path: once a sync has recorded the Email state, only the
+    // emails changed since then are fetched (`Email/changes`). It falls
+    // back to the full sync below whenever the server cannot say what
+    // changed.
+    if let (Some(email_state), Some(previous_mailbox_ids)) = (
+        checkpoint.email_state.as_deref(),
+        checkpoint.mailbox_ids.as_ref(),
+    ) && !existing_mailboxes.is_empty()
+    {
+        let primary = primary_identity(&identities, &target.username).to_owned();
+        if let Some(incremental) = changes::sync_email_changes(
+            &client,
+            email_state,
+            previous_mailbox_ids,
+            &mailbox_details,
+            existing_mailboxes,
+            &primary,
+            &target.attachments_dir,
+        )
+        .await?
+        {
+            let detail = if incremental.changed_emails == 0 {
+                format!("JMAP mailbox state unchanged for {}", target.display_name)
+            } else {
+                format!(
+                    "JMAP incremental sync applied {} email changes for {}",
+                    incremental.changed_emails, target.display_name
+                )
+            };
+            return Ok(AccountSyncSnapshot {
+                checkpoint: JmapCheckpoint {
+                    mailbox_query_state: Some(mailbox_state),
+                    email_query_state: None,
+                    email_state: Some(incremental.email_state),
+                    mailbox_ids: Some(mailbox_ids),
+                }
+                .to_json()?,
+                detail,
+                identities: Some(identities),
+                mailboxes: incremental.mailboxes,
+            });
+        }
+    }
+
+    // The state is read before the query, so anything that changes while
+    // the full sync runs shows up in the next `Email/changes`.
+    let email_state = changes::fetch_email_state(&client).await?;
     let email_query = fetch_email_query(&client).await?;
 
     if checkpoint.mailbox_query_state.as_deref() == Some(mailbox_state.as_str())
         && checkpoint.email_query_state.as_deref() == Some(email_query.query_state.as_str())
+        && !existing_mailboxes.is_empty()
     {
         return Ok(AccountSyncSnapshot {
             checkpoint: JmapCheckpoint {
                 mailbox_query_state: Some(mailbox_state),
                 email_query_state: Some(email_query.query_state),
+                email_state: Some(email_state),
+                mailbox_ids: Some(mailbox_ids),
             }
             .to_json()?,
             detail: format!("JMAP mailbox state unchanged for {}", target.display_name),
@@ -102,6 +159,8 @@ pub async fn discover_and_sync(
         checkpoint: JmapCheckpoint {
             mailbox_query_state: Some(mailbox_state),
             email_query_state: Some(email_query.query_state),
+            email_state: Some(email_state),
+            mailbox_ids: Some(mailbox_ids),
         }
         .to_json()?,
         detail: format!(
@@ -112,43 +171,6 @@ pub async fn discover_and_sync(
         identities: Some(identities),
         mailboxes,
     })
-}
-
-/// Waits until the JMAP server reports a state change or the timeout
-/// elapses, whichever comes first.
-///
-/// The wait holds one event-source connection (SSE) for Email and Mailbox
-/// state changes, with the keepalive ping set to the same interval as the
-/// timeout so only genuine state changes wake the caller early. Transport
-/// errors return `Err` so the caller can back off and fall back to its
-/// polling interval.
-pub async fn wait_for_mail_changes(
-    target: &SyncTarget,
-    secret: &str,
-    wait: Duration,
-) -> Result<()> {
-    if target.protocol != ProtocolKind::Jmap {
-        bail!("JMAP adapter received a non-JMAP sync target");
-    }
-
-    let client = connect_client(&target.endpoint, &target.username, secret, target.auth).await?;
-    let mut notifications = client
-        .event_source(
-            Some([DataType::Email, DataType::Mailbox]),
-            false,
-            Some(wait.as_secs().max(1) as u32),
-            None,
-        )
-        .await
-        .context("failed to open the JMAP event source")?;
-
-    match tokio::time::timeout(wait, notifications.next()).await {
-        Ok(Some(Ok(_notification))) => Ok(()),
-        Ok(Some(Err(error))) => Err(anyhow::anyhow!("the JMAP event source failed: {error}")),
-        // The server closed the stream; the caller reopens on the next loop.
-        Ok(None) => Ok(()),
-        Err(_elapsed) => Ok(()),
-    }
 }
 
 /// Applies queued mailbox operations to the live JMAP account.
@@ -294,6 +316,13 @@ pub async fn submit_outgoing_message(
 struct JmapCheckpoint {
     mailbox_query_state: Option<String>,
     email_query_state: Option<String>,
+    /// `Email` state of the mirror, the `sinceState` of the next
+    /// `Email/changes`.
+    #[serde(default)]
+    email_state: Option<String>,
+    /// Server mailbox ids and the names the mirror stores them under.
+    #[serde(default)]
+    mailbox_ids: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug)]
@@ -303,7 +332,7 @@ struct JmapQueryResult {
 }
 
 #[derive(Debug)]
-struct JmapMailbox {
+pub(crate) struct JmapMailbox {
     id: String,
     name: String,
     role: Option<String>,
@@ -311,7 +340,7 @@ struct JmapMailbox {
 }
 
 #[derive(Debug)]
-struct JmapEmail {
+pub(crate) struct JmapEmail {
     id: String,
     thread_id: String,
     mailbox_ids: Vec<String>,
@@ -369,7 +398,7 @@ fn jmap_credentials(
     }
 }
 
-async fn connect_client(
+pub(crate) async fn connect_client(
     endpoint: &str,
     username: &str,
     secret: &str,
@@ -520,7 +549,7 @@ async fn fetch_email_query(client: &Client) -> Result<JmapQueryResult> {
 /// binary download URL; `jmap-client` 0.4.0 has no `Blob/get` request helper,
 /// but the download endpoint returns the same bytes. Failures skip the part
 /// rather than failing the sync, mirroring the IMAP adapter's tolerance.
-async fn fetch_emails(
+pub(crate) async fn fetch_emails(
     client: &Client,
     ids: &[String],
     attachments_dir: &str,
@@ -705,19 +734,9 @@ fn group_mailboxes(
         })
         .collect::<HashMap<_, _>>();
 
-    let primary_identity = identities
-        .iter()
-        .find(|identity| identity.is_primary)
-        .or_else(|| identities.first())
-        .map(|identity| identity.email_address.as_str())
-        .unwrap_or(fallback_identity);
+    let primary_identity = primary_identity(identities, fallback_identity);
 
     for email in emails {
-        let identity_email = if email.identity_email.is_empty() {
-            primary_identity.to_owned()
-        } else {
-            email.identity_email.clone()
-        };
         for mailbox_id in &email.mailbox_ids {
             let Some(mailbox) = mailboxes.get_mut(mailbox_id) else {
                 continue;
@@ -743,22 +762,9 @@ fn group_mailboxes(
             entry.is_flagged |= email.flagged;
             entry.has_attachments |= email.has_attachments;
             entry.unread_count += usize::from(email.unread);
-            entry.messages.push(MessageSnapshot {
-                remote_id: email.id.clone(),
-                identity_email: identity_email.clone(),
-                sender: email.from.clone(),
-                reply_to: email.reply_to.clone(),
-                recipients: email.recipients.clone(),
-                subject: email.subject.clone(),
-                body_preview: email.preview.clone(),
-                body_text: email.body_text.clone(),
-                sanitized_html: email.sanitized_html.clone(),
-                has_remote_content: email.has_remote_content,
-                is_read: !email.unread,
-                is_flagged: email.flagged,
-                received_at: email.received_at.clone(),
-                attachments: email.attachments.clone(),
-            });
+            entry
+                .messages
+                .push(message_snapshot(&email, primary_identity));
         }
     }
 
@@ -800,6 +806,41 @@ fn group_mailboxes(
         .collect::<Vec<_>>();
     ordered.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.name.cmp(&right.1.name)));
     ordered.into_iter().map(|(_, mailbox)| mailbox).collect()
+}
+
+/// The identity address messages without a sender identity are filed
+/// under: the primary identity, else the first, else the login.
+fn primary_identity<'a>(identities: &'a [NewIdentity], fallback: &'a str) -> &'a str {
+    identities
+        .iter()
+        .find(|identity| identity.is_primary)
+        .or_else(|| identities.first())
+        .map(|identity| identity.email_address.as_str())
+        .unwrap_or(fallback)
+}
+
+/// Converts a fetched email into the stored message row.
+pub(crate) fn message_snapshot(email: &JmapEmail, primary_identity: &str) -> MessageSnapshot {
+    MessageSnapshot {
+        remote_id: email.id.clone(),
+        identity_email: if email.identity_email.is_empty() {
+            primary_identity.to_owned()
+        } else {
+            email.identity_email.clone()
+        },
+        sender: email.from.clone(),
+        reply_to: email.reply_to.clone(),
+        recipients: email.recipients.clone(),
+        subject: email.subject.clone(),
+        body_preview: email.preview.clone(),
+        body_text: email.body_text.clone(),
+        sanitized_html: email.sanitized_html.clone(),
+        has_remote_content: email.has_remote_content,
+        is_read: !email.unread,
+        is_flagged: email.flagged,
+        received_at: email.received_at.clone(),
+        attachments: email.attachments.clone(),
+    }
 }
 
 #[derive(Debug)]
@@ -1003,11 +1044,34 @@ mod tests {
         let checkpoint = JmapCheckpoint {
             mailbox_query_state: Some("m-1".to_owned()),
             email_query_state: Some("e-4".to_owned()),
+            email_state: Some("s-9".to_owned()),
+            mailbox_ids: Some(std::collections::BTreeMap::from([(
+                "m1".to_owned(),
+                "Inbox".to_owned(),
+            )])),
         };
         let json = checkpoint.to_json().expect("checkpoint should serialize");
         let parsed = JmapCheckpoint::from_json(Some(&json)).expect("checkpoint should parse");
         assert_eq!(parsed.mailbox_query_state.as_deref(), Some("m-1"));
         assert_eq!(parsed.email_query_state.as_deref(), Some("e-4"));
+        assert_eq!(parsed.email_state.as_deref(), Some("s-9"));
+        assert_eq!(
+            parsed.mailbox_ids.as_ref().and_then(|ids| ids.get("m1")),
+            Some(&"Inbox".to_owned())
+        );
+    }
+
+    #[test]
+    fn checkpoints_from_before_email_changes_still_decode() {
+        let parsed = JmapCheckpoint::from_json(Some(
+            r#"{"mailbox_query_state":"m-1","email_query_state":"e-4"}"#,
+        ))
+        .expect("legacy checkpoint should parse");
+        assert_eq!(
+            parsed.email_state, None,
+            "a legacy checkpoint runs a full sync"
+        );
+        assert_eq!(parsed.mailbox_ids, None);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::{
     io::{BufRead, BufReader, Write},
     net::TcpStream,
-    sync::Arc,
+    sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -12,8 +12,9 @@ use anyhow::{Context, Result, bail};
 use tokio::runtime::Builder;
 use zmail_core::{
     AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutgoingAttachment, OutgoingConfig,
-    OutgoingMessage, ProtocolKind,
+    OutgoingMessage, PendingOp, PendingOpKind, ProtocolKind,
 };
+use zmail_jmap::{PUSH_PING_INTERVAL, PushEvent, PushPreference, PushTransport};
 use zmail_security::{InMemorySecretStore, SecretStore};
 use zmail_smtp::{SubmissionConfig, SubmissionSecurity, SubmittedMessage, submit_text_message};
 use zmail_store::LocalStore;
@@ -218,7 +219,23 @@ fn submit_harness_attachment_message(
 
 #[test]
 #[ignore = "requires docker compose and the Phase 2b live mail harness"]
-fn event_source_pushes_new_mail_before_the_timeout() -> Result<()> {
+fn event_source_pushes_new_mail() -> Result<()> {
+    assert_push_reports_new_mail(PushPreference::EventSource, PushTransport::EventSource)
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn websocket_pushes_new_mail() -> Result<()> {
+    assert_push_reports_new_mail(PushPreference::WebSocket, PushTransport::WebSocket)
+}
+
+/// Opens a push session over one transport, delivers a message, and
+/// asserts the session reports the change long before the keepalive
+/// interval could have woken it.
+fn assert_push_reports_new_mail(
+    preference: PushPreference,
+    transport: PushTransport,
+) -> Result<()> {
     let _harness_lock = live_harness_lock();
     let _harness = DockerMailHarness::start()?;
     let store = Arc::new(LocalStore::open_ephemeral()?);
@@ -235,43 +252,169 @@ fn event_source_pushes_new_mail_before_the_timeout() -> Result<()> {
         .sync_target(account_id)?
         .with_context(|| "the JMAP target should load")?;
     let secret = secrets.get_account_secret(account_id)?;
-
-    // Submit a message while the event source is already listening, then
-    // assert the push arrives well before the wait's 45 s budget expires.
-    // The ping interval equals the budget, so an early return can only be
-    // a real state change, not a keepalive.
-    let submitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let submitted_writer = submitted.clone();
-    // A plain OS thread, not a runtime task: submit_harness_message builds its
-    // own current-thread runtime, which would panic on a tokio worker thread.
-    thread::spawn(move || {
-        thread::sleep(Duration::from_secs(3));
-        submit_harness_message(
-            "Phase 2b JMAP push",
-            "This message should wake the event source.",
-        )
-        .expect("harness submission should succeed");
-        submitted_writer.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (events_tx, events) = mpsc::channel();
+    let watch = runtime.handle().spawn(async move {
+        zmail_jmap::watch_mail_changes(&target, &secret, preference, move |event| {
+            let _ = events_tx.send(event);
+        })
+        .await
     });
 
-    let wait_secret = secret.clone();
+    let first = events
+        .recv_timeout(Duration::from_secs(20))
+        .context("the push session should connect")?;
+    assert_eq!(first, PushEvent::Connected(transport));
+    // Drop anything the server sends straight after connecting, so only a
+    // push caused by the delivery below can pass.
+    while events.recv_timeout(Duration::from_secs(1)).is_ok() {}
+
+    submit_harness_message(
+        "Phase 2b JMAP push",
+        "This message should wake the push session.",
+    )?;
     let started = Instant::now();
-    let push = runtime.handle().block_on(async {
-        zmail_jmap::wait_for_mail_changes(&target, &wait_secret, Duration::from_secs(45)).await
-    });
-    let elapsed = started.elapsed();
+    let pushed = events.recv_timeout(Duration::from_secs(20));
+    watch.abort();
+    match pushed {
+        Ok(PushEvent::MailChanged) => {}
+        Ok(other) => bail!("unexpected push event {other:?}"),
+        Err(_) => bail!("no {transport:?} push arrived within 20s of delivery"),
+    }
+    assert!(
+        started.elapsed() < PUSH_PING_INTERVAL,
+        "the push is a real state change, not a keepalive"
+    );
+    Ok(())
+}
 
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn mail_watcher_applies_pushed_changes_incrementally() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_JMAP_PASSWORD)?;
+
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
+    submit_harness_message("Phase 2b JMAP before push", "Synced by the full sync.")?;
+    sync_until_subject(
+        &sync_service,
+        &store,
+        account_id,
+        "Phase 2b JMAP before push",
+        12,
+    )?;
+
+    // The poll interval is far beyond the test, so only push can bring the
+    // next message in; nothing below calls sync directly.
+    sync_service.start_mail_watcher_with_interval(Duration::from_secs(3600))?;
+    // Let the connect-time resync settle before delivering.
+    thread::sleep(Duration::from_secs(3));
+    submit_harness_message(
+        "Phase 2b JMAP pushed",
+        "Delivered while the watcher listens.",
+    )?;
+    let thread_id = wait_for_subject(&store, account_id, "Phase 2b JMAP pushed", 30)?;
+    // A full sync records the query state; Email/changes clears it. A
+    // fallback to the full sync after the push would show up here.
+    let checkpoint = sync_checkpoint(&store, account_id)?;
     assert!(
-        submitted.load(std::sync::atomic::Ordering::SeqCst),
-        "the harness message was submitted"
+        checkpoint["email_state"].is_string() && checkpoint["email_query_state"].is_null(),
+        "pushed mail should arrive through Email/changes, checkpoint {checkpoint}"
     );
-    push.with_context(|| "the JMAP event source should connect against James")?;
+    let preview = store
+        .message_preview(thread_id)?
+        .context("the pushed thread should have a preview")?;
     assert!(
-        elapsed < Duration::from_secs(35),
-        "a server state change should arrive before the wait budget, took {elapsed:?}"
+        preview
+            .body_preview
+            .contains("Delivered while the watcher listens")
     );
+
+    // Another client marks the message read; the keyword change arrives as
+    // an `updated` id and keeps the stored body.
+    let remote_id = store
+        .account_mailbox_snapshots(account_id)?
+        .into_iter()
+        .flat_map(|mailbox| mailbox.threads)
+        .flat_map(|thread| thread.messages)
+        .find(|message| message.subject == "Phase 2b JMAP pushed")
+        .map(|message| message.remote_id)
+        .context("the pushed message should be stored")?;
+    let target = store
+        .sync_target(account_id)?
+        .context("the JMAP target should load")?;
+    let secret = secrets.get_account_secret(account_id)?;
+    let report = runtime.handle().block_on(zmail_jmap::apply_pending_ops(
+        &target,
+        &secret,
+        &[PendingOp {
+            id: 1,
+            account_id,
+            kind: PendingOpKind::MarkRead,
+            source_mailbox: "INBOX".to_owned(),
+            remote_id,
+            target_mailbox: None,
+            attempts: 0,
+            last_error: None,
+        }],
+    ))?;
+    assert_eq!(report.applied, vec![1], "the other client marks it read");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let thread = store
+            .thread_view(thread_id)?
+            .context("the pushed thread should still exist")?;
+        if thread.messages.iter().all(|message| message.is_read) {
+            assert!(
+                thread.messages[0].body_text.is_some()
+                    || thread.messages[0].sanitized_html.is_some(),
+                "a keyword change keeps the stored body"
+            );
+            break;
+        }
+        if Instant::now() > deadline {
+            bail!("the remote read state was not pushed within 30s");
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
 
     Ok(())
+}
+
+/// Polls the store, without syncing, until the subject appears in INBOX.
+fn wait_for_subject(
+    store: &LocalStore,
+    account_id: i64,
+    subject: &str,
+    timeout_secs: u64,
+) -> Result<i64> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while Instant::now() < deadline {
+        if let Ok(inbox_mailbox_id) = inbox_id(store, account_id) {
+            let threads = store.list_threads(inbox_mailbox_id, 0..50)?;
+            if let Some(thread) = threads.iter().find(|thread| thread.subject == subject) {
+                return Ok(thread.id);
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    bail!("subject {subject:?} was not pushed into the store within {timeout_secs}s")
+}
+
+fn sync_checkpoint(store: &LocalStore, account_id: i64) -> Result<serde_json::Value> {
+    let checkpoint = store
+        .list_accounts()?
+        .into_iter()
+        .find(|account| account.id == account_id)
+        .and_then(|account| account.sync_status.checkpoint)
+        .context("the JMAP account should have a checkpoint")?;
+    serde_json::from_str(&checkpoint).context("the JMAP checkpoint should be JSON")
 }
 
 #[test]
