@@ -89,6 +89,17 @@ cargo run -p zmail-app -- archive 42
 cargo run -p zmail-app -- delete 42
 ```
 
+Search queries (in the app's search field and the `search` command) combine
+words, `"quoted phrases"` and operators, all of which must match:
+`from:`, `to:`, `subject:`, `has:attachment`, `is:unread`, `is:read`,
+`is:flagged`, `in:<mailbox name or role>`, and `before:`/`after:` with a
+`YYYY-MM-DD` date or a relative one such as `7d`, `2w`, `3m` or `1y`. A
+leading `-` negates any of them:
+
+```bash
+cargo run -p zmail-app -- search 1 'from:alice "budget review" -in:junk after:30d'
+```
+
 Launch the desktop client:
 
 ```bash
