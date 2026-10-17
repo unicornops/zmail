@@ -5,7 +5,6 @@ members = [
     "crates/zmail-auth",
     "crates/zmail-core",
     "crates/zmail-imap",
-    "crates/zmail-html-render",
     "crates/zmail-index",
     "crates/zmail-jmap",
     "crates/zmail-notify",
@@ -17,6 +16,8 @@ members = [
     "crates/zmail-theme",
     "crates/zmail-ui",
 ]
+# Spike for #134 with its own Cargo.lock; see its Cargo.toml.
+exclude = ["crates/zmail-html-render"]
 resolver = "3"
 
 [workspace.package]

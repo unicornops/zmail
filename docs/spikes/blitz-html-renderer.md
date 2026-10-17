@@ -51,8 +51,18 @@ out-of-process renderer (see "Integration").
 
 ## What was built
 
-`crates/zmail-html-render` is a workspace member that nothing else depends on,
-so `zmail-app` and the shipped binary are unchanged.
+`crates/zmail-html-render` is a standalone crate that nothing depends on, so
+`zmail-app` and the shipped binary are unchanged. It was built and checked as
+a workspace member sharing the root `Cargo.lock` (the results in "Toolchain
+and dependency fit"), then excluded from the workspace with its own
+`Cargo.lock`: compiling Stylo in CI's quality job left the runner without disk
+space for the live mail harness build. Re-adding it to `members` repeats the
+GPUI compatibility check. Commands:
+
+```sh
+cargo test --manifest-path crates/zmail-html-render/Cargo.toml
+cargo clippy --manifest-path crates/zmail-html-render/Cargo.toml --all-targets -- -D warnings
+```
 
 - `render(html, MailResources, RenderOptions) -> RenderedMail` parses the
   HTML, resolves style and layout at a CSS width and device scale, and
@@ -112,7 +122,8 @@ Three Blitz behaviours needed working around before anything rendered:
 | Native links | `links` keys shared with GPUI (`yeslogic-fontconfig-sys` 6.0.1, `rayon-core` 1.13) resolve to the same versions. The spike enables `fontique/fontconfig-dlopen` to load fontconfig at runtime as GPUI's font-kit does, so there is no new link-time dependency on Linux. |
 | `cargo deny check licenses advisories bans sources` | Passes, no change to `deny.toml`. MPL-2.0 (Stylo, `cssparser`, `selectors`, `app_units`, 14 crates in all) is already allowed, as it is in `about.toml`. Other new licences: MIT, Apache-2.0, Unicode-3.0, BSD-3-Clause, Zlib, all allowed. All sources are crates.io. Duplicates are warnings under our policy. |
 | `cargo audit` | No new advisories (the same three allowed warnings as `main`). |
-| Build time | Clean debug build of the crate 40 s, release 70 s (12 threads). CI's Linux quality job compiles it; the macOS and Windows build jobs build only `zmail-app`, so Blitz on those platforms is **not** compiled by this PR. |
+| Build time and CI | Clean debug build of the crate 40 s, release 70 s (12 threads). As a workspace member, CI's Linux quality job passed format, clippy, `cargo deny`, `cargo audit` and the workspace tests with it, then ran out of disk building the live mail harness. Now excluded, CI does not build it at all; macOS and Windows builds of Blitz are unverified. As a product dependency it would add to every CI job's build time and disk. |
+| Standalone `cargo deny` | With the repository's `deny.toml` against the crate's own lockfile: `advisories ok, bans ok, licenses ok, sources ok`. |
 | Binary size (Linux x86_64 release, `zmail-app` with `render` called from `main`, measured locally, not committed) | 58.3 MB → 78.2 MB unstripped (+20.0 MB); 43.3 MB → 58.2 MB stripped (+14.9 MB, +34%). |
 
 Licensing note: MPL-2.0 is file-level copyleft and explicitly compatible with

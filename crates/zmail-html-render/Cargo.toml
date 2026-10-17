@@ -2,13 +2,19 @@
 name = "zmail-html-render"
 description = "Spike (issue #134): off-screen HTML mail rendering with Blitz. Not linked into zmail-app."
 version = "0.0.1"
-edition.workspace = true
-license.workspace = true
-rust-version.workspace = true
+edition = "2024"
+license = "GPL-3.0-only"
+rust-version = "1.98"
 publish = false
 
+# Excluded from the zmail workspace (see the root Cargo.toml) and resolved
+# with its own Cargo.lock: compiling Stylo in CI's quality job, next to the
+# live mail harness builds, ran the runner out of disk. Build it with
+# `cargo build --manifest-path crates/zmail-html-render/Cargo.toml`.
+[workspace]
+
 [dependencies]
-anyhow.workspace = true
+anyhow = "1"
 anyrender = "0.14"
 anyrender_vello_cpu = "0.18"
 # Only the features a static mail render needs: no accessibility tree, no
@@ -31,12 +37,19 @@ fontique = { version = "0.12", default-features = false, features = ["fontconfig
 # other formats and decompression bombs before Blitz decodes anything.
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 peniko = "0.6"
-url.workspace = true
+url = "2.5"
 
 [dev-dependencies]
-mail-parser.workspace = true
+mail-parser = "0.11.2"
 png = "0.18"
 zmail-security = { path = "../zmail-security" }
 
-[lints]
-workspace = true
+# Mirrors the zmail workspace lints.
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
