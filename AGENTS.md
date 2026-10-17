@@ -53,6 +53,13 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
+UI view tests use GPUI's test platform (`#[gpui::test]` with `TestAppContext` /
+`VisualTestContext`, from the `test-support` feature in `zmail-ui`'s
+dev-dependencies). They run headless with no display server; on Linux they only
+need the build packages below. `crates/zmail-ui/src/view_tests.rs` opens the real
+`WorkspaceView` over an ephemeral store, and
+`crates/zmail-ui/src/components/text_input/tests.rs` drives a single component.
+
 Release build:
 
 ```bash

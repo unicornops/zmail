@@ -45,8 +45,9 @@ Other upstream inputs:
   build on what upstream tests. CI reads the channel from
   `rust-toolchain.toml`.
 - `deny.toml` `allow-git`: exactly the git repositories the pinned graph
-  uses (Zed itself, its `font-kit`, `xim-rs` and `wasm_thread` forks, and
-  the two patch sources).
+  uses (Zed itself, its `font-kit`, `xim-rs` and `wasm_thread` forks, the
+  `proptest` revision GPUI's `test-support` feature needs for `zmail-ui`'s
+  view tests, and the two patch sources).
 
 ## Why Stable Release Tags
 

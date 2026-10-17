@@ -5,8 +5,7 @@
 //! | Module | Content |
 //! |--------|---------|
 //! | `styles` | Design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
-//! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, … and the gallery |
-//! | `input` | `UiBuffer`, `EditorField`, `InputOutcome` |
+//! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, `TextInput`, … and the gallery |
 //! | `widgets` | `toolbar_button`, `input_card`, `list_row`, `icon`, … |
 //! | `workspace` | `impl WorkspaceView` — all business-logic methods |
 //! | `toolbar` | `render_toolbar()` — action buttons + search |
@@ -21,9 +20,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AssetSource, Bounds, Context, FocusHandle, IntoElement, Render, Styled,
-    TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions, div, prelude::*,
-    px, rgb, size,
+    AnyElement, App, AssetSource, Bounds, Context, Entity, FocusHandle, IntoElement, Render,
+    Styled, Subscription, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, rgb, size,
 };
 use zmail_core::{
     APP_NAME, AccountOverview, AccountSummary, AppBootstrap, DraftSummary, IdentitySummary,
@@ -39,8 +38,7 @@ use crate::styles::{
     WINDOW_WIDTH,
 };
 
-mod input;
-use crate::input::{EditorField, UiBuffer};
+use crate::components::TextInput;
 
 mod widgets;
 use crate::widgets::{HoverExt, icon, status_banner, toolbar_button};
@@ -62,6 +60,8 @@ mod preferences;
 mod sidebar;
 mod toolbar;
 mod tooltip;
+#[cfg(test)]
+mod view_tests;
 mod workspace;
 
 // ---------------------------------------------------------------------------
@@ -110,6 +110,7 @@ pub fn run(
         .with_assets(asset_source)
         .run(move |cx: &mut App| {
             components::init(cx);
+            components::text_input::init(cx);
             let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
             let bootstrap = bootstrap.clone();
             let store = store.clone();
@@ -211,8 +212,10 @@ struct WorkspaceView {
     thread_scroll: UniformListScrollHandle,
     list_mode: ListMode,
     detail_mode: DetailMode,
-    active_field: Option<EditorField>,
-    search_query: UiBuffer,
+    /// The toolbar search field.
+    search_query: Entity<TextInput>,
+    /// Keeps the workspace subscribed to the search field's events.
+    _search_subscription: Subscription,
     compose: Option<ComposeState>,
     account_setup: AccountSetupState,
     /// The last error. It stays until the user dismisses it.
@@ -243,6 +246,11 @@ impl Render for WorkspaceView {
         let colors = UiColors::from_theme(&self.bootstrap.theme);
         // Components read the theme from a global; keep it in step.
         components::ComponentTheme::sync(&self.bootstrap.theme, cx);
+        // Text inputs (their own entities) read the palette from this
+        // global; they render after this view.
+        if cx.try_global::<UiColors>() != Some(&colors) {
+            cx.set_global(colors);
+        }
 
         // Mutable store queries must complete before immutable borrows below.
         let selected_thread = self.selected_thread_view();
@@ -250,7 +258,6 @@ impl Render for WorkspaceView {
         div()
             .size_full()
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(Self::handle_key_down))
             .bg(rgb(colors.background))
             .text_color(rgb(colors.foreground))
             .child(
@@ -433,18 +440,13 @@ impl WorkspaceView {
             ),
 
             // ---- Compose -------------------------------------------------
-            DetailMode::Compose => render_compose_detail(
-                self.compose.as_ref(),
-                &self.identities,
-                self.active_field,
-                colors,
-                cx,
-            ),
+            DetailMode::Compose => {
+                render_compose_detail(self.compose.as_ref(), &self.identities, colors, cx)
+            }
 
             // ---- Account Setup -------------------------------------------
             DetailMode::AccountSetup => {
-                render_account_setup_detail(&self.account_setup, self.active_field, colors, cx)
-                    .into_any_element()
+                render_account_setup_detail(&self.account_setup, colors, cx).into_any_element()
             }
         }
     }

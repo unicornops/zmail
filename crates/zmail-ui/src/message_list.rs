@@ -346,8 +346,8 @@ impl WorkspaceView {
                                     .border_b_1()
                                     .border_color(rgb(colors.border))
                                     .bg(background_color)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.load_draft_into_compose(draft_id);
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.load_draft_into_compose(draft_id, window, cx);
                                         this.list_mode = ListMode::Drafts;
                                         this.detail_mode = DetailMode::Compose;
                                         cx.notify();

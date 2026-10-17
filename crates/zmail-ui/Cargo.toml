@@ -11,6 +11,7 @@ anyhow.workspace = true
 chrono.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
+unicode-segmentation.workspace = true
 url.workspace = true
 zmail-auth = { path = "../zmail-auth" }
 zmail-core = { path = "../zmail-core" }
@@ -22,6 +23,7 @@ zmail-sync = { path = "../zmail-sync" }
 [dev-dependencies]
 # `#[gpui::test]`, `TestAppContext` and `VisualTestContext` for view tests.
 gpui = { workspace = true, features = ["test-support"] }
+tokio.workspace = true
 zmail-theme = { path = "../zmail-theme" }
 
 [lints]

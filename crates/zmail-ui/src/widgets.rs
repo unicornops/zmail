@@ -10,16 +10,15 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, ClickEvent, FontWeight, InteractiveElement, IntoElement, SharedString,
+    AnyElement, App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, SharedString,
     Stateful, StatefulInteractiveElement, Styled, Svg, Window, div, prelude::*, px, rgb, svg,
 };
 use zmail_core::SyncPhase;
 
-use crate::input::UiBuffer;
+use crate::components::TextInput;
 use crate::styles::{
     ACTION_DIVIDER_HEIGHT, ACTION_DIVIDER_WIDTH, BADGE_SIZE, EMPTY_STATE_ICON_FRAME_SIZE,
-    ICON_SIZE_LG, ICON_SIZE_SM, INPUT_HEIGHT_MULTILINE, INPUT_HEIGHT_SINGLE, SEARCH_FIELD_WIDTH,
-    STATUS_BANNER_STRIP_WIDTH, TOOLBAR_BUTTON_HEIGHT, UiColors,
+    ICON_SIZE_LG, ICON_SIZE_SM, STATUS_BANNER_STRIP_WIDTH, TOOLBAR_BUTTON_HEIGHT, UiColors,
 };
 
 // ---------------------------------------------------------------------------
@@ -263,44 +262,11 @@ pub(crate) fn list_row(
 // input_card
 // ---------------------------------------------------------------------------
 
-/// A labelled text-input card backed by a [`UiBuffer`].
-///
-/// The card border highlights in the accent colour when `active` is `true`.
-/// `multiline` controls the minimum height of the content area.
-pub(crate) fn input_card(
-    id: &'static str,
-    label: &str,
-    placeholder: &str,
-    buffer: &UiBuffer,
-    active: bool,
-    multiline: bool,
-    colors: &UiColors,
-) -> Stateful<gpui::Div> {
-    let card_border = if active { colors.accent } else { colors.border };
-    let card_background = if active {
-        colors.background
-    } else {
-        colors.surface
-    };
-    let min_height = if multiline {
-        px(INPUT_HEIGHT_MULTILINE)
-    } else {
-        px(INPUT_HEIGHT_SINGLE)
-    };
-    let is_placeholder = !active && buffer.text.is_empty();
-    let display_text = if is_placeholder {
-        placeholder.to_owned()
-    } else {
-        buffer.display_text(active)
-    };
-    let text_color = if is_placeholder {
-        colors.muted
-    } else {
-        colors.foreground
-    };
-
+/// A labelled [`TextInput`]. The input draws its own field, focus ring and
+/// placeholder; callers can add children (such as a validation error)
+/// below it.
+pub(crate) fn input_card(label: &str, input: &Entity<TextInput>, colors: &UiColors) -> gpui::Div {
     div()
-        .id(id)
         .flex()
         .flex_col()
         .gap_2()
@@ -313,81 +279,7 @@ pub(crate) fn input_card(
                 .text_color(rgb(colors.muted))
                 .child(label.to_owned()),
         )
-        .child(
-            div()
-                .min_h(min_height)
-                .w_full()
-                .px_3()
-                .py_3()
-                .rounded_md()
-                .bg(rgb(card_background))
-                .border_1()
-                .border_color(rgb(card_border))
-                .min_w_0()
-                .child(
-                    div()
-                        .text_color(rgb(text_color))
-                        // Single-line fields never grow to fit their text
-                        // or placeholder; multiline fields wrap.
-                        .when(!multiline, |this| this.ellipsis())
-                        .child(display_text),
-                ),
-        )
-}
-
-// ---------------------------------------------------------------------------
-// search_field
-// ---------------------------------------------------------------------------
-
-/// A compact fixed-width search box for the toolbar.
-///
-/// The width is fixed ([`SEARCH_FIELD_WIDTH`]) so typing never resizes the
-/// field or shifts the buttons beside it; long queries truncate.
-pub(crate) fn search_field(
-    id: &'static str,
-    placeholder: &str,
-    buffer: &UiBuffer,
-    active: bool,
-    colors: &UiColors,
-) -> Stateful<gpui::Div> {
-    let is_placeholder = !active && buffer.text.is_empty();
-    let display_text = if is_placeholder {
-        placeholder.to_owned()
-    } else {
-        buffer.display_text(active)
-    };
-
-    div()
-        .id(id)
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap_2()
-        .w(px(SEARCH_FIELD_WIDTH))
-        .h(px(TOOLBAR_BUTTON_HEIGHT))
-        .px_3()
-        .rounded_md()
-        .bg(rgb(if active {
-            colors.background
-        } else {
-            colors.surface
-        }))
-        .border_1()
-        .border_color(rgb(if active { colors.accent } else { colors.border }))
-        .cursor_text()
-        .child(icon("search", ICON_SIZE_SM, colors.muted).flex_none())
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .ellipsis()
-                .text_color(rgb(if is_placeholder {
-                    colors.muted
-                } else {
-                    colors.foreground
-                }))
-                .child(display_text),
-        )
+        .child(input.clone())
 }
 
 // ---------------------------------------------------------------------------

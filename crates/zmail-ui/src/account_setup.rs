@@ -9,15 +9,221 @@
 use std::collections::BTreeMap;
 
 use gpui::{
-    AnyElement, Context, IntoElement, Stateful, StatefulInteractiveElement, div, prelude::*, rgb,
+    AnyElement, App, AppContext as _, Context, Entity, IntoElement, Subscription, div, prelude::*,
+    rgb,
 };
 use zmail_auth::OAuth2Preset;
 use zmail_core::{AuthKind, ProtocolKind};
 
 use super::WorkspaceView;
-use crate::input::{EditorField, UiBuffer};
+use crate::components::TextInput;
 use crate::styles::{ICON_SIZE_SM, UiColors};
 use crate::widgets::{EllipsisExt, icon, input_card, section_card, toolbar_button};
+
+// ---------------------------------------------------------------------------
+// AccountField
+// ---------------------------------------------------------------------------
+
+/// Identifies one text field of the account setup form, for validation
+/// errors and focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum AccountField {
+    DisplayName,
+    Endpoint,
+    Username,
+    Password,
+    OauthClientId,
+    OauthClientSecret,
+    OauthAuthorizationEndpoint,
+    OauthTokenEndpoint,
+    OauthScopes,
+    DiskBudget,
+    IdentityName,
+    IdentityEmail,
+    Signature,
+    AliasEmails,
+    SmtpHost,
+    SmtpPort,
+    SmtpSecurity,
+    SmtpUsername,
+}
+
+impl AccountField {
+    /// Every field, in form order.
+    pub(crate) const ALL: [AccountField; 18] = [
+        AccountField::DisplayName,
+        AccountField::Endpoint,
+        AccountField::Username,
+        AccountField::Password,
+        AccountField::OauthClientId,
+        AccountField::OauthClientSecret,
+        AccountField::OauthAuthorizationEndpoint,
+        AccountField::OauthTokenEndpoint,
+        AccountField::OauthScopes,
+        AccountField::DiskBudget,
+        AccountField::IdentityName,
+        AccountField::IdentityEmail,
+        AccountField::Signature,
+        AccountField::AliasEmails,
+        AccountField::SmtpHost,
+        AccountField::SmtpPort,
+        AccountField::SmtpSecurity,
+        AccountField::SmtpUsername,
+    ];
+
+    /// The visible label, also the field's accessible name.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            AccountField::DisplayName => "Display Name",
+            AccountField::Endpoint => "Endpoint",
+            AccountField::Username => "Username",
+            AccountField::Password => "Password",
+            AccountField::OauthClientId => "OAuth2 Client Id",
+            AccountField::OauthClientSecret => "OAuth2 Client Secret",
+            AccountField::OauthAuthorizationEndpoint => "Authorization Endpoint",
+            AccountField::OauthTokenEndpoint => "Token Endpoint",
+            AccountField::OauthScopes => "Scopes",
+            AccountField::DiskBudget => "Disk Budget (MiB)",
+            AccountField::IdentityName => "Primary Identity Name",
+            AccountField::IdentityEmail => "Primary Identity Email",
+            AccountField::Signature => "Signature",
+            AccountField::AliasEmails => "Additional Identity Emails",
+            AccountField::SmtpHost => "SMTP Host",
+            AccountField::SmtpPort => "SMTP Port",
+            AccountField::SmtpSecurity => "SMTP Security",
+            AccountField::SmtpUsername => "SMTP Username",
+        }
+    }
+
+    /// Placeholder text. The endpoint's depends on the protocol; see
+    /// [`endpoint_placeholder`].
+    fn placeholder(self) -> &'static str {
+        match self {
+            AccountField::DisplayName => "Work Mail",
+            AccountField::Endpoint => endpoint_placeholder(ProtocolKind::Imap),
+            AccountField::Username => "name@example.com",
+            AccountField::Password => "App password or account secret",
+            AccountField::OauthClientId => "Provider application client id",
+            AccountField::OauthClientSecret => "Optional for public clients",
+            AccountField::OauthAuthorizationEndpoint => "https://provider.example.test/authorize",
+            AccountField::OauthTokenEndpoint => "https://provider.example.test/token",
+            AccountField::OauthScopes => "Space-separated, for example: email",
+            AccountField::DiskBudget => "Empty for unlimited",
+            AccountField::IdentityName => "Jane Doe",
+            AccountField::IdentityEmail => "jane@example.com",
+            AccountField::Signature => "Regards,\nJane",
+            AccountField::AliasEmails => "alias@example.com, billing@example.com",
+            AccountField::SmtpHost => "smtp.example.com",
+            AccountField::SmtpPort => "587",
+            AccountField::SmtpSecurity => "plain, starttls, or implicit_tls",
+            AccountField::SmtpUsername => "Optional override for SMTP auth",
+        }
+    }
+
+    /// Whether Enter in this field submits the form (the last field of
+    /// each section).
+    pub(crate) fn submits_form(self) -> bool {
+        matches!(
+            self,
+            AccountField::Password
+                | AccountField::OauthClientSecret
+                | AccountField::AliasEmails
+                | AccountField::SmtpUsername
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AccountFormValues
+// ---------------------------------------------------------------------------
+
+/// A snapshot of the account setup form's values, which validation and
+/// account building work on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AccountFormValues {
+    pub(crate) protocol: ProtocolKind,
+    pub(crate) auth: AuthKind,
+    pub(crate) oauth_preset: Option<OAuth2Preset>,
+    pub(crate) display_name: String,
+    pub(crate) endpoint: String,
+    pub(crate) username: String,
+    pub(crate) password: String,
+    pub(crate) oauth_client_id: String,
+    pub(crate) oauth_client_secret: String,
+    pub(crate) oauth_authorization_endpoint: String,
+    pub(crate) oauth_token_endpoint: String,
+    pub(crate) oauth_scopes: String,
+    pub(crate) disk_budget_mb: String,
+    pub(crate) identity_name: String,
+    pub(crate) identity_email: String,
+    pub(crate) signature: String,
+    pub(crate) alias_emails: String,
+    pub(crate) smtp_host: String,
+    pub(crate) smtp_port: String,
+    pub(crate) smtp_security: String,
+    pub(crate) smtp_username: String,
+}
+
+impl Default for AccountFormValues {
+    /// The values a new form starts with.
+    fn default() -> Self {
+        Self {
+            protocol: ProtocolKind::Imap,
+            auth: AuthKind::Password,
+            oauth_preset: None,
+            display_name: String::new(),
+            // Empty, so the protocol-specific placeholder shows instead of
+            // an IMAP URL that JMAP accounts would have to delete.
+            endpoint: String::new(),
+            username: String::new(),
+            password: String::new(),
+            oauth_client_id: String::new(),
+            oauth_client_secret: String::new(),
+            // Custom provider endpoints, used by JMAP accounts: no consumer
+            // provider presets offer JMAP.
+            oauth_authorization_endpoint: String::new(),
+            oauth_token_endpoint: String::new(),
+            oauth_scopes: "email".to_owned(),
+            // Empty means unlimited; a number is the budget in MiB that
+            // the post-sync eviction pass enforces.
+            disk_budget_mb: String::new(),
+            identity_name: String::new(),
+            identity_email: String::new(),
+            signature: "Regards,".to_owned(),
+            alias_emails: String::new(),
+            smtp_host: String::new(),
+            smtp_port: "587".to_owned(),
+            smtp_security: "starttls".to_owned(),
+            smtp_username: String::new(),
+        }
+    }
+}
+
+impl AccountFormValues {
+    /// The value of one field.
+    fn value(&self, field: AccountField) -> &str {
+        match field {
+            AccountField::DisplayName => &self.display_name,
+            AccountField::Endpoint => &self.endpoint,
+            AccountField::Username => &self.username,
+            AccountField::Password => &self.password,
+            AccountField::OauthClientId => &self.oauth_client_id,
+            AccountField::OauthClientSecret => &self.oauth_client_secret,
+            AccountField::OauthAuthorizationEndpoint => &self.oauth_authorization_endpoint,
+            AccountField::OauthTokenEndpoint => &self.oauth_token_endpoint,
+            AccountField::OauthScopes => &self.oauth_scopes,
+            AccountField::DiskBudget => &self.disk_budget_mb,
+            AccountField::IdentityName => &self.identity_name,
+            AccountField::IdentityEmail => &self.identity_email,
+            AccountField::Signature => &self.signature,
+            AccountField::AliasEmails => &self.alias_emails,
+            AccountField::SmtpHost => &self.smtp_host,
+            AccountField::SmtpPort => &self.smtp_port,
+            AccountField::SmtpSecurity => &self.smtp_security,
+            AccountField::SmtpUsername => &self.smtp_username,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // AccountSetupState
@@ -25,41 +231,25 @@ use crate::widgets::{EllipsisExt, icon, input_card, section_card, toolbar_button
 
 /// In-memory form state for the new-account setup wizard.
 ///
-/// All text fields are [`UiBuffer`]s so the cursor position is preserved
-/// across refreshes.  The `protocol` field drives which additional SMTP fields
-/// are shown, and `auth` switches between password entry and the OAuth2
-/// provider flow.
-#[derive(Debug, Clone)]
+/// Each text field is its own [`TextInput`] entity, which owns its text,
+/// cursor and undo history. The `protocol` field drives which additional
+/// SMTP fields are shown, and `auth` switches between password entry and
+/// the OAuth2 provider flow.
 pub(crate) struct AccountSetupState {
     pub(crate) protocol: ProtocolKind,
     pub(crate) auth: AuthKind,
     /// Chosen OAuth2 provider preset; `None` until a provider button is
     /// picked, which also fills the endpoint and SMTP defaults.
     pub(crate) oauth_preset: Option<OAuth2Preset>,
-    pub(crate) display_name: UiBuffer,
-    pub(crate) endpoint: UiBuffer,
-    pub(crate) username: UiBuffer,
-    pub(crate) password: UiBuffer,
-    pub(crate) oauth_client_id: UiBuffer,
-    pub(crate) oauth_client_secret: UiBuffer,
-    pub(crate) oauth_authorization_endpoint: UiBuffer,
-    pub(crate) oauth_token_endpoint: UiBuffer,
-    pub(crate) oauth_scopes: UiBuffer,
-    pub(crate) disk_budget_mb: UiBuffer,
-    pub(crate) identity_name: UiBuffer,
-    pub(crate) identity_email: UiBuffer,
-    pub(crate) signature: UiBuffer,
-    pub(crate) alias_emails: UiBuffer,
-    pub(crate) smtp_host: UiBuffer,
-    pub(crate) smtp_port: UiBuffer,
-    pub(crate) smtp_security: UiBuffer,
-    pub(crate) smtp_username: UiBuffer,
+    inputs: BTreeMap<AccountField, Entity<TextInput>>,
     /// Validation errors shown under their fields; editing a field clears
     /// its error.
-    pub(crate) errors: BTreeMap<EditorField, String>,
+    pub(crate) errors: BTreeMap<AccountField, String>,
     /// Why the form opened when the user did not ask for it, for example
     /// Compose with no account.
     pub(crate) notice: Option<&'static str>,
+    /// The workspace's subscriptions to the inputs' events.
+    pub(crate) subscriptions: Vec<Subscription>,
 }
 
 /// Endpoint placeholder for the selected protocol.
@@ -86,38 +276,83 @@ pub(crate) fn preset_smtp(preset: OAuth2Preset) -> (&'static str, &'static str, 
     }
 }
 
-impl Default for AccountSetupState {
-    fn default() -> Self {
+impl AccountSetupState {
+    /// A new, empty form with its default values.
+    pub(crate) fn new(cx: &mut App) -> Self {
+        let defaults = AccountFormValues::default();
+        let inputs = AccountField::ALL
+            .into_iter()
+            .map(|field| {
+                let value = defaults.value(field).to_owned();
+                let input = cx.new(|cx| {
+                    let input = TextInput::new(cx)
+                        .label(field.label())
+                        .placeholder(field.placeholder());
+                    let input = match field {
+                        AccountField::Password | AccountField::OauthClientSecret => input.masked(),
+                        AccountField::Signature => input.multiline().rows(3, 8),
+                        _ => input,
+                    };
+                    input.with_text(value)
+                });
+                (field, input)
+            })
+            .collect();
         Self {
-            protocol: ProtocolKind::Imap,
-            auth: AuthKind::Password,
-            oauth_preset: None,
-            display_name: UiBuffer::single_line(String::new()),
-            // Empty, so the protocol-specific placeholder shows instead of
-            // an IMAP URL that JMAP accounts would have to delete.
-            endpoint: UiBuffer::single_line(String::new()),
-            username: UiBuffer::single_line(String::new()),
-            password: UiBuffer::secret(String::new()),
-            oauth_client_id: UiBuffer::single_line(String::new()),
-            oauth_client_secret: UiBuffer::secret(String::new()),
-            // Custom provider endpoints, used by JMAP accounts: no consumer
-            // provider presets offer JMAP.
-            oauth_authorization_endpoint: UiBuffer::single_line(String::new()),
-            oauth_token_endpoint: UiBuffer::single_line(String::new()),
-            oauth_scopes: UiBuffer::single_line("email"),
-            // Empty means unlimited; a number is the budget in MiB that
-            // the post-sync eviction pass enforces.
-            disk_budget_mb: UiBuffer::single_line(String::new()),
-            identity_name: UiBuffer::single_line(String::new()),
-            identity_email: UiBuffer::single_line(String::new()),
-            signature: UiBuffer::multiline("Regards,"),
-            alias_emails: UiBuffer::single_line(String::new()),
-            smtp_host: UiBuffer::single_line(String::new()),
-            smtp_port: UiBuffer::single_line("587"),
-            smtp_security: UiBuffer::single_line("starttls"),
-            smtp_username: UiBuffer::single_line(String::new()),
+            protocol: defaults.protocol,
+            auth: defaults.auth,
+            oauth_preset: defaults.oauth_preset,
+            inputs,
             errors: BTreeMap::new(),
             notice: None,
+            subscriptions: Vec::new(),
+        }
+    }
+
+    /// The input entity for `field`.
+    pub(crate) fn input(&self, field: AccountField) -> &Entity<TextInput> {
+        &self.inputs[&field]
+    }
+
+    /// Replace a field's text, as the provider presets do.
+    pub(crate) fn set_text(&self, field: AccountField, text: &str, cx: &mut App) {
+        self.input(field)
+            .update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    /// Switch the protocol, updating the protocol-specific placeholder.
+    pub(crate) fn set_protocol(&mut self, protocol: ProtocolKind, cx: &mut App) {
+        self.protocol = protocol;
+        self.input(AccountField::Endpoint).update(cx, |input, cx| {
+            input.set_placeholder(endpoint_placeholder(protocol), cx);
+        });
+    }
+
+    /// Snapshot the form's current values.
+    pub(crate) fn values(&self, cx: &App) -> AccountFormValues {
+        let text = |field: AccountField| self.input(field).read(cx).text().to_owned();
+        AccountFormValues {
+            protocol: self.protocol,
+            auth: self.auth,
+            oauth_preset: self.oauth_preset,
+            display_name: text(AccountField::DisplayName),
+            endpoint: text(AccountField::Endpoint),
+            username: text(AccountField::Username),
+            password: text(AccountField::Password),
+            oauth_client_id: text(AccountField::OauthClientId),
+            oauth_client_secret: text(AccountField::OauthClientSecret),
+            oauth_authorization_endpoint: text(AccountField::OauthAuthorizationEndpoint),
+            oauth_token_endpoint: text(AccountField::OauthTokenEndpoint),
+            oauth_scopes: text(AccountField::OauthScopes),
+            disk_budget_mb: text(AccountField::DiskBudget),
+            identity_name: text(AccountField::IdentityName),
+            identity_email: text(AccountField::IdentityEmail),
+            signature: text(AccountField::Signature),
+            alias_emails: text(AccountField::AliasEmails),
+            smtp_host: text(AccountField::SmtpHost),
+            smtp_port: text(AccountField::SmtpPort),
+            smtp_security: text(AccountField::SmtpSecurity),
+            smtp_username: text(AccountField::SmtpUsername),
         }
     }
 }
@@ -133,7 +368,6 @@ impl Default for AccountSetupState {
 /// scrollable content area.
 pub(crate) fn render_account_setup_detail(
     form: &AccountSetupState,
-    active_field: Option<EditorField>,
     colors: &UiColors,
     cx: &mut Context<WorkspaceView>,
 ) -> gpui::Div {
@@ -184,7 +418,7 @@ pub(crate) fn render_account_setup_detail(
                         .flex_wrap()
                         .gap_2()
                         .children(account_oauth_provider_buttons(form, colors, cx)),
-                    oauth_client_fields(form, active_field, colors, cx),
+                    oauth_client_fields(form, colors),
                     div()
                         .w_full()
                         .rounded_md()
@@ -211,55 +445,22 @@ pub(crate) fn render_account_setup_detail(
                 ]
                     } else if form.auth == AuthKind::OAuth2 && form.protocol == ProtocolKind::Jmap {
                         vec![
-                    oauth_client_fields(form, active_field, colors, cx),
+                    oauth_client_fields(form, colors),
                     div()
                         .flex()
                         .gap_3()
                         .child(
                             div().flex_1().min_w_0().child(
-                                account_input(
- form,
- active_field,
- EditorField::AccountOauthAuthorizationEndpoint,
- "account-oauth-authorization-endpoint-field",
- "Authorization Endpoint",
- "https://provider.example.test/authorize",
- &form.oauth_authorization_endpoint,
- false,
- colors,
- cx,
-),
+                                account_input(form, AccountField::OauthAuthorizationEndpoint, colors),
                             ),
                         )
                         .child(
                             div().flex_1().min_w_0().child(
-                                account_input(
- form,
- active_field,
- EditorField::AccountOauthTokenEndpoint,
- "account-oauth-token-endpoint-field",
- "Token Endpoint",
- "https://provider.example.test/token",
- &form.oauth_token_endpoint,
- false,
- colors,
- cx,
-),
+                                account_input(form, AccountField::OauthTokenEndpoint, colors),
                             ),
                         ),
                     div().child(
-                        account_input(
- form,
- active_field,
- EditorField::AccountOauthScopes,
- "account-oauth-scopes-field",
- "Scopes",
- "Space-separated, for example: email",
- &form.oauth_scopes,
- false,
- colors,
- cx,
-),
+                        account_input(form, AccountField::OauthScopes, colors),
                     ),
                     div()
                         .w_full()
@@ -289,131 +490,32 @@ pub(crate) fn render_account_setup_detail(
                         Vec::new()
                     },
                 )
-                .child(account_input(
-                    form,
-                    active_field,
-                    EditorField::AccountDisplayName,
-                    "account-display-name-field",
-                    "Display Name",
-                    "Work Mail",
-                    &form.display_name,
-                    false,
-                    colors,
-                    cx,
-                ))
-                .child(account_input(
-                    form,
-                    active_field,
-                    EditorField::AccountEndpoint,
-                    "account-endpoint-field",
-                    "Endpoint",
-                    endpoint_placeholder(form.protocol),
-                    &form.endpoint,
-                    false,
-                    colors,
-                    cx,
-                ))
+                .child(account_input(form, AccountField::DisplayName, colors))
+                .child(account_input(form, AccountField::Endpoint, colors))
                 .child(
                     div()
                         .flex()
                         .gap_3()
-                        .child(div().flex_1().min_w_0().child(account_input(
-                            form,
-                            active_field,
-                            EditorField::AccountUsername,
-                            "account-username-field",
-                            "Username",
-                            "name@example.com",
-                            &form.username,
-                            false,
-                            colors,
-                            cx,
-                        )))
+                        .child(div().flex_1().min_w_0().child(account_input(form, AccountField::Username, colors)))
                         .children(if form.auth == AuthKind::Password {
-                            vec![div().flex_1().min_w_0().child(account_input(
-                                form,
-                                active_field,
-                                EditorField::AccountPassword,
-                                "account-password-field",
-                                "Password",
-                                "App password or account secret",
-                                &form.password,
-                                false,
-                                colors,
-                                cx,
-                            ))]
+                            vec![div().flex_1().min_w_0().child(account_input(form, AccountField::Password, colors))]
                         } else {
                             Vec::new()
                         }),
                 ),
         )
-        .child(account_input(
-            form,
-            active_field,
-            EditorField::AccountDiskBudget,
-            "account-disk-budget-field",
-            "Disk Budget (MiB)",
-            "Empty for unlimited",
-            &form.disk_budget_mb,
-            false,
-            colors,
-            cx,
-        ))
+        .child(account_input(form, AccountField::DiskBudget, colors))
         .child(
             section_card("Identity", colors)
                 .child(
                     div()
                         .flex()
                         .gap_3()
-                        .child(div().flex_1().min_w_0().child(account_input(
-                            form,
-                            active_field,
-                            EditorField::AccountIdentityName,
-                            "account-identity-name-field",
-                            "Primary Identity Name",
-                            "Jane Doe",
-                            &form.identity_name,
-                            false,
-                            colors,
-                            cx,
-                        )))
-                        .child(div().flex_1().min_w_0().child(account_input(
-                            form,
-                            active_field,
-                            EditorField::AccountIdentityEmail,
-                            "account-identity-email-field",
-                            "Primary Identity Email",
-                            "jane@example.com",
-                            &form.identity_email,
-                            false,
-                            colors,
-                            cx,
-                        ))),
+                        .child(div().flex_1().min_w_0().child(account_input(form, AccountField::IdentityName, colors)))
+                        .child(div().flex_1().min_w_0().child(account_input(form, AccountField::IdentityEmail, colors))),
                 )
-                .child(account_input(
-                    form,
-                    active_field,
-                    EditorField::AccountAliasEmails,
-                    "account-alias-emails-field",
-                    "Additional Identity Emails",
-                    "alias@example.com, billing@example.com",
-                    &form.alias_emails,
-                    false,
-                    colors,
-                    cx,
-                ))
-                .child(account_input(
-                    form,
-                    active_field,
-                    EditorField::AccountSignature,
-                    "account-signature-field",
-                    "Signature",
-                    "Regards,\nJane",
-                    &form.signature,
-                    true,
-                    colors,
-                    cx,
-                )),
+                .child(account_input(form, AccountField::AliasEmails, colors))
+                .child(account_input(form, AccountField::Signature, colors)),
         )
         // JMAP submits through the account's own endpoint, so the SMTP
         // section only appears for IMAP accounts.
@@ -424,59 +526,15 @@ pub(crate) fn render_account_setup_detail(
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .child(account_input(
-                            form,
-                            active_field,
-                            EditorField::AccountSmtpHost,
-                            "account-smtp-host-field",
-                            "SMTP Host",
-                            "smtp.example.com",
-                            &form.smtp_host,
-                            false,
-                            colors,
-                            cx,
-                        ))
+                        .child(account_input(form, AccountField::SmtpHost, colors))
                         .child(
                             div()
                                 .flex()
                                 .gap_3()
-                                .child(div().flex_1().min_w_0().child(account_input(
-                                    form,
-                                    active_field,
-                                    EditorField::AccountSmtpPort,
-                                    "account-smtp-port-field",
-                                    "SMTP Port",
-                                    "587",
-                                    &form.smtp_port,
-                                    false,
-                                    colors,
-                                    cx,
-                                )))
-                                .child(div().flex_1().min_w_0().child(account_input(
-                                    form,
-                                    active_field,
-                                    EditorField::AccountSmtpSecurity,
-                                    "account-smtp-security-field",
-                                    "SMTP Security",
-                                    "plain, starttls, or implicit_tls",
-                                    &form.smtp_security,
-                                    false,
-                                    colors,
-                                    cx,
-                                ))),
+                                .child(div().flex_1().min_w_0().child(account_input(form, AccountField::SmtpPort, colors)))
+                                .child(div().flex_1().min_w_0().child(account_input(form, AccountField::SmtpSecurity, colors))),
                         )
-                        .child(account_input(
-                            form,
-                            active_field,
-                            EditorField::AccountSmtpUsername,
-                            "account-smtp-username-field",
-                            "SMTP Username",
-                            "Optional override for SMTP auth",
-                            &form.smtp_username,
-                            false,
-                            colors,
-                            cx,
-                        )),
+                        .child(account_input(form, AccountField::SmtpUsername, colors)),
                 ),
             )
         })
@@ -509,7 +567,7 @@ pub(crate) fn account_protocol_buttons(
             },
             colors.foreground,
             cx.listener(|this: &mut WorkspaceView, _, _, cx| {
-                this.account_setup.protocol = ProtocolKind::Imap;
+                this.account_setup.set_protocol(ProtocolKind::Imap, cx);
                 cx.notify();
             }),
         )
@@ -529,7 +587,7 @@ pub(crate) fn account_protocol_buttons(
             },
             colors.foreground,
             cx.listener(|this: &mut WorkspaceView, _, _, cx| {
-                this.account_setup.protocol = ProtocolKind::Jmap;
+                this.account_setup.set_protocol(ProtocolKind::Jmap, cx);
                 // Provider presets carry IMAP endpoints and SMTP submission
                 // defaults; they do not apply to JMAP accounts.
                 this.account_setup.oauth_preset = None;
@@ -545,38 +603,19 @@ pub(crate) fn account_protocol_buttons(
 // ---------------------------------------------------------------------------
 
 /// Renders the shared OAuth2 client id and optional client secret inputs.
-fn oauth_client_fields(
-    form: &AccountSetupState,
-    active_field: Option<EditorField>,
-    colors: &UiColors,
-    cx: &mut Context<WorkspaceView>,
-) -> gpui::Div {
+fn oauth_client_fields(form: &AccountSetupState, colors: &UiColors) -> gpui::Div {
     div()
         .flex()
         .gap_3()
         .child(div().flex_1().min_w_0().child(account_input(
             form,
-            active_field,
-            EditorField::AccountOauthClientId,
-            "account-oauth-client-id-field",
-            "OAuth2 Client Id",
-            "Provider application client id",
-            &form.oauth_client_id,
-            false,
+            AccountField::OauthClientId,
             colors,
-            cx,
         )))
         .child(div().flex_1().min_w_0().child(account_input(
             form,
-            active_field,
-            EditorField::AccountOauthClientSecret,
-            "account-oauth-client-secret-field",
-            "OAuth2 Client Secret",
-            "Optional for public clients",
-            &form.oauth_client_secret,
-            false,
+            AccountField::OauthClientSecret,
             colors,
-            cx,
         )))
 }
 
@@ -660,12 +699,12 @@ pub(crate) fn account_oauth_provider_buttons(
                 colors.foreground,
                 cx.listener(move |this: &mut WorkspaceView, _, _, cx| {
                     this.account_setup.oauth_preset = Some(preset);
-                    this.account_setup.endpoint =
-                        UiBuffer::single_line(preset_endpoint(preset).to_owned());
+                    let form = &this.account_setup;
+                    form.set_text(AccountField::Endpoint, preset_endpoint(preset), cx);
                     let (host, port, security) = preset_smtp(preset);
-                    this.account_setup.smtp_host = UiBuffer::single_line(host.to_owned());
-                    this.account_setup.smtp_port = UiBuffer::single_line(port.to_owned());
-                    this.account_setup.smtp_security = UiBuffer::single_line(security.to_owned());
+                    form.set_text(AccountField::SmtpHost, host, cx);
+                    form.set_text(AccountField::SmtpPort, port, cx);
+                    form.set_text(AccountField::SmtpSecurity, security, cx);
                     cx.notify();
                 }),
             )
@@ -674,43 +713,21 @@ pub(crate) fn account_oauth_provider_buttons(
         .collect()
 }
 
-/// An account-setup input with its click-to-focus handler and, when the
-/// last submit found a problem with it, the error underneath.
-// The label, placeholder and buffer are what make each field distinct.
-#[allow(clippy::too_many_arguments)]
-fn account_input(
-    form: &AccountSetupState,
-    active_field: Option<EditorField>,
-    field: EditorField,
-    id: &'static str,
-    label: &str,
-    placeholder: &str,
-    buffer: &UiBuffer,
-    multiline: bool,
-    colors: &UiColors,
-    cx: &mut Context<WorkspaceView>,
-) -> Stateful<gpui::Div> {
+/// An account-setup input with its label and, when the last submit found
+/// a problem with it, the error underneath.
+fn account_input(form: &AccountSetupState, field: AccountField, colors: &UiColors) -> gpui::Div {
     let danger = colors.danger;
-    input_card(
-        id,
-        label,
-        placeholder,
-        buffer,
-        active_field == Some(field),
-        multiline,
-        colors,
+    input_card(field.label(), form.input(field), colors).when_some(
+        form.errors.get(&field).cloned(),
+        move |this, error| {
+            this.child(
+                div()
+                    .w_full()
+                    .text_sm()
+                    .text_color(rgb(danger))
+                    .ellipsis()
+                    .child(error),
+            )
+        },
     )
-    .on_click(cx.listener(move |this, _, window, cx| {
-        this.set_active_field(field, window, cx);
-    }))
-    .when_some(form.errors.get(&field).cloned(), move |this, error| {
-        this.child(
-            div()
-                .w_full()
-                .text_sm()
-                .text_color(rgb(danger))
-                .ellipsis()
-                .child(error),
-        )
-    })
 }

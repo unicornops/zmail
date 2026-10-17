@@ -8076,6 +8076,8 @@ dependencies = [
  "chrono",
  "gpui",
  "gpui_platform",
+ "tokio",
+ "unicode-segmentation",
  "url",
  "zmail-auth",
  "zmail-core",

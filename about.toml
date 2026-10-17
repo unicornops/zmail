@@ -18,3 +18,11 @@ accepted = [
 
 ignore-build-dependencies = false
 ignore-dev-dependencies = false
+
+# Source files ported from other projects. cargo-about only lists crates,
+# so these are recorded here; keep each file's header notice when editing.
+#
+# - crates/zmail-ui/src/components/text_input.rs
+#   Ported from crates/gpui/examples/input.rs in Zed v1.24.2
+#   (https://github.com/zed-industries/zed), Copyright Zed Industries, Inc.,
+#   licensed under the Apache License 2.0.

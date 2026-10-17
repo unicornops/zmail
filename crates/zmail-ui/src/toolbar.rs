@@ -4,13 +4,12 @@
 //! [`WorkspaceView::render_toolbar`], which produces the action-button bar
 //! that spans the full width at the top of the window.
 
-use gpui::{Context, IntoElement, StatefulInteractiveElement, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 use zmail_core::ThemeAppearance;
 
 use super::{DetailMode, ListMode, WorkspaceView};
-use crate::input::EditorField;
-use crate::styles::{TOOLBAR_HEIGHT, UiColors};
-use crate::widgets::{HoverExt, interactive_background, search_field, toolbar_button};
+use crate::styles::{SEARCH_FIELD_WIDTH, TOOLBAR_HEIGHT, UiColors};
+use crate::widgets::{HoverExt, interactive_background, toolbar_button};
 
 impl WorkspaceView {
     /// Render the top section of the workspace: the action-button bar,
@@ -144,17 +143,13 @@ impl WorkspaceView {
                             )
                         },
                     )
+                    // Fixed width so typing never shifts the buttons beside
+                    // it; long queries scroll inside the field.
                     .child(
-                        search_field(
-                            "search-query-field",
-                            "Search mail",
-                            &self.search_query,
-                            self.active_field == Some(EditorField::SearchQuery),
-                            colors,
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_active_field(EditorField::SearchQuery, window, cx);
-                        })),
+                        div()
+                            .flex_none()
+                            .w(px(SEARCH_FIELD_WIDTH))
+                            .child(self.search_query.clone()),
                     )
                     .child(
                         toolbar_button(
