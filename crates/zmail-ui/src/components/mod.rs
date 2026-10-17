@@ -19,8 +19,10 @@ pub(crate) mod split_handle;
 pub(crate) mod test_support;
 pub(crate) mod text_input;
 pub(crate) mod theme;
+pub(crate) mod title_bar;
 pub(crate) mod toast;
 pub(crate) mod tooltip;
+pub(crate) mod window_frame;
 
 pub(crate) use actions::init;
 pub(crate) use avatar::Avatar;
@@ -36,4 +38,6 @@ pub(crate) use skeleton::SkeletonRow;
 pub(crate) use split_handle::{PaneSide, SplitHandle};
 pub(crate) use text_input::{TextInput, TextInputEvent};
 pub(crate) use theme::ComponentTheme;
+pub(crate) use title_bar::TitleBar;
 pub(crate) use toast::{Toast, ToastHost, ToastKind};
+pub(crate) use window_frame::window_frame;

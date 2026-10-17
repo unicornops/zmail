@@ -26,6 +26,14 @@ ignore-dev-dependencies = false
 #   Ported from crates/gpui/examples/input.rs in Zed v1.24.2
 #   (https://github.com/zed-industries/zed), Copyright Zed Industries, Inc.,
 #   licensed under the Apache License 2.0.
+# - crates/zmail-ui/src/components/title_bar.rs
+#   Ported from crates/platform_title_bar in Zed v1.24.2, Copyright Zed
+#   Industries, Inc., licensed under GPL-3.0-or-later (used under
+#   GPL-3.0-only).
+# - crates/zmail-ui/src/components/window_frame.rs
+#   Ported from client_side_decorations in crates/workspace (GPL-3.0-or-later,
+#   used under GPL-3.0-only) and crates/gpui/examples/window_shadow.rs
+#   (Apache License 2.0) in Zed v1.24.2, Copyright Zed Industries, Inc.
 
 # Bundled assets that are not crates, also recorded here:
 #

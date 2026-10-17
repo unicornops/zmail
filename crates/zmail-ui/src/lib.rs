@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use gpui::{
     App, AppContext as _, AssetSource, Bounds, Entity, FocusHandle, Subscription, TitlebarOptions,
-    WindowBounds, WindowOptions, px, size,
+    WindowBounds, WindowDecorations, WindowOptions, point, px, size,
 };
 use zmail_core::{
     APP_NAME, AccountOverview, AccountSummary, AppBootstrap, DraftSummary, IdentitySummary,
@@ -46,6 +46,7 @@ use crate::styles::{WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_W
 
 mod components;
 use crate::components::TextInput;
+use crate::components::title_bar::TRAFFIC_LIGHT_POSITION;
 pub use components::gallery::run_gallery;
 
 mod account_setup;
@@ -137,10 +138,24 @@ pub fn run(
 
             if let Err(error) = cx.open_window(
                 WindowOptions {
+                    // Zmail draws its own title bar (`components::title_bar`)
+                    // with the toolbar inside it: transparent over the
+                    // traffic lights on macOS, custom caption buttons on
+                    // Windows, and a client-side header bar on Linux when
+                    // the compositor supports it.
                     titlebar: Some(TitlebarOptions {
                         title: Some(APP_NAME.into()),
-                        ..Default::default()
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(
+                            px(TRAFFIC_LIGHT_POSITION.0),
+                            px(TRAFFIC_LIGHT_POSITION.1),
+                        )),
                     }),
+                    // The title bar moves the window itself
+                    // (`start_window_move`), so AppKit must not also drag
+                    // it or delay its clicks (macOS only).
+                    app_owns_titlebar_drag: true,
+                    window_decorations: Some(window_decorations()),
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
                     // Matches the macOS bundle id and the packaged
@@ -172,6 +187,42 @@ pub fn run(
                 panic!("failed to open the Phase 4 window: {error:#}");
             }
         });
+}
+
+/// The decorations to ask the window system for (only Linux reads this;
+/// macOS and Windows ignore it). `Window::window_decorations` says which
+/// the window actually got.
+///
+/// - GNOME on Wayland has no server-side decorations, so GPUI always draws
+///   client-side ones there, whatever is asked for.
+/// - KDE draws its own (Breeze) title bars and supports them on Wayland and
+///   X11, so Zmail asks for server-side decorations there.
+/// - Elsewhere it asks for client-side ones; X11 without a compositor (or a
+///   window manager without `_GTK_FRAME_EXTENTS`) falls back to the window
+///   manager's title bar.
+///
+/// `ZMAIL_WINDOW_DECORATIONS=server` or `=client` overrides the choice.
+fn window_decorations() -> WindowDecorations {
+    decorations_for(
+        std::env::var("ZMAIL_WINDOW_DECORATIONS").ok().as_deref(),
+        std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+    )
+}
+
+/// [`window_decorations`] for the given override and desktop.
+fn decorations_for(requested: Option<&str>, desktop: Option<&str>) -> WindowDecorations {
+    match requested {
+        Some("server") => WindowDecorations::Server,
+        Some("client") => WindowDecorations::Client,
+        _ if desktop
+            .unwrap_or_default()
+            .split(':')
+            .any(|name| name.eq_ignore_ascii_case("KDE")) =>
+        {
+            WindowDecorations::Server
+        }
+        _ => WindowDecorations::Client,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,4 +312,27 @@ struct WorkspaceView {
     /// 12- or 24-hour clock for list and reader dates, from the locale.
     hour_cycle: zmail_core::time::HourCycle,
     _subscriptions: Vec<Subscription>,
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::WindowDecorations;
+
+    use super::decorations_for;
+
+    #[test]
+    fn kde_gets_its_own_title_bar_and_the_rest_draw_one() {
+        let is_server = |requested, desktop| {
+            matches!(
+                decorations_for(requested, desktop),
+                WindowDecorations::Server
+            )
+        };
+        assert!(!is_server(None, Some("GNOME")));
+        assert!(!is_server(None, Some("ubuntu:GNOME")));
+        assert!(!is_server(None, None));
+        assert!(is_server(None, Some("KDE")));
+        assert!(is_server(Some("server"), Some("GNOME")));
+        assert!(!is_server(Some("client"), Some("KDE")));
+    }
 }
