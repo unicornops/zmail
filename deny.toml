@@ -7,6 +7,9 @@ ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste is pulled transitively by the pinned GPUI macOS stack (metal) and has no safe repo-local replacement yet" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser is pulled transitively by the pinned GPUI font stack and has no safe repo-local replacement yet" },
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz is pulled transitively by the pinned GPUI font stack and has no safe repo-local replacement yet" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant is pulled transitively by the pinned GPUI Linux accessibility stack (accesskit_unix, atspi) and folds into zbus 6, which that stack does not use yet" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names is pulled transitively by the pinned GPUI Linux accessibility stack (accesskit_unix, atspi) and folds into zbus 6, which that stack does not use yet" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is pulled transitively by the pinned GPUI Linux accessibility stack (accesskit_unix, atspi) and folds into zbus 6, which that stack does not use yet" },
 ]
 
 [licenses]
