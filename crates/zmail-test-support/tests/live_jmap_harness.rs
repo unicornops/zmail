@@ -359,6 +359,11 @@ fn mail_watcher_applies_pushed_changes_incrementally() -> Result<()> {
             .contains("Delivered while the watcher listens")
     );
 
+    // A wake (sleep or network change) drops the push connection; the
+    // watcher must reconnect at once for the next change to arrive.
+    sync_service.signal_wake();
+    thread::sleep(Duration::from_secs(3));
+
     // Another client marks the message read; the keyword change arrives as
     // an `updated` id and keeps the stored body.
     let remote_id = store

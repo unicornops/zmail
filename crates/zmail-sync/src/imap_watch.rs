@@ -10,7 +10,7 @@ use tokio::{task::JoinSet, time::sleep};
 use zmail_core::SyncTarget;
 use zmail_imap::{WatchEnd, WatchEvent, WatchPlan};
 
-use crate::{SyncService, backoff::Backoff};
+use crate::{SyncService, backoff::Backoff, wake::unless_woken};
 
 /// How long one watch plan runs before the mailbox list is read again, so
 /// mailboxes created or renamed since are watched too.
@@ -50,6 +50,7 @@ impl SyncService {
         poll_interval: Duration,
         backoff: &mut Backoff,
         notify_allowed: &mut bool,
+        wake: &mut tokio::sync::watch::Receiver<u64>,
     ) {
         let plan = match zmail_imap::plan_watch(
             target,
@@ -64,7 +65,12 @@ impl SyncService {
                 plan
             }
             Err(_) => {
-                sleep(backoff.next_delay()).await;
+                if unless_woken(wake, sleep(backoff.next_delay()))
+                    .await
+                    .is_none()
+                {
+                    backoff.reset();
+                }
                 return;
             }
         };
@@ -96,6 +102,9 @@ impl SyncService {
         loop {
             tokio::select! {
                 _ = &mut replan => break,
+                // The tasks reconnect on their own; a wake also replans,
+                // since the mailbox list may have changed meanwhile.
+                Ok(()) = wake.changed() => break,
                 _ = safety.tick() => {
                     if !self.account_exists(target.id) {
                         break;
@@ -122,6 +131,7 @@ impl SyncService {
     async fn run_watch_task(self, target: SyncTarget, mut task: WatchTask) -> TaskEnd {
         let account_id = target.id;
         let mut backoff = Backoff::reconnect();
+        let mut wake = self.inner.wake.subscribe();
         loop {
             if !self.account_exists(account_id) {
                 return TaskEnd::AccountGone;
@@ -129,7 +139,12 @@ impl SyncService {
             // Credentials are resolved per connection so OAuth2 accounts
             // reconnect with a refreshed access token.
             let Ok(secret) = self.connect_secret(&target).await else {
-                sleep(backoff.next_delay()).await;
+                if unless_woken(&mut wake, sleep(backoff.next_delay()))
+                    .await
+                    .is_none()
+                {
+                    backoff.reset();
+                }
                 continue;
             };
 
@@ -142,20 +157,28 @@ impl SyncService {
                 }
                 self.request_sync(account_id);
             };
-            let result = match &task {
-                WatchTask::Notify => zmail_imap::watch_notify(&target, &secret, on_event).await,
-                WatchTask::Idle(mailbox) => {
-                    zmail_imap::watch_idle(&target, &secret, mailbox, on_event).await
+            let watch = async {
+                match &task {
+                    WatchTask::Notify => zmail_imap::watch_notify(&target, &secret, on_event).await,
+                    WatchTask::Idle(mailbox) => {
+                        zmail_imap::watch_idle(&target, &secret, mailbox, on_event).await
+                    }
+                    WatchTask::Poll(mailboxes) => zmail_imap::poll_status(
+                        &target,
+                        &secret,
+                        mailboxes,
+                        zmail_imap::STATUS_POLL_INTERVAL,
+                        on_event,
+                    )
+                    .await
+                    .map(|()| WatchEnd::Unsupported),
                 }
-                WatchTask::Poll(mailboxes) => zmail_imap::poll_status(
-                    &target,
-                    &secret,
-                    mailboxes,
-                    zmail_imap::STATUS_POLL_INTERVAL,
-                    on_event,
-                )
-                .await
-                .map(|()| WatchEnd::Unsupported),
+            };
+            // A wake drops the connection, which is probably dead, and
+            // reconnects at once.
+            let Some(result) = unless_woken(&mut wake, watch).await else {
+                backoff.reset();
+                continue;
             };
 
             match (result, &task) {
@@ -167,7 +190,9 @@ impl SyncService {
                 _ => {
                     let delay =
                         backoff.after_disconnect(connected_at.map(|at: Instant| at.elapsed()));
-                    sleep(delay).await;
+                    if unless_woken(&mut wake, sleep(delay)).await.is_none() {
+                        backoff.reset();
+                    }
                 }
             }
         }

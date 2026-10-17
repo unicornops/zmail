@@ -875,6 +875,10 @@ fn mail_watcher_syncs_mail_delivered_to_any_folder() -> Result<()> {
     // the message in; nothing below syncs directly.
     sync_service.start_mail_watcher_with_interval(Duration::from_secs(3600))?;
     thread::sleep(Duration::from_secs(3));
+    // A wake (sleep or network change) drops and rebuilds every watcher
+    // connection; the message must still arrive through the new ones.
+    sync_service.signal_wake();
+    thread::sleep(Duration::from_secs(3));
     other_client.append_to(
         "Projects",
         "From: peer@example.test\r\nSubject: Live folder probe\r\n\r\nNot the inbox.\r\n",
