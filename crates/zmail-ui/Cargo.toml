@@ -20,6 +20,8 @@ zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }
 
 [dev-dependencies]
+# `#[gpui::test]`, `TestAppContext` and `VisualTestContext` for view tests.
+gpui = { workspace = true, features = ["test-support"] }
 zmail-theme = { path = "../zmail-theme" }
 
 [lints]
