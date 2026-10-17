@@ -148,6 +148,7 @@ impl WorkspaceView {
             dead_op_count: 0,
             search_results: Vec::new(),
             search_results_query: String::new(),
+            server_search_pending: None,
             selected_account_id: None,
             selected_mailbox_id: None,
             selected_thread_id: None,
@@ -334,6 +335,7 @@ impl WorkspaceView {
             selected_thread_id: self.selected_thread_id,
             search_results: self.search_results.clone(),
             search_query: self.search_results_query.clone(),
+            searching_server: self.server_search_pending.is_some(),
             drafts: self.drafts.clone(),
             selected_draft_id: self.selected_draft_id,
             outbox_jobs: self.outbox_jobs.clone(),
@@ -980,13 +982,55 @@ impl WorkspaceView {
         match self.store.search_threads(account_id, &query, 100) {
             Ok(results) => {
                 self.search_results = results;
-                self.search_results_query = query;
+                self.search_results_query = query.clone();
                 self.list_mode = ListMode::Search;
                 self.detail_mode = DetailMode::Reader;
+                self.search_server_if_needed(account_id, query, cx);
             }
             Err(error) => self.store_error = Some(error.to_string()),
         }
         cx.notify();
+    }
+
+    /// Asks the server too when the local index cannot fully answer the
+    /// query (bodies not indexed yet). The hits are recorded in the store
+    /// and the results re-read from it, so the list still shows only local
+    /// state. Runs once per submitted query.
+    fn search_server_if_needed(&mut self, account_id: i64, query: String, cx: &mut Context<Self>) {
+        if !self
+            .store
+            .search_needs_server(account_id, &query)
+            .unwrap_or(false)
+        {
+            self.server_search_pending = None;
+            return;
+        }
+        // Pressing Enter again on a query whose server search is still
+        // running does not start a second one.
+        if self.server_search_pending.as_ref() == Some(&(account_id, query.clone())) {
+            return;
+        }
+        self.server_search_pending = Some((account_id, query.clone()));
+        let service = self.sync_service.clone();
+        cx.spawn(async move |this, cx| {
+            // Offline or failing servers leave the local results as they are.
+            let _ = service.search_server_and_wait(account_id, &query).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.server_search_pending.as_ref() != Some(&(account_id, query.clone())) {
+                    return;
+                }
+                view.server_search_pending = None;
+                if view.selected_account_id == Some(account_id)
+                    && view.search_results_query == query
+                    && let Ok(results) = view.store.search_threads(account_id, &query, 100)
+                {
+                    view.search_results = results;
+                }
+                view.refresh_from_store(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // -----------------------------------------------------------------------

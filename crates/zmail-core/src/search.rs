@@ -26,7 +26,7 @@
 //! escaped FTS5 expression, and the protocol adapters map them onto IMAP
 //! `SEARCH` keys and JMAP `Email/query` filters.
 
-use chrono::{Days, Months, NaiveDate};
+use chrono::{Days, Months, NaiveDate, NaiveTime, TimeDelta, TimeZone};
 
 /// A parsed search query: every clause must match.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -202,6 +202,48 @@ impl SearchQuery {
     pub fn has_text_terms(&self) -> bool {
         self.clauses.iter().any(|clause| clause.term.is_text())
     }
+
+    /// Whether answering the query fully needs message bodies: it has a
+    /// positive free-text word or phrase. Header fields (`from:`, `to:`,
+    /// `subject:`) and state are always stored locally, so only these
+    /// queries can miss mail whose body is not indexed yet.
+    pub fn needs_message_bodies(&self) -> bool {
+        self.clauses.iter().any(|clause| {
+            !clause.negated
+                && matches!(&clause.term, SearchTerm::Text(text) if text.is_searchable())
+        })
+    }
+}
+
+/// The mailbox role an `in:` value also matches, for the common names that
+/// differ from the stored role (`in:spam` finds the `junk` mailbox).
+pub fn mailbox_role_alias(value: &str) -> &str {
+    if value.eq_ignore_ascii_case("spam") {
+        "junk"
+    } else if value.eq_ignore_ascii_case("bin") {
+        "trash"
+    } else {
+        value
+    }
+}
+
+/// Whether an `in:` value names a mailbox, by name or role, ignoring
+/// ASCII case.
+pub fn mailbox_matches(value: &str, name: &str, role: Option<&str>) -> bool {
+    name.eq_ignore_ascii_case(value)
+        || role.is_some_and(|role| role.eq_ignore_ascii_case(mailbox_role_alias(value)))
+}
+
+/// The Unix time at which `day` starts in `zone`. Days that skip midnight
+/// (a daylight-saving jump) start at the first valid local time after it.
+pub fn day_start_unix<Tz: TimeZone>(day: NaiveDate, zone: &Tz) -> Option<i64> {
+    let midnight = day.and_time(NaiveTime::MIN);
+    (0..=2)
+        .find_map(|hours| {
+            zone.from_local_datetime(&(midnight + TimeDelta::hours(hours)))
+                .earliest()
+        })
+        .map(|start| start.timestamp())
 }
 
 /// Parses one clause from the start of `input` (which has no leading
@@ -499,6 +541,30 @@ mod tests {
             vec![positive(text("from:")), positive(text("alice"))]
         );
         assert!(SearchQuery::parse("to:\"\"").is_empty());
+    }
+
+    #[test]
+    fn only_positive_free_text_needs_bodies() {
+        assert!(SearchQuery::parse("is:unread report").needs_message_bodies());
+        assert!(SearchQuery::parse("\"exact words\"").needs_message_bodies());
+        assert!(!SearchQuery::parse("from:alice subject:x is:unread").needs_message_bodies());
+        assert!(!SearchQuery::parse("-report !!").needs_message_bodies());
+    }
+
+    #[test]
+    fn mailboxes_match_by_name_or_role() {
+        assert!(mailbox_matches("inbox", "INBOX", None));
+        assert!(mailbox_matches("Spam", "Bulk", Some("junk")));
+        assert!(mailbox_matches("archive", "All Mail", Some("archive")));
+        assert!(!mailbox_matches("project", "Projects", None));
+    }
+
+    #[test]
+    fn day_starts_follow_the_zone() {
+        let day = NaiveDate::from_ymd_opt(2026, 6, 1).expect("valid date");
+        let plus_one = chrono::FixedOffset::east_opt(3600).expect("valid offset");
+        assert_eq!(day_start_unix(day, &chrono::Utc), Some(1_780_272_000));
+        assert_eq!(day_start_unix(day, &plus_one), Some(1_780_268_400));
     }
 
     #[test]

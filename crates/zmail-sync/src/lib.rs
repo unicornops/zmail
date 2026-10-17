@@ -31,8 +31,10 @@ use zmail_store::LocalStore;
 
 mod indexer;
 pub mod power;
+mod server_search;
 
 pub use indexer::{INDEX_BATCH_SIZE, INDEX_MAX_MESSAGE_BYTES, IndexPause, IndexReport};
+pub use server_search::{SEARCH_SYNC_COOLDOWN, SERVER_SEARCH_MAX_HITS, ServerSearchReport};
 
 const OUTBOX_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const OUTBOX_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
@@ -163,6 +165,9 @@ struct SyncServiceInner {
     /// Accounts with an indexing pass running.
     indexing_accounts: Mutex<HashSet<i64>>,
     power_monitor: Mutex<Arc<dyn power::PowerMonitor>>,
+    /// When a server search last ran a sync for each account, so a burst
+    /// of searches cannot run back-to-back full syncs.
+    search_syncs: Mutex<std::collections::HashMap<i64, std::time::Instant>>,
 }
 
 impl std::fmt::Debug for SyncService {
@@ -199,6 +204,7 @@ impl SyncService {
                 index_wake: tokio::sync::Notify::new(),
                 indexing_accounts: Mutex::new(HashSet::new()),
                 power_monitor: Mutex::new(Arc::new(power::SystemPowerMonitor)),
+                search_syncs: Mutex::new(std::collections::HashMap::new()),
             }),
         };
         service.start_outbox_supervisor();

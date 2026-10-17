@@ -102,6 +102,10 @@ cargo run -p zmail-app -- search 1 'from:alice "budget review" -in:junk after:30
 
 The desktop app indexes bodies in the background; `zmail-app index ID` runs
 one indexing pass for an account in the foreground and prints its progress.
+Until every body is indexed, a search with free text also asks the server
+(IMAP `UID SEARCH`, JMAP `Email/query`); its extra hits are listed after the
+local ones and marked "found on server". `zmail-app search --server ID QUERY`
+does the same from the command line.
 
 Launch the desktop client:
 

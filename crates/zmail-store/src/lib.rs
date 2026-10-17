@@ -21,8 +21,8 @@ use zmail_core::{
     MessageAttachment, MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft,
     OAuth2TargetConfig, OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig,
     OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment,
-    SearchHit, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary,
-    SyncTarget, ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
+    SearchHit, ServerHitRef, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase,
+    SyncStatusSummary, SyncTarget, ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
     preferences::UiPreferences,
 };
 use zmail_security::sanitize_html_for_display;
@@ -49,6 +49,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0013_app_settings", APP_SETTINGS_SCHEMA),
     ("0014_search_index_v2", SEARCH_INDEX_V2_SCHEMA),
     ("0015_background_indexing", BACKGROUND_INDEXING_SCHEMA),
+    ("0016_server_search_hits", SERVER_SEARCH_HITS_SCHEMA),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -380,6 +381,20 @@ ALTER TABLE messages ADD COLUMN body_fetch_failures INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_messages_unhydrated
 ON messages(received_at DESC, id DESC)
 WHERE body_text IS NULL AND sanitized_html IS NULL;
+"#;
+
+/// Threads the server-side search fallback found for an account's latest
+/// server query, so search results still come from local state. One query
+/// is kept per account; hits disappear with their threads.
+const SERVER_SEARCH_HITS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS server_search_hits (
+    account_id INTEGER NOT NULL,
+    query TEXT NOT NULL,
+    thread_id INTEGER NOT NULL,
+    PRIMARY KEY (account_id, query, thread_id),
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+);
 "#;
 
 /// Re-indexes every dirty thread: drops its document, rebuilds it from the
@@ -1952,6 +1967,12 @@ impl LocalStore {
 
     /// [`LocalStore::search_threads`] with an explicit clock and time zone
     /// for `before:`/`after:`, for tests.
+    ///
+    /// Local index hits come first. Threads the server search fallback
+    /// recorded for the same query text ([`LocalStore::record_server_search_hits`])
+    /// follow, marked [`SearchHit::from_server`], when they pass the
+    /// query's non-text clauses and the local index did not already find
+    /// them.
     pub fn search_threads_at<Tz: chrono::TimeZone>(
         &self,
         account_id: i64,
@@ -1960,31 +1981,130 @@ impl LocalStore {
         now: &chrono::DateTime<Tz>,
     ) -> Result<Vec<SearchHit>> {
         let parsed = zmail_core::search::SearchQuery::parse(query);
-        let Some(compiled) = search::compile_search(&parsed, account_id, limit, now) else {
-            return Ok(Vec::new());
-        };
         let conn = self.connection()?;
-        let mut statement = conn
-            .prepare(&compiled.sql)
-            .context("failed to prepare the search query")?;
-        let rows = statement.query_map(rusqlite::params_from_iter(compiled.params), |row| {
-            Ok(SearchHit {
-                mailbox_id: row.get(0)?,
-                mailbox_name: row.get(1)?,
-                thread_id: row.get(2)?,
-                subject: row.get(3)?,
-                latest_sender: row.get(4)?,
-                participants: row.get(5)?,
-                preview: row.get(6)?,
-                unread_count: row.get::<_, usize>(7)?,
-                is_flagged: row.get::<_, bool>(8)?,
-                has_attachments: row.get::<_, bool>(9)?,
-                latest_message_at: row.get(10)?,
-            })
-        })?;
+        let mut hits = match search::compile_search(
+            &parsed,
+            account_id,
+            limit,
+            now,
+            search::SearchScope::Local,
+        ) {
+            Some(compiled) => run_search(&conn, compiled, false)?,
+            None => return Ok(Vec::new()),
+        };
+        if hits.len() < limit
+            && let Some(compiled) = search::compile_search(
+                &parsed,
+                account_id,
+                limit,
+                now,
+                search::SearchScope::ServerHits(query.trim()),
+            )
+        {
+            let local = hits.iter().map(|hit| hit.thread_id).collect::<HashSet<_>>();
+            let server = run_search(&conn, compiled, true)?
+                .into_iter()
+                .filter(|hit| !local.contains(&hit.thread_id));
+            hits.extend(server.take(limit - hits.len()));
+        }
+        Ok(hits)
+    }
 
+    /// Whether a search could miss mail locally and should also ask the
+    /// server: the query needs message bodies
+    /// ([`SearchQuery::needs_message_bodies`](zmail_core::search::SearchQuery::needs_message_bodies))
+    /// and some of the account's messages have no body in the index.
+    pub fn search_needs_server(&self, account_id: i64, query: &str) -> Result<bool> {
+        if !zmail_core::search::SearchQuery::parse(query).needs_message_bodies() {
+            return Ok(false);
+        }
+        let conn = self.connection()?;
+        conn.query_row(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM messages m
+                JOIN threads t ON t.id = m.thread_id
+                JOIN mailboxes b ON b.id = t.mailbox_id
+                WHERE m.body_text IS NULL AND m.sanitized_html IS NULL
+                  AND b.account_id = ?1
+            )
+            "#,
+            params![account_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .context("failed to check for unindexed messages")
+    }
+
+    /// Returns the account's mailboxes as `(server name, role)` pairs in
+    /// sidebar order, for choosing which mailboxes a server search covers.
+    pub fn mailbox_names_and_roles(
+        &self,
+        account_id: i64,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            "SELECT name, role FROM mailboxes WHERE account_id = ?1 ORDER BY sort_order, name",
+        )?;
+        let rows = statement.query_map(params![account_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to search threads")
+            .context("failed to list the mailboxes")
+    }
+
+    /// Records the server search fallback's hits for `query`, replacing the
+    /// account's previous server results, and returns the hits that match
+    /// no stored message (mail that arrived after the last sync).
+    pub fn record_server_search_hits(
+        &self,
+        account_id: i64,
+        query: &str,
+        hits: &[ServerHitRef],
+    ) -> Result<Vec<ServerHitRef>> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the server search transaction")?;
+        transaction.execute(
+            "DELETE FROM server_search_hits WHERE account_id = ?1",
+            params![account_id],
+        )?;
+        let mut unknown = Vec::new();
+        {
+            let mut resolve = transaction.prepare(
+                r#"
+                SELECT m.thread_id
+                FROM messages m
+                JOIN threads t ON t.id = m.thread_id
+                JOIN mailboxes b ON b.id = t.mailbox_id
+                WHERE m.remote_id = ?2 AND b.account_id = ?1
+                  AND (?3 IS NULL OR b.name = ?3)
+                "#,
+            )?;
+            let mut insert = transaction.prepare(
+                "INSERT OR IGNORE INTO server_search_hits(account_id, query, thread_id) \
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for hit in hits {
+                let threads = resolve
+                    .query_map(
+                        params![account_id, hit.remote_id, hit.mailbox_name],
+                        |row| row.get::<_, i64>(0),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                if threads.is_empty() {
+                    unknown.push(hit.clone());
+                }
+                for thread_id in threads {
+                    insert.execute(params![account_id, query.trim(), thread_id])?;
+                }
+            }
+        }
+        transaction
+            .commit()
+            .context("failed to commit the server search hits")?;
+        Ok(unknown)
     }
 
     /// Records a sync phase transition for an account.
@@ -3930,6 +4050,35 @@ fn thread_location(conn: &Connection, thread_id: i64) -> Result<Option<ThreadLoc
 /// Callers run this inside their write transaction, before committing, so
 /// a committed change is always searchable and a concurrent writer cannot
 /// slip dirty rows in between the rebuild and the clear.
+/// Runs a compiled search and maps its rows to hits.
+fn run_search(
+    conn: &Connection,
+    compiled: search::CompiledSearch,
+    from_server: bool,
+) -> Result<Vec<SearchHit>> {
+    let mut statement = conn
+        .prepare(&compiled.sql)
+        .context("failed to prepare the search query")?;
+    let rows = statement.query_map(rusqlite::params_from_iter(compiled.params), |row| {
+        Ok(SearchHit {
+            mailbox_id: row.get(0)?,
+            mailbox_name: row.get(1)?,
+            thread_id: row.get(2)?,
+            subject: row.get(3)?,
+            latest_sender: row.get(4)?,
+            participants: row.get(5)?,
+            preview: row.get(6)?,
+            unread_count: row.get::<_, usize>(7)?,
+            is_flagged: row.get::<_, bool>(8)?,
+            has_attachments: row.get::<_, bool>(9)?,
+            latest_message_at: row.get(10)?,
+            from_server,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to search threads")
+}
+
 fn flush_search_index(conn: &Connection) -> Result<()> {
     conn.execute_batch(SEARCH_INDEX_FLUSH)
         .context("failed to update the search index")

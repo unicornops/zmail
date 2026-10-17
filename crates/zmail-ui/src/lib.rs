@@ -292,6 +292,9 @@ struct WorkspaceView {
     /// The query that produced `search_results`, shown in the list header
     /// (the search field itself may have been edited since).
     search_results_query: String,
+    /// The `(account, query)` whose server search fallback is still
+    /// running; its hits join `search_results` when it finishes.
+    server_search_pending: Option<(i64, String)>,
     selected_account_id: Option<i64>,
     selected_mailbox_id: Option<i64>,
     selected_thread_id: Option<i64>,

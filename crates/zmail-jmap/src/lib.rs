@@ -540,6 +540,126 @@ async fn fetch_email_query(client: &Client) -> Result<JmapQueryResult> {
     })
 }
 
+/// Searches the account on the server with `Email/query` and returns the
+/// ids of the newest `max_hits` matching emails.
+///
+/// This is the fallback for mail whose body the local index does not hold.
+/// Every operator has a JMAP filter: free text (`text`), `from`, `to`,
+/// `subject`, `hasAttachment`, the `$seen` and `$flagged` keywords,
+/// `inMailbox` (resolved by mailbox name or role), and `before`/`after`
+/// at the start of the day in `now`'s zone; negation wraps a condition in
+/// a `NOT` operator. The store re-checks the non-text clauses locally.
+pub async fn search_emails<Tz: chrono::TimeZone>(
+    target: &SyncTarget,
+    secret: &str,
+    query: &zmail_core::search::SearchQuery,
+    now: &DateTime<Tz>,
+    max_hits: usize,
+) -> Result<Vec<zmail_core::ServerHitRef>> {
+    if target.protocol != ProtocolKind::Jmap {
+        bail!("JMAP adapter received a non-JMAP sync target");
+    }
+    let client = connect_client(&target.endpoint, &target.username, secret, target.auth).await?;
+    let (mailboxes, _) = fetch_mailboxes(&client).await?;
+    let Some(filter) = search_filter(query, &mailboxes, now) else {
+        return Ok(Vec::new());
+    };
+    let mut request = client.build();
+    request
+        .query_email()
+        .filter(filter)
+        .sort([email::query::Comparator::received_at().descending()])
+        .limit(max_hits);
+    let mut response: QueryResponse = request
+        .send_query_email()
+        .await
+        .context("failed to search JMAP emails")?;
+    Ok(response
+        .take_ids()
+        .into_iter()
+        .map(|id| zmail_core::ServerHitRef {
+            mailbox_name: None,
+            remote_id: id,
+        })
+        .collect())
+}
+
+/// Builds the `Email/query` filter for a query (see [`search_emails`]).
+/// Returns `None` when the query cannot match anything (an `in:` naming no
+/// mailbox).
+fn search_filter<Tz: chrono::TimeZone>(
+    query: &zmail_core::search::SearchQuery,
+    mailboxes: &[JmapMailbox],
+    now: &DateTime<Tz>,
+) -> Option<jmap_client::core::query::Filter<email::query::Filter>> {
+    use email::query::Filter;
+    use jmap_client::core::query::Filter as Operator;
+    use zmail_core::search::{SearchTerm, day_start_unix, mailbox_matches};
+
+    let today = now.date_naive();
+    let zone = now.timezone();
+    let mut conditions: Vec<Operator<Filter>> = Vec::new();
+    for clause in &query.clauses {
+        let condition: Operator<Filter> = match &clause.term {
+            SearchTerm::Text(text)
+            | SearchTerm::From(text)
+            | SearchTerm::To(text)
+            | SearchTerm::Subject(text) => {
+                if !text.is_searchable() {
+                    continue;
+                }
+                let value = text.value.clone();
+                match &clause.term {
+                    SearchTerm::Text(_) => Filter::text(value),
+                    SearchTerm::From(_) => Filter::from(value),
+                    SearchTerm::To(_) => Filter::to(value),
+                    _ => Filter::subject(value),
+                }
+                .into()
+            }
+            SearchTerm::HasAttachment => Filter::has_attachment(true).into(),
+            SearchTerm::Unread => Filter::not_keyword("$seen").into(),
+            SearchTerm::Read => Filter::has_keyword("$seen").into(),
+            SearchTerm::Flagged => Filter::has_keyword("$flagged").into(),
+            SearchTerm::Mailbox(value) => {
+                let ids = mailboxes
+                    .iter()
+                    .filter(|mailbox| {
+                        mailbox_matches(value, &mailbox.name, mailbox.role.as_deref())
+                    })
+                    .map(|mailbox| Filter::in_mailbox(mailbox.id.clone()))
+                    .collect::<Vec<_>>();
+                if ids.is_empty() {
+                    if clause.negated {
+                        continue;
+                    }
+                    return None;
+                }
+                Operator::or(ids)
+            }
+            SearchTerm::Before(spec) | SearchTerm::After(spec) => {
+                let Some(boundary) = spec
+                    .resolve(today)
+                    .and_then(|day| day_start_unix(day, &zone))
+                else {
+                    continue;
+                };
+                if matches!(clause.term, SearchTerm::Before(_)) {
+                    Filter::before(boundary).into()
+                } else {
+                    Filter::after(boundary).into()
+                }
+            }
+        };
+        conditions.push(if clause.negated {
+            Operator::not([condition])
+        } else {
+            condition
+        });
+    }
+    Some(Operator::and(conditions))
+}
+
 /// Fetches email details, downloading attachment blobs into the store's
 /// attachments directory.
 ///
@@ -1037,6 +1157,66 @@ mod tests {
         assert_eq!(sanitize_component("report.txt"), "report.txt");
         assert_eq!(sanitize_component("a b/c:d.txt"), "a_b_c_d.txt");
         assert_eq!(sanitize_component("../../etc/passwd"), ".._.._etc_passwd");
+    }
+
+    #[test]
+    fn search_filters_map_every_operator() {
+        use chrono::TimeZone;
+        let mailboxes = vec![
+            super::JmapMailbox {
+                id: "mb-inbox".to_owned(),
+                name: "Inbox".to_owned(),
+                role: Some("inbox".to_owned()),
+                sort_order: 0,
+            },
+            super::JmapMailbox {
+                id: "mb-junk".to_owned(),
+                name: "Bulk".to_owned(),
+                role: Some("junk".to_owned()),
+                sort_order: 1,
+            },
+        ];
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 6, 15, 12, 0, 0)
+            .single()
+            .expect("valid time");
+        let filter = |query: &str| {
+            super::search_filter(
+                &zmail_core::search::SearchQuery::parse(query),
+                &mailboxes,
+                &now,
+            )
+            .map(|filter| serde_json::to_value(filter).expect("filters serialise"))
+        };
+        assert_eq!(
+            filter(
+                "budget from:alice -is:unread has:attachment -in:spam after:2026-06-01 \
+                 is:flagged"
+            ),
+            Some(serde_json::json!({
+                "operator": "AND",
+                "conditions": [
+                    {"text": "budget"},
+                    {"from": "alice"},
+                    {"operator": "NOT", "conditions": [{"notKeyword": "$seen"}]},
+                    {"hasAttachment": true},
+                    {"operator": "NOT", "conditions": [
+                        {"operator": "OR", "conditions": [{"inMailbox": "mb-junk"}]}
+                    ]},
+                    {"after": "2026-06-01T00:00:00Z"},
+                    {"hasKeyword": "$flagged"},
+                ],
+            }))
+        );
+        // `in:` naming no mailbox matches nothing; negated, it narrows nothing.
+        assert_eq!(filter("budget in:nowhere"), None);
+        assert_eq!(
+            filter("budget -in:nowhere"),
+            Some(serde_json::json!({
+                "operator": "AND",
+                "conditions": [{"text": "budget"}],
+            }))
+        );
     }
 
     #[test]

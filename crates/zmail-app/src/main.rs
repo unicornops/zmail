@@ -43,7 +43,11 @@ fn main() -> Result<()> {
         Command::ListAccounts => list_accounts(),
         Command::SyncAll => sync_accounts(None),
         Command::SyncAccount(account_id) => sync_accounts(Some(account_id)),
-        Command::Search(account_id, query) => search_threads(account_id, &query),
+        Command::Search {
+            account_id,
+            query,
+            server,
+        } => search_threads(account_id, &query, server),
         Command::IndexAccount(account_id) => index_account(account_id),
         Command::ReadThread(thread_id) => read_thread(thread_id),
         Command::ListAttachments(thread_id) => list_attachments(thread_id),
@@ -117,7 +121,11 @@ enum Command {
     ListAccounts,
     SyncAll,
     SyncAccount(i64),
-    Search(i64, String),
+    Search {
+        account_id: i64,
+        query: String,
+        server: bool,
+    },
     IndexAccount(i64),
     ReadThread(i64),
     ListAttachments(i64),
@@ -190,16 +198,23 @@ impl Command {
                 }
             }
             "search" => {
-                let account_id = args
-                    .next()
-                    .context("search requires an account id")?
+                let mut account = args.next().context("search requires an account id")?;
+                let server = account == "--server";
+                if server {
+                    account = args.next().context("search requires an account id")?;
+                }
+                let account_id = account
                     .parse::<i64>()
                     .context("search account id must be an integer")?;
                 let query = args.collect::<Vec<_>>().join(" ");
                 if query.trim().is_empty() {
                     bail!("search requires a query");
                 }
-                Ok(Self::Search(account_id, query))
+                Ok(Self::Search {
+                    account_id,
+                    query,
+                    server,
+                })
             }
             "index" => Ok(Self::IndexAccount(
                 args.next()
@@ -723,8 +738,26 @@ fn index_account(account_id: i64) -> Result<()> {
     Ok(())
 }
 
-fn search_threads(account_id: i64, query: &str) -> Result<()> {
-    let store = open_store().context("failed to open the local store")?;
+fn search_threads(account_id: i64, query: &str, server: bool) -> Result<()> {
+    let store = Arc::new(open_store().context("failed to open the local store")?);
+    if server {
+        let runtime = BackgroundRuntime::start(2)?;
+        let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+        let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+        let report = runtime
+            .handle()
+            .block_on(sync_service.search_server_and_wait(account_id, query))?;
+        if report.searched {
+            println!(
+                "Server search: {} hits, {} fetched by a sync, {} unresolved.",
+                report.hits, report.fetched_by_sync, report.unresolved
+            );
+        } else {
+            println!("The local index covers this query; the server was not asked.");
+        }
+    } else if store.search_needs_server(account_id, query)? {
+        println!("Some bodies are not indexed yet; add --server to also search the server.");
+    }
     let hits = store.search_threads(account_id, query, 50)?;
     if hits.is_empty() {
         println!("No matches for {query:?} on account {account_id}.");
@@ -732,7 +765,11 @@ fn search_threads(account_id: i64, query: &str) -> Result<()> {
     }
 
     for hit in hits {
-        println!("#{} [{}] {}", hit.thread_id, hit.mailbox_name, hit.subject);
+        let origin = if hit.from_server { " (server)" } else { "" };
+        println!(
+            "#{} [{}] {}{origin}",
+            hit.thread_id, hit.mailbox_name, hit.subject
+        );
         println!("  {}", hit.participants);
         println!("  {}", hit.preview);
         println!(
@@ -1682,7 +1719,9 @@ fn print_help() {
     println!("  zmail-app add-jmap        Add and sync a real JMAP account");
     println!("  zmail-app list-accounts   Show configured accounts");
     println!("  zmail-app sync [all|ID]   Sync all accounts or one account by id");
-    println!("  zmail-app search ID QUERY Search local mail for an account");
+    println!("  zmail-app search [--server] ID QUERY");
+    println!("                            Search local mail for an account; --server also");
+    println!("                            asks the server about mail not indexed yet");
     println!("  zmail-app index ID        Fetch and index message bodies for an account");
     println!("  zmail-app read THREAD     Print the hydrated thread reader view");
     println!("  zmail-app flag THREAD     Flag a thread locally");

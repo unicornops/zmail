@@ -416,6 +416,35 @@ fn search_field_enter_runs_the_search(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn recorded_server_hits_show_in_the_results_marked(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let account_id = harness.store.list_accounts().expect("accounts load")[0].id;
+    // A word only the server knows, as the fallback records it.
+    harness
+        .store
+        .record_server_search_hits(
+            account_id,
+            "albatross",
+            &[zmail_core::ServerHitRef {
+                mailbox_name: Some("Inbox".to_owned()),
+                remote_id: "message-2".to_owned(),
+            }],
+        )
+        .expect("hits record");
+    let search = search_input(&view, cx);
+    focus(&search, cx);
+    cx.simulate_input("albatross");
+    cx.simulate_keystrokes("enter");
+    let results = cx.read_entity(&view, |view, _| {
+        view.search_results
+            .iter()
+            .map(|hit| (hit.subject.clone(), hit.from_server))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(results, vec![("Quarterly report 2".to_owned(), true)]);
+}
+
+#[gpui::test]
 fn search_field_understands_query_operators(cx: &mut TestAppContext) {
     let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
     let search = search_input(&view, cx);

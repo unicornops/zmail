@@ -831,6 +831,88 @@ fn background_indexing_makes_unopened_bodies_searchable() -> Result<()> {
     Ok(())
 }
 
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn server_search_finds_unindexed_and_unsynced_imap_mail() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&imap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_RECIPIENT_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    let smtp_runtime = Builder::new_current_thread().enable_all().build()?;
+    let send = |subject: &str, body: &str| {
+        smtp_runtime.block_on(submit_text_message(
+            &harness_submission(),
+            &SubmittedMessage {
+                envelope_from: MAIL_HARNESS_SENDER.to_owned(),
+                from_name: Some("Harness Sender".to_owned()),
+                recipients: vec![MAIL_HARNESS_RECIPIENT.to_owned()],
+                subject: subject.to_owned(),
+                text_body: body.to_owned(),
+            },
+        ))
+    };
+    let server_search = |query: &str| {
+        runtime
+            .handle()
+            .block_on(sync_service.search_server_and_wait(account_id, query))
+    };
+
+    send(
+        "Server search indexed",
+        "Only the body names the shearwaterx.",
+    )?;
+    sync_service.sync_account_and_wait(account_id)?;
+    // Headers only: the local index cannot see the body word.
+    assert!(
+        store
+            .search_threads(account_id, "shearwaterx", 10)?
+            .is_empty()
+    );
+    assert!(store.search_needs_server(account_id, "shearwaterx")?);
+
+    let report = server_search("shearwaterx")?;
+    assert_eq!((report.hits, report.fetched_by_sync), (1, 0), "{report:?}");
+    let hits = store.search_threads(account_id, "shearwaterx", 10)?;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].subject, "Server search indexed");
+    assert!(hits[0].from_server);
+
+    // State operators reach the server as SEARCH keys, and `in:` limits the
+    // mailboxes searched.
+    assert_eq!(server_search("shearwaterx is:read")?.hits, 0);
+    assert_eq!(server_search("shearwaterx -is:read")?.hits, 1);
+    assert_eq!(server_search("shearwaterx in:archive")?.hits, 0);
+    assert!(
+        store
+            .search_threads(account_id, "shearwaterx in:archive", 10)?
+            .is_empty()
+    );
+    // Header operators are matched locally too and need no server.
+    assert!(!store.search_needs_server(account_id, "from:sender subject:indexed")?);
+
+    // Mail delivered after the last sync: found on the server and brought
+    // in by exactly one sync, still marked as a server hit (IMAP syncs
+    // headers only).
+    send("Server search late", "A late skuax arrives.")?;
+    let report = server_search("skuax")?;
+    assert_eq!((report.hits, report.fetched_by_sync), (1, 1), "{report:?}");
+    let hits = store.search_threads(account_id, "skuax", 10)?;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].subject, "Server search late");
+    assert!(hits[0].from_server);
+
+    // Once indexed, the same query is answered locally and needs no server.
+    sync_service.index_account_and_wait(account_id)?;
+    let hits = store.search_threads(account_id, "skuax", 10)?;
+    assert!(!hits[0].from_server);
+    assert!(!store.search_needs_server(account_id, "skuax")?);
+    Ok(())
+}
+
 /// A power monitor for machines on mains power with an unmetered link.
 struct PluggedIn;
 
