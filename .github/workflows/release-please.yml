@@ -179,14 +179,25 @@ jobs:
       - name: Build release binary
         run: cargo build -p zmail-app --release --locked
 
+      # The archives carry zmail's licence and the bundled Inter font's
+      # SIL OFL 1.1 notice, which must travel with every copy of the font
+      # (Linux builds embed it in the binary).
       - name: Create Unix archive
         if: runner.os != 'Windows'
-        run: tar -czf "${{ matrix.artifact_path }}" -C target/release "${{ matrix.binary_name }}"
+        run: |
+          mkdir -p archive/licenses
+          cp "target/release/${{ matrix.binary_name }}" LICENSE archive/
+          cp assets/fonts/inter/LICENSE.txt archive/licenses/Inter-OFL.txt
+          tar -czf "${{ matrix.artifact_path }}" -C archive .
 
       - name: Create Windows archive
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path "target/release/${{ matrix.binary_name }}" -DestinationPath "${{ matrix.artifact_path }}"
+        run: |
+          New-Item -ItemType Directory -Force archive/licenses | Out-Null
+          Copy-Item "target/release/${{ matrix.binary_name }}", LICENSE archive/
+          Copy-Item assets/fonts/inter/LICENSE.txt archive/licenses/Inter-OFL.txt
+          Compress-Archive -Path archive/* -DestinationPath "${{ matrix.artifact_path }}"
 
       # Opt-in Authenticode signing: the steps no-op until the repository
       # secrets carry a certificate (see docs/phase5-hardening.md).
