@@ -1,5 +1,7 @@
 //! Real IMAP adapter for Phase 2.
 
+mod qresync;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -86,11 +88,19 @@ pub async fn discover_and_sync(
         .map(|identity| identity.email_address.as_str())
         .unwrap_or(target.username.as_str());
     let mut session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
-    let condstore = session
+    let (condstore, qresync_offered) = session
         .capabilities()
         .await
-        .map(|capabilities| capabilities.has_str("CONDSTORE"))
-        .unwrap_or(false);
+        .map(|capabilities| {
+            (
+                capabilities.has_str("CONDSTORE"),
+                capabilities.has_str("QRESYNC"),
+            )
+        })
+        .unwrap_or((false, false));
+    // QRESYNC must be enabled before the first SELECT (RFC 7162 section
+    // 3.2.3); a refusal keeps the CONDSTORE path.
+    let qresync = qresync_offered && qresync::enable(&mut session).await;
     let mailbox_names = list_mailboxes(&mut session).await?;
     let checkpoint = ImapCheckpoint::from_json(target.checkpoint.as_deref())?;
     let existing = existing_mailbox_map(existing_mailboxes);
@@ -100,13 +110,36 @@ pub async fn discover_and_sync(
     let mut refreshed = 0usize;
     let mut incremental = 0usize;
     let mut condstore_skipped = 0usize;
+    let mut qresync_opened = 0usize;
 
     for mailbox_name in mailbox_names {
         let name = mailbox_name.name().to_owned();
+        let previous = checkpoint.mailboxes.get(&name).cloned();
+        // A mailbox the mirror already holds, with a stored UIDVALIDITY and
+        // mod-sequence, opens with QRESYNC: the server reports what was
+        // expunged and what changed since in the same round trip.
+        let qresync_state = previous
+            .as_ref()
+            .filter(|_| qresync && existing.contains_key(name.as_str()))
+            .and_then(|state| Some((state.uid_validity?, state.highest_modseq?, state)));
+        let mut qresync_delta = None;
         // Selecting with (CONDSTORE) makes the server report the highest
         // mod-sequence, which drives the incremental flag path; servers
         // without the extension keep the plain read-only EXAMINE.
-        let status = if condstore {
+        let status = if let Some((uid_validity, modseq, state)) = qresync_state {
+            let known_uids = qresync::uid_set(state.uid_flags.keys().copied());
+            let delta =
+                qresync::examine(&mut session, &name, uid_validity, modseq, Some(&known_uids))
+                    .await?;
+            let status = delta.status.clone();
+            // A changed UIDVALIDITY voids the stored state; the server
+            // reported nothing and the mailbox refreshes in full below.
+            if status.uid_validity == Some(uid_validity) {
+                qresync_opened += 1;
+                qresync_delta = Some(delta);
+            }
+            status
+        } else if condstore {
             session
                 .select_condstore(&name)
                 .await
@@ -118,7 +151,6 @@ pub async fn discover_and_sync(
                 .with_context(|| format!("failed to examine IMAP mailbox {name}"))?
         };
 
-        let previous = checkpoint.mailboxes.get(&name).cloned();
         let mut mailbox_checkpoint = ImapMailboxCheckpoint::from_status(&status);
         next_checkpoint.insert(name.clone(), mailbox_checkpoint.clone());
 
@@ -138,7 +170,31 @@ pub async fn discover_and_sync(
             // flag data is fetched at all. When the message count is stable
             // but the mod-sequence advanced, only the changed messages are
             // fetched and merged into the previous flag map.
-            let flag_map = if let (true, Some(previous_modseq)) = (condstore, previous_modseq) {
+            let flag_map = if let Some(delta) = &qresync_delta {
+                // QRESYNC already reported every expunge and flag change,
+                // so the stored map is patched without fetching anything.
+                let merged = qresync::apply_delta(
+                    &previous
+                        .as_ref()
+                        .map(|state| state.uid_flags.clone())
+                        .unwrap_or_default(),
+                    &delta.vanished,
+                    &delta.changed,
+                );
+                if delta.vanished.is_empty()
+                    && delta.changed.is_empty()
+                    && new_uids.is_empty()
+                    && status.exists == previous_exists
+                {
+                    mailboxes.push(existing_mailbox);
+                    mailbox_checkpoint.last_seen_uid = last_seen_uid;
+                    mailbox_checkpoint.uid_flags = merged;
+                    next_checkpoint.insert(name, mailbox_checkpoint);
+                    condstore_skipped += 1;
+                    continue;
+                }
+                merged
+            } else if let (true, Some(previous_modseq)) = (condstore, previous_modseq) {
                 if status.exists == previous_exists
                     && status.highest_modseq == Some(previous_modseq)
                 {
@@ -228,15 +284,25 @@ pub async fn discover_and_sync(
 
     let detail = if refreshed == 0 && incremental == 0 && condstore_skipped > 0 {
         format!(
-            "IMAP mailbox state unchanged for {} via CONDSTORE",
-            target.display_name
+            "IMAP mailbox state unchanged for {} via {}",
+            target.display_name,
+            if qresync_opened > 0 {
+                "QRESYNC"
+            } else {
+                "CONDSTORE"
+            }
         )
     } else if refreshed == 0 && incremental == 0 {
         format!("IMAP mailbox state unchanged for {}", target.display_name)
     } else {
         format!(
-            "IMAP sync complete against {} with {refreshed} full and {incremental} incremental mailbox refreshes",
-            endpoint.host
+            "IMAP sync complete against {} with {refreshed} full and {incremental} incremental mailbox refreshes{}",
+            endpoint.host,
+            if qresync_opened > 0 {
+                format!(" ({qresync_opened} opened with QRESYNC)")
+            } else {
+                String::new()
+            }
         )
     };
 
