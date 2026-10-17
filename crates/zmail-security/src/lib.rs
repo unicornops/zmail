@@ -299,10 +299,85 @@ fn contains_remote_content(input: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+/// Rewrites `http://` and `https://` (any letter case) to `blocked://`
+/// inside tags, so attributes such as `src`, `href`, `background` and inline
+/// `style` can never load remote content. URLs in the message's visible text
+/// are left alone: they are words the sender wrote, not resources.
+///
+/// Quoted attribute values may contain `>`, so the scan tracks quotes and
+/// only leaves a tag at an unquoted `>`. When unsure it stays inside the tag,
+/// which redacts more, never less.
 fn redact_remote_urls(input: &str) -> String {
-    input
-        .replace("https://", "blocked://")
-        .replace("http://", "blocked://")
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    let mut inside_tag = false;
+    let mut attribute_quote = AttributeQuote::default();
+
+    while let Some(ch) = rest.chars().next() {
+        if inside_tag {
+            if let Some(scheme_len) = remote_scheme_len(rest) {
+                output.push_str("blocked://");
+                rest = &rest[scheme_len..];
+                continue;
+            }
+            if attribute_quote.ends_tag(ch) {
+                inside_tag = false;
+            }
+        } else if ch == '<' {
+            inside_tag = true;
+            attribute_quote = AttributeQuote::default();
+        }
+        output.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+
+    output
+}
+
+/// Tracks quoted attribute values inside a tag, so a `>` within
+/// `title="a > b"` does not end the tag.
+///
+/// As in HTML, a quote only opens a value right after `=`; a stray quote in
+/// an unquoted value (`width=50%"`) is an ordinary character and cannot
+/// swallow the rest of the message.
+#[derive(Default)]
+struct AttributeQuote {
+    open: Option<char>,
+    after_equals: bool,
+}
+
+impl AttributeQuote {
+    /// Feeds the next character inside a tag; returns whether it ends the tag.
+    fn ends_tag(&mut self, ch: char) -> bool {
+        if let Some(open) = self.open {
+            if ch == open {
+                self.open = None;
+            }
+            return false;
+        }
+        match ch {
+            '>' => return true,
+            '"' | '\'' if self.after_equals => self.open = Some(ch),
+            _ => {}
+        }
+        if !ch.is_whitespace() {
+            self.after_equals = ch == '=';
+        }
+        false
+    }
+}
+
+/// Returns the length of a remote URL scheme (`http://` or `https://`, any
+/// letter case) at the start of `input`.
+fn remote_scheme_len(input: &str) -> Option<usize> {
+    ["https://", "http://"]
+        .iter()
+        .find(|scheme| {
+            input
+                .get(..scheme.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+        })
+        .map(|scheme| scheme.len())
 }
 
 /// Tags whose start or end begins a new line of readable text.
@@ -360,11 +435,13 @@ fn html_to_text(input: &str) -> String {
     let mut text = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     let mut inside_tag = false;
+    let mut attribute_quote = AttributeQuote::default();
 
     while let Some(ch) = chars.next() {
         match ch {
             '<' if !inside_tag => {
                 inside_tag = true;
+                attribute_quote = AttributeQuote::default();
                 // Closing tags separate text exactly like opening ones, so
                 // "<td>Plan</td><td>Price</td>" never reads "PlanPrice".
                 if chars.peek() == Some(&'/') {
@@ -384,8 +461,11 @@ fn html_to_text(input: &str) -> String {
                     text.push(' ');
                 }
             }
-            '>' if inside_tag => inside_tag = false,
-            _ if inside_tag => {}
+            _ if inside_tag => {
+                if attribute_quote.ends_tag(ch) {
+                    inside_tag = false;
+                }
+            }
             '&' => push_character_reference(&mut text, &mut chars),
             _ => text.push(ch),
         }
@@ -558,6 +638,33 @@ mod tests {
         assert!(!sanitized.html.contains("<script"));
         assert!(sanitized.html.contains("blocked://example.test/a.png"));
         assert!(sanitized.text.contains("Hello"));
+    }
+
+    #[test]
+    fn remote_urls_are_blocked_in_tags_but_kept_in_visible_text() {
+        let sanitized = sanitize_html_for_display(concat!(
+            r#"<p title="a > b" style="background:url(HTTP://track.example.test/bg)">"#,
+            "Docs at https://docs.example.test/start and http://old.example.test",
+            r#"<img SRC='HtTpS://track.example.test/pixel.gif'>"#,
+            r#"<a href="https://shop.example.test/sale">Shop</a></p>"#,
+            r#"<table><tr><td width=50%">Total</td></tr></table>"#,
+        ));
+
+        assert!(sanitized.has_remote_content);
+        let lower = sanitized.html.to_ascii_lowercase();
+        assert!(!lower.contains("src='http"));
+        assert!(!lower.contains("href=\"http"));
+        assert!(!lower.contains("url(http"));
+        assert!(
+            sanitized
+                .html
+                .contains("blocked://track.example.test/pixel.gif")
+        );
+        assert!(sanitized.html.contains("blocked://shop.example.test/sale"));
+        assert_eq!(
+            sanitized.text,
+            "Docs at https://docs.example.test/start and http://old.example.test Shop\nTotal"
+        );
     }
 
     #[test]
