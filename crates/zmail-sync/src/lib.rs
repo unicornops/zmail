@@ -26,6 +26,11 @@ use zmail_security::{SecretSlot, SecretStore};
 use zmail_smtp::SubmissionConfig;
 use zmail_store::LocalStore;
 
+mod indexer;
+pub mod power;
+
+pub use indexer::{INDEX_BATCH_SIZE, INDEX_MAX_MESSAGE_BYTES, IndexPause, IndexReport};
+
 const OUTBOX_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const OUTBOX_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
 const MAX_OUTBOX_ATTEMPTS: usize = 3;
@@ -145,6 +150,12 @@ struct SyncServiceInner {
     watched_accounts: Mutex<HashSet<i64>>,
     watcher_poll_interval: Mutex<Option<Duration>>,
     notifier: Mutex<Option<Arc<dyn Notifier>>>,
+    indexer_started: AtomicBool,
+    /// Wakes the background indexer, for example after a sync.
+    index_wake: tokio::sync::Notify,
+    /// Accounts with an indexing pass running.
+    indexing_accounts: Mutex<HashSet<i64>>,
+    power_monitor: Mutex<Arc<dyn power::PowerMonitor>>,
 }
 
 impl std::fmt::Debug for SyncService {
@@ -176,6 +187,10 @@ impl SyncService {
                 watched_accounts: Mutex::new(HashSet::new()),
                 watcher_poll_interval: Mutex::new(None),
                 notifier: Mutex::new(None),
+                indexer_started: AtomicBool::new(false),
+                index_wake: tokio::sync::Notify::new(),
+                indexing_accounts: Mutex::new(HashSet::new()),
+                power_monitor: Mutex::new(Arc::new(power::SystemPowerMonitor)),
             }),
         };
         service.start_outbox_supervisor();
@@ -854,6 +869,8 @@ impl SyncService {
             self.inner.store.evict_account_blobs(account_id, budget)?;
         }
         let _ = self.process_outbox(Some(account_id));
+        // New mail is indexed newest first by the background indexer.
+        self.inner.index_wake.notify_one();
 
         Ok(())
     }

@@ -297,30 +297,157 @@ pub async fn fetch_message_bodies(
         .await
         .context("failed to stream the hydration fetches")?;
 
-    let mut bodies = Vec::with_capacity(fetches.len());
-    for fetch in fetches {
-        let Some(uid) = fetch.uid else { continue };
-        let Some(raw) = fetch.body() else { continue };
-        let Some(message) = MessageParser::default().parse(raw) else {
-            continue;
-        };
-        let (body_text, sanitized_html, has_remote_content, preview_source) =
-            hydrate_bodies(&message);
-        let attachments =
-            persist_attachments(&message, mailbox_name, &uid.to_string(), &attachments_dir);
-        bodies.push((
-            uid,
-            HydratedBody {
-                body_text,
-                sanitized_html,
-                has_remote_content,
-                body_preview: excerpt(&preview_source, 180),
-                attachments,
-            },
-        ));
+    Ok(fetches
+        .iter()
+        .filter_map(|fetch| hydrated_body_from_fetch(fetch, mailbox_name, &attachments_dir))
+        .collect())
+}
+
+/// Parses one full-message fetch into the stored body fields, persisting
+/// its attachment blobs. Returns `None` for fetches without a UID or body.
+fn hydrated_body_from_fetch(
+    fetch: &Fetch,
+    mailbox_name: &str,
+    attachments_dir: &Path,
+) -> Option<(u32, HydratedBody)> {
+    let uid = fetch.uid?;
+    let message = MessageParser::default().parse(fetch.body()?)?;
+    let (body_text, sanitized_html, has_remote_content, preview_source) = hydrate_bodies(&message);
+    let attachments =
+        persist_attachments(&message, mailbox_name, &uid.to_string(), attachments_dir);
+    Some((
+        uid,
+        HydratedBody {
+            body_text,
+            sanitized_html,
+            has_remote_content,
+            body_preview: excerpt(&preview_source, 180),
+            attachments,
+        },
+    ))
+}
+
+/// Bodies fetched for background indexing from one mailbox.
+#[derive(Debug, Default)]
+pub struct IndexedBodies {
+    /// Hydrated bodies by UID.
+    pub bodies: Vec<(u32, HydratedBody)>,
+    /// UIDs skipped because the message is larger than the size cap; they
+    /// stay lazy and hydrate when opened.
+    pub oversized: Vec<u32>,
+}
+
+/// One IMAP connection reused across the batches of a background indexing
+/// pass, so indexing a large mailbox does not log in once per batch.
+pub struct BodyIndexSession {
+    session: Session<DynImapStream>,
+    attachments_dir: std::path::PathBuf,
+    examined: Option<String>,
+}
+
+impl std::fmt::Debug for BodyIndexSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BodyIndexSession")
+            .field("examined", &self.examined)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BodyIndexSession {
+    /// Connects and authenticates for background body indexing.
+    pub async fn connect(target: &SyncTarget, secret: &str) -> Result<Self> {
+        if target.protocol != ProtocolKind::Imap {
+            bail!("IMAP adapter received a non-IMAP sync target");
+        }
+        let endpoint = parse_endpoint(&target.endpoint)?;
+        let session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
+        Ok(Self {
+            session,
+            attachments_dir: std::path::PathBuf::from(&target.attachments_dir),
+            examined: None,
+        })
     }
 
-    Ok(bodies)
+    /// Fetches the bodies of `uids` in `mailbox_name`, skipping messages
+    /// whose `RFC822.SIZE` exceeds `max_message_bytes`.
+    ///
+    /// Sizes are fetched first so oversized messages (usually large
+    /// attachments) never download in the background. The mailbox is
+    /// opened read-only with `EXAMINE` and bodies use `BODY.PEEK[]`, so
+    /// indexing never marks mail as read. UIDs the server no longer has
+    /// appear in neither list.
+    pub async fn fetch(
+        &mut self,
+        mailbox_name: &str,
+        uids: &[u32],
+        max_message_bytes: u32,
+    ) -> Result<IndexedBodies> {
+        if uids.is_empty() {
+            return Ok(IndexedBodies::default());
+        }
+        if self.examined.as_deref() != Some(mailbox_name) {
+            self.examined = None;
+            self.session.examine(mailbox_name).await.with_context(|| {
+                format!("failed to open IMAP mailbox {mailbox_name} for indexing")
+            })?;
+            self.examined = Some(mailbox_name.to_owned());
+        }
+
+        let sizes = self
+            .session
+            .uid_fetch(uid_set(uids), "(UID RFC822.SIZE)")
+            .await
+            .with_context(|| format!("failed to fetch message sizes in {mailbox_name}"))?
+            .try_collect::<Vec<_>>()
+            .await
+            .context("failed to stream the message sizes")?;
+        let mut within = Vec::new();
+        let mut result = IndexedBodies::default();
+        for fetch in sizes {
+            let Some(uid) = fetch.uid else { continue };
+            if !uids.contains(&uid) {
+                continue;
+            }
+            match fetch.size {
+                Some(size) if size > max_message_bytes => result.oversized.push(uid),
+                _ => within.push(uid),
+            }
+        }
+        if within.is_empty() {
+            return Ok(result);
+        }
+
+        let fetches = self
+            .session
+            .uid_fetch(uid_set(&within), HYDRATE_QUERY)
+            .await
+            .with_context(|| format!("failed to fetch bodies in {mailbox_name} for indexing"))?
+            .try_collect::<Vec<_>>()
+            .await
+            .context("failed to stream the indexing fetches")?;
+        result.bodies = fetches
+            .iter()
+            .filter(|fetch| fetch.uid.is_some_and(|uid| within.contains(&uid)))
+            .filter_map(|fetch| {
+                hydrated_body_from_fetch(fetch, mailbox_name, &self.attachments_dir)
+            })
+            .collect();
+        Ok(result)
+    }
+
+    /// Logs out, ignoring errors: the pass is over either way.
+    pub async fn logout(mut self) {
+        let _ = self.session.logout().await;
+    }
+}
+
+/// Formats UIDs as an IMAP sequence set (`1,5,9`).
+fn uid_set(uids: &[u32]) -> String {
+    uids.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Waits until the mail server reports a change or the bounded wait

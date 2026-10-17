@@ -17,12 +17,13 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use zmail_core::{
     AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, CachePolicySummary,
     DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate,
-    HydratedBody, IdentitySummary, MailboxSnapshot, MailboxSummary, MessageAttachment,
-    MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, OAuth2TargetConfig,
-    OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage,
-    PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit,
-    StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget,
-    ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView, preferences::UiPreferences,
+    HydratedBody, IdentitySummary, IndexCandidate, IndexProgress, MailboxSnapshot, MailboxSummary,
+    MessageAttachment, MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft,
+    OAuth2TargetConfig, OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig,
+    OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment,
+    SearchHit, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary,
+    SyncTarget, ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
+    preferences::UiPreferences,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -47,7 +48,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0012_message_reply_to", MESSAGE_REPLY_TO_SCHEMA),
     ("0013_app_settings", APP_SETTINGS_SCHEMA),
     ("0014_search_index_v2", SEARCH_INDEX_V2_SCHEMA),
+    ("0015_background_indexing", BACKGROUND_INDEXING_SCHEMA),
 ];
+
+/// Failed background body fetches after which a message is skipped by the
+/// indexer. It still hydrates when opened.
+pub const MAX_BODY_FETCH_FAILURES: i64 = 3;
 
 const PHASE2_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -364,6 +370,16 @@ CREATE TRIGGER IF NOT EXISTS search_dirty_message_delete AFTER DELETE ON message
 BEGIN
     INSERT OR IGNORE INTO search_dirty_threads(thread_id) VALUES (old.thread_id);
 END;
+"#;
+
+/// Background body indexing: a failure counter so a message that cannot be
+/// fetched does not block the newest-first queue, and a partial index over
+/// the messages still waiting for a body, in queue order.
+const BACKGROUND_INDEXING_SCHEMA: &str = r#"
+ALTER TABLE messages ADD COLUMN body_fetch_failures INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_messages_unhydrated
+ON messages(received_at DESC, id DESC)
+WHERE body_text IS NULL AND sanitized_html IS NULL;
 "#;
 
 /// Re-indexes every dirty thread: drops its document, rebuilds it from the
@@ -1703,6 +1719,137 @@ impl LocalStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to list the messages missing bodies")?;
         Ok(Some(rows))
+    }
+
+    /// Returns the account's messages the background indexer should fetch
+    /// next: those without a body, newest first, skipping messages that
+    /// failed [`MAX_BODY_FETCH_FAILURES`] times.
+    ///
+    /// With a disk budget the queue respects the eviction order. Once the
+    /// hydrated bodies reach the budget only messages newer than the oldest
+    /// hydrated body are returned, so each fetch displaces an older body
+    /// instead of one eviction undoing the last fetch. The stored set
+    /// therefore converges on the newest mail that fits.
+    pub fn index_candidates(
+        &self,
+        account_id: i64,
+        limit: usize,
+        budget_bytes: Option<u64>,
+    ) -> Result<Vec<IndexCandidate>> {
+        let conn = self.connection()?;
+        let floor = match budget_bytes {
+            Some(budget) if account_blob_usage(&conn, account_id)? >= budget => conn
+                .query_row(
+                    r#"
+                    SELECT m.received_at, m.id
+                    FROM messages m
+                    JOIN threads t ON t.id = m.thread_id
+                    JOIN mailboxes b ON b.id = t.mailbox_id
+                    WHERE b.account_id = ?1
+                      AND (m.body_text IS NOT NULL OR m.sanitized_html IS NOT NULL)
+                    ORDER BY m.received_at ASC, m.id ASC
+                    LIMIT 1
+                    "#,
+                    params![account_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()
+                .context("failed to find the oldest hydrated body")?,
+            _ => None,
+        };
+        // An empty floor sorts before every timestamp, so it admits all.
+        let (floor_at, floor_id) = floor.unwrap_or_default();
+        let mut statement = conn
+            .prepare(
+                r#"
+                SELECT m.id, b.name, m.remote_id
+                FROM messages m
+                CROSS JOIN threads t ON t.id = m.thread_id
+                JOIN mailboxes b ON b.id = t.mailbox_id
+                WHERE m.body_text IS NULL AND m.sanitized_html IS NULL
+                  AND b.account_id = ?1
+                  AND m.body_fetch_failures < ?2
+                  AND COALESCE(m.remote_id, '') <> ''
+                  AND (m.received_at, m.id) > (?3, ?4)
+                ORDER BY m.received_at DESC, m.id DESC
+                LIMIT ?5
+                "#,
+            )
+            .context("failed to prepare the indexing queue query")?;
+        let rows = statement.query_map(
+            params![
+                account_id,
+                MAX_BODY_FETCH_FAILURES,
+                floor_at,
+                floor_id,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            ],
+            |row| {
+                Ok(IndexCandidate {
+                    message_id: row.get(0)?,
+                    mailbox_name: row.get(1)?,
+                    remote_id: row.get(2)?,
+                })
+            },
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load the indexing queue")
+    }
+
+    /// Records a failed background body fetch. `permanent` failures (such
+    /// as a message over the size cap) skip the message right away.
+    pub fn record_body_fetch_failure(&self, message_id: i64, permanent: bool) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE messages SET body_fetch_failures = \
+             CASE WHEN ?2 THEN MAX(body_fetch_failures, ?3) ELSE body_fetch_failures + 1 END \
+             WHERE id = ?1",
+            params![message_id, permanent, MAX_BODY_FETCH_FAILURES],
+        )
+        .with_context(|| format!("failed to record a body fetch failure for {message_id}"))?;
+        Ok(())
+    }
+
+    /// Returns whether a message currently has a stored body.
+    pub fn message_has_body(&self, message_id: i64) -> Result<bool> {
+        let conn = self.connection()?;
+        Ok(conn
+            .query_row(
+                "SELECT body_text IS NOT NULL OR sanitized_html IS NOT NULL \
+                 FROM messages WHERE id = ?1",
+                params![message_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .context("failed to check the message body")?
+            .unwrap_or(false))
+    }
+
+    /// Reports how much of the account's mail has a searchable body.
+    pub fn index_progress(&self, account_id: i64) -> Result<IndexProgress> {
+        let conn = self.connection()?;
+        conn.query_row(
+            r#"
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(m.body_text IS NOT NULL OR m.sanitized_html IS NOT NULL), 0),
+                COALESCE(SUM(m.body_text IS NULL AND m.sanitized_html IS NULL
+                    AND m.body_fetch_failures >= ?2), 0)
+            FROM messages m
+            JOIN threads t ON t.id = m.thread_id
+            JOIN mailboxes b ON b.id = t.mailbox_id
+            WHERE b.account_id = ?1
+            "#,
+            params![account_id, MAX_BODY_FETCH_FAILURES],
+            |row| {
+                Ok(IndexProgress {
+                    messages: row.get::<_, usize>(0)?,
+                    indexed: row.get::<_, usize>(1)?,
+                    skipped: row.get::<_, usize>(2)?,
+                })
+            },
+        )
+        .context("failed to measure the indexing progress")
     }
 
     /// Persists a fetched body (and attachments) for one stored message.
@@ -6979,6 +7126,7 @@ mod tests {
             }),
             keymap: KeymapName::Gmail,
             undo_send_delay_secs: 5,
+            indexing: Default::default(),
         };
         store
             .save_ui_preferences(&preferences)

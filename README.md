@@ -13,7 +13,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - real IMAP and JMAP account sync behind a dedicated Tokio background runtime
 - OAuth2 account setup in the settings dialog with provider presets (Gmail, Microsoft 365), background access-token refresh, and XOAUTH2 for IMAP sync, SMTP submission, and JMAP bearer authentication
 - received attachment download and save-as for IMAP and JMAP accounts
-- full-text search that indexes lazily hydrated bodies as they are opened
+- full-text search with query operators; IMAP message bodies are fetched and indexed in the background, newest first, within the account's disk budget, pausing on battery power (Linux) unless allowed
 - compose, autosave, attachment handling, outbox retry, SMTP submission, and JMAP submission support
 - multiple identities from day one, with JMAP identity discovery and manual identity setup for generic accounts
 - OS keychain-backed credential storage
@@ -99,6 +99,9 @@ leading `-` negates any of them:
 ```bash
 cargo run -p zmail-app -- search 1 'from:alice "budget review" -in:junk after:30d'
 ```
+
+The desktop app indexes bodies in the background; `zmail-app index ID` runs
+one indexing pass for an account in the foreground and prints its progress.
 
 Launch the desktop client:
 
