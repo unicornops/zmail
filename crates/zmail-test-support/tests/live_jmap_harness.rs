@@ -274,11 +274,27 @@ fn assert_push_reports_new_mail(
     )?;
     let started = Instant::now();
     let pushed = events.recv_timeout(Duration::from_secs(20));
-    watch.abort();
     match pushed {
-        Ok(PushEvent::MailChanged) => {}
+        Ok(PushEvent::MailChanged) => watch.abort(),
         Ok(other) => bail!("unexpected push event {other:?}"),
-        Err(_) => bail!("no {transport:?} push arrived within 20s of delivery"),
+        Err(_) => {
+            // Tell a push session that ended apart from a delivery that
+            // never happened, so a failure says which side broke.
+            let session = if watch.is_finished() {
+                format!("ended with {:?}", runtime.handle().block_on(watch))
+            } else {
+                watch.abort();
+                "was still open".to_owned()
+            };
+            let delivered =
+                sync_until_subject(&sync_service, &store, account_id, "Phase 2b JMAP push", 4)
+                    .is_ok();
+            bail!(
+                "no {transport:?} push arrived within 20s of delivery; the session {session}, \
+                 and the message was {}delivered",
+                if delivered { "" } else { "not " }
+            );
+        }
     }
     assert!(
         started.elapsed() < PUSH_PING_INTERVAL,
