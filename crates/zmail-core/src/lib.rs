@@ -1018,6 +1018,20 @@ pub struct SearchHit {
     pub has_attachments: bool,
     /// Latest local timestamp in ISO-8601 form.
     pub latest_message_at: String,
+    /// Whether the thread matched only through the server-side search
+    /// fallback, because its bodies are not in the local index yet.
+    pub from_server: bool,
+}
+
+/// A message the server reported as a search hit, located by its stable
+/// remote id. IMAP hits carry the mailbox (UIDs are per mailbox); JMAP
+/// email ids are account-wide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerHitRef {
+    /// Server name of the mailbox holding the message, for IMAP.
+    pub mailbox_name: Option<String>,
+    /// Stable remote id (IMAP UID or JMAP email id).
+    pub remote_id: String,
 }
 
 /// Store-wide counts shown in the shell header.

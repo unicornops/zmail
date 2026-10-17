@@ -31,8 +31,10 @@ use zmail_store::LocalStore;
 
 mod indexer;
 pub mod power;
+mod server_search;
 
 pub use indexer::{INDEX_BATCH_SIZE, INDEX_MAX_MESSAGE_BYTES, IndexPause, IndexReport};
+pub use server_search::{SERVER_SEARCH_MAX_HITS, ServerSearchReport};
 
 const OUTBOX_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const OUTBOX_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);

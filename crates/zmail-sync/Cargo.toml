@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 tokio.workspace = true
 zmail-auth = { path = "../zmail-auth" }
 zmail-core = { path = "../zmail-core" }

@@ -8104,6 +8104,7 @@ name = "zmail-sync"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "tokio",
  "zmail-auth",
  "zmail-core",

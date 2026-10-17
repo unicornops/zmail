@@ -63,6 +63,8 @@ pub(crate) struct MessageListState {
     pub(crate) search_results: Vec<SearchHit>,
     /// The query that produced `search_results`.
     pub(crate) search_query: String,
+    /// Whether the server search fallback for the query is still running.
+    pub(crate) searching_server: bool,
     pub(crate) drafts: Vec<DraftSummary>,
     pub(crate) selected_draft_id: Option<i64>,
     pub(crate) outbox_jobs: Vec<OutboxJobSummary>,
@@ -79,6 +81,7 @@ impl Default for MessageListState {
             selected_thread_id: None,
             search_results: Vec::new(),
             search_query: String::new(),
+            searching_server: false,
             drafts: Vec::new(),
             selected_draft_id: None,
             outbox_jobs: Vec::new(),
@@ -490,9 +493,14 @@ impl MessageListView {
                 })
                 .unwrap_or_else(|| "No mailbox selected".to_owned()),
             ListMode::Search => format!(
-                "{} for \u{201c}{}\u{201d}",
+                "{} for \u{201c}{}\u{201d}{}",
                 count_noun(self.state.search_results.len(), "result", "results"),
-                self.state.search_query
+                self.state.search_query,
+                if self.state.searching_server {
+                    " \u{2022} searching the server\u{2026}"
+                } else {
+                    ""
+                }
             ),
             ListMode::Drafts => count_noun(self.state.drafts.len(), "draft", "drafts"),
             ListMode::Outbox => count_noun(
@@ -690,7 +698,16 @@ impl MessageListView {
                         ConversationRow {
                             id: row_id.clone(),
                             subject: &hit.subject,
-                            sender_line: &format!("{} \u{2022} {}", hit.mailbox_name, sender_name),
+                            // Server-only hits matched text the local index
+                            // does not hold yet.
+                            sender_line: &if hit.from_server {
+                                format!(
+                                    "{} \u{2022} {} \u{2022} found on server",
+                                    hit.mailbox_name, sender_name
+                                )
+                            } else {
+                                format!("{} \u{2022} {}", hit.mailbox_name, sender_name)
+                            },
                             preview: &hit.preview,
                             date: format_list_date(&hit.latest_message_at, &now, self.hour_cycle),
                             date_tooltip: format_full_date(

@@ -14,9 +14,9 @@
 //! have a message from Alice and a message on or after that day, not
 //! necessarily the same message.
 
-use chrono::{DateTime, NaiveDate, NaiveTime, TimeDelta, TimeZone};
+use chrono::{DateTime, TimeZone};
 use rusqlite::types::Value;
-use zmail_core::search::{SearchQuery, SearchTerm, SearchText};
+use zmail_core::search::{SearchQuery, SearchTerm, SearchText, day_start_unix, mailbox_role_alias};
 
 /// A query compiled to SQL. `sql` selects the [`zmail_core::SearchHit`]
 /// columns in order; `params` binds its anonymous `?` placeholders.
@@ -24,6 +24,17 @@ use zmail_core::search::{SearchQuery, SearchTerm, SearchText};
 pub(crate) struct CompiledSearch {
     pub(crate) sql: String,
     pub(crate) params: Vec<Value>,
+}
+
+/// Which threads a compiled query looks at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchScope<'a> {
+    /// The local index: every clause is matched locally.
+    Local,
+    /// The threads the server search recorded for this query text. Free
+    /// text is the server's verdict (the local index may lack the bodies),
+    /// so only the other clauses are re-checked locally, exactly.
+    ServerHits(&'a str),
 }
 
 /// Compiles `query` for one account. `now` supplies today's date and the
@@ -36,6 +47,7 @@ pub(crate) fn compile_search<Tz: TimeZone>(
     account_id: i64,
     limit: usize,
     now: &DateTime<Tz>,
+    scope: SearchScope<'_>,
 ) -> Option<CompiledSearch> {
     let today = now.date_naive();
     let zone = now.timezone();
@@ -45,8 +57,18 @@ pub(crate) fn compile_search<Tz: TimeZone>(
     let mut conditions: Vec<String> = Vec::new();
     let mut condition_params: Vec<Value> = Vec::new();
 
+    if let SearchScope::ServerHits(query_text) = scope {
+        conditions.push(
+            "t.id IN (SELECT thread_id FROM server_search_hits WHERE account_id = ? AND query = ?)"
+                .to_owned(),
+        );
+        condition_params.push(Value::Integer(account_id));
+        condition_params.push(Value::Text(query_text.to_owned()));
+    }
+
     for clause in &query.clauses {
         let condition = match &clause.term {
+            SearchTerm::Text(_) if matches!(scope, SearchScope::ServerHits(_)) => None,
             SearchTerm::Text(text) => fts_phrase(text),
             SearchTerm::From(text) => fts_phrase(text).map(|phrase| format!("senders : {phrase}")),
             SearchTerm::To(text) => fts_phrase(text).map(|phrase| format!("recipients : {phrase}")),
@@ -178,30 +200,6 @@ pub(crate) fn fts_phrase(text: &SearchText) -> Option<String> {
     })
 }
 
-/// The mailbox role an `in:` value also matches, for the common names
-/// that differ from the stored role.
-fn mailbox_role_alias(name: &str) -> &str {
-    if name.eq_ignore_ascii_case("spam") {
-        "junk"
-    } else if name.eq_ignore_ascii_case("bin") {
-        "trash"
-    } else {
-        name
-    }
-}
-
-/// The Unix time at which `day` starts in `zone`. Days that skip midnight
-/// (a daylight-saving jump) start at the first valid local time after it.
-fn day_start_unix<Tz: TimeZone>(day: NaiveDate, zone: &Tz) -> Option<i64> {
-    let midnight = day.and_time(NaiveTime::MIN);
-    (0..=2)
-        .find_map(|hours| {
-            zone.from_local_datetime(&(midnight + TimeDelta::hours(hours)))
-                .earliest()
-        })
-        .map(|start| start.timestamp())
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{FixedOffset, Utc};
@@ -213,7 +211,7 @@ mod tests {
             .with_ymd_and_hms(2026, 3, 31, 12, 0, 0)
             .single()
             .expect("valid time");
-        compile_search(&SearchQuery::parse(query), 7, 50, &now)
+        compile_search(&SearchQuery::parse(query), 7, 50, &now, SearchScope::Local)
     }
 
     fn text_params(compiled: &CompiledSearch) -> Vec<String> {
@@ -335,6 +333,7 @@ mod tests {
             1,
             10,
             &now,
+            SearchScope::Local,
         )
         .expect("compiles");
         let integers = compiled
@@ -967,5 +966,76 @@ mod store_tests {
         // m4 is now the oldest (and only) body, so nothing older is fetched
         // again and the queue settles instead of churning.
         assert!(queue(&store, account, Some(100)).is_empty());
+    }
+
+    fn server_hit(mailbox: Option<&str>, remote_id: &str) -> zmail_core::ServerHitRef {
+        zmail_core::ServerHitRef {
+            mailbox_name: mailbox.map(str::to_owned),
+            remote_id: remote_id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn server_hits_join_local_results_marked_and_filtered() {
+        let (store, account) = seeded();
+        assert!(store.search_needs_server(account, "rocket").expect("check"));
+        assert!(
+            !store
+                .search_needs_server(account, "from:alice is:unread")
+                .expect("check")
+        );
+        assert!(search(&store, account, "rocket").is_empty());
+
+        // The server found `rocket` in the unhydrated launch body; `nope`
+        // is mail the store has not synced yet.
+        let unknown = store
+            .record_server_search_hits(
+                account,
+                " rocket ",
+                &[
+                    server_hit(Some("Project X"), "launch"),
+                    server_hit(Some("Inbox"), "launch"),
+                    server_hit(None, "nope"),
+                ],
+            )
+            .expect("hits should record");
+        assert_eq!(
+            unknown,
+            vec![
+                server_hit(Some("Inbox"), "launch"),
+                server_hit(None, "nope")
+            ]
+        );
+        let hits = store
+            .search_threads(account, "rocket", 10)
+            .expect("search should run");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].subject, "Launch plan");
+        assert!(hits[0].from_server);
+
+        // Server hits only belong to the query text that produced them.
+        assert!(search(&store, account, "rockets").is_empty());
+
+        // Non-text clauses are re-checked locally.
+        store
+            .record_server_search_hits(
+                account,
+                "rocket in:inbox",
+                &[server_hit(Some("Project X"), "launch")],
+            )
+            .expect("hits should record");
+        assert!(search(&store, account, "rocket in:inbox").is_empty());
+        // ...and recording replaced the earlier query's hits.
+        assert!(search(&store, account, "rocket").is_empty());
+
+        // A thread the local index also finds is listed once, as local.
+        store
+            .record_server_search_hits(account, "budget", &[server_hit(None, "budget")])
+            .expect("hits should record");
+        let hits = store
+            .search_threads(account, "budget", 10)
+            .expect("search should run");
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| !hit.from_server));
     }
 }

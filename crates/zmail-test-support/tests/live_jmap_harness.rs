@@ -516,6 +516,80 @@ fn syncs_html_only_mail_through_the_sanitizer() -> Result<()> {
     Ok(())
 }
 
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn server_search_finds_jmap_mail_the_local_index_lacks() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_JMAP_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+
+    submit_harness_message(
+        "Server search JMAP indexed",
+        "Only the body names the storm petrelx.",
+    )?;
+    sync_until_subject(
+        &sync_service,
+        &store,
+        account_id,
+        "Server search JMAP indexed",
+        12,
+    )?;
+    // JMAP syncs bodies, so drop them the way a full disk budget does.
+    store.evict_account_blobs(account_id, 0)?;
+    assert!(store.search_threads(account_id, "petrelx", 10)?.is_empty());
+    assert!(store.search_needs_server(account_id, "petrelx")?);
+
+    // Email/query finds the body text; the hit is marked as a server hit.
+    let hits = server_search_until_found(&runtime, &sync_service, &store, account_id, "petrelx")?;
+    assert_eq!(hits[0].subject, "Server search JMAP indexed");
+    assert!(hits[0].from_server);
+    // Non-text clauses are honoured: the message is unread, not read.
+    let read = runtime
+        .handle()
+        .block_on(sync_service.search_server_and_wait(account_id, "petrelx is:read"))?;
+    assert_eq!(read.hits, 0);
+    assert!(
+        store
+            .search_threads(account_id, "petrelx is:read", 10)?
+            .is_empty()
+    );
+
+    // Mail delivered after the last sync: the server finds it and one sync
+    // brings it into the store.
+    submit_harness_message("Server search JMAP late", "A late fulmarx arrives.")?;
+    let hits = server_search_until_found(&runtime, &sync_service, &store, account_id, "fulmarx")?;
+    assert_eq!(hits[0].subject, "Server search JMAP late");
+    Ok(())
+}
+
+/// Runs the server search until the store lists a hit (James indexes new
+/// mail asynchronously) and returns the hits.
+fn server_search_until_found(
+    runtime: &BackgroundRuntime,
+    sync_service: &SyncService,
+    store: &LocalStore,
+    account_id: i64,
+    query: &str,
+) -> Result<Vec<zmail_core::SearchHit>> {
+    for _ in 0..15 {
+        let report = runtime
+            .handle()
+            .block_on(sync_service.search_server_and_wait(account_id, query))?;
+        assert!(report.searched, "{query}: {report:?}");
+        let hits = store.search_threads(account_id, query, 10)?;
+        if !hits.is_empty() {
+            return Ok(hits);
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    bail!("the server search never found {query:?}")
+}
+
 fn submit_harness_message(subject: &str, body: &str) -> Result<()> {
     let smtp_runtime = Builder::new_current_thread().enable_all().build()?;
     smtp_runtime.block_on(async {

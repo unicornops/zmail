@@ -508,6 +508,135 @@ impl BodyIndexSession {
     }
 }
 
+/// Searches the given mailboxes on the server for `query` and returns the
+/// newest `max_hits_per_mailbox` matching UIDs of each.
+///
+/// This is the fallback for mail whose body the local index does not hold
+/// yet. Free text and the header and flag operators map onto `UID SEARCH`
+/// keys (`TEXT`, `FROM`, `TO`, `SUBJECT`, `SEEN`/`UNSEEN`, `FLAGGED`, `NOT`).
+/// `has:attachment` and dates have no exact IMAP equivalent (IMAP dates are
+/// whole days in the server's zone), so they are left out here and the
+/// store re-checks every non-text clause locally. `in:` is applied by the
+/// caller's choice of mailboxes. Mailboxes are opened read-only.
+///
+/// Plain `UID SEARCH` is used even when the server advertises `ESEARCH`:
+/// async-imap cannot parse `ESEARCH` responses (an unknown untagged
+/// response fails the stream), and every `ESEARCH` server still answers
+/// plain `SEARCH`. Non-ASCII text is sent as a UTF-8 literal, which needs
+/// non-synchronizing literals (`LITERAL+` or `LITERAL-`); without them the
+/// search fails rather than send text the server could misread.
+pub async fn search_messages(
+    target: &SyncTarget,
+    secret: &str,
+    query: &zmail_core::search::SearchQuery,
+    mailboxes: &[String],
+    max_hits_per_mailbox: usize,
+) -> Result<Vec<zmail_core::ServerHitRef>> {
+    if target.protocol != ProtocolKind::Imap {
+        bail!("IMAP adapter received a non-IMAP sync target");
+    }
+    let endpoint = parse_endpoint(&target.endpoint)?;
+    let mut session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
+    let literals = session
+        .capabilities()
+        .await
+        .map(|capabilities| capabilities.has_str("LITERAL+") || capabilities.has_str("LITERAL-"))
+        .unwrap_or(false);
+    let criteria = search_criteria(query, literals)
+        .context("the search text needs UTF-8 literals, which this IMAP server does not offer")?;
+
+    let mut hits = Vec::new();
+    for mailbox in mailboxes {
+        session
+            .examine(mailbox)
+            .await
+            .with_context(|| format!("failed to open IMAP mailbox {mailbox} for search"))?;
+        let mut uids = session
+            .uid_search(&criteria)
+            .await
+            .with_context(|| format!("failed to search IMAP mailbox {mailbox}"))?
+            .into_iter()
+            .collect::<Vec<_>>();
+        // Higher UIDs arrived later: keep the newest.
+        uids.sort_unstable_by(|left, right| right.cmp(left));
+        uids.truncate(max_hits_per_mailbox);
+        hits.extend(uids.into_iter().map(|uid| zmail_core::ServerHitRef {
+            mailbox_name: Some(mailbox.clone()),
+            remote_id: uid.to_string(),
+        }));
+    }
+    let _ = session.logout().await;
+    Ok(hits)
+}
+
+/// Builds the `UID SEARCH` criteria for a query (see [`search_messages`]).
+/// Returns `None` when the text needs literals the server does not offer.
+fn search_criteria(query: &zmail_core::search::SearchQuery, literals: bool) -> Option<String> {
+    use zmail_core::search::SearchTerm;
+
+    let mut keys = Vec::new();
+    let mut utf8 = false;
+    for clause in &query.clauses {
+        let key = match &clause.term {
+            SearchTerm::Text(text)
+            | SearchTerm::From(text)
+            | SearchTerm::To(text)
+            | SearchTerm::Subject(text) => {
+                if !text.is_searchable() {
+                    continue;
+                }
+                let name = match &clause.term {
+                    SearchTerm::Text(_) => "TEXT",
+                    SearchTerm::From(_) => "FROM",
+                    SearchTerm::To(_) => "TO",
+                    _ => "SUBJECT",
+                };
+                let (value, needs_utf8) = search_string(&text.value, literals)?;
+                utf8 |= needs_utf8;
+                format!("{name} {value}")
+            }
+            SearchTerm::Unread => "UNSEEN".to_owned(),
+            SearchTerm::Read => "SEEN".to_owned(),
+            SearchTerm::Flagged => "FLAGGED".to_owned(),
+            SearchTerm::HasAttachment
+            | SearchTerm::Mailbox(_)
+            | SearchTerm::Before(_)
+            | SearchTerm::After(_) => continue,
+        };
+        keys.push(if clause.negated {
+            format!("NOT {key}")
+        } else {
+            key
+        });
+    }
+    if keys.is_empty() {
+        keys.push("ALL".to_owned());
+    }
+    let criteria = keys.join(" ");
+    Some(if utf8 {
+        format!("CHARSET UTF-8 {criteria}")
+    } else {
+        criteria
+    })
+}
+
+/// Encodes search text as an IMAP string: a quoted string for ASCII, or a
+/// non-synchronizing UTF-8 literal (`{n+}`) otherwise. Control characters,
+/// which IMAP strings cannot carry, become spaces. Returns the encoded
+/// string and whether it needs `CHARSET UTF-8`, or `None` when it needs a
+/// literal and `literals` is false.
+fn search_string(value: &str, literals: bool) -> Option<(String, bool)> {
+    let cleaned = value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    if cleaned.is_ascii() {
+        let escaped = cleaned.replace('\\', "\\\\").replace('"', "\\\"");
+        return Some((format!("\"{escaped}\""), false));
+    }
+    literals.then(|| (format!("{{{}+}}\r\n{cleaned}", cleaned.len()), true))
+}
+
 /// Formats UIDs as an IMAP sequence set (`1,5,9`).
 fn uid_set(uids: &[u32]) -> String {
     uids.iter()
@@ -1623,6 +1752,51 @@ mod tests {
         xoauth2_response,
     };
     use zmail_core::{MessageSnapshot, ThreadSnapshot};
+
+    #[test]
+    fn search_criteria_map_operators_onto_search_keys() {
+        use zmail_core::search::SearchQuery;
+        let criteria = |query: &str| super::search_criteria(&SearchQuery::parse(query), false);
+        assert_eq!(
+            criteria("budget \"q3 plan\" from:alice -to:bob subject:x is:unread -is:flagged"),
+            Some(
+                "TEXT \"budget\" TEXT \"q3 plan\" FROM \"alice\" NOT TO \"bob\" SUBJECT \"x\" \
+                 UNSEEN NOT FLAGGED"
+                    .to_owned()
+            )
+        );
+        // Re-checked locally instead.
+        assert_eq!(
+            criteria("report has:attachment in:inbox after:7d before:2026-01-01"),
+            Some("TEXT \"report\"".to_owned())
+        );
+        assert_eq!(criteria("is:read"), Some("SEEN".to_owned()));
+        assert_eq!(criteria("!!"), Some("ALL".to_owned()));
+    }
+
+    #[test]
+    fn search_strings_are_escaped_and_never_break_the_command() {
+        use super::search_string;
+        assert_eq!(
+            search_string(r#"say "hi" \ bye"#, false),
+            Some((r#""say \"hi\" \\ bye""#.to_owned(), false))
+        );
+        // CR/LF would end the command early: they become spaces.
+        assert_eq!(
+            search_string("a\r\nb NOOP", false),
+            Some(("\"a  b NOOP\"".to_owned(), false))
+        );
+        // Non-ASCII text needs a UTF-8 literal.
+        assert_eq!(search_string("Zoë", false), None);
+        assert_eq!(
+            search_string("Zoë", true),
+            Some(("{4+}\r\nZoë".to_owned(), true))
+        );
+        assert_eq!(
+            super::search_criteria(&zmail_core::search::SearchQuery::parse("from:Zoë"), true),
+            Some("CHARSET UTF-8 FROM {4+}\r\nZoë".to_owned())
+        );
+    }
 
     #[test]
     fn xoauth2_response_matches_the_sasl_mechanism_format() {
