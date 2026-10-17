@@ -1005,6 +1005,11 @@ impl WorkspaceView {
             self.server_search_pending = None;
             return;
         }
+        // Pressing Enter again on a query whose server search is still
+        // running does not start a second one.
+        if self.server_search_pending.as_ref() == Some(&(account_id, query.clone())) {
+            return;
+        }
         self.server_search_pending = Some((account_id, query.clone()));
         let service = self.sync_service.clone();
         cx.spawn(async move |this, cx| {

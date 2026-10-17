@@ -11,7 +11,9 @@
 //! selectable mailbox and JMAP queries every email; only bodies are lazy,
 //! and eviction only drops bodies), so a hit the store does not know is
 //! mail that arrived after the last sync. One account sync, through the
-//! normal sync path, brings it in; a search never triggers more than one.
+//! normal sync path, brings it in. A search triggers at most one, and
+//! searches start at most one per account every [`SEARCH_SYNC_COOLDOWN`],
+//! so repeated searches never chain full-account syncs.
 //! Should a sync window or partial folder sync ever be added, unknown hits
 //! would need a targeted header fetch (`UID FETCH` / `Email/get` on the
 //! ids) fed through the same snapshot merge instead.
@@ -19,7 +21,7 @@
 //! [`LocalStore::search_needs_server`]: zmail_store::LocalStore::search_needs_server
 //! [`LocalStore::record_server_search_hits`]: zmail_store::LocalStore::record_server_search_hits
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use tokio::time::sleep;
@@ -33,6 +35,10 @@ use crate::SyncService;
 /// Most hits taken from the server: per mailbox for IMAP, per account for
 /// JMAP. The newest are kept.
 pub const SERVER_SEARCH_MAX_HITS: usize = 200;
+
+/// Shortest interval between two syncs started by server searches for the
+/// same account. Searches inside it resolve against the store as it is.
+pub const SEARCH_SYNC_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// How often a server search waiting for a running sync re-checks it.
 const SYNC_WAIT_INTERVAL: Duration = Duration::from_millis(250);
@@ -123,12 +129,14 @@ impl SyncService {
             return Ok(report);
         }
         // Mail newer than the last sync: let a running sync finish, or run
-        // one, then resolve again. At most one sync per search.
+        // one, then resolve again. At most one sync per search, and none
+        // when a search already synced this account within the cooldown,
+        // so repeated searches never chain full-account syncs.
         if self.is_syncing(account_id) {
             while self.is_syncing(account_id) {
                 sleep(SYNC_WAIT_INTERVAL).await;
             }
-        } else if self.mark_account_active(account_id) {
+        } else if self.claim_search_sync(account_id) && self.mark_account_active(account_id) {
             self.clone().run_sync_job(account_id).await?;
         } else {
             while self.is_syncing(account_id) {
@@ -140,6 +148,29 @@ impl SyncService {
         report.unresolved = still_unknown.len();
         Ok(report)
     }
+}
+
+impl SyncService {
+    /// Records a search-triggered sync for the account, returning `false`
+    /// when one already ran within [`SEARCH_SYNC_COOLDOWN`].
+    fn claim_search_sync(&self, account_id: i64) -> bool {
+        let mut syncs = self
+            .inner
+            .search_syncs
+            .lock()
+            .expect("search sync mutex should not be poisoned");
+        let now = Instant::now();
+        if !search_sync_allowed(syncs.get(&account_id).copied(), now) {
+            return false;
+        }
+        syncs.insert(account_id, now);
+        true
+    }
+}
+
+/// Whether a search may start a sync, given when the last one started.
+fn search_sync_allowed(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= SEARCH_SYNC_COOLDOWN)
 }
 
 /// Whether a mailbox is covered by the query's `in:` clauses: it must match
@@ -154,6 +185,21 @@ fn mailbox_in_scope(query: &SearchQuery, name: &str, role: Option<&str>) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_syncs_are_rate_limited_per_account() {
+        let start = Instant::now();
+        assert!(search_sync_allowed(None, start));
+        assert!(!search_sync_allowed(Some(start), start));
+        assert!(!search_sync_allowed(
+            Some(start),
+            start + SEARCH_SYNC_COOLDOWN - Duration::from_millis(1)
+        ));
+        assert!(search_sync_allowed(
+            Some(start),
+            start + SEARCH_SYNC_COOLDOWN
+        ));
+    }
 
     #[test]
     fn in_clauses_choose_the_mailboxes() {
