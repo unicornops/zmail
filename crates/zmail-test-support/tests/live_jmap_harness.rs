@@ -237,7 +237,7 @@ fn assert_push_reports_new_mail(
     transport: PushTransport,
 ) -> Result<()> {
     let _harness_lock = live_harness_lock();
-    let _harness = DockerMailHarness::start()?;
+    let harness = DockerMailHarness::start()?;
     let store = Arc::new(LocalStore::open_ephemeral()?);
     let account_id = store.insert_account(&jmap_account())?;
 
@@ -278,6 +278,14 @@ fn assert_push_reports_new_mail(
         Ok(PushEvent::MailChanged) => watch.abort(),
         Ok(other) => bail!("unexpected push event {other:?}"),
         Err(_) => {
+            // A late push (for example one released by the 30 s heartbeat)
+            // points at buffering between the server and the client.
+            let late = events
+                .recv_timeout(Duration::from_secs(25))
+                .map(|event| format!("{event:?} after {:?}", started.elapsed()));
+            println!("late push: {late:?}");
+            println!("james logs:\n{}", harness.logs("james", 80));
+            println!("nginx logs:\n{}", harness.logs("jmap-proxy", 40));
             // Tell a push session that ended apart from a delivery that
             // never happened, so a failure says which side broke.
             let session = if watch.is_finished() {
