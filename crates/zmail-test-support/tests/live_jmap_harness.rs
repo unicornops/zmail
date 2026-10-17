@@ -528,10 +528,13 @@ fn server_search_finds_jmap_mail_the_local_index_lacks() -> Result<()> {
     let runtime = BackgroundRuntime::start(2)?;
     let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
 
-    submit_harness_message(
-        "Server search JMAP indexed",
-        "Only the body names the storm petrelx.",
-    )?;
+    // The word sits past the stored preview excerpt, so once the body is
+    // gone only the server can still find it.
+    let body = format!(
+        "{} Only the end of the body names the storm petrelx.",
+        "Filler sentence that keeps the preview busy. ".repeat(20)
+    );
+    submit_harness_message("Server search JMAP indexed", &body)?;
     sync_until_subject(
         &sync_service,
         &store,
