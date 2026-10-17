@@ -20,7 +20,7 @@ Zmail is not yet usable without a pointer or with a screen reader. This section 
 
 ### Visual
 
-- The theme follows the system light/dark appearance until the toolbar toggle is used; the choice is not persisted yet.
+- The theme follows the system light/dark appearance until it is switched with Ctrl+Shift+T (Cmd+Shift+T on macOS) or View → Switch Light/Dark Theme; the choice is saved in the UI preferences.
 - Dates in lists are relative ("10:42", "Yesterday"), with the full timestamp in a tooltip. The tooltip needs a pointer to hover; there is no keyboard equivalent yet.
 - Text size follows GPUI's fixed 16px root size. There is no text scaling, high-contrast mode or reduced-motion handling.
 - Status messages dismiss themselves after four seconds, so they can be missed. Errors stay until dismissed with the banner's close button, which needs a pointer.

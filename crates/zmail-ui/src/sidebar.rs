@@ -5,6 +5,10 @@
 //! mailboxes and selection in with [`SidebarView::set_state`]; the sidebar
 //! reports clicks and keyboard selection as [`SidebarEvent`]s and never
 //! touches the store itself.
+//!
+//! Drafts and Outbox sit at the bottom, under "Outgoing", until the
+//! sidebar's Favourites section (Phase 3 of the UI plan, #117) replaces
+//! them.
 
 use std::ops::Range;
 
@@ -15,8 +19,11 @@ use gpui::{
 };
 use zmail_core::{AccountSummary, MailboxSummary};
 
-use crate::actions::{OpenSelected, SelectFirst, SelectLast, SelectNext, SelectPrevious};
-use crate::pane::pane_focus_indicator;
+use crate::actions::{
+    AddAccount, OpenSelected, SelectFirst, SelectLast, SelectNext, SelectPrevious,
+};
+use crate::components::{ButtonSize, IconButton};
+use crate::pane::{dispatch_from, pane_focus_indicator};
 use crate::styles::{AVATAR_SIZE, ICON_SIZE_SM, MAILBOX_ITEM_HEIGHT, UiColors};
 use crate::widgets::{
     EllipsisExt, HoverExt, avatar, badge, icon, interactive_background, message_avatar_background,
@@ -33,9 +40,26 @@ pub(crate) struct SidebarState {
     pub(crate) selected_account_id: Option<i64>,
     pub(crate) mailboxes: Vec<MailboxSummary>,
     pub(crate) selected_mailbox_id: Option<i64>,
-    /// Whether the selected mailbox is highlighted. Drafts, Outbox and
-    /// Search are not a mailbox view, so nothing is highlighted then.
-    pub(crate) highlight_mailbox: bool,
+    /// Which row shows as the current view.
+    pub(crate) highlight: SidebarHighlight,
+    /// Number of drafts, shown beside the Drafts row.
+    pub(crate) draft_count: usize,
+    /// Number of messages waiting in the outbox.
+    pub(crate) outbox_count: usize,
+}
+
+/// The sidebar row that matches what the message list shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SidebarHighlight {
+    /// The selected mailbox.
+    #[default]
+    Mailbox,
+    /// The Drafts row.
+    Drafts,
+    /// The Outbox row.
+    Outbox,
+    /// Nothing (search results are not a sidebar view).
+    None,
 }
 
 /// What the user did in the sidebar.
@@ -45,16 +69,22 @@ pub(crate) enum SidebarEvent {
     SelectAccount(i64),
     /// A mailbox row was clicked or reached with the arrow keys.
     SelectMailbox(i64),
+    /// The Drafts row was clicked or reached with the arrow keys.
+    ShowDrafts,
+    /// The Outbox row was clicked or reached with the arrow keys.
+    ShowOutbox,
     /// Enter: move on to the message list.
     Activate,
 }
 
-/// One keyboard stop in the sidebar: the accounts, then the selected
-/// account's mailboxes.
+/// One keyboard stop in the sidebar: the accounts, the selected
+/// account's mailboxes, then Drafts and Outbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidebarItem {
     Account(i64),
     Mailbox(i64),
+    Drafts,
+    Outbox,
 }
 
 pub(crate) struct SidebarView {
@@ -118,6 +148,7 @@ impl SidebarView {
                     .iter()
                     .map(|mailbox| SidebarItem::Mailbox(mailbox.id)),
             )
+            .chain([SidebarItem::Drafts, SidebarItem::Outbox])
             .collect()
     }
 
@@ -153,6 +184,8 @@ impl SidebarView {
                     .scroll_to_item(index - account_count, gpui::ScrollStrategy::Nearest);
                 cx.emit(SidebarEvent::SelectMailbox(id));
             }
+            SidebarItem::Drafts => cx.emit(SidebarEvent::ShowDrafts),
+            SidebarItem::Outbox => cx.emit(SidebarEvent::ShowOutbox),
         }
         cx.notify();
     }
@@ -225,7 +258,16 @@ impl Render for SidebarView {
                     focused,
                     &colors,
                 )
-                .child(div().font_weight(FontWeight::SEMIBOLD).child("Accounts")),
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("Accounts"))
+                .child(
+                    IconButton::new("sidebar-add-account", "plus", "Add Account")
+                        .size(ButtonSize::Small)
+                        .shortcut("secondary-shift-a")
+                        .on_click(dispatch_from(&self.focus_handle, AddAccount)),
+                ),
             )
             // ---- Account items -------------------------------------------
             .child(
@@ -263,6 +305,22 @@ impl Render for SidebarView {
                     .track_scroll(&self.mailbox_scroll)
                     .h_full(),
                 ),
+            )
+            // ---- Drafts and Outbox ---------------------------------------
+            .child(
+                div()
+                    .flex_none()
+                    .border_t_1()
+                    .border_color(rgb(colors.border))
+                    .child(
+                        div()
+                            .px_3()
+                            .py_3()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Outgoing"),
+                    )
+                    .child(self.render_view_row(SidebarItem::Drafts, &colors, cx))
+                    .child(self.render_view_row(SidebarItem::Outbox, &colors, cx)),
             )
     }
 }
@@ -365,6 +423,59 @@ impl SidebarView {
             )
     }
 
+    /// The Drafts or Outbox row.
+    fn render_view_row(
+        &self,
+        item: SidebarItem,
+        colors: &UiColors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let (id, label, icon_name, count, highlight, event) = match item {
+            SidebarItem::Outbox => (
+                "sidebar-outbox",
+                "Outbox",
+                "send",
+                self.state.outbox_count,
+                SidebarHighlight::Outbox,
+                SidebarEvent::ShowOutbox,
+            ),
+            _ => (
+                "sidebar-drafts",
+                "Drafts",
+                "file-text",
+                self.state.draft_count,
+                SidebarHighlight::Drafts,
+                SidebarEvent::ShowDrafts,
+            ),
+        };
+        let is_selected = self.state.highlight == highlight;
+        div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
+            .flex()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .h(px(MAILBOX_ITEM_HEIGHT))
+            .px_3()
+            .cursor_pointer()
+            .bg(rgb(interactive_background(
+                is_selected,
+                colors.surface,
+                colors,
+            )))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.cursor = Some(item);
+                cx.emit(event);
+            }))
+            .hover_bg(is_selected, colors)
+            .child(icon(icon_name, ICON_SIZE_SM, colors.muted))
+            .child(div().flex_1().min_w_0().ellipsis().child(label))
+            .when(count > 0, |this| {
+                this.child(badge(count, colors.button_background, colors.foreground))
+            })
+    }
+
     fn render_mailboxes(
         &mut self,
         range: Range<usize>,
@@ -377,8 +488,8 @@ impl SidebarView {
                 continue;
             };
             let mailbox_id = mailbox.id;
-            let is_selected =
-                Some(mailbox_id) == self.state.selected_mailbox_id && self.state.highlight_mailbox;
+            let is_selected = Some(mailbox_id) == self.state.selected_mailbox_id
+                && self.state.highlight == SidebarHighlight::Mailbox;
             let background_color = rgb(interactive_background(is_selected, colors.surface, colors));
 
             items.push(

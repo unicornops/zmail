@@ -8,7 +8,8 @@
 use std::{sync::Arc, time::Duration};
 
 use gpui::{
-    AppContext as _, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext, point,
+    AppContext as _, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext, point, px,
+    size,
 };
 use zmail_core::{
     AccountSyncSnapshot, AppBootstrap, AuthKind, CachePolicySummary, MailboxSnapshot,
@@ -122,6 +123,17 @@ fn open_workspace_on(
     setup: Setup,
     initial_view: impl FnOnce(&Harness) -> InitialView,
 ) -> (Entity<WorkspaceView>, &mut VisualTestContext, Harness) {
+    open_workspace_with(cx, setup, initial_view, |_| {})
+}
+
+/// Like [`open_workspace_on`], running `prepare` on the seeded store
+/// before the window opens (to save UI preferences, for example).
+fn open_workspace_with(
+    cx: &mut TestAppContext,
+    setup: Setup,
+    initial_view: impl FnOnce(&Harness) -> InitialView,
+    prepare: impl FnOnce(&LocalStore),
+) -> (Entity<WorkspaceView>, &mut VisualTestContext, Harness) {
     cx.update(|cx| {
         components::init(cx);
         text_input::init(cx);
@@ -215,6 +227,7 @@ fn open_workspace_on(
             gpui_version: String::new(),
         },
     };
+    prepare(&store);
     let initial_view = initial_view(&harness);
     let (view, cx) = cx.add_window_view(move |window, cx| {
         WorkspaceView::new(
@@ -688,6 +701,12 @@ fn every_toolbar_action_is_dispatchable_by_keybinding(cx: &mut TestAppContext) {
     keys("secondary-1", cx);
     assert_eq!(modes(cx), (ListMode::Mail, DetailMode::Reader));
 
+    // Sidebar.
+    keys("secondary-b", cx);
+    assert!(cx.read_entity(&view, |view, _| !view.sidebar_shown()));
+    keys("secondary-b", cx);
+    assert!(cx.read_entity(&view, |view, _| view.sidebar_shown()));
+
     // Theme.
     let appearance = |cx: &mut VisualTestContext| {
         cx.read_entity(&view, |view, _| view.bootstrap.theme.appearance)
@@ -879,4 +898,139 @@ fn the_window_can_open_on_account_setup(cx: &mut TestAppContext) {
             .clone()
     });
     assert_eq!(text(&display_name, cx), "Work");
+}
+
+// ---------------------------------------------------------------------------
+// Toolbar, sidebar views and reader actions (UI plan Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Clicks the centre of the element with debug selector `selector`.
+fn click(selector: &'static str, cx: &mut VisualTestContext) {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} is drawn"));
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+}
+
+/// Resizes the test window to `width` x 900.
+fn resize(width: f32, cx: &mut VisualTestContext) {
+    cx.simulate_resize(size(px(width), px(900.)));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn toolbar_buttons_dispatch_their_actions(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+
+    click("toolbar-compose", cx);
+    assert!(cx.read_entity(&view, |view, _| matches!(
+        view.detail_mode,
+        DetailMode::Compose
+    )));
+
+    // The sidebar toggle hides the sidebar and remembers it.
+    assert!(cx.debug_bounds("sidebar-drafts").is_some());
+    click("toolbar-sidebar", cx);
+    assert!(cx.read_entity(&view, |view, _| !view.sidebar_shown()));
+    assert!(cx.debug_bounds("sidebar-drafts").is_none());
+    let saved = |harness: &Harness| {
+        harness
+            .store
+            .ui_preferences()
+            .expect("the preferences load")
+            .sidebar_collapsed
+    };
+    assert!(saved(&harness));
+    click("toolbar-sidebar", cx);
+    assert!(cx.debug_bounds("sidebar-drafts").is_some());
+    assert!(!saved(&harness));
+
+    // The sync indicator syncs every account.
+    click("toolbar-sync", cx);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.status_message.clone()),
+        Some("Syncing 1 account…".to_owned())
+    );
+}
+
+#[gpui::test]
+fn a_hidden_sidebar_stays_hidden_after_a_restart(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Inbox,
+        |store| {
+            store
+                .update_ui_preferences(|preferences| preferences.sidebar_collapsed = true)
+                .expect("the preferences save");
+        },
+    );
+    assert!(cx.read_entity(&view, |view, _| !view.sidebar_shown()));
+    assert!(cx.debug_bounds("sidebar-drafts").is_none());
+}
+
+#[gpui::test]
+fn the_sidebar_lists_drafts_and_outbox(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+    let mode = |cx: &mut VisualTestContext| cx.read_entity(&view, |view, _| view.list_mode);
+
+    click("sidebar-drafts", cx);
+    assert_eq!(mode(cx), ListMode::Drafts);
+    click("sidebar-outbox", cx);
+    assert_eq!(mode(cx), ListMode::Outbox);
+
+    // They are the sidebar's last keyboard stops.
+    view.update_in(cx, |view, window, cx| {
+        view.focus_pane(Pane::Sidebar, window, cx)
+    });
+    keys("home", cx);
+    assert_eq!(mode(cx), ListMode::Mail);
+    keys("end", cx);
+    assert_eq!(mode(cx), ListMode::Outbox);
+    keys("up", cx);
+    assert_eq!(mode(cx), ListMode::Drafts);
+}
+
+#[gpui::test]
+fn the_reader_more_menu_moves_the_thread(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let first = harness.threads[0];
+    resize(1440., cx);
+    let reader = cx.read_entity(&view, |view, _| view.reader.clone());
+
+    click("reader-more", cx);
+    assert!(cx.read_entity(&reader, |reader, _| reader.more_menu().is_some()));
+    // Wide enough for every button, so the menu starts with Move to:
+    // Archive, then Trash.
+    keys("down enter", cx);
+    assert!(cx.read_entity(&reader, |reader, _| reader.more_menu().is_none()));
+    assert_eq!(mailbox_of(&harness, first), harness.archive_id);
+    assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
+
+    // Escape closes the menu without acting.
+    click("reader-more", cx);
+    keys("escape", cx);
+    assert!(cx.read_entity(&reader, |reader, _| reader.more_menu().is_none()));
+}
+
+#[gpui::test]
+fn a_narrow_reader_moves_actions_into_more(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+    let compact = |cx: &mut VisualTestContext| {
+        let reader = cx.read_entity(&view, |view, _| view.reader.clone());
+        cx.read_entity(&reader, |reader, _| reader.compact_actions())
+    };
+    resize(1440., cx);
+    assert!(!compact(cx));
+    resize(1000., cx);
+    assert!(compact(cx));
+
+    // Reply All is now the first entry of More.
+    click("reader-more", cx);
+    keys("down enter", cx);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| (view.list_mode, view.detail_mode)),
+        (ListMode::Drafts, DetailMode::Compose)
+    );
 }

@@ -23,7 +23,7 @@
 //! | `pane` | pane focus order and the focused-pane indicator |
 //! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, `TextInput`, … and the gallery |
 //! | `styles` | design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
-//! | `preferences` | loading and saving the persisted UI preferences (theme mode so far) |
+//! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar) |
 //! | `widgets` | `toolbar_button`, `input_card`, `list_row`, `icon`, … |
 //! | `diagnostics` | internal counters kept for the future Settings → About page |
 
@@ -311,6 +311,10 @@ struct WorkspaceView {
     theme_overridden: bool,
     /// 12- or 24-hour clock for list and reader dates, from the locale.
     hour_cycle: zmail_core::time::HourCycle,
+    /// Whether the user hid the sidebar (persisted in the UI preferences).
+    sidebar_collapsed: bool,
+    /// The window's content width, which the pane layout follows.
+    viewport_width: f32,
     _subscriptions: Vec<Subscription>,
 }
 

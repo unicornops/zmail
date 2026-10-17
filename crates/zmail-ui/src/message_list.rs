@@ -29,9 +29,10 @@ use zmail_store::LocalStore;
 
 use crate::ListMode;
 use crate::actions::{
-    AddAccount, OpenSelected, SelectFirst, SelectLast, SelectNext, SelectPrevious,
+    AddAccount, OpenSelected, RetryOutbox, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
-use crate::pane::pane_focus_indicator;
+use crate::components::{Button, ButtonSize};
+use crate::pane::{dispatch_from, pane_focus_indicator};
 use crate::styles::{
     AVATAR_SIZE, ICON_SIZE_SM, LIST_ITEM_HEIGHT, ROW_LINE_GAP, ROW_PADDING_Y,
     ROW_PREVIEW_LINE_HEIGHT, ROW_SENDER_LINE_HEIGHT, ROW_TITLE_LINE_HEIGHT, UNREAD_INDICATOR_SIZE,
@@ -398,6 +399,7 @@ impl Render for MessageListView {
         let colors = *cx.global::<UiColors>();
         let focused = self.focus_handle.contains_focused(window, cx);
         let (title, subtitle) = self.header_text();
+        let can_retry = self.state.mode == ListMode::Outbox && !self.state.outbox_jobs.is_empty();
 
         div()
             .id("message-list")
@@ -424,13 +426,31 @@ impl Render for MessageListView {
                     focused,
                     &colors,
                 )
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                .flex()
+                .items_center()
+                .gap_2()
                 .child(
                     div()
-                        .text_sm()
-                        .text_color(rgb(colors.muted))
-                        .child(subtitle),
-                ),
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(colors.muted))
+                                .child(subtitle),
+                        ),
+                )
+                // Retry lives with the outbox it acts on.
+                .when(can_retry, |this| {
+                    this.child(
+                        Button::new("outbox-retry", "Retry")
+                            .icon("refresh-cw")
+                            .size(ButtonSize::Small)
+                            .shortcut("secondary-shift-o")
+                            .on_click(dispatch_from(&self.focus_handle, RetryOutbox)),
+                    )
+                }),
             )
             .child(match self.state.mode {
                 ListMode::Mail => self.render_threads(&colors, cx),

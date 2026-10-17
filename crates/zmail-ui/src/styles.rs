@@ -90,9 +90,15 @@ pub const MESSAGE_LIST_WIDTH: f32 = 380.0;
 /// Narrowest the reader / compose pane gets before the sidebar gives up
 /// width.
 pub const DETAIL_MIN_WIDTH: f32 = 300.0;
-/// Width of the toolbar search field. Fixed so typing never shifts the
-/// toolbar buttons.
-pub const SEARCH_FIELD_WIDTH: f32 = 240.0;
+/// Narrowest the toolbar search field gets. It fills the space between
+/// the leading buttons and the sync indicator up to
+/// [`SEARCH_FIELD_MAX_WIDTH`]; its width never depends on what is typed.
+pub const SEARCH_FIELD_MIN_WIDTH: f32 = 160.0;
+/// Widest the toolbar search field gets.
+pub const SEARCH_FIELD_MAX_WIDTH: f32 = 520.0;
+/// Below this reader width the reader shows only its main actions (Reply,
+/// Archive, Delete) and moves the rest into its More menu.
+pub const READER_COMPACT_ACTIONS_BELOW: f32 = 480.0;
 /// Default application window width.
 pub const WINDOW_WIDTH: f32 = 1440.0;
 /// Default application window height.

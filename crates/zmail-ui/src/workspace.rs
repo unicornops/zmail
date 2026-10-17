@@ -34,8 +34,8 @@ use crate::account_setup::{AccountSetupEvent, AccountSetupView};
 use crate::actions::{
     AddAccount, Archive, Cancel, Delete, FocusNextPane, FocusPreviousPane, FocusSearch, Forward,
     MoveToMailbox, NewMessage, Reply, ReplyAll, RetryOutbox, RunSearch, SaveAttachments,
-    ShowDrafts, ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleFlag, ToggleRead, ToggleTheme,
-    Undo,
+    ShowDrafts, ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleFlag, ToggleRead, ToggleSidebar,
+    ToggleTheme, Undo,
 };
 use crate::app_menu::AppMenuButton;
 use crate::components::{self, TextInput, TextInputEvent, TitleBar};
@@ -44,10 +44,10 @@ use crate::mail_actions::{MailActions, MailEvent};
 use crate::message_list::{MessageListEvent, MessageListState, MessageListView};
 use crate::pane::Pane;
 use crate::reader::{ReaderState, ReaderView};
-use crate::sidebar::{SidebarEvent, SidebarState, SidebarView};
+use crate::sidebar::{SidebarEvent, SidebarHighlight, SidebarState, SidebarView};
 use crate::styles::{
     DETAIL_MIN_WIDTH, ICON_SIZE_SM, MESSAGE_LIST_WIDTH, MenuPlacement, PlatformStyle,
-    SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, UiColors,
+    READER_COMPACT_ACTIONS_BELOW, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, UiColors,
 };
 use crate::widgets::{HoverExt, icon, status_banner};
 
@@ -160,8 +160,23 @@ impl WorkspaceView {
             refresh_scheduled: false,
             theme_overridden: false,
             hour_cycle,
+            sidebar_collapsed: false,
+            viewport_width: f32::from(window.viewport_size().width),
             _subscriptions: subscriptions,
         };
+
+        // The pane layout follows the window width.
+        cx.observe_window_bounds(
+            window,
+            |this: &mut WorkspaceView, window: &mut Window, cx: &mut Context<Self>| {
+                let width = f32::from(window.viewport_size().width);
+                if width != this.viewport_width {
+                    this.viewport_width = width;
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
 
         // New mail only notifies while the window is unfocused: the quiet
         // flag mirrors the window activation state.
@@ -177,6 +192,7 @@ impl WorkspaceView {
         // Start in the saved theme mode (system, light or dark) and follow
         // system changes unless the user has picked a theme.
         view.apply_theme_preference(window.appearance());
+        view.apply_layout_preferences();
         cx.set_global(UiColors::from_theme(&view.bootstrap.theme));
         cx.observe_window_appearance(
             window,
@@ -291,7 +307,14 @@ impl WorkspaceView {
             selected_account_id: self.selected_account_id,
             mailboxes: self.mailboxes.clone(),
             selected_mailbox_id: self.selected_mailbox_id,
-            highlight_mailbox: matches!(self.list_mode, ListMode::Mail),
+            highlight: match self.list_mode {
+                ListMode::Mail => SidebarHighlight::Mailbox,
+                ListMode::Drafts => SidebarHighlight::Drafts,
+                ListMode::Outbox => SidebarHighlight::Outbox,
+                ListMode::Search => SidebarHighlight::None,
+            },
+            draft_count: self.drafts.len(),
+            outbox_count: self.outbox_jobs.len(),
         };
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_state(sidebar_state, cx));
@@ -317,6 +340,7 @@ impl WorkspaceView {
             thread: self.selected_thread_view(),
             mailboxes: self.mailboxes.clone(),
             own_addresses,
+            compact_actions: self.detail_width() < READER_COMPACT_ACTIONS_BELOW,
         };
         self.reader
             .update(cx, |reader, cx| reader.set_state(reader_state, cx));
@@ -582,6 +606,43 @@ impl WorkspaceView {
         }) {
             self.show_error(error, cx);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Layout
+    // -----------------------------------------------------------------------
+
+    /// Whether the sidebar is showing.
+    pub(crate) fn sidebar_shown(&self) -> bool {
+        !self.sidebar_collapsed
+    }
+
+    /// The sidebar's width as laid out: it gives up width, down to its
+    /// minimum, before the detail pane goes below its own.
+    fn sidebar_layout_width(&self) -> f32 {
+        (self.viewport_width - MESSAGE_LIST_WIDTH - DETAIL_MIN_WIDTH)
+            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH)
+    }
+
+    /// The detail pane's width as laid out.
+    pub(crate) fn detail_width(&self) -> f32 {
+        let sidebar = if self.sidebar_shown() {
+            self.sidebar_layout_width()
+        } else {
+            0.
+        };
+        (self.viewport_width - sidebar - MESSAGE_LIST_WIDTH).max(0.)
+    }
+
+    /// Show or hide the sidebar, remembering the choice.
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
+        let hiding = self.sidebar_shown();
+        if hiding && self.focused_pane(window, cx) == Some(Pane::Sidebar) {
+            self.focus_pane(Pane::MessageList, window, cx);
+        }
+        self.sidebar_collapsed = hiding;
+        self.persist_sidebar_collapsed();
+        cx.notify();
     }
 
     // -----------------------------------------------------------------------
@@ -1241,9 +1302,14 @@ impl WorkspaceView {
     }
 
     fn show_drafts(&mut self, _: &ShowDrafts, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_drafts_list(cx);
+        self.focus_pane(Pane::MessageList, window, cx);
+    }
+
+    /// Lists the drafts, with the selected one in the compose pane.
+    fn show_drafts_list(&mut self, cx: &mut Context<Self>) {
         self.set_list_mode(ListMode::Drafts, cx);
         self.detail_mode = DetailMode::Compose;
-        self.focus_pane(Pane::MessageList, window, cx);
     }
 
     fn show_outbox(&mut self, _: &ShowOutbox, window: &mut Window, cx: &mut Context<Self>) {
@@ -1411,6 +1477,8 @@ impl WorkspaceView {
         match *event {
             SidebarEvent::SelectAccount(account_id) => self.select_account(account_id, cx),
             SidebarEvent::SelectMailbox(mailbox_id) => self.select_mailbox(mailbox_id, cx),
+            SidebarEvent::ShowDrafts => self.show_drafts_list(cx),
+            SidebarEvent::ShowOutbox => self.set_list_mode(ListMode::Outbox, cx),
             SidebarEvent::Activate => self.focus_pane(Pane::MessageList, window, cx),
         }
     }
@@ -1545,6 +1613,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::sync_account_action))
             .on_action(cx.listener(Self::sync_all_action))
             .on_action(cx.listener(Self::toggle_theme))
+            .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::focus_previous_pane))
             .on_action(cx.listener(Self::cancel))
@@ -1581,7 +1650,9 @@ impl Render for WorkspaceView {
                             .flex()
                             .flex_1()
                             .overflow_hidden()
-                            .child(self.sidebar.clone().cached(sidebar_style()))
+                            .when(self.sidebar_shown(), |this| {
+                                this.child(self.sidebar.clone().cached(sidebar_style()))
+                            })
                             .child(self.message_list.clone().cached(message_list_style()))
                             .child(detail.cached(detail_style())),
                     )
