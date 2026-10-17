@@ -30,6 +30,7 @@ pub fn run_gallery(assets: impl AssetSource) {
     gpui_platform::application()
         .with_assets(assets)
         .run(|cx: &mut App| {
+            crate::fonts::register_ui_font(cx);
             super::actions::init(cx);
             cx.bind_keys([
                 KeyBinding::new("tab", FocusNext, Some(GALLERY_CONTEXT)),
@@ -664,6 +665,7 @@ impl Render for Gallery {
             }))
             .relative()
             .size_full()
+            .font_family(theme.platform.ui_font.family())
             .bg(rgb(colors.background))
             .text_color(rgb(colors.foreground))
             .type_style(TYPE_BODY)

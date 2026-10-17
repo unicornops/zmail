@@ -89,6 +89,20 @@ pub(crate) fn popover_below(content: impl IntoElement) -> impl IntoElement {
     )
 }
 
+/// Like [`popover_below`], but aligned to the trigger's trailing edge, for
+/// triggers at the end of a bar.
+pub(crate) fn popover_below_end(content: impl IntoElement) -> impl IntoElement {
+    div().absolute().top_full().right_0().child(
+        deferred(
+            anchored()
+                .anchor(Anchor::TopRight)
+                .snap_to_window_with_margin(px(WINDOW_MARGIN))
+                .child(div().mt(px(SPACE_1)).child(content)),
+        )
+        .with_priority(1),
+    )
+}
+
 /// Float `content` with its top-left corner at `position` (window
 /// coordinates), shifted to stay in the window. Used for context menus.
 pub(crate) fn overlay_at(position: Point<Pixels>, content: impl IntoElement) -> impl IntoElement {

@@ -1,0 +1,9 @@
+[
+  {
+    "bindings": {
+      "cmd-h": "zmail::Hide",
+      "alt-cmd-h": "zmail::HideOthers",
+      "cmd-m": "zmail::Minimize"
+    }
+  }
+]

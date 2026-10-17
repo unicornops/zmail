@@ -1,5 +1,10 @@
 [
   {
+    "bindings": {
+      "secondary-q": "zmail::Quit"
+    }
+  },
+  {
     "context": "Workspace",
     "bindings": {
       "secondary-n": "zmail::NewMessage",
@@ -49,9 +54,9 @@
       "secondary-shift-r": "zmail::ReplyAll",
       "secondary-shift-f": "zmail::Forward",
       "secondary-e": "zmail::Archive",
+      "secondary-backspace": "zmail::Delete",
       "delete": "zmail::Delete",
       "backspace": "zmail::Delete",
-      "secondary-backspace": "zmail::Delete",
       "secondary-shift-l": "zmail::ToggleFlag",
       "secondary-shift-u": "zmail::ToggleRead",
       "secondary-shift-s": "zmail::SaveAttachments"

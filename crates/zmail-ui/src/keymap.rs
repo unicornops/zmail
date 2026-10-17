@@ -15,8 +15,16 @@
 //! also be written as `["zmail::Name", { ...arguments }]` for actions that
 //! take arguments.
 //!
-//! The default keymap ships inside the binary. A user keymap and a
-//! Gmail-style keymap are Phase 7 of the UI plan.
+//! Order matters in one way: the native macOS menu bar shows an action's
+//! *first* binding as the menu item's key equivalent, and AppKit fires that
+//! equivalent whenever GPUI leaves the keystroke unhandled. So an action
+//! that is in a menu lists a chorded binding first (Delete lists
+//! `secondary-backspace` before plain `delete`), or a plain key would fire
+//! it from panes that never bound it. `menus::tests` checks this.
+//!
+//! The default keymap ships inside the binary, plus a small macOS keymap for
+//! the system conventions that only exist there (Hide, Minimize). A user
+//! keymap and a Gmail-style keymap are Phase 7 of the UI plan.
 
 use std::rc::Rc;
 
@@ -26,6 +34,18 @@ use serde_json::Value;
 
 /// The keymap bundled with the app.
 pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../keymaps/default.json");
+
+/// macOS-only bindings, loaded after the default keymap on macOS.
+pub(crate) const MACOS_KEYMAP: &str = include_str!("../keymaps/macos.json");
+
+/// The bundled keymaps this platform loads, in order.
+pub(crate) fn platform_keymaps() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &[DEFAULT_KEYMAP, MACOS_KEYMAP]
+    } else {
+        &[DEFAULT_KEYMAP]
+    }
+}
 
 /// Parses a keymap file into bindings. Every action must be registered and
 /// every keystroke and context must parse; the first problem is an error,
@@ -83,12 +103,14 @@ pub(crate) fn parse_keymap(source: &str, cx: &App) -> Result<Vec<KeyBinding>> {
     Ok(bindings)
 }
 
-/// Binds the default keymap. A parse failure is a bug in the bundled file
-/// (the tests load it), so it is logged rather than stopping the app.
+/// Binds the bundled keymaps. A parse failure is a bug in a bundled file
+/// (the tests load them), so it is logged rather than stopping the app.
 pub(crate) fn bind_default_keymap(cx: &mut App) {
-    match parse_keymap(DEFAULT_KEYMAP, cx) {
-        Ok(bindings) => cx.bind_keys(bindings),
-        Err(error) => eprintln!("zmail: the default keymap did not load: {error:#}"),
+    for source in platform_keymaps() {
+        match parse_keymap(source, cx) {
+            Ok(bindings) => cx.bind_keys(bindings),
+            Err(error) => eprintln!("zmail: a bundled keymap did not load: {error:#}"),
+        }
     }
 }
 
@@ -98,21 +120,26 @@ mod tests {
 
     use gpui::TestAppContext;
 
-    use super::{DEFAULT_KEYMAP, parse_keymap};
+    use super::{DEFAULT_KEYMAP, MACOS_KEYMAP, parse_keymap};
     use crate::actions::ACTIONS_WITHOUT_KEYS;
 
     #[gpui::test]
-    fn the_default_keymap_loads(cx: &mut TestAppContext) {
-        let bindings = cx
-            .update(|cx| parse_keymap(DEFAULT_KEYMAP, cx))
-            .expect("the bundled keymap parses");
-        assert!(!bindings.is_empty());
+    fn the_bundled_keymaps_load(cx: &mut TestAppContext) {
+        for source in [DEFAULT_KEYMAP, MACOS_KEYMAP] {
+            let bindings = cx
+                .update(|cx| parse_keymap(source, cx))
+                .expect("the bundled keymap parses");
+            assert!(!bindings.is_empty());
+        }
     }
 
     #[gpui::test]
     fn every_action_has_a_default_binding(cx: &mut TestAppContext) {
+        // Checked against both keymaps on every platform, so a Linux test
+        // run also covers the macOS-only bindings.
         let (bound, registered) = cx.update(|cx| {
-            let bindings = parse_keymap(DEFAULT_KEYMAP, cx).expect("the keymap parses");
+            let mut bindings = parse_keymap(DEFAULT_KEYMAP, cx).expect("the keymap parses");
+            bindings.extend(parse_keymap(MACOS_KEYMAP, cx).expect("the macOS keymap parses"));
             let bound = bindings
                 .iter()
                 .map(|binding| binding.action().name())

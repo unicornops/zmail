@@ -49,6 +49,7 @@ pub(crate) type MenuHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 pub(crate) struct MenuEntry {
     label: SharedString,
     icon: Option<&'static str>,
+    trailing_icon: Option<&'static str>,
     shortcut: Option<SharedString>,
     disabled: bool,
     checked: Option<bool>,
@@ -61,6 +62,7 @@ impl MenuEntry {
         Self {
             label: label.into(),
             icon: None,
+            trailing_icon: None,
             shortcut: None,
             disabled: false,
             checked: None,
@@ -71,6 +73,13 @@ impl MenuEntry {
     /// Show a leading Lucide icon.
     pub(crate) fn icon(mut self, name: &'static str) -> Self {
         self.icon = Some(name);
+        self
+    }
+
+    /// Show a trailing Lucide icon, such as `chevron-right` on an entry
+    /// that opens another menu.
+    pub(crate) fn trailing_icon(mut self, name: &'static str) -> Self {
+        self.trailing_icon = Some(name);
         self
     }
 
@@ -90,6 +99,24 @@ impl MenuEntry {
     pub(crate) fn checked(mut self, checked: bool) -> Self {
         self.checked = Some(checked);
         self
+    }
+
+    /// The entry's label.
+    #[cfg(test)]
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The entry's shortcut, as given.
+    #[cfg(test)]
+    pub(crate) fn shortcut_text(&self) -> Option<&str> {
+        self.shortcut.as_deref()
+    }
+
+    /// Whether the entry is greyed out.
+    #[cfg(test)]
+    pub(crate) fn is_disabled(&self) -> bool {
+        self.disabled
     }
 
     /// Run `handler` when the entry is chosen.
@@ -181,6 +208,15 @@ impl Menu {
             self.selected = Some(index);
         }
         self
+    }
+
+    /// The menu's entries, without separators and headers.
+    #[cfg(test)]
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &MenuEntry> {
+        self.items.iter().filter_map(|item| match item {
+            MenuItem::Entry(entry) => Some(entry),
+            _ => None,
+        })
     }
 
     /// The highlighted item, if any.
@@ -305,6 +341,9 @@ impl Menu {
             )
             .when_some(entry.shortcut.clone(), |this, shortcut| {
                 this.child(Kbd::new(shortcut))
+            })
+            .when_some(entry.trailing_icon, |this, name| {
+                this.child(icon(name, ICON_SIZE_SM, muted))
             })
     }
 }

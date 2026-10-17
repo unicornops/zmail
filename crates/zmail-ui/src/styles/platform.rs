@@ -220,8 +220,8 @@ impl PlatformStyle {
         title_bar_height: 46.0,
         primary_modifier: PrimaryModifier::Ctrl,
         // GPUI's Linux system-font lookup resolves to a font it does not
-        // ship; Inter matches GNOME's Adwaita Sans. Registering the font
-        // is Phase 2 work.
+        // ship; Inter matches GNOME's Adwaita Sans. `fonts::register_ui_font`
+        // registers the bundled faces at startup.
         ui_font: UiFont::Bundled("Inter"),
         menu: MenuPlacement::HeaderBarHamburger,
         send_button: SendButtonPlacement::HeaderBarTrailing,

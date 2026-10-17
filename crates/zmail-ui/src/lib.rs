@@ -16,7 +16,10 @@
 //! | `account_setup` | `AccountSetupView`: the new-account form |
 //! | `mail_actions` | `MailActions`: store writes, `MailEvent`s and undo |
 //! | `actions` | every command as a GPUI action |
-//! | `keymap` | loads `keymaps/default.json` |
+//! | `keymap` | loads `keymaps/default.json` (and `keymaps/macos.json` on macOS) |
+//! | `menus` | `MenuModel`, the command menus; the native macOS menu bar; app-wide commands (Quit, Hide, …) |
+//! | `app_menu` | `AppMenuButton`: the menu model behind a hamburger/overflow button (Windows, Linux) |
+//! | `fonts` | registers the bundled Inter font on Linux |
 //! | `pane` | pane focus order and the focused-pane indicator |
 //! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, `TextInput`, … and the gallery |
 //! | `styles` | design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
@@ -47,10 +50,13 @@ pub use components::gallery::run_gallery;
 
 mod account_setup;
 mod actions;
+mod app_menu;
 mod compose;
 mod diagnostics;
+mod fonts;
 mod keymap;
 mod mail_actions;
+mod menus;
 mod message_list;
 mod pane;
 mod preferences;
@@ -64,6 +70,7 @@ mod widgets;
 mod workspace;
 
 use crate::account_setup::AccountSetupView;
+use crate::app_menu::AppMenuButton;
 use crate::compose::ComposeView;
 use crate::mail_actions::MailActions;
 use crate::message_list::MessageListView;
@@ -115,9 +122,13 @@ pub fn run(
     gpui_platform::application()
         .with_assets(asset_source)
         .run(move |cx: &mut App| {
+            fonts::register_ui_font(cx);
             components::init(cx);
             components::text_input::init(cx);
             keymap::bind_default_keymap(cx);
+            // After the keymap: the macOS menu bar reads key equivalents
+            // from it.
+            menus::init(cx);
             let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
             let bootstrap = bootstrap.clone();
             let store = store.clone();
@@ -205,6 +216,9 @@ struct WorkspaceView {
     account_setup: Entity<AccountSetupView>,
     /// The toolbar search field.
     search_query: Entity<TextInput>,
+    /// The command menu button (Windows and Linux; macOS uses the menu
+    /// bar).
+    app_menu: Entity<AppMenuButton>,
     account: Option<AccountOverview>,
     accounts: Vec<AccountSummary>,
     identities: Vec<IdentitySummary>,

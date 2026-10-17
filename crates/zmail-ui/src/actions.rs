@@ -17,12 +17,29 @@
 //! | `Compose` | the open draft |
 //! | `AccountSetup` | the account form |
 //! | `TextInput` | any text field (owned by the text input component) |
+//!
+//! The application commands at the top (Quit, Hide, Minimize, …) have no
+//! context: [`crate::menus::init`] handles them app-wide, so they work from
+//! the native macOS menu bar even when no Zmail element has focus.
 
 use gpui::{Action, actions};
 
 actions!(
     zmail,
     [
+        // ---- Application (handled app-wide) ------------------------------
+        /// Quit Zmail.
+        Quit,
+        /// Hide Zmail (macOS).
+        Hide,
+        /// Hide every other application (macOS).
+        HideOthers,
+        /// Show every hidden application (macOS).
+        ShowAll,
+        /// Minimise the active window.
+        Minimize,
+        /// Zoom (maximise or restore) the active window.
+        Zoom,
         // ---- Workspace --------------------------------------------------
         /// Start a new message.
         NewMessage,
@@ -138,6 +155,14 @@ pub(crate) const ACTIONS_WITHOUT_KEYS: &[(&str, &str)] = &[
     ("zmail::RemoveAttachment", "needs an attachment argument"),
     ("zmail::SelectIdentity", "needs an identity argument"),
     ("zmail::RunSearch", "Enter in the search field submits it"),
+    (
+        "zmail::ShowAll",
+        "the macOS menu bar has no standard key for it",
+    ),
+    (
+        "zmail::Zoom",
+        "the macOS menu bar has no standard key for it",
+    ),
     (
         "zmail::AddAttachment",
         "Enter in the attachment field submits it",

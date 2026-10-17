@@ -26,3 +26,14 @@ ignore-dev-dependencies = false
 #   Ported from crates/gpui/examples/input.rs in Zed v1.24.2
 #   (https://github.com/zed-industries/zed), Copyright Zed Industries, Inc.,
 #   licensed under the Apache License 2.0.
+
+# Bundled assets that are not crates, also recorded here:
+#
+# - assets/fonts/inter/Inter-{Regular,Medium,SemiBold,Bold}.ttf
+#   Inter 4.1 (https://github.com/rsms/inter/releases/tag/v4.1, from
+#   Inter-4.1.zip, sha256 9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e),
+#   Copyright The Inter Project Authors, licensed under the SIL Open Font
+#   License 1.1 (assets/fonts/inter/LICENSE.txt). Embedded in Linux builds
+#   only (crates/zmail-ui/src/fonts.rs); the .deb also installs the licence.
+# - assets/icons/*.svg (except app-icon.svg)
+#   Lucide (https://lucide.dev), licensed under the ISC License.

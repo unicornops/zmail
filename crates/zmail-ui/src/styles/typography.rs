@@ -9,6 +9,11 @@
 //! ```text
 //! div().type_style(TYPE_BODY_STRONG).child("Inbox")
 //! ```
+//!
+//! The family is not part of a [`TypeStyle`]: each window root sets
+//! [`PlatformStyle::ui_font`](super::PlatformStyle) once and every element
+//! (popovers and menus included) inherits it. That is the system UI font on
+//! macOS and Windows and the bundled Inter on Linux (see `crate::fonts`).
 
 use gpui::{FontWeight, Styled, rems};
 
