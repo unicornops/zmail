@@ -8076,6 +8076,7 @@ dependencies = [
  "chrono",
  "gpui",
  "gpui_platform",
+ "serde_json",
  "tokio",
  "unicode-segmentation",
  "url",
