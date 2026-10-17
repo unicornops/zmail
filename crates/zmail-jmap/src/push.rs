@@ -35,6 +35,10 @@ const STALL_GRACE: Duration = Duration::from_secs(15);
 /// Shortest stall timeout honoured when a server announces its own ping
 /// interval.
 const MIN_PING_INTERVAL: Duration = Duration::from_secs(5);
+/// How often a WebSocket setup request is repeated before giving up, and
+/// how long each attempt waits for the answer.
+const WS_READY_ATTEMPTS: usize = 5;
+const WS_READY_WAIT: Duration = Duration::from_secs(2);
 /// Connection timeout for opening the push stream.
 const PUSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Largest single server-sent event accepted, mirroring `jmap-client`.
@@ -255,6 +259,22 @@ where
         .connect_ws()
         .await
         .context("failed to open the JMAP WebSocket")?;
+    // Apache James 3.9 silently drops frames that arrive before its socket
+    // handler starts reading, which happens right after the upgrade when
+    // the server is busy (a lost WebSocketPushEnable leaves an open
+    // connection that never pushes). A request is therefore repeated until
+    // the server answers, and push is only enabled once it is reading.
+    let mut reading = false;
+    for _ in 0..WS_READY_ATTEMPTS {
+        send_heartbeat(client).await?;
+        if await_response(&mut stream, WS_READY_WAIT).await? {
+            reading = true;
+            break;
+        }
+    }
+    if !reading {
+        bail!("the JMAP WebSocket never answered a request");
+    }
     client
         .enable_push_ws(Some(PUSH_TYPES), Option::<String>::None)
         .await
@@ -263,22 +283,8 @@ where
     // messages in order, so the answer to a request sent after it shows the
     // subscription is in place before the caller is told it is connected.
     send_heartbeat(client).await?;
-    let confirmed = tokio::time::timeout(PUSH_CONNECT_TIMEOUT, async {
-        loop {
-            match stream.next().await {
-                Some(Ok(WebSocketMessage::Response(_))) => return Ok(()),
-                Some(Ok(_)) | Some(Err(jmap_client::Error::Parse(_))) => {}
-                Some(Err(error)) => {
-                    return Err(anyhow!(error).context("the JMAP WebSocket failed"));
-                }
-                None => bail!("the JMAP WebSocket closed before push was enabled"),
-            }
-        }
-    })
-    .await;
-    match confirmed {
-        Ok(result) => result?,
-        Err(_) => bail!("the JMAP WebSocket did not answer after enabling push"),
+    if !await_response(&mut stream, PUSH_CONNECT_TIMEOUT).await? {
+        bail!("the JMAP WebSocket did not answer after enabling push");
     }
     on_event(PushEvent::Connected(PushTransport::WebSocket));
 
@@ -318,6 +324,32 @@ where
                 send_heartbeat(client).await?;
             }
         }
+    }
+}
+
+/// Waits up to `wait` for the next method response on the WebSocket,
+/// returning `false` when none arrives in time. Pushes received meanwhile
+/// are dropped; the caller resyncs on connect anyway.
+async fn await_response<S>(stream: &mut S, wait: Duration) -> Result<bool>
+where
+    S: futures_util::Stream<Item = jmap_client::Result<WebSocketMessage>> + Unpin,
+{
+    let answered = tokio::time::timeout(wait, async {
+        loop {
+            match stream.next().await {
+                Some(Ok(WebSocketMessage::Response(_))) => return Ok(()),
+                Some(Ok(_)) | Some(Err(jmap_client::Error::Parse(_))) => {}
+                Some(Err(error)) => {
+                    return Err(anyhow!(error).context("the JMAP WebSocket failed"));
+                }
+                None => bail!("the JMAP WebSocket closed during setup"),
+            }
+        }
+    })
+    .await;
+    match answered {
+        Ok(result) => result.map(|()| true),
+        Err(_elapsed) => Ok(false),
     }
 }
 
