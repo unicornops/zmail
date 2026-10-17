@@ -1,6 +1,7 @@
 //! Background runtime bootstrap and sync supervision for Phase 3.
 
 mod backoff;
+mod imap_watch;
 
 use std::{
     collections::HashSet,
@@ -510,10 +511,13 @@ impl SyncService {
     /// Starts background mail watchers for every configured account and
     /// returns the number started.
     ///
-    /// IMAP accounts hold one IDLE connection and JMAP accounts hold one
-    /// push connection (event source, or WebSocket when only that opens);
-    /// both trigger a sync as soon as the server reports a change and fall
-    /// back to the poll interval when the server lacks the capability.
+    /// IMAP accounts hold one NOTIFY connection where the server offers it,
+    /// otherwise IDLE connections for Inbox, Sent and Drafts plus a
+    /// `STATUS` poller for every other mailbox, within
+    /// [`zmail_imap::MAX_WATCH_CONNECTIONS`]. JMAP accounts hold one push
+    /// connection (event source, or WebSocket when only that opens). Both
+    /// trigger a sync as soon as the server reports a change and fall back
+    /// to the poll interval when the server lacks the capability.
     pub fn start_mail_watcher(&self) -> Result<usize> {
         self.start_mail_watcher_with_interval(MAIL_WATCHER_POLL_INTERVAL)
     }
@@ -609,17 +613,11 @@ impl SyncService {
     /// pick up refreshed access tokens without restarting the watcher.
     async fn run_mail_watcher(&self, target: SyncTarget, poll_interval: Duration) {
         let mut backoff = Backoff::reconnect();
+        let mut notify_allowed = true;
         loop {
             // Stop watching accounts that no longer exist so the watcher
             // registry slot is free if the id is ever reused.
-            if self
-                .inner
-                .store
-                .sync_target(target.id)
-                .ok()
-                .flatten()
-                .is_none()
-            {
+            if !self.account_exists(target.id) {
                 self.unwatch_account(target.id);
                 return;
             }
@@ -634,15 +632,14 @@ impl SyncService {
 
             match target.protocol {
                 ProtocolKind::Imap => {
-                    match zmail_imap::wait_for_mail_changes(&target, &secret, poll_interval).await {
-                        Ok(()) => backoff.reset(),
-                        Err(_) => {
-                            // The IDLE connection dropped; wait with a
-                            // bounded backoff before reconnecting.
-                            sleep(backoff.next_delay()).await;
-                        }
-                    }
-                    self.request_sync(target.id);
+                    self.watch_imap(
+                        &target,
+                        &secret,
+                        poll_interval,
+                        &mut backoff,
+                        &mut notify_allowed,
+                    )
+                    .await;
                 }
                 ProtocolKind::Jmap => {
                     self.watch_jmap_push(&target, &secret, poll_interval, &mut backoff)

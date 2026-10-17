@@ -3,8 +3,9 @@
 use std::{
     io::{Read, Write},
     net::TcpStream,
-    sync::Arc,
-    time::Duration,
+    sync::{Arc, mpsc},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -13,6 +14,7 @@ use zmail_core::{
     AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutgoingAttachment, OutgoingConfig,
     OutgoingMessage, ProtocolKind,
 };
+use zmail_imap::{WatchEvent, WatchPlan};
 use zmail_security::{InMemorySecretStore, SecretStore};
 use zmail_smtp::{
     SubmissionConfig, SubmissionSecurity, SubmittedMessage, submit_outgoing_message,
@@ -464,7 +466,11 @@ impl RawImap {
     }
 
     fn append(&mut self, message: &str) -> Result<()> {
-        self.command(&format!("APPEND INBOX {{{}}}", message.len()))?;
+        self.append_to("INBOX", message)
+    }
+
+    fn append_to(&mut self, mailbox: &str, message: &str) -> Result<()> {
+        self.command(&format!("APPEND {mailbox} {{{}}}", message.len()))?;
         self.stream.write_all(format!("{message}\r\n").as_bytes())?;
         let tag = format!("T{}", self.tag);
         let mut response = self.read_line()?;
@@ -682,6 +688,241 @@ fn resyncs_expunges_and_flags_through_qresync() -> Result<()> {
 
     harness.down()?;
     Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn idle_and_status_watchers_report_changes_beyond_the_inbox() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&imap_account())?;
+    let target = store
+        .sync_target(account_id)?
+        .context("the GreenMail target should load")?;
+    let runtime = BackgroundRuntime::start(2)?;
+
+    let mut other_client = RawImap::connect(
+        3143,
+        MAIL_HARNESS_RECIPIENT_LOGIN,
+        MAIL_HARNESS_RECIPIENT_PASSWORD,
+    )?;
+    let idle_supported = other_client.has_capability("IDLE")?;
+    other_client.command("CREATE Projects")?;
+
+    // GreenMail has no NOTIFY, so the pool plan applies: Inbox gets IDLE
+    // (when offered) and the new folder is polled.
+    let plan = runtime.handle().block_on(zmail_imap::plan_watch(
+        &target,
+        MAIL_HARNESS_RECIPIENT_PASSWORD,
+        zmail_imap::MAX_WATCH_CONNECTIONS,
+        true,
+    ))?;
+    let WatchPlan::Pool { idle, polled } = plan else {
+        bail!("GreenMail should not get a NOTIFY plan");
+    };
+    assert!(polled.iter().any(|name| name == "Projects"), "{polled:?}");
+    assert!(idle.len() + usize::from(!polled.is_empty()) <= zmail_imap::MAX_WATCH_CONNECTIONS);
+
+    let (events_tx, events) = mpsc::channel();
+    let mut watchers = Vec::new();
+    if idle_supported {
+        assert_eq!(idle.first().map(String::as_str), Some("INBOX"));
+        let target = target.clone();
+        let events_tx = events_tx.clone();
+        watchers.push(runtime.handle().spawn(async move {
+            let _ = zmail_imap::watch_idle(
+                &target,
+                MAIL_HARNESS_RECIPIENT_PASSWORD,
+                "INBOX",
+                move |event| {
+                    let _ = events_tx.send(event);
+                },
+            )
+            .await;
+        }));
+    } else {
+        println!("GreenMail does not advertise IDLE; only the STATUS poller is exercised");
+    }
+    {
+        let target = target.clone();
+        watchers.push(runtime.handle().spawn(async move {
+            let _ = zmail_imap::poll_status(
+                &target,
+                MAIL_HARNESS_RECIPIENT_PASSWORD,
+                &["Projects".to_owned()],
+                Duration::from_secs(2),
+                move |event| {
+                    let _ = events_tx.send(event);
+                },
+            )
+            .await;
+        }));
+    }
+    let expected_connects = watchers.len();
+    for _ in 0..expected_connects {
+        let event = events.recv_timeout(Duration::from_secs(20))?;
+        assert_eq!(event, WatchEvent::Connected);
+    }
+    // Let the poller record its baseline.
+    thread::sleep(Duration::from_secs(3));
+    while events.try_recv().is_ok() {}
+
+    if idle_supported {
+        other_client.append("From: peer@example.test\r\nSubject: IDLE probe\r\n\r\nInbox.\r\n")?;
+        wait_for_change(&events, "INBOX", Duration::from_secs(15))?;
+    }
+    other_client.append_to(
+        "Projects",
+        "From: peer@example.test\r\nSubject: STATUS probe\r\n\r\nProjects.\r\n",
+    )?;
+    wait_for_change(&events, "Projects", Duration::from_secs(15))?;
+    other_client.command("LOGOUT")?;
+
+    for watcher in watchers {
+        watcher.abort();
+    }
+    harness.down()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn notify_reports_changes_in_any_mailbox() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&dovecot_account())?;
+    let target = store
+        .sync_target(account_id)?
+        .context("the Dovecot target should load")?;
+
+    let mut other_client = RawImap::connect(
+        3243,
+        MAIL_HARNESS_DOVECOT_LOGIN,
+        MAIL_HARNESS_DOVECOT_PASSWORD,
+    )?;
+    if !other_client.has_capability("NOTIFY")? {
+        // Gate on the advertised capability instead of faking it.
+        println!("skipping: the Dovecot harness does not advertise NOTIFY");
+        harness.down()?;
+        return Ok(());
+    }
+    other_client.command("CREATE Projects")?;
+
+    let runtime = BackgroundRuntime::start(2)?;
+    let plan = runtime.handle().block_on(zmail_imap::plan_watch(
+        &target,
+        MAIL_HARNESS_DOVECOT_PASSWORD,
+        zmail_imap::MAX_WATCH_CONNECTIONS,
+        true,
+    ))?;
+    assert_eq!(plan, WatchPlan::Notify);
+
+    let (events_tx, events) = mpsc::channel();
+    let watcher_target = target.clone();
+    let watcher = runtime.handle().spawn(async move {
+        zmail_imap::watch_notify(
+            &watcher_target,
+            MAIL_HARNESS_DOVECOT_PASSWORD,
+            move |event| {
+                let _ = events_tx.send(event);
+            },
+        )
+        .await
+    });
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(20))?,
+        WatchEvent::Connected,
+        "the server should accept NOTIFY SET"
+    );
+
+    other_client.append_to(
+        "Projects",
+        "From: peer@example.test\r\nSubject: NOTIFY probe\r\n\r\nProjects.\r\n",
+    )?;
+    wait_for_change(&events, "Projects", Duration::from_secs(15))?;
+    other_client.command("LOGOUT")?;
+
+    watcher.abort();
+    harness.down()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn mail_watcher_syncs_mail_delivered_to_any_folder() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+
+    let mut other_client = RawImap::connect(
+        3243,
+        MAIL_HARNESS_DOVECOT_LOGIN,
+        MAIL_HARNESS_DOVECOT_PASSWORD,
+    )?;
+    other_client.command("CREATE Projects")?;
+
+    let account_id = store.insert_account(&dovecot_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_DOVECOT_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.sync_account_and_wait(account_id)?;
+
+    // The poll interval is far beyond the test, so only the live watchers
+    // (NOTIFY on Dovecot, or the IDLE pool and STATUS poller) can bring
+    // the message in; nothing below syncs directly.
+    sync_service.start_mail_watcher_with_interval(Duration::from_secs(3600))?;
+    thread::sleep(Duration::from_secs(3));
+    other_client.append_to(
+        "Projects",
+        "From: peer@example.test\r\nSubject: Live folder probe\r\n\r\nNot the inbox.\r\n",
+    )?;
+    other_client.command("LOGOUT")?;
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let projects = store
+            .list_mailboxes(account_id)?
+            .into_iter()
+            .find(|mailbox| mailbox.name == "Projects")
+            .map(|mailbox| mailbox.id);
+        if let Some(projects) = projects
+            && store
+                .list_threads(projects, 0..20)?
+                .iter()
+                .any(|thread| thread.subject == "Live folder probe")
+        {
+            break;
+        }
+        if Instant::now() > deadline {
+            bail!("mail delivered to Projects was not synced by the watcher within 60s");
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    harness.down()?;
+    Ok(())
+}
+
+/// Waits for a change report naming `mailbox`, skipping other reports.
+fn wait_for_change(
+    events: &mpsc::Receiver<WatchEvent>,
+    mailbox: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match events.recv_timeout(remaining) {
+            Ok(WatchEvent::Changed {
+                mailbox: Some(changed),
+            }) if changed == mailbox => return Ok(()),
+            Ok(_) => {}
+            Err(_) => bail!("no change was reported for {mailbox} within {timeout:?}"),
+        }
+    }
 }
 
 fn sync_detail(store: &LocalStore, account_id: i64) -> Result<String> {

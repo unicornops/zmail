@@ -1,6 +1,7 @@
 //! Real IMAP adapter for Phase 2.
 
 mod qresync;
+mod watch;
 
 use std::{
     collections::BTreeMap,
@@ -34,6 +35,11 @@ use zmail_core::{
     ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
+
+pub use watch::{
+    IDLE_RENEW_INTERVAL, MAX_WATCH_CONNECTIONS, STATUS_POLL_INTERVAL, WatchEnd, WatchEvent,
+    WatchPlan, plan_watch, poll_status, watch_idle, watch_notify,
+};
 
 /// IMAP extensions prioritized by the plan.
 pub const PRIORITY_CAPABILITIES: &[&str] = &[
@@ -643,47 +649,6 @@ fn uid_set(uids: &[u32]) -> String {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",")
-}
-
-/// Waits until the mail server reports a change or the bounded wait
-/// elapses, whichever comes first.
-///
-/// The wait uses one IDLE connection on INBOX, re-issued at most once per
-/// call so the caller's interval always stays below the RFC 2177 guidance.
-/// Servers that do not advertise IDLE degrade to a plain sleep, so the
-/// caller's polling interval keeps governing latency.
-pub async fn wait_for_mail_changes(
-    target: &SyncTarget,
-    secret: &str,
-    wait: Duration,
-) -> Result<()> {
-    if target.protocol != ProtocolKind::Imap {
-        bail!("IMAP adapter received a non-IMAP sync target");
-    }
-
-    let endpoint = parse_endpoint(&target.endpoint)?;
-    let mut session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
-    session
-        .select("INBOX")
-        .await
-        .context("failed to select INBOX for the IDLE watcher")?;
-
-    let bounded_wait = wait.min(Duration::from_secs(29 * 60));
-    let mut idle = session.idle();
-    if idle.init().await.is_err() {
-        // The server does not advertise IDLE; fall back to the caller's
-        // poll interval so latency stays bounded. The half-initialized
-        // handle is dropped, which closes the connection.
-        tokio::time::sleep(bounded_wait).await;
-        return Ok(());
-    }
-
-    let (idle_wait, _stop) = idle.wait_with_timeout(bounded_wait);
-    let _ = idle_wait.await;
-    if let Ok(mut session) = idle.done().await {
-        let _ = session.logout().await;
-    }
-    Ok(())
 }
 
 /// Empties the server's trash mailbox, expunging every message in it.
