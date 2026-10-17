@@ -40,7 +40,11 @@ jobs:
 
             - name: Create Windows archive
               shell: pwsh
-              run: Compress-Archive -Path "target/release/zmail-app.exe" -DestinationPath "zmail-windows-x86_64.zip"
+              run: |
+                  New-Item -ItemType Directory -Force archive/licenses | Out-Null
+                  Copy-Item "target/release/zmail-app.exe", LICENSE archive/
+                  Copy-Item assets/fonts/inter/LICENSE.txt archive/licenses/Inter-OFL.txt
+                  Compress-Archive -Path archive/* -DestinationPath "zmail-windows-x86_64.zip"
 
             - name: Create Windows installer
               shell: bash
