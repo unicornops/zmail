@@ -26,6 +26,8 @@ use zmail_core::{
 };
 use zmail_security::sanitize_html_for_display;
 
+mod search;
+
 /// The storage stance recorded during Phase 2.
 pub const STORAGE_MODEL: &str =
     "SQLite metadata plus content-addressed blobs, optimized for large offline-first mailboxes.";
@@ -44,6 +46,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0011_account_disk_budget", ACCOUNT_DISK_BUDGET_SCHEMA),
     ("0012_message_reply_to", MESSAGE_REPLY_TO_SCHEMA),
     ("0013_app_settings", APP_SETTINGS_SCHEMA),
+    ("0014_search_index_v2", SEARCH_INDEX_V2_SCHEMA),
 ];
 
 const PHASE2_SCHEMA: &str = r#"
@@ -306,26 +309,82 @@ CREATE TABLE IF NOT EXISTS app_settings (
 /// `app_settings` key holding the serialised [`UiPreferences`].
 const UI_PREFERENCES_KEY: &str = "ui_preferences";
 
-/// Rebuilds the full-text search document of one thread from stored rows.
+/// Rebuilds the full-text index as one document per thread keyed by the
+/// thread id (the FTS rowid), with the senders and recipients of its
+/// messages as their own columns for `from:` and `to:`.
 ///
-/// Shared by the account-wide index refresh and per-thread hydration so a
-/// single document row is always derived the same way.
-const THREAD_SEARCH_DOCUMENT_INSERT: &str = r#"
-INSERT INTO search_documents(account_id, mailbox_id, thread_id, mailbox_name, subject, participants, preview, body)
+/// Mailbox names are no longer part of the document, so moving a thread
+/// leaves its document untouched. Triggers record every thread whose
+/// indexed text changes in `search_dirty_threads`, and writers call
+/// [`flush_search_index`] before they commit, so the index stays exact
+/// without re-indexing whole accounts. All existing threads start dirty and
+/// are indexed by the flush that runs after the migrations.
+const SEARCH_INDEX_V2_SCHEMA: &str = r#"
+DROP TABLE IF EXISTS search_documents;
+CREATE VIRTUAL TABLE search_documents USING fts5(
+    subject,
+    participants,
+    preview,
+    body,
+    senders,
+    recipients
+);
+
+CREATE INDEX IF NOT EXISTS idx_threads_latest ON threads(latest_message_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS search_dirty_threads (
+    thread_id INTEGER PRIMARY KEY
+);
+INSERT OR IGNORE INTO search_dirty_threads(thread_id) SELECT id FROM threads;
+
+CREATE TRIGGER IF NOT EXISTS search_dirty_thread_insert AFTER INSERT ON threads
+BEGIN
+    INSERT OR IGNORE INTO search_dirty_threads(thread_id) VALUES (new.id);
+END;
+CREATE TRIGGER IF NOT EXISTS search_dirty_thread_update
+AFTER UPDATE OF subject, participants, preview ON threads
+BEGIN
+    INSERT OR IGNORE INTO search_dirty_threads(thread_id) VALUES (new.id);
+END;
+CREATE TRIGGER IF NOT EXISTS search_dirty_thread_delete AFTER DELETE ON threads
+BEGIN
+    INSERT OR IGNORE INTO search_dirty_threads(thread_id) VALUES (old.id);
+END;
+CREATE TRIGGER IF NOT EXISTS search_dirty_message_insert AFTER INSERT ON messages
+BEGIN
+    INSERT OR IGNORE INTO search_dirty_threads(thread_id) VALUES (new.thread_id);
+END;
+CREATE TRIGGER IF NOT EXISTS search_dirty_message_update
+AFTER UPDATE OF thread_id, sender, recipients, body_preview, body_text, sanitized_html ON messages
+BEGIN
+    INSERT OR IGNORE INTO search_dirty_threads(thread_id) VALUES (old.thread_id);
+    INSERT OR IGNORE INTO search_dirty_threads(thread_id) VALUES (new.thread_id);
+END;
+CREATE TRIGGER IF NOT EXISTS search_dirty_message_delete AFTER DELETE ON messages
+BEGIN
+    INSERT OR IGNORE INTO search_dirty_threads(thread_id) VALUES (old.thread_id);
+END;
+"#;
+
+/// Re-indexes every dirty thread: drops its document, rebuilds it from the
+/// stored rows (deleted threads simply get no new document) and clears the
+/// dirty set. Run inside the writer's transaction.
+const SEARCH_INDEX_FLUSH: &str = r#"
+DELETE FROM search_documents WHERE rowid IN (SELECT thread_id FROM search_dirty_threads);
+INSERT INTO search_documents(rowid, subject, participants, preview, body, senders, recipients)
 SELECT
-    mailboxes.account_id,
-    mailboxes.id,
     threads.id,
-    mailboxes.name,
     threads.subject,
     threads.participants,
     threads.preview,
-    COALESCE(GROUP_CONCAT(COALESCE(messages.body_text, messages.sanitized_html, messages.body_preview), ' '), '')
-FROM threads
-JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+    COALESCE(GROUP_CONCAT(COALESCE(messages.body_text, messages.sanitized_html, messages.body_preview), ' '), ''),
+    COALESCE(GROUP_CONCAT(messages.sender, ' '), ''),
+    COALESCE(GROUP_CONCAT(messages.recipients, ' '), '')
+FROM search_dirty_threads
+JOIN threads ON threads.id = search_dirty_threads.thread_id
 LEFT JOIN messages ON messages.thread_id = threads.id
-WHERE threads.id = ?1
-GROUP BY threads.id
+GROUP BY threads.id;
+DELETE FROM search_dirty_threads;
 "#;
 
 const PENDING_OP_STATES_SCHEMA: &str = r#"
@@ -884,7 +943,7 @@ impl LocalStore {
         let mut body_statement = transaction
             .prepare(
                 r#"
-                SELECT m.id, m.thread_id,
+                SELECT m.id,
                        LENGTH(COALESCE(m.body_text, '')) +
                        LENGTH(COALESCE(m.sanitized_html, ''))
                 FROM messages m
@@ -897,13 +956,9 @@ impl LocalStore {
             )
             .context("failed to prepare the body eviction query")?;
         while usage > budget_bytes {
-            let Some((message_id, thread_id, size)) = body_statement
+            let Some((message_id, size)) = body_statement
                 .query_row(params![account_id], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
                 })
                 .optional()
                 .context("failed to load the next eviction candidate")?
@@ -917,7 +972,6 @@ impl LocalStore {
                     params![message_id],
                 )
                 .with_context(|| format!("failed to evict the body of message {message_id}"))?;
-            refresh_thread_search_index(&transaction, thread_id)?;
             freed += size.max(0) as u64;
             usage = usage.saturating_sub(size.max(0) as u64);
         }
@@ -927,7 +981,7 @@ impl LocalStore {
         let mut attachment_statement = transaction
             .prepare(
                 r#"
-                SELECT a.id, a.storage_path, a.size_bytes, m.thread_id
+                SELECT a.id, a.storage_path, a.size_bytes
                 FROM message_attachments a
                 JOIN messages m ON m.id = a.message_id
                 JOIN threads t ON t.id = m.thread_id
@@ -938,13 +992,12 @@ impl LocalStore {
             )
             .context("failed to prepare the attachment eviction query")?;
         while usage > budget_bytes {
-            let Some((attachment_id, storage_path, size, thread_id)) = attachment_statement
+            let Some((attachment_id, storage_path, size)) = attachment_statement
                 .query_row(params![account_id], |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
                     ))
                 })
                 .optional()
@@ -958,7 +1011,6 @@ impl LocalStore {
                     params![attachment_id],
                 )
                 .with_context(|| format!("failed to evict attachment {attachment_id}"))?;
-            refresh_thread_search_index(&transaction, thread_id)?;
             // The blob file may already be gone; eviction must not fail on it.
             let _ = std::fs::remove_file(self.attachment_storage_dir().join(&storage_path));
             freed += size.max(0) as u64;
@@ -966,6 +1018,8 @@ impl LocalStore {
         }
         drop(attachment_statement);
 
+        // Cleared bodies fall back to their previews in the index.
+        flush_search_index(&transaction)?;
         transaction
             .commit()
             .context("failed to commit the eviction transaction")?;
@@ -1721,64 +1775,62 @@ impl LocalStore {
             "UPDATE threads SET has_attachments = MAX(has_attachments, ?2) WHERE id = ?1",
             params![thread_id, has_attachments],
         )?;
-        refresh_thread_search_index(&transaction, thread_id)?;
+        flush_search_index(&transaction)?;
         transaction
             .commit()
             .context("failed to commit the hydration transaction")
     }
 
-    /// Runs a local full-text search against the selected account.
+    /// Searches the selected account's local mail.
+    ///
+    /// `query` uses the search language of [`zmail_core::search`]: words,
+    /// quoted phrases, `from:`, `to:`, `subject:`, `has:attachment`,
+    /// `is:unread`/`is:read`/`is:flagged`, `in:<mailbox>`,
+    /// `before:`/`after:` and `-` negation. Dates are taken in the local
+    /// time zone. Returns threads newest first, which keeps the first page
+    /// cheap on large mailboxes (the date index stops the scan at `limit`)
+    /// and matches how mail clients list results.
     pub fn search_threads(
         &self,
         account_id: i64,
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        let Some(compiled_query) = build_fts_query(query) else {
+        self.search_threads_at(account_id, query, limit, &chrono::Local::now())
+    }
+
+    /// [`LocalStore::search_threads`] with an explicit clock and time zone
+    /// for `before:`/`after:`, for tests.
+    pub fn search_threads_at<Tz: chrono::TimeZone>(
+        &self,
+        account_id: i64,
+        query: &str,
+        limit: usize,
+        now: &chrono::DateTime<Tz>,
+    ) -> Result<Vec<SearchHit>> {
+        let parsed = zmail_core::search::SearchQuery::parse(query);
+        let Some(compiled) = search::compile_search(&parsed, account_id, limit, now) else {
             return Ok(Vec::new());
         };
         let conn = self.connection()?;
-        let mut statement = conn.prepare(
-            r#"
-            SELECT
-                threads.mailbox_id,
-                mailboxes.name,
-                threads.id,
-                threads.subject,
-                messages.sender,
-                threads.participants,
-                threads.preview,
-                threads.unread_count,
-                threads.is_flagged,
-                threads.has_attachments,
-                threads.latest_message_at
-            FROM search_documents
-            JOIN threads ON threads.id = search_documents.thread_id
-            JOIN mailboxes ON mailboxes.id = threads.mailbox_id
-            JOIN messages ON messages.id = threads.latest_message_id
-            WHERE search_documents.account_id = ?1
-              AND search_documents MATCH ?2
-            ORDER BY bm25(search_documents), threads.latest_message_at DESC
-            LIMIT ?3
-            "#,
-        )?;
-
-        let rows =
-            statement.query_map(params![account_id, compiled_query, limit as i64], |row| {
-                Ok(SearchHit {
-                    mailbox_id: row.get(0)?,
-                    mailbox_name: row.get(1)?,
-                    thread_id: row.get(2)?,
-                    subject: row.get(3)?,
-                    latest_sender: row.get(4)?,
-                    participants: row.get(5)?,
-                    preview: row.get(6)?,
-                    unread_count: row.get::<_, usize>(7)?,
-                    is_flagged: row.get::<_, bool>(8)?,
-                    has_attachments: row.get::<_, bool>(9)?,
-                    latest_message_at: row.get(10)?,
-                })
-            })?;
+        let mut statement = conn
+            .prepare(&compiled.sql)
+            .context("failed to prepare the search query")?;
+        let rows = statement.query_map(rusqlite::params_from_iter(compiled.params), |row| {
+            Ok(SearchHit {
+                mailbox_id: row.get(0)?,
+                mailbox_name: row.get(1)?,
+                thread_id: row.get(2)?,
+                subject: row.get(3)?,
+                latest_sender: row.get(4)?,
+                participants: row.get(5)?,
+                preview: row.get(6)?,
+                unread_count: row.get::<_, usize>(7)?,
+                is_flagged: row.get::<_, bool>(8)?,
+                has_attachments: row.get::<_, bool>(9)?,
+                latest_message_at: row.get(10)?,
+            })
+        })?;
 
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to search threads")
@@ -1862,7 +1914,6 @@ impl LocalStore {
 
         let existing_mailboxes = load_account_mailbox_ids(&transaction, account_id)?;
         let pending_remote_ids = load_pending_op_remote_ids(&transaction, account_id)?;
-        let mut account_changed = snapshot.identities.is_some();
 
         for (sort_order, mailbox) in snapshot.mailboxes.iter().enumerate() {
             let mailbox_id = match existing_mailboxes.get(&mailbox.name) {
@@ -1876,7 +1927,6 @@ impl LocalStore {
                                 params![existing_id, mailbox.role, sort_order as i64],
                             )
                             .context("failed to update the mailbox during the snapshot merge")?;
-                        account_changed = true;
                     }
                     *existing_id
                 }
@@ -1889,7 +1939,6 @@ impl LocalStore {
                         params![account_id, mailbox.name, mailbox.role, sort_order as i64],
                     )
                     .context("failed to insert the mailbox during the snapshot merge")?;
-                    account_changed = true;
                     transaction.last_insert_rowid()
                 }
             };
@@ -1903,7 +1952,6 @@ impl LocalStore {
                 &pending_remote_ids,
             )?;
             let pruned = prune_mailbox_threads(&transaction, mailbox_id, &kept_thread_ids)?;
-            account_changed |= threads_changed || pruned;
             if threads_changed || pruned {
                 transaction
                     .execute(
@@ -1935,18 +1983,13 @@ impl LocalStore {
                     .with_context(|| {
                         format!("failed to remove the {name} mailbox missing from the snapshot")
                     })?;
-                account_changed = true;
             }
         }
 
+        flush_search_index(&transaction)?;
         transaction
             .commit()
-            .context("failed to commit the snapshot transaction")?;
-        if account_changed {
-            self.refresh_account_search_index(account_id)
-        } else {
-            Ok(())
-        }
+            .context("failed to commit the snapshot transaction")
     }
 
     /// Records a successful sync and resets the failure counter.
@@ -2127,10 +2170,11 @@ impl LocalStore {
             PendingOpKind::Move,
             Some(&destination_name),
         )?;
+        // Search documents do not carry the mailbox, so a move leaves the
+        // index untouched.
         transaction
             .commit()
-            .context("failed to commit the move transaction")?;
-        self.refresh_account_search_index(location.account_id)
+            .context("failed to commit the move transaction")
     }
 
     /// Moves a thread into the archive mailbox when one exists.
@@ -2183,10 +2227,9 @@ impl LocalStore {
                 PendingOpKind::Move,
                 Some(&trash_name),
             )?;
-            transaction
+            return transaction
                 .commit()
-                .context("failed to commit the trash move transaction")?;
-            return self.refresh_account_search_index(location.account_id);
+                .context("failed to commit the trash move transaction");
         }
 
         // Without a trash mailbox the local rows are removed; the server
@@ -2210,10 +2253,10 @@ impl LocalStore {
             "#,
             params![source_mailbox.id, i64::from(location.unread_count > 0)],
         )?;
+        flush_search_index(&transaction)?;
         transaction
             .commit()
-            .context("failed to commit the delete transaction")?;
-        self.refresh_account_search_index(location.account_id)
+            .context("failed to commit the delete transaction")
     }
 
     /// Returns the server name of the account's mailbox for a role.
@@ -3198,7 +3241,15 @@ impl LocalStore {
                 .with_context(|| format!("failed to commit migration {version}"))?;
         }
 
-        Ok(())
+        // Index whatever a migration (or an interrupted earlier flush) left
+        // dirty; a no-op on an up-to-date store.
+        let transaction = conn
+            .transaction()
+            .context("failed to begin the search index transaction")?;
+        flush_search_index(&transaction)?;
+        transaction
+            .commit()
+            .context("failed to commit the search index")
     }
 
     fn record_sync_error(
@@ -3249,36 +3300,6 @@ impl LocalStore {
             .with_context(|| format!("failed to open {}", self.path.display()))?;
         configure_connection(&conn)?;
         Ok(conn)
-    }
-
-    fn refresh_account_search_index(&self, account_id: i64) -> Result<()> {
-        let conn = self.connection()?;
-        conn.execute(
-            "DELETE FROM search_documents WHERE account_id = ?1",
-            params![account_id],
-        )?;
-
-        let thread_ids = conn
-            .prepare(
-                r#"
-                SELECT threads.id
-                FROM threads
-                JOIN mailboxes ON mailboxes.id = threads.mailbox_id
-                WHERE mailboxes.account_id = ?1
-                ORDER BY threads.id ASC
-                "#,
-            )?
-            .query_map(params![account_id], |row| row.get::<_, i64>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to enumerate threads for search indexing")?;
-
-        let mut insert_statement = conn.prepare(THREAD_SEARCH_DOCUMENT_INSERT)?;
-
-        for thread_id in thread_ids {
-            insert_statement.execute(params![thread_id])?;
-        }
-
-        Ok(())
     }
 
     fn thread_location(&self, thread_id: i64) -> Result<Option<ThreadLocation>> {
@@ -3745,19 +3766,15 @@ fn thread_location(conn: &Connection, thread_id: i64) -> Result<Option<ThreadLoc
     .context("failed to load thread location")
 }
 
-/// Rebuilds the full-text search document for a single thread.
+/// Re-indexes the threads whose indexed text changed since the last flush
+/// (see [`SEARCH_INDEX_V2_SCHEMA`]).
 ///
-/// Hydration calls this in its own transaction so a lazily fetched body
-/// becomes searchable without re-indexing the rest of the account.
-fn refresh_thread_search_index(conn: &Connection, thread_id: i64) -> Result<()> {
-    conn.execute(
-        "DELETE FROM search_documents WHERE thread_id = ?1",
-        params![thread_id],
-    )
-    .with_context(|| format!("failed to drop the search document for thread {thread_id}"))?;
-    conn.execute(THREAD_SEARCH_DOCUMENT_INSERT, params![thread_id])
-        .with_context(|| format!("failed to index thread {thread_id} for search"))?;
-    Ok(())
+/// Callers run this inside their write transaction, before committing, so
+/// a committed change is always searchable and a concurrent writer cannot
+/// slip dirty rows in between the rebuild and the clear.
+fn flush_search_index(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SEARCH_INDEX_FLUSH)
+        .context("failed to update the search index")
 }
 
 /// Measures the account's blob usage from stored rows: the character
@@ -3901,26 +3918,6 @@ fn renderable_body(
     }
 
     (preview.to_owned(), MessageRenderMode::PreviewOnly)
-}
-
-fn build_fts_query(query: &str) -> Option<String> {
-    let tokens = query
-        .split_whitespace()
-        .map(|token| {
-            token
-                .chars()
-                .filter(|ch| ch.is_alphanumeric() || matches!(ch, '@' | '.' | '_' | '-'))
-                .collect::<String>()
-        })
-        .filter(|token| !token.is_empty())
-        .map(|token| format!("\"{token}\"*"))
-        .collect::<Vec<_>>();
-
-    if tokens.is_empty() {
-        None
-    } else {
-        Some(tokens.join(" AND "))
-    }
 }
 
 fn identity_id_map(

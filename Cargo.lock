@@ -8020,6 +8020,7 @@ name = "zmail-store"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "divan",
  "rusqlite",
  "serde_json",

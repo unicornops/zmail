@@ -401,6 +401,35 @@ fn search_field_enter_runs_the_search(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn search_field_understands_query_operators(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+    let search = search_input(&view, cx);
+    let select_all = if cfg!(target_os = "macos") {
+        "cmd-a"
+    } else {
+        "ctrl-a"
+    };
+    let run = |query: &str, cx: &mut VisualTestContext| {
+        focus(&search, cx);
+        cx.simulate_keystrokes(select_all);
+        cx.simulate_keystrokes("backspace");
+        cx.simulate_input(query);
+        cx.simulate_keystrokes("enter");
+        cx.read_entity(&view, |view, _| {
+            view.search_results
+                .iter()
+                .map(|hit| hit.subject.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(
+        run("from:kai is:unread \"report 1\"", cx),
+        vec!["Quarterly report 1".to_owned()]
+    );
+    assert!(run("quarterly -from:kai", cx).is_empty());
+}
+
+#[gpui::test]
 fn account_setup_focuses_fields_and_clears_errors_on_edit(cx: &mut TestAppContext) {
     let (view, cx, _harness) = open_workspace(cx, Setup::NoAccount);
     assert!(cx.read_entity(&view, |view, _| matches!(

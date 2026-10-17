@@ -4,6 +4,7 @@ use std::fmt;
 
 pub mod participants;
 pub mod preferences;
+pub mod search;
 pub mod text;
 pub mod time;
 
