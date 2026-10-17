@@ -189,15 +189,38 @@ pub fn run(
         });
 }
 
-/// The decorations to ask the window system for. Client-side by default:
-/// GNOME on Wayland draws none of its own, and X11 without a compositor and
-/// KDE fall back to server-side anyway (`Window::window_decorations` says
-/// which the window got). `ZMAIL_WINDOW_DECORATIONS=server` forces the
-/// window manager's title bar, for desktops where the drawn one misbehaves.
-/// Only Linux reads this; macOS and Windows ignore it.
+/// The decorations to ask the window system for (only Linux reads this;
+/// macOS and Windows ignore it). `Window::window_decorations` says which
+/// the window actually got.
+///
+/// - GNOME on Wayland has no server-side decorations, so GPUI always draws
+///   client-side ones there, whatever is asked for.
+/// - KDE draws its own (Breeze) title bars and supports them on Wayland and
+///   X11, so Zmail asks for server-side decorations there.
+/// - Elsewhere it asks for client-side ones; X11 without a compositor (or a
+///   window manager without `_GTK_FRAME_EXTENTS`) falls back to the window
+///   manager's title bar.
+///
+/// `ZMAIL_WINDOW_DECORATIONS=server` or `=client` overrides the choice.
 fn window_decorations() -> WindowDecorations {
-    match std::env::var("ZMAIL_WINDOW_DECORATIONS").as_deref() {
-        Ok("server") => WindowDecorations::Server,
+    decorations_for(
+        std::env::var("ZMAIL_WINDOW_DECORATIONS").ok().as_deref(),
+        std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+    )
+}
+
+/// [`window_decorations`] for the given override and desktop.
+fn decorations_for(requested: Option<&str>, desktop: Option<&str>) -> WindowDecorations {
+    match requested {
+        Some("server") => WindowDecorations::Server,
+        Some("client") => WindowDecorations::Client,
+        _ if desktop
+            .unwrap_or_default()
+            .split(':')
+            .any(|name| name.eq_ignore_ascii_case("KDE")) =>
+        {
+            WindowDecorations::Server
+        }
         _ => WindowDecorations::Client,
     }
 }
@@ -289,4 +312,27 @@ struct WorkspaceView {
     /// 12- or 24-hour clock for list and reader dates, from the locale.
     hour_cycle: zmail_core::time::HourCycle,
     _subscriptions: Vec<Subscription>,
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::WindowDecorations;
+
+    use super::decorations_for;
+
+    #[test]
+    fn kde_gets_its_own_title_bar_and_the_rest_draw_one() {
+        let is_server = |requested, desktop| {
+            matches!(
+                decorations_for(requested, desktop),
+                WindowDecorations::Server
+            )
+        };
+        assert!(!is_server(None, Some("GNOME")));
+        assert!(!is_server(None, Some("ubuntu:GNOME")));
+        assert!(!is_server(None, None));
+        assert!(is_server(None, Some("KDE")));
+        assert!(is_server(Some("server"), Some("GNOME")));
+        assert!(!is_server(Some("client"), Some("KDE")));
+    }
 }
