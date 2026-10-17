@@ -1,0 +1,42 @@
+[package]
+name = "zmail-html-render"
+description = "Spike (issue #134): off-screen HTML mail rendering with Blitz. Not linked into zmail-app."
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+anyrender = "0.14"
+anyrender_vello_cpu = "0.18"
+# Only the features a static mail render needs: no accessibility tree, no
+# custom widgets or file inputs, no ICU text-transform tables. `floats` is
+# off by default upstream but mail layouts lean on `align=left/right`.
+# `svg` stays OFF: usvg's default `<image href>` resolver reads any local
+# path (and on Windows a UNC path reaches the network), bypassing the
+# provider. See docs/spikes/blitz-html-renderer.md.
+blitz-dom = { version = "=0.3.0-beta.4", default-features = false, features = ["floats", "system-fonts", "woff"] }
+blitz-html = { version = "=0.3.0-beta.4", default-features = false }
+blitz-paint = { version = "=0.3.0-beta.4", default-features = false }
+blitz-traits = { version = "=0.3.0-beta.4", default-features = false }
+# Same version blitz-html drives; used to force the HTML parser (see lib.rs).
+html5ever = "0.40.1"
+# Load fontconfig at runtime like GPUI's font-kit does, so the renderer adds
+# no new link-time native dependency on Linux.
+fontique = { version = "0.12", default-features = false, features = ["fontconfig-dlopen"] }
+# blitz-dom enables no image formats itself; the embedder picks them. Mail
+# needs these four. The provider also reads image headers with it to refuse
+# other formats and decompression bombs before Blitz decodes anything.
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+peniko = "0.6"
+url.workspace = true
+
+[dev-dependencies]
+mail-parser.workspace = true
+png = "0.18"
+zmail-security = { path = "../zmail-security" }
+
+[lints]
+workspace = true

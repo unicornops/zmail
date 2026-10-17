@@ -1,0 +1,50 @@
+From: Reports <reports@example.org>
+To: user@example.org
+Subject: Monthly usage report
+Date: Thu, 15 Oct 2026 08:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="rel-boundary"; type="text/html"
+
+--rel-boundary
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+<html><body style="margin:0;font-family:Arial,sans-serif;background:#eef1f5">
+<table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:20px">
+<table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px">
+<tr><td style="padding:20px 24px;border-bottom:1px solid #e4e7ec"><img src="cid:badge@zmail.test" width="32" height="32" alt="logo" style="vertical-align:middle"> <span style="font-size:18px;font-weight:bold;vertical-align:middle">Monthly usage report</span></td></tr>
+<tr><td style="padding:20px 24px;font-size:14px;color:#344054">Here is your usage for the last six months. The chart is an inline image attached to this message.</td></tr>
+<tr><td align="center" style="padding:0 24px 20px"><img src="cid:CHART@zmail.test" width="300" height="120" alt="usage chart"></td></tr>
+<tr><td style="padding:0 24px 20px;font-size:14px;color:#344054">A third image is referenced but missing: <img src="cid:missing@zmail.test" alt="[missing inline image]"></td></tr>
+<tr><td style="padding:16px 24px;font-size:12px;color:#98a2b3;border-top:1px solid #e4e7ec"><a href="https://reports.example.org/settings">Report settings</a></td></tr>
+</table></td></tr></table></body></html>
+--rel-boundary
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-ID: <badge@zmail.test>
+Content-Disposition: inline; filename="badge.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAxklEQVR42u3aQQ6DMBQDUR+ix+6a
+65ZtVSAkJFL9rYk4wLwlifUpfgQgCPDa3v2fEWCoe7lE/+peJZFJ/WODTNIfM+RWP2qQW/ooQ7b1
+nQY51/cYZF5/a5B/fduQC7CqbxhUpf7KkAiwrT81qFb90QDAClCi/scAwAdQqP7bAAAAAAAAAAAA
+AACAA4AfGgDzAK5VAMwDyt+Ncr3uASj/QsMjnweg/Dtxwkt9wlYiYa2SsBcKWWwlbOZCVosJu9Gc
+5S7j76mzAz8/URYCiJ70AAAAAElFTkSuQmCC
+
+--rel-boundary
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-ID: <chart@zmail.test>
+Content-Disposition: inline; filename="chart.png"
+
+iVBORw0KGgoAAAANSUhEUgAAASwAAAB4CAIAAADHd1h3AAAB30lEQVR42u3awQkAIQxFwfRlKZZu
+I4oXaxAVCQy8Aj5u5rbRx5T0sfAEEoQShJIglCCUBKEEoSQIJQglQShBKAlCCUJJEEoQSoJQglAS
+hBKEkiCUIJQEoQShJAglCCVBKEEoCUIJQkkQShBKglCCUBKEEoSSIJTOKrW9DkIJQglCCCUIJQgh
+lCCUIIRQglCCEEIJQglCCCUIJQghlCCUIJTDun5Y3gpCQQihIPRWEApCCAWht4IQQgghFIRWQQih
+c4dQEFoFIYTOHUJBaBWEEEIIoSC0CkIIIYRQEFqVHaG/QJw7hA7LW0EIIYTOHUKH5a0ghBBC5w6h
+w/JWEEIIoXOH0GF5K6sghNC5Q+iwvJVVEELo3CGE0FtZBSGEzh1Ch2WVVRA6LKsghNAqqyB0WFZB
+CKFVVkHosKyCEEKrrILQYVkFIYRWWQWhw7IKQgitsgpCh2VVYoQeyyqrILTKKgg9llVWQWiVVRB6
+LKusgtAqqyD0WFZZBaFVVkHoE1plFYRWWQWhT2iVVRBaZRWEPqFVVkFolVUQ+oRWWQWhVVZB6BNa
+ZRWEVlkFoU9olVUQWmUVhD6hVVZBaJVVEPqEVlkFoVVWQegTWmUVhFZZBaFPaJVVEFplFYQ+oVVW
+baxaGOAU67IhugkAAAAASUVORK5CYII=
+
+--rel-boundary--

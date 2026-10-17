@@ -5,6 +5,7 @@ members = [
     "crates/zmail-auth",
     "crates/zmail-core",
     "crates/zmail-imap",
+    "crates/zmail-html-render",
     "crates/zmail-index",
     "crates/zmail-jmap",
     "crates/zmail-notify",
