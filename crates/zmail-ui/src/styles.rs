@@ -80,15 +80,23 @@ pub const SPACING_SCALE: [f32; 10] = [
 // Layout dimensions
 // ---------------------------------------------------------------------------
 
-/// Width of the left sidebar pane (accounts + mailboxes).
+/// Default width of the left sidebar pane (accounts + mailboxes). The
+/// user can drag it between [`SIDEBAR_MIN_WIDTH`] and
+/// [`SIDEBAR_MAX_WIDTH`]; `layout::PaneLayout` applies the limits.
 pub const SIDEBAR_WIDTH: f32 = 280.0;
-/// Narrowest the sidebar shrinks to when the window is too narrow for all
-/// three panes at their natural width.
+/// Narrowest the sidebar gets.
 pub const SIDEBAR_MIN_WIDTH: f32 = 200.0;
-/// Width of the message/thread list pane. The pane never shrinks.
+/// Widest the sidebar gets.
+pub const SIDEBAR_MAX_WIDTH: f32 = 420.0;
+/// Default width of the message/thread list pane.
 pub const MESSAGE_LIST_WIDTH: f32 = 380.0;
-/// Narrowest the reader / compose pane gets before the sidebar gives up
-/// width.
+/// Narrowest the message list gets: room for a row's date beside a short
+/// subject.
+pub const MESSAGE_LIST_MIN_WIDTH: f32 = 280.0;
+/// Widest the message list gets.
+pub const MESSAGE_LIST_MAX_WIDTH: f32 = 640.0;
+/// Narrowest the reader / compose pane gets; the sidebar and list give up
+/// width before it does.
 pub const DETAIL_MIN_WIDTH: f32 = 300.0;
 /// Narrowest the toolbar search field gets. It fills the space between
 /// the leading buttons and the sync indicator up to

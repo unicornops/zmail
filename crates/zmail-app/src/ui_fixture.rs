@@ -29,6 +29,9 @@ pub(crate) enum FixtureView {
     Compose,
     /// The account setup pane with an account already configured.
     AccountSetup,
+    /// The seeded inbox with keyboard focus in the sidebar, so a window
+    /// too narrow for the sidebar pane shows it as an overlay.
+    Sidebar,
 }
 
 impl FixtureView {
@@ -39,8 +42,9 @@ impl FixtureView {
             "reader" => Self::Reader,
             "compose" => Self::Compose,
             "account-setup" => Self::AccountSetup,
+            "sidebar" => Self::Sidebar,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, reader, compose or account-setup"
+                "unknown fixture view {other}; expected empty, inbox, reader, compose, account-setup or sidebar"
             ),
         })
     }
@@ -103,6 +107,7 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
     Ok(match view {
         FixtureView::Empty | FixtureView::Inbox => InitialView::Inbox,
         FixtureView::AccountSetup => InitialView::AccountSetup,
+        FixtureView::Sidebar => InitialView::Sidebar,
         FixtureView::Reader => {
             let inbox = store
                 .mailbox_id_by_role(account_id, "inbox")?
@@ -466,7 +471,14 @@ mod tests {
 
     #[test]
     fn every_view_and_theme_parses() -> Result<()> {
-        for name in ["empty", "inbox", "reader", "compose", "account-setup"] {
+        for name in [
+            "empty",
+            "inbox",
+            "reader",
+            "compose",
+            "account-setup",
+            "sidebar",
+        ] {
             FixtureView::parse(name)?;
         }
         assert!(FixtureView::parse("settings").is_err());
@@ -528,6 +540,14 @@ mod tests {
             .draft_detail(draft_id)?
             .context("draft should exist")?;
         assert_eq!(draft.subject, "Re: Q4 roadmap review");
+        Ok(())
+    }
+
+    #[test]
+    fn sidebar_opens_the_seeded_inbox_on_the_sidebar() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::Sidebar)?;
+        assert_eq!(initial_view, InitialView::Sidebar);
+        assert_eq!(store.list_accounts()?.len(), 1);
         Ok(())
     }
 

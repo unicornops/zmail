@@ -14,8 +14,9 @@ use std::{collections::HashSet, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
 use gpui::{
-    AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement, Render,
-    StyleRefinement, Styled, Window, WindowAppearance, div, prelude::*, px, rgb,
+    AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight,
+    IntoElement, MouseButton, Render, StyleRefinement, Styled, Window, WindowAppearance, div, hsla,
+    prelude::*, px, rgb,
 };
 use std::sync::Arc;
 use zmail_core::{
@@ -33,23 +34,24 @@ use super::{DetailMode, InitialView, ListMode, WorkspaceView};
 use crate::account_setup::{AccountSetupEvent, AccountSetupView};
 use crate::actions::{
     AddAccount, Archive, Cancel, Delete, FocusNextPane, FocusPreviousPane, FocusSearch, Forward,
-    MoveToMailbox, NewMessage, Reply, ReplyAll, RetryOutbox, RunSearch, SaveAttachments,
+    GoBack, MoveToMailbox, NewMessage, Reply, ReplyAll, RetryOutbox, RunSearch, SaveAttachments,
     ShowDrafts, ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleFlag, ToggleRead, ToggleSidebar,
     ToggleTheme, Undo,
 };
 use crate::app_menu::AppMenuButton;
-use crate::components::{self, TextInput, TextInputEvent, TitleBar};
+use crate::components::{self, IconButton, SplitHandle, TextInput, TextInputEvent, TitleBar};
 use crate::compose::{ComposeEvent, ComposeView};
+use crate::layout::{LayoutMode, PaneLayout, SinglePane};
 use crate::mail_actions::{MailActions, MailEvent};
 use crate::message_list::{MessageListEvent, MessageListState, MessageListView};
-use crate::pane::Pane;
+use crate::pane::{Pane, dispatch_from};
 use crate::reader::{ReaderState, ReaderView};
 use crate::sidebar::{SidebarEvent, SidebarHighlight, SidebarState, SidebarView};
 use crate::styles::{
-    DETAIL_MIN_WIDTH, ICON_SIZE_SM, MESSAGE_LIST_WIDTH, MenuPlacement, PlatformStyle,
-    READER_COMPACT_ACTIONS_BELOW, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, UiColors,
+    DETAIL_MIN_WIDTH, ICON_SIZE_SM, MESSAGE_LIST_MIN_WIDTH, MESSAGE_LIST_WIDTH, MenuPlacement,
+    PlatformStyle, READER_COMPACT_ACTIONS_BELOW, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, UiColors,
 };
-use crate::widgets::{HoverExt, icon, status_banner};
+use crate::widgets::{EllipsisExt, HoverExt, icon, status_banner};
 
 /// The key context the shell sets on the window root.
 pub(crate) const KEY_CONTEXT: &str = "Workspace";
@@ -161,6 +163,11 @@ impl WorkspaceView {
             theme_overridden: false,
             hour_cycle,
             sidebar_collapsed: false,
+            sidebar_width: SIDEBAR_WIDTH,
+            list_width: MESSAGE_LIST_WIDTH,
+            pane_widths_generation: 0,
+            sidebar_overlay_open: false,
+            single_pane: SinglePane::List,
             viewport_width: f32::from(window.viewport_size().width),
             _subscriptions: subscriptions,
         };
@@ -169,11 +176,7 @@ impl WorkspaceView {
         cx.observe_window_bounds(
             window,
             |this: &mut WorkspaceView, window: &mut Window, cx: &mut Context<Self>| {
-                let width = f32::from(window.viewport_size().width);
-                if width != this.viewport_width {
-                    this.viewport_width = width;
-                    cx.notify();
-                }
+                this.on_window_resized(f32::from(window.viewport_size().width), window, cx);
             },
         )
         .detach();
@@ -226,6 +229,7 @@ impl WorkspaceView {
                 if let Ok(Some(draft)) = view.store.draft_detail(draft_id) {
                     view.select_account(draft.account_id, cx);
                     view.open_draft(draft_id, window, cx);
+                    view.focus_pane(Pane::Detail, window, cx);
                 }
             }
             // `show_thread`, not `select_thread`, which would mark the thread
@@ -234,9 +238,11 @@ impl WorkspaceView {
                 if let Ok(Some(thread)) = view.store.thread_view(thread_id) {
                     view.show_thread(thread_id, thread.mailbox_id, cx);
                     view.refresh_from_store(cx);
+                    view.focus_pane(Pane::Detail, window, cx);
                 }
             }
             InitialView::AccountSetup => view.open_account_setup(window, cx),
+            InitialView::Sidebar => view.focus_pane(Pane::Sidebar, window, cx),
         }
         view.sync_panes(cx);
 
@@ -612,37 +618,145 @@ impl WorkspaceView {
     // Layout
     // -----------------------------------------------------------------------
 
-    /// Whether the sidebar is showing.
-    pub(crate) fn sidebar_shown(&self) -> bool {
-        !self.sidebar_collapsed
+    /// The pane layout for the current window width and the user's pane
+    /// widths.
+    pub(crate) fn pane_layout(&self) -> PaneLayout {
+        PaneLayout::compute(
+            self.viewport_width,
+            self.sidebar_width,
+            self.list_width,
+            self.sidebar_collapsed,
+        )
     }
 
-    /// The sidebar's width as laid out: it gives up width, down to its
-    /// minimum, before the detail pane goes below its own.
-    fn sidebar_layout_width(&self) -> f32 {
-        (self.viewport_width - MESSAGE_LIST_WIDTH - DETAIL_MIN_WIDTH)
-            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH)
+    /// Whether the sidebar is showing, as a pane or as an overlay.
+    pub(crate) fn sidebar_shown(&self) -> bool {
+        self.pane_layout().sidebar.is_some() || self.sidebar_overlay_open
     }
 
     /// The detail pane's width as laid out.
     pub(crate) fn detail_width(&self) -> f32 {
-        let sidebar = if self.sidebar_shown() {
-            self.sidebar_layout_width()
-        } else {
-            0.
-        };
-        (self.viewport_width - sidebar - MESSAGE_LIST_WIDTH).max(0.)
+        self.pane_layout().detail
     }
 
-    /// Show or hide the sidebar, remembering the choice.
+    /// Follows a window resize: the sidebar overlay closes once the
+    /// sidebar is a pane again (or opens if the sidebar had focus when it
+    /// stopped being one), and entering the single-pane layout shows
+    /// whichever pane had focus.
+    fn on_window_resized(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
+        if width == self.viewport_width {
+            return;
+        }
+        let before = self.pane_layout();
+        self.viewport_width = width;
+        let after = self.pane_layout();
+        let focused = self.focused_pane(window, cx);
+        if after.sidebar.is_some() {
+            self.sidebar_overlay_open = false;
+        } else if before.sidebar.is_some() && focused == Some(Pane::Sidebar) {
+            self.sidebar_overlay_open = true;
+        }
+        if after.mode == LayoutMode::Single && before.mode != LayoutMode::Single {
+            match focused {
+                Some(Pane::Detail) => self.single_pane = SinglePane::Detail,
+                Some(Pane::MessageList) => self.single_pane = SinglePane::List,
+                Some(Pane::Sidebar) | None => {}
+            }
+        }
+        cx.notify();
+    }
+
+    /// Show or hide the sidebar. In the wide layout this hides the pane
+    /// and remembers the choice; in the narrower ones it opens or closes
+    /// the overlay.
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
-        let hiding = self.sidebar_shown();
-        if hiding && self.focused_pane(window, cx) == Some(Pane::Sidebar) {
+        if self.pane_layout().mode == LayoutMode::Wide && !self.sidebar_overlay_open {
+            let hiding = !self.sidebar_collapsed;
+            if hiding && self.focused_pane(window, cx) == Some(Pane::Sidebar) {
+                self.focus_pane(Pane::MessageList, window, cx);
+            }
+            self.sidebar_collapsed = hiding;
+            self.persist_sidebar_collapsed();
+        } else if self.sidebar_overlay_open {
+            self.close_sidebar_overlay(window, cx);
+        } else {
+            // Focusing the sidebar opens it as an overlay.
+            self.focus_pane(Pane::Sidebar, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Closes the sidebar overlay, moving focus to the list if it was in
+    /// the sidebar.
+    fn close_sidebar_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sidebar_overlay_open {
+            return;
+        }
+        if self.focused_pane(window, cx) == Some(Pane::Sidebar) {
             self.focus_pane(Pane::MessageList, window, cx);
         }
-        self.sidebar_collapsed = hiding;
-        self.persist_sidebar_collapsed();
+        self.sidebar_overlay_open = false;
         cx.notify();
+    }
+
+    /// Back, in the single-pane layout: from the detail pane to the list.
+    fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
+        self.go_back_to_list(window, cx);
+    }
+
+    /// Returns whether there was somewhere to go back to.
+    fn go_back_to_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.pane_layout().mode != LayoutMode::Single || self.single_pane != SinglePane::Detail {
+            return false;
+        }
+        self.focus_pane(Pane::MessageList, window, cx);
+        true
+    }
+
+    /// Records a dragged sidebar width and saves it shortly after the
+    /// drag settles.
+    fn resize_sidebar(&mut self, width: f32, cx: &mut Context<Self>) {
+        self.sidebar_width = width;
+        self.schedule_pane_widths_save(cx);
+        cx.notify();
+    }
+
+    /// Records a dragged list width and saves it shortly after the drag
+    /// settles.
+    fn resize_list(&mut self, width: f32, cx: &mut Context<Self>) {
+        self.list_width = width;
+        self.schedule_pane_widths_save(cx);
+        cx.notify();
+    }
+
+    /// Saves the pane widths [`PANE_WIDTHS_SAVE_DELAY`] after the last
+    /// change, so a drag writes the preferences once, not per pixel.
+    fn schedule_pane_widths_save(&mut self, cx: &mut Context<Self>) {
+        self.pane_widths_generation = self.pane_widths_generation.wrapping_add(1);
+        let generation = self.pane_widths_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PANE_WIDTHS_SAVE_DELAY).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.pane_widths_generation == generation {
+                    view.persist_pane_widths();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The list pane's title: the mailbox name, Search, Drafts or Outbox.
+    fn list_title(&self) -> String {
+        match self.list_mode {
+            ListMode::Mail => self
+                .selected_mailbox()
+                .map(|mailbox| mailbox.name.clone())
+                .unwrap_or_else(|| "Mail".to_owned()),
+            ListMode::Search => "Search".to_owned(),
+            ListMode::Drafts => "Drafts".to_owned(),
+            ListMode::Outbox => "Outbox".to_owned(),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -919,6 +1033,7 @@ impl WorkspaceView {
             Ok(draft_id) => {
                 self.open_draft(draft_id, window, cx);
                 self.list_mode = ListMode::Drafts;
+                self.single_pane = SinglePane::Detail;
                 self.compose
                     .update(cx, |compose, cx| compose.focus_to(window, cx));
                 self.refresh_from_store(cx);
@@ -946,6 +1061,7 @@ impl WorkspaceView {
             Ok(draft_id) => {
                 self.open_draft(draft_id, window, cx);
                 self.list_mode = ListMode::Drafts;
+                self.single_pane = SinglePane::Detail;
                 // The reply starts above the quoted message.
                 self.compose
                     .update(cx, |compose, cx| compose.focus_body_start(window, cx));
@@ -977,6 +1093,7 @@ impl WorkspaceView {
             Ok(draft_id) => {
                 self.open_draft(draft_id, window, cx);
                 self.list_mode = ListMode::Drafts;
+                self.single_pane = SinglePane::Detail;
                 self.compose
                     .update(cx, |compose, cx| compose.focus_to(window, cx));
                 self.show_status("Forward draft ready.".to_owned(), cx);
@@ -1180,6 +1297,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.detail_mode = DetailMode::AccountSetup;
+        self.single_pane = SinglePane::Detail;
         self.account_setup
             .update(cx, |form, cx| form.open(notice, window, cx));
         cx.notify();
@@ -1351,6 +1469,8 @@ impl WorkspaceView {
             .contains_focused(window, cx)
         {
             self.focus_pane(Pane::MessageList, window, cx);
+        } else if self.sidebar_overlay_open {
+            self.close_sidebar_overlay(window, cx);
         } else if self.store_error.is_some() {
             self.dismiss_error(cx);
         } else if matches!(self.detail_mode, DetailMode::AccountSetup) && !self.accounts.is_empty()
@@ -1361,6 +1481,7 @@ impl WorkspaceView {
         } else if self.status_message.is_some() {
             self.status_message = None;
             cx.notify();
+        } else if self.go_back_to_list(window, cx) {
         } else if matches!(self.list_mode, ListMode::Search) {
             self.set_list_mode(ListMode::Mail, cx);
         }
@@ -1399,7 +1520,20 @@ impl WorkspaceView {
 
     /// Moves keyboard focus into a pane. Compose and account setup focus
     /// their first field, so typing works straight away.
+    ///
+    /// Panes the layout is not showing come into view: the sidebar opens
+    /// as an overlay, and the single-pane layout switches to the pane.
     pub(crate) fn focus_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        if pane == Pane::Sidebar {
+            self.sidebar_overlay_open = self.pane_layout().sidebar.is_none();
+        } else {
+            self.sidebar_overlay_open = false;
+            self.single_pane = if pane == Pane::Detail {
+                SinglePane::Detail
+            } else {
+                SinglePane::List
+            };
+        }
         match pane {
             Pane::Sidebar => window.focus(&self.sidebar.focus_handle(cx), cx),
             Pane::MessageList => window.focus(&self.message_list.focus_handle(cx), cx),
@@ -1480,6 +1614,12 @@ impl WorkspaceView {
             SidebarEvent::ShowDrafts => self.show_drafts_list(cx),
             SidebarEvent::ShowOutbox => self.set_list_mode(ListMode::Outbox, cx),
             SidebarEvent::Activate => self.focus_pane(Pane::MessageList, window, cx),
+            // Picking a view in the overlay closes it.
+            SidebarEvent::RowClicked => {
+                if self.sidebar_overlay_open {
+                    self.focus_pane(Pane::MessageList, window, cx);
+                }
+            }
         }
     }
 
@@ -1504,6 +1644,13 @@ impl WorkspaceView {
                 cx.notify();
             }
             MessageListEvent::Activate => self.focus_pane(Pane::Detail, window, cx),
+            // In the single-pane layout a click opens the row's detail;
+            // elsewhere the detail is already beside the list.
+            MessageListEvent::RowClicked => {
+                if self.pane_layout().mode == LayoutMode::Single {
+                    self.focus_pane(Pane::Detail, window, cx);
+                }
+            }
             MessageListEvent::Error(error) => self.show_error(error, cx),
         }
     }
@@ -1555,23 +1702,10 @@ impl WorkspaceView {
 // Render
 // ---------------------------------------------------------------------------
 
-/// Layout of the cached sidebar pane. A cached pane is laid out from this
-/// style, not measured from its content.
-fn sidebar_style() -> StyleRefinement {
-    StyleRefinement::default()
-        .w(px(SIDEBAR_WIDTH))
-        // The sidebar gives up width before the reader does when the window
-        // is too narrow for all three panes.
-        .flex_shrink(1.)
-        .min_w(px(SIDEBAR_MIN_WIDTH))
-        .h_full()
-}
-
-fn message_list_style() -> StyleRefinement {
-    StyleRefinement::default()
-        .w(px(MESSAGE_LIST_WIDTH))
-        .flex_none()
-        .h_full()
+/// Layout of a cached pane `width` pixels wide. A cached pane is laid out
+/// from this style, not measured from its content.
+fn fixed_pane_style(width: f32) -> StyleRefinement {
+    StyleRefinement::default().w(px(width)).flex_none().h_full()
 }
 
 fn detail_style() -> StyleRefinement {
@@ -1583,6 +1717,134 @@ fn detail_style() -> StyleRefinement {
         .h_full()
 }
 
+fn fill_style() -> StyleRefinement {
+    StyleRefinement::default().size_full()
+}
+
+/// Height of the single-pane layout's back bar.
+const BACK_BAR_HEIGHT: f32 = 44.0;
+
+impl WorkspaceView {
+    /// The panes for `layout`, each its own cached view, with split
+    /// handles between them and the sidebar overlay on top.
+    fn render_panes(
+        &self,
+        layout: PaneLayout,
+        colors: &UiColors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let detail: AnyView = match self.detail_mode {
+            DetailMode::Reader => self.reader.clone().into(),
+            DetailMode::Compose => self.compose.clone().into(),
+            DetailMode::AccountSetup => self.account_setup.clone().into(),
+        };
+        let panes = div().relative().flex().flex_1().overflow_hidden();
+        let panes = match layout.mode {
+            LayoutMode::Single => match self.single_pane {
+                SinglePane::List => panes.child(self.message_list.clone().cached(fill_style())),
+                SinglePane::Detail => panes.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .size_full()
+                        .child(self.render_back_bar(colors))
+                        .child(detail.cached(StyleRefinement::default().flex_1().w_full())),
+                ),
+            },
+            LayoutMode::Wide | LayoutMode::Overlay => panes
+                .when_some(layout.sidebar, |this, width| {
+                    this.child(self.sidebar.clone().cached(fixed_pane_style(width)))
+                        .child(
+                            SplitHandle::new("sidebar-split", width)
+                                .range(SIDEBAR_MIN_WIDTH, layout.sidebar_max)
+                                .default_width(SIDEBAR_WIDTH)
+                                .on_resize(cx.listener(|this, width: &f32, _, cx| {
+                                    this.resize_sidebar(*width, cx);
+                                })),
+                        )
+                })
+                .child(
+                    self.message_list
+                        .clone()
+                        .cached(fixed_pane_style(layout.list)),
+                )
+                .child(
+                    SplitHandle::new("list-split", layout.list)
+                        .range(MESSAGE_LIST_MIN_WIDTH, layout.list_max)
+                        .default_width(MESSAGE_LIST_WIDTH)
+                        .on_resize(cx.listener(|this, width: &f32, _, cx| {
+                            this.resize_list(*width, cx);
+                        })),
+                )
+                .child(detail.cached(detail_style())),
+        };
+        let overlay = self.sidebar_overlay_open && layout.sidebar.is_none();
+        let scrim = if components::ComponentTheme::get(cx).is_light {
+            hsla(0.0, 0.0, 0.0, 0.25)
+        } else {
+            hsla(0.0, 0.0, 0.0, 0.45)
+        };
+        panes.when(overlay, |this| {
+            this.child(
+                // A click beside the overlay closes it.
+                div()
+                    .id("sidebar-scrim")
+                    .debug_selector(|| "sidebar-scrim".into())
+                    .absolute()
+                    .inset_0()
+                    .bg(scrim)
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.close_sidebar_overlay(window, cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .h_full()
+                    .w(px(layout.overlay_sidebar))
+                    .shadow_lg()
+                    .occlude()
+                    .child(self.sidebar.clone().cached(fill_style())),
+            )
+        })
+    }
+
+    /// The single-pane layout's bar above the detail pane: a back button
+    /// to the list, named after it.
+    fn render_back_bar(&self, colors: &UiColors) -> impl IntoElement {
+        let title = self.list_title();
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .h(px(BACK_BAR_HEIGHT))
+            .px_2()
+            .bg(rgb(colors.surface))
+            .border_b_1()
+            .border_color(rgb(colors.border))
+            .child(
+                div().debug_selector(|| "single-pane-back".into()).child(
+                    IconButton::new("single-pane-back", "arrow-left", format!("Back to {title}"))
+                        .shortcut("secondary-[")
+                        .on_click(dispatch_from(&self.focus_handle, GoBack)),
+                ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .ellipsis()
+                    .child(title),
+            )
+    }
+}
+
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = UiColors::from_theme(&self.bootstrap.theme);
@@ -1592,11 +1854,7 @@ impl Render for WorkspaceView {
         if cx.try_global::<UiColors>() != Some(&colors) {
             cx.set_global(colors);
         }
-        let detail: AnyView = match self.detail_mode {
-            DetailMode::Reader => self.reader.clone().into(),
-            DetailMode::Compose => self.compose.clone().into(),
-            DetailMode::AccountSetup => self.account_setup.clone().into(),
-        };
+        let layout = self.pane_layout();
 
         let root = div()
             .id("workspace")
@@ -1614,6 +1872,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::sync_all_action))
             .on_action(cx.listener(Self::toggle_theme))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::focus_previous_pane))
             .on_action(cx.listener(Self::cancel))
@@ -1644,18 +1903,8 @@ impl Render for WorkspaceView {
                             )
                             .child(self.render_toolbar(&colors, cx)),
                     )
-                    // ---- The three panes, each its own cached view ------------
-                    .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .overflow_hidden()
-                            .when(self.sidebar_shown(), |this| {
-                                this.child(self.sidebar.clone().cached(sidebar_style()))
-                            })
-                            .child(self.message_list.clone().cached(message_list_style()))
-                            .child(detail.cached(detail_style())),
-                    )
+                    // ---- The panes, each its own cached view ------------------
+                    .child(self.render_panes(layout, &colors, cx))
                     // ---- Status / error banners at the bottom ----------------
                     .when_some(self.status_message.clone(), |this, message| {
                         this.child(status_banner(
@@ -1713,6 +1962,9 @@ pub(crate) fn split_addresses(value: &str) -> Vec<String> {
         .map(str::to_owned)
         .collect()
 }
+
+/// How long after the last pane resize the widths are saved.
+const PANE_WIDTHS_SAVE_DELAY: Duration = Duration::from_millis(300);
 
 /// How long a status message stays before it dismisses itself.
 const STATUS_TOAST_DURATION: Duration = Duration::from_secs(4);

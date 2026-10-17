@@ -1,13 +1,13 @@
 //! Reads and writes the persisted [`UiPreferences`] for the workspace.
 //!
-//! The theme mode and the sidebar's collapsed state are wired up so far;
-//! density, pane widths, the reading pane and the rest are stored by
+//! The theme mode, the sidebar's collapsed state and the pane widths are
+//! wired up so far; density, the reading pane and the rest are stored by
 //! `zmail-store` and get wired as the views that use them land.
 
 use gpui::WindowAppearance;
 use zmail_core::{
     ThemeAppearance,
-    preferences::{ThemeMode, UiPreferences},
+    preferences::{PaneWidths, ThemeMode, UiPreferences},
 };
 
 use super::WorkspaceView;
@@ -34,10 +34,19 @@ impl WorkspaceView {
         }
     }
 
-    /// Applies the saved layout at startup: whether the sidebar is hidden.
+    /// Applies the saved layout at startup: whether the sidebar is hidden
+    /// and the widths the user dragged the panes to.
     pub(crate) fn apply_layout_preferences(&mut self) {
         match self.store.ui_preferences() {
-            Ok(preferences) => self.sidebar_collapsed = preferences.sidebar_collapsed,
+            Ok(preferences) => {
+                self.sidebar_collapsed = preferences.sidebar_collapsed;
+                if let Some(width) = preferences.pane_widths.sidebar {
+                    self.sidebar_width = width;
+                }
+                if let Some(width) = preferences.pane_widths.message_list {
+                    self.list_width = width;
+                }
+            }
             Err(error) => {
                 self.store_error = Some(format!("Could not load the UI preferences: {error:#}"));
             }
@@ -51,6 +60,19 @@ impl WorkspaceView {
             preferences.sidebar_collapsed = collapsed;
         }) {
             self.store_error = Some(format!("Could not save the layout: {error:#}"));
+        }
+    }
+
+    /// Saves the sidebar and list widths.
+    pub(crate) fn persist_pane_widths(&mut self) {
+        let (sidebar, list) = (self.sidebar_width, self.list_width);
+        if let Err(error) = self.store.update_ui_preferences(|preferences| {
+            preferences.pane_widths = PaneWidths {
+                sidebar: Some(sidebar),
+                message_list: Some(list),
+            };
+        }) {
+            self.store_error = Some(format!("Could not save the pane widths: {error:#}"));
         }
     }
 
