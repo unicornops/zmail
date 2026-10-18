@@ -334,7 +334,9 @@ impl DockerMailHarness {
         let _ = harness.compose(["down", "-v", "--remove-orphans"]);
         harness.compose(["up", "-d", "--remove-orphans"])?;
         harness.wait_until_ready(Duration::from_secs(30))?;
-        harness.provision_jmap_accounts(Duration::from_secs(90))?;
+        // James is a JVM server; on a busy CI runner it can take well over a
+        // minute after its ports open before WebAdmin accepts writes.
+        harness.provision_jmap_accounts(Duration::from_secs(240))?;
 
         Ok(harness)
     }
@@ -396,6 +398,7 @@ impl DockerMailHarness {
             format!("{MAIL_HARNESS_JMAP_ADMIN_ENDPOINT}/users/{MAIL_HARNESS_JMAP_ACCOUNT}");
         let sender_url = format!("{MAIL_HARNESS_JMAP_ADMIN_ENDPOINT}/users/{MAIL_HARNESS_SENDER}");
 
+        let mut last_failure = String::from("no attempt finished");
         while Instant::now() < deadline {
             let domain = client.put(&domain_url).send();
             let primary = client
@@ -414,11 +417,20 @@ impl DockerMailHarness {
                 return Ok(());
             }
 
+            last_failure = [
+                ("domain", &domain),
+                ("primary", &primary),
+                ("sender", &sender),
+            ]
+            .iter()
+            .map(|(what, result)| format!("{what}: {}", describe_response(result)))
+            .collect::<Vec<_>>()
+            .join(", ");
             thread::sleep(Duration::from_millis(500));
         }
 
         bail!(
-            "failed to provision James JMAP accounts within {} seconds",
+            "failed to provision James JMAP accounts within {} seconds (last attempt: {last_failure})",
             timeout.as_secs()
         )
     }
@@ -526,6 +538,15 @@ fn repo_root() -> PathBuf {
 
 fn port_is_open(address: SocketAddr) -> bool {
     TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
+}
+
+fn describe_response(
+    result: &std::result::Result<reqwest::blocking::Response, reqwest::Error>,
+) -> String {
+    match result {
+        Ok(response) => response.status().to_string(),
+        Err(error) => error.to_string(),
+    }
 }
 
 fn response_is_success(
