@@ -19,8 +19,8 @@
 use std::ops::RangeInclusive;
 
 use gpui::{
-    AnyElement, Context, DismissEvent, FontWeight, IntoElement, Modifiers, ScrollStrategy, Window,
-    div, prelude::*, rgb,
+    AnyElement, Context, DismissEvent, Entity, FontWeight, IntoElement, Modifiers, Pixels, Point,
+    ScrollStrategy, Subscription, Window, div, prelude::*, rgb,
 };
 use zmail_core::{MailboxSelection, MailboxSummary};
 
@@ -59,6 +59,15 @@ impl ListSelection {
     pub(crate) fn is_multiple(&self) -> bool {
         self.thread_ids.len() > 1
     }
+}
+
+/// An open Move to… picker.
+pub(super) struct OpenMovePicker {
+    pub(super) picker: Entity<MovePicker>,
+    /// Where the context menu opened it, or `None` below the bulk bar's
+    /// button.
+    pub(super) at: Option<Point<Pixels>>,
+    _subscriptions: Vec<Subscription>,
 }
 
 /// `ids` with `id` added, or removed if it was there.
@@ -310,7 +319,7 @@ impl MessageListView {
     /// The folders the selection can move to: its account's folders,
     /// other than the one the list shows. None when the selection spans
     /// accounts.
-    fn move_destinations(&self) -> Vec<MailboxSummary> {
+    pub(super) fn move_destinations(&self) -> Vec<MailboxSummary> {
         let Some(account_id) = self.state.selection.account_id else {
             return Vec::new();
         };
@@ -330,9 +339,16 @@ impl MessageListView {
             .collect()
     }
 
-    /// Opens the Move to… picker. Picking a folder dispatches
-    /// [`MoveToMailbox`] from the list, so the shell moves the selection.
-    pub(super) fn open_move_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the Move to… picker, below the bulk bar's button or, given a
+    /// position, there (from the context menu). Picking a folder
+    /// dispatches [`MoveToMailbox`] from the list, so the shell moves the
+    /// selection.
+    pub(super) fn open_move_picker(
+        &mut self,
+        at: Option<Point<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let destinations = self.move_destinations();
         if destinations.is_empty() {
             return;
@@ -358,7 +374,11 @@ impl MessageListView {
                 cx.notify();
             }),
         ];
-        self.move_picker = Some((picker, subscriptions));
+        self.move_picker = Some(OpenMovePicker {
+            picker,
+            at,
+            _subscriptions: subscriptions,
+        });
         cx.notify();
     }
 
@@ -421,13 +441,14 @@ impl MessageListView {
                                     .selected(self.move_picker.is_some())
                                     .on_click(cx.listener(|list, _, window, cx| {
                                         if list.move_picker.take().is_none() {
-                                            list.open_move_picker(window, cx);
+                                            list.open_move_picker(None, window, cx);
                                         }
                                     })),
                             )
-                            .when_some(self.move_picker.as_ref(), |this, (picker, _)| {
-                                this.child(popover_below_end(picker.clone()))
-                            }),
+                            .when_some(
+                                self.move_picker.as_ref().filter(|open| open.at.is_none()),
+                                |this, open| this.child(popover_below_end(open.picker.clone())),
+                            ),
                     )
                 })
                 .child(

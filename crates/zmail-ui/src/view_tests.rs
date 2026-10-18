@@ -1135,6 +1135,94 @@ fn the_bulk_bar_moves_the_selection_with_the_folder_picker(cx: &mut TestAppConte
     assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
 }
 
+/// Right-clicks list row `index` and returns the menu's entry labels.
+fn right_click_row(
+    view: &Entity<WorkspaceView>,
+    index: usize,
+    cx: &mut VisualTestContext,
+) -> Vec<String> {
+    let bounds = cx
+        .debug_bounds(Box::leak(format!("thread-row-{index}").into_boxed_str()))
+        .expect("the row is drawn");
+    cx.simulate_mouse_down(bounds.center(), gpui::MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(bounds.center(), gpui::MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    let menu = context_menu(view, cx).expect("the context menu opens");
+    cx.read_entity(&menu, |menu, _| {
+        menu.entries()
+            .map(|entry| entry.label().to_owned())
+            .collect()
+    })
+}
+
+fn context_menu(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+) -> Option<Entity<components::Menu>> {
+    cx.read_entity(view, |view, cx| view.message_list.read(cx).context_menu())
+}
+
+/// Chooses menu item `index` (counting separators) of the open context
+/// menu.
+fn choose(view: &Entity<WorkspaceView>, index: usize, cx: &mut VisualTestContext) {
+    let menu = context_menu(view, cx).expect("the context menu is open");
+    menu.update_in(cx, |menu, window, cx| menu.activate(index, window, cx));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_context_menu_acts_on_the_clicked_row(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let threads = harness.threads.clone();
+
+    let labels = right_click_row(&view, 2, cx);
+    assert_eq!(
+        labels,
+        ["Archive", "Delete", "Move to…", "Flag", "Mark as Read"]
+    );
+    assert_eq!(
+        selected_thread(&view, cx),
+        Some(threads[2]),
+        "a right-click selects the row it acts on"
+    );
+
+    choose(&view, 0, cx);
+    assert_eq!(mailbox_of(&harness, threads[2]), harness.archive_id);
+    assert_eq!(toasts(&view, cx), ["Conversation archived"]);
+    assert!(context_menu(&view, cx).is_none());
+    assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+}
+
+#[gpui::test]
+fn the_context_menu_acts_on_the_selection_it_was_opened_on(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let threads = harness.threads.clone();
+    keys("shift-down", cx);
+
+    let labels = right_click_row(&view, 1, cx);
+    assert_eq!(labels[0], "Archive 2 Conversations");
+    assert_eq!(selection(&view, cx), [threads[0], threads[1]]);
+
+    // Move to… opens the folder picker where the menu was.
+    choose(&view, 2, cx);
+    assert!(context_menu(&view, cx).is_none());
+    cx.simulate_input("arch");
+    keys("enter", cx);
+    for thread_id in &threads[..2] {
+        assert_eq!(mailbox_of(&harness, *thread_id), harness.archive_id);
+    }
+    assert_eq!(toasts(&view, cx), ["2 conversations moved to Archive"]);
+
+    // A right-click outside the selection acts on that row alone.
+    keys("secondary-z", cx);
+    keys("secondary-a", cx);
+    keys("escape", cx);
+    keys("shift-down", cx);
+    let labels = right_click_row(&view, 2, cx);
+    assert_eq!(labels[0], "Archive");
+    assert_eq!(selection(&view, cx), Vec::<i64>::new());
+}
+
 #[gpui::test]
 fn conversation_actions_have_keys_and_undo(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::Mail);
