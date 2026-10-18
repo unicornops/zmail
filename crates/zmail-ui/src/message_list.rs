@@ -11,6 +11,7 @@
 //! [`MessageListView::reload_rows`] after a store refresh, which re-reads
 //! the cached page and only re-renders when it changed.
 
+mod context_menu;
 mod row;
 mod selection;
 
@@ -18,8 +19,9 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    IntoElement, Render, Role, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle,
-    Window, div, prelude::*, rgb, uniform_list,
+    IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, Role, ScrollStrategy,
+    SharedString, Subscription, UniformListScrollHandle, Window, div, prelude::*, rgb,
+    uniform_list,
 };
 use std::sync::Arc;
 use zmail_core::{
@@ -32,13 +34,12 @@ use zmail_core::{
 use zmail_store::LocalStore;
 
 pub(crate) use self::selection::ListSelection;
-use self::selection::row_colors;
+use self::selection::{OpenMovePicker, row_colors};
 use crate::ListMode;
 use crate::actions::{
     AddAccount, OpenSelected, RetryOutbox, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
-use crate::components::{Button, ButtonSize};
-use crate::move_picker::MovePicker;
+use crate::components::{Button, ButtonSize, Menu};
 use crate::pane::{dispatch_from, pane_focus_indicator};
 use crate::styles::{DensityTokens, UiColors};
 use crate::widgets::{HoverExt, empty_state, interactive_background, list_row, toolbar_button};
@@ -192,8 +193,11 @@ pub(crate) struct MessageListView {
     thread_scroll: UniformListScrollHandle,
     /// Where Shift-click and Shift+arrows extend the selection from.
     selection_anchor: Option<usize>,
-    /// The open Move to… picker and its subscriptions.
-    move_picker: Option<(Entity<MovePicker>, Vec<Subscription>)>,
+    /// The open Move to… picker, where the context menu opened it (or
+    /// `None` below the bulk bar's button), and its subscriptions.
+    move_picker: Option<OpenMovePicker>,
+    /// The open row context menu, where it opened, and its subscription.
+    context_menu: Option<(Entity<Menu>, Point<Pixels>, Subscription)>,
     /// Test instrumentation: renders and store queries for rows.
     #[cfg(test)]
     pub(crate) counters: crate::pane::RenderCounters,
@@ -223,6 +227,7 @@ impl MessageListView {
             thread_scroll: UniformListScrollHandle::new(),
             selection_anchor: None,
             move_picker: None,
+            context_menu: None,
             #[cfg(test)]
             counters: Default::default(),
         }
@@ -255,6 +260,7 @@ impl MessageListView {
             self.selected_index_hint = None;
             self.selection_anchor = None;
             self.move_picker = None;
+            self.context_menu = None;
             self.thread_scroll.scroll_to_item(0, ScrollStrategy::Top);
         }
         cx.notify();
@@ -556,6 +562,7 @@ impl Render for MessageListView {
                 }),
             )
             .children(self.render_bulk_bar(&colors, cx))
+            .children(self.render_row_overlays())
             .child(match self.state.mode {
                 ListMode::Mail => self.render_threads(&colors, cx),
                 ListMode::Search => self.render_search_results(&colors, focused, cx),
@@ -714,6 +721,12 @@ impl MessageListView {
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         this.click_thread_row(index, event.modifiers(), cx);
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.open_context_menu(index, event.position, window, cx);
+                        }),
+                    )
                     .child(row_content(
                         row,
                         None,
@@ -763,6 +776,12 @@ impl MessageListView {
                             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                                 this.click_thread_row(index, event.modifiers(), cx);
                             }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    this.open_context_menu(index, event.position, window, cx);
+                                }),
+                            )
                             .child(row_content(
                                 row,
                                 None,
