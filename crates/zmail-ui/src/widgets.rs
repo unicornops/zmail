@@ -17,7 +17,7 @@ use zmail_core::SyncPhase;
 
 use crate::components::TextInput;
 use crate::styles::{
-    ACCOUNT_COLORS, ACCOUNT_DOT_SIZE, ACTION_DIVIDER_HEIGHT, ACTION_DIVIDER_WIDTH, BADGE_SIZE,
+    ACCOUNT_COLORS, ACCOUNT_DOT_SIZE, ACTION_DIVIDER_HEIGHT, ACTION_DIVIDER_WIDTH,
     EMPTY_STATE_ICON_FRAME_SIZE, ICON_SIZE_LG, ICON_SIZE_SM, STATUS_BANNER_STRIP_WIDTH,
     TOOLBAR_BUTTON_HEIGHT, UiColors,
 };
@@ -344,28 +344,6 @@ pub(crate) fn icon(name: &str, size: f32, color: u32) -> Svg {
         .flex_none()
         .size(px(size))
         .text_color(rgb(color))
-}
-
-// ---------------------------------------------------------------------------
-// badge
-// ---------------------------------------------------------------------------
-
-/// Render a compact unread-count pill.
-pub(crate) fn badge(count: usize, bg_color: u32, text_color: u32) -> gpui::Div {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .min_w(px(BADGE_SIZE))
-        .h(px(BADGE_SIZE))
-        .px_2()
-        .rounded_full()
-        .bg(rgb(bg_color))
-        .text_xs()
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(text_color))
-        .child(count.to_string())
 }
 
 // ---------------------------------------------------------------------------
