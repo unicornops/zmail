@@ -12,13 +12,15 @@
 //! the cached page and only re-renders when it changed.
 
 mod context_menu;
+mod header;
+mod quick_actions;
 mod row;
 mod selection;
 
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, Role, ScrollStrategy,
     SharedString, Subscription, UniformListScrollHandle, Window, div, prelude::*, rgb,
     uniform_list,
@@ -26,7 +28,7 @@ use gpui::{
 use std::sync::Arc;
 use zmail_core::{
     DraftState, DraftSummary, MailboxSelection, MailboxSummary, OutboxJobSummary, SearchHit,
-    ThreadSummary,
+    ThreadFilter, ThreadSummary,
     preferences::Density,
     text::count_noun,
     time::{HourCycle, format_list_date},
@@ -37,11 +39,11 @@ pub(crate) use self::selection::ListSelection;
 use self::selection::{OpenMovePicker, row_colors};
 use crate::ListMode;
 use crate::actions::{
-    AddAccount, OpenSelected, RetryOutbox, SelectFirst, SelectLast, SelectNext, SelectPrevious,
+    AddAccount, OpenSelected, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
-use crate::components::{Button, ButtonSize, Menu};
+use crate::components::Menu;
 use crate::drag::DraggedThreads;
-use crate::pane::{dispatch_from, pane_focus_indicator};
+use crate::mail_actions::MailActions;
 use crate::styles::{DensityTokens, UiColors};
 use crate::widgets::{HoverExt, empty_state, interactive_background, list_row, toolbar_button};
 
@@ -170,13 +172,20 @@ pub(crate) enum MessageListEvent {
 #[derive(Debug, Clone)]
 struct RowPage {
     selection: MailboxSelection,
+    filter: ThreadFilter,
     start: usize,
     rows: Vec<ThreadSummary>,
 }
 
 impl RowPage {
-    fn covers(&self, selection: &MailboxSelection, range: &Range<usize>) -> bool {
+    fn covers(
+        &self,
+        selection: &MailboxSelection,
+        filter: ThreadFilter,
+        range: &Range<usize>,
+    ) -> bool {
         self.selection == *selection
+            && self.filter == filter
             && range.start >= self.start
             && range.end <= self.start + self.rows.len()
     }
@@ -185,8 +194,24 @@ impl RowPage {
 pub(crate) struct MessageListView {
     focus_handle: FocusHandle,
     store: Arc<LocalStore>,
+    /// Quick actions change mail through the same service (and undo
+    /// stack) as every other command.
+    mail_actions: Entity<MailActions>,
     hour_cycle: HourCycle,
     state: MessageListState,
+    /// The header's filter (All, Unread, Flagged, Has attachments). It
+    /// resets to All when another mailbox is shown.
+    filter: ThreadFilter,
+    /// How many threads the filter leaves, when it is not All.
+    filtered_total: Option<usize>,
+    /// The open filter menu and the subscription that closes it.
+    filter_menu: Option<(Entity<Menu>, Subscription)>,
+    /// Set when a press on the filter button closed the open menu, so the
+    /// click that follows does not reopen it.
+    swallow_filter_click: bool,
+    /// The thread row under the pointer: it shows quick actions in place
+    /// of its date.
+    hovered_thread: Option<i64>,
     page: Option<RowPage>,
     /// Where the selected thread was last seen, so the arrow keys do not
     /// have to search the mailbox for it.
@@ -215,14 +240,21 @@ impl Focusable for MessageListView {
 impl MessageListView {
     pub(crate) fn new(
         store: Arc<LocalStore>,
+        mail_actions: Entity<MailActions>,
         hour_cycle: HourCycle,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             store,
+            mail_actions,
             hour_cycle,
             state: MessageListState::default(),
+            filter: ThreadFilter::All,
+            filtered_total: None,
+            filter_menu: None,
+            swallow_filter_click: false,
+            hovered_thread: None,
             page: None,
             selected_index_hint: None,
             thread_scroll: UniformListScrollHandle::new(),
@@ -254,8 +286,13 @@ impl MessageListView {
             self.selection_anchor = None;
         }
         self.state = state;
+        if mailbox_changed {
+            self.filter = ThreadFilter::All;
+            self.filter_menu = None;
+        }
         if mailbox_changed || counts_changed {
             self.page = None;
+            self.count_filtered(cx);
         }
         if mailbox_changed {
             self.selected_index_hint = None;
@@ -270,11 +307,23 @@ impl MessageListView {
     /// Re-reads the cached page of thread rows after a store refresh and
     /// re-renders only if a row changed.
     pub(crate) fn reload_rows(&mut self, cx: &mut Context<Self>) {
+        // A change can move a thread in or out of the filter without
+        // changing the mailbox's counts.
+        if self.filter != ThreadFilter::All {
+            let before = self.filtered_total;
+            self.count_filtered(cx);
+            if self.filtered_total != before {
+                cx.notify();
+            }
+        }
         let Some(page) = self.page.as_ref() else {
             return;
         };
         let range = page.start..page.start + page.rows.len().max(1);
-        match self.store.list_selection_threads(&page.selection, range) {
+        match self
+            .store
+            .list_filtered_threads(&page.selection, page.filter, range)
+        {
             Ok(rows) if rows != page.rows => {
                 if let Some(page) = self.page.as_mut() {
                     page.rows = rows;
@@ -295,24 +344,23 @@ impl MessageListView {
         if !self
             .page
             .as_ref()
-            .is_some_and(|page| page.covers(&selection, &range))
+            .is_some_and(|page| page.covers(&selection, self.filter, &range))
         {
-            let total = self
-                .state
-                .mailbox
-                .as_ref()
-                .map(|mailbox| mailbox.total_threads)
-                .unwrap_or_default();
+            let total = self.thread_count();
             let start = range.start.saturating_sub(ROW_PAGE_PADDING);
             let end = (range.end + ROW_PAGE_PADDING).min(total.max(range.end));
             #[cfg(test)]
             {
                 self.counters.queries += 1;
             }
-            match self.store.list_selection_threads(&selection, start..end) {
+            match self
+                .store
+                .list_filtered_threads(&selection, self.filter, start..end)
+            {
                 Ok(rows) => {
                     self.page = Some(RowPage {
                         selection,
+                        filter: self.filter,
                         start,
                         rows,
                     })
@@ -344,12 +392,7 @@ impl MessageListView {
 
     fn row_count(&self) -> usize {
         match self.state.mode {
-            ListMode::Mail => self
-                .state
-                .mailbox
-                .as_ref()
-                .map(|mailbox| mailbox.total_threads)
-                .unwrap_or_default(),
+            ListMode::Mail => self.thread_count(),
             ListMode::Search => self.state.search_results.len(),
             ListMode::Drafts => self.state.drafts.len(),
             ListMode::Outbox => self.state.outbox_jobs.len(),
@@ -505,9 +548,6 @@ impl Render for MessageListView {
         }
         let colors = *cx.global::<UiColors>();
         let focused = self.focus_handle.contains_focused(window, cx);
-        let (title, subtitle) = self.header_text();
-        let can_retry = self.state.mode == ListMode::Outbox && !self.state.outbox_jobs.is_empty();
-
         div()
             .id("message-list")
             .key_context(KEY_CONTEXT)
@@ -526,42 +566,7 @@ impl Render for MessageListView {
             .bg(rgb(colors.surface))
             .border_r_1()
             .border_color(rgb(colors.border))
-            .child(
-                pane_focus_indicator(
-                    div()
-                        .px_3()
-                        .py_3()
-                        .border_b_1()
-                        .border_color(rgb(colors.border)),
-                    focused,
-                    &colors,
-                )
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(colors.muted))
-                                .child(subtitle),
-                        ),
-                )
-                // Retry lives with the outbox it acts on.
-                .when(can_retry, |this| {
-                    this.child(
-                        Button::new("outbox-retry", "Retry")
-                            .icon("refresh-cw")
-                            .size(ButtonSize::Small)
-                            .shortcut("secondary-shift-o")
-                            .on_click(dispatch_from(&self.focus_handle, RetryOutbox)),
-                    )
-                }),
-            )
+            .child(self.render_header(focused, &colors, cx))
             .children(self.render_bulk_bar(&colors, cx))
             .children(self.render_row_overlays())
             .child(match self.state.mode {
@@ -574,58 +579,9 @@ impl Render for MessageListView {
 }
 
 impl MessageListView {
-    fn header_text(&self) -> (String, String) {
-        let mailbox = self.state.mailbox.as_ref();
-        let title = match self.state.mode {
-            ListMode::Mail => mailbox
-                .map(|mailbox| mailbox.name.clone())
-                .unwrap_or_else(|| "Mail".to_owned()),
-            ListMode::Search => "Search".to_owned(),
-            ListMode::Drafts => "Drafts".to_owned(),
-            ListMode::Outbox => "Outbox".to_owned(),
-        };
-        let subtitle = match self.state.mode {
-            ListMode::Mail => mailbox
-                .map(|mailbox| {
-                    if mailbox.unread_threads > 0 {
-                        format!(
-                            "{} • {} unread",
-                            count_noun(mailbox.total_threads, "conversation", "conversations"),
-                            mailbox.unread_threads
-                        )
-                    } else {
-                        count_noun(mailbox.total_threads, "conversation", "conversations")
-                    }
-                })
-                .unwrap_or_else(|| "No mailbox selected".to_owned()),
-            ListMode::Search => format!(
-                "{} for \u{201c}{}\u{201d}{}",
-                count_noun(self.state.search_results.len(), "result", "results"),
-                self.state.search_query,
-                if self.state.searching_server {
-                    " \u{2022} searching the server\u{2026}"
-                } else {
-                    ""
-                }
-            ),
-            ListMode::Drafts => count_noun(self.state.drafts.len(), "draft", "drafts"),
-            ListMode::Outbox => count_noun(
-                self.state.outbox_jobs.len(),
-                "message waiting to send",
-                "messages waiting to send",
-            ),
-        };
-        (title, subtitle)
-    }
-
     fn render_threads(&mut self, colors: &UiColors, cx: &mut Context<Self>) -> AnyElement {
         let colors = *colors;
-        let thread_count = self
-            .state
-            .mailbox
-            .as_ref()
-            .map(|mailbox| mailbox.total_threads)
-            .unwrap_or_default();
+        let thread_count = self.thread_count();
         if !self.state.has_accounts {
             let focus_handle = self.focus_handle.clone();
             return empty_state(
@@ -645,6 +601,9 @@ impl MessageListView {
                 ),
                 &colors,
             );
+        }
+        if thread_count == 0 && self.filter != ThreadFilter::All {
+            return self.render_filtered_empty(&colors, cx);
         }
         if thread_count == 0 {
             return empty_state(
@@ -716,10 +675,18 @@ impl MessageListView {
                             color: None,
                         });
 
+                // The hovered row shows quick actions for that row; the
+                // selection hooks act on the selection.
+                let quick_actions = (self.hovered_thread == Some(thread_id))
+                    .then(|| self.quick_actions(thread_id, &row, cx));
+
                 row_shell(row_id, is_selected, focused, density, colors)
                     .debug_selector(move || format!("thread-row-{index}"))
                     .role(Role::ListItem)
                     .aria_label(row.accessible_label())
+                    .on_hover(cx.listener(move |this, hovered, _, cx| {
+                        this.set_hovered_thread(thread_id, *hovered, cx);
+                    }))
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         this.click_thread_row(index, event.modifiers(), cx);
                     }))
@@ -734,7 +701,7 @@ impl MessageListView {
                     })
                     .child(row_content(
                         row,
-                        None,
+                        quick_actions,
                         density,
                         &row_colors(is_selected, focused, colors),
                     ))
@@ -774,10 +741,15 @@ impl MessageListView {
                         let is_selected = self.is_thread_selected(thread_id);
                         let row =
                             MessageRow::search_hit(row_id.clone(), hit, &now, self.hour_cycle);
+                        let quick_actions = (self.hovered_thread == Some(thread_id))
+                            .then(|| self.quick_actions(thread_id, &row, cx));
 
                         row_shell(row_id, is_selected, focused, density, colors)
                             .role(Role::ListItem)
                             .aria_label(row.accessible_label())
+                            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                                this.set_hovered_thread(thread_id, *hovered, cx);
+                            }))
                             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                                 this.click_thread_row(index, event.modifiers(), cx);
                             }))
@@ -789,7 +761,7 @@ impl MessageListView {
                             )
                             .child(row_content(
                                 row,
-                                None,
+                                quick_actions,
                                 density,
                                 &row_colors(is_selected, focused, colors),
                             ))

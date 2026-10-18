@@ -23,8 +23,8 @@ use zmail_core::{
     OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp,
     PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, ServerHitRef,
     StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget,
-    ThreadCounts, ThreadMarks, ThreadMessage, ThreadSnapshot, ThreadState, ThreadSummary,
-    ThreadView, VirtualMailbox, preferences::UiPreferences,
+    ThreadCounts, ThreadFilter, ThreadMarks, ThreadMessage, ThreadSnapshot, ThreadState,
+    ThreadSummary, ThreadView, VirtualMailbox, preferences::UiPreferences,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -1435,12 +1435,24 @@ impl LocalStore {
         selection: &MailboxSelection,
         range: Range<usize>,
     ) -> Result<Vec<ThreadSummary>> {
+        self.list_filtered_threads(selection, ThreadFilter::All, range)
+    }
+
+    /// Like [`Self::list_selection_threads`], keeping only the threads
+    /// `thread_filter` matches.
+    pub fn list_filtered_threads(
+        &self,
+        selection: &MailboxSelection,
+        thread_filter: ThreadFilter,
+        range: Range<usize>,
+    ) -> Result<Vec<ThreadSummary>> {
         let limit = range.end.saturating_sub(range.start) as i64;
         if limit == 0 {
             return Ok(Vec::new());
         }
 
         let (filter, mut values) = selection_filter(selection);
+        let filter = format!("{filter}{}", thread_filter_clause(thread_filter));
         let next = values.len() + 1;
         values.push(limit.into());
         values.push((range.start as i64).into());
@@ -1539,8 +1551,19 @@ impl LocalStore {
     /// How many threads a mailbox or virtual mailbox shows, and how many
     /// of them are unread.
     pub fn selection_counts(&self, selection: &MailboxSelection) -> Result<ThreadCounts> {
+        self.filtered_counts(selection, ThreadFilter::All)
+    }
+
+    /// Like [`Self::selection_counts`], counting only the threads
+    /// `thread_filter` matches.
+    pub fn filtered_counts(
+        &self,
+        selection: &MailboxSelection,
+        thread_filter: ThreadFilter,
+    ) -> Result<ThreadCounts> {
         let conn = self.connection()?;
         let (filter, values) = selection_filter(selection);
+        let filter = format!("{filter}{}", thread_filter_clause(thread_filter));
         conn.query_row(
             &format!(
                 r#"
@@ -4706,6 +4729,17 @@ fn replace_account_identities(
 
 /// The `WHERE` clause over `threads` that picks a selection's threads, and
 /// the values it binds as `?1`, `?2`, ….
+/// The extra `WHERE` condition for a [`ThreadFilter`], on the `threads`
+/// table, appended to a selection's filter.
+fn thread_filter_clause(filter: ThreadFilter) -> &'static str {
+    match filter {
+        ThreadFilter::All => "",
+        ThreadFilter::Unread => " AND threads.unread_count > 0",
+        ThreadFilter::Flagged => " AND threads.is_flagged = 1",
+        ThreadFilter::HasAttachments => " AND threads.has_attachments = 1",
+    }
+}
+
 fn selection_filter(selection: &MailboxSelection) -> (String, Vec<rusqlite::types::Value>) {
     match selection {
         MailboxSelection::Mailbox { mailbox_id, .. } => (
@@ -5833,7 +5867,7 @@ mod tests {
         AccountSyncSnapshot, AuthKind, CachePolicySummary, DraftState, HydratedBody, MailboxRole,
         MailboxSelection, MailboxSnapshot, MessageAttachment, MessageRenderMode, MessageSnapshot,
         NewAccount, NewDraft, NewIdentity, PendingOpKind, ProtocolKind, SyncPhase, ThreadCounts,
-        ThreadSnapshot, VirtualMailbox,
+        ThreadFilter, ThreadSnapshot, VirtualMailbox,
     };
 
     #[test]
@@ -6523,6 +6557,67 @@ mod tests {
                 .expect("threads should list")
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn filters_narrow_a_selection_and_its_counts() {
+        let (store, _, _) = two_account_store();
+        let unified = MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Inbox));
+        let subjects = |filter, range| {
+            store
+                .list_filtered_threads(&unified, filter, range)
+                .expect("threads should list")
+                .into_iter()
+                .map(|row| row.subject)
+                .collect::<Vec<_>>()
+        };
+        let total = |filter| {
+            store
+                .filtered_counts(&unified, filter)
+                .expect("counts")
+                .total_threads
+        };
+
+        assert_eq!(subjects(ThreadFilter::All, 0..10).len(), 4);
+        assert_eq!(
+            subjects(ThreadFilter::Unread, 0..10),
+            ["work-new", "home-mid"]
+        );
+        assert_eq!(subjects(ThreadFilter::Unread, 1..10), ["home-mid"]);
+        assert_eq!(total(ThreadFilter::Unread), 2);
+        assert_eq!(
+            subjects(ThreadFilter::Flagged, 0..10),
+            ["home-mid", "work-flagged"]
+        );
+        assert_eq!(total(ThreadFilter::Flagged), 2);
+        assert!(subjects(ThreadFilter::HasAttachments, 0..10).is_empty());
+
+        store
+            .connection()
+            .expect("connection")
+            .execute(
+                "UPDATE threads SET has_attachments = 1 WHERE subject = 'home-old'",
+                [],
+            )
+            .expect("update");
+        assert_eq!(subjects(ThreadFilter::HasAttachments, 0..10), ["home-old"]);
+        assert_eq!(
+            store
+                .filtered_counts(&unified, ThreadFilter::HasAttachments)
+                .expect("counts"),
+            ThreadCounts {
+                total_threads: 1,
+                unread_threads: 0,
+            }
+        );
+        assert_eq!(
+            store
+                .selection_counts(&unified)
+                .expect("counts")
+                .total_threads,
+            4,
+            "the unfiltered counts are unchanged"
         );
     }
 
