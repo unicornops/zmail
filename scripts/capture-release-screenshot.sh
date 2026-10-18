@@ -35,8 +35,10 @@ APP_PID=""
 OPENBOX_PID=""
 HARNESS_STARTED=0
 
-# The matrix: NAME VIEW THEME WIDTH HEIGHT. 1440x920 is the app's default
-# window size. The inbox and reader are also captured at each layout
+# The matrix: NAME VIEW THEME WIDTH HEIGHT [POINTER_X POINTER_Y]. 1440x920
+# is the app's default window size. With a pointer position (in window
+# coordinates) the mouse rests there before the capture, to show a hover
+# state such as a message row's quick actions. The inbox and reader are also captured at each layout
 # breakpoint: 720 (one pane at a time), 900 (sidebar as an overlay) and
 # 1920 (wide); `sidebar` is the overlay open at 900. `accounts` is three
 # accounts with nested folders on the Unified Inbox.
@@ -47,6 +49,8 @@ MATRIX=(
   "inbox-light inbox light 1440 920"
   "inbox-compact-dark inbox-compact dark 1440 920"
   "inbox-compact-light inbox-compact light 1440 920"
+  "inbox-hover-dark inbox dark 1440 920 470 240"
+  "inbox-hover-light inbox light 1440 920 470 240"
   "reader-dark reader dark 1440 920"
   "reader-light reader light 1440 920"
   "compose-dark compose dark 1440 920"
@@ -175,6 +179,7 @@ capture_release() {
 # Captures one matrix state into OUTPUT_DIR/NAME.png.
 capture_state() {
   local output_dir="$1" name="$2" view="$3" theme="$4" width="$5" height="$6"
+  local pointer_x="${7:-}" pointer_y="${8:-}"
   local output_path="${output_dir}/${name}.png"
 
   echo "capturing ${name} (${view}, ${theme}, ${width}x${height})"
@@ -200,9 +205,16 @@ capture_state() {
     echo "the ${name} window is ${actual}, not ${width}x${height}" >&2
     return 1
   fi
+  if [[ -n "${pointer_x}" ]]; then
+    xdotool mousemove --window "${window_id}" "${pointer_x}" "${pointer_y}"
+  fi
   sleep 3
 
   import -window "${window_id}" "${output_path}"
+  if [[ -n "${pointer_x}" ]]; then
+    # Park the pointer so it does not hover the next state.
+    xdotool mousemove 2500 1400
+  fi
   stop_app
   # Let the window unmap so the next state cannot find this one.
   sleep 1

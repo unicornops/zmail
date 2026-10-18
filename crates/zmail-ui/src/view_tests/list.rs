@@ -1,16 +1,19 @@
 //! Message-list rows (UI plan Phase 3): the comfortable and compact
 //! densities and what a row shows.
 
-use gpui::{TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext};
 use zmail_core::{
-    AccountSyncSnapshot, MailboxRole, MailboxSnapshot, MessageSnapshot, ThreadSnapshot,
-    VirtualMailbox, preferences::Density,
+    AccountSyncSnapshot, MailboxRole, MailboxSnapshot, MessageSnapshot, ThreadFilter,
+    ThreadSnapshot, VirtualMailbox, preferences::Density,
 };
 use zmail_store::LocalStore;
 
-use super::{Setup, open_workspace_with};
+use super::{
+    Setup, click, focused_pane, keys, open_workspace, open_workspace_with, selected_thread,
+};
 use crate::InitialView;
-use crate::actions::ToggleDensity;
+use crate::actions::{ToggleDensity, Undo};
+use crate::pane::Pane;
 use crate::styles::DensityTokens;
 
 fn message(sender: &str, at: &str, is_read: bool) -> MessageSnapshot {
@@ -235,4 +238,134 @@ fn cross_account_rows_name_their_account(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(drawn(chip(work_thread), cx));
     assert!(drawn(chip(harness.home_threads[0]), cx));
+}
+
+// ---------------------------------------------------------------------------
+// Header, filters and quick actions
+// ---------------------------------------------------------------------------
+
+fn list_filter(
+    view: &gpui::Entity<crate::WorkspaceView>,
+    cx: &mut VisualTestContext,
+) -> ThreadFilter {
+    cx.read_entity(view, |view, cx| view.message_list.read(cx).filter())
+}
+
+/// Picks the filter `steps` entries below the current one in the menu.
+fn pick_filter(steps: usize, cx: &mut VisualTestContext) {
+    click("list-filter", cx);
+    keys(&format!("{}enter", "down ".repeat(steps)), cx);
+}
+
+#[gpui::test]
+fn the_header_filters_rows_in_the_store(cx: &mut TestAppContext) {
+    let (view, cx, harness) =
+        open_workspace_with(cx, Setup::Account, |_| InitialView::Inbox, seed_inbox);
+    let roadmap = inbox_threads(&harness.store)[0];
+    assert!(cx.debug_bounds("list-unread-count").is_some());
+    assert!(cx.debug_bounds("thread-row-1").is_some());
+
+    // All -> Unread: only the unread roadmap thread is left, and focus is
+    // back on the rows.
+    pick_filter(1, cx);
+    assert_eq!(list_filter(&view, cx), ThreadFilter::Unread);
+    assert!(cx.debug_bounds("thread-row-0").is_some());
+    assert!(cx.debug_bounds("thread-row-1").is_none());
+    assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+    // Unread -> Flagged -> Has attachments: the same thread each time.
+    pick_filter(1, cx);
+    assert_eq!(list_filter(&view, cx), ThreadFilter::Flagged);
+    assert!(cx.debug_bounds("thread-row-1").is_none());
+    pick_filter(1, cx);
+    assert_eq!(list_filter(&view, cx), ThreadFilter::HasAttachments);
+    assert!(cx.debug_bounds("thread-row-0").is_some());
+    assert!(cx.debug_bounds("thread-row-1").is_none());
+
+    // Under Unread, reading the last unread thread empties the list; the
+    // empty state's one action shows everything again.
+    click("list-filter", cx);
+    keys("up up enter", cx);
+    assert_eq!(list_filter(&view, cx), ThreadFilter::Unread);
+    harness
+        .store
+        .set_thread_read(roadmap, true)
+        .expect("the thread is marked read");
+    view.update(cx, |view, cx| view.refresh_from_store(cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-row-0").is_none());
+    click("list-filter-show-all", cx);
+    assert_eq!(list_filter(&view, cx), ThreadFilter::All);
+    assert!(cx.debug_bounds("thread-row-1").is_some());
+
+    // Another mailbox starts unfiltered.
+    pick_filter(2, cx);
+    assert_eq!(list_filter(&view, cx), ThreadFilter::Flagged);
+    view.update(cx, |view, cx| {
+        view.select_virtual_mailbox(VirtualMailbox::Unified(MailboxRole::Inbox), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(list_filter(&view, cx), ThreadFilter::All);
+}
+
+fn hover(selector: &'static str, cx: &mut VisualTestContext) {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} is drawn"));
+    cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn hover_quick_actions_replace_the_date_and_go_through_mail_actions(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let (first, second) = (harness.threads[0], harness.threads[1]);
+    let part = |thread: i64, part: &str| format!("thread-row-{thread}-{part}");
+    assert_eq!(selected_thread(&view, cx), Some(first));
+    assert!(drawn(part(second, "date"), cx));
+    assert!(!drawn(part(second, "actions"), cx));
+
+    hover("thread-row-1", cx);
+    assert!(
+        !drawn(part(second, "date"), cx),
+        "the actions replace the date"
+    );
+    for action in ["quick-archive", "quick-delete", "quick-flag", "quick-read"] {
+        assert!(drawn(part(second, action), cx), "{action} is shown");
+    }
+    assert!(drawn(part(first, "date"), cx), "other rows keep their date");
+
+    // Flag the hovered (not the selected) thread.
+    click(Box::leak(part(second, "quick-flag").into_boxed_str()), cx);
+    let thread = |id| {
+        harness
+            .store
+            .thread_view(id)
+            .expect("the thread loads")
+            .expect("the thread exists")
+    };
+    assert!(thread(second).is_flagged);
+    assert_eq!(
+        selected_thread(&view, cx),
+        Some(first),
+        "the click did not open it"
+    );
+    // Mark it read, then undo that like any other change.
+    click(Box::leak(part(second, "quick-read").into_boxed_str()), cx);
+    assert_eq!(thread(second).unread_count, 0);
+    cx.dispatch_action(Undo);
+    cx.run_until_parked();
+    assert_eq!(thread(second).unread_count, 1);
+    assert!(thread(second).is_flagged, "only the last change was undone");
+
+    // Archive moves it out of the Inbox.
+    hover("thread-row-1", cx);
+    click(
+        Box::leak(part(second, "quick-archive").into_boxed_str()),
+        cx,
+    );
+    assert_eq!(
+        thread(second).mailbox_id,
+        harness.archive_id.expect("an archive")
+    );
+    assert_eq!(selected_thread(&view, cx), Some(first));
 }

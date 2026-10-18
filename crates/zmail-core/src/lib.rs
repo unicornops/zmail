@@ -1013,6 +1013,35 @@ pub enum MailboxSelection {
     Virtual(VirtualMailbox),
 }
 
+/// Which of a list's threads to show: the message list's filter menu.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ThreadFilter {
+    /// Every thread.
+    #[default]
+    All,
+    /// Threads with unread mail.
+    Unread,
+    /// Flagged threads.
+    Flagged,
+    /// Threads with one or more attachments.
+    HasAttachments,
+}
+
+impl ThreadFilter {
+    /// Every filter, in menu order.
+    pub const ALL: [Self; 4] = [Self::All, Self::Unread, Self::Flagged, Self::HasAttachments];
+
+    /// Human-facing label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Unread => "Unread",
+            Self::Flagged => "Flagged",
+            Self::HasAttachments => "Has attachments",
+        }
+    }
+}
+
 /// Thread counts of a [`MailboxSelection`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ThreadCounts {

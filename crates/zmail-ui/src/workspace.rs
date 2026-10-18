@@ -85,7 +85,8 @@ impl WorkspaceView {
         let hour_cycle = HourCycle::from_env();
         let mail_actions = cx.new(|_| MailActions::new(store.clone()));
         let sidebar = cx.new(SidebarView::new);
-        let message_list = cx.new(|cx| MessageListView::new(store.clone(), hour_cycle, cx));
+        let message_list =
+            cx.new(|cx| MessageListView::new(store.clone(), mail_actions.clone(), hour_cycle, cx));
         let reader = cx.new(|cx| ReaderView::new(hour_cycle, cx));
         let compose = cx.new(|cx| {
             ComposeView::new(
