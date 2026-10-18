@@ -13,6 +13,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde_json::json;
+use zmail_core::{
+    AccountSyncSnapshot, MailboxSnapshot, MessageAttachment, MessageSnapshot, ThreadSnapshot,
+};
 
 /// Parameters for a generated mailbox dataset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +41,221 @@ impl SyntheticMailboxSpec {
         (0..self.mailbox_count)
             .map(|index| format!("Synthetic/{index:03}"))
             .collect()
+    }
+}
+
+impl SyntheticMailboxSpec {
+    /// Generates the dataset as one account snapshot, deterministically
+    /// from `seed`.
+    ///
+    /// Every thread gets a unique `T<n>` tag in its subject; messages draw
+    /// senders, recipients, subject and body words from small fixed
+    /// vocabularies, so text queries hit realistic fractions of the
+    /// mailbox. Timestamps spread back two years from 2026-10-01 (UTC).
+    /// Roughly 20% of messages are unread, 5% flagged and 8% carry an
+    /// attachment. One message in `hydrated_every` has its body stored
+    /// (`0` stores none, like a fresh lazy IMAP sync); the rest carry only
+    /// a preview, as headers-only messages do.
+    pub fn snapshot(self, seed: u64, hydrated_every: usize) -> AccountSyncSnapshot {
+        let mut random = SyntheticRandom(seed ^ 0x9e37_79b9_7f4a_7c15);
+        let base = 1_790_812_800_i64; // 2026-10-01T00:00:00Z
+        let span = 2 * 365 * 24 * 3600_i64;
+        let mut ordinal = 0usize;
+        let mailboxes = self
+            .mailbox_names()
+            .into_iter()
+            .enumerate()
+            .map(|(mailbox_index, name)| {
+                let threads = (0..self.threads_per_mailbox)
+                    .map(|_| {
+                        let thread_number = ordinal;
+                        let topic = random.words(SUBJECT_WORDS, 3);
+                        let subject = format!("{topic} T{thread_number}");
+                        let start = base - random.below(span as u64) as i64;
+                        let messages = (0..self.messages_per_thread)
+                            .map(|position| {
+                                ordinal += 1;
+                                let (first, last, domain) = random.person();
+                                let (to_first, to_last, to_domain) = random.person();
+                                let at = start + position as i64 * 3_600;
+                                let received_at = chrono::DateTime::from_timestamp(at, 0)
+                                    .unwrap_or_default()
+                                    .to_rfc3339();
+                                let body = random.body(self.average_body_bytes);
+                                let preview = body.chars().take(120).collect::<String>();
+                                let hydrated =
+                                    hydrated_every > 0 && ordinal.is_multiple_of(hydrated_every);
+                                let attachments = if random.below(100) < 8 {
+                                    vec![MessageAttachment {
+                                        filename: "report.pdf".to_owned(),
+                                        content_type: "application/pdf".to_owned(),
+                                        size_bytes: 1_024,
+                                        storage_path: format!("synthetic/{ordinal}.pdf"),
+                                    }]
+                                } else {
+                                    Vec::new()
+                                };
+                                MessageSnapshot {
+                                    remote_id: format!("{mailbox_index}-{ordinal}"),
+                                    identity_email: "synthetic@zmail.test".to_owned(),
+                                    sender: format!(
+                                        "{first} {last} <{}.{}@{domain}>",
+                                        first.to_lowercase(),
+                                        last.to_lowercase()
+                                    ),
+                                    reply_to: None,
+                                    recipients: format!("{to_first}.{to_last}@{to_domain}")
+                                        .to_lowercase(),
+                                    subject: subject.clone(),
+                                    body_preview: preview,
+                                    body_text: hydrated.then_some(body),
+                                    sanitized_html: None,
+                                    has_remote_content: false,
+                                    is_read: random.below(100) >= 20,
+                                    is_flagged: random.below(100) < 5,
+                                    received_at,
+                                    attachments,
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        ThreadSnapshot {
+                            remote_thread_id: format!("thread-{thread_number}"),
+                            subject,
+                            participants: zmail_core::participants::thread_participants(&messages),
+                            preview: messages
+                                .last()
+                                .map(|message| message.body_preview.clone())
+                                .unwrap_or_default(),
+                            is_flagged: messages.iter().any(|message| message.is_flagged),
+                            has_attachments: messages
+                                .iter()
+                                .any(|message| !message.attachments.is_empty()),
+                            unread_count: messages
+                                .iter()
+                                .filter(|message| !message.is_read)
+                                .count(),
+                            latest_message_at: messages
+                                .last()
+                                .map(|message| message.received_at.clone())
+                                .unwrap_or_default(),
+                            messages,
+                        }
+                    })
+                    .collect();
+                MailboxSnapshot {
+                    role: (mailbox_index == 0).then(|| "inbox".to_owned()),
+                    name,
+                    threads,
+                }
+            })
+            .collect();
+        AccountSyncSnapshot {
+            checkpoint: format!("synthetic-{seed}"),
+            detail: "synthetic mailbox".to_owned(),
+            identities: None,
+            mailboxes,
+        }
+    }
+}
+
+/// Subject vocabulary of the synthetic dataset.
+pub const SUBJECT_WORDS: &[&str] = &[
+    "budget", "review", "launch", "incident", "invoice", "meeting", "travel", "report", "deploy",
+    "holiday", "contract", "hiring", "roadmap", "security", "outage", "release",
+];
+/// Body vocabulary of the synthetic dataset (a superset of the subject
+/// words).
+pub const BODY_WORDS: &[&str] = &[
+    "budget",
+    "review",
+    "launch",
+    "incident",
+    "invoice",
+    "meeting",
+    "travel",
+    "report",
+    "deploy",
+    "holiday",
+    "contract",
+    "hiring",
+    "roadmap",
+    "security",
+    "outage",
+    "release",
+    "please",
+    "attached",
+    "tomorrow",
+    "numbers",
+    "agenda",
+    "customer",
+    "migration",
+    "schedule",
+    "approval",
+    "draft",
+    "feedback",
+    "quarter",
+    "pipeline",
+    "latency",
+    "vendor",
+    "renewal",
+    "kittiwake",
+];
+const FIRST_NAMES: &[&str] = &[
+    "Alice", "Bob", "Carol", "Dmitri", "Erin", "Farah", "Gus", "Hana", "Ivan", "Jules", "Kai",
+    "Lena", "Mateo", "Nia", "Oscar", "Priya",
+];
+const LAST_NAMES: &[&str] = &[
+    "Smith", "Jones", "Okafor", "Novak", "Tanaka", "Silva", "Murphy", "Kowalski", "Haddad",
+    "Larsen", "Moreau", "Quinn",
+];
+const DOMAINS: &[&str] = &["example.com", "partner.test", "vendor.test", "zmail.test"];
+
+/// A small deterministic generator (64-bit LCG), so datasets are stable
+/// across runs and platforms without a `rand` dependency.
+struct SyntheticRandom(u64);
+
+impl SyntheticRandom {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 33
+    }
+
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound.max(1)
+    }
+
+    fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+        items[self.below(items.len() as u64) as usize]
+    }
+
+    fn words(&mut self, vocabulary: &[&str], count: usize) -> String {
+        (0..count)
+            .map(|_| self.pick(vocabulary))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn person(&mut self) -> (&'static str, &'static str, &'static str) {
+        (
+            self.pick(FIRST_NAMES),
+            self.pick(LAST_NAMES),
+            self.pick(DOMAINS),
+        )
+    }
+
+    fn body(&mut self, average_bytes: usize) -> String {
+        let target = average_bytes / 2 + self.below(average_bytes.max(1) as u64) as usize;
+        let mut body = String::with_capacity(target + 16);
+        while body.len() < target {
+            if !body.is_empty() {
+                body.push(' ');
+            }
+            body.push_str(self.pick(BODY_WORDS));
+        }
+        body
     }
 }
 
