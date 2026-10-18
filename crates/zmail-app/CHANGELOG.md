@@ -6,10 +6,24 @@
 ### Features
 
 * **search:** fall back to server search for mail not indexed yet ([#159](https://github.com/unicornops/zmail/issues/159)) ([68ea246](https://github.com/unicornops/zmail/commit/68ea24675f1dab98ec7d0e9a86f5adacac386760))
-* **search:** index message bodies in the background ([#156](https://github.com/unicornops/zmail/issues/156)) ([59bb725](https://github.com/unicornops/zmail/commit/59bb725ca8967ab98472639f0e9f19648e05fd0c))
+* **imap:** resync mailboxes with QRESYNC and VANISHED ([#157](https://github.com/unicornops/zmail/issues/157)) ([b267db2](https://github.com/unicornops/zmail/commit/b267db2fcb6406aa38ad3905fac06c7733ee6c1e))
 * **ui:** add resizable panes and a responsive layout ([#155](https://github.com/unicornops/zmail/issues/155)) ([f6b100b](https://github.com/unicornops/zmail/commit/f6b100b87426b933c73524ed1b49189e82a34ab2))
+* **jmap:** hold a push connection and sync changes through Email/changes ([#153](https://github.com/unicornops/zmail/issues/153)) ([ab314e2](https://github.com/unicornops/zmail/commit/ab314e21294a76bafac449b36b9fa643b7763ab7))
+* **ui:** redesign the toolbar and move message actions into the reader ([#151](https://github.com/unicornops/zmail/issues/151)) ([277fa29](https://github.com/unicornops/zmail/commit/277fa29703019812a2f99fa03c37a972b8dae7ac))
+* **search:** index message bodies in the background ([#156](https://github.com/unicornops/zmail/issues/156)) ([59bb725](https://github.com/unicornops/zmail/commit/59bb725ca8967ab98472639f0e9f19648e05fd0c))
+* **search:** query operators compiled to parameterised SQL and FTS5 ([#152](https://github.com/unicornops/zmail/issues/152)) ([08c3da3](https://github.com/unicornops/zmail/commit/08c3da3e2408b445413a4091c691c2375e66e34e))
+* **ui:** platform title bar with the toolbar inside and a Linux CSD frame ([#160](https://github.com/unicornops/zmail/issues/160)) ([660557d](https://github.com/unicornops/zmail/commit/660557d43952bb6b18db1f5068b538af6843269e))
 * **ui:** menu model, native macOS menus, app-menu button and bundled Inter ([#154](https://github.com/unicornops/zmail/issues/154)) ([d160894](https://github.com/unicornops/zmail/commit/d1608945dddd0cf3220314399c5c54b75143de86))
+* **ui:** real text input with IME, selection, undo and safe Unicode editing ([#144](https://github.com/unicornops/zmail/issues/144)) ([68682d5](https://github.com/unicornops/zmail/commit/68682d5e3b79697e25682131c66f05289b18da96))
+* **ui:** add the core component set ([#145](https://github.com/unicornops/zmail/issues/145)) ([27dfd13](https://github.com/unicornops/zmail/commit/27dfd137348388e755bdc394d2e4c10b4d607a4a))
 * **ui:** tokens 2.0, platform style, contrast checks and UI preferences ([#143](https://github.com/unicornops/zmail/issues/143)) ([ca2a4b7](https://github.com/unicornops/zmail/commit/ca2a4b78b788cdc9e22b6362ef62418797870824))
+
+### Bug Fixes
+
+* **store:** begin write transactions immediately so writes wait out a sync ([#165](https://github.com/unicornops/zmail/issues/165)) ([69e414f](https://github.com/unicornops/zmail/commit/69e414f8b858ef39d0d173776d88a21c25555e70))
+* **security:** block remote URLs only inside tags, keep them in visible text ([#166](https://github.com/unicornops/zmail/issues/166)) ([13b6733](https://github.com/unicornops/zmail/commit/13b6733614d3b489e243f5cc76762e044c361fef))
+* **store:** give each ephemeral store its own directory ([#149](https://github.com/unicornops/zmail/issues/149)) ([3a9005d](https://github.com/unicornops/zmail/commit/3a9005dbddb95601c5ffa661b8efa21a13e6c095))
+* **jmap:** render HTML-only bodies through the sanitizer and detect remote content ([#141](https://github.com/unicornops/zmail/issues/141)) ([281c4ec](https://github.com/unicornops/zmail/commit/281c4ec5a6340bf4e91d3fbdde47c034b6dd15ef))
 
 ## [0.10.0](https://github.com/unicornops/zmail/compare/v0.9.0...v0.10.0) (2026-10-16)
 
