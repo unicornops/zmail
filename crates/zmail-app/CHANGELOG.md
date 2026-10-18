@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.11.0](https://github.com/unicornops/zmail/compare/v0.10.0...v0.11.0) (2026-10-18)
+
+
+### Features
+
+* **search:** fall back to server search for mail not indexed yet ([#159](https://github.com/unicornops/zmail/issues/159)) ([68ea246](https://github.com/unicornops/zmail/commit/68ea24675f1dab98ec7d0e9a86f5adacac386760))
+* **search:** index message bodies in the background ([#156](https://github.com/unicornops/zmail/issues/156)) ([59bb725](https://github.com/unicornops/zmail/commit/59bb725ca8967ab98472639f0e9f19648e05fd0c))
+* **ui:** add resizable panes and a responsive layout ([#155](https://github.com/unicornops/zmail/issues/155)) ([f6b100b](https://github.com/unicornops/zmail/commit/f6b100b87426b933c73524ed1b49189e82a34ab2))
+* **ui:** menu model, native macOS menus, app-menu button and bundled Inter ([#154](https://github.com/unicornops/zmail/issues/154)) ([d160894](https://github.com/unicornops/zmail/commit/d1608945dddd0cf3220314399c5c54b75143de86))
+* **ui:** tokens 2.0, platform style, contrast checks and UI preferences ([#143](https://github.com/unicornops/zmail/issues/143)) ([ca2a4b7](https://github.com/unicornops/zmail/commit/ca2a4b78b788cdc9e22b6362ef62418797870824))
+
 ## [0.10.0](https://github.com/unicornops/zmail/compare/v0.9.0...v0.10.0) (2026-10-16)
 
 
