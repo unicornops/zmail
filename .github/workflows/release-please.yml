@@ -179,15 +179,18 @@ jobs:
       - name: Build release binary
         run: cargo build -p zmail-app --release --locked
 
-      # The archives carry zmail's licence and the bundled Inter font's
-      # SIL OFL 1.1 notice, which must travel with every copy of the font
-      # (Linux builds embed it in the binary).
+      # The archives carry zmail's licence and the notices that must travel
+      # with every copy of what the binary embeds: the Inter font's SIL OFL
+      # 1.1 (Linux builds), Lucide's ISC/MIT and the Apache-2.0 licence of
+      # the code ported from GPUI.
       - name: Create Unix archive
         if: runner.os != 'Windows'
         run: |
           mkdir -p archive/licenses
           cp "target/release/${{ matrix.binary_name }}" LICENSE archive/
           cp assets/fonts/inter/LICENSE.txt archive/licenses/Inter-OFL.txt
+          cp assets/icons/LICENSE.txt archive/licenses/Lucide-LICENSE.txt
+          cp crates/zmail-ui/LICENSE-APACHE archive/licenses/GPUI-Apache-2.0.txt
           tar -czf "${{ matrix.artifact_path }}" -C archive .
 
       - name: Create Windows archive
@@ -197,6 +200,8 @@ jobs:
           New-Item -ItemType Directory -Force archive/licenses | Out-Null
           Copy-Item "target/release/${{ matrix.binary_name }}", LICENSE archive/
           Copy-Item assets/fonts/inter/LICENSE.txt archive/licenses/Inter-OFL.txt
+          Copy-Item assets/icons/LICENSE.txt archive/licenses/Lucide-LICENSE.txt
+          Copy-Item crates/zmail-ui/LICENSE-APACHE archive/licenses/GPUI-Apache-2.0.txt
           Compress-Archive -Path archive/* -DestinationPath "${{ matrix.artifact_path }}"
 
       # Opt-in Authenticode signing: the steps no-op until the repository

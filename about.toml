@@ -25,7 +25,7 @@ ignore-dev-dependencies = false
 # - crates/zmail-ui/src/components/text_input.rs
 #   Ported from crates/gpui/examples/input.rs in Zed v1.24.2
 #   (https://github.com/zed-industries/zed), Copyright Zed Industries, Inc.,
-#   licensed under the Apache License 2.0.
+#   licensed under the Apache License 2.0 (crates/zmail-ui/LICENSE-APACHE).
 # - crates/zmail-ui/src/components/title_bar.rs
 #   Ported from crates/platform_title_bar in Zed v1.24.2, Copyright Zed
 #   Industries, Inc., licensed under GPL-3.0-or-later (used under
@@ -33,7 +33,8 @@ ignore-dev-dependencies = false
 # - crates/zmail-ui/src/components/window_frame.rs
 #   Ported from client_side_decorations in crates/workspace (GPL-3.0-or-later,
 #   used under GPL-3.0-only) and crates/gpui/examples/window_shadow.rs
-#   (Apache License 2.0) in Zed v1.24.2, Copyright Zed Industries, Inc.
+#   (Apache License 2.0, crates/zmail-ui/LICENSE-APACHE) in Zed v1.24.2,
+#   Copyright Zed Industries, Inc.
 
 # Bundled assets that are not crates, also recorded here:
 #
@@ -44,4 +45,7 @@ ignore-dev-dependencies = false
 #   License 1.1 (assets/fonts/inter/LICENSE.txt). Embedded in Linux builds
 #   only (crates/zmail-ui/src/fonts.rs); the .deb also installs the licence.
 # - assets/icons/*.svg (except app-icon.svg)
-#   Lucide (https://lucide.dev), licensed under the ISC License.
+#   Lucide (https://lucide.dev), licensed under the ISC License; the icons
+#   Lucide derives from Feather are also under MIT (assets/icons/LICENSE.txt,
+#   copied from the Lucide repository). Embedded in all builds; the .deb also
+#   installs the licence.
