@@ -1711,6 +1711,17 @@ impl WorkspaceView {
         change: impl FnOnce(&mut MailActions, &[i64], &mut Context<MailActions>) -> Result<()>,
     ) -> bool {
         let thread_ids = self.command_thread_ids();
+        self.change_these_threads(thread_ids, cx, change)
+    }
+
+    /// [`Self::change_threads`] on `thread_ids`, for example conversations
+    /// dropped on a sidebar folder.
+    fn change_these_threads(
+        &mut self,
+        thread_ids: Vec<i64>,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut MailActions, &[i64], &mut Context<MailActions>) -> Result<()>,
+    ) -> bool {
         if thread_ids.is_empty() {
             return false;
         }
@@ -2169,6 +2180,15 @@ impl WorkspaceView {
             SidebarEvent::RetryOutbox => self.retry_failed_outbox(window, cx),
             SidebarEvent::ToggleCollapsed(ref node) => self.toggle_sidebar_node(node, cx),
             SidebarEvent::FixAccount(account_id) => self.fix_account(account_id, window, cx),
+            // A drop is an ordinary, undoable move.
+            SidebarEvent::DropThreads {
+                ref thread_ids,
+                mailbox_id,
+            } => {
+                self.change_these_threads(thread_ids.clone(), cx, |actions, thread_ids, cx| {
+                    actions.move_threads(thread_ids, mailbox_id, cx)
+                });
+            }
             SidebarEvent::Activate => self.focus_pane(Pane::MessageList, window, cx),
             // Picking a view in the overlay closes it.
             SidebarEvent::RowClicked => {

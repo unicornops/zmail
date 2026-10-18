@@ -1223,6 +1223,91 @@ fn the_context_menu_acts_on_the_selection_it_was_opened_on(cx: &mut TestAppConte
     assert_eq!(selection(&view, cx), Vec::<i64>::new());
 }
 
+/// Drags list row `index` onto the sidebar row `target` and drops it.
+fn drag_row_to(index: usize, target: &str, cx: &mut VisualTestContext) {
+    let from = cx
+        .debug_bounds(Box::leak(format!("thread-row-{index}").into_boxed_str()))
+        .expect("the row is drawn")
+        .center();
+    let to = cx
+        .debug_bounds(Box::leak(target.to_owned().into_boxed_str()))
+        .expect("the folder row is drawn")
+        .center();
+    cx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        from + point(px(12.), px(12.)),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_move(to, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_up(to, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn dragging_a_row_onto_a_folder_moves_it_and_can_be_undone(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let threads = harness.threads.clone();
+    let archive_id = harness.archive_id.expect("an archive");
+
+    drag_row_to(0, &format!("mailbox-row-{archive_id}"), cx);
+    assert_eq!(mailbox_of(&harness, threads[0]), Some(archive_id));
+    assert_eq!(toasts(&view, cx), ["Conversation moved to Archive"]);
+    assert_eq!(
+        selected_thread(&view, cx),
+        Some(threads[1]),
+        "the row below takes the dragged one's place"
+    );
+    assert!(!cx.update(|_, cx| cx.has_active_drag()));
+
+    keys("secondary-z", cx);
+    assert_eq!(mailbox_of(&harness, threads[0]), harness.inbox_id);
+
+    // The folder the conversation is in does not take it.
+    let inbox_id = harness.inbox_id.expect("an inbox");
+    drag_row_to(1, &format!("mailbox-row-{inbox_id}"), cx);
+    assert_eq!(mailbox_of(&harness, threads[1]), Some(inbox_id));
+    assert_eq!(toasts(&view, cx), ["Undone: Conversation moved to Archive"]);
+}
+
+#[gpui::test]
+fn another_accounts_folder_does_not_take_a_dragged_row(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    let archive_id = harness.archive_id.expect("Work has an archive");
+    view.update(cx, |view, cx| {
+        view.select_virtual_mailbox(VirtualMailbox::Unified(MailboxRole::Inbox), cx)
+    });
+    cx.run_until_parked();
+
+    // Row 0 of the Unified Inbox is Home's newest conversation.
+    drag_row_to(0, &format!("mailbox-row-{archive_id}"), cx);
+    assert_eq!(
+        mailbox_of(&harness, harness.home_threads[0]),
+        harness.home_inbox_id
+    );
+    // Row 1 is Work's newest, which Work's Archive takes.
+    drag_row_to(1, &format!("mailbox-row-{archive_id}"), cx);
+    assert_eq!(mailbox_of(&harness, harness.threads[0]), Some(archive_id));
+}
+
+#[gpui::test]
+fn dragging_a_selected_row_moves_the_whole_selection(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let threads = harness.threads.clone();
+    let trash_id = harness.trash_id.expect("a trash");
+    keys("shift-down", cx);
+
+    drag_row_to(1, &format!("mailbox-row-{trash_id}"), cx);
+    for thread_id in &threads[..2] {
+        assert_eq!(mailbox_of(&harness, *thread_id), Some(trash_id));
+    }
+    assert_eq!(mailbox_of(&harness, threads[2]), harness.inbox_id);
+    assert_eq!(toasts(&view, cx), ["2 conversations moved to Trash"]);
+    assert_eq!(selection(&view, cx), Vec::<i64>::new());
+    assert_eq!(selected_thread(&view, cx), Some(threads[2]));
+}
+
 #[gpui::test]
 fn conversation_actions_have_keys_and_undo(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::Mail);
