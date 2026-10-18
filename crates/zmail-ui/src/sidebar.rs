@@ -923,9 +923,7 @@ impl SidebarView {
                 (
                     mailbox_row_id(*mailbox_id),
                     mailbox_icon_name(mailbox.and_then(|mailbox| mailbox.role)),
-                    mailbox
-                        .map(|mailbox| mailbox.leaf_name().to_owned())
-                        .unwrap_or_default(),
+                    mailbox.map(folder_label).unwrap_or_default(),
                 )
             }
             SidebarItem::Group(folder) => {
@@ -954,6 +952,17 @@ impl SidebarView {
             .child(self.chevron(chevron_id, self.tree_node(item), expanded, colors, cx))
             .child(icon(icon_name, ICON_SIZE_SM, colors.muted))
             .child(Self::label(label))
+    }
+}
+
+/// A folder's name in the tree: its last path segment, except that the
+/// Inbox is always "Inbox" (IMAP servers call it "INBOX").
+fn folder_label(mailbox: &MailboxSummary) -> String {
+    match mailbox.role {
+        Some(MailboxRole::Inbox) if mailbox.parent.is_none() => {
+            MailboxRole::Inbox.label().to_owned()
+        }
+        _ => mailbox.leaf_name().to_owned(),
     }
 }
 
@@ -1151,6 +1160,14 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn the_inbox_is_called_inbox() {
+        let inbox = mailbox(1, "INBOX", Some(MailboxRole::Inbox), None, Some("/"));
+        assert_eq!(folder_label(&inbox), "Inbox");
+        let nested = mailbox(2, "Work/Website", None, Some("Work"), Some("/"));
+        assert_eq!(folder_label(&nested), "Website");
     }
 
     #[test]

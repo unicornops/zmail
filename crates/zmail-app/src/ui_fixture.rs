@@ -477,7 +477,8 @@ const SIDE_PROJECT_INBOX: &[Thread] = &[Thread {
 
 /// The `accounts` view: two more accounts (a slash-delimited tree three
 /// levels deep, and a dot-delimited one that fails to sync), a failed
-/// message in the outbox, and the Unified Inbox open.
+/// message in the outbox, Work's tree collapsed and the Unified Inbox
+/// open.
 fn seed_more_accounts(store: &LocalStore, work_id: i64, now: u64) -> Result<()> {
     let account = |name: &str, email: &str| NewAccount {
         display_name: name.to_owned(),
@@ -558,6 +559,8 @@ fn seed_more_accounts(store: &LocalStore, work_id: i64, now: u64) -> Result<()> 
     store.record_outbox_failure(job, "connection refused")?;
 
     store.update_ui_preferences(|preferences| {
+        // Work's tree is collapsed so the other accounts' trees fit.
+        preferences.sidebar_tree.collapsed_accounts = vec![work_id];
         preferences.last_mailbox = Some(MailboxSelection::Virtual(VirtualMailbox::Unified(
             MailboxRole::Inbox,
         )));
