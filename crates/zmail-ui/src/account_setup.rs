@@ -15,7 +15,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use anyhow::{Context as _, Result, bail};
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, Render, Subscription, Window, div, prelude::*, rgb,
+    IntoElement, Render, SharedString, Subscription, Window, div, prelude::*, rgb,
 };
 use url::Url;
 use zmail_auth::OAuth2Preset;
@@ -264,7 +264,7 @@ pub(crate) struct AccountSetupState {
     pub(crate) errors: BTreeMap<AccountField, String>,
     /// Why the form opened when the user did not ask for it, for example
     /// Compose with no account.
-    pub(crate) notice: Option<&'static str>,
+    pub(crate) notice: Option<SharedString>,
 }
 
 /// Endpoint placeholder for the selected protocol.
@@ -426,7 +426,7 @@ impl AccountSetupView {
     /// did not ask for it, and focuses the first field.
     pub(crate) fn open(
         &mut self,
-        notice: Option<&'static str>,
+        notice: Option<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -669,7 +669,7 @@ fn render_account_setup_detail(
         .gap_4()
         .w_full()
         .min_w_0()
-        .when_some(form.notice, |this, notice| {
+        .when_some(form.notice.clone(), |this, notice| {
             this.child(
                 div()
                     .w_full()
@@ -683,7 +683,7 @@ fn render_account_setup_detail(
                     .border_1()
                     .border_color(rgb(colors.info))
                     .child(icon("user-plus", ICON_SIZE_SM, colors.info))
-                    .child(div().flex_1().min_w_0().ellipsis().child(notice)),
+                    .child(div().flex_1().min_w_0().child(notice)),
             )
         })
         .child(

@@ -144,6 +144,23 @@ pub const LIST_ITEM_HEIGHT: f32 = ROW_PADDING_Y * 2.0
     + ROW_BORDER_WIDTH;
 /// Height of a single mailbox row in the sidebar.
 pub const MAILBOX_ITEM_HEIGHT: f32 = 40.0;
+/// Indent per level of the sidebar's folder tree.
+pub const SIDEBAR_TREE_INDENT: f32 = SPACE_4;
+/// Diameter of an account's colour dot.
+pub const ACCOUNT_DOT_SIZE: f32 = 8.0;
+/// Account colours, given out in account order (see
+/// `widgets::account_color`). Mid-tone hues that read on light and dark
+/// surfaces; they only mark which account something belongs to.
+pub const ACCOUNT_COLORS: [u32; 8] = [
+    0x3B82F6, // blue
+    0x10B981, // green
+    0xF59E0B, // amber
+    0xEC4899, // pink
+    0x8B5CF6, // violet
+    0x06B6D4, // cyan
+    0xF97316, // orange
+    0x84CC16, // lime
+];
 /// Diameter of a sender avatar circle.
 pub const AVATAR_SIZE: f32 = 32.0;
 /// Width and height of compact circular icon-only controls.

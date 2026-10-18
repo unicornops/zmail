@@ -38,7 +38,8 @@ HARNESS_STARTED=0
 # The matrix: NAME VIEW THEME WIDTH HEIGHT. 1440x920 is the app's default
 # window size. The inbox and reader are also captured at each layout
 # breakpoint: 720 (one pane at a time), 900 (sidebar as an overlay) and
-# 1920 (wide); `sidebar` is the overlay open at 900.
+# 1920 (wide); `sidebar` is the overlay open at 900. `accounts` is three
+# accounts with nested folders on the Unified Inbox.
 MATRIX=(
   "empty-dark empty dark 1440 920"
   "empty-light empty light 1440 920"
@@ -62,6 +63,8 @@ MATRIX=(
   "reader-light-900 reader light 900 720"
   "sidebar-dark-900 sidebar dark 900 720"
   "sidebar-light-900 sidebar light 900 720"
+  "accounts-dark accounts dark 1440 920"
+  "accounts-light accounts light 1440 920"
   "inbox-dark-1920 inbox dark 1920 1080"
   "inbox-light-1920 inbox light 1920 1080"
   "reader-dark-1920 reader dark 1920 1080"

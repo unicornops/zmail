@@ -43,6 +43,7 @@ impl WorkspaceView {
             Ok(preferences) => {
                 self.sidebar_collapsed = preferences.sidebar_collapsed;
                 self.density = preferences.density;
+                self.sidebar_tree = preferences.sidebar_tree;
                 if let Some(width) = preferences.pane_widths.sidebar {
                     self.sidebar_width = width;
                 }
@@ -65,6 +66,16 @@ impl WorkspaceView {
             preferences.last_mailbox = Some(selection);
         }) {
             self.store_error = Some(format!("Could not save the open mailbox: {error:#}"));
+        }
+    }
+
+    /// Saves the sidebar's collapsed accounts and folders.
+    pub(crate) fn persist_sidebar_tree(&mut self) {
+        let tree = self.sidebar_tree.clone();
+        if let Err(error) = self.store.update_ui_preferences(|preferences| {
+            preferences.sidebar_tree = tree;
+        }) {
+            self.store_error = Some(format!("Could not save the sidebar: {error:#}"));
         }
     }
 

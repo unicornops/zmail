@@ -82,6 +82,29 @@ pub struct PaneWidths {
     pub message_list: Option<f32>,
 }
 
+/// What the sidebar's account trees have collapsed. Everything starts
+/// expanded; only what the user collapses is recorded.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SidebarTree {
+    /// Accounts whose folder tree is collapsed.
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Vec::is_empty")]
+    pub collapsed_accounts: Vec<i64>,
+    /// Folders whose subfolders are hidden.
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Vec::is_empty")]
+    pub collapsed_folders: Vec<FolderRef>,
+}
+
+/// A folder in an account's tree, by its server name (a folder-tree node
+/// may be a parent that holds no mail, so it has no mailbox id).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FolderRef {
+    /// Store id of the account.
+    pub account_id: i64,
+    /// Server name of the folder.
+    pub name: String,
+}
+
 /// When background body indexing runs (see `zmail_sync`'s indexer).
 ///
 /// Indexing downloads message bodies so search can find mail that was never
@@ -138,6 +161,9 @@ pub struct UiPreferences {
     /// Whether the sidebar is collapsed.
     #[serde(deserialize_with = "lenient")]
     pub sidebar_collapsed: bool,
+    /// Collapsed accounts and folders in the sidebar.
+    #[serde(deserialize_with = "lenient")]
+    pub sidebar_tree: SidebarTree,
     /// The mailbox (or virtual mailbox) that was open when the app last
     /// closed.
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
@@ -162,6 +188,7 @@ impl Default for UiPreferences {
             reading_pane: ReadingPanePosition::default(),
             pane_widths: PaneWidths::default(),
             sidebar_collapsed: false,
+            sidebar_tree: SidebarTree::default(),
             last_mailbox: None,
             keymap: KeymapName::default(),
             undo_send_delay_secs: DEFAULT_UNDO_SEND_DELAY_SECS,
@@ -236,6 +263,13 @@ mod tests {
                 message_list: Some(420.5),
             },
             sidebar_collapsed: true,
+            sidebar_tree: SidebarTree {
+                collapsed_accounts: vec![2],
+                collapsed_folders: vec![FolderRef {
+                    account_id: 3,
+                    name: "Projects".to_owned(),
+                }],
+            },
             last_mailbox: Some(MailboxSelection::Mailbox {
                 account_id: 3,
                 mailbox_id: 42,
