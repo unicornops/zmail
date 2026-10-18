@@ -1566,7 +1566,7 @@ impl WorkspaceView {
 
     /// The "Fix…" action on an account whose sync fails: open the account
     /// form with the error. There is no Settings → Accounts page yet
-    /// (#121), so this is the form that exists.
+    /// (#120), so this is the form that exists.
     fn fix_account(&mut self, account_id: i64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(account) = self
             .accounts
