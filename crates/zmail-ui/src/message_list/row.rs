@@ -37,7 +37,7 @@ use crate::styles::{
     ROW_TITLE_LINE_HEIGHT, TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TypeStyleExt,
     UNREAD_INDICATOR_SIZE, UiColors,
 };
-use crate::widgets::{EllipsisExt, HoverExt, icon};
+use crate::widgets::{EllipsisExt, HoverExt, account_dot, icon};
 
 /// Share of a compact row the sender column takes.
 const COMPACT_SENDER_WIDTH: f32 = 0.3;
@@ -91,12 +91,11 @@ pub(super) enum SnippetTone {
 }
 
 /// The account chip of a row in a cross-account list: the account's
-/// colour dot and name.
+/// colour dot (the same as its sidebar header's) and name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RowAccount {
+    pub(super) id: i64,
     pub(super) name: String,
-    /// The account colour, when one is set.
-    pub(super) color: Option<u32>,
 }
 
 impl MessageRow {
@@ -636,15 +635,7 @@ fn status_icons(row: &MessageRow, colors: &UiColors) -> Vec<gpui::Div> {
                     let part = row.part("account");
                     move || part
                 })
-                .when_some(account.color, |this, color| {
-                    this.child(
-                        div()
-                            .flex_none()
-                            .size(px(UNREAD_INDICATOR_SIZE))
-                            .rounded_full()
-                            .bg(rgb(color)),
-                    )
-                })
+                .child(account_dot(account.id))
                 .child(
                     div()
                         .min_w_0()

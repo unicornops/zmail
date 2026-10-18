@@ -551,3 +551,27 @@ fn drafts_and_the_outbox_reuse_the_message_row(cx: &mut TestAppContext) {
         .map(|listed| listed.state);
     assert_ne!(state, Some(OutboxJobState::Failed), "the job is requeued");
 }
+
+#[gpui::test]
+fn the_sidebar_follows_the_row_density(cx: &mut TestAppContext) {
+    let (_view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let height = |cx: &mut VisualTestContext| {
+        let bounds = cx
+            .debug_bounds("sidebar-drafts")
+            .expect("the Drafts favourite is drawn");
+        f32::from(bounds.size.height)
+    };
+    assert_eq!(height(cx), DensityTokens::COMFORTABLE.sidebar_row_height);
+
+    cx.dispatch_action(ToggleDensity);
+    cx.run_until_parked();
+    assert_eq!(height(cx), DensityTokens::COMPACT.sidebar_row_height);
+    assert_eq!(
+        harness
+            .store
+            .ui_preferences()
+            .expect("the preferences load")
+            .density,
+        Density::Compact
+    );
+}
