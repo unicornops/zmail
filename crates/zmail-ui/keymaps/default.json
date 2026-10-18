@@ -47,6 +47,9 @@
       "home": "zmail::SelectFirst",
       "end": "zmail::SelectLast",
       "enter": "zmail::OpenSelected",
+      "shift-down": "zmail::ExtendSelectionDown",
+      "shift-up": "zmail::ExtendSelectionUp",
+      "secondary-a": "zmail::SelectAll",
       "secondary-z": "zmail::Undo"
     }
   },

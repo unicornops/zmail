@@ -10,11 +10,12 @@
 //! | `workspace` | the shell: store refresh, selection, pane coordination, action handlers |
 //! | `toolbar` | the shell's toolbar and search field |
 //! | `sidebar` | `SidebarView`: accounts and mailboxes |
-//! | `message_list` | `MessageListView`: threads, search results, drafts, outbox |
+//! | `message_list` | `MessageListView`: threads, search results, drafts, outbox; its multi-row selection and bulk bar |
 //! | `reader` | `ReaderView`: the open conversation and its actions |
 //! | `compose` | `ComposeView`: the open draft |
 //! | `account_setup` | `AccountSetupView`: the new-account form |
 //! | `mail_actions` | `MailActions`: store writes, `MailEvent`s and undo |
+//! | `move_picker` | `MovePicker`: the searchable Move to… folder picker |
 //! | `actions` | every command as a GPUI action |
 //! | `keymap` | loads `keymaps/default.json` (and `keymaps/macos.json` on macOS) |
 //! | `menus` | `MenuModel`, the command menus; the native macOS menu bar; app-wide commands (Quit, Hide, …) |
@@ -61,6 +62,7 @@ mod layout;
 mod mail_actions;
 mod menus;
 mod message_list;
+mod move_picker;
 mod pane;
 mod preferences;
 mod reader;
@@ -109,6 +111,9 @@ pub enum InitialView {
     /// The inbox with keyboard focus in the sidebar, which opens it as an
     /// overlay in a window too narrow for the sidebar pane.
     Sidebar,
+    /// The inbox with its three newest threads selected, so the bulk
+    /// action bar shows.
+    MultiSelect,
 }
 
 /// Runs the native Phase 4 shell.
@@ -322,6 +327,9 @@ struct WorkspaceView {
     /// Collapsed accounts and folders in the sidebar (persisted).
     sidebar_tree: zmail_core::preferences::SidebarTree,
     selected_thread_id: Option<i64>,
+    /// The message list's multi-row selection; empty unless more than one
+    /// row is selected. The conversation commands then act on all of them.
+    list_selection: message_list::ListSelection,
     selected_draft_id: Option<i64>,
     selected_outbox_job_id: Option<i64>,
     list_mode: ListMode,

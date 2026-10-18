@@ -64,7 +64,7 @@ struct Harness {
 }
 
 /// A theme with no colour tokens, so the bundled palette applies.
-fn theme(appearance: ThemeAppearance) -> ThemeSummary {
+pub(crate) fn theme(appearance: ThemeAppearance) -> ThemeSummary {
     ThemeSummary {
         family_name: "Test".to_owned(),
         theme_name: "Test".to_owned(),
@@ -990,6 +990,151 @@ fn undo_in_a_text_field_edits_the_text_not_the_mail(cx: &mut TestAppContext) {
     );
 }
 
+/// The list's multi-row selection, as the shell keeps it.
+fn selection(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<i64> {
+    cx.read_entity(view, |view, _| view.list_selection.thread_ids.clone())
+}
+
+/// Clicks list row `index` with `modifiers` held.
+fn click_row(index: usize, modifiers: Modifiers, cx: &mut VisualTestContext) {
+    let bounds = cx
+        .debug_bounds(Box::leak(format!("thread-row-{index}").into_boxed_str()))
+        .expect("the row is drawn");
+    cx.simulate_click(bounds.center(), modifiers);
+    cx.run_until_parked();
+}
+
+/// What the reader shows: the selected count, and whether a conversation
+/// is open.
+fn reader_shows(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> (usize, bool) {
+    cx.read_entity(view, |view, cx| {
+        let state = view.reader.read(cx).state();
+        (state.selected_count, state.thread.is_some())
+    })
+}
+
+#[gpui::test]
+fn modifier_clicks_build_a_selection_and_the_reader_counts_it(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let threads = harness.threads.clone();
+    assert_eq!(selected_thread(&view, cx), Some(threads[0]));
+
+    // Cmd/Ctrl-click adds a row to the one already selected.
+    click_row(2, Modifiers::secondary_key(), cx);
+    assert_eq!(selection(&view, cx), [threads[0], threads[2]]);
+    assert_eq!(reader_shows(&view, cx), (2, false));
+    assert!(cx.debug_bounds("bulk-bar").is_some(), "the bulk bar shows");
+    assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+
+    // Cmd/Ctrl-click again removes it; one row left is a plain selection.
+    click_row(2, Modifiers::secondary_key(), cx);
+    assert_eq!(selection(&view, cx), Vec::<i64>::new());
+    assert_eq!(selected_thread(&view, cx), Some(threads[0]));
+    assert_eq!(reader_shows(&view, cx), (0, true));
+    assert!(cx.debug_bounds("bulk-bar").is_none());
+
+    // Shift-click selects from the anchor (the row clicked last) to here.
+    click_row(1, Modifiers::none(), cx);
+    click_row(2, Modifiers::shift(), cx);
+    assert_eq!(selection(&view, cx), [threads[1], threads[2]]);
+    click_row(0, Modifiers::shift(), cx);
+    assert_eq!(selection(&view, cx), [threads[0], threads[1]]);
+
+    // A plain click goes back to one row.
+    click_row(2, Modifiers::none(), cx);
+    assert_eq!(selection(&view, cx), Vec::<i64>::new());
+    assert_eq!(selected_thread(&view, cx), Some(threads[2]));
+}
+
+#[gpui::test]
+fn shift_arrows_select_and_the_bulk_archive_is_one_undo(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let threads = harness.threads.clone();
+
+    keys("shift-down shift-down", cx);
+    assert_eq!(selection(&view, cx), threads);
+    keys("shift-up", cx);
+    assert_eq!(selection(&view, cx), [threads[0], threads[1]]);
+
+    keys("secondary-e", cx);
+    for thread_id in &threads[..2] {
+        assert_eq!(mailbox_of(&harness, *thread_id), harness.archive_id);
+    }
+    assert_eq!(mailbox_of(&harness, threads[2]), harness.inbox_id);
+    assert_eq!(toasts(&view, cx), ["2 conversations archived"]);
+    assert_eq!(selection(&view, cx), Vec::<i64>::new());
+    assert_eq!(
+        selected_thread(&view, cx),
+        Some(threads[2]),
+        "the row after the archived ones is selected"
+    );
+
+    keys("secondary-z", cx);
+    for thread_id in &threads[..2] {
+        assert_eq!(mailbox_of(&harness, *thread_id), harness.inbox_id);
+    }
+}
+
+#[gpui::test]
+fn select_all_then_flag_read_and_escape(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let threads = harness.threads.clone();
+    let thread = |id: i64| {
+        harness
+            .store
+            .thread_view(id)
+            .expect("the thread loads")
+            .expect("the thread exists")
+    };
+
+    keys("secondary-a", cx);
+    assert_eq!(selection(&view, cx), threads);
+    assert_eq!(reader_shows(&view, cx), (3, false));
+
+    // Flag and Mark Read act on every selected conversation, which stays
+    // selected.
+    keys("secondary-shift-l secondary-shift-u", cx);
+    assert!(threads.iter().all(|id| thread(*id).is_flagged));
+    assert!(threads.iter().all(|id| thread(*id).unread_count == 0));
+    assert_eq!(selection(&view, cx), threads);
+    assert_eq!(toasts(&view, cx), ["3 conversations marked as read"]);
+    // All flagged now, so Flag removes the flags.
+    keys("secondary-shift-l", cx);
+    assert!(threads.iter().all(|id| !thread(*id).is_flagged));
+
+    keys("escape", cx);
+    assert_eq!(selection(&view, cx), Vec::<i64>::new());
+    assert_eq!(reader_shows(&view, cx), (0, true));
+}
+
+#[gpui::test]
+fn the_window_can_open_on_a_selection(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace_on(cx, Setup::Mail, |_| InitialView::MultiSelect);
+    assert_eq!(selection(&view, cx), harness.threads);
+    assert_eq!(reader_shows(&view, cx), (3, false));
+    assert!(cx.debug_bounds("bulk-bar").is_some());
+}
+
+#[gpui::test]
+fn the_bulk_bar_moves_the_selection_with_the_folder_picker(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let threads = harness.threads.clone();
+    keys("shift-down", cx);
+
+    let bounds = cx.debug_bounds("bulk-move").expect("Move to… shows");
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_input("tra");
+    keys("enter", cx);
+
+    for thread_id in &threads[..2] {
+        assert_eq!(mailbox_of(&harness, *thread_id), harness.trash_id);
+    }
+    assert_eq!(toasts(&view, cx), ["2 conversations moved to Trash"]);
+    assert_eq!(selected_thread(&view, cx), Some(threads[2]));
+    assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+}
+
 #[gpui::test]
 fn conversation_actions_have_keys_and_undo(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::Mail);
@@ -1620,6 +1765,49 @@ fn the_unified_inbox_lists_every_account_and_follows_the_open_thread(cx: &mut Te
             MailboxRole::Inbox
         )))
     );
+}
+
+#[gpui::test]
+fn a_selection_across_accounts_acts_on_each_and_offers_no_folders(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    view.update(cx, |view, cx| {
+        view.select_virtual_mailbox(VirtualMailbox::Unified(MailboxRole::Inbox), cx)
+    });
+    cx.run_until_parked();
+    let (home_newest, work_newest) = (harness.home_threads[0], harness.threads[0]);
+
+    // Home's newest and Work's newest: two accounts, so no Move to….
+    keys("shift-down", cx);
+    assert_eq!(selection(&view, cx), [home_newest, work_newest]);
+    assert!(cx.debug_bounds("bulk-bar").is_some());
+    assert!(cx.debug_bounds("bulk-move").is_none());
+    // Flag acts on both accounts' threads.
+    keys("secondary-shift-l", cx);
+    for thread_id in [home_newest, work_newest] {
+        assert!(
+            harness
+                .store
+                .thread_view(thread_id)
+                .expect("the thread loads")
+                .expect("the thread exists")
+                .is_flagged
+        );
+    }
+
+    // Work's two newest: one account, so its folders are offered.
+    keys("escape shift-down", cx);
+    assert_eq!(
+        selection(&view, cx),
+        [harness.threads[0], harness.threads[1]]
+    );
+    let bounds = cx.debug_bounds("bulk-move").expect("Move to… shows");
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_input("arch");
+    keys("enter", cx);
+    for thread_id in &harness.threads[..2] {
+        assert_eq!(mailbox_of(&harness, *thread_id), harness.archive_id);
+    }
 }
 
 #[gpui::test]

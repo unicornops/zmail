@@ -198,11 +198,20 @@ impl MailActions {
     ) -> Result<()> {
         let mut change = Change::default();
         let mut destination = None;
+        // A folder belongs to one account; threads of other accounts in a
+        // cross-account selection stay where they are.
+        let destination_account = self
+            .store
+            .list_all_mailboxes()?
+            .into_iter()
+            .find(|mailbox| mailbox.id == to_mailbox_id)
+            .map(|mailbox| mailbox.account_id);
         let result = thread_ids.iter().try_for_each(|&thread_id| {
             let Some(before) = self.thread(thread_id)? else {
                 return Ok(());
             };
-            if before.mailbox_id == to_mailbox_id {
+            if before.mailbox_id == to_mailbox_id || Some(before.account_id) != destination_account
+            {
                 return Ok(());
             }
             self.store.move_thread(thread_id, to_mailbox_id)?;

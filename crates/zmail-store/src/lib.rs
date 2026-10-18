@@ -23,8 +23,8 @@ use zmail_core::{
     OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp,
     PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, ServerHitRef,
     StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget,
-    ThreadCounts, ThreadMessage, ThreadSnapshot, ThreadState, ThreadSummary, ThreadView,
-    VirtualMailbox, preferences::UiPreferences,
+    ThreadCounts, ThreadMarks, ThreadMessage, ThreadSnapshot, ThreadState, ThreadSummary,
+    ThreadView, VirtualMailbox, preferences::UiPreferences,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -1604,16 +1604,22 @@ impl LocalStore {
     /// without the bodies [`Self::thread_view`] hydrates.
     pub fn thread_state(&self, thread_id: i64) -> Result<Option<ThreadState>> {
         let conn = self.connection()?;
-        let Some((mailbox_id, mailbox_name)) = conn
+        let Some((account_id, mailbox_id, mailbox_name)) = conn
             .query_row(
                 r#"
-                SELECT threads.mailbox_id, mailboxes.name
+                SELECT mailboxes.account_id, threads.mailbox_id, mailboxes.name
                 FROM threads
                 JOIN mailboxes ON mailboxes.id = threads.mailbox_id
                 WHERE threads.id = ?1
                 "#,
                 params![thread_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()
             .context("failed to load the thread's mailbox")?
@@ -1640,10 +1646,63 @@ impl LocalStore {
             .context("failed to load the thread's message states")?;
         Ok(Some(ThreadState {
             id: thread_id,
+            account_id,
             mailbox_id,
             mailbox_name,
             messages,
         }))
+    }
+
+    /// The account, mailbox, flag and unread state of each of
+    /// `thread_ids` that still exists and, given `listed_in`, is still in
+    /// that thread list, in no particular order. A multi-row selection
+    /// reads this to label its actions and to drop threads that left the
+    /// list.
+    pub fn thread_marks(
+        &self,
+        thread_ids: &[i64],
+        listed_in: Option<&MailboxSelection>,
+    ) -> Result<Vec<ThreadMarks>> {
+        let conn = self.connection()?;
+        let (filter, filter_values) = match listed_in {
+            Some(selection) => selection_filter(selection),
+            None => ("1".to_owned(), Vec::new()),
+        };
+        let mut marks = Vec::with_capacity(thread_ids.len());
+        // Stay well inside SQLite's bound-parameter limit.
+        for chunk in thread_ids.chunks(500) {
+            let first = filter_values.len() + 1;
+            let placeholders = (first..first + chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut statement = conn.prepare(&format!(
+                r#"
+                SELECT threads.id, mailboxes.account_id, threads.mailbox_id,
+                       threads.is_flagged, threads.unread_count > 0
+                FROM threads
+                JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+                WHERE threads.id IN ({placeholders}) AND {filter}
+                "#
+            ))?;
+            let values = filter_values
+                .iter()
+                .cloned()
+                .chain(chunk.iter().map(|id| rusqlite::types::Value::from(*id)));
+            let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
+                Ok(ThreadMarks {
+                    id: row.get(0)?,
+                    account_id: row.get(1)?,
+                    mailbox_id: row.get(2)?,
+                    is_flagged: row.get(3)?,
+                    is_unread: row.get(4)?,
+                })
+            })?;
+            for row in rows {
+                marks.push(row.context("failed to load a selected thread")?);
+            }
+        }
+        Ok(marks)
     }
 
     /// Puts each listed message of the thread back to the given read and
