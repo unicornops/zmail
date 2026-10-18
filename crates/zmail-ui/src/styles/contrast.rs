@@ -217,6 +217,15 @@ mod tests {
             MIN_TEXT_CONTRAST,
         );
 
+        // The message list's thread-count pill is a neutral badge: the
+        // readable theme colour on the button fill.
+        push(
+            "thread-count pill text".to_owned(),
+            readable_on(c.button_background, &[c.foreground, c.background]),
+            c.button_background,
+            MIN_TEXT_CONTRAST,
+        );
+
         // State and boundary indicators against the panes they sit on.
         for (pane_name, pane) in [("background", c.background), ("surface", c.surface)] {
             push(

@@ -44,6 +44,8 @@ MATRIX=(
   "empty-light empty light 1440 920"
   "inbox-dark inbox dark 1440 920"
   "inbox-light inbox light 1440 920"
+  "inbox-compact-dark inbox-compact dark 1440 920"
+  "inbox-compact-light inbox-compact light 1440 920"
   "reader-dark reader dark 1440 920"
   "reader-light reader light 1440 920"
   "compose-dark compose dark 1440 920"

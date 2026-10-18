@@ -11,7 +11,8 @@ use anyhow::{Context, Result, bail};
 use zmail_core::{
     AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxSnapshot, MessageAttachment,
     MessageSnapshot, NewAccount, NewDraft, NewIdentity, OutgoingConfig, ProtocolKind,
-    ThemeAppearance, ThreadSnapshot, participants::thread_participants, time::utc_timestamp,
+    ThemeAppearance, ThreadSnapshot, participants::thread_participants, preferences::Density,
+    time::utc_timestamp,
 };
 use zmail_store::LocalStore;
 use zmail_ui::InitialView;
@@ -23,6 +24,8 @@ pub(crate) enum FixtureView {
     Empty,
     /// The seeded inbox with its newest thread open.
     Inbox,
+    /// The seeded inbox with compact (one-line) rows.
+    InboxCompact,
     /// The reader on a longer conversation with an attachment.
     Reader,
     /// The compose pane on a half-written reply.
@@ -39,12 +42,13 @@ impl FixtureView {
         Ok(match value {
             "empty" => Self::Empty,
             "inbox" => Self::Inbox,
+            "inbox-compact" => Self::InboxCompact,
             "reader" => Self::Reader,
             "compose" => Self::Compose,
             "account-setup" => Self::AccountSetup,
             "sidebar" => Self::Sidebar,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, reader, compose, account-setup or sidebar"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, reader, compose, account-setup or sidebar"
             ),
         })
     }
@@ -106,6 +110,12 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
 
     Ok(match view {
         FixtureView::Empty | FixtureView::Inbox => InitialView::Inbox,
+        FixtureView::InboxCompact => {
+            store
+                .update_ui_preferences(|preferences| preferences.density = Density::Compact)
+                .context("failed to save the fixture density")?;
+            InitialView::Inbox
+        }
         FixtureView::AccountSetup => InitialView::AccountSetup,
         FixtureView::Sidebar => InitialView::Sidebar,
         FixtureView::Reader => {
@@ -475,6 +485,7 @@ mod tests {
         for name in [
             "empty",
             "inbox",
+            "inbox-compact",
             "reader",
             "compose",
             "account-setup",
@@ -510,6 +521,16 @@ mod tests {
         let threads = store.list_threads(inbox, 0..100)?;
         assert_eq!(threads.len(), INBOX.len());
         assert_eq!(threads[0].subject, INBOX[0].subject);
+        Ok(())
+    }
+
+    #[test]
+    fn inbox_compact_saves_compact_rows() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::InboxCompact)?;
+        assert_eq!(initial_view, InitialView::Inbox);
+        assert_eq!(store.ui_preferences()?.density, Density::Compact);
+        let (store, _) = seeded(FixtureView::Inbox)?;
+        assert_eq!(store.ui_preferences()?.density, Density::Comfortable);
         Ok(())
     }
 

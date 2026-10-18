@@ -63,6 +63,8 @@ actions!(
         SyncAll,
         /// Switch between the light and dark theme.
         ToggleTheme,
+        /// Switch the message list between comfortable and compact rows.
+        ToggleDensity,
         /// Show or hide the sidebar.
         ToggleSidebar,
         /// In the single-pane layout, go back from the detail pane to the
@@ -159,6 +161,10 @@ pub(crate) const ACTIONS_WITHOUT_KEYS: &[(&str, &str)] = &[
     ("zmail::MoveToMailbox", "needs a mailbox argument"),
     ("zmail::RemoveAttachment", "needs an attachment argument"),
     ("zmail::SelectIdentity", "needs an identity argument"),
+    (
+        "zmail::ToggleDensity",
+        "a View menu setting, rarely switched; no key to collide with",
+    ),
     ("zmail::RunSearch", "Enter in the search field submits it"),
     (
         "zmail::ShowAll",

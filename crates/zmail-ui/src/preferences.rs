@@ -1,14 +1,16 @@
 //! Reads and writes the persisted [`UiPreferences`] for the workspace.
 //!
-//! The theme mode, the sidebar's collapsed state and the pane widths are
-//! wired up so far; density, the reading pane and the rest are stored by
-//! `zmail-store` and get wired as the views that use them land.
+//! The theme mode, the sidebar's collapsed state, the pane widths and the
+//! list density are wired up so far; the reading pane and the rest are
+//! stored by `zmail-store` and get wired as the views that use them land.
 
-use gpui::WindowAppearance;
+use gpui::{Context, Window, WindowAppearance};
 use zmail_core::{
     ThemeAppearance,
-    preferences::{PaneWidths, ThemeMode, UiPreferences},
+    preferences::{Density, PaneWidths, ThemeMode, UiPreferences},
 };
+
+use crate::actions::ToggleDensity;
 
 use super::WorkspaceView;
 
@@ -40,6 +42,7 @@ impl WorkspaceView {
         match self.store.ui_preferences() {
             Ok(preferences) => {
                 self.sidebar_collapsed = preferences.sidebar_collapsed;
+                self.density = preferences.density;
                 if let Some(width) = preferences.pane_widths.sidebar {
                     self.sidebar_width = width;
                 }
@@ -73,6 +76,27 @@ impl WorkspaceView {
         }) {
             self.store_error = Some(format!("Could not save the layout: {error:#}"));
         }
+    }
+
+    /// Switches the message list between comfortable and compact rows and
+    /// saves the choice.
+    pub(crate) fn toggle_density(
+        &mut self,
+        _: &ToggleDensity,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.density = match self.density {
+            Density::Comfortable => Density::Compact,
+            Density::Compact => Density::Comfortable,
+        };
+        let density = self.density;
+        if let Err(error) = self.store.update_ui_preferences(|preferences| {
+            preferences.density = density;
+        }) {
+            self.store_error = Some(format!("Could not save the row density: {error:#}"));
+        }
+        cx.notify();
     }
 
     /// Saves the sidebar and list widths.

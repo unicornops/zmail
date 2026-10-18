@@ -11,19 +11,21 @@
 //! [`MessageListView::reload_rows`] after a store refresh, which re-reads
 //! the cached page and only re-renders when it changed.
 
+mod row;
+
 use std::ops::Range;
 
 use gpui::{
     AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
-    Render, ScrollStrategy, SharedString, StatefulInteractiveElement, UniformListScrollHandle,
-    Window, div, prelude::*, px, rgb, uniform_list,
+    Render, Role, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div, prelude::*,
+    rgb, uniform_list,
 };
 use std::sync::Arc;
 use zmail_core::{
     DraftState, DraftSummary, MailboxSelection, OutboxJobSummary, SearchHit, ThreadSummary,
-    participants::{participant_summary, sender_display_name},
+    preferences::Density,
     text::count_noun,
-    time::{HourCycle, format_full_date, format_list_date},
+    time::{HourCycle, format_list_date},
 };
 use zmail_store::LocalStore;
 
@@ -33,16 +35,10 @@ use crate::actions::{
 };
 use crate::components::{Button, ButtonSize};
 use crate::pane::{dispatch_from, pane_focus_indicator};
-use crate::styles::{
-    AVATAR_SIZE, ICON_SIZE_SM, LIST_ITEM_HEIGHT, ROW_LINE_GAP, ROW_PADDING_Y,
-    ROW_PREVIEW_LINE_HEIGHT, ROW_SENDER_LINE_HEIGHT, ROW_TITLE_LINE_HEIGHT, UNREAD_INDICATOR_SIZE,
-    UiColors,
-};
-use crate::tooltip::text_tooltip;
-use crate::widgets::{
-    EllipsisExt, HoverExt, avatar, badge, empty_state, icon, interactive_background, list_row,
-    message_avatar_background, toolbar_button,
-};
+use crate::styles::{DensityTokens, UiColors};
+use crate::widgets::{HoverExt, empty_state, interactive_background, list_row, toolbar_button};
+
+use self::row::{MessageRow, RowAccount, display_subject, row_content, row_shell};
 
 /// The key context the list sets.
 pub(crate) const KEY_CONTEXT: &str = "MessageList";
@@ -92,13 +88,13 @@ pub(crate) struct MessageListState {
     pub(crate) selected_draft_id: Option<i64>,
     pub(crate) outbox_jobs: Vec<OutboxJobSummary>,
     pub(crate) selected_outbox_job_id: Option<i64>,
+    /// Comfortable (three-line) or compact (one-line) rows.
+    pub(crate) density: Density,
 }
 
 impl MessageListState {
     /// The account a thread row comes from, named only in lists that span
     /// accounts (the Unified Inbox, Flagged, Sent).
-    // Rendered by the Phase 3 message rows (#117).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn row_account_name(&self, account_id: i64) -> Option<&str> {
         let spans_accounts = matches!(
             self.mailbox.as_ref().map(|mailbox| mailbox.selection),
@@ -127,6 +123,7 @@ impl Default for MessageListState {
             selected_draft_id: None,
             outbox_jobs: Vec::new(),
             selected_outbox_job_id: None,
+            density: Density::default(),
         }
     }
 }
@@ -296,6 +293,11 @@ impl MessageListView {
         let from = range.start.saturating_sub(page.start).min(page.rows.len());
         let to = range.end.saturating_sub(page.start).min(page.rows.len());
         page.rows[from..to].to_vec()
+    }
+
+    /// Row geometry for the chosen density.
+    fn density_tokens(&self) -> DensityTokens {
+        DensityTokens::for_density(self.state.density)
     }
 
     // -----------------------------------------------------------------------
@@ -628,7 +630,7 @@ impl MessageListView {
         let start = range.start;
         let threads = self.thread_rows(range, cx);
         let now = chrono::Local::now();
-        let hour_cycle = self.hour_cycle;
+        let density = self.density_tokens();
         let own_addresses = self
             .state
             .own_addresses
@@ -642,30 +644,27 @@ impl MessageListView {
             .map(|(offset, thread)| {
                 let index = start + offset;
                 let (thread_id, mailbox_id) = (thread.id, thread.mailbox_id);
-                let sender_name = sender_display_name(&thread.latest_sender);
-                let sender_line = if thread.message_count > 1
-                    && !thread.participants.trim().is_empty()
-                {
-                    participant_summary(&thread.participants, thread.message_count, &own_addresses)
-                } else {
-                    sender_name.clone()
-                };
                 let row_id = thread_row_id(thread_id);
                 let is_selected = Some(thread_id) == self.state.selected_thread_id;
-                let background_color =
-                    rgb(interactive_background(is_selected, colors.surface, colors));
+                let mut row = MessageRow::thread(
+                    row_id.clone(),
+                    &thread,
+                    &own_addresses,
+                    &now,
+                    self.hour_cycle,
+                );
+                row.account =
+                    self.state
+                        .row_account_name(thread.account_id)
+                        .map(|name| RowAccount {
+                            name: name.to_owned(),
+                            color: None,
+                        });
 
-                div()
-                    .id(row_id.clone())
+                row_shell(row_id, is_selected, density, colors)
                     .debug_selector(move || format!("thread-row-{index}"))
-                    .w_full()
-                    .h(px(LIST_ITEM_HEIGHT))
-                    .px_3()
-                    .py(px(ROW_PADDING_Y))
-                    .cursor_pointer()
-                    .border_b_1()
-                    .border_color(rgb(colors.border))
-                    .bg(background_color)
+                    .role(Role::ListItem)
+                    .aria_label(row.accessible_label())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected_index_hint = Some((thread_id, index));
                         this.state.selected_thread_id = Some(thread_id);
@@ -676,26 +675,7 @@ impl MessageListView {
                         cx.emit(MessageListEvent::RowClicked);
                         cx.notify();
                     }))
-                    .hover_bg(is_selected, colors)
-                    .child(conversation_list_row(
-                        ConversationRow {
-                            id: row_id.clone(),
-                            subject: &thread.subject,
-                            sender_line: &sender_line,
-                            preview: &thread.preview,
-                            date: format_list_date(&thread.latest_message_at, &now, hour_cycle),
-                            date_tooltip: format_full_date(
-                                &thread.latest_message_at,
-                                &now.timezone(),
-                                hour_cycle,
-                            ),
-                            avatar_seed: &sender_name,
-                            unread_count: thread.unread_count,
-                            is_flagged: thread.is_flagged,
-                            has_attachments: thread.has_attachments,
-                        },
-                        colors,
-                    ))
+                    .child(row_content(row, None, density, colors))
             })
             .collect()
     }
@@ -711,28 +691,21 @@ impl MessageListView {
             );
         }
         let now = chrono::Local::now();
+        let density = self.density_tokens();
         div()
             .id("search-results-list")
             .flex_1()
             .overflow_y_scroll()
             .children(self.state.search_results.iter().map(|hit| {
-                let sender_name = sender_display_name(&hit.latest_sender);
                 let mailbox_id = hit.mailbox_id;
                 let thread_id = hit.thread_id;
                 let row_id = search_row_id(thread_id);
                 let is_selected = Some(thread_id) == self.state.selected_thread_id;
-                let background_color =
-                    rgb(interactive_background(is_selected, colors.surface, colors));
+                let row = MessageRow::search_hit(row_id.clone(), hit, &now, self.hour_cycle);
 
-                div()
-                    .id(row_id.clone())
-                    .h(px(LIST_ITEM_HEIGHT))
-                    .px_3()
-                    .py(px(ROW_PADDING_Y))
-                    .cursor_pointer()
-                    .border_b_1()
-                    .border_color(rgb(colors.border))
-                    .bg(background_color)
+                row_shell(row_id, is_selected, density, colors)
+                    .role(Role::ListItem)
+                    .aria_label(row.accessible_label())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.selected_thread_id = Some(thread_id);
                         cx.emit(MessageListEvent::OpenThread {
@@ -742,35 +715,7 @@ impl MessageListView {
                         cx.emit(MessageListEvent::RowClicked);
                         cx.notify();
                     }))
-                    .hover_bg(is_selected, colors)
-                    .child(conversation_list_row(
-                        ConversationRow {
-                            id: row_id.clone(),
-                            subject: &hit.subject,
-                            // Server-only hits matched text the local index
-                            // does not hold yet.
-                            sender_line: &if hit.from_server {
-                                format!(
-                                    "{} \u{2022} {} \u{2022} found on server",
-                                    hit.mailbox_name, sender_name
-                                )
-                            } else {
-                                format!("{} \u{2022} {}", hit.mailbox_name, sender_name)
-                            },
-                            preview: &hit.preview,
-                            date: format_list_date(&hit.latest_message_at, &now, self.hour_cycle),
-                            date_tooltip: format_full_date(
-                                &hit.latest_message_at,
-                                &now.timezone(),
-                                self.hour_cycle,
-                            ),
-                            avatar_seed: &sender_name,
-                            unread_count: hit.unread_count,
-                            is_flagged: hit.is_flagged,
-                            has_attachments: hit.has_attachments,
-                        },
-                        colors,
-                    ))
+                    .child(row_content(row, None, density, colors))
             }))
             .into_any_element()
     }
@@ -885,15 +830,6 @@ impl MessageListView {
     }
 }
 
-/// The subject to show for a draft or queued message.
-fn display_subject(subject: &str) -> &str {
-    if subject.trim().is_empty() {
-        "(no subject)"
-    } else {
-        subject
-    }
-}
-
 /// "To: …" line for a draft or queued message.
 fn recipient_line(recipients: &str) -> String {
     if recipients.trim().is_empty() {
@@ -918,134 +854,6 @@ fn draft_meta(draft: &DraftSummary) -> String {
         ));
     }
     parts.join(" • ")
-}
-
-/// Three fixed-height lines beside a `flex_none` avatar:
-///
-/// ```text
-/// [avatar] [dot] [subject...] [flag] [clip]   [date]
-///                [sender...]                  [badge]
-///                [preview...]
-/// ```
-///
-/// Every line has an explicit height and truncates, so a row never grows
-/// past [`LIST_ITEM_HEIGHT`] and long text never pushes the date or badge
-/// out of view.
-fn conversation_list_row(row: ConversationRow<'_>, colors: &UiColors) -> gpui::Div {
-    let avatar_color = message_avatar_background(row.avatar_seed, colors);
-
-    div()
-        .flex()
-        .items_start()
-        .gap_3()
-        .h_full()
-        .w_full()
-        .child(avatar(row.avatar_seed, AVATAR_SIZE, avatar_color, colors))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(ROW_LINE_GAP))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .w_full()
-                        .h(px(ROW_TITLE_LINE_HEIGHT))
-                        .line_height(px(ROW_TITLE_LINE_HEIGHT))
-                        .child(unread_indicator(row.unread_count > 0, colors))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .ellipsis()
-                                .when(row.unread_count > 0, |this| {
-                                    this.font_weight(FontWeight::SEMIBOLD)
-                                })
-                                .child(row.subject.to_owned()),
-                        )
-                        .when(row.is_flagged, |this| {
-                            this.child(icon("star", ICON_SIZE_SM, colors.warning).flex_none())
-                        })
-                        .when(row.has_attachments, |this| {
-                            this.child(icon("paperclip", ICON_SIZE_SM, colors.muted).flex_none())
-                        })
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("{}-date", row.id)))
-                                .flex_none()
-                                .whitespace_nowrap()
-                                .text_sm()
-                                .text_color(rgb(colors.muted))
-                                .tooltip(text_tooltip(row.date_tooltip, *colors))
-                                .child(row.date),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .w_full()
-                        .h(px(ROW_SENDER_LINE_HEIGHT))
-                        .line_height(px(ROW_SENDER_LINE_HEIGHT))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_sm()
-                                .text_color(rgb(colors.muted))
-                                .ellipsis()
-                                .child(row.sender_line.to_owned()),
-                        )
-                        .when(row.unread_count > 1, |this| {
-                            this.child(
-                                badge(row.unread_count, colors.accent, colors.background)
-                                    .flex_none(),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(ROW_PREVIEW_LINE_HEIGHT))
-                        .line_height(px(ROW_PREVIEW_LINE_HEIGHT))
-                        .text_sm()
-                        .text_color(rgb(colors.muted))
-                        .ellipsis()
-                        .child(row.preview.to_owned()),
-                ),
-        )
-}
-
-struct ConversationRow<'a> {
-    /// Element id of the row; the date's tooltip id derives from it.
-    id: SharedString,
-    subject: &'a str,
-    sender_line: &'a str,
-    preview: &'a str,
-    /// Short relative date ("10:42", "Yesterday", "12 Oct").
-    date: String,
-    /// Full timestamp shown when hovering the date.
-    date_tooltip: String,
-    avatar_seed: &'a str,
-    unread_count: usize,
-    is_flagged: bool,
-    has_attachments: bool,
-}
-
-fn unread_indicator(is_unread: bool, colors: &UiColors) -> gpui::Div {
-    div()
-        .flex_none()
-        .w(px(UNREAD_INDICATOR_SIZE))
-        .h(px(UNREAD_INDICATOR_SIZE))
-        .rounded_full()
-        // Read rows keep the space but draw nothing, so the dot does not
-        // show up against selected or hovered backgrounds.
-        .when(is_unread, |this| this.bg(rgb(colors.accent)))
 }
 
 fn thread_row_id(thread_id: i64) -> SharedString {
