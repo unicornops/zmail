@@ -2,6 +2,7 @@
 
 mod backoff;
 mod imap_watch;
+mod wake;
 
 use std::{
     collections::HashSet,
@@ -21,6 +22,7 @@ use tokio::{
     sync::oneshot,
     time::sleep,
 };
+use wake::{WakeSignal, unless_woken};
 use zmail_core::{
     AuthKind, MailboxSnapshot, PendingOutboxJob, ProtocolKind, RuntimeSummary, SubmissionKind,
     SyncPhase, SyncTarget,
@@ -169,6 +171,9 @@ struct SyncServiceInner {
     /// When a server search last ran a sync for each account, so a burst
     /// of searches cannot run back-to-back full syncs.
     search_syncs: Mutex<std::collections::HashMap<i64, std::time::Instant>>,
+    /// Raised after a sleep or network change so watchers reconnect now.
+    wake: WakeSignal,
+    wake_watchdog_started: AtomicBool,
 }
 
 impl std::fmt::Debug for SyncService {
@@ -206,6 +211,8 @@ impl SyncService {
                 indexing_accounts: Mutex::new(HashSet::new()),
                 power_monitor: Mutex::new(Arc::new(power::SystemPowerMonitor)),
                 search_syncs: Mutex::new(std::collections::HashMap::new()),
+                wake: WakeSignal::new(),
+                wake_watchdog_started: AtomicBool::new(false),
             }),
         };
         service.start_outbox_supervisor();
@@ -557,6 +564,7 @@ impl SyncService {
             }
             interval.expect("the watcher poll interval is always set")
         };
+        self.start_wake_watchdog();
 
         let mut started = 0;
         for target in self.inner.store.list_sync_targets()? {
@@ -614,6 +622,7 @@ impl SyncService {
     async fn run_mail_watcher(&self, target: SyncTarget, poll_interval: Duration) {
         let mut backoff = Backoff::reconnect();
         let mut notify_allowed = true;
+        let mut wake = self.inner.wake.subscribe();
         loop {
             // Stop watching accounts that no longer exist so the watcher
             // registry slot is free if the id is ever reused.
@@ -626,7 +635,12 @@ impl SyncService {
                 // A transient refresh failure (for example an offline token
                 // endpoint) backs off and retries like a dropped connection;
                 // permanent account deletion is caught by the check above.
-                sleep(backoff.next_delay()).await;
+                if unless_woken(&mut wake, sleep(backoff.next_delay()))
+                    .await
+                    .is_none()
+                {
+                    backoff.reset();
+                }
                 continue;
             };
 
@@ -638,11 +652,12 @@ impl SyncService {
                         poll_interval,
                         &mut backoff,
                         &mut notify_allowed,
+                        &mut wake,
                     )
                     .await;
                 }
                 ProtocolKind::Jmap => {
-                    self.watch_jmap_push(&target, &secret, poll_interval, &mut backoff)
+                    self.watch_jmap_push(&target, &secret, poll_interval, &mut backoff, &mut wake)
                         .await;
                 }
             }
@@ -654,40 +669,53 @@ impl SyncService {
     /// reconnects.
     ///
     /// Servers without a usable push transport are polled at
-    /// `poll_interval` instead.
+    /// `poll_interval` instead. A wake signal drops the connection (or cuts
+    /// the wait short) so the caller reconnects at once.
     async fn watch_jmap_push(
         &self,
         target: &SyncTarget,
         secret: &str,
         poll_interval: Duration,
         backoff: &mut Backoff,
+        wake: &mut tokio::sync::watch::Receiver<u64>,
     ) {
         let account_id = target.id;
         let mut connected_at = None;
-        let result = zmail_jmap::watch_mail_changes(
-            target,
-            secret,
-            zmail_jmap::PushPreference::Auto,
-            |event| {
-                // Every connect resyncs: changes made while no stream was
-                // open are not replayed by the server.
-                if let zmail_jmap::PushEvent::Connected(_) = event {
-                    connected_at = Some(Instant::now());
-                }
-                self.request_sync(account_id);
-            },
+        let result = unless_woken(
+            wake,
+            zmail_jmap::watch_mail_changes(
+                target,
+                secret,
+                zmail_jmap::PushPreference::Auto,
+                |event| {
+                    // Every connect resyncs: changes made while no stream
+                    // was open are not replayed by the server.
+                    if let zmail_jmap::PushEvent::Connected(_) = event {
+                        connected_at = Some(Instant::now());
+                    }
+                    self.request_sync(account_id);
+                },
+            ),
         )
         .await;
-        match result {
-            Ok(zmail_jmap::PushEnd::Unsupported) => {
+        let wait = match result {
+            None => {
                 backoff.reset();
-                sleep(poll_interval).await;
-                self.request_sync(account_id);
+                return;
             }
-            Ok(zmail_jmap::PushEnd::Closed(_)) | Err(_) => {
-                let delay = backoff.after_disconnect(connected_at.map(|at: Instant| at.elapsed()));
-                sleep(delay).await;
+            Some(Ok(zmail_jmap::PushEnd::Unsupported)) => {
+                backoff.reset();
+                poll_interval
             }
+            Some(Ok(zmail_jmap::PushEnd::Closed(_)) | Err(_)) => {
+                backoff.after_disconnect(connected_at.map(|at: Instant| at.elapsed()))
+            }
+        };
+        if unless_woken(wake, sleep(wait)).await.is_none() {
+            backoff.reset();
+        }
+        if matches!(result, Some(Ok(zmail_jmap::PushEnd::Unsupported))) {
+            self.request_sync(account_id);
         }
     }
 
