@@ -847,12 +847,129 @@ pub struct PendingOutboxJob {
 pub struct MailboxSummary {
     /// Mailbox identifier.
     pub id: i64,
-    /// Display name.
+    /// Account that owns the mailbox.
+    pub account_id: i64,
+    /// Server name: the full path for IMAP (`Projects/Website`), the
+    /// mailbox's own name for JMAP.
     pub name: String,
+    /// What the mailbox is for, when the server said or the name made it
+    /// clear.
+    pub role: Option<MailboxRole>,
+    /// The IMAP hierarchy delimiter (`/` or `.`); `None` for JMAP and for
+    /// servers with a flat namespace.
+    pub delimiter: Option<String>,
+    /// Server name of the parent mailbox, if the mailbox is nested. The
+    /// parent may not be a stored mailbox itself: IMAP parents that cannot
+    /// hold mail (`\Noselect`, such as Gmail's `[Gmail]`) are not synced.
+    pub parent: Option<String>,
     /// Total thread count in the local store.
     pub total_threads: usize,
     /// Unread thread count.
     pub unread_threads: usize,
+}
+
+impl MailboxSummary {
+    /// The name shown for the mailbox in a folder tree: the last segment
+    /// of an IMAP path, or the JMAP name as is.
+    pub fn leaf_name(&self) -> &str {
+        mailbox_leaf_name(
+            &self.name,
+            self.parent.as_deref(),
+            self.delimiter.as_deref(),
+        )
+    }
+}
+
+/// The last segment of a mailbox name: `name` without its `parent` path
+/// and delimiter, or after the last `delimiter`, or `name` itself.
+pub fn mailbox_leaf_name<'a>(
+    name: &'a str,
+    parent: Option<&str>,
+    delimiter: Option<&str>,
+) -> &'a str {
+    let Some(delimiter) = delimiter.filter(|delimiter| !delimiter.is_empty()) else {
+        return name;
+    };
+    if let Some(leaf) = parent
+        .and_then(|parent| name.strip_prefix(parent))
+        .and_then(|rest| rest.strip_prefix(delimiter))
+        .filter(|leaf| !leaf.is_empty())
+    {
+        return leaf;
+    }
+    name.rsplit_once(delimiter)
+        .map(|(_, leaf)| leaf)
+        .filter(|leaf| !leaf.is_empty())
+        .unwrap_or(name)
+}
+
+/// What a mailbox is for: the special-use roles of RFC 6154 (IMAP) and
+/// RFC 8621 (JMAP) that the app treats specially.
+///
+/// The variants are in sidebar order, so sorting by role puts Inbox first
+/// and Trash last.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MailboxRole {
+    /// Incoming mail.
+    Inbox,
+    /// Unsent drafts.
+    Drafts,
+    /// Copies of sent mail.
+    Sent,
+    /// Archived mail (IMAP `\Archive`, or `\All` where there is no
+    /// archive).
+    Archive,
+    /// Spam.
+    Junk,
+    /// Deleted mail.
+    Trash,
+}
+
+impl MailboxRole {
+    /// Every role, in sidebar order.
+    pub const ALL: [Self; 6] = [
+        Self::Inbox,
+        Self::Drafts,
+        Self::Sent,
+        Self::Archive,
+        Self::Junk,
+        Self::Trash,
+    ];
+
+    /// Stable storage name, as in the `mailboxes.role` column and JMAP.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inbox => "inbox",
+            Self::Drafts => "drafts",
+            Self::Sent => "sent",
+            Self::Archive => "archive",
+            Self::Junk => "junk",
+            Self::Trash => "trash",
+        }
+    }
+
+    /// Human-facing label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Inbox => "Inbox",
+            Self::Drafts => "Drafts",
+            Self::Sent => "Sent",
+            Self::Archive => "Archive",
+            Self::Junk => "Junk",
+            Self::Trash => "Trash",
+        }
+    }
+
+    /// Parses a stored role, ignoring case. Roles the app does not treat
+    /// specially (JMAP's `important`, say) are `None`.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|role| role.as_str().eq_ignore_ascii_case(value.trim()))
+    }
 }
 
 /// Thread metadata shown in the center pane.
@@ -1061,12 +1178,17 @@ pub struct AccountSyncSnapshot {
 }
 
 /// Mailbox snapshot written into the local store by a sync adapter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MailboxSnapshot {
-    /// Display name.
+    /// Server name (the full path for IMAP); the store matches mailboxes
+    /// by it.
     pub name: String,
     /// Server-reported role if known.
     pub role: Option<String>,
+    /// IMAP hierarchy delimiter, if the server has one.
+    pub delimiter: Option<String>,
+    /// Server name of the parent mailbox, if nested.
+    pub parent: Option<String>,
     /// Threads stored within the mailbox.
     pub threads: Vec<ThreadSnapshot>,
 }
@@ -1306,7 +1428,51 @@ pub struct AppBootstrap {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthKind, ProtocolKind};
+    use super::{AuthKind, MailboxRole, ProtocolKind, mailbox_leaf_name};
+
+    #[test]
+    fn mailbox_roles_parse_their_storage_names_ignoring_case() {
+        for role in MailboxRole::ALL {
+            assert_eq!(MailboxRole::parse(role.as_str()), Some(role));
+            assert_eq!(
+                MailboxRole::parse(&role.as_str().to_uppercase()),
+                Some(role)
+            );
+        }
+        assert_eq!(MailboxRole::parse("important"), None);
+        assert_eq!(MailboxRole::parse(""), None);
+        let mut sorted = vec![MailboxRole::Trash, MailboxRole::Inbox, MailboxRole::Sent];
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            [MailboxRole::Inbox, MailboxRole::Sent, MailboxRole::Trash],
+            "roles sort in sidebar order"
+        );
+    }
+
+    #[test]
+    fn leaf_names_drop_the_parent_path() {
+        assert_eq!(
+            mailbox_leaf_name("Projects/Website", Some("Projects"), Some("/")),
+            "Website"
+        );
+        assert_eq!(
+            mailbox_leaf_name("INBOX.Lists.rust", Some("INBOX.Lists"), Some(".")),
+            "rust"
+        );
+        assert_eq!(
+            mailbox_leaf_name("[Gmail]/Sent Mail", Some("[Gmail]"), Some("/")),
+            "Sent Mail"
+        );
+        // JMAP names are already leaves.
+        assert_eq!(
+            mailbox_leaf_name("Website", Some("Projects"), None),
+            "Website"
+        );
+        assert_eq!(mailbox_leaf_name("Inbox", None, Some("/")), "Inbox");
+        assert_eq!(mailbox_leaf_name("a/b", None, Some("")), "a/b");
+        assert_eq!(mailbox_leaf_name("trailing/", None, Some("/")), "trailing/");
+    }
 
     #[test]
     fn auth_kind_round_trips_through_its_database_representation() {

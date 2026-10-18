@@ -17,13 +17,13 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use zmail_core::{
     AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, CachePolicySummary,
     DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate,
-    HydratedBody, IdentitySummary, IndexCandidate, IndexProgress, MailboxSnapshot, MailboxSummary,
-    MessageAttachment, MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft,
-    OAuth2TargetConfig, OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig,
-    OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment,
-    SearchHit, ServerHitRef, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase,
-    SyncStatusSummary, SyncTarget, ThreadMessage, ThreadSnapshot, ThreadSummary, ThreadView,
-    preferences::UiPreferences,
+    HydratedBody, IdentitySummary, IndexCandidate, IndexProgress, MailboxRole, MailboxSnapshot,
+    MailboxSummary, MessageAttachment, MessagePreview, MessageRenderMode, MessageSnapshot,
+    NewAccount, NewDraft, OAuth2TargetConfig, OutboxJobState, OutboxJobSummary, OutgoingAttachment,
+    OutgoingConfig, OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind,
+    ReceivedAttachment, SearchHit, ServerHitRef, StoreStats, SubmissionKind, SubmissionSecurity,
+    SyncPhase, SyncStatusSummary, SyncTarget, ThreadMessage, ThreadSnapshot, ThreadSummary,
+    ThreadView, preferences::UiPreferences,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -50,6 +50,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0014_search_index_v2", SEARCH_INDEX_V2_SCHEMA),
     ("0015_background_indexing", BACKGROUND_INDEXING_SCHEMA),
     ("0016_server_search_hits", SERVER_SEARCH_HITS_SCHEMA),
+    ("0017_mailbox_hierarchy", MAILBOX_HIERARCHY_SCHEMA),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -426,6 +427,20 @@ const PENDING_OP_STATES_SCHEMA: &str = r#"
 ALTER TABLE pending_ops ADD COLUMN state TEXT NOT NULL DEFAULT 'pending';
 CREATE INDEX IF NOT EXISTS idx_pending_ops_state ON pending_ops(account_id, state);
 "#;
+
+/// The mailbox hierarchy for the sidebar's folder tree: the IMAP
+/// hierarchy delimiter and the parent mailbox's server name (JMAP's
+/// `parentId`, resolved to a name). Rows fill in on the next sync.
+const MAILBOX_HIERARCHY_SCHEMA: &str = r#"
+ALTER TABLE mailboxes ADD COLUMN delimiter TEXT;
+ALTER TABLE mailboxes ADD COLUMN parent_name TEXT;
+"#;
+
+/// Orders mailboxes with the special-use roles first, in
+/// [`MailboxRole`] order, then the rest in server order.
+const MAILBOX_ROLE_ORDER: &str = "CASE lower(role) \
+    WHEN 'inbox' THEN 0 WHEN 'drafts' THEN 1 WHEN 'sent' THEN 2 \
+    WHEN 'archive' THEN 3 WHEN 'junk' THEN 4 WHEN 'trash' THEN 5 ELSE 6 END";
 
 static EPHEMERAL_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -1223,26 +1238,21 @@ impl LocalStore {
         Ok(exported)
     }
 
-    /// Lists mailboxes for a single account in display order.
+    /// Lists mailboxes for a single account in display order: the
+    /// special-use roles first (Inbox, Drafts, Sent, Archive, Junk,
+    /// Trash), then the rest in server order.
     pub fn list_mailboxes(&self, account_id: i64) -> Result<Vec<MailboxSummary>> {
         let conn = self.connection()?;
-        let mut statement = conn.prepare(
+        let mut statement = conn.prepare(&format!(
             r#"
-            SELECT id, name, total_threads, unread_threads
+            SELECT {MAILBOX_SUMMARY_COLUMNS}
             FROM mailboxes
             WHERE account_id = ?1
-            ORDER BY sort_order ASC, name ASC
+            ORDER BY {MAILBOX_ROLE_ORDER}, sort_order ASC, name ASC
             "#,
-        )?;
+        ))?;
 
-        let rows = statement.query_map(params![account_id], |row| {
-            Ok(MailboxSummary {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                total_threads: row.get::<_, usize>(2)?,
-                unread_threads: row.get::<_, usize>(3)?,
-            })
-        })?;
+        let rows = statement.query_map(params![account_id], mailbox_summary_from_row)?;
 
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to list mailboxes")
@@ -1254,7 +1264,7 @@ impl LocalStore {
         let mailbox_rows = conn
             .prepare(
                 r#"
-                SELECT id, name, role
+                SELECT id, name, role, delimiter, parent_name
                 FROM mailboxes
                 WHERE account_id = ?1
                 ORDER BY sort_order ASC, name ASC
@@ -1265,13 +1275,15 @@ impl LocalStore {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to list mailbox snapshots")?;
 
         let mut mailboxes = Vec::with_capacity(mailbox_rows.len());
-        for (mailbox_id, name, role) in mailbox_rows {
+        for (mailbox_id, name, role, delimiter, parent) in mailbox_rows {
             let thread_rows = conn
                 .prepare(
                     r#"
@@ -1379,6 +1391,8 @@ impl LocalStore {
             mailboxes.push(MailboxSnapshot {
                 name,
                 role,
+                delimiter,
+                parent,
                 threads,
             });
         }
@@ -2188,28 +2202,51 @@ impl LocalStore {
 
         for (sort_order, mailbox) in snapshot.mailboxes.iter().enumerate() {
             let mailbox_id = match existing_mailboxes.get(&mailbox.name) {
-                Some((existing_id, role, sort_order_stored)) => {
-                    if role.as_deref() != mailbox.role.as_deref()
-                        || *sort_order_stored != sort_order as i64
+                Some(existing) => {
+                    if existing.role.as_deref() != mailbox.role.as_deref()
+                        || existing.sort_order != sort_order as i64
+                        || existing.delimiter != mailbox.delimiter
+                        || existing.parent != mailbox.parent
                     {
                         transaction
                             .execute(
-                                "UPDATE mailboxes SET role = ?2, sort_order = ?3 WHERE id = ?1",
-                                params![existing_id, mailbox.role, sort_order as i64],
+                                r#"
+                                UPDATE mailboxes
+                                SET role = ?2, sort_order = ?3, delimiter = ?4, parent_name = ?5
+                                WHERE id = ?1
+                                "#,
+                                params![
+                                    existing.id,
+                                    mailbox.role,
+                                    sort_order as i64,
+                                    mailbox.delimiter,
+                                    mailbox.parent
+                                ],
                             )
                             .context("failed to update the mailbox during the snapshot merge")?;
                     }
-                    *existing_id
+                    existing.id
                 }
                 None => {
-                    transaction.execute(
-                        r#"
-                        INSERT INTO mailboxes(account_id, name, role, sort_order, total_threads, unread_threads)
-                        VALUES (?1, ?2, ?3, ?4, 0, 0)
+                    transaction
+                        .execute(
+                            r#"
+                        INSERT INTO mailboxes(
+                            account_id, name, role, sort_order, delimiter, parent_name,
+                            total_threads, unread_threads
+                        )
+                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0)
                         "#,
-                        params![account_id, mailbox.name, mailbox.role, sort_order as i64],
-                    )
-                    .context("failed to insert the mailbox during the snapshot merge")?;
+                            params![
+                                account_id,
+                                mailbox.name,
+                                mailbox.role,
+                                sort_order as i64,
+                                mailbox.delimiter,
+                                mailbox.parent
+                            ],
+                        )
+                        .context("failed to insert the mailbox during the snapshot merge")?;
                     transaction.last_insert_rowid()
                 }
             };
@@ -2247,10 +2284,10 @@ impl LocalStore {
             .iter()
             .map(|mailbox| mailbox.name.as_str())
             .collect();
-        for (name, (mailbox_id, _, _)) in &existing_mailboxes {
+        for (name, existing) in &existing_mailboxes {
             if !snapshot_names.contains(name.as_str()) {
                 transaction
-                    .execute("DELETE FROM mailboxes WHERE id = ?1", params![mailbox_id])
+                    .execute("DELETE FROM mailboxes WHERE id = ?1", params![existing.id])
                     .with_context(|| {
                         format!("failed to remove the {name} mailbox missing from the snapshot")
                     })?;
@@ -4322,24 +4359,55 @@ fn replace_account_identities(
     Ok(())
 }
 
-/// An existing mailbox row: id, server role, and sort order.
-type ExistingMailbox = (i64, Option<String>, i64);
+/// The `mailboxes` columns [`mailbox_summary_from_row`] reads, in order.
+const MAILBOX_SUMMARY_COLUMNS: &str =
+    "id, account_id, name, role, delimiter, parent_name, total_threads, unread_threads";
+
+/// Reads a [`MailboxSummary`] from a row of [`MAILBOX_SUMMARY_COLUMNS`].
+fn mailbox_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MailboxSummary> {
+    Ok(MailboxSummary {
+        id: row.get(0)?,
+        account_id: row.get(1)?,
+        name: row.get(2)?,
+        role: row
+            .get::<_, Option<String>>(3)?
+            .as_deref()
+            .and_then(MailboxRole::parse),
+        delimiter: row.get(4)?,
+        parent: row.get(5)?,
+        total_threads: row.get::<_, usize>(6)?,
+        unread_threads: row.get::<_, usize>(7)?,
+    })
+}
+
+/// An existing mailbox row, as the snapshot merge compares it.
+struct ExistingMailbox {
+    id: i64,
+    role: Option<String>,
+    sort_order: i64,
+    delimiter: Option<String>,
+    parent: Option<String>,
+}
 
 /// Loads the mailbox rows for an account, keyed by mailbox name.
 fn load_account_mailbox_ids(
     transaction: &Transaction<'_>,
     account_id: i64,
 ) -> Result<std::collections::HashMap<String, ExistingMailbox>> {
-    let mut statement = transaction
-        .prepare("SELECT id, name, role, sort_order FROM mailboxes WHERE account_id = ?1")?;
+    let mut statement = transaction.prepare(
+        "SELECT id, name, role, sort_order, delimiter, parent_name \
+         FROM mailboxes WHERE account_id = ?1",
+    )?;
     let rows = statement.query_map(params![account_id], |row| {
         Ok((
             row.get::<_, String>(1)?,
-            (
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, i64>(3)?,
-            ),
+            ExistingMailbox {
+                id: row.get(0)?,
+                role: row.get(2)?,
+                sort_order: row.get(3)?,
+                delimiter: row.get(4)?,
+                parent: row.get(5)?,
+            },
         ))
     })?;
     let pairs = rows
@@ -5182,7 +5250,7 @@ mod tests {
 
     use super::LocalStore;
     use zmail_core::{
-        AccountSyncSnapshot, AuthKind, CachePolicySummary, DraftState, HydratedBody,
+        AccountSyncSnapshot, AuthKind, CachePolicySummary, DraftState, HydratedBody, MailboxRole,
         MailboxSnapshot, MessageAttachment, MessageRenderMode, MessageSnapshot, NewAccount,
         NewDraft, NewIdentity, PendingOpKind, ProtocolKind, SyncPhase, ThreadSnapshot,
     };
@@ -5561,6 +5629,7 @@ mod tests {
                         attachments: Vec::new(),
                     }],
                 }],
+                ..Default::default()
             }],
         };
 
@@ -5635,6 +5704,7 @@ mod tests {
                         attachments: Vec::new(),
                     }],
                 }],
+                ..Default::default()
             }],
         };
 
@@ -5737,8 +5807,91 @@ mod tests {
                         attachments: Vec::new(),
                     }],
                 }],
+                ..Default::default()
             }],
         }
+    }
+
+    #[test]
+    fn mailboxes_list_roles_first_with_their_hierarchy() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let mailbox = |name: &str, role: Option<&str>, parent: Option<&str>| MailboxSnapshot {
+            name: name.to_owned(),
+            role: role.map(str::to_owned),
+            delimiter: Some("/".to_owned()),
+            parent: parent.map(str::to_owned),
+            ..Default::default()
+        };
+        let mut snapshot = merge_test_snapshot("Subject", "Body", "thread-1", "message-1", None);
+        snapshot.mailboxes.extend([
+            mailbox("Projects", None, None),
+            mailbox("Trash", Some("trash"), None),
+            mailbox("Projects/Website", None, Some("Projects")),
+            mailbox("Sent", Some("SENT"), None),
+            mailbox("Notes", Some("important"), None),
+        ]);
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+
+        let mailboxes = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes should list");
+        let listed = mailboxes
+            .iter()
+            .map(|mailbox| (mailbox.name.as_str(), mailbox.role))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            [
+                ("Inbox", Some(MailboxRole::Inbox)),
+                ("Sent", Some(MailboxRole::Sent)),
+                ("Trash", Some(MailboxRole::Trash)),
+                ("Projects", None),
+                ("Projects/Website", None),
+                ("Notes", None),
+            ],
+            "roles sort first, the rest keep server order; unknown roles are none"
+        );
+        let website = &mailboxes[4];
+        assert_eq!(website.account_id, account_id);
+        assert_eq!(website.parent.as_deref(), Some("Projects"));
+        assert_eq!(website.delimiter.as_deref(), Some("/"));
+        assert_eq!(website.leaf_name(), "Website");
+
+        // A later sync that renames the role or moves the folder updates
+        // the row in place.
+        let projects = snapshot
+            .mailboxes
+            .iter_mut()
+            .find(|mailbox| mailbox.name == "Projects/Website")
+            .expect("the folder is in the snapshot");
+        projects.parent = None;
+        projects.role = Some("archive".to_owned());
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+        let website = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes should list")
+            .into_iter()
+            .find(|mailbox| mailbox.name == "Projects/Website")
+            .expect("the folder is still listed");
+        assert_eq!(website.id, mailboxes[4].id, "the row is kept");
+        assert_eq!(website.parent, None);
+        assert_eq!(website.role, Some(MailboxRole::Archive));
+
+        let exported = store
+            .account_mailbox_snapshots(account_id)
+            .expect("snapshots should export");
+        let sent = exported
+            .iter()
+            .find(|mailbox| mailbox.name == "Sent")
+            .expect("Sent is exported");
+        assert_eq!(sent.delimiter.as_deref(), Some("/"));
     }
 
     #[test]
@@ -5754,6 +5907,7 @@ mod tests {
             name: "Deleted Items".to_owned(),
             role: Some("trash".to_owned()),
             threads: Vec::new(),
+            ..Default::default()
         });
         store
             .replace_account_snapshot(account_id, &snapshot)
@@ -6216,6 +6370,7 @@ mod tests {
             name: "Archive".to_owned(),
             role: Some("archive".to_owned()),
             threads: Vec::new(),
+            ..Default::default()
         });
         store
             .replace_account_snapshot(account_id, &first)
@@ -6281,6 +6436,7 @@ mod tests {
                         attachments: Vec::new(),
                     }],
                 }],
+                ..Default::default()
             }],
         };
         store
@@ -6326,6 +6482,7 @@ mod tests {
                         attachments: Vec::new(),
                     }],
                 }],
+                ..Default::default()
             }],
         };
         store
@@ -6398,6 +6555,7 @@ mod tests {
                         attachments: Vec::new(),
                     }],
                 }],
+                ..Default::default()
             }],
         };
 
@@ -6959,16 +7117,19 @@ mod tests {
                             attachments: Vec::new(),
                         }],
                     }],
+                    ..Default::default()
                 },
                 MailboxSnapshot {
                     name: "Archive".to_owned(),
                     role: Some("archive".to_owned()),
                     threads: Vec::new(),
+                    ..Default::default()
                 },
                 MailboxSnapshot {
                     name: "Trash".to_owned(),
                     role: Some("trash".to_owned()),
                     threads: Vec::new(),
+                    ..Default::default()
                 },
             ],
         };

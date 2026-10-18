@@ -146,6 +146,7 @@ impl SyntheticMailboxSpec {
                     role: (mailbox_index == 0).then(|| "inbox".to_owned()),
                     name,
                     threads,
+                    ..Default::default()
                 }
             })
             .collect();

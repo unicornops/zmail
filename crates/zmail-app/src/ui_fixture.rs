@@ -374,6 +374,7 @@ fn fixture_snapshot(now: u64) -> AccountSyncSnapshot {
             .iter()
             .map(|thread| thread_snapshot(thread, now))
             .collect(),
+        ..Default::default()
     };
     AccountSyncSnapshot {
         checkpoint: "fixture:1".to_owned(),

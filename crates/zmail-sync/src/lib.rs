@@ -1598,6 +1598,7 @@ mod tests {
             name: name.to_owned(),
             role: Some("inbox".to_owned()),
             threads,
+            ..Default::default()
         }
     }
 }

@@ -337,6 +337,8 @@ pub(crate) struct JmapMailbox {
     name: String,
     role: Option<String>,
     sort_order: u32,
+    /// The parent mailbox's name (`parentId` resolved), if nested.
+    parent: Option<String>,
 }
 
 #[derive(Debug)]
@@ -468,15 +470,23 @@ async fn fetch_mailboxes(client: &Client) -> Result<(Vec<JmapMailbox>, String)> 
         .context("failed to fetch JMAP mailboxes")?;
     let state = response.take_state();
 
-    let mut mailboxes = response
-        .take_list()
-        .into_iter()
+    let list = response.take_list();
+    let names = list
+        .iter()
+        .filter_map(|mailbox| Some((mailbox.id()?, mailbox.name()?)))
+        .collect::<HashMap<_, _>>();
+    let mut mailboxes = list
+        .iter()
         .filter_map(|mailbox| {
             Some(JmapMailbox {
                 id: mailbox.id()?.to_owned(),
                 name: mailbox.name()?.to_owned(),
                 role: mailbox_role(mailbox.role()),
                 sort_order: mailbox.sort_order(),
+                parent: mailbox
+                    .parent_id()
+                    .and_then(|parent_id| names.get(parent_id))
+                    .map(|name| (*name).to_owned()),
             })
         })
         .collect::<Vec<_>>();
@@ -847,6 +857,7 @@ fn group_mailboxes(
                 MailboxAccumulator {
                     name: mailbox.name,
                     role: mailbox.role,
+                    parent: mailbox.parent,
                     sort_order: mailbox.sort_order,
                     threads: BTreeMap::new(),
                 },
@@ -919,6 +930,8 @@ fn group_mailboxes(
                 MailboxSnapshot {
                     name: mailbox.name,
                     role: mailbox.role,
+                    delimiter: None,
+                    parent: mailbox.parent,
                     threads,
                 },
             )
@@ -967,6 +980,7 @@ pub(crate) fn message_snapshot(email: &JmapEmail, primary_identity: &str) -> Mes
 struct MailboxAccumulator {
     name: String,
     role: Option<String>,
+    parent: Option<String>,
     sort_order: u32,
     threads: BTreeMap<String, ThreadAccumulator>,
 }
@@ -1168,12 +1182,14 @@ mod tests {
                 name: "Inbox".to_owned(),
                 role: Some("inbox".to_owned()),
                 sort_order: 0,
+                parent: None,
             },
             super::JmapMailbox {
                 id: "mb-junk".to_owned(),
                 name: "Bulk".to_owned(),
                 role: Some("junk".to_owned()),
                 sort_order: 1,
+                parent: None,
             },
         ];
         let now = chrono::Utc

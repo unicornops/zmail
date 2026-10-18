@@ -504,6 +504,7 @@ mod store_tests {
                         _ => None,
                     },
                     threads: vec![thread],
+                    ..Default::default()
                 }),
             }
         }
