@@ -28,6 +28,7 @@ use zmail_core::{
     time::{HourCycle, format_full_date, format_list_date},
 };
 
+use super::selection::{row_background, row_colors};
 use crate::components::tooltip::TooltipExt;
 use crate::components::{Avatar, Badge, BadgeTone};
 use crate::styles::{
@@ -35,7 +36,7 @@ use crate::styles::{
     ROW_TITLE_LINE_HEIGHT, TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TypeStyleExt,
     UNREAD_INDICATOR_SIZE, UiColors,
 };
-use crate::widgets::{EllipsisExt, HoverExt, icon, interactive_background};
+use crate::widgets::{EllipsisExt, HoverExt, icon};
 
 /// Share of a compact row the sender column takes.
 const COMPACT_SENDER_WIDTH: f32 = 0.3;
@@ -194,6 +195,7 @@ pub(super) fn display_subject(subject: &str) -> &str {
 pub(super) fn row_shell(
     id: SharedString,
     selected: bool,
+    list_focused: bool,
     density: DensityTokens,
     colors: &UiColors,
 ) -> Stateful<gpui::Div> {
@@ -206,11 +208,8 @@ pub(super) fn row_shell(
         .cursor_pointer()
         .border_b_1()
         .border_color(rgb(colors.border))
-        .bg(rgb(interactive_background(
-            selected,
-            colors.surface,
-            colors,
-        )))
+        .bg(rgb(row_background(selected, list_focused, colors)))
+        .text_color(rgb(row_colors(selected, list_focused, colors).foreground))
         .hover_bg(selected, colors)
 }
 

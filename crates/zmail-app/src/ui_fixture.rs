@@ -38,6 +38,9 @@ pub(crate) enum FixtureView {
     /// Three accounts on the Unified Inbox: nested folder trees, one
     /// account failing to sync and a failed message in the outbox.
     Accounts,
+    /// The seeded inbox with its three newest threads selected, showing
+    /// the bulk action bar and the reader's selection count.
+    MultiSelect,
 }
 
 impl FixtureView {
@@ -51,8 +54,9 @@ impl FixtureView {
             "account-setup" => Self::AccountSetup,
             "sidebar" => Self::Sidebar,
             "accounts" => Self::Accounts,
+            "multi-select" => Self::MultiSelect,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, reader, compose, account-setup, sidebar or accounts"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, reader, compose, account-setup, sidebar, accounts or multi-select"
             ),
         })
     }
@@ -126,6 +130,7 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         }
         FixtureView::AccountSetup => InitialView::AccountSetup,
         FixtureView::Sidebar => InitialView::Sidebar,
+        FixtureView::MultiSelect => InitialView::MultiSelect,
         FixtureView::Reader => {
             let inbox = store
                 .mailbox_id_by_role(account_id, "inbox")?
@@ -657,6 +662,7 @@ mod tests {
             "account-setup",
             "sidebar",
             "accounts",
+            "multi-select",
         ] {
             FixtureView::parse(name)?;
         }
@@ -764,6 +770,14 @@ mod tests {
             .context("the nested folder exists")?;
         assert_eq!(nested.parent.as_deref(), Some("Family/Holidays"));
         assert_eq!(store.list_outbox_jobs(None)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn multi_select_opens_the_seeded_inbox_with_a_selection() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::MultiSelect)?;
+        assert_eq!(initial_view, InitialView::MultiSelect);
+        assert_eq!(store.list_accounts()?.len(), 1);
         Ok(())
     }
 

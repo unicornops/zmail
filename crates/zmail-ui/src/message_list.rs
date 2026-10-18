@@ -12,28 +12,33 @@
 //! the cached page and only re-renders when it changed.
 
 mod row;
+mod selection;
 
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
-    Render, Role, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div, prelude::*,
-    rgb, uniform_list,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    IntoElement, Render, Role, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle,
+    Window, div, prelude::*, rgb, uniform_list,
 };
 use std::sync::Arc;
 use zmail_core::{
-    DraftState, DraftSummary, MailboxSelection, OutboxJobSummary, SearchHit, ThreadSummary,
+    DraftState, DraftSummary, MailboxSelection, MailboxSummary, OutboxJobSummary, SearchHit,
+    ThreadSummary,
     preferences::Density,
     text::count_noun,
     time::{HourCycle, format_list_date},
 };
 use zmail_store::LocalStore;
 
+pub(crate) use self::selection::ListSelection;
+use self::selection::row_colors;
 use crate::ListMode;
 use crate::actions::{
     AddAccount, OpenSelected, RetryOutbox, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
 use crate::components::{Button, ButtonSize};
+use crate::move_picker::MovePicker;
 use crate::pane::{dispatch_from, pane_focus_indicator};
 use crate::styles::{DensityTokens, UiColors};
 use crate::widgets::{HoverExt, empty_state, interactive_background, list_row, toolbar_button};
@@ -90,6 +95,10 @@ pub(crate) struct MessageListState {
     pub(crate) selected_outbox_job_id: Option<i64>,
     /// Comfortable (three-line) or compact (one-line) rows.
     pub(crate) density: Density,
+    /// The multi-row selection (see `selection.rs`).
+    pub(crate) selection: ListSelection,
+    /// Every account's mailboxes, for Move to….
+    pub(crate) mailboxes: Vec<MailboxSummary>,
 }
 
 impl MessageListState {
@@ -124,6 +133,8 @@ impl Default for MessageListState {
             outbox_jobs: Vec::new(),
             selected_outbox_job_id: None,
             density: Density::default(),
+            selection: ListSelection::default(),
+            mailboxes: Vec::new(),
         }
     }
 }
@@ -133,6 +144,13 @@ impl Default for MessageListState {
 pub(crate) enum MessageListEvent {
     /// A thread or search result was clicked or reached with the arrows.
     OpenThread { thread_id: i64, mailbox_id: i64 },
+    /// More than one thread or search result is now selected, with the
+    /// cursor on `thread_id`.
+    SelectThreads {
+        thread_ids: Vec<i64>,
+        thread_id: i64,
+        mailbox_id: i64,
+    },
     /// A draft was clicked or reached with the arrows.
     OpenDraft(i64),
     /// An outbox message was clicked or reached with the arrows.
@@ -172,6 +190,10 @@ pub(crate) struct MessageListView {
     /// have to search the mailbox for it.
     selected_index_hint: Option<(i64, usize)>,
     thread_scroll: UniformListScrollHandle,
+    /// Where Shift-click and Shift+arrows extend the selection from.
+    selection_anchor: Option<usize>,
+    /// The open Move to… picker and its subscriptions.
+    move_picker: Option<(Entity<MovePicker>, Vec<Subscription>)>,
     /// Test instrumentation: renders and store queries for rows.
     #[cfg(test)]
     pub(crate) counters: crate::pane::RenderCounters,
@@ -199,6 +221,8 @@ impl MessageListView {
             page: None,
             selected_index_hint: None,
             thread_scroll: UniformListScrollHandle::new(),
+            selection_anchor: None,
+            move_picker: None,
             #[cfg(test)]
             counters: Default::default(),
         }
@@ -218,12 +242,19 @@ impl MessageListView {
         let mailbox_changed = self.state.mailbox.as_ref().map(|mailbox| mailbox.selection)
             != state.mailbox.as_ref().map(|mailbox| mailbox.selection);
         let counts_changed = self.state.mailbox != state.mailbox;
+        // The shell cleared the selection (Escape, or a change took the
+        // rows away): Shift extends from the selected row again.
+        if self.state.selection.is_multiple() && !state.selection.is_multiple() {
+            self.selection_anchor = None;
+        }
         self.state = state;
         if mailbox_changed || counts_changed {
             self.page = None;
         }
         if mailbox_changed {
             self.selected_index_hint = None;
+            self.selection_anchor = None;
+            self.move_picker = None;
             self.thread_scroll.scroll_to_item(0, ScrollStrategy::Top);
         }
         cx.notify();
@@ -366,15 +397,24 @@ impl MessageListView {
     /// The selected thread's row in the mailbox, so the shell can select
     /// the row that takes its place when it leaves the list.
     pub(crate) fn selected_row_index(&mut self, cx: &mut Context<Self>) -> Option<usize> {
-        (self.state.mode == ListMode::Mail)
-            .then(|| self.current_index(cx))
-            .flatten()
+        if self.state.mode != ListMode::Mail {
+            return None;
+        }
+        if self.state.selection.is_multiple() {
+            return self
+                .first_selected_index()
+                .or_else(|| self.current_index(cx));
+        }
+        self.current_index(cx)
     }
 
     fn select_index(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.row_count() {
             return;
         }
+        // Moving without Shift leaves a single selected row.
+        self.state.selection.thread_ids.clear();
+        self.selection_anchor = Some(index);
         match self.state.mode {
             ListMode::Mail => {
                 let Some(thread) = self.thread_rows(index..index + 1, cx).into_iter().next() else {
@@ -470,6 +510,9 @@ impl Render for MessageListView {
             .on_action(cx.listener(Self::select_first))
             .on_action(cx.listener(Self::select_last))
             .on_action(cx.listener(Self::open_selected))
+            .on_action(cx.listener(Self::extend_selection_down))
+            .on_action(cx.listener(Self::extend_selection_up))
+            .on_action(cx.listener(Self::select_all))
             .size_full()
             .flex()
             .flex_col()
@@ -512,9 +555,10 @@ impl Render for MessageListView {
                     )
                 }),
             )
+            .children(self.render_bulk_bar(&colors, cx))
             .child(match self.state.mode {
                 ListMode::Mail => self.render_threads(&colors, cx),
-                ListMode::Search => self.render_search_results(&colors, cx),
+                ListMode::Search => self.render_search_results(&colors, focused, cx),
                 ListMode::Drafts => self.render_drafts(&colors, cx),
                 ListMode::Outbox => self.render_outbox(&colors, cx),
             })
@@ -611,8 +655,9 @@ impl MessageListView {
                 uniform_list(
                     "threads",
                     thread_count,
-                    cx.processor(move |this, range: Range<usize>, _window, cx| {
-                        this.render_thread_rows(range, &colors, cx)
+                    cx.processor(move |this, range: Range<usize>, window, cx| {
+                        let focused = this.focus_handle.contains_focused(window, cx);
+                        this.render_thread_rows(range, &colors, focused, cx)
                     }),
                 )
                 .track_scroll(&self.thread_scroll)
@@ -625,6 +670,7 @@ impl MessageListView {
         &mut self,
         range: Range<usize>,
         colors: &UiColors,
+        focused: bool,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::Stateful<gpui::Div>> {
         let start = range.start;
@@ -643,9 +689,9 @@ impl MessageListView {
             .enumerate()
             .map(|(offset, thread)| {
                 let index = start + offset;
-                let (thread_id, mailbox_id) = (thread.id, thread.mailbox_id);
+                let thread_id = thread.id;
                 let row_id = thread_row_id(thread_id);
-                let is_selected = Some(thread_id) == self.state.selected_thread_id;
+                let is_selected = self.is_thread_selected(thread_id);
                 let mut row = MessageRow::thread(
                     row_id.clone(),
                     &thread,
@@ -661,26 +707,29 @@ impl MessageListView {
                             color: None,
                         });
 
-                row_shell(row_id, is_selected, density, colors)
+                row_shell(row_id, is_selected, focused, density, colors)
                     .debug_selector(move || format!("thread-row-{index}"))
                     .role(Role::ListItem)
                     .aria_label(row.accessible_label())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected_index_hint = Some((thread_id, index));
-                        this.state.selected_thread_id = Some(thread_id);
-                        cx.emit(MessageListEvent::OpenThread {
-                            thread_id,
-                            mailbox_id,
-                        });
-                        cx.emit(MessageListEvent::RowClicked);
-                        cx.notify();
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        this.click_thread_row(index, event.modifiers(), cx);
                     }))
-                    .child(row_content(row, None, density, colors))
+                    .child(row_content(
+                        row,
+                        None,
+                        density,
+                        &row_colors(is_selected, focused, colors),
+                    ))
             })
             .collect()
     }
 
-    fn render_search_results(&self, colors: &UiColors, cx: &mut Context<Self>) -> AnyElement {
+    fn render_search_results(
+        &self,
+        colors: &UiColors,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if self.state.search_results.is_empty() {
             return empty_state(
                 "No search results",
@@ -696,27 +745,32 @@ impl MessageListView {
             .id("search-results-list")
             .flex_1()
             .overflow_y_scroll()
-            .children(self.state.search_results.iter().map(|hit| {
-                let mailbox_id = hit.mailbox_id;
-                let thread_id = hit.thread_id;
-                let row_id = search_row_id(thread_id);
-                let is_selected = Some(thread_id) == self.state.selected_thread_id;
-                let row = MessageRow::search_hit(row_id.clone(), hit, &now, self.hour_cycle);
+            .children(
+                self.state
+                    .search_results
+                    .iter()
+                    .enumerate()
+                    .map(|(index, hit)| {
+                        let thread_id = hit.thread_id;
+                        let row_id = search_row_id(thread_id);
+                        let is_selected = self.is_thread_selected(thread_id);
+                        let row =
+                            MessageRow::search_hit(row_id.clone(), hit, &now, self.hour_cycle);
 
-                row_shell(row_id, is_selected, density, colors)
-                    .role(Role::ListItem)
-                    .aria_label(row.accessible_label())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state.selected_thread_id = Some(thread_id);
-                        cx.emit(MessageListEvent::OpenThread {
-                            thread_id,
-                            mailbox_id,
-                        });
-                        cx.emit(MessageListEvent::RowClicked);
-                        cx.notify();
-                    }))
-                    .child(row_content(row, None, density, colors))
-            }))
+                        row_shell(row_id, is_selected, focused, density, colors)
+                            .role(Role::ListItem)
+                            .aria_label(row.accessible_label())
+                            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                                this.click_thread_row(index, event.modifiers(), cx);
+                            }))
+                            .child(row_content(
+                                row,
+                                None,
+                                density,
+                                &row_colors(is_selected, focused, colors),
+                            ))
+                    }),
+            )
             .into_any_element()
     }
 

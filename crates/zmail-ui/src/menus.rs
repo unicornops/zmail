@@ -80,6 +80,12 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
     ("zmail::SelectFirst", "list navigation key"),
     ("zmail::SelectLast", "list navigation key"),
     ("zmail::OpenSelected", "list navigation key"),
+    ("zmail::ExtendSelectionDown", "list navigation key"),
+    ("zmail::ExtendSelectionUp", "list navigation key"),
+    (
+        "zmail::SelectAll",
+        "Edit → Select All's key, while the message list has focus",
+    ),
     ("zmail::ScrollUp", "reader scrolling key"),
     ("zmail::ScrollDown", "reader scrolling key"),
     ("zmail::PageUp", "reader scrolling key"),

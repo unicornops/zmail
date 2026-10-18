@@ -65,6 +65,8 @@ MATRIX=(
   "sidebar-light-900 sidebar light 900 720"
   "accounts-dark accounts dark 1440 920"
   "accounts-light accounts light 1440 920"
+  "multi-select-dark multi-select dark 1440 920"
+  "multi-select-light multi-select light 1440 920"
   "inbox-dark-1920 inbox dark 1920 1080"
   "inbox-light-1920 inbox light 1920 1080"
   "reader-dark-1920 reader dark 1920 1080"

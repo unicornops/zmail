@@ -55,6 +55,9 @@ pub(crate) struct ReaderState {
     /// The pane is too narrow for every action button: only Reply,
     /// Archive and Delete stay in the row, the rest move to More.
     pub(crate) compact_actions: bool,
+    /// How many conversations the list has selected. With more than one,
+    /// the reader shows the count instead of a conversation.
+    pub(crate) selected_count: usize,
 }
 
 pub(crate) struct ReaderView {
@@ -106,6 +109,12 @@ impl ReaderView {
             self.more_menu = None;
         }
         cx.notify();
+    }
+
+    /// What the reader shows.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &ReaderState {
+        &self.state
     }
 
     /// Whether the action bar is compact.
@@ -295,18 +304,35 @@ impl Render for ReaderView {
                     .track_scroll(&self.scroll_handle)
                     .px_4()
                     .py_4()
-                    .child(render_reader_detail(
-                        thread,
-                        self.hour_cycle,
-                        &self.state.own_addresses,
-                        &colors,
-                    )),
+                    .child(if self.state.selected_count > 1 {
+                        render_selection_summary(self.state.selected_count, &colors)
+                    } else {
+                        render_reader_detail(
+                            thread,
+                            self.hour_cycle,
+                            &self.state.own_addresses,
+                            &colors,
+                        )
+                    }),
             )
     }
 }
 
 /// Height of the reader's action bar.
 const ACTION_BAR_HEIGHT: f32 = 48.0;
+
+/// What the reader shows while the list has several conversations
+/// selected.
+fn render_selection_summary(count: usize, colors: &UiColors) -> AnyElement {
+    empty_state(
+        &format!("{count} conversations selected"),
+        "Archive, delete, move or flag them together from the bar above the list. \
+         Esc clears the selection.",
+        "check-circle",
+        None,
+        colors,
+    )
+}
 
 /// Render the full thread reader: subject, metadata, and conversation
 /// cards. Returns an [`AnyElement`] ready to be placed

@@ -91,6 +91,13 @@ actions!(
         SelectLast,
         /// Open the selected row and move focus to where it opened.
         OpenSelected,
+        // ---- Message list selection --------------------------------------
+        /// Add the next row to the selection.
+        ExtendSelectionDown,
+        /// Add the previous row to the selection.
+        ExtendSelectionUp,
+        /// Select every conversation in the list.
+        SelectAll,
         // ---- Conversation (MessageList, Reader) --------------------------
         /// Reply to the sender of the latest message.
         Reply,

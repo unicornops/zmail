@@ -46,7 +46,7 @@ use crate::compose::{ComposeEvent, ComposeView};
 use crate::layout::{LayoutMode, PaneLayout, SinglePane};
 use crate::mail_actions::{MailActions, MailEvent, UndoEntry, UndoId};
 use crate::message_list::{
-    AccountLabel, ListMailbox, MessageListEvent, MessageListState, MessageListView,
+    AccountLabel, ListMailbox, ListSelection, MessageListEvent, MessageListState, MessageListView,
 };
 use crate::pane::{Pane, dispatch_from};
 use crate::reader::{ReaderState, ReaderView};
@@ -167,6 +167,7 @@ impl WorkspaceView {
             flagged_unread: 0,
             sidebar_tree: Default::default(),
             selected_thread_id: None,
+            list_selection: ListSelection::default(),
             selected_draft_id: None,
             selected_outbox_job_id: None,
             list_mode: ListMode::Mail,
@@ -263,6 +264,15 @@ impl WorkspaceView {
             }
             InitialView::AccountSetup => view.open_account_setup(window, cx),
             InitialView::Sidebar => view.focus_pane(Pane::Sidebar, window, cx),
+            InitialView::MultiSelect => {
+                if let Some(selection) = view.mailbox_selection()
+                    && let Ok(threads) = view.store.list_selection_threads(&selection, 0..3)
+                {
+                    let ids: Vec<i64> = threads.iter().map(|thread| thread.id).collect();
+                    view.selected_thread_id = ids.first().copied();
+                    view.set_list_selection(ids, cx);
+                }
+            }
         }
         view.sync_panes(cx);
 
@@ -388,12 +398,28 @@ impl WorkspaceView {
             outbox_jobs: self.outbox_jobs.clone(),
             selected_outbox_job_id: self.selected_outbox_job_id,
             density: self.density,
+            selection: ListSelection {
+                account_id: if self.list_selection.is_multiple() {
+                    self.list_selection.account_id
+                } else {
+                    self.selected_account_id
+                },
+                ..self.list_selection.clone()
+            },
+            mailboxes: self.all_mailboxes.clone(),
         };
         self.message_list
             .update(cx, |list, cx| list.set_state(list_state, cx));
 
+        let selected_count = self.list_selection.thread_ids.len();
         let reader_state = ReaderState {
-            thread: self.selected_thread_view(),
+            // Several selected conversations show as a count instead.
+            thread: if selected_count > 1 {
+                None
+            } else {
+                self.selected_thread_view()
+            },
+            selected_count,
             mailboxes: self.mailboxes.clone(),
             own_addresses,
             compact_actions: self.detail_width() < READER_COMPACT_ACTIONS_BELOW,
@@ -534,6 +560,8 @@ impl WorkspaceView {
                     .and_then(|mailbox_id| self.store.first_thread_id(mailbox_id).ok().flatten());
             }
         }
+
+        self.refresh_list_selection();
 
         self.selected_draft_id = self
             .selected_draft_id
@@ -927,6 +955,7 @@ impl WorkspaceView {
     pub(crate) fn select_account(&mut self, account_id: i64, cx: &mut Context<Self>) {
         self.selected_account_id = Some(account_id);
         self.virtual_mailbox = None;
+        self.list_selection = ListSelection::default();
         self.list_mode = ListMode::Mail;
         if matches!(self.detail_mode, DetailMode::AccountSetup) {
             self.detail_mode = DetailMode::Reader;
@@ -945,6 +974,7 @@ impl WorkspaceView {
             self.selected_account_id = account_id;
         }
         self.selected_mailbox_id = Some(mailbox_id);
+        self.list_selection = ListSelection::default();
         self.selected_thread_id = match self.store.first_thread_id(mailbox_id) {
             Ok(thread_id) => thread_id,
             Err(error) => {
@@ -1062,6 +1092,9 @@ impl WorkspaceView {
     /// Switch the list panel mode.  Switching to [`ListMode::Mail`] also
     /// resets the detail pane to the reader.
     pub(crate) fn set_list_mode(&mut self, list_mode: ListMode, cx: &mut Context<Self>) {
+        if list_mode != self.list_mode {
+            self.list_selection = ListSelection::default();
+        }
         self.list_mode = list_mode;
         if matches!(list_mode, ListMode::Mail) {
             self.detail_mode = DetailMode::Reader;
@@ -1611,7 +1644,61 @@ impl WorkspaceView {
     /// The conversations the commands act on: the selected conversation,
     /// while the reader shows it.
     fn command_thread_ids(&self) -> Vec<i64> {
+        if self.list_selection.is_multiple() && matches!(self.detail_mode, DetailMode::Reader) {
+            return self.list_selection.thread_ids.clone();
+        }
         self.command_thread_id().into_iter().collect()
+    }
+
+    /// Makes `thread_ids` the multi-row selection (or clears it, given
+    /// fewer than two) and reads their flag and unread state.
+    fn set_list_selection(&mut self, thread_ids: Vec<i64>, cx: &mut Context<Self>) {
+        self.list_selection.thread_ids = if thread_ids.len() > 1 {
+            thread_ids
+        } else {
+            Vec::new()
+        };
+        self.refresh_list_selection();
+        cx.notify();
+    }
+
+    /// Drops selected threads that left the list (moved out of the shown
+    /// mailbox, or gone) and re-reads the selection's flag and unread
+    /// state.
+    fn refresh_list_selection(&mut self) {
+        if self.list_selection.thread_ids.is_empty() {
+            self.list_selection = ListSelection::default();
+            return;
+        }
+        let shown = (self.list_mode == ListMode::Mail)
+            .then(|| self.mailbox_selection())
+            .flatten();
+        let listed = match self
+            .store
+            .thread_marks(&self.list_selection.thread_ids, shown.as_ref())
+        {
+            Ok(marks) => marks,
+            Err(error) => {
+                self.store_error = Some(error.to_string());
+                return;
+            }
+        };
+        self.list_selection
+            .thread_ids
+            .retain(|id| listed.iter().any(|mark| mark.id == *id));
+        if self.list_selection.thread_ids.len() < 2 {
+            self.list_selection = ListSelection::default();
+            return;
+        }
+        self.list_selection.all_flagged = listed.iter().all(|mark| mark.is_flagged);
+        self.list_selection.any_unread = listed.iter().any(|mark| mark.is_unread);
+        // A cross-account selection (the Unified Inbox) has no one set of
+        // folders to move to.
+        let account_id = listed[0].account_id;
+        self.list_selection.account_id = listed
+            .iter()
+            .all(|mark| mark.account_id == account_id)
+            .then_some(account_id);
     }
 
     /// Runs a [`MailActions`] change on the conversations the commands act
@@ -1633,7 +1720,15 @@ impl WorkspaceView {
         let result = self
             .mail_actions
             .update(cx, |actions, cx| change(actions, &thread_ids, cx));
-        if let Some(row) = selected_row {
+        if self.list_selection.is_multiple() {
+            // The selection keeps the rows still listed; once fewer than
+            // two are, the next row is selected as usual.
+            self.refresh_list_selection();
+            cx.notify();
+        }
+        if let Some(row) = selected_row
+            && !self.list_selection.is_multiple()
+        {
             self.select_row_if_selection_left(row, cx);
         }
         match result {
@@ -1694,18 +1789,24 @@ impl WorkspaceView {
     }
 
     fn toggle_flag(&mut self, _: &ToggleFlag, _: &mut Window, cx: &mut Context<Self>) {
-        let flagged = self
-            .selected_thread_view()
-            .is_some_and(|thread| thread.is_flagged);
+        let flagged = if self.list_selection.is_multiple() {
+            self.list_selection.all_flagged
+        } else {
+            self.selected_thread_view()
+                .is_some_and(|thread| thread.is_flagged)
+        };
         self.change_threads(cx, |actions, thread_ids, cx| {
             actions.set_threads_flagged(thread_ids, !flagged, cx)
         });
     }
 
     fn toggle_read(&mut self, _: &ToggleRead, _: &mut Window, cx: &mut Context<Self>) {
-        let has_unread = self
-            .selected_thread_view()
-            .is_some_and(|thread| thread.unread_count > 0);
+        let has_unread = if self.list_selection.is_multiple() {
+            self.list_selection.any_unread
+        } else {
+            self.selected_thread_view()
+                .is_some_and(|thread| thread.unread_count > 0)
+        };
         self.change_threads(cx, |actions, thread_ids, cx| {
             actions.set_threads_read(thread_ids, has_unread, cx)
         });
@@ -1894,6 +1995,15 @@ impl WorkspaceView {
             self.focus_pane(Pane::MessageList, window, cx);
         } else if self.sidebar_overlay_open {
             self.close_sidebar_overlay(window, cx);
+        } else if self.list_selection.is_multiple() {
+            self.set_list_selection(Vec::new(), cx);
+            if let Some((thread_id, mailbox_id)) = self
+                .selected_thread_id
+                .zip(self.selected_mailbox_id)
+                .filter(|_| self.list_mode == ListMode::Mail)
+            {
+                self.show_thread(thread_id, mailbox_id, cx);
+            }
         } else if self.store_error.is_some() {
             self.dismiss_error(cx);
         } else if matches!(self.detail_mode, DetailMode::AccountSetup) && !self.accounts.is_empty()
@@ -2080,7 +2190,18 @@ impl WorkspaceView {
             MessageListEvent::OpenThread {
                 thread_id,
                 mailbox_id,
-            } => self.select_thread(*thread_id, *mailbox_id, cx),
+            } => {
+                self.list_selection = ListSelection::default();
+                self.select_thread(*thread_id, *mailbox_id, cx);
+            }
+            MessageListEvent::SelectThreads {
+                thread_ids,
+                thread_id,
+                mailbox_id: _,
+            } => {
+                self.selected_thread_id = Some(*thread_id);
+                self.set_list_selection(thread_ids.clone(), cx);
+            }
             MessageListEvent::OpenDraft(draft_id) => {
                 self.open_draft(*draft_id, window, cx);
                 self.list_mode = ListMode::Drafts;

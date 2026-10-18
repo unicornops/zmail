@@ -1173,6 +1173,8 @@ pub struct ThreadView {
 pub struct ThreadState {
     /// Thread identifier.
     pub id: i64,
+    /// Account that owns the thread.
+    pub account_id: i64,
     /// Mailbox identifier.
     pub mailbox_id: i64,
     /// Mailbox name.
@@ -1191,6 +1193,22 @@ impl ThreadState {
     pub fn is_flagged(&self) -> bool {
         self.messages.iter().any(|message| message.is_flagged)
     }
+}
+
+/// Where a thread is and whether it is flagged or unread: what a list
+/// selection needs to know about each selected thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadMarks {
+    /// Thread identifier.
+    pub id: i64,
+    /// Account that owns the thread.
+    pub account_id: i64,
+    /// Mailbox identifier.
+    pub mailbox_id: i64,
+    /// Whether any message is flagged.
+    pub is_flagged: bool,
+    /// Whether any message is unread.
+    pub is_unread: bool,
 }
 
 /// The read and flag state of one message.
