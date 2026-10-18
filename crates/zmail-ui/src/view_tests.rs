@@ -30,6 +30,8 @@ use crate::pane::Pane;
 use crate::styles::{DETAIL_MIN_WIDTH, MESSAGE_LIST_WIDTH, SIDEBAR_WIDTH};
 use crate::{DetailMode, InitialView, ListMode, WorkspaceView};
 
+mod list;
+
 /// What the store holds when the window opens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Setup {

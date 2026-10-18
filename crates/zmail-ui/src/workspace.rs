@@ -175,6 +175,7 @@ impl WorkspaceView {
             theme_overridden: false,
             hour_cycle,
             sidebar_collapsed: false,
+            density: Default::default(),
             sidebar_width: SIDEBAR_WIDTH,
             list_width: MESSAGE_LIST_WIDTH,
             pane_widths_generation: 0,
@@ -362,6 +363,7 @@ impl WorkspaceView {
             selected_draft_id: self.selected_draft_id,
             outbox_jobs: self.outbox_jobs.clone(),
             selected_outbox_job_id: self.selected_outbox_job_id,
+            density: self.density,
         };
         self.message_list
             .update(cx, |list, cx| list.set_state(list_state, cx));
@@ -2212,6 +2214,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::sync_account_action))
             .on_action(cx.listener(Self::sync_all_action))
             .on_action(cx.listener(Self::toggle_theme))
+            .on_action(cx.listener(Self::toggle_density))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::focus_next_pane))

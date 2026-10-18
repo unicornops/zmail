@@ -119,11 +119,12 @@ pub const WINDOW_MIN_HEIGHT: f32 = 480.0;
 pub const TOOLBAR_HEIGHT: f32 = 48.0;
 /// Minimum height of a toolbar or action button.
 pub const TOOLBAR_BUTTON_HEIGHT: f32 = 32.0;
-/// Line height of the first (subject) line of a message-list row. The
-/// line holds body-size text plus the unread dot and 16px icons.
+/// Line height of the second (subject) line of a comfortable message-list
+/// row. The line holds body-size text plus 16px flag and attachment icons.
 pub const ROW_TITLE_LINE_HEIGHT: f32 = 20.0;
-/// Line height of the second (sender) line of a message-list row. It also
-/// holds the unread-count badge, so it is as tall as the badge.
+/// Line height of the first (sender) line of a comfortable message-list
+/// row. It holds the unread dot and the thread-count pill, so it is as
+/// tall as the pill.
 pub const ROW_SENDER_LINE_HEIGHT: f32 = BADGE_SIZE;
 /// Line height of the third (preview) line of a message-list row.
 pub const ROW_PREVIEW_LINE_HEIGHT: f32 = 18.0;
@@ -575,13 +576,13 @@ mod tests {
         // Smallest line height that does not clip glyphs at a font size.
         let min_line = |font_size: f32| font_size * 1.2;
 
-        // Line 1: body text, unread dot and 16px flag/attachment icons.
-        assert!(ROW_TITLE_LINE_HEIGHT >= min_line(REM));
-        const { assert!(ROW_TITLE_LINE_HEIGHT >= ICON_SIZE_SM) };
-        const { assert!(ROW_TITLE_LINE_HEIGHT >= UNREAD_INDICATOR_SIZE) };
-        // Line 2: `text_sm` sender plus the unread-count badge.
+        // Line 1: the sender, the unread dot and the thread-count pill.
         assert!(ROW_SENDER_LINE_HEIGHT >= min_line(REM * 0.875));
         const { assert!(ROW_SENDER_LINE_HEIGHT >= BADGE_SIZE) };
+        const { assert!(ROW_SENDER_LINE_HEIGHT >= UNREAD_INDICATOR_SIZE) };
+        // Line 2: the subject and 16px flag/attachment icons.
+        assert!(ROW_TITLE_LINE_HEIGHT >= min_line(REM * 0.875));
+        const { assert!(ROW_TITLE_LINE_HEIGHT >= ICON_SIZE_SM) };
         // Line 3: `text_sm` preview.
         assert!(ROW_PREVIEW_LINE_HEIGHT >= min_line(REM * 0.875));
 

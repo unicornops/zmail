@@ -4,7 +4,8 @@
 //! address list (`Alice Johnson <alice@example.com>, bob@example.com`):
 //! the distinct senders of the thread's messages, oldest first. The shell
 //! parses it back with [`parse_address_list`] to show display names, for
-//! example "Alice, Bob (3)" via [`participant_summary`].
+//! example "Alice, Bob" via [`participant_names`], or "Alice, Bob (3)" via
+//! [`participant_summary`].
 //!
 //! Older mirrors stored `sender -> recipients` instead; the parser treats
 //! ` -> ` as a list separator so those rows still read sensibly until the
@@ -225,17 +226,27 @@ pub fn thread_participants(messages: &[MessageSnapshot]) -> String {
     format_address_list(&participants)
 }
 
-/// A list-row summary of a thread's participants: `Alice Johnson` for one
-/// sender, `Alice, Bob` for several, with the message count appended when
-/// the thread has more than one message: `Alice, Bob (3)`.
-///
-/// Addresses in `own_addresses` show as "me". At most three names are
-/// listed.
+/// A list-row summary of a thread's participants: [`participant_names`]
+/// with the message count appended when the thread has more than one
+/// message: `Alice, Bob (3)`.
 pub fn participant_summary(
     participants: &str,
     message_count: usize,
     own_addresses: &[&str],
 ) -> String {
+    let mut summary = participant_names(participants, own_addresses);
+    if message_count > 1 {
+        summary.push_str(&format!(" ({message_count})"));
+    }
+    summary
+}
+
+/// The names of a thread's participants for a list row: `Alice Johnson`
+/// for one sender, `Alice, Bob` (first names) for several.
+///
+/// Addresses in `own_addresses` show as "me". At most three names are
+/// listed.
+pub fn participant_names(participants: &str, own_addresses: &[&str]) -> String {
     const MAX_NAMES: usize = 3;
     let own = own_addresses
         .iter()
@@ -274,11 +285,7 @@ pub fn participant_summary(
             .collect()
     };
 
-    let mut summary = names.join(", ");
-    if message_count > 1 {
-        summary.push_str(&format!(" ({message_count})"));
-    }
-    summary
+    names.join(", ")
 }
 
 fn unquote(value: &str) -> String {
@@ -293,8 +300,8 @@ fn unquote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Participant, format_address_list, parse_address_list, participant_summary,
-        sender_display_name, sender_identity, thread_participants,
+        Participant, format_address_list, parse_address_list, participant_names,
+        participant_summary, sender_display_name, sender_identity, thread_participants,
     };
     use crate::MessageSnapshot;
 
@@ -456,6 +463,21 @@ mod tests {
                 &[]
             ),
             "A, B, C (5)"
+        );
+    }
+
+    #[test]
+    fn names_leave_out_the_message_count() {
+        assert_eq!(
+            participant_names("Alice Johnson <alice@example.com>", &[]),
+            "Alice Johnson"
+        );
+        assert_eq!(
+            participant_names(
+                "Alice <alice@example.com>, Rob Example <rob@example.com>",
+                &["rob@example.com"]
+            ),
+            "Alice, me"
         );
     }
 }

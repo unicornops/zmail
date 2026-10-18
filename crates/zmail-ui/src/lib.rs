@@ -341,6 +341,8 @@ struct WorkspaceView {
     hour_cycle: zmail_core::time::HourCycle,
     /// Whether the user hid the sidebar (persisted in the UI preferences).
     sidebar_collapsed: bool,
+    /// Message-list row density (persisted).
+    density: zmail_core::preferences::Density,
     /// The user's sidebar width (persisted); the layout clamps it to
     /// what the window fits.
     sidebar_width: f32,
