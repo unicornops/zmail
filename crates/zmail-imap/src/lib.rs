@@ -1,6 +1,7 @@
 //! Real IMAP adapter for Phase 2.
 
 mod qresync;
+mod watch;
 
 use std::{
     collections::BTreeMap,
@@ -34,6 +35,11 @@ use zmail_core::{
     ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
+
+pub use watch::{
+    IDLE_RENEW_INTERVAL, MAX_WATCH_CONNECTIONS, STATUS_POLL_INTERVAL, WatchEnd, WatchEvent,
+    WatchPlan, plan_watch, poll_status, watch_idle, watch_notify,
+};
 
 /// IMAP extensions prioritized by the plan.
 pub const PRIORITY_CAPABILITIES: &[&str] = &[
@@ -160,7 +166,7 @@ pub async fn discover_and_sync(
             && previous.is_some()
             && let Some(existing_mailbox) = existing.get(name.as_str()).cloned()
         {
-            let last_seen_uid = previous.as_ref().and_then(|state| state.last_seen_uid);
+            let last_seen_uid = resume_uid(previous.as_ref(), &existing_mailbox);
             let new_uids = new_mailbox_uids(&mut session, last_seen_uid).await?;
             let previous_exists = previous.as_ref().map(|state| state.exists).unwrap_or(0);
             let previous_modseq = previous.as_ref().and_then(|state| state.highest_modseq);
@@ -187,7 +193,7 @@ pub async fn discover_and_sync(
                     && status.exists == previous_exists
                 {
                     mailboxes.push(existing_mailbox);
-                    mailbox_checkpoint.last_seen_uid = last_seen_uid;
+                    mailbox_checkpoint.last_seen_uid = Some(last_seen_uid);
                     mailbox_checkpoint.uid_flags = merged;
                     next_checkpoint.insert(name, mailbox_checkpoint);
                     condstore_skipped += 1;
@@ -199,7 +205,7 @@ pub async fn discover_and_sync(
                     && status.highest_modseq == Some(previous_modseq)
                 {
                     mailboxes.push(existing_mailbox);
-                    mailbox_checkpoint.last_seen_uid = last_seen_uid;
+                    mailbox_checkpoint.last_seen_uid = Some(last_seen_uid);
                     mailbox_checkpoint.uid_flags = previous
                         .as_ref()
                         .map(|state| state.uid_flags.clone())
@@ -233,7 +239,7 @@ pub async fn discover_and_sync(
             {
                 // Nothing changed server-side; the mirror is reused as is.
                 mailboxes.push(existing_mailbox);
-                mailbox_checkpoint.last_seen_uid = last_seen_uid;
+                mailbox_checkpoint.last_seen_uid = Some(last_seen_uid);
                 mailbox_checkpoint.uid_flags = flag_map;
                 next_checkpoint.insert(name, mailbox_checkpoint);
                 continue;
@@ -252,13 +258,8 @@ pub async fn discover_and_sync(
                 )
                 .await?;
             }
-            mailbox_checkpoint.last_seen_uid = Some(
-                new_uids
-                    .last()
-                    .copied()
-                    .unwrap_or(0)
-                    .max(last_seen_uid.unwrap_or(0)),
-            );
+            mailbox_checkpoint.last_seen_uid =
+                Some(new_uids.last().copied().unwrap_or(0).max(last_seen_uid));
             mailbox_checkpoint.uid_flags = flag_map;
             next_checkpoint.insert(name, mailbox_checkpoint);
             mailboxes.push(merged);
@@ -643,47 +644,6 @@ fn uid_set(uids: &[u32]) -> String {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",")
-}
-
-/// Waits until the mail server reports a change or the bounded wait
-/// elapses, whichever comes first.
-///
-/// The wait uses one IDLE connection on INBOX, re-issued at most once per
-/// call so the caller's interval always stays below the RFC 2177 guidance.
-/// Servers that do not advertise IDLE degrade to a plain sleep, so the
-/// caller's polling interval keeps governing latency.
-pub async fn wait_for_mail_changes(
-    target: &SyncTarget,
-    secret: &str,
-    wait: Duration,
-) -> Result<()> {
-    if target.protocol != ProtocolKind::Imap {
-        bail!("IMAP adapter received a non-IMAP sync target");
-    }
-
-    let endpoint = parse_endpoint(&target.endpoint)?;
-    let mut session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
-    session
-        .select("INBOX")
-        .await
-        .context("failed to select INBOX for the IDLE watcher")?;
-
-    let bounded_wait = wait.min(Duration::from_secs(29 * 60));
-    let mut idle = session.idle();
-    if idle.init().await.is_err() {
-        // The server does not advertise IDLE; fall back to the caller's
-        // poll interval so latency stays bounded. The half-initialized
-        // handle is dropped, which closes the connection.
-        tokio::time::sleep(bounded_wait).await;
-        return Ok(());
-    }
-
-    let (idle_wait, _stop) = idle.wait_with_timeout(bounded_wait);
-    let _ = idle_wait.await;
-    if let Ok(mut session) = idle.done().await {
-        let _ = session.logout().await;
-    }
-    Ok(())
 }
 
 /// Empties the server's trash mailbox, expunging every message in it.
@@ -1214,12 +1174,8 @@ async fn fetch_changed_flags(
 
 async fn new_mailbox_uids(
     session: &mut Session<DynImapStream>,
-    last_seen_uid: Option<u32>,
+    last_seen: u32,
 ) -> Result<Vec<u32>> {
-    let Some(last_seen) = last_seen_uid else {
-        return Ok(Vec::new());
-    };
-
     let mut uids = session
         .uid_search(&format!("UID {}:*", last_seen.saturating_add(1)))
         .await
@@ -1231,6 +1187,31 @@ async fn new_mailbox_uids(
     uids.retain(|uid| *uid > last_seen);
     uids.sort_unstable();
     Ok(uids)
+}
+
+/// The highest UID the mirror already holds, above which new mail starts.
+///
+/// A mailbox that was empty at its last sync has no recorded UID; it then
+/// resumes from 0 so its first messages are fetched by the very next sync,
+/// which matters now that a single pushed change triggers a single sync.
+/// Checkpoints that predate `last_seen_uid` fall back to the highest UID in
+/// the flag map or the mirror, so nothing already stored is fetched twice.
+fn resume_uid(previous: Option<&ImapMailboxCheckpoint>, mailbox: &MailboxSnapshot) -> u32 {
+    previous
+        .and_then(|state| {
+            state
+                .last_seen_uid
+                .or_else(|| state.uid_flags.keys().last().copied())
+        })
+        .or_else(|| {
+            mailbox
+                .threads
+                .iter()
+                .flat_map(|thread| &thread.messages)
+                .filter_map(|message| message.remote_id.parse::<u32>().ok())
+                .max()
+        })
+        .unwrap_or(0)
 }
 
 /// Returns `true` when a message in the existing mirror is missing from
@@ -1749,9 +1730,9 @@ mod tests {
     use super::{
         ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, conversation_key, excerpt, guess_role,
         hydrate_bodies, parse_endpoint, persist_attachments, recompute_thread_aggregates,
-        xoauth2_response,
+        resume_uid, xoauth2_response,
     };
-    use zmail_core::{MessageSnapshot, ThreadSnapshot};
+    use zmail_core::{MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
 
     #[test]
     fn search_criteria_map_operators_onto_search_keys() {
@@ -2133,6 +2114,33 @@ mod tests {
             thread.participants, "Older Sender, Newer Sender",
             "participants list every sender, oldest first"
         );
+    }
+
+    #[test]
+    fn new_mail_resumes_after_the_highest_known_uid() {
+        let empty = MailboxSnapshot {
+            name: "Projects".to_owned(),
+            role: None,
+            threads: Vec::new(),
+        };
+        let checkpoint = |last_seen_uid, uids: &[u32]| ImapMailboxCheckpoint {
+            last_seen_uid,
+            uid_flags: uids.iter().map(|uid| (*uid, Vec::new())).collect(),
+            ..ImapMailboxCheckpoint::default()
+        };
+
+        assert_eq!(
+            resume_uid(Some(&checkpoint(None, &[])), &empty),
+            0,
+            "a mailbox that was empty fetches its first message next time"
+        );
+        assert_eq!(resume_uid(Some(&checkpoint(Some(7), &[3, 9])), &empty), 7);
+        assert_eq!(
+            resume_uid(Some(&checkpoint(None, &[3, 9])), &empty),
+            9,
+            "legacy checkpoints resume after the flag map"
+        );
+        assert_eq!(resume_uid(None, &empty), 0);
     }
 
     #[test]

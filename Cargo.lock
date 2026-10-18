@@ -8126,6 +8126,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "zmail-core",
+ "zmail-imap",
  "zmail-jmap",
  "zmail-security",
  "zmail-smtp",
