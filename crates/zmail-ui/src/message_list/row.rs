@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! Comfortable:
-//! [avatar] [•] Sender (bold if unread)  [3]        09:42
+//! • [avatar] Sender (bold if unread)  [3]        09:42
 //!              Subject                   [label] [⚑] [📎]
 //!              Snippet…
 //!
@@ -252,11 +252,22 @@ fn comfortable_row(
             .line_height(px(height))
     };
 
+    // The unread dot sits in the row's leading padding, level with the
+    // sender, so the sender, subject and snippet line up.
+    let dot = unread_indicator(&row, colors)
+        .absolute()
+        .left(px(
+            -(density.message_row_padding_x + UNREAD_INDICATOR_SIZE) / 2.0
+        ))
+        .top(px((ROW_SENDER_LINE_HEIGHT - UNREAD_INDICATOR_SIZE) / 2.0));
+
     div()
+        .relative()
         .flex()
         .items_start()
         .gap(px(density.row_gap))
         .size_full()
+        .child(dot)
         .when(density.show_avatar, |this| {
             this.child(
                 div()
@@ -277,7 +288,6 @@ fn comfortable_row(
                 .gap(px(density.message_row_line_gap))
                 .child(
                     line(ROW_SENDER_LINE_HEIGHT)
-                        .child(unread_indicator(&row, colors))
                         .child(sender(&row, colors).flex_1())
                         .children(thread_count(&row))
                         .child(trailing(&row, quick_actions, colors)),
@@ -378,7 +388,8 @@ fn sender(row: &MessageRow, colors: &UiColors) -> gpui::Div {
         .child(row.sender.clone())
 }
 
-/// The unread dot. Read rows keep its space, so senders line up.
+/// The unread dot. In compact rows read rows keep its space, so senders
+/// line up.
 fn unread_indicator(row: &MessageRow, colors: &UiColors) -> gpui::Div {
     div()
         .flex_none()
