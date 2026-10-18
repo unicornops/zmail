@@ -20,7 +20,7 @@ use gpui::{
 };
 use std::sync::Arc;
 use zmail_core::{
-    DraftState, DraftSummary, MailboxSummary, OutboxJobSummary, SearchHit, ThreadSummary,
+    DraftState, DraftSummary, MailboxSelection, OutboxJobSummary, SearchHit, ThreadSummary,
     participants::{participant_summary, sender_display_name},
     text::count_noun,
     time::{HourCycle, format_full_date, format_list_date},
@@ -51,12 +51,35 @@ pub(crate) const KEY_CONTEXT: &str = "MessageList";
 /// stay inside the cached page.
 const ROW_PAGE_PADDING: usize = 50;
 
+/// The thread list Mail mode shows: one mailbox, or a virtual mailbox
+/// across accounts (the Unified Inbox, Flagged, Sent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ListMailbox {
+    /// Which threads to list; rows are read with
+    /// `LocalStore::list_selection_threads`.
+    pub(crate) selection: MailboxSelection,
+    /// The mailbox's (or virtual mailbox's) name.
+    pub(crate) name: String,
+    pub(crate) total_threads: usize,
+    pub(crate) unread_threads: usize,
+}
+
+/// An account as list rows name it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AccountLabel {
+    pub(crate) id: i64,
+    pub(crate) name: String,
+}
+
 /// What the shell shows in the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MessageListState {
     pub(crate) mode: ListMode,
     pub(crate) has_accounts: bool,
-    pub(crate) mailbox: Option<MailboxSummary>,
+    pub(crate) mailbox: Option<ListMailbox>,
+    /// Every account, to name the account each row of a cross-account
+    /// list comes from (see [`MessageListState::row_account_name`]).
+    pub(crate) accounts: Vec<AccountLabel>,
     /// The user's own addresses, shown as "me".
     pub(crate) own_addresses: Vec<String>,
     pub(crate) selected_thread_id: Option<i64>,
@@ -71,12 +94,30 @@ pub(crate) struct MessageListState {
     pub(crate) selected_outbox_job_id: Option<i64>,
 }
 
+impl MessageListState {
+    /// The account a thread row comes from, named only in lists that span
+    /// accounts (the Unified Inbox, Flagged, Sent).
+    // Rendered by the Phase 3 message rows (#117).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn row_account_name(&self, account_id: i64) -> Option<&str> {
+        let spans_accounts = matches!(
+            self.mailbox.as_ref().map(|mailbox| mailbox.selection),
+            Some(MailboxSelection::Virtual(_))
+        );
+        self.accounts
+            .iter()
+            .find(|account| spans_accounts && account.id == account_id)
+            .map(|account| account.name.as_str())
+    }
+}
+
 impl Default for MessageListState {
     fn default() -> Self {
         Self {
             mode: ListMode::Mail,
             has_accounts: false,
             mailbox: None,
+            accounts: Vec::new(),
             own_addresses: Vec::new(),
             selected_thread_id: None,
             search_results: Vec::new(),
@@ -111,14 +152,14 @@ pub(crate) enum MessageListEvent {
 /// The cached page of thread rows.
 #[derive(Debug, Clone)]
 struct RowPage {
-    mailbox_id: i64,
+    selection: MailboxSelection,
     start: usize,
     rows: Vec<ThreadSummary>,
 }
 
 impl RowPage {
-    fn covers(&self, mailbox_id: i64, range: &Range<usize>) -> bool {
-        self.mailbox_id == mailbox_id
+    fn covers(&self, selection: &MailboxSelection, range: &Range<usize>) -> bool {
+        self.selection == *selection
             && range.start >= self.start
             && range.end <= self.start + self.rows.len()
     }
@@ -166,13 +207,19 @@ impl MessageListView {
         }
     }
 
+    /// What the list shows now.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &MessageListState {
+        &self.state
+    }
+
     /// Replaces what the list shows; re-renders only when it changed.
     pub(crate) fn set_state(&mut self, state: MessageListState, cx: &mut Context<Self>) {
         if self.state == state {
             return;
         }
-        let mailbox_changed = self.state.mailbox.as_ref().map(|mailbox| mailbox.id)
-            != state.mailbox.as_ref().map(|mailbox| mailbox.id);
+        let mailbox_changed = self.state.mailbox.as_ref().map(|mailbox| mailbox.selection)
+            != state.mailbox.as_ref().map(|mailbox| mailbox.selection);
         let counts_changed = self.state.mailbox != state.mailbox;
         self.state = state;
         if mailbox_changed || counts_changed {
@@ -192,7 +239,7 @@ impl MessageListView {
             return;
         };
         let range = page.start..page.start + page.rows.len().max(1);
-        match self.store.list_threads(page.mailbox_id, range) {
+        match self.store.list_selection_threads(&page.selection, range) {
             Ok(rows) if rows != page.rows => {
                 if let Some(page) = self.page.as_mut() {
                     page.rows = rows;
@@ -207,13 +254,13 @@ impl MessageListView {
     /// Rows in `range` of the selected mailbox, from the cached page when
     /// it covers them.
     fn thread_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<ThreadSummary> {
-        let Some(mailbox_id) = self.state.mailbox.as_ref().map(|mailbox| mailbox.id) else {
+        let Some(selection) = self.state.mailbox.as_ref().map(|mailbox| mailbox.selection) else {
             return Vec::new();
         };
         if !self
             .page
             .as_ref()
-            .is_some_and(|page| page.covers(mailbox_id, &range))
+            .is_some_and(|page| page.covers(&selection, &range))
         {
             let total = self
                 .state
@@ -227,10 +274,10 @@ impl MessageListView {
             {
                 self.counters.queries += 1;
             }
-            match self.store.list_threads(mailbox_id, start..end) {
+            match self.store.list_selection_threads(&selection, start..end) {
                 Ok(rows) => {
                     self.page = Some(RowPage {
-                        mailbox_id,
+                        selection,
                         start,
                         rows,
                     })
@@ -328,9 +375,6 @@ impl MessageListView {
         }
         match self.state.mode {
             ListMode::Mail => {
-                let Some(mailbox_id) = self.state.mailbox.as_ref().map(|mailbox| mailbox.id) else {
-                    return;
-                };
                 let Some(thread) = self.thread_rows(index..index + 1, cx).into_iter().next() else {
                     return;
                 };
@@ -340,7 +384,7 @@ impl MessageListView {
                 self.state.selected_thread_id = Some(thread.id);
                 cx.emit(MessageListEvent::OpenThread {
                     thread_id: thread.id,
-                    mailbox_id,
+                    mailbox_id: thread.mailbox_id,
                 });
             }
             ListMode::Search => {
@@ -581,9 +625,6 @@ impl MessageListView {
         colors: &UiColors,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::Stateful<gpui::Div>> {
-        let Some(mailbox_id) = self.state.mailbox.as_ref().map(|mailbox| mailbox.id) else {
-            return Vec::new();
-        };
         let start = range.start;
         let threads = self.thread_rows(range, cx);
         let now = chrono::Local::now();
@@ -600,7 +641,7 @@ impl MessageListView {
             .enumerate()
             .map(|(offset, thread)| {
                 let index = start + offset;
-                let thread_id = thread.id;
+                let (thread_id, mailbox_id) = (thread.id, thread.mailbox_id);
                 let sender_name = sender_display_name(&thread.latest_sender);
                 let sender_line = if thread.message_count > 1
                     && !thread.participants.trim().is_empty()

@@ -17,13 +17,14 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use zmail_core::{
     AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, CachePolicySummary,
     DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate,
-    HydratedBody, IdentitySummary, IndexCandidate, IndexProgress, MailboxRole, MailboxSnapshot,
-    MailboxSummary, MessageAttachment, MessageFlagState, MessagePreview, MessageRenderMode,
-    MessageSnapshot, NewAccount, NewDraft, OAuth2TargetConfig, OutboxJobState, OutboxJobSummary,
-    OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp, PendingOpKind,
-    PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, ServerHitRef, StoreStats,
-    SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget, ThreadMessage,
-    ThreadSnapshot, ThreadState, ThreadSummary, ThreadView, preferences::UiPreferences,
+    HydratedBody, IdentitySummary, IndexCandidate, IndexProgress, MailboxRole, MailboxSelection,
+    MailboxSnapshot, MailboxSummary, MessageAttachment, MessageFlagState, MessagePreview,
+    MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, OAuth2TargetConfig, OutboxJobState,
+    OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp,
+    PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, ServerHitRef,
+    StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget,
+    ThreadCounts, ThreadMessage, ThreadSnapshot, ThreadState, ThreadSummary, ThreadView,
+    VirtualMailbox, preferences::UiPreferences,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -1258,6 +1259,22 @@ impl LocalStore {
             .context("failed to list mailboxes")
     }
 
+    /// Lists every account's mailboxes, account by account (in account
+    /// order) and each account's in [`LocalStore::list_mailboxes`] order.
+    pub fn list_all_mailboxes(&self) -> Result<Vec<MailboxSummary>> {
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(&format!(
+            r#"
+            SELECT {MAILBOX_SUMMARY_COLUMNS}
+            FROM mailboxes
+            ORDER BY account_id ASC, {MAILBOX_ROLE_ORDER}, sort_order ASC, name ASC
+            "#,
+        ))?;
+        let rows = statement.query_map([], mailbox_summary_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list every mailbox")
+    }
+
     /// Exports the current local mailbox mirror for an account.
     pub fn account_mailbox_snapshots(&self, account_id: i64) -> Result<Vec<MailboxSnapshot>> {
         let conn = self.connection()?;
@@ -1402,13 +1419,33 @@ impl LocalStore {
 
     /// Lists a visible range of threads for a mailbox, ordered by newest first.
     pub fn list_threads(&self, mailbox_id: i64, range: Range<usize>) -> Result<Vec<ThreadSummary>> {
+        self.list_selection_threads(
+            &MailboxSelection::Mailbox {
+                account_id: 0,
+                mailbox_id,
+            },
+            range,
+        )
+    }
+
+    /// Lists a visible range of the threads a mailbox or virtual mailbox
+    /// shows, newest first. Each row names its own mailbox and account.
+    pub fn list_selection_threads(
+        &self,
+        selection: &MailboxSelection,
+        range: Range<usize>,
+    ) -> Result<Vec<ThreadSummary>> {
         let limit = range.end.saturating_sub(range.start) as i64;
         if limit == 0 {
             return Ok(Vec::new());
         }
 
+        let (filter, mut values) = selection_filter(selection);
+        let next = values.len() + 1;
+        values.push(limit.into());
+        values.push((range.start as i64).into());
         let conn = self.connection()?;
-        let mut statement = conn.prepare(
+        let mut statement = conn.prepare(&format!(
             r#"
             SELECT
                 threads.id,
@@ -1420,16 +1457,20 @@ impl LocalStore {
                 threads.unread_count,
                 threads.is_flagged,
                 threads.has_attachments,
-                threads.latest_message_at
+                threads.latest_message_at,
+                threads.mailbox_id,
+                mailboxes.account_id
             FROM threads
             JOIN messages ON messages.id = threads.latest_message_id
-            WHERE mailbox_id = ?1
+            JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+            WHERE {filter}
             ORDER BY threads.latest_message_at DESC, threads.id DESC
-            LIMIT ?2 OFFSET ?3
+            LIMIT ?{next} OFFSET ?{}
             "#,
-        )?;
+            next + 1
+        ))?;
 
-        let rows = statement.query_map(params![mailbox_id, limit, range.start as i64], |row| {
+        let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
             Ok(ThreadSummary {
                 id: row.get(0)?,
                 subject: row.get(1)?,
@@ -1441,6 +1482,8 @@ impl LocalStore {
                 is_flagged: row.get::<_, bool>(7)?,
                 has_attachments: row.get::<_, bool>(8)?,
                 latest_message_at: row.get(9)?,
+                mailbox_id: row.get(10)?,
+                account_id: row.get(11)?,
             })
         })?;
 
@@ -1464,6 +1507,57 @@ impl LocalStore {
         )
         .optional()
         .context("failed to query the first thread id")
+    }
+
+    /// The newest thread a mailbox or virtual mailbox shows, if any.
+    pub fn first_selection_thread(
+        &self,
+        selection: &MailboxSelection,
+    ) -> Result<Option<ThreadSummary>> {
+        Ok(self
+            .list_selection_threads(selection, 0..1)?
+            .into_iter()
+            .next())
+    }
+
+    /// Whether a mailbox or virtual mailbox lists `thread_id`.
+    pub fn selection_contains(&self, selection: &MailboxSelection, thread_id: i64) -> Result<bool> {
+        let conn = self.connection()?;
+        let (filter, mut values) = selection_filter(selection);
+        let thread = values.len() + 1;
+        values.push(thread_id.into());
+        conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM threads WHERE threads.id = ?{thread} AND {filter})"
+            ),
+            rusqlite::params_from_iter(values),
+            |row| row.get::<_, bool>(0),
+        )
+        .context("failed to check whether a thread is listed")
+    }
+
+    /// How many threads a mailbox or virtual mailbox shows, and how many
+    /// of them are unread.
+    pub fn selection_counts(&self, selection: &MailboxSelection) -> Result<ThreadCounts> {
+        let conn = self.connection()?;
+        let (filter, values) = selection_filter(selection);
+        conn.query_row(
+            &format!(
+                r#"
+                SELECT COUNT(*), COALESCE(SUM(threads.unread_count > 0), 0)
+                FROM threads
+                WHERE {filter}
+                "#
+            ),
+            rusqlite::params_from_iter(values),
+            |row| {
+                Ok(ThreadCounts {
+                    total_threads: row.get::<_, usize>(0)?,
+                    unread_threads: row.get::<_, usize>(1)?,
+                })
+            },
+        )
+        .context("failed to count the listed threads")
     }
 
     /// Loads the latest message preview for the selected thread.
@@ -4551,6 +4645,59 @@ fn replace_account_identities(
     Ok(())
 }
 
+/// The `WHERE` clause over `threads` that picks a selection's threads, and
+/// the values it binds as `?1`, `?2`, ….
+fn selection_filter(selection: &MailboxSelection) -> (String, Vec<rusqlite::types::Value>) {
+    match selection {
+        MailboxSelection::Mailbox { mailbox_id, .. } => (
+            "threads.mailbox_id = ?1".to_owned(),
+            vec![(*mailbox_id).into()],
+        ),
+        // Each account's first mailbox with the role, as
+        // `mailbox_id_by_role` resolves it.
+        MailboxSelection::Virtual(VirtualMailbox::Unified(role)) => (
+            r#"threads.mailbox_id IN (
+                SELECT (
+                    SELECT role_mailbox.id FROM mailboxes AS role_mailbox
+                    WHERE role_mailbox.account_id = accounts.id
+                      AND lower(role_mailbox.role) = ?1
+                    ORDER BY role_mailbox.sort_order, role_mailbox.id
+                    LIMIT 1
+                )
+                FROM accounts
+            )"#
+            .to_owned(),
+            vec![role.as_str().to_owned().into()],
+        ),
+        // One copy of each flagged conversation per account: a
+        // conversation filed in several mailboxes (Gmail's labels, or All
+        // Mail) is listed once, preferring its Inbox copy.
+        MailboxSelection::Virtual(VirtualMailbox::Flagged) => (
+            r#"threads.id IN (
+                SELECT thread_id FROM (
+                    SELECT
+                        flagged.id AS thread_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY
+                                flagged_mailbox.account_id,
+                                COALESCE(NULLIF(flagged.remote_thread_id, ''), 'local:' || flagged.id)
+                            ORDER BY
+                                CASE lower(flagged_mailbox.role) WHEN 'inbox' THEN 0 ELSE 1 END,
+                                flagged.id
+                        ) AS copy
+                    FROM threads AS flagged
+                    JOIN mailboxes AS flagged_mailbox ON flagged_mailbox.id = flagged.mailbox_id
+                    WHERE flagged.is_flagged = 1
+                      AND COALESCE(lower(flagged_mailbox.role), '') NOT IN ('trash', 'junk')
+                )
+                WHERE copy = 1
+            )"#
+            .to_owned(),
+            Vec::new(),
+        ),
+    }
+}
+
 /// The `mailboxes` columns [`mailbox_summary_from_row`] reads, in order.
 const MAILBOX_SUMMARY_COLUMNS: &str =
     "id, account_id, name, role, delimiter, parent_name, total_threads, unread_threads";
@@ -5625,8 +5772,9 @@ mod tests {
     use super::LocalStore;
     use zmail_core::{
         AccountSyncSnapshot, AuthKind, CachePolicySummary, DraftState, HydratedBody, MailboxRole,
-        MailboxSnapshot, MessageAttachment, MessageRenderMode, MessageSnapshot, NewAccount,
-        NewDraft, NewIdentity, PendingOpKind, ProtocolKind, SyncPhase, ThreadSnapshot,
+        MailboxSelection, MailboxSnapshot, MessageAttachment, MessageRenderMode, MessageSnapshot,
+        NewAccount, NewDraft, NewIdentity, PendingOpKind, ProtocolKind, SyncPhase, ThreadCounts,
+        ThreadSnapshot, VirtualMailbox,
     };
 
     #[test]
@@ -6139,6 +6287,256 @@ mod tests {
     }
 
     /// Builds a one-thread, one-message snapshot with stable remote ids.
+    /// A one-message thread for the virtual mailbox tests: `id` names the
+    /// conversation, `minute` orders the threads (later is newer).
+    fn listed_thread(
+        id: &str,
+        copy: &str,
+        minute: u32,
+        flagged: bool,
+        unread: bool,
+    ) -> ThreadSnapshot {
+        let at = format!("2026-03-21T09:{minute:02}:00Z");
+        ThreadSnapshot {
+            remote_thread_id: id.to_owned(),
+            subject: id.to_owned(),
+            participants: "Kai Santos".to_owned(),
+            preview: id.to_owned(),
+            is_flagged: flagged,
+            has_attachments: false,
+            unread_count: usize::from(unread),
+            latest_message_at: at.clone(),
+            messages: vec![MessageSnapshot {
+                remote_id: format!("{id}-{copy}"),
+                identity_email: "phase2@localhost".to_owned(),
+                sender: "Kai Santos".to_owned(),
+                reply_to: None,
+                recipients: "phase2@localhost".to_owned(),
+                subject: id.to_owned(),
+                body_preview: id.to_owned(),
+                body_text: None,
+                sanitized_html: None,
+                has_remote_content: false,
+                is_read: !unread,
+                is_flagged: flagged,
+                received_at: at,
+                attachments: Vec::new(),
+            }],
+        }
+    }
+
+    /// Two accounts with mail in Inbox, Sent, Archive and Trash.
+    fn two_account_store() -> (LocalStore, i64, i64) {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let mailbox = |name: &str, role: &str, threads: Vec<ThreadSnapshot>| MailboxSnapshot {
+            name: name.to_owned(),
+            role: Some(role.to_owned()),
+            threads,
+            ..Default::default()
+        };
+        let snapshot = |mailboxes| AccountSyncSnapshot {
+            checkpoint: "virtual:test".to_owned(),
+            detail: "virtual test sync".to_owned(),
+            identities: None,
+            mailboxes,
+        };
+        let work = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        store
+            .replace_account_snapshot(
+                work,
+                &snapshot(vec![
+                    mailbox(
+                        "INBOX",
+                        "inbox",
+                        vec![
+                            listed_thread("work-new", "inbox", 50, false, true),
+                            listed_thread("work-flagged", "inbox", 10, true, false),
+                        ],
+                    ),
+                    mailbox(
+                        "Sent",
+                        "sent",
+                        vec![listed_thread("work-sent", "sent", 40, false, false)],
+                    ),
+                    // Gmail-style: the flagged conversation is also in All Mail.
+                    mailbox(
+                        "All Mail",
+                        "archive",
+                        vec![
+                            listed_thread("work-flagged", "all", 10, true, false),
+                            listed_thread("work-archived-flag", "all", 5, true, true),
+                        ],
+                    ),
+                    mailbox(
+                        "Trash",
+                        "trash",
+                        vec![listed_thread("work-binned", "trash", 59, true, true)],
+                    ),
+                ]),
+            )
+            .expect("snapshot should apply");
+        let home = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        store
+            .replace_account_snapshot(
+                home,
+                &snapshot(vec![
+                    mailbox(
+                        "Inbox",
+                        "inbox",
+                        vec![
+                            listed_thread("home-old", "inbox", 1, false, false),
+                            listed_thread("home-mid", "inbox", 30, true, true),
+                        ],
+                    ),
+                    mailbox("Sent", "sent", Vec::new()),
+                ]),
+            )
+            .expect("snapshot should apply");
+        (store, work, home)
+    }
+
+    #[test]
+    fn the_unified_inbox_merges_every_accounts_inbox_newest_first() {
+        let (store, work, home) = two_account_store();
+        let unified = MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Inbox));
+        let rows = store
+            .list_selection_threads(&unified, 0..10)
+            .expect("threads should list");
+        let listed = rows
+            .iter()
+            .map(|row| (row.subject.as_str(), row.account_id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            [
+                ("work-new", work),
+                ("home-mid", home),
+                ("work-flagged", work),
+                ("home-old", home),
+            ]
+        );
+        let home_inbox = store
+            .mailbox_id_by_role(home, "inbox")
+            .expect("role lookup")
+            .expect("home has an inbox");
+        assert_eq!(rows[1].mailbox_id, home_inbox, "rows name their mailbox");
+        assert_eq!(
+            store
+                .list_selection_threads(&unified, 1..3)
+                .expect("threads should list")
+                .iter()
+                .map(|row| row.subject.as_str())
+                .collect::<Vec<_>>(),
+            ["home-mid", "work-flagged"],
+            "ranges page through the merged list"
+        );
+        assert_eq!(
+            store.selection_counts(&unified).expect("counts"),
+            ThreadCounts {
+                total_threads: 4,
+                unread_threads: 2,
+            }
+        );
+        assert_eq!(
+            store
+                .first_selection_thread(&unified)
+                .expect("first thread")
+                .map(|row| row.subject),
+            Some("work-new".to_owned())
+        );
+
+        let sent = MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Sent));
+        assert_eq!(
+            store.selection_counts(&sent).expect("counts").total_threads,
+            1
+        );
+        let one = MailboxSelection::Mailbox {
+            account_id: home,
+            mailbox_id: home_inbox,
+        };
+        assert_eq!(
+            store
+                .list_selection_threads(&one, 0..10)
+                .expect("threads should list")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn flagged_lists_each_conversation_once_outside_trash() {
+        let (store, work, _) = two_account_store();
+        let flagged = MailboxSelection::Virtual(VirtualMailbox::Flagged);
+        let rows = store
+            .list_selection_threads(&flagged, 0..10)
+            .expect("threads should list");
+        let listed = rows
+            .iter()
+            .map(|row| row.subject.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            ["home-mid", "work-flagged", "work-archived-flag"],
+            "Trash is left out and the All Mail copy is not repeated"
+        );
+        assert!(
+            store
+                .selection_contains(&flagged, rows[1].id)
+                .expect("contains")
+        );
+        let copies = store
+            .list_threads(
+                store
+                    .mailbox_id_by_role(work, "archive")
+                    .expect("role lookup")
+                    .expect("All Mail"),
+                0..10,
+            )
+            .expect("threads should list");
+        assert!(
+            !store
+                .selection_contains(&flagged, copies[0].id)
+                .expect("contains"),
+            "the All Mail copy is not listed"
+        );
+        let work_inbox = store
+            .mailbox_id_by_role(work, "inbox")
+            .expect("role lookup")
+            .expect("work has an inbox");
+        assert_eq!(rows[1].mailbox_id, work_inbox, "the Inbox copy is listed");
+        assert_eq!(
+            store.selection_counts(&flagged).expect("counts"),
+            ThreadCounts {
+                total_threads: 3,
+                unread_threads: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn every_accounts_mailboxes_list_together() {
+        let (store, work, home) = two_account_store();
+        let accounts = store
+            .list_all_mailboxes()
+            .expect("mailboxes should list")
+            .iter()
+            .map(|mailbox| (mailbox.account_id, mailbox.name.clone()))
+            .collect::<Vec<_>>();
+        let expect = |account: i64, names: &[&str]| {
+            names
+                .iter()
+                .map(|name| (account, (*name).to_owned()))
+                .collect::<Vec<_>>()
+        };
+        let mut expected = expect(work, &["INBOX", "Sent", "All Mail", "Trash"]);
+        expected.extend(expect(home, &["Inbox", "Sent"]));
+        assert_eq!(accounts, expected);
+    }
+
     fn merge_test_snapshot(
         subject: &str,
         body: &str,
@@ -8128,9 +8526,9 @@ mod tests {
     #[test]
     fn ui_preferences_round_trip_through_the_store() {
         use zmail_core::preferences::{
-            Density, KeymapName, MailboxRef, PaneWidths, ReadingPanePosition, ThemeMode,
-            UiPreferences,
+            Density, KeymapName, PaneWidths, ReadingPanePosition, ThemeMode, UiPreferences,
         };
+        use zmail_core::{MailboxSelection, VirtualMailbox};
 
         let store = LocalStore::open_ephemeral().expect("store should open");
         let preferences = UiPreferences {
@@ -8142,10 +8540,7 @@ mod tests {
                 message_list: None,
             },
             sidebar_collapsed: true,
-            last_mailbox: Some(MailboxRef {
-                account_id: 1,
-                mailbox_id: 7,
-            }),
+            last_mailbox: Some(MailboxSelection::Virtual(VirtualMailbox::Flagged)),
             keymap: KeymapName::Gmail,
             undo_send_delay_secs: 5,
             indexing: Default::default(),

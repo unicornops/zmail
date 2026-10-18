@@ -16,6 +16,7 @@ use zmail_core::{
     MessageSnapshot, NewAccount, NewIdentity, OutgoingConfig, ProtocolKind, RuntimeSummary,
     ThemeAppearance, ThemeSummary, ThreadSnapshot, UpstreamPins, preferences::PaneWidths,
 };
+use zmail_core::{MailboxRole, MailboxSelection, VirtualMailbox};
 use zmail_security::{InMemorySecretStore, SecretStore};
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
@@ -39,6 +40,9 @@ enum Setup {
     /// One IMAP account with three Inbox threads and empty Archive and
     /// Trash mailboxes.
     Mail,
+    /// `Mail` plus a second account, "Home", whose Inbox holds the newest
+    /// thread (flagged) and the oldest.
+    Accounts,
 }
 
 /// Keeps the store and the sync runtime alive for the test.
@@ -49,6 +53,11 @@ struct Harness {
     inbox_id: Option<i64>,
     archive_id: Option<i64>,
     trash_id: Option<i64>,
+    /// The "Home" account of [`Setup::Accounts`].
+    home_account_id: Option<i64>,
+    home_inbox_id: Option<i64>,
+    /// Home's Inbox threads, newest first.
+    home_threads: Vec<i64>,
     _runtime: tokio::runtime::Runtime,
 }
 
@@ -109,6 +118,78 @@ fn thread_snapshot(index: usize) -> ThreadSnapshot {
     }
 }
 
+/// Adds [`Setup::Accounts`]' second account.
+fn add_home_account(store: &LocalStore, harness: &mut Harness) {
+    let account_id = store
+        .insert_account(&NewAccount {
+            display_name: "Home".to_owned(),
+            protocol: ProtocolKind::Imap,
+            auth: AuthKind::Password,
+            endpoint: "imaps://mail.example.org:993".to_owned(),
+            username: "me@example.org".to_owned(),
+            cache_policy: CachePolicySummary::performance_first(),
+            outgoing: Some(OutgoingConfig::smtp_default("mail.example.org")),
+            identities: vec![NewIdentity {
+                display_name: "Me at home".to_owned(),
+                email_address: "me@example.org".to_owned(),
+                signature: String::new(),
+                is_primary: true,
+            }],
+        })
+        .expect("the account is stored");
+    let thread = |id: &str, at: &str, flagged: bool| {
+        let mut thread = thread_snapshot(0);
+        thread.remote_thread_id = id.to_owned();
+        thread.subject = format!("Home {id}");
+        thread.latest_message_at = at.to_owned();
+        thread.is_flagged = flagged;
+        for message in &mut thread.messages {
+            message.remote_id = format!("home-{id}");
+            message.identity_email = "me@example.org".to_owned();
+            message.received_at = at.to_owned();
+            message.is_flagged = flagged;
+        }
+        thread
+    };
+    store
+        .replace_account_snapshot(
+            account_id,
+            &AccountSyncSnapshot {
+                checkpoint: "test".to_owned(),
+                detail: "test".to_owned(),
+                identities: None,
+                mailboxes: vec![
+                    MailboxSnapshot {
+                        name: "INBOX".to_owned(),
+                        role: Some("inbox".to_owned()),
+                        threads: vec![
+                            thread("newest", "2026-03-26T09:15:00Z", true),
+                            thread("oldest", "2026-03-01T09:15:00Z", false),
+                        ],
+                        ..Default::default()
+                    },
+                    MailboxSnapshot {
+                        name: "Sent".to_owned(),
+                        role: Some("sent".to_owned()),
+                        ..Default::default()
+                    },
+                ],
+            },
+        )
+        .expect("the mail is stored");
+    let inbox_id = store
+        .mailbox_id_by_role(account_id, "inbox")
+        .expect("the mailbox lookup works");
+    harness.home_account_id = Some(account_id);
+    harness.home_inbox_id = inbox_id;
+    harness.home_threads = store
+        .list_threads(inbox_id.expect("an inbox"), 0..10)
+        .expect("the threads load")
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect();
+}
+
 /// Opens the workspace on the inbox in a test window with the default
 /// keymap bound.
 fn open_workspace(
@@ -153,6 +234,9 @@ fn open_workspace_with(
         inbox_id: None,
         archive_id: None,
         trash_id: None,
+        home_account_id: None,
+        home_inbox_id: None,
+        home_threads: Vec::new(),
         _runtime: runtime,
     };
     if setup != Setup::NoAccount {
@@ -173,7 +257,7 @@ fn open_workspace_with(
                 }],
             })
             .expect("the account is stored");
-        if setup == Setup::Mail {
+        if matches!(setup, Setup::Mail | Setup::Accounts) {
             let mailbox = |name: &str, role: &str, threads| MailboxSnapshot {
                 name: name.to_owned(),
                 role: Some(role.to_owned()),
@@ -210,6 +294,9 @@ fn open_workspace_with(
                 .map(|thread| thread.id)
                 .collect();
         }
+    }
+    if setup == Setup::Accounts {
+        add_home_account(&store, &mut harness);
     }
     let secrets: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::default());
     let sync_service = SyncService::new(
@@ -1433,4 +1520,190 @@ fn a_window_opened_on_a_thread_keeps_the_reader_when_narrowed(cx: &mut TestAppCo
     resize(720., cx);
     assert!(cx.debug_bounds("reader-more").is_some());
     assert!(cx.debug_bounds("single-pane-back").is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Virtual mailboxes (UI plan Phase 3)
+// ---------------------------------------------------------------------------
+
+fn selected_account(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Option<i64> {
+    cx.read_entity(view, |view, _| view.selected_account_id)
+}
+
+#[gpui::test]
+fn the_unified_inbox_lists_every_account_and_follows_the_open_thread(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    let work = cx.read_entity(&view, |view, _| view.accounts[0].id);
+    let home = harness.home_account_id;
+    assert_eq!(selected_account(&view, cx), Some(work));
+
+    view.update(cx, |view, cx| {
+        view.select_virtual_mailbox(VirtualMailbox::Unified(MailboxRole::Inbox), cx)
+    });
+    cx.run_until_parked();
+    // The newest thread is Home's, so the shell now acts on Home.
+    assert_eq!(selected_thread(&view, cx), Some(harness.home_threads[0]));
+    assert_eq!(selected_account(&view, cx), home);
+    let state = cx.read_entity(&view, |view, cx| view.message_list.read(cx).state().clone());
+    let mailbox = state.mailbox.clone().expect("the list shows a mailbox");
+    assert_eq!(mailbox.name, "Unified Inbox");
+    assert_eq!(mailbox.total_threads, 5);
+    assert_eq!(state.row_account_name(work), Some("Work"));
+
+    // Down moves to Work's newest thread: the account follows it.
+    keys("down", cx);
+    assert_eq!(selected_thread(&view, cx), Some(harness.threads[0]));
+    assert_eq!(selected_account(&view, cx), Some(work));
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.mailbox_selection()),
+        Some(MailboxSelection::Virtual(VirtualMailbox::Unified(
+            MailboxRole::Inbox
+        ))),
+        "the list stays on the Unified Inbox"
+    );
+    keys("end", cx);
+    assert_eq!(
+        selected_thread(&view, cx),
+        harness.home_threads.last().copied()
+    );
+
+    // The choice is saved for the next launch.
+    assert_eq!(
+        harness
+            .store
+            .ui_preferences()
+            .expect("the preferences load")
+            .last_mailbox,
+        Some(MailboxSelection::Virtual(VirtualMailbox::Unified(
+            MailboxRole::Inbox
+        )))
+    );
+}
+
+#[gpui::test]
+fn flagged_lists_flagged_threads_across_accounts(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    view.update(cx, |view, cx| {
+        view.select_virtual_mailbox(VirtualMailbox::Flagged, cx)
+    });
+    cx.run_until_parked();
+    let state = cx.read_entity(&view, |view, cx| view.message_list.read(cx).state().clone());
+    let mailbox = state.mailbox.expect("the list shows a mailbox");
+    assert_eq!(
+        (mailbox.name.as_str(), mailbox.total_threads),
+        ("Flagged", 1)
+    );
+    assert_eq!(selected_thread(&view, cx), Some(harness.home_threads[0]));
+}
+
+#[gpui::test]
+fn picking_another_accounts_mailbox_switches_the_account(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    let home_inbox = harness.home_inbox_id.expect("Home has an inbox");
+    view.update(cx, |view, cx| view.select_mailbox(home_inbox, cx));
+    cx.run_until_parked();
+    assert_eq!(selected_account(&view, cx), harness.home_account_id);
+    assert_eq!(selected_thread(&view, cx), Some(harness.home_threads[0]));
+    let identities = cx.read_entity(&view, |view, _| view.own_addresses());
+    assert_eq!(identities, ["me@example.org"], "replies come from Home");
+    let state = cx.read_entity(&view, |view, cx| view.message_list.read(cx).state().clone());
+    assert_eq!(
+        state.row_account_name(harness.home_account_id.expect("Home")),
+        None,
+        "one account's mailbox does not name the account on each row"
+    );
+}
+
+#[gpui::test]
+fn the_last_mailbox_reopens_after_a_restart(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Accounts,
+        |_| InitialView::Inbox,
+        |store| {
+            store
+                .update_ui_preferences(|preferences| {
+                    preferences.last_mailbox =
+                        Some(MailboxSelection::Virtual(VirtualMailbox::Flagged));
+                })
+                .expect("the preferences save");
+        },
+    );
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.virtual_mailbox),
+        Some(VirtualMailbox::Flagged)
+    );
+    assert_eq!(selected_thread(&view, cx), Some(harness.home_threads[0]));
+}
+
+#[gpui::test]
+fn archiving_in_the_unified_inbox_selects_the_next_row_and_undo_brings_it_back(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    let work = cx.read_entity(&view, |view, _| view.accounts[0].id);
+    view.update(cx, |view, cx| {
+        view.select_virtual_mailbox(VirtualMailbox::Unified(MailboxRole::Inbox), cx)
+    });
+    cx.run_until_parked();
+    // Rows: Home's newest, then Work's three, then Home's oldest.
+    keys("down", cx);
+    let archived = harness.threads[0];
+    assert_eq!(selected_thread(&view, cx), Some(archived));
+
+    keys("secondary-e", cx);
+    assert_eq!(mailbox_of(&harness, archived), harness.archive_id);
+    assert_eq!(
+        selected_thread(&view, cx),
+        Some(harness.threads[1]),
+        "the row that took its place is selected"
+    );
+    assert_eq!(selected_account(&view, cx), Some(work));
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.virtual_mailbox),
+        Some(VirtualMailbox::Unified(MailboxRole::Inbox)),
+        "the list stays on the Unified Inbox"
+    );
+
+    keys("secondary-z", cx);
+    assert_eq!(mailbox_of(&harness, archived), harness.inbox_id);
+    assert_eq!(
+        selected_thread(&view, cx),
+        Some(archived),
+        "undo selects the conversation it brought back"
+    );
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.selected_mailbox_id),
+        harness.inbox_id
+    );
+}
+
+#[gpui::test]
+fn unflagging_in_flagged_moves_on_across_accounts_and_undo_reselects(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    let work = cx.read_entity(&view, |view, _| view.accounts[0].id);
+    let work_thread = harness.threads[0];
+    harness
+        .store
+        .set_thread_flagged(work_thread, true)
+        .expect("the thread is flagged");
+    view.update(cx, |view, cx| {
+        view.select_virtual_mailbox(VirtualMailbox::Flagged, cx)
+    });
+    cx.run_until_parked();
+    let home_thread = harness.home_threads[0];
+    assert_eq!(selected_thread(&view, cx), Some(home_thread));
+
+    // Unflagging takes Home's thread out of Flagged: Work's is next.
+    keys("secondary-shift-l", cx);
+    assert_eq!(selected_thread(&view, cx), Some(work_thread));
+    assert_eq!(selected_account(&view, cx), Some(work));
+
+    keys("secondary-z", cx);
+    assert_eq!(selected_thread(&view, cx), Some(home_thread));
+    assert_eq!(selected_account(&view, cx), harness.home_account_id);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.selected_mailbox_id),
+        harness.home_inbox_id
+    );
 }

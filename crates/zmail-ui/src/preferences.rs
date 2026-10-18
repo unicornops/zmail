@@ -53,6 +53,18 @@ impl WorkspaceView {
         }
     }
 
+    /// Saves the mailbox the list shows, to reopen on the next launch.
+    pub(crate) fn persist_last_mailbox(&mut self) {
+        let Some(selection) = self.mailbox_selection() else {
+            return;
+        };
+        if let Err(error) = self.store.update_ui_preferences(|preferences| {
+            preferences.last_mailbox = Some(selection);
+        }) {
+            self.store_error = Some(format!("Could not save the open mailbox: {error:#}"));
+        }
+    }
+
     /// Saves whether the sidebar is hidden.
     pub(crate) fn persist_sidebar_collapsed(&mut self) {
         let collapsed = self.sidebar_collapsed;

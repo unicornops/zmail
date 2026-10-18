@@ -972,11 +972,67 @@ impl MailboxRole {
     }
 }
 
+/// A thread list that spans accounts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualMailbox {
+    /// The mailbox with this role in every account: `Inbox` is the
+    /// Unified Inbox, `Sent` the Sent favourite.
+    Unified(MailboxRole),
+    /// Flagged conversations in every account, outside Trash and Junk.
+    /// A conversation that is in several mailboxes of one account (Gmail's
+    /// labels) is listed once, from its Inbox copy when it has one.
+    Flagged,
+}
+
+impl VirtualMailbox {
+    /// The name the sidebar and the list header show.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unified(MailboxRole::Inbox) => "Unified Inbox",
+            Self::Unified(role) => role.label(),
+            Self::Flagged => "Flagged",
+        }
+    }
+}
+
+/// What the message list shows: one account's mailbox, or a virtual
+/// mailbox across accounts. The UI keeps the last one in
+/// [`preferences::UiPreferences::last_mailbox`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailboxSelection {
+    /// One stored mailbox.
+    Mailbox {
+        /// Account that owns the mailbox.
+        account_id: i64,
+        /// Mailbox identifier.
+        mailbox_id: i64,
+    },
+    /// A thread list across accounts.
+    Virtual(VirtualMailbox),
+}
+
+/// Thread counts of a [`MailboxSelection`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadCounts {
+    /// Conversations listed.
+    pub total_threads: usize,
+    /// Conversations with unread mail.
+    pub unread_threads: usize,
+}
+
 /// Thread metadata shown in the center pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadSummary {
     /// Thread identifier.
     pub id: i64,
+    /// Mailbox the thread row belongs to. Lists that span mailboxes
+    /// (the Unified Inbox, Flagged) open each thread in its own mailbox.
+    pub mailbox_id: i64,
+    /// Account that owns the mailbox, so lists that span accounts can show
+    /// where each row comes from.
+    pub account_id: i64,
     /// Subject line.
     pub subject: String,
     /// Latest sender display string.
