@@ -16,7 +16,7 @@ use zmail_core::{
     MessageSnapshot, NewAccount, NewIdentity, OutgoingConfig, ProtocolKind, RuntimeSummary,
     ThemeAppearance, ThemeSummary, ThreadSnapshot, UpstreamPins, preferences::PaneWidths,
 };
-use zmail_core::{MailboxRole, MailboxSelection, VirtualMailbox};
+use zmail_core::{MailboxRole, MailboxSelection, NewDraft, VirtualMailbox, preferences::FolderRef};
 use zmail_security::{InMemorySecretStore, SecretStore};
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
@@ -153,6 +153,12 @@ fn add_home_account(store: &LocalStore, harness: &mut Harness) {
         }
         thread
     };
+    let folder = |name: &str, parent: Option<&str>| MailboxSnapshot {
+        name: name.to_owned(),
+        delimiter: Some("/".to_owned()),
+        parent: parent.map(str::to_owned),
+        ..Default::default()
+    };
     store
         .replace_account_snapshot(
             account_id,
@@ -175,6 +181,10 @@ fn add_home_account(store: &LocalStore, harness: &mut Harness) {
                         role: Some("sent".to_owned()),
                         ..Default::default()
                     },
+                    folder("Projects", None),
+                    folder("Projects/Website", Some("Projects")),
+                    // "Lists" holds no mail, so it is not stored.
+                    folder("Lists/rust", Some("Lists")),
                 ],
             },
         )
@@ -679,16 +689,25 @@ fn arrow_keys_move_the_selection_only_in_the_focused_pane(cx: &mut TestAppContex
     keys("up up down", cx);
     assert_eq!(selected_thread(&view, cx), Some(threads[2]));
 
-    // In the sidebar the arrows move through the mailboxes.
+    // In the sidebar the arrows move through the rows: Inbox, then the
+    // Favourites, then the account's folders.
     keys("tab", cx);
     assert_eq!(focused_pane(&view, cx), Some(Pane::Sidebar));
+    let selection =
+        |cx: &mut VisualTestContext| cx.read_entity(&view, |view, _| view.mailbox_selection());
     keys("down", cx);
-    let mailbox = cx.read_entity(&view, |view, _| view.selected_mailbox_id);
     assert_eq!(
-        mailbox, harness.archive_id,
-        "down from Inbox selects the next mailbox"
+        selection(cx),
+        Some(MailboxSelection::Virtual(VirtualMailbox::Flagged)),
+        "down from Inbox selects Flagged"
     );
+    keys("end", cx);
+    let mailbox = cx.read_entity(&view, |view, _| view.selected_mailbox_id);
+    assert_eq!(mailbox, harness.trash_id, "the last folder is Trash");
     keys("up", cx);
+    let mailbox = cx.read_entity(&view, |view, _| view.selected_mailbox_id);
+    assert_eq!(mailbox, harness.archive_id);
+    keys("home", cx);
     let mailbox = cx.read_entity(&view, |view, _| view.selected_mailbox_id);
     assert_eq!(mailbox, harness.inbox_id);
     // Enter moves on to the list.
@@ -1132,6 +1151,17 @@ fn the_window_can_open_on_account_setup(cx: &mut TestAppContext) {
 // ---------------------------------------------------------------------------
 
 /// Clicks the centre of the element with debug selector `selector`.
+/// [`click`] for a selector built at run time.
+fn click_on(selector: String, cx: &mut VisualTestContext) {
+    click(Box::leak(selector.into_boxed_str()), cx);
+}
+
+/// Whether an element with the run-time `selector` is drawn.
+fn drawn(selector: String, cx: &mut VisualTestContext) -> bool {
+    cx.debug_bounds(Box::leak(selector.into_boxed_str()))
+        .is_some()
+}
+
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
     let bounds = cx
         .debug_bounds(selector)
@@ -1207,16 +1237,26 @@ fn the_sidebar_lists_drafts_and_outbox(cx: &mut TestAppContext) {
     click("sidebar-outbox", cx);
     assert_eq!(mode(cx), ListMode::Outbox);
 
-    // They are the sidebar's last keyboard stops.
+    // They are Favourites, between Flagged and Sent and after Sent.
     view.update_in(cx, |view, window, cx| {
         view.focus_pane(Pane::Sidebar, window, cx)
     });
     keys("home", cx);
     assert_eq!(mode(cx), ListMode::Mail);
-    keys("end", cx);
+    keys("down down", cx);
+    assert_eq!(mode(cx), ListMode::Drafts);
+    keys("down down", cx);
     assert_eq!(mode(cx), ListMode::Outbox);
     keys("up", cx);
-    assert_eq!(mode(cx), ListMode::Drafts);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| (view.list_mode, view.mailbox_selection())),
+        (
+            ListMode::Mail,
+            Some(MailboxSelection::Virtual(VirtualMailbox::Unified(
+                MailboxRole::Sent
+            )))
+        )
+    );
 }
 
 #[gpui::test]
@@ -1707,5 +1747,228 @@ fn unflagging_in_flagged_moves_on_across_accounts_and_undo_reselects(cx: &mut Te
     assert_eq!(
         cx.read_entity(&view, |view, _| view.selected_mailbox_id),
         harness.home_inbox_id
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar (UI plan Phase 3)
+// ---------------------------------------------------------------------------
+
+/// The id of `account`'s mailbox called `name`.
+fn mailbox_named(harness: &Harness, account_id: i64, name: &str) -> i64 {
+    harness
+        .store
+        .list_mailboxes(account_id)
+        .expect("the mailboxes list")
+        .into_iter()
+        .find(|mailbox| mailbox.name == name)
+        .unwrap_or_else(|| panic!("{name} exists"))
+        .id
+}
+
+#[gpui::test]
+fn the_sidebar_shows_inboxes_favourites_and_each_accounts_folders(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    resize(1440., cx);
+    let work = cx.read_entity(&view, |view, _| view.accounts[0].id);
+    let home = harness.home_account_id.expect("Home");
+    let home_inbox = harness.home_inbox_id.expect("Home's inbox");
+    let work_inbox = harness.inbox_id.expect("Work's inbox");
+
+    for selector in [
+        "sidebar-unified-inbox",
+        "sidebar-flagged",
+        "sidebar-drafts",
+        "sidebar-sent",
+        "sidebar-outbox",
+    ] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector} is drawn");
+    }
+    for selector in [
+        format!("inbox-row-{work_inbox}"),
+        format!("inbox-row-{home_inbox}"),
+        format!("account-row-{work}"),
+        format!("account-row-{home}"),
+        format!(
+            "mailbox-row-{}",
+            mailbox_named(&harness, home, "Projects/Website")
+        ),
+        format!("folder-group-{home}-Lists"),
+    ] {
+        assert!(drawn(selector.clone(), cx), "{selector} is drawn");
+    }
+
+    // The Unified Inbox, then one account's inbox.
+    click("sidebar-unified-inbox", cx);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.mailbox_selection()),
+        Some(MailboxSelection::Virtual(VirtualMailbox::Unified(
+            MailboxRole::Inbox
+        )))
+    );
+    click_on(format!("inbox-row-{home_inbox}"), cx);
+    assert_eq!(selected_account(&view, cx), Some(home));
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.selected_mailbox_id),
+        Some(home_inbox)
+    );
+    click("sidebar-sent", cx);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.virtual_mailbox),
+        Some(VirtualMailbox::Unified(MailboxRole::Sent))
+    );
+}
+
+#[gpui::test]
+fn sidebar_folders_collapse_and_stay_collapsed(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    resize(1440., cx);
+    let home = harness.home_account_id.expect("Home");
+    let website = format!(
+        "mailbox-row-{}",
+        mailbox_named(&harness, home, "Projects/Website")
+    );
+    let projects = mailbox_named(&harness, home, "Projects");
+    assert!(drawn(website.clone(), cx));
+
+    // A folder's chevron hides its subfolders.
+    click_on(format!("mailbox-row-{projects}-chevron"), cx);
+    assert!(!drawn(website.clone(), cx), "Website is hidden");
+    assert!(drawn(format!("mailbox-row-{projects}"), cx));
+    assert_ne!(
+        cx.read_entity(&view, |view, _| view.selected_mailbox_id),
+        Some(projects),
+        "the chevron does not open the folder"
+    );
+
+    // Clicking an account header collapses the whole account.
+    click_on(format!("account-row-{home}"), cx);
+    assert!(!drawn(format!("mailbox-row-{projects}"), cx));
+
+    let saved = harness
+        .store
+        .ui_preferences()
+        .expect("the preferences load")
+        .sidebar_tree;
+    assert_eq!(saved.collapsed_accounts, [home]);
+    assert_eq!(
+        saved.collapsed_folders,
+        [FolderRef {
+            account_id: home,
+            name: "Projects".to_owned(),
+        }]
+    );
+
+    // From the keyboard, Enter on the header expands it again; the
+    // folder stays collapsed.
+    view.update_in(cx, |view, window, cx| {
+        view.focus_pane(Pane::Sidebar, window, cx)
+    });
+    keys("end enter", cx);
+    assert!(drawn(format!("mailbox-row-{projects}"), cx));
+    assert!(!drawn(website, cx));
+}
+
+#[gpui::test]
+fn collapsed_folders_load_collapsed(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Accounts,
+        |_| InitialView::Inbox,
+        |store| {
+            let home = store.list_accounts().expect("accounts")[1].id;
+            store
+                .update_ui_preferences(|preferences| {
+                    preferences.sidebar_tree.collapsed_accounts = vec![home];
+                })
+                .expect("the preferences save");
+        },
+    );
+    resize(1440., cx);
+    let _ = view;
+    let home = harness.home_account_id.expect("Home");
+    assert!(drawn(format!("account-row-{home}"), cx));
+    assert!(!drawn(
+        format!("mailbox-row-{}", mailbox_named(&harness, home, "Projects")),
+        cx
+    ));
+}
+
+#[gpui::test]
+fn a_failing_account_offers_fix(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Accounts,
+        |_| InitialView::Inbox,
+        |store| {
+            let home = store.list_accounts().expect("accounts")[1].id;
+            store
+                .record_sync_failure(home, "Sync failed", "authentication failed")
+                .expect("the failure is recorded");
+        },
+    );
+    resize(1440., cx);
+    let work = cx.read_entity(&view, |view, _| view.accounts[0].id);
+    let home = harness.home_account_id.expect("Home");
+    assert!(!drawn(format!("account-fix-{work}"), cx), "Work is fine");
+
+    click_on(format!("account-fix-{home}"), cx);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.detail_mode),
+        DetailMode::AccountSetup
+    );
+    let notice = cx.read_entity(&view, |view, cx| {
+        view.account_setup.read(cx).form.notice.clone()
+    });
+    assert_eq!(
+        notice.as_deref(),
+        Some("Home can't sync: authentication failed")
+    );
+    assert!(
+        drawn(
+            format!("mailbox-row-{}", mailbox_named(&harness, home, "Projects")),
+            cx
+        ),
+        "Fix… does not collapse the account"
+    );
+}
+
+#[gpui::test]
+fn the_outbox_row_counts_waiting_mail_and_retries_failures(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    assert!(cx.debug_bounds("sidebar-outbox-retry").is_none());
+    let account_id = cx.read_entity(&view, |view, _| view.accounts[0].id);
+    let identity = harness
+        .store
+        .list_identities(account_id)
+        .expect("identities")[0]
+        .id;
+    let draft_id = harness
+        .store
+        .create_draft(&NewDraft {
+            account_id,
+            identity_id: identity,
+            to: vec!["kai@example.test".to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Report".to_owned(),
+            body: "Attached".to_owned(),
+        })
+        .expect("the draft is stored");
+    let job = harness.store.queue_draft(draft_id).expect("queued");
+    harness
+        .store
+        .record_outbox_failure(job, "connection refused")
+        .expect("the failure is recorded");
+    view.update(cx, |view, cx| {
+        view.refresh_from_store(cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    click("sidebar-outbox-retry", cx);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.status_message.clone()),
+        Some("1 message queued for another send attempt.".to_owned())
     );
 }

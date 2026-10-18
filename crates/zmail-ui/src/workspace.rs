@@ -15,13 +15,13 @@ use std::{collections::HashSet, time::Duration};
 use anyhow::{Context as _, Result, bail};
 use gpui::{
     AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight,
-    IntoElement, MouseButton, Render, StyleRefinement, Styled, Window, WindowAppearance, div, hsla,
-    prelude::*, px, rgb,
+    IntoElement, MouseButton, Render, SharedString, StyleRefinement, Styled, Window,
+    WindowAppearance, div, hsla, prelude::*, px, rgb,
 };
 use std::sync::Arc;
 use zmail_core::{
     AccountSummary, AppBootstrap, IdentitySummary, MailboxSelection, MailboxSummary, NewDraft,
-    StoreStats, ThemeAppearance, ThreadMessage, ThreadView, VirtualMailbox,
+    OutboxJobState, StoreStats, ThemeAppearance, ThreadMessage, ThreadView, VirtualMailbox,
     text::count_noun,
     time::{HourCycle, format_full_date, next_local_midnight},
 };
@@ -50,7 +50,9 @@ use crate::message_list::{
 };
 use crate::pane::{Pane, dispatch_from};
 use crate::reader::{ReaderState, ReaderView};
-use crate::sidebar::{SidebarEvent, SidebarHighlight, SidebarState, SidebarView};
+use crate::sidebar::{
+    OutboxStatus, SidebarEvent, SidebarHighlight, SidebarState, SidebarView, TreeNode,
+};
 use crate::styles::{
     DETAIL_MIN_WIDTH, ICON_SIZE_SM, MESSAGE_LIST_MIN_WIDTH, MESSAGE_LIST_WIDTH, MenuPlacement,
     PlatformStyle, READER_COMPACT_ACTIONS_BELOW, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, UiColors,
@@ -162,6 +164,8 @@ impl WorkspaceView {
             selected_mailbox_id: None,
             virtual_mailbox: None,
             virtual_counts: Default::default(),
+            flagged_unread: 0,
+            sidebar_tree: Default::default(),
             selected_thread_id: None,
             selected_draft_id: None,
             selected_outbox_job_id: None,
@@ -225,7 +229,7 @@ impl WorkspaceView {
             view.detail_mode = DetailMode::AccountSetup;
             view.account_setup.update(cx, |form, cx| {
                 form.open(
-                    Some("Add your first mail account to get started."),
+                    Some("Add your first mail account to get started.".into()),
                     window,
                     cx,
                 );
@@ -326,17 +330,37 @@ impl WorkspaceView {
     pub(crate) fn sync_panes(&mut self, cx: &mut Context<Self>) {
         let sidebar_state = SidebarState {
             accounts: self.accounts.clone(),
-            selected_account_id: self.selected_account_id,
-            mailboxes: self.mailboxes.clone(),
-            selected_mailbox_id: self.selected_mailbox_id,
+            mailboxes: self.all_mailboxes.clone(),
             highlight: match self.list_mode {
-                ListMode::Mail => SidebarHighlight::Mailbox,
+                ListMode::Mail => match self.mailbox_selection() {
+                    Some(MailboxSelection::Virtual(virtual_mailbox)) => {
+                        SidebarHighlight::Virtual(virtual_mailbox)
+                    }
+                    Some(MailboxSelection::Mailbox { mailbox_id, .. }) => {
+                        SidebarHighlight::Mailbox(mailbox_id)
+                    }
+                    None => SidebarHighlight::None,
+                },
                 ListMode::Drafts => SidebarHighlight::Drafts,
                 ListMode::Outbox => SidebarHighlight::Outbox,
                 ListMode::Search => SidebarHighlight::None,
             },
+            flagged_unread: self.flagged_unread,
             draft_count: self.drafts.len(),
-            outbox_count: self.outbox_jobs.len(),
+            outbox: OutboxStatus {
+                waiting: self
+                    .outbox_jobs
+                    .iter()
+                    .filter(|job| job.state != OutboxJobState::Sent)
+                    .count(),
+                failed: self
+                    .outbox_jobs
+                    .iter()
+                    .filter(|job| is_retryable(job.state))
+                    .count(),
+            },
+            tree: self.sidebar_tree.clone(),
+            density: Default::default(),
         };
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_state(sidebar_state, cx));
@@ -460,13 +484,13 @@ impl WorkspaceView {
             .filter(|mailbox| Some(mailbox.account_id) == self.selected_account_id)
             .cloned()
             .collect();
-        self.drafts = self
+        // Drafts and the outbox are Favourites: every account's.
+        self.drafts = self.store.list_drafts(None).unwrap_or_default();
+        self.outbox_jobs = self.store.list_outbox_jobs(None).unwrap_or_default();
+        self.flagged_unread = self
             .store
-            .list_drafts(self.selected_account_id)
-            .unwrap_or_default();
-        self.outbox_jobs = self
-            .store
-            .list_outbox_jobs(self.selected_account_id)
+            .selection_counts(&MailboxSelection::Virtual(VirtualMailbox::Flagged))
+            .map(|counts| counts.unread_threads)
             .unwrap_or_default();
         // Re-run the shown search so read state, flags and moves made since
         // it ran show up in the results.
@@ -1199,7 +1223,7 @@ impl WorkspaceView {
     pub(crate) fn open_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(account_id) = self.selected_account_id else {
             self.open_account_setup_with_notice(
-                Some("Add a mail account first. You can write messages once it is set up."),
+                Some("Add a mail account first. You can write messages once it is set up.".into()),
                 window,
                 cx,
             );
@@ -1459,6 +1483,61 @@ impl WorkspaceView {
             .context("select or configure an account identity before composing")
     }
 
+    /// Sends every failed outbox message again (the sidebar's Retry).
+    pub(crate) fn retry_failed_outbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let failed = self
+            .outbox_jobs
+            .iter()
+            .filter(|job| is_retryable(job.state))
+            .map(|job| job.id)
+            .collect::<Vec<_>>();
+        if failed.is_empty() {
+            return;
+        }
+        for job_id in &failed {
+            if let Err(error) = self
+                .mail_actions
+                .update(cx, |actions, cx| actions.retry_outbox_job(*job_id, cx))
+            {
+                self.store_error = Some(error.to_string());
+            }
+        }
+        let _ = self.sync_service.process_outbox(None);
+        self.show_status(
+            format!(
+                "{} queued for another send attempt.",
+                count_noun(failed.len(), "message", "messages")
+            ),
+            cx,
+        );
+        self.refresh_from_store(cx);
+        self.schedule_refresh(window, cx);
+        cx.notify();
+    }
+
+    /// Expands or collapses an account or folder in the sidebar and saves
+    /// the tree.
+    fn toggle_sidebar_node(&mut self, node: &TreeNode, cx: &mut Context<Self>) {
+        fn toggle<T: PartialEq>(list: &mut Vec<T>, value: T) {
+            match list.iter().position(|item| *item == value) {
+                Some(index) => {
+                    list.remove(index);
+                }
+                None => list.push(value),
+            }
+        }
+        match node {
+            TreeNode::Account(account_id) => {
+                toggle(&mut self.sidebar_tree.collapsed_accounts, *account_id)
+            }
+            TreeNode::Folder(folder) => {
+                toggle(&mut self.sidebar_tree.collapsed_folders, folder.clone())
+            }
+        }
+        self.persist_sidebar_tree();
+        cx.notify();
+    }
+
     /// Retry the currently-selected outbox job.
     pub(crate) fn retry_selected_outbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(job_id) = self.selected_outbox_job_id else {
@@ -1485,6 +1564,26 @@ impl WorkspaceView {
     // Account setup
     // -----------------------------------------------------------------------
 
+    /// The "Fix…" action on an account whose sync fails: open the account
+    /// form with the error. There is no Settings → Accounts page yet
+    /// (#120), so this is the form that exists.
+    fn fix_account(&mut self, account_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(account) = self
+            .accounts
+            .iter()
+            .find(|account| account.id == account_id)
+        else {
+            return;
+        };
+        let error = account
+            .sync_status
+            .last_error_message
+            .clone()
+            .unwrap_or_else(|| "the last sync failed".to_owned());
+        let notice = format!("{} can't sync: {error}", account.display_name);
+        self.open_account_setup_with_notice(Some(notice.into()), window, cx);
+    }
+
     /// Switch to the account setup pane.
     pub(crate) fn open_account_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_account_setup_with_notice(None, window, cx);
@@ -1494,7 +1593,7 @@ impl WorkspaceView {
     /// user did not ask for it.
     pub(crate) fn open_account_setup_with_notice(
         &mut self,
-        notice: Option<&'static str>,
+        notice: Option<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1951,10 +2050,15 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         match *event {
-            SidebarEvent::SelectAccount(account_id) => self.select_account(account_id, cx),
             SidebarEvent::SelectMailbox(mailbox_id) => self.select_mailbox(mailbox_id, cx),
+            SidebarEvent::SelectVirtual(virtual_mailbox) => {
+                self.select_virtual_mailbox(virtual_mailbox, cx)
+            }
             SidebarEvent::ShowDrafts => self.show_drafts_list(cx),
             SidebarEvent::ShowOutbox => self.set_list_mode(ListMode::Outbox, cx),
+            SidebarEvent::RetryOutbox => self.retry_failed_outbox(window, cx),
+            SidebarEvent::ToggleCollapsed(ref node) => self.toggle_sidebar_node(node, cx),
+            SidebarEvent::FixAccount(account_id) => self.fix_account(account_id, window, cx),
             SidebarEvent::Activate => self.focus_pane(Pane::MessageList, window, cx),
             // Picking a view in the overlay closes it.
             SidebarEvent::RowClicked => {
@@ -2299,6 +2403,11 @@ impl Render for WorkspaceView {
 
 /// Split a comma-separated address string into individual trimmed addresses,
 /// discarding empty entries.
+/// Whether an outbox message failed and waits for a retry.
+fn is_retryable(state: OutboxJobState) -> bool {
+    matches!(state, OutboxJobState::Failed | OutboxJobState::Retrying)
+}
+
 pub(crate) fn split_addresses(value: &str) -> Vec<String> {
     value
         .split(',')

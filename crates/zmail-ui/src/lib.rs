@@ -317,6 +317,10 @@ struct WorkspaceView {
     /// The virtual mailbox's thread counts, read with the rest of the
     /// store state.
     virtual_counts: ThreadCounts,
+    /// Unread conversations in Flagged, for the sidebar.
+    flagged_unread: usize,
+    /// Collapsed accounts and folders in the sidebar (persisted).
+    sidebar_tree: zmail_core::preferences::SidebarTree,
     selected_thread_id: Option<i64>,
     selected_draft_id: Option<i64>,
     selected_outbox_job_id: Option<i64>,

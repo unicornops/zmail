@@ -17,8 +17,9 @@ use zmail_core::SyncPhase;
 
 use crate::components::TextInput;
 use crate::styles::{
-    ACTION_DIVIDER_HEIGHT, ACTION_DIVIDER_WIDTH, BADGE_SIZE, EMPTY_STATE_ICON_FRAME_SIZE,
-    ICON_SIZE_LG, ICON_SIZE_SM, STATUS_BANNER_STRIP_WIDTH, TOOLBAR_BUTTON_HEIGHT, UiColors,
+    ACCOUNT_COLORS, ACCOUNT_DOT_SIZE, ACTION_DIVIDER_HEIGHT, ACTION_DIVIDER_WIDTH,
+    EMPTY_STATE_ICON_FRAME_SIZE, ICON_SIZE_LG, ICON_SIZE_SM, STATUS_BANNER_STRIP_WIDTH,
+    TOOLBAR_BUTTON_HEIGHT, UiColors,
 };
 
 // ---------------------------------------------------------------------------
@@ -346,28 +347,6 @@ pub(crate) fn icon(name: &str, size: f32, color: u32) -> Svg {
 }
 
 // ---------------------------------------------------------------------------
-// badge
-// ---------------------------------------------------------------------------
-
-/// Render a compact unread-count pill.
-pub(crate) fn badge(count: usize, bg_color: u32, text_color: u32) -> gpui::Div {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .min_w(px(BADGE_SIZE))
-        .h(px(BADGE_SIZE))
-        .px_2()
-        .rounded_full()
-        .bg(rgb(bg_color))
-        .text_xs()
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(text_color))
-        .child(count.to_string())
-}
-
-// ---------------------------------------------------------------------------
 // label_chip
 // ---------------------------------------------------------------------------
 
@@ -480,6 +459,27 @@ pub(crate) fn message_avatar_background(seed: &str, colors: &UiColors) -> u32 {
     let palette = [colors.accent, colors.info, colors.success, colors.warning];
     let index = (hasher.finish() as usize) % palette.len();
     palette[index]
+}
+
+// ---------------------------------------------------------------------------
+// account_color
+// ---------------------------------------------------------------------------
+
+/// An account's colour: derived from its id with no setting, so the first
+/// accounts all differ and an account keeps its colour across launches.
+pub(crate) fn account_color(account_id: i64) -> u32 {
+    let index = account_id.rem_euclid(ACCOUNT_COLORS.len() as i64) as usize;
+    // Ids start at 1; the first account gets the first colour.
+    ACCOUNT_COLORS[(index + ACCOUNT_COLORS.len() - 1) % ACCOUNT_COLORS.len()]
+}
+
+/// A small dot in an account's colour.
+pub(crate) fn account_dot(account_id: i64) -> gpui::Div {
+    div()
+        .flex_none()
+        .size(px(ACCOUNT_DOT_SIZE))
+        .rounded_full()
+        .bg(rgb(account_color(account_id)))
 }
 
 // ---------------------------------------------------------------------------

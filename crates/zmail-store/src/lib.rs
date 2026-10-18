@@ -8540,6 +8540,7 @@ mod tests {
                 message_list: None,
             },
             sidebar_collapsed: true,
+            sidebar_tree: Default::default(),
             last_mailbox: Some(MailboxSelection::Virtual(VirtualMailbox::Flagged)),
             keymap: KeymapName::Gmail,
             undo_send_delay_secs: 5,

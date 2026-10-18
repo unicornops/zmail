@@ -9,10 +9,10 @@
 
 use anyhow::{Context, Result, bail};
 use zmail_core::{
-    AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxSnapshot, MessageAttachment,
-    MessageSnapshot, NewAccount, NewDraft, NewIdentity, OutgoingConfig, ProtocolKind,
-    ThemeAppearance, ThreadSnapshot, participants::thread_participants, preferences::Density,
-    time::utc_timestamp,
+    AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxRole, MailboxSelection,
+    MailboxSnapshot, MessageAttachment, MessageSnapshot, NewAccount, NewDraft, NewIdentity,
+    OutgoingConfig, ProtocolKind, ThemeAppearance, ThreadSnapshot, VirtualMailbox,
+    participants::thread_participants, preferences::Density, time::utc_timestamp,
 };
 use zmail_store::LocalStore;
 use zmail_ui::InitialView;
@@ -35,6 +35,9 @@ pub(crate) enum FixtureView {
     /// The seeded inbox with keyboard focus in the sidebar, so a window
     /// too narrow for the sidebar pane shows it as an overlay.
     Sidebar,
+    /// Three accounts on the Unified Inbox: nested folder trees, one
+    /// account failing to sync and a failed message in the outbox.
+    Accounts,
 }
 
 impl FixtureView {
@@ -47,8 +50,9 @@ impl FixtureView {
             "compose" => Self::Compose,
             "account-setup" => Self::AccountSetup,
             "sidebar" => Self::Sidebar,
+            "accounts" => Self::Accounts,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, reader, compose, account-setup or sidebar"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, reader, compose, account-setup, sidebar or accounts"
             ),
         })
     }
@@ -114,6 +118,10 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
             store
                 .update_ui_preferences(|preferences| preferences.density = Density::Compact)
                 .context("failed to save the fixture density")?;
+            InitialView::Inbox
+        }
+        FixtureView::Accounts => {
+            seed_more_accounts(store, account_id, now)?;
             InitialView::Inbox
         }
         FixtureView::AccountSetup => InitialView::AccountSetup,
@@ -397,9 +405,167 @@ fn fixture_snapshot(now: u64) -> AccountSyncSnapshot {
             mailbox("Archive", Some("archive"), ARCHIVE),
             mailbox("Junk", Some("junk"), &[]),
             mailbox("Trash", Some("trash"), &[]),
-            mailbox("Projects/Website", None, &[]),
+            MailboxSnapshot {
+                name: "Projects/Website".to_owned(),
+                delimiter: Some("/".to_owned()),
+                // "Projects" holds no mail, so the tree shows it as a
+                // parent without a mailbox.
+                parent: Some("Projects".to_owned()),
+                ..Default::default()
+            },
         ],
     }
+}
+
+/// Personal Inbox threads for the `accounts` view.
+const PERSONAL_INBOX: &[Thread] = &[
+    Thread {
+        id: "p-holiday",
+        subject: "Ferry tickets for August",
+        flagged: true,
+        messages: &[Message {
+            sender: "Harbour Ferries <bookings@example.net>",
+            minutes_ago: 30 * MINUTE,
+            is_read: false,
+            body: "Your booking is confirmed: two adults and a car, sailing on 14 August at \
+                   09:30. Please arrive 45 minutes before departure.",
+            attachments: &["booking-confirmation.pdf"],
+        }],
+    },
+    Thread {
+        id: "p-book-club",
+        subject: "Book club: next month's pick",
+        flagged: false,
+        messages: &[Message {
+            sender: "Nora Walsh <nora.walsh@example.org>",
+            minutes_ago: 7 * HOUR,
+            is_read: false,
+            body: "Three votes for the lighthouse novel, so that's next month's book. \
+                   We meet at mine on the 3rd.",
+            attachments: &[],
+        }],
+    },
+    Thread {
+        id: "p-allotment",
+        subject: "Allotment rota",
+        flagged: false,
+        messages: &[Message {
+            sender: "Allotment Society <rota@example.org>",
+            minutes_ago: 2 * DAY,
+            is_read: true,
+            body: "This month's watering rota is attached. Swap with a neighbour if \
+                   your week does not suit.",
+            attachments: &[],
+        }],
+    },
+];
+
+/// Side-project Inbox threads for the `accounts` view.
+const SIDE_PROJECT_INBOX: &[Thread] = &[Thread {
+    id: "s-release",
+    subject: "Release 2.1 is out",
+    flagged: false,
+    messages: &[Message {
+        sender: "Package Bot <bot@example.net>",
+        minutes_ago: 3 * HOUR,
+        is_read: false,
+        body: "Version 2.1 was published. The changelog lists 14 fixes and one new \
+               configuration option.",
+        attachments: &[],
+    }],
+}];
+
+/// The `accounts` view: two more accounts (a slash-delimited tree three
+/// levels deep, and a dot-delimited one that fails to sync), a failed
+/// message in the outbox, Work's tree collapsed and the Unified Inbox
+/// open.
+fn seed_more_accounts(store: &LocalStore, work_id: i64, now: u64) -> Result<()> {
+    let account = |name: &str, email: &str| NewAccount {
+        display_name: name.to_owned(),
+        username: email.to_owned(),
+        identities: vec![NewIdentity {
+            display_name: OWN_NAME.to_owned(),
+            email_address: email.to_owned(),
+            signature: String::new(),
+            is_primary: true,
+        }],
+        ..fixture_account()
+    };
+    let folder =
+        |name: &str, role: Option<&str>, delimiter: &str, threads: &[Thread]| MailboxSnapshot {
+            name: name.to_owned(),
+            role: role.map(str::to_owned),
+            delimiter: Some(delimiter.to_owned()),
+            parent: name
+                .rsplit_once(delimiter)
+                .map(|(parent, _)| parent.to_owned()),
+            threads: threads
+                .iter()
+                .map(|thread| thread_snapshot(thread, now))
+                .collect(),
+        };
+    let snapshot = |mailboxes| AccountSyncSnapshot {
+        checkpoint: "fixture:1".to_owned(),
+        detail: "Up to date".to_owned(),
+        identities: None,
+        mailboxes,
+    };
+
+    let personal = store.insert_account(&account("Personal", "sam@example.org"))?;
+    let personal_snapshot = snapshot(vec![
+        folder("INBOX", Some("inbox"), "/", PERSONAL_INBOX),
+        folder("Sent", Some("sent"), "/", &[]),
+        folder("Trash", Some("trash"), "/", &[]),
+        folder("Family", None, "/", &[]),
+        folder("Family/Holidays", None, "/", &[]),
+        folder("Family/Holidays/2026", None, "/", &[]),
+        folder("Family/School", None, "/", &[]),
+        folder("Receipts", None, "/", &[]),
+    ]);
+    store.replace_account_snapshot(personal, &personal_snapshot)?;
+    store.record_sync_success(personal, "Up to date", "fixture:1")?;
+
+    let side = store.insert_account(&account("Side project", "sam@example.net"))?;
+    store.replace_account_snapshot(
+        side,
+        &snapshot(vec![
+            folder("INBOX", Some("inbox"), ".", SIDE_PROJECT_INBOX),
+            folder("INBOX.Sent", Some("sent"), ".", &[]),
+            folder("INBOX.Lists", None, ".", &[]),
+            folder("INBOX.Lists.announce", None, ".", &[]),
+        ]),
+    )?;
+    store.record_sync_failure(
+        side,
+        "Sync failed",
+        "authentication failed: the app password was revoked",
+    )?;
+
+    let identity = store
+        .list_identities(work_id)?
+        .into_iter()
+        .next()
+        .context("the fixture account has no identity")?;
+    let draft_id = store.create_draft(&NewDraft {
+        account_id: work_id,
+        identity_id: identity.id,
+        to: vec!["Priya Raman <priya.raman@example.org>".to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "Estimates for the settings redesign".to_owned(),
+        body: "Hi Priya,\n\nEstimates attached.\n\nSam".to_owned(),
+    })?;
+    let job = store.queue_draft(draft_id)?;
+    store.record_outbox_failure(job, "connection refused")?;
+
+    store.update_ui_preferences(|preferences| {
+        // Work's tree is collapsed so the other accounts' trees fit.
+        preferences.sidebar_tree.collapsed_accounts = vec![work_id];
+        preferences.last_mailbox = Some(MailboxSelection::Virtual(VirtualMailbox::Unified(
+            MailboxRole::Inbox,
+        )));
+    })?;
+    Ok(())
 }
 
 fn thread_snapshot(thread: &Thread, now: u64) -> ThreadSnapshot {
@@ -490,6 +656,7 @@ mod tests {
             "compose",
             "account-setup",
             "sidebar",
+            "accounts",
         ] {
             FixtureView::parse(name)?;
         }
@@ -570,6 +737,33 @@ mod tests {
         let (store, initial_view) = seeded(FixtureView::Sidebar)?;
         assert_eq!(initial_view, InitialView::Sidebar);
         assert_eq!(store.list_accounts()?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn accounts_seeds_three_accounts_on_the_unified_inbox() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::Accounts)?;
+        assert_eq!(initial_view, InitialView::Inbox);
+        let accounts = store.list_accounts()?;
+        assert_eq!(accounts.len(), 3);
+        assert!(accounts[2].sync_status.failure_count > 0);
+        let unified = MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Inbox));
+        assert_eq!(
+            store.ui_preferences()?.last_mailbox,
+            Some(unified),
+            "the window opens on the Unified Inbox"
+        );
+        assert_eq!(
+            store.selection_counts(&unified)?.total_threads,
+            INBOX.len() + PERSONAL_INBOX.len() + SIDE_PROJECT_INBOX.len()
+        );
+        let nested = store
+            .list_mailboxes(accounts[1].id)?
+            .into_iter()
+            .find(|mailbox| mailbox.name == "Family/Holidays/2026")
+            .context("the nested folder exists")?;
+        assert_eq!(nested.parent.as_deref(), Some("Family/Holidays"));
+        assert_eq!(store.list_outbox_jobs(None)?.len(), 1);
         Ok(())
     }
 
