@@ -275,6 +275,13 @@ struct WorkspaceView {
     /// The command menu button (Windows and Linux; macOS uses the menu
     /// bar).
     app_menu: Entity<AppMenuButton>,
+    /// Undo toasts at the bottom of the window.
+    toasts: Entity<components::ToastHost>,
+    /// The toast offering to undo the latest mail change, and that change.
+    undo_toast: Option<(components::ToastId, mail_actions::UndoId)>,
+    /// Set while a store refresh for mail events is queued, so a change to
+    /// many threads refreshes once.
+    mail_refresh_queued: bool,
     account: Option<AccountOverview>,
     accounts: Vec<AccountSummary>,
     identities: Vec<IdentitySummary>,

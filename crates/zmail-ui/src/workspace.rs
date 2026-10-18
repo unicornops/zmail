@@ -39,10 +39,12 @@ use crate::actions::{
     ToggleTheme, Undo,
 };
 use crate::app_menu::AppMenuButton;
-use crate::components::{self, IconButton, SplitHandle, TextInput, TextInputEvent, TitleBar};
+use crate::components::{
+    self, IconButton, SplitHandle, TextInput, TextInputEvent, TitleBar, Toast, ToastHost, ToastKind,
+};
 use crate::compose::{ComposeEvent, ComposeView};
 use crate::layout::{LayoutMode, PaneLayout, SinglePane};
-use crate::mail_actions::{MailActions, MailEvent};
+use crate::mail_actions::{MailActions, MailEvent, UndoEntry, UndoId};
 use crate::message_list::{MessageListEvent, MessageListState, MessageListView};
 use crate::pane::{Pane, dispatch_from};
 use crate::reader::{ReaderState, ReaderView};
@@ -102,6 +104,7 @@ impl WorkspaceView {
 
         let focus_handle = cx.focus_handle();
         let app_menu = cx.new(|_| AppMenuButton::new(focus_handle.clone()));
+        let toasts = cx.new(|_| ToastHost::new());
 
         let subscriptions = vec![
             cx.subscribe(&search_query, |this, _, event: &TextInputEvent, cx| {
@@ -132,6 +135,9 @@ impl WorkspaceView {
             account_setup,
             search_query,
             app_menu,
+            toasts,
+            undo_toast: None,
+            mail_refresh_queued: false,
             account: None,
             accounts: Vec::new(),
             identities: Vec::new(),
@@ -1351,20 +1357,35 @@ impl WorkspaceView {
     // Conversation commands
     // -----------------------------------------------------------------------
 
-    /// Runs a [`MailActions`] change on the conversation the commands act
-    /// on. The resulting [`MailEvent`] refreshes the panes.
-    fn change_thread(
+    /// The conversations the commands act on: the selected conversation,
+    /// while the reader shows it.
+    fn command_thread_ids(&self) -> Vec<i64> {
+        self.command_thread_id().into_iter().collect()
+    }
+
+    /// Runs a [`MailActions`] change on the conversations the commands act
+    /// on. The resulting [`MailEvent`]s refresh the panes. When the change
+    /// takes the selected conversation out of the list, the row that takes
+    /// its place is selected.
+    fn change_threads(
         &mut self,
         cx: &mut Context<Self>,
-        change: impl FnOnce(&mut MailActions, i64, &mut Context<MailActions>) -> Result<()>,
+        change: impl FnOnce(&mut MailActions, &[i64], &mut Context<MailActions>) -> Result<()>,
     ) -> bool {
-        let Some(thread_id) = self.command_thread_id() else {
+        let thread_ids = self.command_thread_ids();
+        if thread_ids.is_empty() {
             return false;
-        };
-        match self
+        }
+        let selected_row = self
+            .message_list
+            .update(cx, |list, cx| list.selected_row_index(cx));
+        let result = self
             .mail_actions
-            .update(cx, |actions, cx| change(actions, thread_id, cx))
-        {
+            .update(cx, |actions, cx| change(actions, &thread_ids, cx));
+        if let Some(row) = selected_row {
+            self.select_row_if_selection_left(row, cx);
+        }
+        match result {
             Ok(()) => true,
             Err(error) => {
                 self.show_error(error, cx);
@@ -1373,15 +1394,49 @@ impl WorkspaceView {
         }
     }
 
+    /// If the selected conversation is no longer in the shown mailbox,
+    /// selects the one now at its row `row` (the next one), or the last
+    /// one when it was at the end.
+    fn select_row_if_selection_left(&mut self, row: usize, cx: &mut Context<Self>) {
+        let (Some(mailbox_id), Some(thread_id)) =
+            (self.selected_mailbox_id, self.selected_thread_id)
+        else {
+            return;
+        };
+        let still_listed = self
+            .store
+            .thread_state(thread_id)
+            .ok()
+            .flatten()
+            .is_some_and(|thread| thread.mailbox_id == mailbox_id);
+        if self.list_mode != ListMode::Mail || still_listed {
+            return;
+        }
+        let thread_at = |row: usize| {
+            self.store
+                .list_threads(mailbox_id, row..row + 1)
+                .ok()
+                .and_then(|threads| threads.into_iter().next())
+        };
+        let next = thread_at(row).or_else(|| row.checked_sub(1).and_then(thread_at));
+        match next {
+            Some(next) => self.select_thread(next.id, mailbox_id, cx),
+            None => {
+                self.selected_thread_id = None;
+                cx.notify();
+            }
+        }
+    }
+
     fn archive(&mut self, _: &Archive, _: &mut Window, cx: &mut Context<Self>) {
-        self.change_thread(cx, |actions, thread_id, cx| {
-            actions.archive_thread(thread_id, cx)
+        self.change_threads(cx, |actions, thread_ids, cx| {
+            actions.archive_threads(thread_ids, cx)
         });
     }
 
     fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-        self.change_thread(cx, |actions, thread_id, cx| {
-            actions.delete_thread(thread_id, cx)
+        self.change_threads(cx, |actions, thread_ids, cx| {
+            actions.delete_threads(thread_ids, cx)
         });
     }
 
@@ -1389,8 +1444,8 @@ impl WorkspaceView {
         let flagged = self
             .selected_thread_view()
             .is_some_and(|thread| thread.is_flagged);
-        self.change_thread(cx, |actions, thread_id, cx| {
-            actions.set_thread_flagged(thread_id, !flagged, cx)
+        self.change_threads(cx, |actions, thread_ids, cx| {
+            actions.set_threads_flagged(thread_ids, !flagged, cx)
         });
     }
 
@@ -1398,28 +1453,80 @@ impl WorkspaceView {
         let has_unread = self
             .selected_thread_view()
             .is_some_and(|thread| thread.unread_count > 0);
-        self.change_thread(cx, |actions, thread_id, cx| {
-            actions.set_thread_read(thread_id, has_unread, cx)
+        self.change_threads(cx, |actions, thread_ids, cx| {
+            actions.set_threads_read(thread_ids, has_unread, cx)
         });
     }
 
     fn move_to_mailbox(&mut self, action: &MoveToMailbox, _: &mut Window, cx: &mut Context<Self>) {
         let mailbox_id = action.mailbox_id;
-        if self.change_thread(cx, |actions, thread_id, cx| {
-            actions.move_thread(thread_id, mailbox_id, cx)
-        }) {
-            // The list follows the conversation to its new mailbox.
-            self.selected_mailbox_id = Some(mailbox_id);
-            cx.notify();
+        self.change_threads(cx, |actions, thread_ids, cx| {
+            actions.move_threads(thread_ids, mailbox_id, cx)
+        });
+    }
+
+    /// Secondary+Z: reverses the latest mail change.
+    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        let result = self.mail_actions.update(cx, |actions, cx| actions.undo(cx));
+        match result {
+            Ok(Some(entry)) => self.after_undo(&entry, cx),
+            Ok(None) => {
+                self.toasts.update(cx, |toasts, cx| {
+                    toasts.push(Toast::new("Nothing to undo"), cx)
+                });
+            }
+            Err(error) => self.show_error(error, cx),
         }
     }
 
-    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
-        match self.mail_actions.update(cx, |actions, cx| actions.undo(cx)) {
-            Ok(Some(label)) => self.show_status(format!("Undone: {label}."), cx),
-            Ok(None) => self.show_status("Nothing to undo.", cx),
+    /// The Undo button on the toast for change `id`.
+    fn undo_from_toast(&mut self, id: UndoId, cx: &mut Context<Self>) {
+        let result = self
+            .mail_actions
+            .update(cx, |actions, cx| actions.undo_entry(id, cx));
+        match result {
+            Ok(Some(entry)) => self.after_undo(&entry, cx),
+            Ok(None) => {}
             Err(error) => self.show_error(error, cx),
         }
+    }
+
+    /// Selects the first conversation the undo brought back into the shown
+    /// mailbox, and says what was undone.
+    fn after_undo(&mut self, entry: &UndoEntry, cx: &mut Context<Self>) {
+        if self.list_mode == ListMode::Mail
+            && let Some(mailbox_id) = self.selected_mailbox_id
+            && let Some(thread_id) = entry.restores_into(mailbox_id).next()
+        {
+            self.show_thread(thread_id, mailbox_id, cx);
+        }
+        let message = format!("Undone: {}", entry.label);
+        self.toasts
+            .update(cx, |toasts, cx| toasts.push(Toast::new(message), cx));
+    }
+
+    /// Shows the toast for a recorded mail change, with Undo when it can
+    /// be undone. Only the latest change offers Undo, so the toast before
+    /// it closes.
+    fn show_undo_toast(&mut self, id: UndoId, label: &str, can_undo: bool, cx: &mut Context<Self>) {
+        if let Some((toast_id, _)) = self.undo_toast.take() {
+            self.toasts
+                .update(cx, |toasts, cx| toasts.dismiss(toast_id, cx));
+        }
+        let mut toast = Toast::new(label.to_owned()).kind(ToastKind::Success);
+        if can_undo {
+            let workspace = cx.entity().downgrade();
+            toast = toast.on_undo(move |_, cx| {
+                // The toast host is mid-update while this runs; undo once
+                // it is done.
+                let workspace = workspace.clone();
+                cx.defer(move |cx| {
+                    let _ = workspace.update(cx, |this, cx| this.undo_from_toast(id, cx));
+                });
+            });
+        }
+        let toast_id = self.toasts.update(cx, |toasts, cx| toasts.push(toast, cx));
+        self.undo_toast = can_undo.then_some((toast_id, id));
     }
 
     fn reply(&mut self, _: &Reply, window: &mut Window, cx: &mut Context<Self>) {
@@ -1631,7 +1738,17 @@ impl WorkspaceView {
             // Autosave fires on every keystroke; the drafts list catches up
             // a moment later.
             MailEvent::DraftSaved { .. } => self.schedule_refresh(window, cx),
-            MailEvent::UndoRecorded { .. } | MailEvent::Undone { .. } => {}
+            MailEvent::UndoRecorded {
+                id,
+                label,
+                can_undo,
+            } => self.show_undo_toast(*id, label, *can_undo, cx),
+            MailEvent::Undone { id, .. } => {
+                if let Some((toast_id, _)) = self.undo_toast.take_if(|(_, undo)| undo == id) {
+                    self.toasts
+                        .update(cx, |toasts, cx| toasts.dismiss(toast_id, cx));
+                }
+            }
             MailEvent::ThreadMoved { .. }
             | MailEvent::ThreadDestroyed { .. }
             | MailEvent::ThreadFlagChanged { .. }
@@ -1639,8 +1756,16 @@ impl WorkspaceView {
             | MailEvent::DraftCreated { .. }
             | MailEvent::DraftAttachmentsChanged { .. }
             | MailEvent::OutboxJobRetried { .. } => {
-                self.refresh_from_store(cx);
-                cx.notify();
+                // A change to many threads emits an event for each; the
+                // store is read once, after the last.
+                if !self.mail_refresh_queued {
+                    self.mail_refresh_queued = true;
+                    cx.defer_in(window, |this, _, cx| {
+                        this.mail_refresh_queued = false;
+                        this.refresh_from_store(cx);
+                        cx.notify();
+                    });
+                }
             }
         }
     }
@@ -1902,6 +2027,7 @@ impl Render for WorkspaceView {
 
         let root = div()
             .id("workspace")
+            .relative()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::new_message))
@@ -1985,7 +2111,8 @@ impl Render for WorkspaceView {
                             ),
                         )
                     }),
-            );
+            )
+            .child(self.toasts.clone());
         // The Linux client-side decoration frame (nothing elsewhere); it
         // also paints the window background.
         components::window_frame(root, window, cx)
