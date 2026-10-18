@@ -35,6 +35,7 @@ use crate::actions::{
 use crate::components::{
     Badge, BadgeTone, Button, ButtonSize, ButtonVariant, IconButton, Scrollbar,
 };
+use crate::drag::DraggedThreads;
 use crate::pane::{dispatch_from, pane_focus_indicator};
 use crate::styles::{DensityTokens, ICON_SIZE_SM, SIDEBAR_TREE_INDENT, UiColors};
 use crate::tooltip::text_tooltip;
@@ -106,6 +107,12 @@ pub(crate) enum SidebarEvent {
     ToggleCollapsed(TreeNode),
     /// An account's "Fix…" button.
     FixAccount(i64),
+    /// Conversations dragged from the message list were dropped on a
+    /// folder: move them there.
+    DropThreads {
+        thread_ids: Vec<i64>,
+        mailbox_id: i64,
+    },
     /// Enter: move on to the message list.
     Activate,
     /// A row that shows a list was clicked (after its select event). The
@@ -913,6 +920,9 @@ impl SidebarView {
         colors: &UiColors,
         cx: &mut Context<Self>,
     ) -> Stateful<gpui::Div> {
+        // Only stored mailboxes take dropped conversations; a parent that
+        // holds no mail does not.
+        let mut drop_target = None;
         let (id, icon_name, label) = match item {
             SidebarItem::Folder(mailbox_id) => {
                 let mailbox = self
@@ -920,6 +930,7 @@ impl SidebarView {
                     .mailboxes
                     .iter()
                     .find(|mailbox| mailbox.id == *mailbox_id);
+                drop_target = mailbox.map(|mailbox| (mailbox.id, mailbox.account_id));
                 (
                     mailbox_row_id(*mailbox_id),
                     mailbox_icon_name(mailbox.and_then(|mailbox| mailbox.role)),
@@ -949,9 +960,43 @@ impl SidebarView {
         };
         let chevron_id = SharedString::from(format!("{id}-chevron"));
         self.row_frame(id, item, depth, is_selected, colors, cx)
+            .when_some(drop_target, |row, (mailbox_id, account_id)| {
+                Self::drop_target(row, mailbox_id, account_id, colors, cx)
+            })
             .child(self.chevron(chevron_id, self.tree_node(item), expanded, colors, cx))
             .child(icon(icon_name, ICON_SIZE_SM, colors.muted))
             .child(Self::label(label))
+    }
+
+    /// Makes `row`, the folder `mailbox_id` of account `account_id`, take
+    /// conversations dragged from the list. It highlights only while
+    /// conversations it accepts hover over it.
+    fn drop_target(
+        row: Stateful<gpui::Div>,
+        mailbox_id: i64,
+        account_id: i64,
+        colors: &UiColors,
+        cx: &mut Context<Self>,
+    ) -> Stateful<gpui::Div> {
+        let (fill, text) = (colors.selection_background, colors.selection_foreground);
+        row.drag_over::<DraggedThreads>(move |style, dragged, _, _| {
+            if dragged.accepts(mailbox_id, account_id) {
+                style.bg(rgb(fill)).text_color(rgb(text))
+            } else {
+                style
+            }
+        })
+        .can_drop(move |dragged, _, _| {
+            dragged
+                .downcast_ref::<DraggedThreads>()
+                .is_some_and(|dragged| dragged.accepts(mailbox_id, account_id))
+        })
+        .on_drop(cx.listener(move |_, dragged: &DraggedThreads, _, cx| {
+            cx.emit(SidebarEvent::DropThreads {
+                thread_ids: dragged.thread_ids.clone(),
+                mailbox_id,
+            });
+        }))
     }
 }
 

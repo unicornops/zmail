@@ -22,7 +22,7 @@ use gpui::{
     AnyElement, Context, DismissEvent, Entity, FontWeight, IntoElement, Modifiers, Pixels, Point,
     ScrollStrategy, Subscription, Window, div, prelude::*, rgb,
 };
-use zmail_core::{MailboxSelection, MailboxSummary};
+use zmail_core::{MailboxSelection, MailboxSummary, ThreadSummary};
 
 use super::{MessageListEvent, MessageListView};
 use crate::ListMode;
@@ -31,6 +31,7 @@ use crate::actions::{
     ToggleFlag, ToggleRead,
 };
 use crate::components::{IconButton, popover_below_end};
+use crate::drag::DraggedThreads;
 use crate::move_picker::{MovePicker, MovePickerEvent};
 use crate::pane::dispatch_from;
 use crate::styles::UiColors;
@@ -299,6 +300,29 @@ impl MessageListView {
                 .get(index)
                 .map(|hit| (hit.thread_id, hit.mailbox_id)),
             ListMode::Drafts | ListMode::Outbox => None,
+        }
+    }
+
+    /// What dragging the row of `thread` carries: the whole selection when
+    /// the row is part of it, otherwise the row alone.
+    pub(super) fn dragged_threads(&self, thread: &ThreadSummary) -> DraggedThreads {
+        let selection = &self.state.selection;
+        if selection.is_multiple() && selection.thread_ids.contains(&thread.id) {
+            let mailbox_id = match self.state.mailbox.as_ref().map(|mailbox| mailbox.selection) {
+                Some(MailboxSelection::Mailbox { mailbox_id, .. }) => Some(mailbox_id),
+                _ => None,
+            };
+            DraggedThreads {
+                thread_ids: selection.thread_ids.clone(),
+                account_id: selection.account_id,
+                mailbox_id,
+            }
+        } else {
+            DraggedThreads {
+                thread_ids: vec![thread.id],
+                account_id: Some(thread.account_id),
+                mailbox_id: Some(thread.mailbox_id),
+            }
         }
     }
 

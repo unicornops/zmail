@@ -40,6 +40,7 @@ use crate::actions::{
     AddAccount, OpenSelected, RetryOutbox, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
 use crate::components::{Button, ButtonSize, Menu};
+use crate::drag::DraggedThreads;
 use crate::pane::{dispatch_from, pane_focus_indicator};
 use crate::styles::{DensityTokens, UiColors};
 use crate::widgets::{HoverExt, empty_state, interactive_background, list_row, toolbar_button};
@@ -699,6 +700,7 @@ impl MessageListView {
                 let thread_id = thread.id;
                 let row_id = thread_row_id(thread_id);
                 let is_selected = self.is_thread_selected(thread_id);
+                let dragged = self.dragged_threads(&thread);
                 let mut row = MessageRow::thread(
                     row_id.clone(),
                     &thread,
@@ -727,6 +729,9 @@ impl MessageListView {
                             this.open_context_menu(index, event.position, window, cx);
                         }),
                     )
+                    .on_drag(dragged, |dragged: &DraggedThreads, _, _, cx| {
+                        cx.new(|_| dragged.clone())
+                    })
                     .child(row_content(
                         row,
                         None,

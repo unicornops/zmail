@@ -15,6 +15,7 @@
 //! | `compose` | `ComposeView`: the open draft |
 //! | `account_setup` | `AccountSetupView`: the new-account form |
 //! | `mail_actions` | `MailActions`: store writes, `MailEvent`s and undo |
+//! | `drag` | `DraggedThreads`: conversations dragged from the list onto sidebar folders |
 //! | `move_picker` | `MovePicker`: the searchable Move to… folder picker |
 //! | `actions` | every command as a GPUI action |
 //! | `keymap` | loads `keymaps/default.json` (and `keymaps/macos.json` on macOS) |
@@ -56,6 +57,7 @@ mod actions;
 mod app_menu;
 mod compose;
 mod diagnostics;
+mod drag;
 mod fonts;
 mod keymap;
 mod layout;
