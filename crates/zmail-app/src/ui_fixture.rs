@@ -30,8 +30,9 @@ pub(crate) enum FixtureView {
     InboxEmpty,
     /// An account in its first sync: skeleton rows.
     Syncing,
-    /// The outbox with a message sending, one waiting for a retry, one
-    /// that failed and one waiting to send.
+    /// The outbox with a message sending, one waiting for a retry and one
+    /// that failed. (A queued message would be sent, and fail, as soon as
+    /// the window opens.)
     Outbox,
     /// The reader on a longer conversation with an attachment.
     Reader,
@@ -193,7 +194,8 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
     })
 }
 
-/// Queues four replies and moves them to each outbox state.
+/// Queues three replies and moves them to the sending, retrying and
+/// failed states.
 fn seed_outbox(store: &LocalStore, account_id: i64) -> Result<()> {
     let identity = store
         .list_identities(account_id)?
@@ -234,10 +236,6 @@ fn seed_outbox(store: &LocalStore, account_id: i64) -> Result<()> {
         "Re: Your talk proposal was accepted",
     )?;
     store.record_outbox_failure(failed, "550 5.1.1 Mailbox unavailable")?;
-    queue(
-        "Lena Fischer <lena.fischer@example.com>",
-        "Re: Updated icons for the sidebar",
-    )?;
     Ok(())
 }
 
@@ -817,7 +815,7 @@ mod tests {
             .map(|job| job.state.as_str())
             .collect::<Vec<_>>();
         states.sort_unstable();
-        assert_eq!(states, ["failed", "queued", "retrying", "sending"]);
+        assert_eq!(states, ["failed", "retrying", "sending"]);
         Ok(())
     }
 

@@ -279,7 +279,13 @@ impl MessageListView {
                         format!("{} of {total}", self.thread_count())
                     }
                 })
-                .unwrap_or_else(|| "No mailbox selected".to_owned()),
+                .unwrap_or_else(|| {
+                    if self.state.first_sync {
+                        "Fetching your mail for the first time\u{2026}".to_owned()
+                    } else {
+                        "No mailbox selected".to_owned()
+                    }
+                }),
             ListMode::Search => format!(
                 "{} for \u{201c}{}\u{201d}{}",
                 count_noun(self.state.search_results.len(), "result", "results"),
