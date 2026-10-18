@@ -5,6 +5,7 @@
 
 ### Features
 
+* **sync:** live IMAP updates for every folder with NOTIFY or an IDLE pool ([#158](https://github.com/unicornops/zmail/issues/158)) ([95479e3](https://github.com/unicornops/zmail/commit/95479e3bbc02bd52e082576058c5e6c1c13f07a8))
 * **search:** fall back to server search for mail not indexed yet ([#159](https://github.com/unicornops/zmail/issues/159)) ([68ea246](https://github.com/unicornops/zmail/commit/68ea24675f1dab98ec7d0e9a86f5adacac386760))
 * **imap:** resync mailboxes with QRESYNC and VANISHED ([#157](https://github.com/unicornops/zmail/issues/157)) ([b267db2](https://github.com/unicornops/zmail/commit/b267db2fcb6406aa38ad3905fac06c7733ee6c1e))
 * **ui:** add resizable panes and a responsive layout ([#155](https://github.com/unicornops/zmail/issues/155)) ([f6b100b](https://github.com/unicornops/zmail/commit/f6b100b87426b933c73524ed1b49189e82a34ab2))
