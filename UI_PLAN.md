@@ -1,6 +1,12 @@
 # Zmail UI Modernisation Plan
 
-Status: proposed, 2026-10-15, against `main` at v0.9.0 (`a030302`).
+Status: adopted. Written 2026-10-15 against `main` at v0.9.0 (`a030302`); section 1
+describes that release. Progress as of 2026-10-18:
+
+- Phase 0 (#114), Phase 1 (#115) and Phase 2 (#116) are done. Phases 3 to 8 are tracked
+  in #117 to #122.
+- Decision 1 is settled: option (a). GPUI now comes from the Zed v1.24.2 git tag (#125).
+- Decisions 2, 3 and 4 are still open.
 
 This replaces the first UI plan (icons, tokens, module split, light theme). That plan is
 done: see "What the first plan delivered" at the end. This plan turns the working shell
@@ -511,7 +517,8 @@ Store and core dependencies can run in parallel with Phase 1:
 
 ## 6. Out of scope here
 
-- Rendering HTML mail faithfully, and loading remote content.
+- Rendering HTML mail faithfully, and loading remote content. The Blitz spike (#134,
+  #163) was a no-go for now.
 - Rich-text compose (decision 2).
 - Calendar and contacts.
 - Smart categorised inboxes (Primary/Updates/…) — possibly later, and opt-in.
