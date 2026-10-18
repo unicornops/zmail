@@ -6,9 +6,12 @@ use gpui::{AnyElement, IntoElement, SharedString, div, prelude::*};
 use zmail_core::{MailboxRole, MailboxSelection, VirtualMailbox};
 
 use super::MessageListView;
-use crate::actions::{NewMessage, ShowMail, SyncAccount, SyncAll};
+use crate::actions::{
+    NewMessage, SearchAllAccounts, SearchInAccount, ShowMail, SyncAccount, SyncAll,
+};
 use crate::components::{Button, SkeletonRow};
 use crate::pane::dispatch_from;
+use crate::search::SearchLevel;
 use crate::styles::UiColors;
 use crate::widgets::empty_state;
 
@@ -81,9 +84,10 @@ impl MessageListView {
         }
     }
 
-    /// A search that found nothing (yet).
+    /// A search that found nothing (yet). It says where it looked and
+    /// offers the next wider scope: the folder's account, then every
+    /// account, then clearing the search.
     pub(super) fn render_no_results(&self, colors: &UiColors) -> AnyElement {
-        let query = &self.state.search_query;
         if self.state.searching_server {
             return empty_state(
                 "Searching the server\u{2026}",
@@ -93,7 +97,7 @@ impl MessageListView {
                 colors,
             );
         }
-        if query.is_empty() {
+        if self.state.search_query.is_empty() {
             return empty_state(
                 "Search your mail",
                 "Type in the search field and press Enter.",
@@ -102,12 +106,58 @@ impl MessageListView {
                 colors,
             );
         }
-        empty_state(
-            &format!("No results for \u{201c}{query}\u{201d}"),
-            "Search covers every mailbox in this account.",
-            "search",
-            Some(self.action_button("list-search-clear", "Clear Search", ShowMail)),
-            colors,
+        let scope = &self.state.search_scope;
+        let account = scope.account.as_deref().unwrap_or("this account");
+        let search_all = || {
+            self.action_button(
+                "list-search-widen",
+                "Search all accounts",
+                SearchAllAccounts,
+            )
+        };
+        let clear = || self.action_button("list-search-clear", "Clear Search", ShowMail);
+        let (place, action) = match (scope.level, &scope.in_clause, &scope.folder) {
+            // The query's `in:` names the folder.
+            (SearchLevel::Folder, Some(value), _) => (
+                format!("in:{value}"),
+                if scope.many_accounts && !scope.folder_spans_accounts {
+                    search_all()
+                } else {
+                    clear()
+                },
+            ),
+            (SearchLevel::Folder, None, Some(folder)) => (
+                folder.clone(),
+                div()
+                    .debug_selector(|| "list-search-widen".into())
+                    .child(
+                        Button::new("list-search-widen", format!("Search {account}"))
+                            .on_click(dispatch_from(&self.focus_handle, SearchInAccount)),
+                    )
+                    .into_any_element(),
+            ),
+            (SearchLevel::Folder | SearchLevel::Account, _, _) => (
+                account.to_owned(),
+                if scope.many_accounts {
+                    search_all()
+                } else {
+                    clear()
+                },
+            ),
+            (SearchLevel::AllAccounts, _, _) => ("all accounts".to_owned(), clear()),
+        };
+        tagged(
+            "list-search-empty",
+            empty_state(
+                &format!("No results in {place}"),
+                &format!(
+                    "Nothing matches \u{201c}{}\u{201d}.",
+                    self.state.search_query
+                ),
+                "search",
+                Some(action),
+                colors,
+            ),
         )
     }
 

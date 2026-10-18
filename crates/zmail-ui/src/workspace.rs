@@ -161,7 +161,7 @@ impl WorkspaceView {
             dead_op_count: 0,
             search_results: Vec::new(),
             search_results_query: String::new(),
-            server_search_pending: None,
+            search_context: Default::default(),
             selected_account_id: None,
             selected_mailbox_id: None,
             virtual_mailbox: None,
@@ -241,7 +241,10 @@ impl WorkspaceView {
             window.focus(&view.message_list.focus_handle(cx), cx);
         }
 
-        if matches!(initial_view, InitialView::Inbox | InitialView::Sidebar) {
+        if matches!(
+            initial_view,
+            InitialView::Inbox | InitialView::Sidebar | InitialView::Search(_)
+        ) {
             view.restore_last_mailbox(cx);
         }
         match initial_view {
@@ -276,6 +279,12 @@ impl WorkspaceView {
                 }
             }
             InitialView::Outbox => view.show_outbox(&ShowOutbox, window, cx),
+            InitialView::Search(query) => {
+                view.search_query
+                    .update(cx, |input, cx| input.set_text(query, cx));
+                view.run_search(cx);
+                view.focus_pane(Pane::MessageList, window, cx);
+            }
         }
         view.sync_panes(cx);
 
@@ -395,7 +404,8 @@ impl WorkspaceView {
             selected_thread_id: self.selected_thread_id,
             search_results: self.search_results.clone(),
             search_query: self.search_results_query.clone(),
-            searching_server: self.server_search_pending.is_some(),
+            searching_server: self.search_context.servers_pending > 0,
+            search_scope: self.search_scope_state(),
             drafts: self.drafts.clone(),
             selected_draft_id: self.selected_draft_id,
             outbox_jobs: self.outbox_jobs.clone(),
@@ -524,15 +534,7 @@ impl WorkspaceView {
             .unwrap_or_default();
         // Re-run the shown search so read state, flags and moves made since
         // it ran show up in the results.
-        if matches!(self.list_mode, ListMode::Search)
-            && !self.search_results_query.is_empty()
-            && let Some(account_id) = self.selected_account_id
-            && let Ok(results) =
-                self.store
-                    .search_threads(account_id, &self.search_results_query, 100)
-        {
-            self.search_results = results;
-        }
+        self.refresh_search_results();
         self.pending_op_count = self
             .selected_account_id
             .and_then(|account_id| self.store.pending_op_count(account_id).ok())
@@ -636,7 +638,7 @@ impl WorkspaceView {
     }
 
     /// The list's mailbox with its name and counts.
-    fn list_mailbox(&self) -> Option<ListMailbox> {
+    pub(crate) fn list_mailbox(&self) -> Option<ListMailbox> {
         match self.virtual_mailbox {
             Some(virtual_mailbox) => Some(ListMailbox {
                 selection: MailboxSelection::Virtual(virtual_mailbox),
@@ -744,7 +746,7 @@ impl WorkspaceView {
     }
 
     /// Records an error for the banner.
-    fn show_error(&mut self, error: impl ToString, cx: &mut Context<Self>) {
+    pub(crate) fn show_error(&mut self, error: impl ToString, cx: &mut Context<Self>) {
         self.store_error = Some(error.to_string());
         cx.notify();
     }
@@ -1202,74 +1204,6 @@ impl WorkspaceView {
     // -----------------------------------------------------------------------
     // Search
     // -----------------------------------------------------------------------
-
-    /// Execute the current search query against the local full-text index.
-    pub(crate) fn run_search(&mut self, cx: &mut Context<Self>) {
-        let Some(account_id) = self.selected_account_id else {
-            self.show_error("Select or add an account before searching.", cx);
-            return;
-        };
-        let query = self.search_query.read(cx).text().trim().to_owned();
-        if query.is_empty() {
-            self.search_results.clear();
-            self.list_mode = ListMode::Mail;
-            cx.notify();
-            return;
-        }
-
-        match self.store.search_threads(account_id, &query, 100) {
-            Ok(results) => {
-                self.search_results = results;
-                self.search_results_query = query.clone();
-                self.list_mode = ListMode::Search;
-                self.detail_mode = DetailMode::Reader;
-                self.search_server_if_needed(account_id, query, cx);
-            }
-            Err(error) => self.store_error = Some(error.to_string()),
-        }
-        cx.notify();
-    }
-
-    /// Asks the server too when the local index cannot fully answer the
-    /// query (bodies not indexed yet). The hits are recorded in the store
-    /// and the results re-read from it, so the list still shows only local
-    /// state. Runs once per submitted query.
-    fn search_server_if_needed(&mut self, account_id: i64, query: String, cx: &mut Context<Self>) {
-        if !self
-            .store
-            .search_needs_server(account_id, &query)
-            .unwrap_or(false)
-        {
-            self.server_search_pending = None;
-            return;
-        }
-        // Pressing Enter again on a query whose server search is still
-        // running does not start a second one.
-        if self.server_search_pending.as_ref() == Some(&(account_id, query.clone())) {
-            return;
-        }
-        self.server_search_pending = Some((account_id, query.clone()));
-        let service = self.sync_service.clone();
-        cx.spawn(async move |this, cx| {
-            // Offline or failing servers leave the local results as they are.
-            let _ = service.search_server_and_wait(account_id, &query).await;
-            let _ = this.update(cx, |view, cx| {
-                if view.server_search_pending.as_ref() != Some(&(account_id, query.clone())) {
-                    return;
-                }
-                view.server_search_pending = None;
-                if view.selected_account_id == Some(account_id)
-                    && view.search_results_query == query
-                    && let Ok(results) = view.store.search_threads(account_id, &query, 100)
-                {
-                    view.search_results = results;
-                }
-                view.refresh_from_store(cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
 
     // -----------------------------------------------------------------------
     // Compose workflow
@@ -2483,6 +2417,9 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::retry_outbox))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::run_search_action))
+            .on_action(cx.listener(Self::search_in_folder))
+            .on_action(cx.listener(Self::search_in_account))
+            .on_action(cx.listener(Self::search_all_accounts))
             .on_action(cx.listener(Self::sync_account_action))
             .on_action(cx.listener(Self::sync_all_action))
             .on_action(cx.listener(Self::toggle_theme))

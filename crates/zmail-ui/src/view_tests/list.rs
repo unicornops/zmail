@@ -15,6 +15,7 @@ use super::{
 };
 use crate::actions::{ShowDrafts, ShowOutbox, ToggleDensity, Undo};
 use crate::pane::Pane;
+use crate::search::SearchLevel;
 use crate::styles::DensityTokens;
 use crate::{InitialView, ListMode};
 
@@ -472,22 +473,141 @@ fn an_empty_inbox_is_all_caught_up(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("list-empty-inbox").is_some());
 }
 
-#[gpui::test]
-fn a_search_with_no_results_offers_to_clear_it(cx: &mut TestAppContext) {
-    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
-    let search = search_input(&view, cx);
+/// Types `query` into the search field and runs it.
+fn search_for(view: &gpui::Entity<crate::WorkspaceView>, query: &str, cx: &mut VisualTestContext) {
+    let search = search_input(view, cx);
     focus(&search, cx);
-    cx.simulate_input("zebra");
+    let select_all = if cfg!(target_os = "macos") {
+        "cmd-a"
+    } else {
+        "ctrl-a"
+    };
+    keys(&format!("{select_all} backspace"), cx);
+    cx.simulate_input(query);
     keys("enter", cx);
-    assert_eq!(
-        cx.read_entity(&view, |view, _| view.list_mode),
-        ListMode::Search
+}
+
+fn search_level(
+    view: &gpui::Entity<crate::WorkspaceView>,
+    cx: &mut VisualTestContext,
+) -> SearchLevel {
+    cx.read_entity(view, |view, _| view.search_context.level)
+}
+
+fn result_subjects(
+    view: &gpui::Entity<crate::WorkspaceView>,
+    cx: &mut VisualTestContext,
+) -> Vec<String> {
+    cx.read_entity(view, |view, _| {
+        view.search_results
+            .iter()
+            .map(|hit| hit.subject.clone())
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn a_search_starts_in_the_folder_and_widens_to_clear(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+    search_for(&view, "zebra", cx);
+    assert_eq!(search_level(&view, cx), SearchLevel::Folder);
+    assert!(cx.debug_bounds("search-scope-folder").is_some());
+    assert!(cx.debug_bounds("search-scope-account").is_some());
+    assert!(
+        cx.debug_bounds("search-scope-all").is_none(),
+        "one account has nothing wider"
     );
+
+    // "No results in Inbox" offers "Search Work"...
+    assert!(cx.debug_bounds("list-search-empty").is_some());
+    click("list-search-widen", cx);
+    assert_eq!(search_level(&view, cx), SearchLevel::Account);
+    // ...and with one account, "No results in Work" offers to clear.
+    assert!(cx.debug_bounds("list-search-widen").is_none());
     click("list-search-clear", cx);
     assert_eq!(
         cx.read_entity(&view, |view, _| view.list_mode),
         ListMode::Mail
     );
+
+    // A new search starts in the folder again.
+    search_for(&view, "quarterly", cx);
+    assert_eq!(search_level(&view, cx), SearchLevel::Folder);
+    assert_eq!(result_subjects(&view, cx).len(), 3);
+}
+
+#[gpui::test]
+fn the_scope_widens_to_every_account(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    // Work's Inbox has no Home mail, nor does the Work account.
+    search_for(&view, "home", cx);
+    assert!(result_subjects(&view, cx).is_empty());
+    click("search-scope-account", cx);
+    assert_eq!(search_level(&view, cx), SearchLevel::Account);
+    assert!(result_subjects(&view, cx).is_empty());
+
+    // "No results in Work" offers every account; the results name theirs.
+    click("list-search-widen", cx);
+    assert_eq!(search_level(&view, cx), SearchLevel::AllAccounts);
+    let mut subjects = result_subjects(&view, cx);
+    subjects.sort();
+    assert_eq!(subjects, ["Home newest", "Home oldest"]);
+    // One account's results alone carry no chip.
+    assert!(!drawn(
+        format!("search-row-{}-account", harness.home_threads[0]),
+        cx
+    ));
+
+    // Results from both accounts do. The scope keys work from the
+    // search field.
+    search_for(&view, "numbers", cx);
+    assert_eq!(search_level(&view, cx), SearchLevel::Folder);
+    keys("secondary-alt-3", cx);
+    assert_eq!(search_level(&view, cx), SearchLevel::AllAccounts);
+    let hits = cx.read_entity(&view, |view, _| view.search_results.clone());
+    assert!(
+        hits.iter()
+            .any(|hit| Some(hit.account_id) == harness.home_account_id)
+    );
+    assert!(
+        hits.iter()
+            .any(|hit| Some(hit.account_id) != harness.home_account_id)
+    );
+    assert!(drawn(
+        format!("search-row-{}-account", harness.home_threads[0]),
+        cx
+    ));
+
+    // Opening another account's result follows it to that account.
+    click(
+        Box::leak(format!("search-row-{}", harness.home_threads[0]).into_boxed_str()),
+        cx,
+    );
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.selected_account_id),
+        harness.home_account_id
+    );
+    assert_eq!(selected_thread(&view, cx), Some(harness.home_threads[0]));
+}
+
+#[gpui::test]
+fn an_in_clause_takes_the_folders_place(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Accounts);
+    search_for(&view, "quarterly in:archive", cx);
+    assert!(cx.debug_bounds("search-scope-in").is_some());
+    assert!(
+        cx.debug_bounds("search-scope-folder").is_none(),
+        "the query names the folder, not the control"
+    );
+    assert!(result_subjects(&view, cx).is_empty());
+    // "No results in in:archive" offers every account.
+    click("list-search-widen", cx);
+    assert_eq!(search_level(&view, cx), SearchLevel::AllAccounts);
+
+    // The clause beats the folder the search started in.
+    search_for(&view, "quarterly in:inbox", cx);
+    assert_eq!(search_level(&view, cx), SearchLevel::Folder);
+    assert_eq!(result_subjects(&view, cx).len(), 3);
 }
 
 #[gpui::test]
@@ -574,4 +694,96 @@ fn the_sidebar_follows_the_row_density(cx: &mut TestAppContext) {
             .density,
         Density::Compact
     );
+}
+
+#[gpui::test]
+fn the_context_menu_acts_on_a_scoped_search_hit_from_another_account(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    let home_oldest = harness.home_threads[1];
+    search_for(&view, "numbers", cx);
+    keys("secondary-alt-3", cx);
+    assert_eq!(search_level(&view, cx), SearchLevel::AllAccounts);
+
+    let bounds = cx
+        .debug_bounds(Box::leak(
+            format!("search-row-{home_oldest}").into_boxed_str(),
+        ))
+        .expect("Home's hit is drawn");
+    cx.simulate_mouse_down(bounds.center(), gpui::MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(bounds.center(), gpui::MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    let menu = cx
+        .read_entity(&view, |view, cx| view.message_list.read(cx).context_menu())
+        .expect("the context menu opens");
+    let labels = cx.read_entity(&menu, |menu, _| {
+        menu.entries()
+            .map(|entry| entry.label().to_owned())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(labels[3], "Flag");
+    // Archive, Delete, Move to…, separator, Flag.
+    menu.update_in(cx, |menu, window, cx| menu.activate(4, window, cx));
+    cx.run_until_parked();
+
+    let flagged = harness
+        .store
+        .thread_view(home_oldest)
+        .expect("the thread loads")
+        .expect("the thread exists")
+        .is_flagged;
+    assert!(flagged, "the Home hit was flagged");
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.list_mode),
+        ListMode::Search,
+        "the search stays open"
+    );
+    assert_eq!(search_level(&view, cx), SearchLevel::AllAccounts);
+}
+
+#[gpui::test]
+fn a_search_hit_drags_onto_its_own_accounts_folder(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    let home = harness.home_account_id.expect("Home");
+    let home_oldest = harness.home_threads[1];
+    let projects = harness
+        .store
+        .list_mailboxes(home)
+        .expect("the mailboxes load")
+        .into_iter()
+        .find(|mailbox| mailbox.name == "Projects")
+        .expect("Home has Projects")
+        .id;
+    search_for(&view, "numbers", cx);
+    keys("secondary-alt-3", cx);
+
+    let from = cx
+        .debug_bounds(Box::leak(
+            format!("search-row-{home_oldest}").into_boxed_str(),
+        ))
+        .expect("Home's hit is drawn")
+        .center();
+    let to = cx
+        .debug_bounds(Box::leak(
+            format!("mailbox-row-{projects}").into_boxed_str(),
+        ))
+        .expect("Home's Projects folder is drawn")
+        .center();
+    cx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        from + gpui::point(gpui::px(12.), gpui::px(12.)),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_move(to, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_up(to, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    let mailbox = harness
+        .store
+        .thread_view(home_oldest)
+        .expect("the thread loads")
+        .expect("the thread exists")
+        .mailbox_id;
+    assert_eq!(mailbox, projects);
 }

@@ -42,6 +42,7 @@ use crate::actions::{
 use crate::components::{Button, ButtonSize, Menu};
 use crate::drag::DraggedThreads;
 use crate::mail_actions::MailActions;
+use crate::search::SearchScopeState;
 use crate::styles::{DensityTokens, UiColors};
 use crate::widgets::{empty_state, toolbar_button};
 
@@ -93,6 +94,8 @@ pub(crate) struct MessageListState {
     pub(crate) search_query: String,
     /// Whether the server search fallback for the query is still running.
     pub(crate) searching_server: bool,
+    /// Where the search looks, for the header's scope control.
+    pub(crate) search_scope: SearchScopeState,
     pub(crate) drafts: Vec<DraftSummary>,
     pub(crate) selected_draft_id: Option<i64>,
     pub(crate) outbox_jobs: Vec<OutboxJobSummary>,
@@ -135,6 +138,7 @@ impl Default for MessageListState {
             search_results: Vec::new(),
             search_query: String::new(),
             searching_server: false,
+            search_scope: SearchScopeState::default(),
             drafts: Vec::new(),
             selected_draft_id: None,
             outbox_jobs: Vec::new(),
@@ -286,6 +290,11 @@ impl MessageListView {
         let mailbox_changed = self.state.mailbox.as_ref().map(|mailbox| mailbox.selection)
             != state.mailbox.as_ref().map(|mailbox| mailbox.selection);
         let counts_changed = self.state.mailbox != state.mailbox;
+        // Opening a search result from another account moves the shell to
+        // that account's mailbox, but the list still shows the same
+        // results: its menus and scroll position stay.
+        let rows_changed = mailbox_changed
+            && !(self.state.mode == ListMode::Search && state.mode == ListMode::Search);
         // The shell cleared the selection (Escape, or a change took the
         // rows away): Shift extends from the selected row again.
         if self.state.selection.is_multiple() && !state.selection.is_multiple() {
@@ -300,7 +309,7 @@ impl MessageListView {
             self.page = None;
             self.count_filtered(cx);
         }
-        if mailbox_changed {
+        if rows_changed {
             self.selected_index_hint = None;
             self.selection_anchor = None;
             self.move_picker = None;
@@ -662,7 +671,7 @@ impl MessageListView {
                 let thread_id = thread.id;
                 let row_id = thread_row_id(thread_id);
                 let is_selected = self.is_thread_selected(thread_id);
-                let dragged = self.dragged_threads(&thread);
+                let dragged = self.dragged_threads(thread.id, thread.account_id, thread.mailbox_id);
                 let mut row = MessageRow::thread(
                     row_id.clone(),
                     &thread,
@@ -723,6 +732,14 @@ impl MessageListView {
         }
         let now = chrono::Local::now();
         let density = self.density_tokens();
+        // Results from several accounts name their account, as rows of
+        // the Unified Inbox do.
+        let first_account = self.state.search_results.first().map(|hit| hit.account_id);
+        let spans_accounts = self
+            .state
+            .search_results
+            .iter()
+            .any(|hit| Some(hit.account_id) != first_account);
         div()
             .id("search-results-list")
             .flex_1()
@@ -736,12 +753,28 @@ impl MessageListView {
                         let thread_id = hit.thread_id;
                         let row_id = search_row_id(thread_id);
                         let is_selected = self.is_thread_selected(thread_id);
-                        let row =
+                        let mut row =
                             MessageRow::search_hit(row_id.clone(), hit, &now, self.hour_cycle);
+                        if spans_accounts {
+                            row.account = self
+                                .state
+                                .accounts
+                                .iter()
+                                .find(|account| account.id == hit.account_id)
+                                .map(|account| RowAccount {
+                                    id: account.id,
+                                    name: account.name.clone(),
+                                });
+                        }
                         let quick_actions = (self.hovered_thread == Some(thread_id))
                             .then(|| self.quick_actions(thread_id, &row, cx));
+                        // A hit says where it is, so it can be dragged to
+                        // one of its account's folders.
+                        let dragged =
+                            self.dragged_threads(thread_id, hit.account_id, hit.mailbox_id);
 
                         row_shell(row_id, is_selected, focused, density, colors)
+                            .debug_selector(move || format!("search-row-{thread_id}"))
                             .role(Role::ListItem)
                             .aria_label(row.accessible_label())
                             .on_hover(cx.listener(move |this, hovered, _, cx| {
@@ -756,6 +789,9 @@ impl MessageListView {
                                     this.open_context_menu(index, event.position, window, cx);
                                 }),
                             )
+                            .on_drag(dragged, |dragged: &DraggedThreads, _, _, cx| {
+                                cx.new(|_| dragged.clone())
+                            })
                             .child(row_content(
                                 row,
                                 quick_actions,

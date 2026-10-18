@@ -16,7 +16,10 @@
 
 use chrono::{DateTime, TimeZone};
 use rusqlite::types::Value;
-use zmail_core::search::{SearchQuery, SearchTerm, SearchText, day_start_unix, mailbox_role_alias};
+use zmail_core::{
+    MailboxSelection, SearchScope,
+    search::{SearchQuery, SearchTerm, SearchText, day_start_unix, mailbox_role_alias},
+};
 
 /// A query compiled to SQL. `sql` selects the [`zmail_core::SearchHit`]
 /// columns in order; `params` binds its anonymous `?` placeholders.
@@ -26,9 +29,9 @@ pub(crate) struct CompiledSearch {
     pub(crate) params: Vec<Value>,
 }
 
-/// Which threads a compiled query looks at.
+/// Which threads a compiled query looks at, within its [`SearchScope`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SearchScope<'a> {
+pub(crate) enum HitSource<'a> {
     /// The local index: every clause is matched locally.
     Local,
     /// The threads the server search recorded for this query text. Free
@@ -37,17 +40,21 @@ pub(crate) enum SearchScope<'a> {
     ServerHits(&'a str),
 }
 
-/// Compiles `query` for one account. `now` supplies today's date and the
-/// time zone that `before:`/`after:` day boundaries are taken in.
+/// Compiles `query` for the threads `scope` covers: a folder, one account
+/// or every account. `now` supplies today's date and the time zone that
+/// `before:`/`after:` day boundaries are taken in.
+///
+/// An `in:` clause in the query chooses the folder itself, so a folder
+/// scope then only keeps the folder's accounts (see [`scope_condition`]).
 ///
 /// Returns `None` when no clause is searchable (for example a query of
 /// only punctuation), which callers treat as no results.
 pub(crate) fn compile_search<Tz: TimeZone>(
     query: &SearchQuery,
-    account_id: i64,
+    scope: &SearchScope,
     limit: usize,
     now: &DateTime<Tz>,
-    scope: SearchScope<'_>,
+    source: HitSource<'_>,
 ) -> Option<CompiledSearch> {
     let today = now.date_naive();
     let zone = now.timezone();
@@ -57,18 +64,16 @@ pub(crate) fn compile_search<Tz: TimeZone>(
     let mut conditions: Vec<String> = Vec::new();
     let mut condition_params: Vec<Value> = Vec::new();
 
-    if let SearchScope::ServerHits(query_text) = scope {
-        conditions.push(
-            "t.id IN (SELECT thread_id FROM server_search_hits WHERE account_id = ? AND query = ?)"
-                .to_owned(),
-        );
-        condition_params.push(Value::Integer(account_id));
+    if let HitSource::ServerHits(query_text) = source {
+        // The scope condition keeps only the scope's accounts' hits.
+        conditions
+            .push("t.id IN (SELECT thread_id FROM server_search_hits WHERE query = ?)".to_owned());
         condition_params.push(Value::Text(query_text.to_owned()));
     }
 
     for clause in &query.clauses {
         let condition = match &clause.term {
-            SearchTerm::Text(_) if matches!(scope, SearchScope::ServerHits(_)) => None,
+            SearchTerm::Text(_) if matches!(source, HitSource::ServerHits(_)) => None,
             SearchTerm::Text(text) => fts_phrase(text),
             SearchTerm::From(text) => fts_phrase(text).map(|phrase| format!("senders : {phrase}")),
             SearchTerm::To(text) => fts_phrase(text).map(|phrase| format!("recipients : {phrase}")),
@@ -142,15 +147,17 @@ pub(crate) fn compile_search<Tz: TimeZone>(
     let mut params = Vec::new();
     let mut sql = String::from(
         "SELECT t.mailbox_id, b.name, t.id, t.subject, m.sender, t.participants, t.preview, \
-         t.unread_count, t.is_flagged, t.has_attachments, t.latest_message_at\n",
+         t.unread_count, t.is_flagged, t.has_attachments, t.latest_message_at, b.account_id\n",
     );
     sql.push_str(
         "FROM threads t\n\
          CROSS JOIN mailboxes b ON b.id = t.mailbox_id\n\
          JOIN messages m ON m.id = t.latest_message_id\n\
-         WHERE b.account_id = ?",
+         WHERE ",
     );
-    params.push(Value::Integer(account_id));
+    let (scope_condition, scope_params) = scope_condition(scope, query);
+    sql.push_str(&scope_condition);
+    params.extend(scope_params);
     if !include.is_empty() {
         sql.push_str(
             "\n  AND t.id IN (SELECT rowid FROM search_documents WHERE search_documents MATCH ?)",
@@ -173,6 +180,38 @@ pub(crate) fn compile_search<Tz: TimeZone>(
     params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
 
     Some(CompiledSearch { sql, params })
+}
+
+/// The `WHERE` condition (on `t`, the threads, and `b`, their mailboxes)
+/// that keeps the threads `scope` covers, with its parameters.
+///
+/// An `in:` clause in the query names the folder itself, so it takes
+/// precedence over a folder scope: the search then covers the folder's
+/// account (every account, for a virtual folder) and the clause narrows
+/// it.
+pub(crate) fn scope_condition(scope: &SearchScope, query: &SearchQuery) -> (String, Vec<Value>) {
+    let named_folder = query.mailbox_clause().is_some();
+    match scope {
+        SearchScope::Account(account_id) => (
+            "b.account_id = ?".to_owned(),
+            vec![Value::Integer(*account_id)],
+        ),
+        SearchScope::AllAccounts => ("1 = 1".to_owned(), Vec::new()),
+        SearchScope::Folder(MailboxSelection::Mailbox { mailbox_id, .. }) if named_folder => (
+            "b.account_id = (SELECT account_id FROM mailboxes WHERE id = ?)".to_owned(),
+            vec![Value::Integer(*mailbox_id)],
+        ),
+        SearchScope::Folder(MailboxSelection::Virtual(_)) if named_folder => {
+            ("1 = 1".to_owned(), Vec::new())
+        }
+        SearchScope::Folder(selection) => {
+            let (filter, values) = super::selection_filter(selection);
+            (
+                format!("t.id IN (SELECT threads.id FROM threads WHERE {filter})"),
+                values,
+            )
+        }
+    }
 }
 
 fn push_condition(conditions: &mut Vec<String>, negated: bool, condition: &str) {
@@ -211,7 +250,13 @@ mod tests {
             .with_ymd_and_hms(2026, 3, 31, 12, 0, 0)
             .single()
             .expect("valid time");
-        compile_search(&SearchQuery::parse(query), 7, 50, &now, SearchScope::Local)
+        compile_search(
+            &SearchQuery::parse(query),
+            &SearchScope::Account(7),
+            50,
+            &now,
+            HitSource::Local,
+        )
     }
 
     fn text_params(compiled: &CompiledSearch) -> Vec<String> {
@@ -330,10 +375,10 @@ mod tests {
             .expect("valid time");
         let compiled = compile_search(
             &SearchQuery::parse("after:2026-06-01 before:7d"),
-            1,
+            &SearchScope::Account(1),
             10,
             &now,
-            SearchScope::Local,
+            HitSource::Local,
         )
         .expect("compiles");
         let integers = compiled
@@ -743,6 +788,186 @@ mod store_tests {
         assert!(search(&store, other, "budget").is_empty());
         assert!(search(&store, other, "is:unread").is_empty());
         assert_eq!(search(&store, account, "budget").len(), 2);
+    }
+
+    /// A second account with a budget mail of its own in its Inbox and Junk.
+    fn second_account(store: &LocalStore) -> i64 {
+        let other = store
+            .create_demo_account(ProtocolKind::Jmap)
+            .expect("account should be created");
+        let mail = [
+            Mail {
+                mailbox: "Inbox",
+                id: "home-budget",
+                from: "Dana <dana@home.test>",
+                to: "me@home.test",
+                subject: "Holiday budget",
+                body: Some("Flights and the budget for August."),
+                at: "2026-03-29T09:00:00Z",
+                unread: false,
+                flagged: true,
+                attachment: false,
+            },
+            Mail {
+                mailbox: "Junk",
+                id: "home-prize",
+                from: "Prize Desk <win@spam.test>",
+                to: "me@home.test",
+                subject: "Another budget prize",
+                body: Some("Click"),
+                at: "2026-03-28T09:00:00Z",
+                unread: true,
+                flagged: false,
+                attachment: false,
+            },
+        ];
+        store
+            .replace_account_snapshot(other, &snapshot(&mail))
+            .expect("snapshot should apply");
+        other
+    }
+
+    fn search_in(store: &LocalStore, scope: &zmail_core::SearchScope, query: &str) -> Vec<String> {
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 31, 12, 0, 0)
+            .single()
+            .expect("valid time");
+        let mut subjects = store
+            .search_threads_in_at(scope, query, 50, &now)
+            .unwrap_or_else(|error| panic!("`{query}` should run: {error:#}"))
+            .into_iter()
+            .map(|hit| hit.subject)
+            .collect::<Vec<_>>();
+        subjects.sort();
+        subjects
+    }
+
+    fn mailbox(store: &LocalStore, account_id: i64, name: &str) -> zmail_core::MailboxSelection {
+        let mailbox_id = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes should list")
+            .into_iter()
+            .find(|mailbox| mailbox.name == name)
+            .unwrap_or_else(|| panic!("{name} should exist"))
+            .id;
+        zmail_core::MailboxSelection::Mailbox {
+            account_id,
+            mailbox_id,
+        }
+    }
+
+    #[test]
+    fn scopes_search_a_folder_an_account_or_every_account() {
+        use zmail_core::{MailboxRole, MailboxSelection, SearchScope, VirtualMailbox};
+
+        let (store, work) = seeded();
+        let home = second_account(&store);
+        let inbox = SearchScope::Folder(mailbox(&store, work, "Inbox"));
+
+        assert_eq!(
+            search_in(&store, &inbox, "budget"),
+            ["Quarterly budget review"]
+        );
+        assert_eq!(
+            search_in(&store, &SearchScope::Account(work), "budget"),
+            ["Quarterly budget review", "You won a budget prize"]
+        );
+        assert_eq!(
+            search_in(&store, &SearchScope::AllAccounts, "budget"),
+            [
+                "Another budget prize",
+                "Holiday budget",
+                "Quarterly budget review",
+                "You won a budget prize"
+            ]
+        );
+        // The Unified Inbox is every account's inbox; Flagged is its own
+        // virtual folder.
+        let unified = SearchScope::Folder(MailboxSelection::Virtual(VirtualMailbox::Unified(
+            MailboxRole::Inbox,
+        )));
+        assert_eq!(
+            search_in(&store, &unified, "budget"),
+            ["Holiday budget", "Quarterly budget review"]
+        );
+        let flagged = SearchScope::Folder(MailboxSelection::Virtual(VirtualMailbox::Flagged));
+        assert_eq!(
+            search_in(&store, &flagged, "budget OR notes"),
+            Vec::<String>::new(),
+            "every clause must match"
+        );
+        assert_eq!(search_in(&store, &flagged, "notes"), ["Standup notes"]);
+        assert_eq!(search_in(&store, &flagged, "budget"), ["Holiday budget"]);
+
+        // Hits say where they are, so another account's hit can be opened.
+        let hits = store
+            .search_threads_in(&SearchScope::AllAccounts, "holiday", 10)
+            .expect("search should run");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].account_id, home);
+        let MailboxSelection::Mailbox { mailbox_id, .. } = mailbox(&store, home, "Inbox") else {
+            unreachable!("a stored mailbox")
+        };
+        assert_eq!(hits[0].mailbox_id, mailbox_id);
+    }
+
+    #[test]
+    fn an_in_clause_names_the_folder_over_the_scope() {
+        use zmail_core::{MailboxRole, MailboxSelection, SearchScope, VirtualMailbox};
+
+        let (store, work) = seeded();
+        second_account(&store);
+        // In Work's Inbox, `in:junk` searches Work's Junk instead.
+        let inbox = SearchScope::Folder(mailbox(&store, work, "Inbox"));
+        assert_eq!(
+            search_in(&store, &inbox, "budget in:junk"),
+            ["You won a budget prize"]
+        );
+        // In the Unified Inbox, it searches every account's Junk.
+        let unified = SearchScope::Folder(MailboxSelection::Virtual(VirtualMailbox::Unified(
+            MailboxRole::Inbox,
+        )));
+        assert_eq!(
+            search_in(&store, &unified, "budget in:spam"),
+            ["Another budget prize", "You won a budget prize"]
+        );
+        // A negated `in:` only narrows the folder scope.
+        assert_eq!(
+            search_in(&store, &inbox, "budget -in:junk"),
+            ["Quarterly budget review"]
+        );
+    }
+
+    #[test]
+    fn server_hits_and_the_fallback_check_follow_the_scope() {
+        use zmail_core::SearchScope;
+
+        let (store, work) = seeded();
+        let inbox = mailbox(&store, work, "Inbox");
+        let project = mailbox(&store, work, "Project X");
+        // Every Inbox body is indexed; Project X's launch mail is not.
+        assert!(
+            !store
+                .search_needs_server_in(work, Some(&inbox), "rocket")
+                .expect("check")
+        );
+        assert!(
+            store
+                .search_needs_server_in(work, Some(&project), "rocket")
+                .expect("check")
+        );
+        store
+            .record_server_search_hits(work, "rocket", &[server_hit(Some("Project X"), "launch")])
+            .expect("hits should record");
+        assert!(search_in(&store, &SearchScope::Folder(inbox), "rocket").is_empty());
+        assert_eq!(
+            search_in(&store, &SearchScope::Folder(project), "rocket"),
+            ["Launch plan"]
+        );
+        assert_eq!(
+            search_in(&store, &SearchScope::AllAccounts, "rocket"),
+            ["Launch plan"]
+        );
     }
 
     #[test]

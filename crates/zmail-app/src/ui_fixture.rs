@@ -49,6 +49,9 @@ pub(crate) enum FixtureView {
     /// The seeded inbox with its three newest threads selected, showing
     /// the bulk action bar and the reader's selection count.
     MultiSelect,
+    /// The `accounts` view with a search across the Unified Inbox, so the
+    /// scope control and account chips show.
+    Search,
 }
 
 impl FixtureView {
@@ -66,8 +69,9 @@ impl FixtureView {
             "sidebar" => Self::Sidebar,
             "accounts" => Self::Accounts,
             "multi-select" => Self::MultiSelect,
+            "search" => Self::Search,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, compose, account-setup, sidebar, accounts or multi-select"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, compose, account-setup, sidebar, accounts, multi-select or search"
             ),
         })
     }
@@ -155,6 +159,10 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         FixtureView::Accounts => {
             seed_more_accounts(store, account_id, now)?;
             InitialView::Inbox
+        }
+        FixtureView::Search => {
+            seed_more_accounts(store, account_id, now)?;
+            InitialView::Search("release")
         }
         FixtureView::AccountSetup => InitialView::AccountSetup,
         FixtureView::Sidebar => InitialView::Sidebar,
@@ -739,6 +747,7 @@ mod tests {
             "sidebar",
             "accounts",
             "multi-select",
+            "search",
         ] {
             FixtureView::parse(name)?;
         }
@@ -855,6 +864,22 @@ mod tests {
         let (store, initial_view) = seeded(FixtureView::Sidebar)?;
         assert_eq!(initial_view, InitialView::Sidebar);
         assert_eq!(store.list_accounts()?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn search_finds_hits_in_several_accounts_unified_inbox() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::Search)?;
+        let InitialView::Search(query) = initial_view else {
+            bail!("the search fixture should open a search, not {initial_view:?}");
+        };
+        let unified = MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Inbox));
+        let hits = store.search_threads_in(&zmail_core::SearchScope::Folder(unified), query, 50)?;
+        let accounts = hits
+            .iter()
+            .map(|hit| hit.account_id)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(accounts.len() > 1, "{hits:?}");
         Ok(())
     }
 

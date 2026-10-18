@@ -14,6 +14,12 @@
 //! normal sync path, brings it in. A search triggers at most one, and
 //! searches start at most one per account every [`SEARCH_SYNC_COOLDOWN`],
 //! so repeated searches never chain full-account syncs.
+//!
+//! A search scoped to a folder ([`SyncService::search_server_in_and_wait`])
+//! asks IMAP about that folder's mailboxes only; an `in:` clause in the
+//! query names the mailboxes instead. JMAP's `Email/query` covers the
+//! account and the store keeps the folder's hits. A search across every
+//! account runs this once per account; each account's failure is its own.
 //! Should a sync window or partial folder sync ever be added, unknown hits
 //! would need a targeted header fetch (`UID FETCH` / `Email/get` on the
 //! ids) fed through the same snapshot merge instead.
@@ -26,7 +32,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use tokio::time::sleep;
 use zmail_core::{
-    ProtocolKind,
+    MailboxSelection, MailboxSummary, ProtocolKind, VirtualMailbox,
     search::{SearchQuery, SearchTerm, mailbox_matches},
 };
 
@@ -73,33 +79,65 @@ impl SyncService {
         account_id: i64,
         query: &str,
     ) -> Result<ServerSearchReport> {
+        self.search_server_in_and_wait(account_id, None, query)
+            .await
+    }
+
+    /// Like [`Self::search_server_and_wait`], for a search scoped to
+    /// `folder` (one of the account's mailboxes, or a virtual mailbox
+    /// across accounts): IMAP searches only the folder's mailboxes. With
+    /// no folder it covers the whole account.
+    pub async fn search_server_in_and_wait(
+        &self,
+        account_id: i64,
+        folder: Option<MailboxSelection>,
+        query: &str,
+    ) -> Result<ServerSearchReport> {
         let service = self.clone();
         let query = query.to_owned();
         self.inner
             .handle
-            .spawn(async move { service.search_server_job(account_id, &query).await })
+            .spawn(async move {
+                service
+                    .search_server_job(account_id, folder.as_ref(), &query)
+                    .await
+            })
             .await
             .context("the server search worker exited before returning a result")?
     }
 
-    async fn search_server_job(&self, account_id: i64, query: &str) -> Result<ServerSearchReport> {
+    async fn search_server_job(
+        &self,
+        account_id: i64,
+        folder: Option<&MailboxSelection>,
+        query: &str,
+    ) -> Result<ServerSearchReport> {
         let store = &self.inner.store;
         let mut report = ServerSearchReport::default();
-        if !store.search_needs_server(account_id, query)? {
+        let parsed = SearchQuery::parse(query);
+        // An `in:` clause names the mailboxes itself.
+        let folder = folder.filter(|_| parsed.mailbox_clause().is_none());
+        if !store.search_needs_server_in(account_id, folder, query)? {
             return Ok(report);
         }
         let Some(target) = store.sync_target(account_id)? else {
             bail!("account {account_id} no longer exists");
         };
-        let parsed = SearchQuery::parse(query);
         let secret = self.connect_secret(&target).await?;
         let hits = match target.protocol {
             ProtocolKind::Imap => {
                 let mailboxes = store
-                    .mailbox_names_and_roles(account_id)?
+                    .list_mailboxes(account_id)?
                     .into_iter()
-                    .filter(|(name, role)| mailbox_in_scope(&parsed, name, role.as_deref()))
-                    .map(|(name, _)| name)
+                    .filter(|mailbox| {
+                        mailbox_in_folder(folder, mailbox)
+                            && mailbox_in_scope(
+                                &parsed,
+                                &mailbox.name,
+                                mailbox.role.map(|role| role.as_str()),
+                            )
+                    })
+                    .map(|mailbox| mailbox.name)
                     .collect::<Vec<_>>();
                 zmail_imap::search_messages(
                     &target,
@@ -173,6 +211,19 @@ fn search_sync_allowed(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|last| now.saturating_duration_since(last) >= SEARCH_SYNC_COOLDOWN)
 }
 
+/// Whether a mailbox belongs to the folder a search is scoped to. A
+/// virtual folder's mailboxes are each account's mailbox with its role;
+/// Flagged spans every mailbox (the store keeps the flagged hits).
+fn mailbox_in_folder(folder: Option<&MailboxSelection>, mailbox: &MailboxSummary) -> bool {
+    match folder {
+        None | Some(MailboxSelection::Virtual(VirtualMailbox::Flagged)) => true,
+        Some(MailboxSelection::Mailbox { mailbox_id, .. }) => mailbox.id == *mailbox_id,
+        Some(MailboxSelection::Virtual(VirtualMailbox::Unified(role))) => {
+            mailbox.role == Some(*role)
+        }
+    }
+}
+
 /// Whether a mailbox is covered by the query's `in:` clauses: it must match
 /// every positive one and no negated one.
 fn mailbox_in_scope(query: &SearchQuery, name: &str, role: Option<&str>) -> bool {
@@ -199,6 +250,37 @@ mod tests {
             Some(start),
             start + SEARCH_SYNC_COOLDOWN
         ));
+    }
+
+    #[test]
+    fn folder_scopes_choose_the_mailboxes() {
+        use zmail_core::MailboxRole;
+
+        let mailbox = |id: i64, name: &str, role: Option<MailboxRole>| MailboxSummary {
+            id,
+            account_id: 1,
+            name: name.to_owned(),
+            role,
+            delimiter: None,
+            parent: None,
+            total_threads: 0,
+            unread_threads: 0,
+        };
+        let inbox = mailbox(1, "INBOX", Some(MailboxRole::Inbox));
+        let archive = mailbox(2, "Archive", Some(MailboxRole::Archive));
+        let one = MailboxSelection::Mailbox {
+            account_id: 1,
+            mailbox_id: 2,
+        };
+        let unified = MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Inbox));
+        let flagged = MailboxSelection::Virtual(VirtualMailbox::Flagged);
+
+        assert!(mailbox_in_folder(None, &inbox) && mailbox_in_folder(None, &archive));
+        assert!(!mailbox_in_folder(Some(&one), &inbox));
+        assert!(mailbox_in_folder(Some(&one), &archive));
+        assert!(mailbox_in_folder(Some(&unified), &inbox));
+        assert!(!mailbox_in_folder(Some(&unified), &archive));
+        assert!(mailbox_in_folder(Some(&flagged), &archive));
     }
 
     #[test]

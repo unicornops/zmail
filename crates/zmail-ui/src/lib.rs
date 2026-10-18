@@ -68,6 +68,7 @@ mod move_picker;
 mod pane;
 mod preferences;
 mod reader;
+mod search;
 mod sidebar;
 mod toolbar;
 mod tooltip;
@@ -118,6 +119,8 @@ pub enum InitialView {
     MultiSelect,
     /// The outbox list.
     Outbox,
+    /// The last mailbox with this query searched in it.
+    Search(&'static str),
 }
 
 /// Runs the native Phase 4 shell.
@@ -311,9 +314,9 @@ struct WorkspaceView {
     /// The query that produced `search_results`, shown in the list header
     /// (the search field itself may have been edited since).
     search_results_query: String,
-    /// The `(account, query)` whose server search fallback is still
-    /// running; its hits join `search_results` when it finishes.
-    server_search_pending: Option<(i64, String)>,
+    /// Where the shown search looks (folder, account or every account)
+    /// and its running server searches.
+    search_context: search::SearchContext,
     /// The account the shell acts on: the selected mailbox's, or in a
     /// virtual mailbox the open thread's.
     selected_account_id: Option<i64>,

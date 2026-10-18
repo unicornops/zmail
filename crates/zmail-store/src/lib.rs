@@ -21,10 +21,10 @@ use zmail_core::{
     MailboxSnapshot, MailboxSummary, MessageAttachment, MessageFlagState, MessagePreview,
     MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, OAuth2TargetConfig, OutboxJobState,
     OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp,
-    PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, ServerHitRef,
-    StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget,
-    ThreadCounts, ThreadFilter, ThreadMarks, ThreadMessage, ThreadSnapshot, ThreadState,
-    ThreadSummary, ThreadView, VirtualMailbox, preferences::UiPreferences,
+    PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, SearchScope,
+    ServerHitRef, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary,
+    SyncTarget, ThreadCounts, ThreadFilter, ThreadMarks, ThreadMessage, ThreadSnapshot,
+    ThreadState, ThreadSummary, ThreadView, VirtualMailbox, preferences::UiPreferences,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -1540,7 +1540,9 @@ impl LocalStore {
         values.push(thread_id.into());
         conn.query_row(
             &format!(
-                "SELECT EXISTS(SELECT 1 FROM threads WHERE threads.id = ?{thread} AND {filter})"
+                // The filter's anonymous `?`s come first, so they number
+                // 1, 2, … before the explicit `?{thread}`.
+                "SELECT EXISTS(SELECT 1 FROM threads WHERE {filter} AND threads.id = ?{thread})"
             ),
             rusqlite::params_from_iter(values),
             |row| row.get::<_, bool>(0),
@@ -1694,6 +1696,8 @@ impl LocalStore {
         let mut marks = Vec::with_capacity(thread_ids.len());
         // Stay well inside SQLite's bound-parameter limit.
         for chunk in thread_ids.chunks(500) {
+            // The filter's anonymous `?`s come first in the SQL, so they
+            // number 1, 2, … before these explicit ones.
             let first = filter_values.len() + 1;
             let placeholders = (first..first + chunk.len())
                 .map(|index| format!("?{index}"))
@@ -1705,7 +1709,7 @@ impl LocalStore {
                        threads.is_flagged, threads.unread_count > 0
                 FROM threads
                 JOIN mailboxes ON mailboxes.id = threads.mailbox_id
-                WHERE threads.id IN ({placeholders}) AND {filter}
+                WHERE {filter} AND threads.id IN ({placeholders})
                 "#
             ))?;
             let values = filter_values
@@ -2279,7 +2283,33 @@ impl LocalStore {
             .context("failed to commit the hydration transaction")
     }
 
-    /// Searches the selected account's local mail.
+    /// Searches one account's local mail: [`Self::search_threads_in`] with
+    /// [`SearchScope::Account`].
+    pub fn search_threads(
+        &self,
+        account_id: i64,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_threads_in(&SearchScope::Account(account_id), query, limit)
+    }
+
+    /// [`LocalStore::search_threads`] with an explicit clock and time zone
+    /// for `before:`/`after:`, for tests.
+    pub fn search_threads_at<Tz: chrono::TimeZone>(
+        &self,
+        account_id: i64,
+        query: &str,
+        limit: usize,
+        now: &chrono::DateTime<Tz>,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_threads_in_at(&SearchScope::Account(account_id), query, limit, now)
+    }
+
+    /// Searches local mail in `scope`: a folder (a mailbox, or a virtual
+    /// mailbox such as the Unified Inbox), one account, or every account.
+    /// An `in:` clause in the query names the folder itself and takes
+    /// precedence over a folder scope.
     ///
     /// `query` uses the search language of [`zmail_core::search`]: words,
     /// quoted phrases, `from:`, `to:`, `subject:`, `has:attachment`,
@@ -2288,49 +2318,44 @@ impl LocalStore {
     /// time zone. Returns threads newest first, which keeps the first page
     /// cheap on large mailboxes (the date index stops the scan at `limit`)
     /// and matches how mail clients list results.
-    pub fn search_threads(
+    pub fn search_threads_in(
         &self,
-        account_id: i64,
+        scope: &SearchScope,
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        self.search_threads_at(account_id, query, limit, &chrono::Local::now())
+        self.search_threads_in_at(scope, query, limit, &chrono::Local::now())
     }
 
-    /// [`LocalStore::search_threads`] with an explicit clock and time zone
-    /// for `before:`/`after:`, for tests.
+    /// [`LocalStore::search_threads_in`] with an explicit clock and time
+    /// zone for `before:`/`after:`, for tests.
     ///
     /// Local index hits come first. Threads the server search fallback
     /// recorded for the same query text ([`LocalStore::record_server_search_hits`])
-    /// follow, marked [`SearchHit::from_server`], when they pass the
-    /// query's non-text clauses and the local index did not already find
-    /// them.
-    pub fn search_threads_at<Tz: chrono::TimeZone>(
+    /// follow, marked [`SearchHit::from_server`], when they are in scope,
+    /// pass the query's non-text clauses and the local index did not
+    /// already find them.
+    pub fn search_threads_in_at<Tz: chrono::TimeZone>(
         &self,
-        account_id: i64,
+        scope: &SearchScope,
         query: &str,
         limit: usize,
         now: &chrono::DateTime<Tz>,
     ) -> Result<Vec<SearchHit>> {
         let parsed = zmail_core::search::SearchQuery::parse(query);
         let conn = self.connection()?;
-        let mut hits = match search::compile_search(
-            &parsed,
-            account_id,
-            limit,
-            now,
-            search::SearchScope::Local,
-        ) {
-            Some(compiled) => run_search(&conn, compiled, false)?,
-            None => return Ok(Vec::new()),
-        };
+        let mut hits =
+            match search::compile_search(&parsed, scope, limit, now, search::HitSource::Local) {
+                Some(compiled) => run_search(&conn, compiled, false)?,
+                None => return Ok(Vec::new()),
+            };
         if hits.len() < limit
             && let Some(compiled) = search::compile_search(
                 &parsed,
-                account_id,
+                scope,
                 limit,
                 now,
-                search::SearchScope::ServerHits(query.trim()),
+                search::HitSource::ServerHits(query.trim()),
             )
         {
             let local = hits.iter().map(|hit| hit.thread_id).collect::<HashSet<_>>();
@@ -2347,22 +2372,47 @@ impl LocalStore {
     /// ([`SearchQuery::needs_message_bodies`](zmail_core::search::SearchQuery::needs_message_bodies))
     /// and some of the account's messages have no body in the index.
     pub fn search_needs_server(&self, account_id: i64, query: &str) -> Result<bool> {
+        self.search_needs_server_in(account_id, None, query)
+    }
+
+    /// Like [`Self::search_needs_server`], looking only at the messages in
+    /// `folder` (when given) for unindexed bodies.
+    pub fn search_needs_server_in(
+        &self,
+        account_id: i64,
+        folder: Option<&MailboxSelection>,
+        query: &str,
+    ) -> Result<bool> {
         if !zmail_core::search::SearchQuery::parse(query).needs_message_bodies() {
             return Ok(false);
         }
         let conn = self.connection()?;
+        let (folder_filter, mut values) = match folder {
+            Some(selection) => {
+                let (filter, values) = selection_filter(selection);
+                (
+                    format!("AND t.id IN (SELECT threads.id FROM threads WHERE {filter})"),
+                    values,
+                )
+            }
+            None => (String::new(), Vec::new()),
+        };
+        values.push(account_id.into());
         conn.query_row(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM messages m
-                JOIN threads t ON t.id = m.thread_id
-                JOIN mailboxes b ON b.id = t.mailbox_id
-                WHERE m.body_text IS NULL AND m.sanitized_html IS NULL
-                  AND b.account_id = ?1
-            )
-            "#,
-            params![account_id],
+            &format!(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM messages m
+                    JOIN threads t ON t.id = m.thread_id
+                    JOIN mailboxes b ON b.id = t.mailbox_id
+                    WHERE m.body_text IS NULL AND m.sanitized_html IS NULL
+                      {folder_filter}
+                      AND b.account_id = ?
+                )
+                "#
+            ),
+            rusqlite::params_from_iter(values),
             |row| row.get::<_, bool>(0),
         )
         .context("failed to check for unindexed messages")
@@ -4477,6 +4527,7 @@ fn run_search(
             is_flagged: row.get::<_, bool>(8)?,
             has_attachments: row.get::<_, bool>(9)?,
             latest_message_at: row.get(10)?,
+            account_id: row.get(11)?,
             from_server,
         })
     })?;
@@ -4743,7 +4794,7 @@ fn thread_filter_clause(filter: ThreadFilter) -> &'static str {
 fn selection_filter(selection: &MailboxSelection) -> (String, Vec<rusqlite::types::Value>) {
     match selection {
         MailboxSelection::Mailbox { mailbox_id, .. } => (
-            "threads.mailbox_id = ?1".to_owned(),
+            "threads.mailbox_id = ?".to_owned(),
             vec![(*mailbox_id).into()],
         ),
         // Each account's first mailbox with the role, as
@@ -4753,7 +4804,7 @@ fn selection_filter(selection: &MailboxSelection) -> (String, Vec<rusqlite::type
                 SELECT (
                     SELECT role_mailbox.id FROM mailboxes AS role_mailbox
                     WHERE role_mailbox.account_id = accounts.id
-                      AND lower(role_mailbox.role) = ?1
+                      AND lower(role_mailbox.role) = ?
                     ORDER BY role_mailbox.sort_order, role_mailbox.id
                     LIMIT 1
                 )
@@ -6555,6 +6606,43 @@ mod tests {
             store
                 .list_selection_threads(&one, 0..10)
                 .expect("threads should list")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn selection_filters_embed_before_numbered_parameters() {
+        // The selection filters use anonymous `?`s; queries that add
+        // numbered ones after them must still bind the right values.
+        let (store, _, home) = two_account_store();
+        let home_inbox = store
+            .mailbox_id_by_role(home, "inbox")
+            .expect("role lookup")
+            .expect("home has an inbox");
+        let one = MailboxSelection::Mailbox {
+            account_id: home,
+            mailbox_id: home_inbox,
+        };
+        let rows = store
+            .list_selection_threads(&one, 0..10)
+            .expect("threads should list");
+        let ids = rows.iter().map(|row| row.id).collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        assert!(store.selection_contains(&one, ids[0]).expect("check"));
+        let unified = MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Inbox));
+        assert!(store.selection_contains(&unified, ids[1]).expect("check"));
+        assert_eq!(
+            store
+                .thread_marks(&ids, Some(&one))
+                .expect("marks should load")
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .thread_marks(&ids, Some(&unified))
+                .expect("marks should load")
                 .len(),
             2
         );

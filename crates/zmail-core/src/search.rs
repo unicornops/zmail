@@ -198,6 +198,16 @@ impl SearchQuery {
         self.clauses.is_empty()
     }
 
+    /// The value of the first positive `in:` clause, if the query names a
+    /// mailbox. Such a clause chooses the folder, so it takes precedence
+    /// over the folder a search would otherwise start in.
+    pub fn mailbox_clause(&self) -> Option<&str> {
+        self.clauses.iter().find_map(|clause| match &clause.term {
+            SearchTerm::Mailbox(value) if !clause.negated => Some(value.as_str()),
+            _ => None,
+        })
+    }
+
     /// Whether any clause needs message text (see [`SearchTerm::is_text`]).
     pub fn has_text_terms(&self) -> bool {
         self.clauses.iter().any(|clause| clause.term.is_text())
@@ -572,6 +582,22 @@ mod tests {
         assert!(SearchQuery::parse("is:unread report").has_text_terms());
         assert!(SearchQuery::parse("from:alice").has_text_terms());
         assert!(!SearchQuery::parse("is:unread in:inbox after:7d").has_text_terms());
+    }
+
+    #[test]
+    fn the_first_positive_in_clause_names_the_folder() {
+        let clause = |query: &str| {
+            SearchQuery::parse(query)
+                .mailbox_clause()
+                .map(str::to_owned)
+        };
+        assert_eq!(clause("report"), None);
+        assert_eq!(clause("report -in:spam"), None);
+        assert_eq!(
+            clause("-in:spam in:\"Project X\" in:inbox"),
+            Some("Project X".to_owned())
+        );
+        assert_eq!(clause("IN:archive"), Some("archive".to_owned()));
     }
 
     #[test]

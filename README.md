@@ -100,11 +100,22 @@ leading `-` negates any of them:
 cargo run -p zmail-app -- search 1 'from:alice "budget review" -in:junk after:30d'
 ```
 
+In the app, a search starts in the folder the list shows (the Unified
+Inbox counts as one folder: every account's inbox). The scope control under
+the list header, the empty state and the Edit menu widen it to the folder's
+account or to every account (Secondary+Alt+1, 2 and 3 pick folder, account
+and all accounts). Each new search starts in the folder again. An `in:`
+operator in the query names the folder itself and takes the folder's place
+in the scope control. The `search` command searches one account.
+
 The desktop app indexes bodies in the background; `zmail-app index ID` runs
 one indexing pass for an account in the foreground and prints its progress.
 Until every body is indexed, a search with free text also asks the server
 (IMAP `UID SEARCH`, JMAP `Email/query`); its extra hits are listed after the
-local ones and marked "found on server". `zmail-app search --server ID QUERY`
+local ones and marked "found on server". The server search follows the
+scope: in folder scope IMAP searches only that folder's mailboxes, and a
+search across accounts asks each account's server separately, so one
+offline account does not stop the others' results. `zmail-app search --server ID QUERY`
 does the same from the command line.
 
 Launch the desktop client:

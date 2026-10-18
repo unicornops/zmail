@@ -22,7 +22,7 @@ use gpui::{
     AnyElement, Context, DismissEvent, Entity, FontWeight, IntoElement, Modifiers, Pixels, Point,
     ScrollStrategy, Subscription, Window, div, prelude::*, rgb,
 };
-use zmail_core::{MailboxSelection, MailboxSummary, ThreadSummary};
+use zmail_core::{MailboxSelection, MailboxSummary};
 
 use super::{MessageListEvent, MessageListView};
 use crate::ListMode;
@@ -303,13 +303,23 @@ impl MessageListView {
         }
     }
 
-    /// What dragging the row of `thread` carries: the whole selection when
+    /// What dragging the row of thread `thread_id` carries: the whole selection when
     /// the row is part of it, otherwise the row alone.
-    pub(super) fn dragged_threads(&self, thread: &ThreadSummary) -> DraggedThreads {
+    pub(super) fn dragged_threads(
+        &self,
+        thread_id: i64,
+        account_id: i64,
+        mailbox_id: i64,
+    ) -> DraggedThreads {
         let selection = &self.state.selection;
-        if selection.is_multiple() && selection.thread_ids.contains(&thread.id) {
+        if selection.is_multiple() && selection.thread_ids.contains(&thread_id) {
+            // Search results can come from several mailboxes.
             let mailbox_id = match self.state.mailbox.as_ref().map(|mailbox| mailbox.selection) {
-                Some(MailboxSelection::Mailbox { mailbox_id, .. }) => Some(mailbox_id),
+                Some(MailboxSelection::Mailbox { mailbox_id, .. })
+                    if self.state.mode == ListMode::Mail =>
+                {
+                    Some(mailbox_id)
+                }
                 _ => None,
             };
             DraggedThreads {
@@ -319,9 +329,9 @@ impl MessageListView {
             }
         } else {
             DraggedThreads {
-                thread_ids: vec![thread.id],
-                account_id: Some(thread.account_id),
-                mailbox_id: Some(thread.mailbox_id),
+                thread_ids: vec![thread_id],
+                account_id: Some(account_id),
+                mailbox_id: Some(mailbox_id),
             }
         }
     }
