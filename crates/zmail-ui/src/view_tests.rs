@@ -776,6 +776,112 @@ fn every_toolbar_action_is_dispatchable_by_keybinding(cx: &mut TestAppContext) {
     assert_eq!(status(cx), "Draft saved.");
 }
 
+/// The messages of the visible toasts, oldest first.
+fn toasts(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<String> {
+    cx.read_entity(view, |view, cx| {
+        view.toasts
+            .read(cx)
+            .visible()
+            .into_iter()
+            .map(|(_, message)| message.to_string())
+            .collect()
+    })
+}
+
+/// Presses the Undo button of the newest toast that has one.
+fn click_toast_undo(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) {
+    let host = cx.read_entity(view, |view, _| view.toasts.clone());
+    let undone = host.update_in(cx, |host, window, cx| host.undo_latest(window, cx));
+    assert!(undone, "a toast offers Undo");
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn archiving_selects_the_next_row_and_the_toast_undoes_it(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let threads = harness.threads.clone();
+    keys("down", cx);
+    assert_eq!(selected_thread(&view, cx), Some(threads[1]));
+
+    keys("secondary-e", cx);
+    assert_eq!(mailbox_of(&harness, threads[1]), harness.archive_id);
+    assert_eq!(
+        selected_thread(&view, cx),
+        Some(threads[2]),
+        "the row below takes the archived one's place"
+    );
+    assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+    assert_eq!(toasts(&view, cx), ["Conversation archived"]);
+
+    // The last row leaving selects the one above it.
+    keys("secondary-e", cx);
+    assert_eq!(mailbox_of(&harness, threads[2]), harness.archive_id);
+    assert_eq!(selected_thread(&view, cx), Some(threads[0]));
+    assert_eq!(
+        toasts(&view, cx),
+        ["Conversation archived"],
+        "only the latest change offers Undo"
+    );
+
+    // The toast's Undo brings it back and selects it.
+    click_toast_undo(&view, cx);
+    assert_eq!(mailbox_of(&harness, threads[2]), harness.inbox_id);
+    assert_eq!(selected_thread(&view, cx), Some(threads[2]));
+    assert_eq!(toasts(&view, cx), ["Undone: Conversation archived"]);
+    // Secondary+Z undoes the change before it.
+    keys("secondary-z", cx);
+    assert_eq!(mailbox_of(&harness, threads[1]), harness.inbox_id);
+    assert_eq!(selected_thread(&view, cx), Some(threads[1]));
+    assert!(
+        harness
+            .store
+            .list_pending_ops(harness.store.list_accounts().expect("accounts load")[0].id)
+            .expect("the write-back queue loads")
+            .is_empty(),
+        "undone before any sync, so nothing goes to the server"
+    );
+
+    // Toasts close themselves.
+    cx.executor().advance_clock(Duration::from_secs(10));
+    cx.run_until_parked();
+    assert!(toasts(&view, cx).is_empty());
+}
+
+#[gpui::test]
+fn moving_a_conversation_keeps_the_list_and_selects_the_next_row(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let threads = harness.threads.clone();
+    let archive_id = harness.archive_id.expect("an archive");
+    cx.dispatch_action(crate::actions::MoveToMailbox {
+        mailbox_id: archive_id,
+    });
+    cx.run_until_parked();
+    assert_eq!(mailbox_of(&harness, threads[0]), Some(archive_id));
+    let shown = cx.read_entity(&view, |view, _| view.selected_mailbox_id);
+    assert_eq!(shown, harness.inbox_id, "the list stays on the Inbox");
+    assert_eq!(selected_thread(&view, cx), Some(threads[1]));
+    assert_eq!(toasts(&view, cx), ["Conversation moved to Archive"]);
+}
+
+#[gpui::test]
+fn undo_in_a_text_field_edits_the_text_not_the_mail(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let first = harness.threads[0];
+    keys("secondary-e", cx);
+    assert_eq!(mailbox_of(&harness, first), harness.archive_id);
+
+    let search = search_input(&view, cx);
+    focus(&search, cx);
+    cx.simulate_input("abc");
+    keys("secondary-z", cx);
+    assert_eq!(text(&search, cx), "", "the field undid its typing");
+    assert_eq!(
+        mailbox_of(&harness, first),
+        harness.archive_id,
+        "the archive stays"
+    );
+}
+
 #[gpui::test]
 fn conversation_actions_have_keys_and_undo(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::Mail);

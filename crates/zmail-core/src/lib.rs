@@ -1110,6 +1110,44 @@ pub struct ThreadView {
     pub messages: Vec<ThreadMessage>,
 }
 
+/// Where a thread is and the read and flag state of each of its messages:
+/// what a change records so that undo can put the thread back exactly,
+/// including a partly read thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadState {
+    /// Thread identifier.
+    pub id: i64,
+    /// Mailbox identifier.
+    pub mailbox_id: i64,
+    /// Mailbox name.
+    pub mailbox_name: String,
+    /// The thread's messages, oldest first.
+    pub messages: Vec<MessageFlagState>,
+}
+
+impl ThreadState {
+    /// Whether every message is read.
+    pub fn is_read(&self) -> bool {
+        self.messages.iter().all(|message| message.is_read)
+    }
+
+    /// Whether any message is flagged.
+    pub fn is_flagged(&self) -> bool {
+        self.messages.iter().any(|message| message.is_flagged)
+    }
+}
+
+/// The read and flag state of one message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageFlagState {
+    /// Local message identifier.
+    pub message_id: i64,
+    /// Whether the message is read.
+    pub is_read: bool,
+    /// Whether the message is flagged.
+    pub is_flagged: bool,
+}
+
 /// Search hit returned by the local Phase 3 mail search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHit {

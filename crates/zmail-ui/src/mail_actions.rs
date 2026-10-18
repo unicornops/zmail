@@ -8,21 +8,30 @@
 //! 2. emits a [`MailEvent`] describing what changed, so the workspace shell
 //!    and the panes refresh only from local state, and
 //! 3. for reversible thread changes, records an [`UndoEntry`] holding the
-//!    inverse operation.
+//!    inverse operations.
 //!
-//! The undo toast and its Secondary+Z binding are Phase 3 of the UI plan;
-//! the inverse operations are recorded now so that work only adds UI.
-//! [`MailActions::undo`] already applies them.
+//! Thread changes take a list of threads, so a multi-row selection is one
+//! change with one undo entry ("3 conversations archived"). The inverses
+//! go through the same store calls, and the store folds them into the
+//! write-back still queued, so undoing a change before it syncs leaves the
+//! server nothing to do.
 
 use std::{collections::VecDeque, path::Path, sync::Arc};
 
 use anyhow::{Context as _, Result, bail};
 use gpui::{Context, EventEmitter};
-use zmail_core::{DraftAttachment, DraftUpdate, NewDraft, ThreadView};
+use zmail_core::{
+    DraftAttachment, DraftUpdate, MessageFlagState, NewDraft, ThreadState, text::count_noun,
+};
 use zmail_store::LocalStore;
 
 /// How many undo entries are kept; older ones are dropped.
 pub(crate) const UNDO_LIMIT: usize = 50;
+
+/// Identifies one recorded change, so the undo toast for it can undo
+/// exactly that change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UndoId(u64);
 
 /// What changed in the local store. The shell subscribes and refreshes the
 /// panes from the store; nothing here carries remote state.
@@ -50,35 +59,65 @@ pub(crate) enum MailEvent {
     DraftAttachmentsChanged { draft_id: i64 },
     /// An outbox job was requeued for another delivery attempt.
     OutboxJobRetried { job_id: i64 },
-    /// A reversible change was recorded; the label describes it, for
-    /// example "Conversation archived".
-    UndoRecorded { label: String },
-    /// The most recent change was undone.
-    Undone { label: String },
+    /// A change was recorded; the label describes it, for example
+    /// "3 conversations archived". `can_undo` is false for a change that
+    /// cannot be reversed (a permanent delete).
+    UndoRecorded {
+        id: UndoId,
+        label: String,
+        can_undo: bool,
+    },
+    /// A recorded change was undone.
+    Undone { id: UndoId, label: String },
 }
 
-/// The operation that reverses a recorded change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// An operation that reverses part of a recorded change.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InverseOp {
     /// Move the thread back to the mailbox it came from.
     MoveThread { thread_id: i64, to_mailbox_id: i64 },
-    /// Restore the thread's flag.
-    SetFlagged { thread_id: i64, flagged: bool },
-    /// Restore the thread's read state.
-    SetRead { thread_id: i64, read: bool },
+    /// Put each message's read and flag state back.
+    RestoreFlags {
+        thread_id: i64,
+        messages: Vec<MessageFlagState>,
+    },
+}
+
+impl InverseOp {
+    fn thread_id(&self) -> i64 {
+        match self {
+            Self::MoveThread { thread_id, .. } | Self::RestoreFlags { thread_id, .. } => *thread_id,
+        }
+    }
 }
 
 /// One change the user can undo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UndoEntry {
+    pub(crate) id: UndoId,
     /// Short description for the undo toast, for example
     /// "Conversation archived".
     pub(crate) label: String,
-    /// How to reverse the change, or `None` when it cannot be reversed
-    /// (a thread deleted without a trash mailbox is gone locally). Such an
-    /// entry still sits on the stack so Undo never silently reverses an
-    /// older change instead.
-    pub(crate) inverse: Option<InverseOp>,
+    /// How to reverse the change, one operation per thread. Empty when it
+    /// cannot be reversed (threads deleted without a trash mailbox are
+    /// gone locally). Such an entry still sits on the stack so Undo never
+    /// silently reverses an older change instead.
+    pub(crate) inverses: Vec<InverseOp>,
+}
+
+impl UndoEntry {
+    /// The threads the change moved back into `mailbox_id` when undone.
+    pub(crate) fn restores_into(&self, mailbox_id: i64) -> impl Iterator<Item = i64> + '_ {
+        self.inverses
+            .iter()
+            .filter_map(move |inverse| match inverse {
+                InverseOp::MoveThread {
+                    thread_id,
+                    to_mailbox_id,
+                } if *to_mailbox_id == mailbox_id => Some(*thread_id),
+                _ => None,
+            })
+    }
 }
 
 /// The mail mutation service. One instance lives for the window, owned by
@@ -86,6 +125,7 @@ pub(crate) struct UndoEntry {
 pub(crate) struct MailActions {
     store: Arc<LocalStore>,
     undo_stack: VecDeque<UndoEntry>,
+    next_undo_id: u64,
 }
 
 impl EventEmitter<MailEvent> for MailActions {}
@@ -96,18 +136,17 @@ impl MailActions {
         Self {
             store,
             undo_stack: VecDeque::new(),
+            next_undo_id: 0,
         }
     }
 
-    /// The recorded undo entries, oldest first. (The undo toast in Phase 3
-    /// reads these.)
+    /// The recorded undo entries, oldest first.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn undo_entries(&self) -> impl ExactSizeIterator<Item = &UndoEntry> {
         self.undo_stack.iter()
     }
 
     /// The entry [`Self::undo`] would reverse next.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn last_undo(&self) -> Option<&UndoEntry> {
         self.undo_stack.back()
     }
@@ -116,122 +155,165 @@ impl MailActions {
     // Thread changes (reversible)
     // -----------------------------------------------------------------------
 
-    /// Moves the thread to the account's archive mailbox.
-    pub(crate) fn archive_thread(&mut self, thread_id: i64, cx: &mut Context<Self>) -> Result<()> {
-        let Some(thread) = self.thread(thread_id)? else {
-            return Ok(());
-        };
-        self.store.archive_thread(thread_id)?;
-        let to_mailbox_id = self.current_mailbox_id(thread_id)?;
-        self.finish_move(&thread, to_mailbox_id, "Conversation archived", cx);
-        Ok(())
+    /// Moves the threads to their account's archive mailbox.
+    pub(crate) fn archive_threads(
+        &mut self,
+        thread_ids: &[i64],
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let mut change = Change::default();
+        let result = thread_ids.iter().try_for_each(|&thread_id| {
+            let Some(before) = self.thread(thread_id)? else {
+                return Ok(());
+            };
+            self.store.archive_thread(thread_id)?;
+            let to_mailbox_id = self.current_mailbox_id(thread_id)?;
+            change.moved(&before, to_mailbox_id, cx);
+            Ok(())
+        });
+        let count = change.inverses.len();
+        self.record(
+            change,
+            if count == 1 {
+                "Conversation archived".to_owned()
+            } else {
+                format!("{} archived", conversations(count))
+            },
+            cx,
+        );
+        result
     }
 
-    /// Moves the thread to another mailbox of the same account.
-    pub(crate) fn move_thread(
+    /// Moves the threads to another mailbox of the same account.
+    pub(crate) fn move_threads(
         &mut self,
-        thread_id: i64,
+        thread_ids: &[i64],
         to_mailbox_id: i64,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let Some(thread) = self.thread(thread_id)? else {
-            return Ok(());
-        };
-        if thread.mailbox_id == to_mailbox_id {
-            return Ok(());
-        }
-        self.store.move_thread(thread_id, to_mailbox_id)?;
-        self.finish_move(&thread, to_mailbox_id, "Conversation moved", cx);
-        Ok(())
+        let mut change = Change::default();
+        let mut destination = None;
+        let result = thread_ids.iter().try_for_each(|&thread_id| {
+            let Some(before) = self.thread(thread_id)? else {
+                return Ok(());
+            };
+            if before.mailbox_id == to_mailbox_id {
+                return Ok(());
+            }
+            self.store.move_thread(thread_id, to_mailbox_id)?;
+            if destination.is_none() {
+                destination = self.thread(thread_id)?.map(|after| after.mailbox_name);
+            }
+            change.moved(&before, to_mailbox_id, cx);
+            Ok(())
+        });
+        let count = change.inverses.len();
+        let destination = destination.unwrap_or_else(|| "another folder".to_owned());
+        self.record(
+            change,
+            if count == 1 {
+                format!("Conversation moved to {destination}")
+            } else {
+                format!("{} moved to {destination}", conversations(count))
+            },
+            cx,
+        );
+        result
     }
 
-    /// Deletes the thread: into the trash mailbox when the account has one,
-    /// otherwise (or from the trash itself) for good. Only the first kind
-    /// can be undone.
-    pub(crate) fn delete_thread(&mut self, thread_id: i64, cx: &mut Context<Self>) -> Result<()> {
-        let Some(thread) = self.thread(thread_id)? else {
-            return Ok(());
-        };
-        self.store.delete_thread(thread_id)?;
-        match self.store.thread_view(thread_id)? {
-            Some(moved) if moved.mailbox_id != thread.mailbox_id => {
-                self.finish_move(&thread, moved.mailbox_id, "Conversation moved to Trash", cx);
-            }
-            _ => {
-                self.record_undo(
-                    UndoEntry {
-                        label: "Conversation deleted".to_owned(),
-                        inverse: None,
-                    },
-                    cx,
-                );
-                cx.emit(MailEvent::ThreadDestroyed {
-                    thread_id,
-                    mailbox_id: thread.mailbox_id,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    /// Flags or unflags the thread.
-    pub(crate) fn set_thread_flagged(
+    /// Deletes the threads: into the trash mailbox when the account has
+    /// one, otherwise (or from the trash itself) for good. Only the first
+    /// kind can be undone.
+    pub(crate) fn delete_threads(
         &mut self,
-        thread_id: i64,
+        thread_ids: &[i64],
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let mut change = Change::default();
+        let result = thread_ids.iter().try_for_each(|&thread_id| {
+            let Some(before) = self.thread(thread_id)? else {
+                return Ok(());
+            };
+            self.store.delete_thread(thread_id)?;
+            match self.thread(thread_id)? {
+                Some(after) if after.mailbox_id != before.mailbox_id => {
+                    change.moved(&before, after.mailbox_id, cx);
+                }
+                _ => {
+                    change.destroyed += 1;
+                    cx.emit(MailEvent::ThreadDestroyed {
+                        thread_id,
+                        mailbox_id: before.mailbox_id,
+                    });
+                }
+            }
+            Ok(())
+        });
+        let count = change.inverses.len() + change.destroyed;
+        let label = match (count, change.destroyed) {
+            (1, 0) => "Conversation moved to Trash".to_owned(),
+            (_, 0) => format!("{} moved to Trash", conversations(count)),
+            (1, _) => "Conversation deleted".to_owned(),
+            _ => format!("{} deleted", conversations(count)),
+        };
+        self.record(change, label, cx);
+        result
+    }
+
+    /// Flags or unflags the threads.
+    pub(crate) fn set_threads_flagged(
+        &mut self,
+        thread_ids: &[i64],
         flagged: bool,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let Some(thread) = self.thread(thread_id)? else {
-            return Ok(());
+        let mut change = Change::default();
+        let result = thread_ids.iter().try_for_each(|&thread_id| {
+            let Some(before) = self.thread(thread_id)? else {
+                return Ok(());
+            };
+            self.store.set_thread_flagged(thread_id, flagged)?;
+            change.flags_changed(before);
+            cx.emit(MailEvent::ThreadFlagChanged { thread_id, flagged });
+            Ok(())
+        });
+        let count = change.inverses.len();
+        let label = match (count, flagged) {
+            (1, true) => "Conversation flagged".to_owned(),
+            (_, true) => format!("{} flagged", conversations(count)),
+            (1, false) => "Flag removed".to_owned(),
+            (_, false) => format!("Flags removed from {}", conversations(count)),
         };
-        self.store.set_thread_flagged(thread_id, flagged)?;
-        self.record_undo(
-            UndoEntry {
-                label: if flagged {
-                    "Conversation flagged"
-                } else {
-                    "Flag removed"
-                }
-                .to_owned(),
-                inverse: Some(InverseOp::SetFlagged {
-                    thread_id,
-                    flagged: thread.is_flagged,
-                }),
-            },
-            cx,
-        );
-        cx.emit(MailEvent::ThreadFlagChanged { thread_id, flagged });
-        Ok(())
+        self.record(change, label, cx);
+        result
     }
 
-    /// Marks the thread read or unread because the user asked to.
-    pub(crate) fn set_thread_read(
+    /// Marks the threads read or unread because the user asked to.
+    pub(crate) fn set_threads_read(
         &mut self,
-        thread_id: i64,
+        thread_ids: &[i64],
         read: bool,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let Some(thread) = self.thread(thread_id)? else {
-            return Ok(());
+        let mut change = Change::default();
+        let result = thread_ids.iter().try_for_each(|&thread_id| {
+            let Some(before) = self.thread(thread_id)? else {
+                return Ok(());
+            };
+            self.store.set_thread_read(thread_id, read)?;
+            change.flags_changed(before);
+            cx.emit(MailEvent::ThreadReadChanged { thread_id, read });
+            Ok(())
+        });
+        let count = change.inverses.len();
+        let state = if read { "read" } else { "unread" };
+        let label = if count == 1 {
+            format!("Marked as {state}")
+        } else {
+            format!("{} marked as {state}", conversations(count))
         };
-        self.store.set_thread_read(thread_id, read)?;
-        self.record_undo(
-            UndoEntry {
-                label: if read {
-                    "Marked as read"
-                } else {
-                    "Marked as unread"
-                }
-                .to_owned(),
-                inverse: Some(InverseOp::SetRead {
-                    thread_id,
-                    read: thread.unread_count == 0,
-                }),
-            },
-            cx,
-        );
-        cx.emit(MailEvent::ThreadReadChanged { thread_id, read });
-        Ok(())
+        self.record(change, label, cx);
+        result
     }
 
     /// Marks a thread read because it stayed open in the reader. Opening a
@@ -249,44 +331,98 @@ impl MailActions {
         Ok(())
     }
 
-    /// Reverses the most recent recorded change and returns its label, or
-    /// `None` when there is nothing to undo.
-    pub(crate) fn undo(&mut self, cx: &mut Context<Self>) -> Result<Option<String>> {
+    /// Reverses the most recent recorded change and returns it, or `None`
+    /// when there is nothing to undo.
+    pub(crate) fn undo(&mut self, cx: &mut Context<Self>) -> Result<Option<UndoEntry>> {
         let Some(entry) = self.undo_stack.pop_back() else {
             return Ok(None);
         };
-        let Some(inverse) = entry.inverse else {
+        self.apply_undo(entry, cx).map(Some)
+    }
+
+    /// Reverses the change `id` if it is still the most recent one, as the
+    /// Undo button on its toast does. Returns `None` when it is not (it was
+    /// undone already, or a newer change came after it).
+    pub(crate) fn undo_entry(
+        &mut self,
+        id: UndoId,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<UndoEntry>> {
+        if self.last_undo().is_none_or(|entry| entry.id != id) {
+            return Ok(None);
+        }
+        self.undo(cx)
+    }
+
+    fn apply_undo(&mut self, entry: UndoEntry, cx: &mut Context<Self>) -> Result<UndoEntry> {
+        if entry.inverses.is_empty() {
             bail!("{} can't be undone.", entry.label);
-        };
-        match inverse {
-            InverseOp::MoveThread {
-                thread_id,
-                to_mailbox_id,
-            } => {
-                let from_mailbox_id = self
-                    .thread(thread_id)?
-                    .context("the conversation no longer exists")?
-                    .mailbox_id;
-                self.store.move_thread(thread_id, to_mailbox_id)?;
-                cx.emit(MailEvent::ThreadMoved {
+        }
+        // Undo what can still be undone; a thread that has gone since
+        // (deleted on another device and synced) is skipped.
+        let mut missing = 0;
+        for inverse in &entry.inverses {
+            let Some(current) = self.thread(inverse.thread_id())? else {
+                missing += 1;
+                continue;
+            };
+            match inverse {
+                &InverseOp::MoveThread {
                     thread_id,
-                    from_mailbox_id,
                     to_mailbox_id,
-                });
-            }
-            InverseOp::SetFlagged { thread_id, flagged } => {
-                self.store.set_thread_flagged(thread_id, flagged)?;
-                cx.emit(MailEvent::ThreadFlagChanged { thread_id, flagged });
-            }
-            InverseOp::SetRead { thread_id, read } => {
-                self.store.set_thread_read(thread_id, read)?;
-                cx.emit(MailEvent::ThreadReadChanged { thread_id, read });
+                } => {
+                    if current.mailbox_id == to_mailbox_id {
+                        continue;
+                    }
+                    self.store.move_thread(thread_id, to_mailbox_id)?;
+                    cx.emit(MailEvent::ThreadMoved {
+                        thread_id,
+                        from_mailbox_id: current.mailbox_id,
+                        to_mailbox_id,
+                    });
+                }
+                InverseOp::RestoreFlags {
+                    thread_id,
+                    messages,
+                } => {
+                    self.store
+                        .restore_message_flag_states(*thread_id, messages)?;
+                    let restored = self
+                        .thread(*thread_id)?
+                        .context("the conversation disappeared while undoing")?;
+                    if restored.is_flagged() != current.is_flagged() {
+                        cx.emit(MailEvent::ThreadFlagChanged {
+                            thread_id: *thread_id,
+                            flagged: restored.is_flagged(),
+                        });
+                    }
+                    let read_states = |thread: &ThreadState| {
+                        thread
+                            .messages
+                            .iter()
+                            .map(|message| message.is_read)
+                            .collect::<Vec<_>>()
+                    };
+                    if read_states(&restored) != read_states(&current) {
+                        cx.emit(MailEvent::ThreadReadChanged {
+                            thread_id: *thread_id,
+                            read: restored.is_read(),
+                        });
+                    }
+                }
             }
         }
+        if missing == entry.inverses.len() {
+            bail!(
+                "{} can't be undone: the mail is no longer here.",
+                entry.label
+            );
+        }
         cx.emit(MailEvent::Undone {
+            id: entry.id,
             label: entry.label.clone(),
         });
-        Ok(Some(entry.label))
+        Ok(entry)
     }
 
     // -----------------------------------------------------------------------
@@ -351,8 +487,8 @@ impl MailActions {
     // Helpers
     // -----------------------------------------------------------------------
 
-    fn thread(&self, thread_id: i64) -> Result<Option<ThreadView>> {
-        self.store.thread_view(thread_id)
+    fn thread(&self, thread_id: i64) -> Result<Option<ThreadState>> {
+        self.store.thread_state(thread_id)
     }
 
     fn current_mailbox_id(&self, thread_id: i64) -> Result<i64> {
@@ -362,23 +498,43 @@ impl MailActions {
             .mailbox_id)
     }
 
-    fn finish_move(
-        &mut self,
-        before: &ThreadView,
-        to_mailbox_id: i64,
-        label: &str,
-        cx: &mut Context<Self>,
-    ) {
-        self.record_undo(
-            UndoEntry {
-                label: label.to_owned(),
-                inverse: Some(InverseOp::MoveThread {
-                    thread_id: before.id,
-                    to_mailbox_id: before.mailbox_id,
-                }),
-            },
-            cx,
-        );
+    /// Records `change` under `label` if it touched any thread.
+    fn record(&mut self, change: Change, label: String, cx: &mut Context<Self>) {
+        if change.inverses.is_empty() && change.destroyed == 0 {
+            return;
+        }
+        if self.undo_stack.len() == UNDO_LIMIT {
+            self.undo_stack.pop_front();
+        }
+        let id = UndoId(self.next_undo_id);
+        self.next_undo_id += 1;
+        cx.emit(MailEvent::UndoRecorded {
+            id,
+            label: label.clone(),
+            can_undo: !change.inverses.is_empty(),
+        });
+        self.undo_stack.push_back(UndoEntry {
+            id,
+            label,
+            inverses: change.inverses,
+        });
+    }
+}
+
+/// The inverses collected while a change runs over its threads.
+#[derive(Default)]
+struct Change {
+    inverses: Vec<InverseOp>,
+    /// Threads deleted for good, which have no inverse.
+    destroyed: usize,
+}
+
+impl Change {
+    fn moved(&mut self, before: &ThreadState, to_mailbox_id: i64, cx: &mut Context<MailActions>) {
+        self.inverses.push(InverseOp::MoveThread {
+            thread_id: before.id,
+            to_mailbox_id: before.mailbox_id,
+        });
         cx.emit(MailEvent::ThreadMoved {
             thread_id: before.id,
             from_mailbox_id: before.mailbox_id,
@@ -386,15 +542,17 @@ impl MailActions {
         });
     }
 
-    fn record_undo(&mut self, entry: UndoEntry, cx: &mut Context<Self>) {
-        if self.undo_stack.len() == UNDO_LIMIT {
-            self.undo_stack.pop_front();
-        }
-        cx.emit(MailEvent::UndoRecorded {
-            label: entry.label.clone(),
+    fn flags_changed(&mut self, before: ThreadState) {
+        self.inverses.push(InverseOp::RestoreFlags {
+            thread_id: before.id,
+            messages: before.messages,
         });
-        self.undo_stack.push_back(entry);
     }
+}
+
+/// "3 conversations".
+fn conversations(count: usize) -> String {
+    count_noun(count, "conversation", "conversations")
 }
 
 #[cfg(test)]
@@ -403,22 +561,46 @@ mod tests {
 
     use gpui::{AppContext as _, Entity, TestAppContext};
     use zmail_core::{
-        AccountSyncSnapshot, DraftUpdate, MailboxSnapshot, MessageSnapshot, NewDraft, ProtocolKind,
-        ThreadSnapshot,
+        AccountSyncSnapshot, DraftUpdate, MailboxSnapshot, MessageSnapshot, NewDraft,
+        PendingOpKind, ProtocolKind, ThreadSnapshot,
     };
     use zmail_store::LocalStore;
 
     use super::{InverseOp, MailActions, MailEvent, UNDO_LIMIT};
 
-    /// A temporary store with one account holding Inbox (one unread,
-    /// unflagged thread), Archive and, optionally, Trash.
+    /// A temporary store with one account holding Inbox, Archive and,
+    /// optionally, Trash. The Inbox has two threads: an unread, unflagged
+    /// one with one message, and a partly read one with two (the first
+    /// read).
     struct Fixture {
         store: Arc<LocalStore>,
         account_id: i64,
         inbox_id: i64,
         archive_id: i64,
         trash_id: Option<i64>,
+        /// The single-message thread.
         thread_id: i64,
+        /// The partly read thread.
+        other_id: i64,
+    }
+
+    fn message(remote_id: &str, is_read: bool, at: &str) -> MessageSnapshot {
+        MessageSnapshot {
+            remote_id: remote_id.to_owned(),
+            identity_email: "ops1@zmail.dev".to_owned(),
+            sender: "Kai Santos <kai@example.com>".to_owned(),
+            reply_to: None,
+            recipients: "ops1@zmail.dev".to_owned(),
+            subject: "Quarterly report".to_owned(),
+            body_preview: "Numbers attached".to_owned(),
+            body_text: Some("Numbers attached".to_owned()),
+            sanitized_html: None,
+            has_remote_content: false,
+            is_read,
+            is_flagged: false,
+            received_at: at.to_owned(),
+            attachments: Vec::new(),
+        }
     }
 
     fn fixture(with_trash: bool) -> Fixture {
@@ -426,36 +608,41 @@ mod tests {
         let account_id = store
             .create_demo_account(ProtocolKind::Imap)
             .expect("account is created");
+        let thread = |remote_thread_id: &str, subject: &str, messages: Vec<MessageSnapshot>| {
+            ThreadSnapshot {
+                remote_thread_id: remote_thread_id.to_owned(),
+                subject: subject.to_owned(),
+                participants: "Kai Santos".to_owned(),
+                preview: "Numbers attached".to_owned(),
+                is_flagged: false,
+                has_attachments: false,
+                unread_count: messages.iter().filter(|message| !message.is_read).count(),
+                latest_message_at: messages
+                    .last()
+                    .map(|message| message.received_at.clone())
+                    .unwrap_or_default(),
+                messages,
+            }
+        };
         let mut mailboxes = vec![
             MailboxSnapshot {
                 name: "Inbox".to_owned(),
                 role: Some("inbox".to_owned()),
-                threads: vec![ThreadSnapshot {
-                    remote_thread_id: "thread-1".to_owned(),
-                    subject: "Quarterly report".to_owned(),
-                    participants: "Kai Santos".to_owned(),
-                    preview: "Numbers attached".to_owned(),
-                    is_flagged: false,
-                    has_attachments: false,
-                    unread_count: 1,
-                    latest_message_at: "2026-03-21T09:15:00Z".to_owned(),
-                    messages: vec![MessageSnapshot {
-                        remote_id: "message-1".to_owned(),
-                        identity_email: "ops1@zmail.dev".to_owned(),
-                        sender: "Kai Santos <kai@example.com>".to_owned(),
-                        reply_to: None,
-                        recipients: "ops1@zmail.dev".to_owned(),
-                        subject: "Quarterly report".to_owned(),
-                        body_preview: "Numbers attached".to_owned(),
-                        body_text: Some("Numbers attached".to_owned()),
-                        sanitized_html: None,
-                        has_remote_content: false,
-                        is_read: false,
-                        is_flagged: false,
-                        received_at: "2026-03-21T09:15:00Z".to_owned(),
-                        attachments: Vec::new(),
-                    }],
-                }],
+                threads: vec![
+                    thread(
+                        "thread-1",
+                        "Quarterly report",
+                        vec![message("1", false, "2026-03-21T09:15:00Z")],
+                    ),
+                    thread(
+                        "thread-2",
+                        "Offsite plans",
+                        vec![
+                            message("2", true, "2026-03-20T09:15:00Z"),
+                            message("3", false, "2026-03-20T10:15:00Z"),
+                        ],
+                    ),
+                ],
                 ..Default::default()
             },
             MailboxSnapshot {
@@ -488,17 +675,45 @@ mod tests {
         let inbox_id = role("inbox").expect("inbox exists");
         let archive_id = role("archive").expect("archive exists");
         let trash_id = role("trash");
-        let thread_id = store
-            .first_thread_id(inbox_id)
-            .expect("lookup")
-            .expect("thread exists");
+        let threads = store.list_threads(inbox_id, 0..2).expect("threads load");
         Fixture {
             store,
             account_id,
             inbox_id,
             archive_id,
             trash_id,
-            thread_id,
+            thread_id: threads[0].id,
+            other_id: threads[1].id,
+        }
+    }
+
+    impl Fixture {
+        fn mailbox_of(&self, thread_id: i64) -> Option<i64> {
+            self.store
+                .thread_state(thread_id)
+                .expect("thread state loads")
+                .map(|thread| thread.mailbox_id)
+        }
+
+        /// Each message's (read, flagged) state.
+        fn flags_of(&self, thread_id: i64) -> Vec<(bool, bool)> {
+            self.store
+                .thread_state(thread_id)
+                .expect("thread state loads")
+                .expect("thread exists")
+                .messages
+                .iter()
+                .map(|message| (message.is_read, message.is_flagged))
+                .collect()
+        }
+
+        fn queued(&self) -> Vec<PendingOpKind> {
+            self.store
+                .list_pending_ops(self.account_id)
+                .expect("ops load")
+                .into_iter()
+                .map(|op| op.kind)
+                .collect()
         }
     }
 
@@ -520,12 +735,25 @@ mod tests {
         (actions, events)
     }
 
-    fn mailbox_of(fixture: &Fixture) -> Option<i64> {
-        fixture
-            .store
-            .thread_view(fixture.thread_id)
-            .expect("thread view loads")
-            .map(|thread| thread.mailbox_id)
+    fn undo(actions: &Entity<MailActions>, cx: &mut TestAppContext) -> Option<String> {
+        actions
+            .update(cx, |actions, cx| actions.undo(cx))
+            .expect("undo works")
+            .map(|entry| entry.label)
+    }
+
+    /// The labels of the recorded entries in `events`.
+    fn recorded(events: &RefCell<Vec<MailEvent>>) -> Vec<(String, bool)> {
+        events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                MailEvent::UndoRecorded {
+                    label, can_undo, ..
+                } => Some((label.clone(), *can_undo)),
+                _ => None,
+            })
+            .collect()
     }
 
     #[gpui::test]
@@ -535,47 +763,56 @@ mod tests {
 
         actions
             .update(cx, |actions, cx| {
-                actions.archive_thread(fixture.thread_id, cx)
+                actions.archive_threads(&[fixture.thread_id], cx)
             })
             .expect("archive works");
-        assert_eq!(mailbox_of(&fixture), Some(fixture.archive_id));
-        assert!(
-            !fixture
-                .store
-                .list_pending_ops(fixture.account_id)
-                .expect("ops load")
-                .is_empty(),
-            "the store queued the server write-back"
+        assert_eq!(
+            fixture.mailbox_of(fixture.thread_id),
+            Some(fixture.archive_id)
         );
+        assert_eq!(
+            fixture.queued(),
+            [PendingOpKind::Move],
+            "the write-back is queued"
+        );
+        let id = actions.read_with(cx, |actions, _| {
+            let entry = actions.last_undo().expect("an entry is recorded");
+            assert_eq!(
+                entry.inverses,
+                [InverseOp::MoveThread {
+                    thread_id: fixture.thread_id,
+                    to_mailbox_id: fixture.inbox_id,
+                }]
+            );
+            entry.id
+        });
         assert_eq!(
             events.borrow().as_slice(),
             &[
-                MailEvent::UndoRecorded {
-                    label: "Conversation archived".to_owned()
-                },
                 MailEvent::ThreadMoved {
                     thread_id: fixture.thread_id,
                     from_mailbox_id: fixture.inbox_id,
                     to_mailbox_id: fixture.archive_id,
                 },
+                MailEvent::UndoRecorded {
+                    id,
+                    label: "Conversation archived".to_owned(),
+                    can_undo: true,
+                },
             ]
         );
-        actions.read_with(cx, |actions, _| {
-            assert_eq!(
-                actions.last_undo().and_then(|entry| entry.inverse),
-                Some(InverseOp::MoveThread {
-                    thread_id: fixture.thread_id,
-                    to_mailbox_id: fixture.inbox_id,
-                })
-            );
-        });
 
         events.borrow_mut().clear();
-        let undone = actions
-            .update(cx, |actions, cx| actions.undo(cx))
-            .expect("undo works");
-        assert_eq!(undone.as_deref(), Some("Conversation archived"));
-        assert_eq!(mailbox_of(&fixture), Some(fixture.inbox_id));
+        assert_eq!(undo(&actions, cx).as_deref(), Some("Conversation archived"));
+        assert_eq!(
+            fixture.mailbox_of(fixture.thread_id),
+            Some(fixture.inbox_id)
+        );
+        assert_eq!(
+            fixture.queued(),
+            [],
+            "undone before it synced: nothing to write back"
+        );
         assert_eq!(
             events.borrow().as_slice(),
             &[
@@ -585,16 +822,66 @@ mod tests {
                     to_mailbox_id: fixture.inbox_id,
                 },
                 MailEvent::Undone {
+                    id,
                     label: "Conversation archived".to_owned()
                 },
             ]
         );
         actions.read_with(cx, |actions, _| assert_eq!(actions.undo_entries().len(), 0));
+        assert_eq!(undo(&actions, cx), None, "an empty stack is not an error");
+    }
+
+    #[gpui::test]
+    fn a_batch_is_one_entry_and_one_undo(cx: &mut TestAppContext) {
+        let fixture = fixture(true);
+        let (actions, events) = service(&fixture, cx);
+        let both = [fixture.thread_id, fixture.other_id];
+
+        actions
+            .update(cx, |actions, cx| actions.archive_threads(&both, cx))
+            .expect("archive works");
+        actions
+            .update(cx, |actions, cx| {
+                actions.set_threads_flagged(&both, true, cx)
+            })
+            .expect("flag works");
+        actions
+            .update(cx, |actions, cx| actions.set_threads_read(&both, true, cx))
+            .expect("mark read works");
         assert_eq!(
-            actions
-                .update(cx, |actions, cx| actions.undo(cx))
-                .expect("an empty stack is not an error"),
-            None
+            recorded(&events),
+            [
+                ("2 conversations archived".to_owned(), true),
+                ("2 conversations flagged".to_owned(), true),
+                ("2 conversations marked as read".to_owned(), true),
+            ]
+        );
+
+        assert_eq!(
+            undo(&actions, cx).as_deref(),
+            Some("2 conversations marked as read")
+        );
+        // The partly read thread is partly read again.
+        assert_eq!(
+            fixture.flags_of(fixture.other_id),
+            [(true, true), (false, true)]
+        );
+        undo(&actions, cx);
+        undo(&actions, cx);
+        for thread_id in both {
+            assert_eq!(fixture.mailbox_of(thread_id), Some(fixture.inbox_id));
+        }
+        assert_eq!(fixture.flags_of(fixture.thread_id), [(false, false)]);
+        assert_eq!(
+            fixture.flags_of(fixture.other_id),
+            [(true, false), (false, false)]
+        );
+        // Each message keeps a harmless last-wins read and flag write-back,
+        // but no move: the server never sees the archive.
+        assert!(
+            !fixture.queued().contains(&PendingOpKind::Move),
+            "{:?}",
+            fixture.queued()
         );
     }
 
@@ -602,57 +889,87 @@ mod tests {
     fn move_records_the_source_mailbox(cx: &mut TestAppContext) {
         let fixture = fixture(true);
         let (actions, events) = service(&fixture, cx);
-        let trash_id = fixture.trash_id.expect("trash exists");
+        let archive_id = fixture.archive_id;
 
         actions
             .update(cx, |actions, cx| {
-                actions.move_thread(fixture.thread_id, trash_id, cx)
+                actions.move_threads(&[fixture.thread_id], archive_id, cx)
             })
             .expect("move works");
-        assert_eq!(mailbox_of(&fixture), Some(trash_id));
-        assert!(events.borrow().contains(&MailEvent::ThreadMoved {
-            thread_id: fixture.thread_id,
-            from_mailbox_id: fixture.inbox_id,
-            to_mailbox_id: trash_id,
-        }));
+        assert_eq!(fixture.mailbox_of(fixture.thread_id), Some(archive_id));
+        assert_eq!(
+            recorded(&events),
+            [("Conversation moved to Archive".to_owned(), true)]
+        );
 
         // Moving to the mailbox it is already in changes nothing.
         events.borrow_mut().clear();
         actions
             .update(cx, |actions, cx| {
-                actions.move_thread(fixture.thread_id, trash_id, cx)
+                actions.move_threads(&[fixture.thread_id], archive_id, cx)
             })
             .expect("a no-op move works");
         assert!(events.borrow().is_empty());
 
-        actions
-            .update(cx, |actions, cx| actions.undo(cx))
-            .expect("undo works");
-        assert_eq!(mailbox_of(&fixture), Some(fixture.inbox_id));
+        undo(&actions, cx);
+        assert_eq!(
+            fixture.mailbox_of(fixture.thread_id),
+            Some(fixture.inbox_id)
+        );
     }
 
     #[gpui::test]
-    fn delete_to_trash_can_be_undone(cx: &mut TestAppContext) {
+    fn undoing_a_delete_before_it_syncs_leaves_no_server_delete(cx: &mut TestAppContext) {
         let fixture = fixture(true);
         let (actions, events) = service(&fixture, cx);
         let trash_id = fixture.trash_id.expect("trash exists");
 
         actions
             .update(cx, |actions, cx| {
-                actions.delete_thread(fixture.thread_id, cx)
+                actions.delete_threads(&[fixture.thread_id, fixture.other_id], cx)
             })
             .expect("delete works");
-        assert_eq!(mailbox_of(&fixture), Some(trash_id));
-        assert!(events.borrow().contains(&MailEvent::ThreadMoved {
-            thread_id: fixture.thread_id,
-            from_mailbox_id: fixture.inbox_id,
-            to_mailbox_id: trash_id,
-        }));
+        assert_eq!(fixture.mailbox_of(fixture.thread_id), Some(trash_id));
+        assert_eq!(fixture.queued().len(), 3, "one move per message");
+        assert_eq!(
+            recorded(&events),
+            [("2 conversations moved to Trash".to_owned(), true)]
+        );
+
+        undo(&actions, cx);
+        assert_eq!(
+            fixture.mailbox_of(fixture.thread_id),
+            Some(fixture.inbox_id)
+        );
+        assert_eq!(fixture.mailbox_of(fixture.other_id), Some(fixture.inbox_id));
+        assert_eq!(fixture.queued(), []);
+    }
+
+    #[gpui::test]
+    fn undoing_after_the_write_back_queues_the_reverse(cx: &mut TestAppContext) {
+        let fixture = fixture(true);
+        let (actions, _events) = service(&fixture, cx);
+        let account_id = fixture.account_id;
 
         actions
-            .update(cx, |actions, cx| actions.undo(cx))
-            .expect("undo works");
-        assert_eq!(mailbox_of(&fixture), Some(fixture.inbox_id));
+            .update(cx, |actions, cx| {
+                actions.set_threads_flagged(&[fixture.thread_id], true, cx)
+            })
+            .expect("flag works");
+        // The sync service writes it back.
+        for op in fixture
+            .store
+            .list_pending_ops(account_id)
+            .expect("ops load")
+        {
+            fixture
+                .store
+                .complete_pending_op(op.id)
+                .expect("op completes");
+        }
+        undo(&actions, cx);
+        assert_eq!(fixture.flags_of(fixture.thread_id), [(false, false)]);
+        assert_eq!(fixture.queued(), [PendingOpKind::ClearFlagged]);
     }
 
     #[gpui::test]
@@ -663,19 +980,27 @@ mod tests {
         // Flag first, so there is an older reversible entry underneath.
         actions
             .update(cx, |actions, cx| {
-                actions.set_thread_flagged(fixture.thread_id, true, cx)
+                actions.set_threads_flagged(&[fixture.thread_id], true, cx)
             })
             .expect("flag works");
         actions
             .update(cx, |actions, cx| {
-                actions.delete_thread(fixture.thread_id, cx)
+                actions.delete_threads(&[fixture.thread_id], cx)
             })
             .expect("delete works");
-        assert_eq!(mailbox_of(&fixture), None, "the thread is gone locally");
+        assert_eq!(
+            fixture.mailbox_of(fixture.thread_id),
+            None,
+            "the thread is gone locally"
+        );
         assert!(events.borrow().contains(&MailEvent::ThreadDestroyed {
             thread_id: fixture.thread_id,
             mailbox_id: fixture.inbox_id,
         }));
+        assert_eq!(
+            recorded(&events).last(),
+            Some(&("Conversation deleted".to_owned(), false))
+        );
 
         let error = actions
             .update(cx, |actions, cx| actions.undo(cx))
@@ -686,48 +1011,37 @@ mod tests {
     }
 
     #[gpui::test]
-    fn flag_and_read_record_the_previous_state(cx: &mut TestAppContext) {
+    fn a_toast_undoes_only_its_own_change(cx: &mut TestAppContext) {
         let fixture = fixture(true);
-        let (actions, events) = service(&fixture, cx);
-        let thread = |fixture: &Fixture| {
-            fixture
-                .store
-                .thread_view(fixture.thread_id)
-                .expect("loads")
-                .expect("exists")
-        };
+        let (actions, _events) = service(&fixture, cx);
 
         actions
             .update(cx, |actions, cx| {
-                actions.set_thread_flagged(fixture.thread_id, true, cx)
+                actions.archive_threads(&[fixture.thread_id], cx)
+            })
+            .expect("archive works");
+        let archived = actions.read_with(cx, |actions, _| {
+            actions.last_undo().expect("the archive is recorded").id
+        });
+        actions
+            .update(cx, |actions, cx| {
+                actions.set_threads_flagged(&[fixture.other_id], true, cx)
             })
             .expect("flag works");
-        actions
-            .update(cx, |actions, cx| {
-                actions.set_thread_read(fixture.thread_id, true, cx)
-            })
-            .expect("mark read works");
-        assert!(thread(&fixture).is_flagged);
-        assert_eq!(thread(&fixture).unread_count, 0);
-        assert!(events.borrow().contains(&MailEvent::ThreadFlagChanged {
-            thread_id: fixture.thread_id,
-            flagged: true,
-        }));
-        assert!(events.borrow().contains(&MailEvent::ThreadReadChanged {
-            thread_id: fixture.thread_id,
-            read: true,
-        }));
 
-        // Undo runs newest first: read state, then the flag.
-        actions
-            .update(cx, |actions, cx| actions.undo(cx))
+        // The archive's toast is stale once the flag is the latest change.
+        let undone = actions
+            .update(cx, |actions, cx| actions.undo_entry(archived, cx))
             .expect("undo works");
-        assert_eq!(thread(&fixture).unread_count, 1);
-        assert!(thread(&fixture).is_flagged);
-        actions
-            .update(cx, |actions, cx| actions.undo(cx))
-            .expect("undo works");
-        assert!(!thread(&fixture).is_flagged);
+        assert_eq!(undone, None);
+        assert_eq!(
+            fixture.mailbox_of(fixture.thread_id),
+            Some(fixture.archive_id)
+        );
+        assert_eq!(
+            fixture.flags_of(fixture.other_id),
+            [(true, true), (false, true)]
+        );
     }
 
     #[gpui::test]
@@ -758,7 +1072,7 @@ mod tests {
         for index in 0..UNDO_LIMIT + 5 {
             actions
                 .update(cx, |actions, cx| {
-                    actions.set_thread_flagged(fixture.thread_id, index % 2 == 0, cx)
+                    actions.set_threads_flagged(&[fixture.thread_id], index % 2 == 0, cx)
                 })
                 .expect("flag works");
         }

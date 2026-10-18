@@ -18,12 +18,12 @@ use zmail_core::{
     AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, CachePolicySummary,
     DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate,
     HydratedBody, IdentitySummary, IndexCandidate, IndexProgress, MailboxRole, MailboxSnapshot,
-    MailboxSummary, MessageAttachment, MessagePreview, MessageRenderMode, MessageSnapshot,
-    NewAccount, NewDraft, OAuth2TargetConfig, OutboxJobState, OutboxJobSummary, OutgoingAttachment,
-    OutgoingConfig, OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind,
-    ReceivedAttachment, SearchHit, ServerHitRef, StoreStats, SubmissionKind, SubmissionSecurity,
-    SyncPhase, SyncStatusSummary, SyncTarget, ThreadMessage, ThreadSnapshot, ThreadSummary,
-    ThreadView, preferences::UiPreferences,
+    MailboxSummary, MessageAttachment, MessageFlagState, MessagePreview, MessageRenderMode,
+    MessageSnapshot, NewAccount, NewDraft, OAuth2TargetConfig, OutboxJobState, OutboxJobSummary,
+    OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp, PendingOpKind,
+    PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, ServerHitRef, StoreStats,
+    SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget, ThreadMessage,
+    ThreadSnapshot, ThreadState, ThreadSummary, ThreadView, preferences::UiPreferences,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -1506,6 +1506,148 @@ impl LocalStore {
         .context("failed to load the message preview")
     }
 
+    /// Loads where a thread is and its messages' read and flag state,
+    /// without the bodies [`Self::thread_view`] hydrates.
+    pub fn thread_state(&self, thread_id: i64) -> Result<Option<ThreadState>> {
+        let conn = self.connection()?;
+        let Some((mailbox_id, mailbox_name)) = conn
+            .query_row(
+                r#"
+                SELECT threads.mailbox_id, mailboxes.name
+                FROM threads
+                JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+                WHERE threads.id = ?1
+                "#,
+                params![thread_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .context("failed to load the thread's mailbox")?
+        else {
+            return Ok(None);
+        };
+        let mut statement = conn.prepare(
+            r#"
+            SELECT id, is_read, is_flagged
+            FROM messages
+            WHERE thread_id = ?1
+            ORDER BY received_at ASC, id ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![thread_id], |row| {
+            Ok(MessageFlagState {
+                message_id: row.get(0)?,
+                is_read: row.get(1)?,
+                is_flagged: row.get(2)?,
+            })
+        })?;
+        let messages = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load the thread's message states")?;
+        Ok(Some(ThreadState {
+            id: thread_id,
+            mailbox_id,
+            mailbox_name,
+            messages,
+        }))
+    }
+
+    /// Puts each listed message of the thread back to the given read and
+    /// flag state (from [`Self::thread_state`] before a change), queuing
+    /// write-back only for messages whose state differs. Messages no longer
+    /// in the thread are skipped.
+    pub fn restore_message_flag_states(
+        &self,
+        thread_id: i64,
+        states: &[MessageFlagState],
+    ) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin the message state transaction")?;
+        let Some(location) = thread_location(&transaction, thread_id)? else {
+            return Ok(());
+        };
+        let source_name = mailbox_name(&transaction, location.mailbox_id)?;
+
+        for state in states {
+            let current: Option<(bool, bool, Option<String>)> = transaction
+                .query_row(
+                    "SELECT is_read, is_flagged, remote_id FROM messages WHERE id = ?1 AND thread_id = ?2",
+                    params![state.message_id, thread_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .context("failed to load a message's state")?;
+            let Some((is_read, is_flagged, remote_id)) = current else {
+                continue;
+            };
+            if (is_read, is_flagged) == (state.is_read, state.is_flagged) {
+                continue;
+            }
+            transaction.execute(
+                "UPDATE messages SET is_read = ?2, is_flagged = ?3 WHERE id = ?1",
+                params![state.message_id, state.is_read, state.is_flagged],
+            )?;
+            let Some(remote_id) = remote_id.filter(|remote_id| !remote_id.is_empty()) else {
+                continue;
+            };
+            if is_read != state.is_read {
+                enqueue_message_op(
+                    &transaction,
+                    location.account_id,
+                    &remote_id,
+                    &source_name,
+                    if state.is_read {
+                        PendingOpKind::MarkRead
+                    } else {
+                        PendingOpKind::MarkUnread
+                    },
+                    None,
+                )?;
+            }
+            if is_flagged != state.is_flagged {
+                enqueue_message_op(
+                    &transaction,
+                    location.account_id,
+                    &remote_id,
+                    &source_name,
+                    if state.is_flagged {
+                        PendingOpKind::SetFlagged
+                    } else {
+                        PendingOpKind::ClearFlagged
+                    },
+                    None,
+                )?;
+            }
+        }
+
+        let (unread_count, is_flagged): (i64, bool) = transaction
+            .query_row(
+                r#"
+                SELECT COALESCE(SUM(is_read = 0), 0), COALESCE(MAX(is_flagged), 0)
+                FROM messages
+                WHERE thread_id = ?1
+                "#,
+                params![thread_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .context("failed to count the thread's message states")?;
+        transaction.execute(
+            "UPDATE threads SET unread_count = ?2, is_flagged = ?3 WHERE id = ?1",
+            params![thread_id, unread_count, is_flagged],
+        )?;
+        update_mailbox_unread_threads(
+            &transaction,
+            location.mailbox_id,
+            location.unread_count > 0,
+            unread_count > 0,
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the message state transaction")
+    }
+
     /// Loads the full hydrated thread view for the Phase 3 reader.
     pub fn thread_view(&self, thread_id: i64) -> Result<Option<ThreadView>> {
         let conn = self.connection()?;
@@ -2633,11 +2775,61 @@ impl LocalStore {
     }
 
     /// Removes a write-back operation after the server accepted it.
+    ///
+    /// An IMAP move gives the message a new uid in the target mailbox,
+    /// which only the next snapshot brings back. Until then the message
+    /// has no remote id, so no change made in between can address another
+    /// message that happens to hold its old uid there; such a change stays
+    /// local and the snapshot then shows the server's state.
     pub fn complete_pending_op(&self, op_id: i64) -> Result<()> {
-        let conn = self.connection()?;
-        conn.execute("DELETE FROM pending_ops WHERE id = ?1", params![op_id])
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin the write-back completion transaction")?;
+        let imap_move: Option<(i64, String, String)> = transaction
+            .query_row(
+                r#"
+                SELECT pending_ops.account_id, pending_ops.remote_id, pending_ops.target_mailbox
+                FROM pending_ops
+                JOIN accounts ON accounts.id = pending_ops.account_id
+                WHERE pending_ops.id = ?1
+                  AND pending_ops.op = ?2
+                  AND pending_ops.target_mailbox IS NOT NULL
+                  AND accounts.protocol_kind = ?3
+                "#,
+                params![
+                    op_id,
+                    PendingOpKind::Move.as_str(),
+                    ProtocolKind::Imap.as_str()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .with_context(|| format!("failed to load pending operation {op_id}"))?;
+        if let Some((account_id, remote_id, target_mailbox)) = imap_move {
+            transaction
+                .execute(
+                    r#"
+                    UPDATE messages
+                    SET remote_id = NULL
+                    WHERE remote_id = ?2
+                      AND thread_id IN (
+                        SELECT threads.id
+                        FROM threads
+                        JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+                        WHERE mailboxes.account_id = ?1 AND mailboxes.name = ?3
+                      )
+                    "#,
+                    params![account_id, remote_id, target_mailbox],
+                )
+                .with_context(|| format!("failed to retire the uid moved by operation {op_id}"))?;
+        }
+        transaction
+            .execute("DELETE FROM pending_ops WHERE id = ?1", params![op_id])
             .with_context(|| format!("failed to complete pending operation {op_id}"))?;
-        Ok(())
+        transaction
+            .commit()
+            .context("failed to commit the write-back completion")
     }
 
     /// Lists write-back operations that exhausted their retry budget.
@@ -5029,7 +5221,8 @@ fn mailbox_name(transaction: &Transaction<'_>, mailbox_id: i64) -> Result<String
 }
 
 /// Queues one write-back operation per message of a thread that has a
-/// stable remote id.
+/// stable remote id, folded into what is already queued for each message
+/// (see [`enqueue_message_op`]).
 ///
 /// The source mailbox is passed explicitly because move operations change
 /// the thread's mailbox before this helper runs.
@@ -5041,23 +5234,204 @@ fn enqueue_thread_ops(
     kind: PendingOpKind,
     target_mailbox: Option<&str>,
 ) -> Result<()> {
-    let mut statement = transaction.prepare(
-        r#"
-        INSERT INTO pending_ops(account_id, op, source_mailbox, remote_id, target_mailbox)
-        SELECT ?1, ?2, ?3, messages.remote_id, ?4
-        FROM messages
-        WHERE messages.thread_id = ?5
-          AND messages.remote_id IS NOT NULL
-          AND messages.remote_id != ''
-        "#,
-    )?;
-    statement.execute(params![
-        account_id,
-        kind.as_str(),
-        source_mailbox,
-        target_mailbox,
-        thread_id,
-    ])?;
+    let remote_ids = {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT remote_id
+            FROM messages
+            WHERE thread_id = ?1 AND remote_id IS NOT NULL AND remote_id != ''
+            ORDER BY id ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![thread_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load the remote ids of the thread's messages")?
+    };
+    for remote_id in remote_ids {
+        enqueue_message_op(
+            transaction,
+            account_id,
+            &remote_id,
+            source_mailbox,
+            kind,
+            target_mailbox,
+        )?;
+    }
+    Ok(())
+}
+
+/// Queues one write-back operation for a message, folded into the
+/// operations still waiting for it so the server only sees the net change.
+/// `local_mailbox` is the mailbox the message is in locally before this
+/// change.
+///
+/// - A message has at most one queued move, and it runs after the
+///   message's other operations. Until it runs, the server still has the
+///   message in the move's source mailbox, under the remote id the queued
+///   operations carry (an IMAP uid is only valid in that mailbox), so new
+///   read and flag changes are addressed there.
+/// - Moving the message back to that source cancels the queued move: an
+///   archive, delete or move undone before it syncs leaves nothing to
+///   write back. Moving it on retargets the queued move.
+/// - A read or flag change replaces any queued change of the same kind;
+///   the last one wins either way.
+/// - Destroying a message with a queued move destroys it where the server
+///   has it.
+///
+/// The sync service may already be writing back an operation folded here.
+/// That loses at worst the newer change, which the next snapshot then
+/// shows undone; IMAP never reuses a uid within a mailbox, so the stale
+/// operation cannot reach another message.
+fn enqueue_message_op(
+    transaction: &Transaction<'_>,
+    account_id: i64,
+    remote_id: &str,
+    local_mailbox: &str,
+    kind: PendingOpKind,
+    target_mailbox: Option<&str>,
+) -> Result<()> {
+    // Only a move that put the message where it is now counts; IMAP uids
+    // repeat across mailboxes, so the same remote id elsewhere is another
+    // message.
+    let queued_move: Option<(i64, String)> = transaction
+        .query_row(
+            r#"
+            SELECT id, source_mailbox
+            FROM pending_ops
+            WHERE account_id = ?1
+              AND remote_id = ?2
+              AND op = ?3
+              AND target_mailbox = ?4
+              AND state = 'pending'
+            ORDER BY id DESC
+            LIMIT 1
+            "#,
+            params![
+                account_id,
+                remote_id,
+                PendingOpKind::Move.as_str(),
+                local_mailbox
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .context("failed to load the queued move for a message")?;
+    let server_mailbox = queued_move
+        .as_ref()
+        .map_or(local_mailbox, |(_, source)| source.as_str());
+
+    match kind {
+        PendingOpKind::Move => {
+            let target = target_mailbox
+                .filter(|name| !name.is_empty())
+                .context("a move needs a target mailbox")?;
+            match &queued_move {
+                Some((op_id, source)) if source == target => {
+                    transaction.execute("DELETE FROM pending_ops WHERE id = ?1", params![op_id])?;
+                }
+                Some((op_id, _)) => {
+                    transaction.execute(
+                        "UPDATE pending_ops SET target_mailbox = ?2 WHERE id = ?1",
+                        params![op_id, target],
+                    )?;
+                }
+                None => insert_pending_op(
+                    transaction,
+                    account_id,
+                    kind,
+                    local_mailbox,
+                    remote_id,
+                    Some(target),
+                )?,
+            }
+        }
+        PendingOpKind::Destroy => {
+            if let Some((op_id, _)) = &queued_move {
+                transaction.execute("DELETE FROM pending_ops WHERE id = ?1", params![op_id])?;
+            }
+            insert_pending_op(
+                transaction,
+                account_id,
+                kind,
+                server_mailbox,
+                remote_id,
+                None,
+            )?;
+        }
+        PendingOpKind::MarkRead
+        | PendingOpKind::MarkUnread
+        | PendingOpKind::SetFlagged
+        | PendingOpKind::ClearFlagged => {
+            let family = match kind {
+                PendingOpKind::MarkRead | PendingOpKind::MarkUnread => {
+                    [PendingOpKind::MarkRead, PendingOpKind::MarkUnread]
+                }
+                _ => [PendingOpKind::SetFlagged, PendingOpKind::ClearFlagged],
+            };
+            transaction.execute(
+                r#"
+                DELETE FROM pending_ops
+                WHERE account_id = ?1
+                  AND remote_id = ?2
+                  AND source_mailbox = ?3
+                  AND op IN (?4, ?5)
+                  AND state = 'pending'
+                "#,
+                params![
+                    account_id,
+                    remote_id,
+                    server_mailbox,
+                    family[0].as_str(),
+                    family[1].as_str()
+                ],
+            )?;
+            insert_pending_op(
+                transaction,
+                account_id,
+                kind,
+                server_mailbox,
+                remote_id,
+                None,
+            )?;
+            // Keep the move last, keeping its retry count.
+            if let Some((op_id, _)) = &queued_move {
+                transaction.execute(
+                    r#"
+                    UPDATE pending_ops
+                    SET id = (SELECT MAX(id) FROM pending_ops) + 1
+                    WHERE id = ?1
+                    "#,
+                    params![op_id],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn insert_pending_op(
+    transaction: &Transaction<'_>,
+    account_id: i64,
+    kind: PendingOpKind,
+    source_mailbox: &str,
+    remote_id: &str,
+    target_mailbox: Option<&str>,
+) -> Result<()> {
+    transaction
+        .execute(
+            r#"
+            INSERT INTO pending_ops(account_id, op, source_mailbox, remote_id, target_mailbox)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                account_id,
+                kind.as_str(),
+                source_mailbox,
+                remote_id,
+                target_mailbox
+            ],
+        )
+        .context("failed to queue a write-back operation")?;
     Ok(())
 }
 
@@ -7069,6 +7443,287 @@ mod tests {
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].kind, PendingOpKind::Destroy);
         assert_eq!(ops[0].remote_id, "message-10");
+    }
+
+    /// An IMAP account with Inbox (one thread of two messages, the first
+    /// read), Archive and Trash. Returns the store, the account and the
+    /// thread.
+    fn write_back_fixture(protocol: ProtocolKind) -> (LocalStore, i64, i64) {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(protocol)
+            .expect("account should be created");
+        let message = |remote_id: &str, is_read: bool, at: &str| MessageSnapshot {
+            remote_id: remote_id.to_owned(),
+            identity_email: "phase2@localhost".to_owned(),
+            sender: "Kai Santos".to_owned(),
+            reply_to: None,
+            recipients: "phase2@localhost".to_owned(),
+            subject: "Undo subject".to_owned(),
+            body_preview: "Undo body".to_owned(),
+            body_text: Some("Undo body".to_owned()),
+            sanitized_html: None,
+            has_remote_content: false,
+            is_read,
+            is_flagged: false,
+            received_at: at.to_owned(),
+            attachments: Vec::new(),
+        };
+        let mut snapshot =
+            merge_test_snapshot("Undo subject", "Undo body", "thread-u", "unused", None);
+        snapshot.mailboxes[0].threads[0].messages = vec![
+            message("11", true, "2026-03-21T09:15:00Z"),
+            message("12", false, "2026-03-21T10:15:00Z"),
+        ];
+        for (name, role) in [("Archive", "archive"), ("Trash", "trash")] {
+            snapshot.mailboxes.push(MailboxSnapshot {
+                name: name.to_owned(),
+                role: Some(role.to_owned()),
+                threads: Vec::new(),
+                ..Default::default()
+            });
+        }
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+        let inbox_id = store
+            .mailbox_id_by_role(account_id, "inbox")
+            .expect("lookup works")
+            .expect("inbox exists");
+        let thread_id = store
+            .first_thread_id(inbox_id)
+            .expect("lookup works")
+            .expect("thread exists");
+        (store, account_id, thread_id)
+    }
+
+    fn role_id(store: &LocalStore, account_id: i64, role: &str) -> i64 {
+        store
+            .mailbox_id_by_role(account_id, role)
+            .expect("the mailbox lookup works")
+            .expect("the mailbox exists")
+    }
+
+    /// The queued operations as (kind, source, remote id, target).
+    fn queued(
+        store: &LocalStore,
+        account_id: i64,
+    ) -> Vec<(PendingOpKind, String, String, Option<String>)> {
+        store
+            .list_pending_ops(account_id)
+            .expect("pending operations should load")
+            .into_iter()
+            .map(|op| (op.kind, op.source_mailbox, op.remote_id, op.target_mailbox))
+            .collect()
+    }
+
+    #[test]
+    fn moving_back_before_write_back_cancels_the_queued_move() {
+        let (store, account_id, thread_id) = write_back_fixture(ProtocolKind::Imap);
+        let inbox_id = role_id(&store, account_id, "inbox");
+        let archive_id = role_id(&store, account_id, "archive");
+
+        // Delete into the trash, then undo it before any sync: nothing is
+        // left for the server, in particular no delete.
+        store.delete_thread(thread_id).expect("delete works");
+        assert_eq!(queued(&store, account_id).len(), 2, "one move per message");
+        store
+            .move_thread(thread_id, inbox_id)
+            .expect("moving back works");
+        assert_eq!(queued(&store, account_id), Vec::new());
+
+        // Archive, then move on to the trash: one move per message, from
+        // where the server has it to where it ends up.
+        store.archive_thread(thread_id).expect("archive works");
+        store.delete_thread(thread_id).expect("delete works");
+        let trash = Some("Trash".to_owned());
+        assert_eq!(
+            queued(&store, account_id),
+            vec![
+                (
+                    PendingOpKind::Move,
+                    "Inbox".to_owned(),
+                    "11".to_owned(),
+                    trash.clone()
+                ),
+                (
+                    PendingOpKind::Move,
+                    "Inbox".to_owned(),
+                    "12".to_owned(),
+                    trash
+                ),
+            ]
+        );
+        // And back through Archive to the Inbox.
+        store
+            .move_thread(thread_id, archive_id)
+            .expect("move works");
+        store.move_thread(thread_id, inbox_id).expect("move works");
+        assert_eq!(queued(&store, account_id), Vec::new());
+    }
+
+    #[test]
+    fn changes_to_a_moved_message_are_addressed_where_the_server_has_it() {
+        let (store, account_id, thread_id) = write_back_fixture(ProtocolKind::Imap);
+
+        store.archive_thread(thread_id).expect("archive works");
+        store
+            .set_thread_flagged(thread_id, true)
+            .expect("flag works");
+        store
+            .set_thread_flagged(thread_id, false)
+            .expect("unflag works");
+        // The flag changes run in the Inbox, where the uids are valid, before
+        // the move; the later one replaced the earlier.
+        let archive = Some("Archive".to_owned());
+        assert_eq!(
+            queued(&store, account_id),
+            vec![
+                (
+                    PendingOpKind::ClearFlagged,
+                    "Inbox".to_owned(),
+                    "11".to_owned(),
+                    None
+                ),
+                (
+                    PendingOpKind::Move,
+                    "Inbox".to_owned(),
+                    "11".to_owned(),
+                    archive.clone()
+                ),
+                (
+                    PendingOpKind::ClearFlagged,
+                    "Inbox".to_owned(),
+                    "12".to_owned(),
+                    None
+                ),
+                (
+                    PendingOpKind::Move,
+                    "Inbox".to_owned(),
+                    "12".to_owned(),
+                    archive
+                ),
+            ]
+        );
+
+        // Deleting it from the archive for good destroys it in the Inbox.
+        let conn = store.connection().expect("connection opens");
+        conn.execute("DELETE FROM mailboxes WHERE name = 'Trash'", [])
+            .expect("the trash goes");
+        drop(conn);
+        store.delete_thread(thread_id).expect("delete works");
+        let ops = queued(&store, account_id);
+        assert!(
+            ops.iter()
+                .all(|(kind, source, _, _)| *kind != PendingOpKind::Move && source == "Inbox"),
+            "{ops:?}"
+        );
+        assert_eq!(
+            ops.iter()
+                .filter(|(kind, _, _, _)| *kind == PendingOpKind::Destroy)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn restoring_message_states_puts_back_a_partly_read_thread() {
+        let (store, account_id, thread_id) = write_back_fixture(ProtocolKind::Imap);
+        let inbox_id = role_id(&store, account_id, "inbox");
+        let before = store
+            .thread_state(thread_id)
+            .expect("state loads")
+            .expect("thread exists");
+        assert_eq!(before.mailbox_name, "Inbox");
+        assert!(!before.is_read());
+        assert_eq!(
+            before
+                .messages
+                .iter()
+                .map(|message| message.is_read)
+                .collect::<Vec<_>>(),
+            [true, false]
+        );
+
+        store
+            .set_thread_read(thread_id, true)
+            .expect("mark read works");
+        store
+            .set_thread_flagged(thread_id, true)
+            .expect("flag works");
+        store
+            .restore_message_flag_states(thread_id, &before.messages)
+            .expect("restore works");
+
+        assert_eq!(
+            store.thread_state(thread_id).expect("state loads"),
+            Some(before)
+        );
+        let summary = &store.list_threads(inbox_id, 0..1).expect("threads load")[0];
+        assert_eq!(summary.unread_count, 1);
+        assert!(!summary.is_flagged);
+        let inbox = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes load")
+            .into_iter()
+            .find(|mailbox| mailbox.id == inbox_id)
+            .expect("inbox exists");
+        assert_eq!(inbox.unread_threads, 1);
+        // Each message keeps one, last-wins, operation of each kind; the
+        // already read first message keeps the harmless Mark Read.
+        assert_eq!(
+            queued(&store, account_id),
+            vec![
+                (
+                    PendingOpKind::MarkRead,
+                    "Inbox".to_owned(),
+                    "11".to_owned(),
+                    None
+                ),
+                (
+                    PendingOpKind::ClearFlagged,
+                    "Inbox".to_owned(),
+                    "11".to_owned(),
+                    None
+                ),
+                (
+                    PendingOpKind::MarkUnread,
+                    "Inbox".to_owned(),
+                    "12".to_owned(),
+                    None
+                ),
+                (
+                    PendingOpKind::ClearFlagged,
+                    "Inbox".to_owned(),
+                    "12".to_owned(),
+                    None
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_completed_imap_move_retires_the_old_uid_until_the_next_snapshot() {
+        for protocol in [ProtocolKind::Imap, ProtocolKind::Jmap] {
+            let (store, account_id, thread_id) = write_back_fixture(protocol);
+            store.archive_thread(thread_id).expect("archive works");
+            for op in store
+                .list_pending_ops(account_id)
+                .expect("pending operations should load")
+            {
+                store.complete_pending_op(op.id).expect("completion works");
+            }
+            // Moving it back now must not address uid 11 or 12 in the
+            // Archive: there they may be other messages.
+            let inbox_id = role_id(&store, account_id, "inbox");
+            store.move_thread(thread_id, inbox_id).expect("move works");
+            let ops = queued(&store, account_id);
+            match protocol {
+                ProtocolKind::Imap => assert_eq!(ops, Vec::new()),
+                // JMAP ids name the message wherever it is.
+                ProtocolKind::Jmap => assert_eq!(ops.len(), 2, "{ops:?}"),
+            }
+        }
     }
 
     #[test]

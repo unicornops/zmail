@@ -314,6 +314,14 @@ impl MessageListView {
         }
     }
 
+    /// The selected thread's row in the mailbox, so the shell can select
+    /// the row that takes its place when it leaves the list.
+    pub(crate) fn selected_row_index(&mut self, cx: &mut Context<Self>) -> Option<usize> {
+        (self.state.mode == ListMode::Mail)
+            .then(|| self.current_index(cx))
+            .flatten()
+    }
+
     fn select_index(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.row_count() {
             return;
