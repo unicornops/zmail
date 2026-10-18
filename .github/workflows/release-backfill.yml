@@ -44,6 +44,8 @@ jobs:
                   New-Item -ItemType Directory -Force archive/licenses | Out-Null
                   Copy-Item "target/release/zmail-app.exe", LICENSE archive/
                   Copy-Item assets/fonts/inter/LICENSE.txt archive/licenses/Inter-OFL.txt
+                  Copy-Item assets/icons/LICENSE.txt archive/licenses/Lucide-LICENSE.txt
+                  Copy-Item crates/zmail-ui/LICENSE-APACHE archive/licenses/GPUI-Apache-2.0.txt
                   Compress-Archive -Path archive/* -DestinationPath "zmail-windows-x86_64.zip"
 
             - name: Create Windows installer
