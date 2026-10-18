@@ -51,6 +51,7 @@ fn synthetic_snapshot(thread_count: usize) -> AccountSyncSnapshot {
             name: "Inbox".to_owned(),
             role: Some("inbox".to_owned()),
             threads,
+            ..Default::default()
         }],
     }
 }

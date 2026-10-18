@@ -178,6 +178,7 @@ fn open_workspace_with(
                 name: name.to_owned(),
                 role: Some(role.to_owned()),
                 threads,
+                ..Default::default()
             };
             store
                 .replace_account_snapshot(

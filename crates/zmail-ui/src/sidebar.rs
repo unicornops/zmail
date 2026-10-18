@@ -17,7 +17,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement, UniformListScrollHandle, Window, div, prelude::*, px,
     rgb, uniform_list,
 };
-use zmail_core::{AccountSummary, MailboxSummary};
+use zmail_core::{AccountSummary, MailboxRole, MailboxSummary};
 
 use crate::actions::{
     AddAccount, OpenSelected, SelectFirst, SelectLast, SelectNext, SelectPrevious,
@@ -528,7 +528,7 @@ impl SidebarView {
                                     .flex_1()
                                     .min_w_0()
                                     .child(icon(
-                                        mailbox_icon_name(&mailbox.name),
+                                        mailbox_icon_name(mailbox.role),
                                         ICON_SIZE_SM,
                                         colors.muted,
                                     ))
@@ -556,24 +556,35 @@ fn mailbox_row_id(mailbox_id: i64) -> SharedString {
     SharedString::from(format!("mailbox-row-{mailbox_id}"))
 }
 
-fn mailbox_icon_name(name: &str) -> &'static str {
-    let normalized = name.trim().to_ascii_lowercase();
+/// The icon for a mailbox: from its role, never its name, so "Sent Mail",
+/// "Gesendet" and Gmail's "[Gmail]/Sent Mail" all get the Sent icon.
+pub(crate) fn mailbox_icon_name(role: Option<MailboxRole>) -> &'static str {
+    match role {
+        Some(MailboxRole::Inbox) => "inbox",
+        Some(MailboxRole::Drafts) => "file-text",
+        Some(MailboxRole::Sent) => "send",
+        Some(MailboxRole::Archive) => "archive",
+        Some(MailboxRole::Junk) => "shield-alert",
+        Some(MailboxRole::Trash) => "trash-2",
+        None => "folder",
+    }
+}
 
-    if normalized == "inbox" {
-        "inbox"
-    } else if normalized == "sent" || normalized == "sent items" {
-        "send"
-    } else if normalized == "drafts" {
-        "file-text"
-    } else if normalized == "archive" {
-        "archive"
-    } else if normalized == "trash"
-        || normalized == "junk"
-        || normalized == "spam"
-        || normalized == "junk email"
-    {
-        "trash-2"
-    } else {
-        "folder"
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mailbox_icons_follow_the_role_and_exist() {
+        let icons = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/icons");
+        for role in MailboxRole::ALL.map(Some).into_iter().chain([None]) {
+            let name = mailbox_icon_name(role);
+            assert!(
+                icons.join(format!("{name}.svg")).is_file(),
+                "the {name} icon is bundled"
+            );
+        }
+        assert_eq!(mailbox_icon_name(Some(MailboxRole::Sent)), "send");
+        assert_eq!(mailbox_icon_name(None), "folder");
     }
 }

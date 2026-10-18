@@ -14,12 +14,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_imap::{
     extensions::idle::IdleResponse,
     imap_proto::{MailboxDatum, Response},
-    types::NameAttribute,
 };
 use tokio::time::timeout;
 use zmail_core::{ProtocolKind, SyncTarget};
 
-use crate::{DynImapStream, connect_session, guess_role, list_mailboxes, parse_endpoint};
+use crate::{DynImapStream, connect_session, list_mailboxes, mailbox_listings, parse_endpoint};
 
 /// Most long-lived connections the watchers of one account hold.
 ///
@@ -98,15 +97,11 @@ pub async fn plan_watch(
         let _ = session.logout().await;
         return Ok(WatchPlan::Notify);
     }
-    let mailboxes = list_mailboxes(&mut session)
-        .await?
-        .into_iter()
-        .map(|name| {
-            let role = special_use_role(name.attributes())
-                .map(str::to_owned)
-                .or_else(|| guess_role(name.name()));
-            (name.name().to_owned(), role)
-        })
+    let names = list_mailboxes(&mut session).await?;
+    let mailboxes = names
+        .iter()
+        .zip(mailbox_listings(&names))
+        .map(|(name, listing)| (name.name().to_owned(), listing.role))
         .collect::<Vec<_>>();
     let _ = session.logout().await;
     Ok(pool_plan(&mailboxes, idle, max_connections))
@@ -154,18 +149,6 @@ pub(crate) fn pool_plan(
         idle: favourites,
         polled,
     }
-}
-
-/// The role a SPECIAL-USE (RFC 6154) attribute names.
-fn special_use_role(attributes: &[NameAttribute<'_>]) -> Option<&'static str> {
-    attributes.iter().find_map(|attribute| match attribute {
-        NameAttribute::Sent => Some("sent"),
-        NameAttribute::Drafts => Some("drafts"),
-        NameAttribute::Archive | NameAttribute::All => Some("archive"),
-        NameAttribute::Junk => Some("junk"),
-        NameAttribute::Trash => Some("trash"),
-        _ => None,
-    })
 }
 
 /// Holds one IDLE connection on `mailbox`, reporting every change, until
@@ -462,15 +445,6 @@ mod tests {
                 polled: names(&["INBOX", "Sent"]),
             }
         );
-    }
-
-    #[test]
-    fn special_use_attributes_name_roles() {
-        assert_eq!(
-            special_use_role(&[NameAttribute::Marked, NameAttribute::Sent]),
-            Some("sent")
-        );
-        assert_eq!(special_use_role(&[NameAttribute::NoInferiors]), None);
     }
 
     #[test]

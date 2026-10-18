@@ -108,6 +108,13 @@ pub async fn discover_and_sync(
     // 3.2.3); a refusal keeps the CONDSTORE path.
     let qresync = qresync_offered && qresync::enable(&mut session).await;
     let mailbox_names = list_mailboxes(&mut session).await?;
+    // Roles, delimiters and parents come from the listing, so they are
+    // current even for a mailbox whose mirror is reused unchanged below.
+    let listings = mailbox_names
+        .iter()
+        .map(|name| name.name().to_owned())
+        .zip(mailbox_listings(&mailbox_names))
+        .collect::<BTreeMap<_, _>>();
     let checkpoint = ImapCheckpoint::from_json(target.checkpoint.as_deref())?;
     let existing = existing_mailbox_map(existing_mailboxes);
 
@@ -267,14 +274,8 @@ pub async fn discover_and_sync(
         }
 
         refreshed += 1;
-        let (snapshot, uid_flags) = fetch_mailbox_snapshot(
-            &mut session,
-            &name,
-            guess_role(&name),
-            identity_email,
-            &attachments_dir,
-        )
-        .await?;
+        let (snapshot, uid_flags) =
+            fetch_mailbox_snapshot(&mut session, &name, identity_email, &attachments_dir).await?;
         mailbox_checkpoint.last_seen_uid = uid_flags.keys().last().copied();
         mailbox_checkpoint.uid_flags = uid_flags;
         next_checkpoint.insert(name, mailbox_checkpoint);
@@ -282,6 +283,14 @@ pub async fn discover_and_sync(
     }
 
     let _ = session.logout().await;
+
+    for mailbox in &mut mailboxes {
+        if let Some(listing) = listings.get(&mailbox.name) {
+            mailbox.role = listing.role.clone();
+            mailbox.delimiter = listing.delimiter.clone();
+            mailbox.parent = listing.parent.clone();
+        }
+    }
 
     let detail = if refreshed == 0 && incremental == 0 && condstore_skipped > 0 {
         format!(
@@ -1028,7 +1037,6 @@ async fn list_mailboxes(session: &mut Session<DynImapStream>) -> Result<Vec<Name
 async fn fetch_mailbox_snapshot(
     session: &mut Session<DynImapStream>,
     mailbox_name: &str,
-    role: Option<String>,
     identity_email: &str,
     attachments_dir: &Path,
 ) -> Result<(MailboxSnapshot, BTreeMap<u32, Vec<String>>)> {
@@ -1092,8 +1100,9 @@ async fn fetch_mailbox_snapshot(
 
     let snapshot = MailboxSnapshot {
         name: mailbox_name.to_owned(),
-        role,
         threads,
+        // The caller fills in the role and hierarchy from the listing.
+        ..Default::default()
     };
     Ok((snapshot, uid_flags))
 }
@@ -1704,6 +1713,99 @@ fn excerpt(text: &str, max_chars: usize) -> String {
     }
 }
 
+/// What a sync records about a listed mailbox besides its name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MailboxListing {
+    /// The mailbox's role (see [`mailbox_listings`]).
+    pub(crate) role: Option<String>,
+    /// The hierarchy delimiter the server listed it with.
+    pub(crate) delimiter: Option<String>,
+    /// The name of the mailbox one level up, whether or not it is listed.
+    pub(crate) parent: Option<String>,
+}
+
+/// Roles, delimiters and parents for listed mailboxes, in listing order.
+pub(crate) fn mailbox_listings(names: &[Name]) -> Vec<MailboxListing> {
+    let roles = mailbox_roles(
+        &names
+            .iter()
+            .map(|name| (name.name(), name.attributes()))
+            .collect::<Vec<_>>(),
+    );
+    names
+        .iter()
+        .zip(roles)
+        .map(|(name, role)| {
+            let delimiter = name
+                .delimiter()
+                .filter(|delimiter| !delimiter.is_empty())
+                .map(str::to_owned);
+            MailboxListing {
+                role,
+                parent: delimiter
+                    .as_deref()
+                    .and_then(|delimiter| parent_name(name.name(), delimiter)),
+                delimiter,
+            }
+        })
+        .collect()
+}
+
+/// The name one level up from `name`, if it is nested.
+fn parent_name(name: &str, delimiter: &str) -> Option<String> {
+    name.rsplit_once(delimiter)
+        .map(|(parent, _)| parent)
+        .filter(|parent| !parent.is_empty())
+        .map(str::to_owned)
+}
+
+/// Each mailbox's role, in order.
+///
+/// SPECIAL-USE attributes (RFC 6154) decide first. A role is only guessed
+/// from a name when no mailbox claims it with an attribute, so a folder
+/// the user happens to call "Archive" does not compete with the server's
+/// `\Archive` mailbox. `\All` (Gmail's All Mail) is the archive only when
+/// nothing is marked `\Archive`.
+fn mailbox_roles(mailboxes: &[(&str, &[NameAttribute<'_>])]) -> Vec<Option<String>> {
+    let has_archive = mailboxes.iter().any(|(_, attributes)| {
+        attributes
+            .iter()
+            .any(|attribute| matches!(attribute, NameAttribute::Archive))
+    });
+    let special = mailboxes
+        .iter()
+        .map(|(_, attributes)| {
+            special_use_role(attributes).filter(|role| {
+                *role != "archive"
+                    || !has_archive
+                    || attributes
+                        .iter()
+                        .any(|attribute| matches!(attribute, NameAttribute::Archive))
+            })
+        })
+        .collect::<Vec<_>>();
+    mailboxes
+        .iter()
+        .zip(&special)
+        .map(|((name, _), special_role)| match special_role {
+            Some(role) => Some((*role).to_owned()),
+            None => guess_role(name).filter(|guessed| !special.contains(&Some(guessed.as_str()))),
+        })
+        .collect()
+}
+
+/// The role a SPECIAL-USE (RFC 6154) attribute names.
+fn special_use_role(attributes: &[NameAttribute<'_>]) -> Option<&'static str> {
+    attributes.iter().find_map(|attribute| match attribute {
+        NameAttribute::Sent => Some("sent"),
+        NameAttribute::Drafts => Some("drafts"),
+        NameAttribute::Archive | NameAttribute::All => Some("archive"),
+        NameAttribute::Junk => Some("junk"),
+        NameAttribute::Trash => Some("trash"),
+        _ => None,
+    })
+}
+
 fn guess_role(mailbox_name: &str) -> Option<String> {
     match mailbox_name.to_ascii_lowercase().as_str() {
         "inbox" => Some("inbox".to_owned()),
@@ -1727,10 +1829,12 @@ fn existing_mailbox_map(mailboxes: &[MailboxSnapshot]) -> BTreeMap<&str, Mailbox
 mod tests {
     use std::collections::BTreeMap;
 
+    use async_imap::types::NameAttribute;
+
     use super::{
         ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, conversation_key, excerpt, guess_role,
-        hydrate_bodies, parse_endpoint, persist_attachments, recompute_thread_aggregates,
-        resume_uid, xoauth2_response,
+        hydrate_bodies, mailbox_roles, parent_name, parse_endpoint, persist_attachments,
+        recompute_thread_aggregates, resume_uid, special_use_role, xoauth2_response,
     };
     use zmail_core::{MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
 
@@ -2122,6 +2226,7 @@ mod tests {
             name: "Projects".to_owned(),
             role: None,
             threads: Vec::new(),
+            ..Default::default()
         };
         let checkpoint = |last_seen_uid, uids: &[u32]| ImapMailboxCheckpoint {
             last_seen_uid,
@@ -2148,6 +2253,65 @@ mod tests {
         assert_eq!(guess_role("Inbox").as_deref(), Some("inbox"));
         assert_eq!(guess_role("Sent Items").as_deref(), Some("sent"));
         assert_eq!(guess_role("Projects"), None);
+    }
+
+    #[test]
+    fn special_use_attributes_name_roles() {
+        assert_eq!(
+            special_use_role(&[NameAttribute::Marked, NameAttribute::Sent]),
+            Some("sent")
+        );
+        assert_eq!(special_use_role(&[NameAttribute::NoInferiors]), None);
+    }
+
+    #[test]
+    fn special_use_wins_over_names() {
+        let roles = |mailboxes: &[(&str, &[NameAttribute<'static>])]| {
+            mailbox_roles(mailboxes)
+                .into_iter()
+                .map(|role| role.unwrap_or_default())
+                .collect::<Vec<_>>()
+        };
+        // Gmail: the attributes name the roles; INBOX is guessed.
+        assert_eq!(
+            roles(&[
+                ("INBOX", &[]),
+                ("[Gmail]/All Mail", &[NameAttribute::All]),
+                ("[Gmail]/Sent Mail", &[NameAttribute::Sent]),
+                ("[Gmail]/Bin", &[NameAttribute::Trash]),
+                ("[Gmail]/Spam", &[NameAttribute::Junk]),
+                ("Trash", &[]),
+            ]),
+            ["inbox", "archive", "sent", "trash", "junk", ""],
+            "a folder named like a claimed role gets no role"
+        );
+        // Without attributes the names still decide.
+        assert_eq!(
+            roles(&[("Inbox", &[]), ("Sent Items", &[]), ("Projects", &[])]),
+            ["inbox", "sent", ""]
+        );
+        // \Archive beats \All.
+        assert_eq!(
+            roles(&[
+                ("All", &[NameAttribute::All]),
+                ("Archive", &[NameAttribute::Archive]),
+            ]),
+            ["", "archive"]
+        );
+    }
+
+    #[test]
+    fn parents_are_one_level_up() {
+        assert_eq!(
+            parent_name("Projects/Website", "/").as_deref(),
+            Some("Projects")
+        );
+        assert_eq!(
+            parent_name("INBOX.Lists.rust", ".").as_deref(),
+            Some("INBOX.Lists")
+        );
+        assert_eq!(parent_name("Projects", "/"), None);
+        assert_eq!(parent_name("/rooted", "/"), None);
     }
 
     #[test]

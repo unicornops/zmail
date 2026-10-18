@@ -456,11 +456,13 @@ mod tests {
                         attachments: Vec::new(),
                     }],
                 }],
+                ..Default::default()
             },
             MailboxSnapshot {
                 name: "Archive".to_owned(),
                 role: Some("archive".to_owned()),
                 threads: Vec::new(),
+                ..Default::default()
             },
         ];
         if with_trash {
@@ -468,6 +470,7 @@ mod tests {
                 name: "Trash".to_owned(),
                 role: Some("trash".to_owned()),
                 threads: Vec::new(),
+                ..Default::default()
             });
         }
         store
