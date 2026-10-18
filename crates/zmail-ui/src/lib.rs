@@ -36,7 +36,7 @@ use gpui::{
 };
 use zmail_core::{
     APP_NAME, AccountOverview, AccountSummary, AppBootstrap, DraftSummary, IdentitySummary,
-    MailboxSummary, OutboxJobSummary, SearchHit, StoreStats,
+    MailboxSummary, OutboxJobSummary, SearchHit, StoreStats, ThreadCounts, VirtualMailbox,
 };
 use zmail_security::SecretStore;
 use zmail_store::LocalStore;
@@ -286,6 +286,9 @@ struct WorkspaceView {
     accounts: Vec<AccountSummary>,
     identities: Vec<IdentitySummary>,
     stats: StoreStats,
+    /// Every account's mailboxes, for the sidebar.
+    all_mailboxes: Vec<MailboxSummary>,
+    /// The selected account's mailboxes.
     mailboxes: Vec<MailboxSummary>,
     drafts: Vec<DraftSummary>,
     outbox_jobs: Vec<OutboxJobSummary>,
@@ -302,8 +305,18 @@ struct WorkspaceView {
     /// The `(account, query)` whose server search fallback is still
     /// running; its hits join `search_results` when it finishes.
     server_search_pending: Option<(i64, String)>,
+    /// The account the shell acts on: the selected mailbox's, or in a
+    /// virtual mailbox the open thread's.
     selected_account_id: Option<i64>,
+    /// The mailbox the list shows, or in a virtual mailbox the open
+    /// thread's mailbox.
     selected_mailbox_id: Option<i64>,
+    /// Set while the list shows a virtual mailbox (the Unified Inbox,
+    /// Flagged, Sent) instead of `selected_mailbox_id`.
+    virtual_mailbox: Option<VirtualMailbox>,
+    /// The virtual mailbox's thread counts, read with the rest of the
+    /// store state.
+    virtual_counts: ThreadCounts,
     selected_thread_id: Option<i64>,
     selected_draft_id: Option<i64>,
     selected_outbox_job_id: Option<i64>,

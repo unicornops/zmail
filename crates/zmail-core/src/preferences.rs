@@ -18,6 +18,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::MailboxSelection;
+
 /// Whether the UI follows the system light/dark appearance or forces one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -80,15 +82,6 @@ pub struct PaneWidths {
     pub message_list: Option<f32>,
 }
 
-/// A mailbox to reopen on the next launch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MailboxRef {
-    /// Store id of the account that owns the mailbox.
-    pub account_id: i64,
-    /// Store id of the mailbox.
-    pub mailbox_id: i64,
-}
-
 /// When background body indexing runs (see `zmail_sync`'s indexer).
 ///
 /// Indexing downloads message bodies so search can find mail that was never
@@ -145,9 +138,10 @@ pub struct UiPreferences {
     /// Whether the sidebar is collapsed.
     #[serde(deserialize_with = "lenient")]
     pub sidebar_collapsed: bool,
-    /// The mailbox that was open when the app last closed.
+    /// The mailbox (or virtual mailbox) that was open when the app last
+    /// closed.
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
-    pub last_mailbox: Option<MailboxRef>,
+    pub last_mailbox: Option<MailboxSelection>,
     /// Keyboard shortcut set.
     #[serde(deserialize_with = "lenient")]
     pub keymap: KeymapName,
@@ -242,7 +236,7 @@ mod tests {
                 message_list: Some(420.5),
             },
             sidebar_collapsed: true,
-            last_mailbox: Some(MailboxRef {
+            last_mailbox: Some(MailboxSelection::Mailbox {
                 account_id: 3,
                 mailbox_id: 42,
             }),
@@ -253,6 +247,22 @@ mod tests {
                 on_battery: true,
                 on_metered: true,
             },
+        }
+    }
+
+    #[test]
+    fn virtual_mailboxes_round_trip() {
+        use crate::{MailboxRole, VirtualMailbox};
+        for selection in [
+            MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Inbox)),
+            MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Sent)),
+            MailboxSelection::Virtual(VirtualMailbox::Flagged),
+        ] {
+            let prefs = UiPreferences {
+                last_mailbox: Some(selection),
+                ..UiPreferences::default()
+            };
+            assert_eq!(UiPreferences::from_json(&prefs.to_json()), prefs);
         }
     }
 

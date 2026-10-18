@@ -106,6 +106,11 @@ pub(crate) struct UndoEntry {
 }
 
 impl UndoEntry {
+    /// Every thread the change touched, in the order it was made.
+    pub(crate) fn thread_ids(&self) -> impl Iterator<Item = i64> + '_ {
+        self.inverses.iter().map(InverseOp::thread_id)
+    }
+
     /// The threads the change moved back into `mailbox_id` when undone.
     pub(crate) fn restores_into(&self, mailbox_id: i64) -> impl Iterator<Item = i64> + '_ {
         self.inverses

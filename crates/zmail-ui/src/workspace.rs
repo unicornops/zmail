@@ -20,8 +20,8 @@ use gpui::{
 };
 use std::sync::Arc;
 use zmail_core::{
-    AccountSummary, AppBootstrap, IdentitySummary, MailboxSummary, NewDraft, StoreStats,
-    ThemeAppearance, ThreadMessage, ThreadView,
+    AccountSummary, AppBootstrap, IdentitySummary, MailboxSelection, MailboxSummary, NewDraft,
+    StoreStats, ThemeAppearance, ThreadMessage, ThreadView, VirtualMailbox,
     text::count_noun,
     time::{HourCycle, format_full_date, next_local_midnight},
 };
@@ -45,7 +45,9 @@ use crate::components::{
 use crate::compose::{ComposeEvent, ComposeView};
 use crate::layout::{LayoutMode, PaneLayout, SinglePane};
 use crate::mail_actions::{MailActions, MailEvent, UndoEntry, UndoId};
-use crate::message_list::{MessageListEvent, MessageListState, MessageListView};
+use crate::message_list::{
+    AccountLabel, ListMailbox, MessageListEvent, MessageListState, MessageListView,
+};
 use crate::pane::{Pane, dispatch_from};
 use crate::reader::{ReaderState, ReaderView};
 use crate::sidebar::{SidebarEvent, SidebarHighlight, SidebarState, SidebarView};
@@ -147,6 +149,7 @@ impl WorkspaceView {
                 thread_count: 0,
                 message_count: 0,
             },
+            all_mailboxes: Vec::new(),
             mailboxes: Vec::new(),
             drafts: Vec::new(),
             outbox_jobs: Vec::new(),
@@ -157,6 +160,8 @@ impl WorkspaceView {
             server_search_pending: None,
             selected_account_id: None,
             selected_mailbox_id: None,
+            virtual_mailbox: None,
+            virtual_counts: Default::default(),
             selected_thread_id: None,
             selected_draft_id: None,
             selected_outbox_job_id: None,
@@ -228,6 +233,9 @@ impl WorkspaceView {
             window.focus(&view.message_list.focus_handle(cx), cx);
         }
 
+        if matches!(initial_view, InitialView::Inbox | InitialView::Sidebar) {
+            view.restore_last_mailbox(cx);
+        }
         match initial_view {
             InitialView::Inbox => {}
             // A mailto launch pre-selects the draft's account and opens the
@@ -336,7 +344,15 @@ impl WorkspaceView {
         let list_state = MessageListState {
             mode: self.list_mode,
             has_accounts: !self.accounts.is_empty(),
-            mailbox: self.selected_mailbox().cloned(),
+            mailbox: self.list_mailbox(),
+            accounts: self
+                .accounts
+                .iter()
+                .map(|account| AccountLabel {
+                    id: account.id,
+                    name: account.display_name.clone(),
+                })
+                .collect(),
             own_addresses: own_addresses.clone(),
             selected_thread_id: self.selected_thread_id,
             search_results: self.search_results.clone(),
@@ -393,6 +409,14 @@ impl WorkspaceView {
             message_count: 0,
         });
 
+        self.all_mailboxes = match self.store.list_all_mailboxes() {
+            Ok(mailboxes) => mailboxes,
+            Err(error) => {
+                self.store_error = Some(error.to_string());
+                Vec::new()
+            }
+        };
+
         self.selected_account_id = self
             .selected_account_id
             .filter(|selected_id| {
@@ -402,6 +426,25 @@ impl WorkspaceView {
             })
             .or_else(|| self.accounts.first().map(|account| account.id));
 
+        // A virtual mailbox acts on the open thread's account and mailbox.
+        if let Some(virtual_mailbox) = self.virtual_mailbox {
+            let selection = MailboxSelection::Virtual(virtual_mailbox);
+            self.virtual_counts = self.store.selection_counts(&selection).unwrap_or_default();
+            let rows = self
+                .store
+                .list_selection_threads(&selection, 0..200)
+                .unwrap_or_default();
+            let open = self
+                .selected_thread_id
+                .and_then(|selected| rows.iter().find(|row| row.id == selected))
+                .or_else(|| rows.first());
+            self.selected_thread_id = open.map(|row| row.id);
+            if let Some(row) = open {
+                self.selected_account_id = Some(row.account_id);
+                self.selected_mailbox_id = Some(row.mailbox_id);
+            }
+        }
+
         self.account = self
             .selected_account_id
             .and_then(|account_id| self.store.account_overview(account_id).ok().flatten());
@@ -410,9 +453,11 @@ impl WorkspaceView {
             .and_then(|account_id| self.store.list_identities(account_id).ok())
             .unwrap_or_default();
         self.mailboxes = self
-            .selected_account_id
-            .and_then(|account_id| self.store.list_mailboxes(account_id).ok())
-            .unwrap_or_default();
+            .all_mailboxes
+            .iter()
+            .filter(|mailbox| Some(mailbox.account_id) == self.selected_account_id)
+            .cloned()
+            .collect();
         self.drafts = self
             .store
             .list_drafts(self.selected_account_id)
@@ -450,16 +495,18 @@ impl WorkspaceView {
             })
             .or_else(|| self.mailboxes.first().map(|mailbox| mailbox.id));
 
-        self.selected_thread_id = self.selected_thread_id.filter(|selected_id| {
-            self.selected_mailbox_id
-                .and_then(|mailbox_id| self.store.list_threads(mailbox_id, 0..200).ok())
-                .map(|threads| threads.into_iter().any(|thread| thread.id == *selected_id))
-                .unwrap_or(false)
-        });
-        if self.selected_thread_id.is_none() {
-            self.selected_thread_id = self
-                .selected_mailbox_id
-                .and_then(|mailbox_id| self.store.first_thread_id(mailbox_id).ok().flatten());
+        if self.virtual_mailbox.is_none() {
+            self.selected_thread_id = self.selected_thread_id.filter(|selected_id| {
+                self.selected_mailbox_id
+                    .and_then(|mailbox_id| self.store.list_threads(mailbox_id, 0..200).ok())
+                    .map(|threads| threads.into_iter().any(|thread| thread.id == *selected_id))
+                    .unwrap_or(false)
+            });
+            if self.selected_thread_id.is_none() {
+                self.selected_thread_id = self
+                    .selected_mailbox_id
+                    .and_then(|mailbox_id| self.store.first_thread_id(mailbox_id).ok().flatten());
+            }
         }
 
         self.selected_draft_id = self
@@ -514,6 +561,41 @@ impl WorkspaceView {
                 .iter()
                 .find(|account| account.id == account_id)
         })
+    }
+
+    /// What the list shows in Mail mode: the virtual mailbox, or the
+    /// selected mailbox.
+    pub(crate) fn mailbox_selection(&self) -> Option<MailboxSelection> {
+        match self.virtual_mailbox {
+            Some(virtual_mailbox) => Some(MailboxSelection::Virtual(virtual_mailbox)),
+            None => self
+                .selected_mailbox()
+                .map(|mailbox| MailboxSelection::Mailbox {
+                    account_id: mailbox.account_id,
+                    mailbox_id: mailbox.id,
+                }),
+        }
+    }
+
+    /// The list's mailbox with its name and counts.
+    fn list_mailbox(&self) -> Option<ListMailbox> {
+        match self.virtual_mailbox {
+            Some(virtual_mailbox) => Some(ListMailbox {
+                selection: MailboxSelection::Virtual(virtual_mailbox),
+                name: virtual_mailbox.label().to_owned(),
+                total_threads: self.virtual_counts.total_threads,
+                unread_threads: self.virtual_counts.unread_threads,
+            }),
+            None => self.selected_mailbox().map(|mailbox| ListMailbox {
+                selection: MailboxSelection::Mailbox {
+                    account_id: mailbox.account_id,
+                    mailbox_id: mailbox.id,
+                },
+                name: mailbox.leaf_name().to_owned(),
+                total_threads: mailbox.total_threads,
+                unread_threads: mailbox.unread_threads,
+            }),
+        }
     }
 
     /// Return a reference to the currently-selected mailbox summary, if any.
@@ -758,8 +840,8 @@ impl WorkspaceView {
     fn list_title(&self) -> String {
         match self.list_mode {
             ListMode::Mail => self
-                .selected_mailbox()
-                .map(|mailbox| mailbox.name.clone())
+                .list_mailbox()
+                .map(|mailbox| mailbox.name)
                 .unwrap_or_else(|| "Mail".to_owned()),
             ListMode::Search => "Search".to_owned(),
             ListMode::Drafts => "Drafts".to_owned(),
@@ -818,6 +900,7 @@ impl WorkspaceView {
     /// Switch the active account and refresh the view.
     pub(crate) fn select_account(&mut self, account_id: i64, cx: &mut Context<Self>) {
         self.selected_account_id = Some(account_id);
+        self.virtual_mailbox = None;
         self.list_mode = ListMode::Mail;
         if matches!(self.detail_mode, DetailMode::AccountSetup) {
             self.detail_mode = DetailMode::Reader;
@@ -826,8 +909,15 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Switch the active mailbox and select its first thread.
+    /// Switch the active mailbox (of any account) and select its first
+    /// thread.
     pub(crate) fn select_mailbox(&mut self, mailbox_id: i64, cx: &mut Context<Self>) {
+        let was_virtual = self.virtual_mailbox.take().is_some();
+        let account_id = self.mailbox_account_id(mailbox_id);
+        let account_changed = account_id.is_some() && account_id != self.selected_account_id;
+        if account_changed {
+            self.selected_account_id = account_id;
+        }
         self.selected_mailbox_id = Some(mailbox_id);
         self.selected_thread_id = match self.store.first_thread_id(mailbox_id) {
             Ok(thread_id) => thread_id,
@@ -838,7 +928,57 @@ impl WorkspaceView {
         };
         self.list_mode = ListMode::Mail;
         self.detail_mode = DetailMode::Reader;
+        if account_changed || was_virtual {
+            self.refresh_from_store(cx);
+        }
+        self.persist_last_mailbox();
         cx.notify();
+    }
+
+    /// Show a virtual mailbox (the Unified Inbox, Flagged, Sent) and
+    /// select its newest thread.
+    pub(crate) fn select_virtual_mailbox(
+        &mut self,
+        virtual_mailbox: VirtualMailbox,
+        cx: &mut Context<Self>,
+    ) {
+        self.virtual_mailbox = Some(virtual_mailbox);
+        self.selected_thread_id = None;
+        self.list_mode = ListMode::Mail;
+        self.detail_mode = DetailMode::Reader;
+        self.refresh_from_store(cx);
+        self.persist_last_mailbox();
+        cx.notify();
+    }
+
+    /// Reopens the mailbox saved in the UI preferences, if it still
+    /// exists.
+    fn restore_last_mailbox(&mut self, cx: &mut Context<Self>) {
+        let Ok(Some(last)) = self
+            .store
+            .ui_preferences()
+            .map(|preferences| preferences.last_mailbox)
+        else {
+            return;
+        };
+        match last {
+            MailboxSelection::Virtual(virtual_mailbox) => {
+                self.select_virtual_mailbox(virtual_mailbox, cx)
+            }
+            MailboxSelection::Mailbox { mailbox_id, .. } => {
+                if self.mailbox_account_id(mailbox_id).is_some() {
+                    self.select_mailbox(mailbox_id, cx);
+                }
+            }
+        }
+    }
+
+    /// The account a stored mailbox belongs to.
+    fn mailbox_account_id(&self, mailbox_id: i64) -> Option<i64> {
+        self.all_mailboxes
+            .iter()
+            .find(|mailbox| mailbox.id == mailbox_id)
+            .map(|mailbox| mailbox.account_id)
     }
 
     /// Select a specific thread (from the list or the search results) and
@@ -856,6 +996,16 @@ impl WorkspaceView {
     /// Shows a thread in the list and reader without marking it read, for
     /// example when the window opens on a given thread.
     pub(crate) fn show_thread(&mut self, thread_id: i64, mailbox_id: i64, cx: &mut Context<Self>) {
+        // In a virtual mailbox the thread may be another account's: reply
+        // identities, moves and body fetches follow it.
+        if let Some(account_id) = self.mailbox_account_id(mailbox_id)
+            && Some(account_id) != self.selected_account_id
+        {
+            self.selected_account_id = Some(account_id);
+            self.selected_mailbox_id = Some(mailbox_id);
+            self.selected_thread_id = Some(thread_id);
+            self.refresh_from_store(cx);
+        }
         self.selected_mailbox_id = Some(mailbox_id);
         self.selected_thread_id = Some(thread_id);
         self.detail_mode = DetailMode::Reader;
@@ -1397,30 +1547,32 @@ impl WorkspaceView {
     /// If the selected conversation is no longer in the shown mailbox,
     /// selects the one now at its row `row` (the next one), or the last
     /// one when it was at the end.
+    ///
+    /// In a virtual mailbox the conversation leaves when it no longer
+    /// matches it (archived out of the Unified Inbox, unflagged in
+    /// Flagged), and the next row may be another account's.
     fn select_row_if_selection_left(&mut self, row: usize, cx: &mut Context<Self>) {
-        let (Some(mailbox_id), Some(thread_id)) =
-            (self.selected_mailbox_id, self.selected_thread_id)
+        let (Some(selection), Some(thread_id)) =
+            (self.mailbox_selection(), self.selected_thread_id)
         else {
             return;
         };
         let still_listed = self
             .store
-            .thread_state(thread_id)
-            .ok()
-            .flatten()
-            .is_some_and(|thread| thread.mailbox_id == mailbox_id);
+            .selection_contains(&selection, thread_id)
+            .unwrap_or(false);
         if self.list_mode != ListMode::Mail || still_listed {
             return;
         }
         let thread_at = |row: usize| {
             self.store
-                .list_threads(mailbox_id, row..row + 1)
+                .list_selection_threads(&selection, row..row + 1)
                 .ok()
                 .and_then(|threads| threads.into_iter().next())
         };
         let next = thread_at(row).or_else(|| row.checked_sub(1).and_then(thread_at));
         match next {
-            Some(next) => self.select_thread(next.id, mailbox_id, cx),
+            Some(next) => self.select_thread(next.id, next.mailbox_id, cx),
             None => {
                 self.selected_thread_id = None;
                 cx.notify();
@@ -1493,11 +1645,30 @@ impl WorkspaceView {
 
     /// Selects the first conversation the undo brought back into the shown
     /// mailbox, and says what was undone.
+    ///
+    /// A virtual mailbox selects the first conversation the undo put back
+    /// into it, in whichever mailbox of whichever account it now is.
     fn after_undo(&mut self, entry: &UndoEntry, cx: &mut Context<Self>) {
-        if self.list_mode == ListMode::Mail
-            && let Some(mailbox_id) = self.selected_mailbox_id
-            && let Some(thread_id) = entry.restores_into(mailbox_id).next()
-        {
+        let restored = match self.mailbox_selection() {
+            _ if self.list_mode != ListMode::Mail => None,
+            Some(MailboxSelection::Mailbox { mailbox_id, .. }) => entry
+                .restores_into(mailbox_id)
+                .next()
+                .map(|thread_id| (thread_id, mailbox_id)),
+            Some(selection @ MailboxSelection::Virtual(_)) => entry
+                .thread_ids()
+                .filter(|thread_id| {
+                    self.store
+                        .selection_contains(&selection, *thread_id)
+                        .unwrap_or(false)
+                })
+                .find_map(|thread_id| {
+                    let thread = self.store.thread_state(thread_id).ok().flatten()?;
+                    Some((thread_id, thread.mailbox_id))
+                }),
+            None => None,
+        };
+        if let Some((thread_id, mailbox_id)) = restored {
             self.show_thread(thread_id, mailbox_id, cx);
         }
         let message = format!("Undone: {}", entry.label);
