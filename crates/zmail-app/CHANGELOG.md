@@ -5,6 +5,7 @@
 
 ### Features
 
+* **sync:** reconnect watchers at once after sleep or a network change ([#161](https://github.com/unicornops/zmail/issues/161)) ([110faa4](https://github.com/unicornops/zmail/commit/110faa48115ace05081d988e87a4b56abc83164d))
 * **sync:** live IMAP updates for every folder with NOTIFY or an IDLE pool ([#158](https://github.com/unicornops/zmail/issues/158)) ([95479e3](https://github.com/unicornops/zmail/commit/95479e3bbc02bd52e082576058c5e6c1c13f07a8))
 * **search:** fall back to server search for mail not indexed yet ([#159](https://github.com/unicornops/zmail/issues/159)) ([68ea246](https://github.com/unicornops/zmail/commit/68ea24675f1dab98ec7d0e9a86f5adacac386760))
 * **imap:** resync mailboxes with QRESYNC and VANISHED ([#157](https://github.com/unicornops/zmail/issues/157)) ([b267db2](https://github.com/unicornops/zmail/commit/b267db2fcb6406aa38ad3905fac06c7733ee6c1e))
