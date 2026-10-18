@@ -22,7 +22,7 @@ use gpui::{
     AnyElement, Context, DismissEvent, FontWeight, IntoElement, Modifiers, ScrollStrategy, Window,
     div, prelude::*, rgb,
 };
-use zmail_core::{MailboxSelection, MailboxSummary, text::count_noun};
+use zmail_core::{MailboxSelection, MailboxSummary};
 
 use super::{MessageListEvent, MessageListView};
 use crate::ListMode;
@@ -34,6 +34,7 @@ use crate::components::{IconButton, popover_below_end};
 use crate::move_picker::{MovePicker, MovePickerEvent};
 use crate::pane::dispatch_from;
 use crate::styles::UiColors;
+use crate::widgets::EllipsisExt;
 
 /// The selection the shell keeps, as the list needs it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -397,10 +398,8 @@ impl MessageListView {
                         .min_w_0()
                         .px_1()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!(
-                            "{} selected",
-                            count_noun(selection.thread_ids.len(), "conversation", "conversations")
-                        )),
+                        .ellipsis()
+                        .child(format!("{} selected", selection.thread_ids.len())),
                 )
                 .child(
                     IconButton::new("bulk-archive", "archive", "Archive")
