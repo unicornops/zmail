@@ -21,7 +21,8 @@ use gpui::{
 use std::sync::Arc;
 use zmail_core::{
     AccountSummary, AppBootstrap, IdentitySummary, MailboxSelection, MailboxSummary, NewDraft,
-    OutboxJobState, StoreStats, ThemeAppearance, ThreadMessage, ThreadView, VirtualMailbox,
+    OutboxJobState, StoreStats, SyncPhase, ThemeAppearance, ThreadMessage, ThreadView,
+    VirtualMailbox,
     text::count_noun,
     time::{HourCycle, format_full_date, next_local_midnight},
 };
@@ -274,6 +275,7 @@ impl WorkspaceView {
                     view.set_list_selection(ids, cx);
                 }
             }
+            InitialView::Outbox => view.show_outbox(&ShowOutbox, window, cx),
         }
         view.sync_panes(cx);
 
@@ -408,6 +410,7 @@ impl WorkspaceView {
                 ..self.list_selection.clone()
             },
             mailboxes: self.all_mailboxes.clone(),
+            first_sync: self.list_first_sync(),
         };
         self.message_list
             .update(cx, |list, cx| list.set_state(list_state, cx));
@@ -638,6 +641,7 @@ impl WorkspaceView {
             Some(virtual_mailbox) => Some(ListMailbox {
                 selection: MailboxSelection::Virtual(virtual_mailbox),
                 name: virtual_mailbox.label().to_owned(),
+                role: None,
                 total_threads: self.virtual_counts.total_threads,
                 unread_threads: self.virtual_counts.unread_threads,
             }),
@@ -647,10 +651,28 @@ impl WorkspaceView {
                     mailbox_id: mailbox.id,
                 },
                 name: mailbox.leaf_name().to_owned(),
+                role: mailbox.role,
                 total_threads: mailbox.total_threads,
                 unread_threads: mailbox.unread_threads,
             }),
         }
+    }
+
+    /// Whether an account the list shows is in its first sync: syncing
+    /// and never synced before. Its empty list is still filling.
+    fn list_first_sync(&self) -> bool {
+        self.accounts
+            .iter()
+            .filter(|account| {
+                self.virtual_mailbox.is_some() || Some(account.id) == self.selected_account_id
+            })
+            .any(|account| {
+                account.sync_status.last_success_at.is_none()
+                    && matches!(
+                        account.sync_status.phase,
+                        SyncPhase::Connecting | SyncPhase::Discovering | SyncPhase::Syncing
+                    )
+            })
     }
 
     /// Return a reference to the currently-selected mailbox summary, if any.
@@ -2230,6 +2252,10 @@ impl WorkspaceView {
             MessageListEvent::SelectOutboxJob(job_id) => {
                 self.selected_outbox_job_id = Some(*job_id);
                 cx.notify();
+            }
+            MessageListEvent::RetryOutboxJob(job_id) => {
+                self.selected_outbox_job_id = Some(*job_id);
+                self.retry_selected_outbox(window, cx);
             }
             MessageListEvent::Activate => self.focus_pane(Pane::Detail, window, cx),
             // In the single-pane layout a click opens the row's detail;

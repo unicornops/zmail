@@ -16,6 +16,7 @@ mod header;
 mod quick_actions;
 mod row;
 mod selection;
+mod states;
 
 use std::ops::Range;
 
@@ -27,11 +28,8 @@ use gpui::{
 };
 use std::sync::Arc;
 use zmail_core::{
-    DraftState, DraftSummary, MailboxSelection, MailboxSummary, OutboxJobSummary, SearchHit,
-    ThreadFilter, ThreadSummary,
-    preferences::Density,
-    text::count_noun,
-    time::{HourCycle, format_list_date},
+    DraftSummary, MailboxRole, MailboxSelection, MailboxSummary, OutboxJobSummary, SearchHit,
+    ThreadFilter, ThreadSummary, preferences::Density, time::HourCycle,
 };
 use zmail_store::LocalStore;
 
@@ -41,13 +39,13 @@ use crate::ListMode;
 use crate::actions::{
     AddAccount, OpenSelected, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
-use crate::components::Menu;
+use crate::components::{Button, ButtonSize, Menu};
 use crate::drag::DraggedThreads;
 use crate::mail_actions::MailActions;
 use crate::styles::{DensityTokens, UiColors};
-use crate::widgets::{HoverExt, empty_state, interactive_background, list_row, toolbar_button};
+use crate::widgets::{empty_state, toolbar_button};
 
-use self::row::{MessageRow, RowAccount, display_subject, row_content, row_shell};
+use self::row::{MessageRow, RowAccount, outbox_status, row_content, row_shell};
 
 /// The key context the list sets.
 pub(crate) const KEY_CONTEXT: &str = "MessageList";
@@ -65,6 +63,8 @@ pub(crate) struct ListMailbox {
     pub(crate) selection: MailboxSelection,
     /// The mailbox's (or virtual mailbox's) name.
     pub(crate) name: String,
+    /// A single mailbox's role (Inbox, Sent, …), for its empty state.
+    pub(crate) role: Option<MailboxRole>,
     pub(crate) total_threads: usize,
     pub(crate) unread_threads: usize,
 }
@@ -103,6 +103,9 @@ pub(crate) struct MessageListState {
     pub(crate) selection: ListSelection,
     /// Every account's mailboxes, for Move to….
     pub(crate) mailboxes: Vec<MailboxSummary>,
+    /// An account the list shows is syncing for the first time, so an
+    /// empty list is still filling: it shows skeleton rows.
+    pub(crate) first_sync: bool,
 }
 
 impl MessageListState {
@@ -139,6 +142,7 @@ impl Default for MessageListState {
             density: Density::default(),
             selection: ListSelection::default(),
             mailboxes: Vec::new(),
+            first_sync: false,
         }
     }
 }
@@ -159,6 +163,8 @@ pub(crate) enum MessageListEvent {
     OpenDraft(i64),
     /// An outbox message was clicked or reached with the arrows.
     SelectOutboxJob(i64),
+    /// An outbox row's Retry now was clicked.
+    RetryOutboxJob(i64),
     /// Enter: move on to the detail pane.
     Activate,
     /// A thread, search result or draft row was clicked (after its open
@@ -572,8 +578,8 @@ impl Render for MessageListView {
             .child(match self.state.mode {
                 ListMode::Mail => self.render_threads(&colors, cx),
                 ListMode::Search => self.render_search_results(&colors, focused, cx),
-                ListMode::Drafts => self.render_drafts(&colors, cx),
-                ListMode::Outbox => self.render_outbox(&colors, cx),
+                ListMode::Drafts => self.render_drafts(&colors, focused, cx),
+                ListMode::Outbox => self.render_outbox(&colors, focused, cx),
             })
     }
 }
@@ -605,14 +611,11 @@ impl MessageListView {
         if thread_count == 0 && self.filter != ThreadFilter::All {
             return self.render_filtered_empty(&colors, cx);
         }
+        if thread_count == 0 && self.state.first_sync {
+            return self.render_skeleton();
+        }
         if thread_count == 0 {
-            return empty_state(
-                "No local mail yet",
-                "Sync the selected account to populate the local mirror.",
-                "inbox",
-                None,
-                &colors,
-            );
+            return self.render_empty_mailbox(&colors);
         }
 
         div()
@@ -716,13 +719,7 @@ impl MessageListView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.state.search_results.is_empty() {
-            return empty_state(
-                "No search results",
-                "Type a query above and run search against the local index.",
-                "search",
-                None,
-                colors,
-            );
+            return self.render_no_results(colors);
         }
         let now = chrono::Local::now();
         let density = self.density_tokens();
@@ -770,140 +767,119 @@ impl MessageListView {
             .into_any_element()
     }
 
-    fn render_drafts(&self, colors: &UiColors, cx: &mut Context<Self>) -> AnyElement {
+    fn render_drafts(
+        &self,
+        colors: &UiColors,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if self.state.drafts.is_empty() {
-            return empty_state(
-                "No drafts",
-                "Press Compose to start a new message.",
-                "pen-square",
-                None,
-                colors,
-            );
+            return self.render_no_drafts(colors);
         }
         let now = chrono::Local::now();
+        let density = self.density_tokens();
         div()
             .id("drafts-list")
             .flex_1()
             .overflow_y_scroll()
             .children(self.state.drafts.iter().map(|draft| {
                 let draft_id = draft.id;
+                let row_id = draft_row_id(draft_id);
                 let is_selected = Some(draft_id) == self.state.selected_draft_id;
-                let background_color =
-                    rgb(interactive_background(is_selected, colors.surface, colors));
+                let row = MessageRow::draft(row_id.clone(), draft, &now, self.hour_cycle);
 
-                div()
-                    .id(draft_row_id(draft_id))
-                    .px_3()
-                    .py_3()
-                    .cursor_pointer()
-                    .border_b_1()
-                    .border_color(rgb(colors.border))
-                    .bg(background_color)
+                row_shell(row_id, is_selected, focused, density, colors)
+                    .role(Role::ListItem)
+                    .aria_label(row.accessible_label())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.selected_draft_id = Some(draft_id);
                         cx.emit(MessageListEvent::OpenDraft(draft_id));
                         cx.emit(MessageListEvent::RowClicked);
                         cx.notify();
                     }))
-                    .hover_bg(is_selected, colors)
-                    .child(list_row(
-                        display_subject(&draft.subject),
-                        &format_list_date(&draft.updated_at, &now, self.hour_cycle),
-                        &recipient_line(&draft.recipient_summary),
-                        "",
-                        &draft_meta(draft),
-                        colors,
+                    .child(row_content(
+                        row,
+                        None,
+                        density,
+                        &row_colors(is_selected, focused, colors),
                     ))
             }))
             .into_any_element()
     }
 
-    fn render_outbox(&self, colors: &UiColors, cx: &mut Context<Self>) -> AnyElement {
+    fn render_outbox(
+        &self,
+        colors: &UiColors,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if self.state.outbox_jobs.is_empty() {
-            return empty_state(
-                "No outbox jobs",
-                "Queued and retrying deliveries will appear here.",
-                "send",
-                None,
-                colors,
-            );
+            return self.render_empty_outbox(colors);
         }
         let now = chrono::Local::now();
+        let density = self.density_tokens();
         div()
             .id("outbox-list")
             .flex_1()
             .overflow_y_scroll()
             .children(self.state.outbox_jobs.iter().map(|job| {
                 let job_id = job.id;
+                let row_id = outbox_row_id(job_id);
                 let is_selected = Some(job_id) == self.state.selected_outbox_job_id;
-                let background_color =
-                    rgb(interactive_background(is_selected, colors.surface, colors));
                 let draft = self
                     .state
                     .drafts
                     .iter()
                     .find(|draft| draft.id == job.draft_id);
+                let row = MessageRow::outbox_job(row_id.clone(), job, draft, &now, self.hour_cycle);
+                // A message waiting for a retry, or one that gave up,
+                // offers Retry now where the date goes.
+                let retry = outbox_status(job, &now)
+                    .can_retry
+                    .then(|| self.retry_now_button(job_id, &row_id, cx));
 
-                div()
-                    .id(outbox_row_id(job_id))
-                    .px_3()
-                    .py_3()
-                    .cursor_pointer()
-                    .border_b_1()
-                    .border_color(rgb(colors.border))
-                    .bg(background_color)
+                row_shell(row_id, is_selected, focused, density, colors)
+                    .role(Role::ListItem)
+                    .aria_label(row.accessible_label())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.selected_outbox_job_id = Some(job_id);
                         cx.emit(MessageListEvent::SelectOutboxJob(job_id));
                         cx.notify();
                     }))
-                    .hover_bg(is_selected, colors)
-                    .child(list_row(
-                        display_subject(draft.map(|draft| draft.subject.as_str()).unwrap_or("")),
-                        &job.next_attempt_at
-                            .as_deref()
-                            .map(|at| {
-                                format!("Retry {}", format_list_date(at, &now, self.hour_cycle))
-                            })
-                            .unwrap_or_default(),
-                        &recipient_line(
-                            draft
-                                .map(|draft| draft.recipient_summary.as_str())
-                                .unwrap_or(""),
-                        ),
-                        job.last_error_message.as_deref().unwrap_or(""),
-                        job.state.label(),
-                        colors,
+                    .child(row_content(
+                        row,
+                        retry,
+                        density,
+                        &row_colors(is_selected, focused, colors),
                     ))
             }))
             .into_any_element()
     }
-}
 
-/// "To: …" line for a draft or queued message.
-fn recipient_line(recipients: &str) -> String {
-    if recipients.trim().is_empty() {
-        "No recipients yet".to_owned()
-    } else {
-        format!("To: {}", recipients.trim())
+    /// The "Retry now" button on an outbox row.
+    fn retry_now_button(
+        &self,
+        job_id: i64,
+        row_id: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = format!("{row_id}-retry");
+        div()
+            .debug_selector({
+                let id = id.clone();
+                move || id
+            })
+            .child(
+                Button::new(SharedString::from(id), "Retry now")
+                    .size(ButtonSize::Small)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        // Not the row's click as well.
+                        cx.stop_propagation();
+                        cx.emit(MessageListEvent::RetryOutboxJob(job_id));
+                    })),
+            )
+            .into_any_element()
     }
-}
-
-/// Status line for a draft row: only states that need attention and a
-/// non-zero attachment count are shown.
-fn draft_meta(draft: &DraftSummary) -> String {
-    let mut parts = Vec::new();
-    if draft.state != DraftState::Editing {
-        parts.push(draft.state.label().to_owned());
-    }
-    if draft.attachment_count > 0 {
-        parts.push(count_noun(
-            draft.attachment_count,
-            "attachment",
-            "attachments",
-        ));
-    }
-    parts.join(" • ")
 }
 
 fn thread_row_id(thread_id: i64) -> SharedString {

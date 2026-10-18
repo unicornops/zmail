@@ -1,20 +1,22 @@
-//! Message-list rows (UI plan Phase 3): the comfortable and compact
-//! densities and what a row shows.
+//! The message list (UI plan Phase 3): comfortable and compact rows, the
+//! header's filters, hover quick actions, loading and empty states, and
+//! the drafts and outbox rows.
 
 use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext};
 use zmail_core::{
-    AccountSyncSnapshot, MailboxRole, MailboxSnapshot, MessageSnapshot, ThreadFilter,
-    ThreadSnapshot, VirtualMailbox, preferences::Density,
+    AccountSyncSnapshot, MailboxRole, MailboxSnapshot, MessageSnapshot, NewDraft, OutboxJobState,
+    SyncPhase, ThreadFilter, ThreadSnapshot, VirtualMailbox, preferences::Density,
 };
 use zmail_store::LocalStore;
 
 use super::{
-    Setup, click, focused_pane, keys, open_workspace, open_workspace_with, selected_thread,
+    Setup, click, focus, focused_pane, keys, open_workspace, open_workspace_with, search_input,
+    selected_thread,
 };
-use crate::InitialView;
-use crate::actions::{ToggleDensity, Undo};
+use crate::actions::{ShowDrafts, ShowOutbox, ToggleDensity, Undo};
 use crate::pane::Pane;
 use crate::styles::DensityTokens;
+use crate::{InitialView, ListMode};
 
 fn message(sender: &str, at: &str, is_read: bool) -> MessageSnapshot {
     MessageSnapshot {
@@ -290,7 +292,7 @@ fn the_header_filters_rows_in_the_store(cx: &mut TestAppContext) {
         .store
         .set_thread_read(roadmap, true)
         .expect("the thread is marked read");
-    view.update(cx, |view, cx| view.refresh_from_store(cx));
+    refresh(&view, cx);
     cx.run_until_parked();
     assert!(cx.debug_bounds("thread-row-0").is_none());
     click("list-filter-show-all", cx);
@@ -368,4 +370,184 @@ fn hover_quick_actions_replace_the_date_and_go_through_mail_actions(cx: &mut Tes
         harness.archive_id.expect("an archive")
     );
     assert_eq!(selected_thread(&view, cx), Some(first));
+}
+
+// ---------------------------------------------------------------------------
+// Loading and empty states, drafts and the outbox
+// ---------------------------------------------------------------------------
+
+/// Re-reads the store, as a sync or a mail change does.
+fn refresh(view: &gpui::Entity<crate::WorkspaceView>, cx: &mut VisualTestContext) {
+    view.update(cx, |view, cx| {
+        view.refresh_from_store(cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+}
+
+fn first_account(store: &LocalStore) -> i64 {
+    store.list_accounts().expect("the accounts load")[0].id
+}
+
+/// Replaces the account's mail with an empty Inbox and an empty Archive.
+fn seed_empty_mailboxes(store: &LocalStore) {
+    let mailbox = |name: &str, role: &str| MailboxSnapshot {
+        name: name.to_owned(),
+        role: Some(role.to_owned()),
+        delimiter: None,
+        parent: None,
+        threads: Vec::new(),
+    };
+    store
+        .replace_account_snapshot(
+            first_account(store),
+            &AccountSyncSnapshot {
+                checkpoint: "test".to_owned(),
+                detail: "test".to_owned(),
+                identities: None,
+                mailboxes: vec![mailbox("Inbox", "inbox"), mailbox("Archive", "archive")],
+            },
+        )
+        .expect("the mailboxes are stored");
+}
+
+#[gpui::test]
+fn a_first_sync_shows_skeleton_rows(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Account,
+        |_| InitialView::Inbox,
+        |store| {
+            store
+                .begin_sync_attempt(first_account(store), SyncPhase::Syncing, "first sync")
+                .expect("the phase is saved");
+        },
+    );
+    assert!(cx.debug_bounds("list-skeleton").is_some());
+    assert!(cx.debug_bounds("list-empty-unsynced").is_none());
+
+    // Once it has synced, an empty account says so instead.
+    let account = first_account(&harness.store);
+    harness
+        .store
+        .record_sync_success(account, "done", "checkpoint")
+        .expect("the sync is recorded");
+    refresh(&view, cx);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("list-skeleton").is_none());
+    assert!(cx.debug_bounds("list-empty-unsynced").is_some());
+    assert!(
+        cx.debug_bounds("list-empty-sync").is_some(),
+        "with one action"
+    );
+}
+
+#[gpui::test]
+fn an_empty_inbox_is_all_caught_up(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Account,
+        |_| InitialView::Inbox,
+        seed_empty_mailboxes,
+    );
+    assert!(cx.debug_bounds("list-empty-inbox").is_some());
+    assert!(cx.debug_bounds("list-empty-sync").is_some());
+
+    let account = first_account(&harness.store);
+    let archive = harness
+        .store
+        .mailbox_id_by_role(account, "archive")
+        .expect("the lookup works")
+        .expect("an archive");
+    view.update(cx, |view, cx| view.select_mailbox(archive, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("list-empty-inbox").is_none());
+    assert!(cx.debug_bounds("list-empty-mailbox").is_some());
+
+    // The Unified Inbox is an inbox too.
+    view.update(cx, |view, cx| {
+        view.select_virtual_mailbox(VirtualMailbox::Unified(MailboxRole::Inbox), cx)
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("list-empty-inbox").is_some());
+}
+
+#[gpui::test]
+fn a_search_with_no_results_offers_to_clear_it(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+    let search = search_input(&view, cx);
+    focus(&search, cx);
+    cx.simulate_input("zebra");
+    keys("enter", cx);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.list_mode),
+        ListMode::Search
+    );
+    click("list-search-clear", cx);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.list_mode),
+        ListMode::Mail
+    );
+}
+
+#[gpui::test]
+fn drafts_and_the_outbox_reuse_the_message_row(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    cx.dispatch_action(ShowDrafts);
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("list-new-message").is_some(),
+        "no drafts yet"
+    );
+
+    let account = first_account(&harness.store);
+    let identity = harness
+        .store
+        .list_identities(account)
+        .expect("the identities load")[0]
+        .id;
+    let draft = harness
+        .store
+        .create_draft(&NewDraft {
+            account_id: account,
+            identity_id: identity,
+            to: vec!["Priya Raman <priya@example.test>".to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Q4 estimates".to_owned(),
+            body: "Attached.".to_owned(),
+        })
+        .expect("the draft is stored");
+    refresh(&view, cx);
+    cx.run_until_parked();
+    let draft_row = format!("draft-row-{draft}");
+    assert!(drawn(format!("{draft_row}-avatar"), cx));
+    assert!(drawn(format!("{draft_row}-date"), cx));
+
+    // Queue it and let the first attempt fail for good: the outbox row
+    // offers Retry now, which requeues it.
+    let job = harness
+        .store
+        .queue_draft(draft)
+        .expect("the draft is queued");
+    harness
+        .store
+        .record_outbox_failure(job, "550 mailbox unavailable")
+        .expect("the failure is recorded");
+    cx.dispatch_action(ShowOutbox);
+    cx.run_until_parked();
+    refresh(&view, cx);
+    cx.run_until_parked();
+    let retry = format!("outbox-row-{job}-retry");
+    assert!(drawn(retry.clone(), cx));
+    assert!(!drawn(format!("outbox-row-{job}-date"), cx));
+    click(Box::leak(retry.into_boxed_str()), cx);
+    let state = harness
+        .store
+        .list_outbox_jobs(Some(account))
+        .expect("the jobs load")
+        .into_iter()
+        .find(|listed| listed.id == job)
+        .map(|listed| listed.state);
+    assert_ne!(state, Some(OutboxJobState::Failed), "the job is requeued");
 }

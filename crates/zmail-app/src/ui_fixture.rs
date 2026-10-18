@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use zmail_core::{
     AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxRole, MailboxSelection,
     MailboxSnapshot, MessageAttachment, MessageSnapshot, NewAccount, NewDraft, NewIdentity,
-    OutgoingConfig, ProtocolKind, ThemeAppearance, ThreadSnapshot, VirtualMailbox,
+    OutgoingConfig, ProtocolKind, SyncPhase, ThemeAppearance, ThreadSnapshot, VirtualMailbox,
     participants::thread_participants, preferences::Density, time::utc_timestamp,
 };
 use zmail_store::LocalStore;
@@ -26,6 +26,13 @@ pub(crate) enum FixtureView {
     Inbox,
     /// The seeded inbox with compact (one-line) rows.
     InboxCompact,
+    /// An empty inbox: "You're all caught up".
+    InboxEmpty,
+    /// An account in its first sync: skeleton rows.
+    Syncing,
+    /// The outbox with a message sending, one waiting for a retry, one
+    /// that failed and one waiting to send.
+    Outbox,
     /// The reader on a longer conversation with an attachment.
     Reader,
     /// The compose pane on a half-written reply.
@@ -49,6 +56,9 @@ impl FixtureView {
             "empty" => Self::Empty,
             "inbox" => Self::Inbox,
             "inbox-compact" => Self::InboxCompact,
+            "inbox-empty" => Self::InboxEmpty,
+            "syncing" => Self::Syncing,
+            "outbox" => Self::Outbox,
             "reader" => Self::Reader,
             "compose" => Self::Compose,
             "account-setup" => Self::AccountSetup,
@@ -56,7 +66,7 @@ impl FixtureView {
             "accounts" => Self::Accounts,
             "multi-select" => Self::MultiSelect,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, reader, compose, account-setup, sidebar, accounts or multi-select"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, compose, account-setup, sidebar, accounts or multi-select"
             ),
         })
     }
@@ -108,7 +118,17 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
     let account_id = store
         .insert_account(&fixture_account())
         .context("failed to insert the fixture account")?;
-    let snapshot = fixture_snapshot(now);
+    if view == FixtureView::Syncing {
+        // Nothing synced yet, and the first sync under way.
+        store
+            .begin_sync_attempt(account_id, SyncPhase::Syncing, "Fetching mail")
+            .context("failed to record the fixture sync phase")?;
+        return Ok(InitialView::Inbox);
+    }
+    let mut snapshot = fixture_snapshot(now);
+    if view == FixtureView::InboxEmpty {
+        snapshot.mailboxes[0].threads.clear();
+    }
     store
         .replace_account_snapshot(account_id, &snapshot)
         .context("failed to seed the fixture mailboxes")?;
@@ -117,7 +137,14 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         .context("failed to record the fixture sync")?;
 
     Ok(match view {
-        FixtureView::Empty | FixtureView::Inbox => InitialView::Inbox,
+        FixtureView::Empty
+        | FixtureView::Inbox
+        | FixtureView::InboxEmpty
+        | FixtureView::Syncing => InitialView::Inbox,
+        FixtureView::Outbox => {
+            seed_outbox(store, account_id)?;
+            InitialView::Outbox
+        }
         FixtureView::InboxCompact => {
             store
                 .update_ui_preferences(|preferences| preferences.density = Density::Compact)
@@ -164,6 +191,54 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
             InitialView::Draft(draft_id)
         }
     })
+}
+
+/// Queues four replies and moves them to each outbox state.
+fn seed_outbox(store: &LocalStore, account_id: i64) -> Result<()> {
+    let identity = store
+        .list_identities(account_id)?
+        .into_iter()
+        .next()
+        .context("the fixture account has no identity")?;
+    let queue = |to: &str, subject: &str| -> Result<i64> {
+        let draft_id = store.create_draft(&NewDraft {
+            account_id,
+            identity_id: identity.id,
+            to: vec![to.to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: subject.to_owned(),
+            body: "Thanks, see you there.\n\nSam".to_owned(),
+        })?;
+        store.queue_draft(draft_id)
+    };
+    // Claimed first, so it is the one sending.
+    queue(
+        "Priya Raman <priya.raman@example.org>",
+        "Re: Q4 roadmap review",
+    )?;
+    store
+        .claim_due_outbox_job(Some(account_id))?
+        .context("the fixture job was not claimed")?;
+    let retrying = queue(
+        "Tomás Ortega <tomas.ortega@example.org>",
+        "Re: Team lunch on Friday?",
+    )?;
+    store.record_outbox_retry(
+        retrying,
+        "421 4.7.0 Try again later",
+        std::time::Duration::from_secs(5 * 60),
+    )?;
+    let failed = queue(
+        "Programme Committee <talks@example.net>",
+        "Re: Your talk proposal was accepted",
+    )?;
+    store.record_outbox_failure(failed, "550 5.1.1 Mailbox unavailable")?;
+    queue(
+        "Lena Fischer <lena.fischer@example.com>",
+        "Re: Updated icons for the sidebar",
+    )?;
+    Ok(())
 }
 
 fn fixture_account() -> NewAccount {
@@ -657,6 +732,9 @@ mod tests {
             "empty",
             "inbox",
             "inbox-compact",
+            "inbox-empty",
+            "syncing",
+            "outbox",
             "reader",
             "compose",
             "account-setup",
@@ -704,6 +782,42 @@ mod tests {
         assert_eq!(store.ui_preferences()?.density, Density::Compact);
         let (store, _) = seeded(FixtureView::Inbox)?;
         assert_eq!(store.ui_preferences()?.density, Density::Comfortable);
+        Ok(())
+    }
+
+    #[test]
+    fn inbox_empty_has_no_inbox_threads() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::InboxEmpty)?;
+        assert_eq!(initial_view, InitialView::Inbox);
+        let account = store.list_accounts()?.remove(0);
+        let inbox = store
+            .mailbox_id_by_role(account.id, "inbox")?
+            .context("inbox should exist")?;
+        assert!(store.list_threads(inbox, 0..10)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn syncing_is_a_first_sync() -> Result<()> {
+        let (store, _) = seeded(FixtureView::Syncing)?;
+        let account = store.list_accounts()?.remove(0);
+        assert_eq!(account.sync_status.phase, SyncPhase::Syncing);
+        assert_eq!(account.sync_status.last_success_at, None);
+        assert!(store.list_mailboxes(account.id)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn outbox_has_a_job_in_each_state() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::Outbox)?;
+        assert_eq!(initial_view, InitialView::Outbox);
+        let mut states = store
+            .list_outbox_jobs(None)?
+            .into_iter()
+            .map(|job| job.state.as_str())
+            .collect::<Vec<_>>();
+        states.sort_unstable();
+        assert_eq!(states, ["failed", "queued", "retrying", "sending"]);
         Ok(())
     }
 
