@@ -4,11 +4,6 @@
 //! higher-level render modules can share them without duplicating code or
 //! importing directly from `lib.rs`.
 
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-};
-
 use gpui::{
     AnyElement, App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, SharedString,
     Stateful, StatefulInteractiveElement, Styled, Svg, Window, div, prelude::*, px, rgb, svg,
@@ -311,35 +306,6 @@ pub(crate) fn label_chip(
 }
 
 // ---------------------------------------------------------------------------
-// avatar
-// ---------------------------------------------------------------------------
-
-/// Render a circular avatar from the first alphanumeric character in a name.
-pub(crate) fn avatar(name: &str, size: f32, bg_color: u32, colors: &UiColors) -> gpui::Div {
-    let initial = name
-        .chars()
-        .find_map(|ch| {
-            ch.is_ascii_alphanumeric()
-                .then_some(ch.to_ascii_uppercase())
-        })
-        .unwrap_or('?');
-
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .w(px(size))
-        .h(px(size))
-        .rounded_full()
-        .bg(rgb(bg_color))
-        .text_sm()
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(contrasting_text_color(bg_color, colors)))
-        .child(initial.to_string())
-}
-
-// ---------------------------------------------------------------------------
 // action_divider
 // ---------------------------------------------------------------------------
 
@@ -381,19 +347,6 @@ pub(crate) fn status_banner(
                 .child(icon(icon_name, ICON_SIZE_SM, accent_color))
                 .child(div().flex_1().text_sm().child(message.to_owned())),
         )
-}
-
-// ---------------------------------------------------------------------------
-// message_avatar_background
-// ---------------------------------------------------------------------------
-
-/// Choose a stable accent colour for avatars derived from sender/account text.
-pub(crate) fn message_avatar_background(seed: &str, colors: &UiColors) -> u32 {
-    let mut hasher = DefaultHasher::new();
-    seed.hash(&mut hasher);
-    let palette = [colors.accent, colors.info, colors.success, colors.warning];
-    let index = (hasher.finish() as usize) % palette.len();
-    palette[index]
 }
 
 // ---------------------------------------------------------------------------
@@ -441,23 +394,4 @@ pub(crate) fn sync_badge(phase: SyncPhase, colors: &UiColors) -> (&'static str, 
 /// Truncate a git SHA string to the first 8 characters for compact display.
 pub(crate) fn short_sha(value: &str) -> &str {
     value.get(..8).unwrap_or(value)
-}
-
-fn contrasting_text_color(color: u32, colors: &UiColors) -> u32 {
-    let color_luminance = luminance(color);
-    let foreground_delta = color_luminance.abs_diff(luminance(colors.foreground));
-    let background_delta = color_luminance.abs_diff(luminance(colors.background));
-
-    if foreground_delta >= background_delta {
-        colors.foreground
-    } else {
-        colors.background
-    }
-}
-
-fn luminance(color: u32) -> u32 {
-    let red = (color >> 16) & 0xff;
-    let green = (color >> 8) & 0xff;
-    let blue = color & 0xff;
-    (red * 299) + (green * 587) + (blue * 114)
 }

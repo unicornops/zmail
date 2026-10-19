@@ -1,13 +1,13 @@
-//! The reader's commands: the action bar's icon buttons and the More
-//! menu.
+//! The reader's commands: the action bar's icon buttons, and the entries
+//! of its menus (the action bar's More, each message's More, and the
+//! sender menu).
 
 use gpui::{Action, AnyElement, FocusHandle, SharedString, div, prelude::*};
-use zmail_core::{MailboxSummary, ThreadView};
+use zmail_core::{MailboxSummary, ThreadView, participants::sender_identity};
 
 use super::ReaderState;
 use crate::actions::{
-    Archive, Delete, Forward, MoveToMailbox, Reply, ReplyAll, SaveAttachments, ToggleFlag,
-    ToggleRead,
+    Archive, Delete, Forward, Reply, ReplyAll, SaveAttachments, ToggleFlag, ToggleRead,
 };
 use crate::components::IconButton;
 use crate::styles::UiColors;
@@ -144,16 +144,65 @@ pub(super) fn action_bar_buttons(
     elements
 }
 
-/// One row of the More menu.
-pub(super) enum MoreItem {
-    Action(ReaderAction),
-    Separator,
-    Header(String),
+/// A command the reader runs itself, rather than an action the shell
+/// handles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReaderCommand {
+    /// Open the Move to… folder picker.
+    MoveTo,
+    /// Show the plain text or HTML source of the message at this index.
+    ViewSource(usize),
+    /// Copy the sender's address of the message at this index.
+    CopyAddress(usize),
+    /// Copy the sender's name and address of the message at this index.
+    CopyNameAndAddress(usize),
 }
 
-/// The More menu: the actions a compact bar leaves out, then Move to…
-/// with one entry per other mailbox. Empty when there is nothing to put
-/// in it (no thread, or a full bar and no other mailbox).
+/// One row of a reader menu.
+pub(super) enum MoreItem {
+    Action(ReaderAction),
+    Command {
+        label: SharedString,
+        icon: &'static str,
+        command: ReaderCommand,
+    },
+    Separator,
+    Header(SharedString),
+}
+
+impl MoreItem {
+    fn command(label: &'static str, icon: &'static str, command: ReaderCommand) -> Self {
+        Self::Command {
+            label: label.into(),
+            icon,
+            command,
+        }
+    }
+}
+
+/// Whether the conversation can move anywhere: the account has another
+/// mailbox.
+pub(super) fn can_move(thread: &ThreadView, state: &ReaderState) -> bool {
+    state
+        .mailboxes
+        .iter()
+        .any(|mailbox| mailbox.id != thread.mailbox_id)
+}
+
+/// The folders the Move to… picker offers: every other mailbox of the
+/// account.
+pub(super) fn move_destinations(thread: &ThreadView, state: &ReaderState) -> Vec<MailboxSummary> {
+    state
+        .mailboxes
+        .iter()
+        .filter(|mailbox| mailbox.id != thread.mailbox_id)
+        .cloned()
+        .collect()
+}
+
+/// The action bar's More menu: the actions a compact bar leaves out, then
+/// Move to…. Empty when there is nothing to put in it (no thread, or a
+/// full bar and no other mailbox).
 pub(super) fn more_menu_items(thread: Option<&ThreadView>, state: &ReaderState) -> Vec<MoreItem> {
     let Some(thread) = thread else {
         return Vec::new();
@@ -172,27 +221,80 @@ pub(super) fn more_menu_items(thread: Option<&ThreadView>, state: &ReaderState) 
             items.extend(hidden.into_iter().map(MoreItem::Action));
         }
     }
-    let destinations: Vec<&MailboxSummary> = state
-        .mailboxes
-        .iter()
-        .filter(|mailbox| mailbox.id != thread.mailbox_id)
-        .collect();
-    if !destinations.is_empty() {
+    if can_move(thread, state) {
         if !items.is_empty() {
             items.push(MoreItem::Separator);
         }
-        items.push(MoreItem::Header("Move to".to_owned()));
-        items.extend(destinations.into_iter().map(|mailbox| {
-            MoreItem::Action(ReaderAction {
-                label: mailbox.name.clone().into(),
-                icon: "folder",
-                shortcut: None,
-                action: Box::new(MoveToMailbox {
-                    mailbox_id: mailbox.id,
-                }),
-                compact: false,
-            })
-        }));
+        items.push(MoreItem::command(
+            "Move to…",
+            "folder",
+            ReaderCommand::MoveTo,
+        ));
+    }
+    items
+}
+
+/// A message's More menu: Move to…, Mark Read or Unread, View Plain Text
+/// (or Source for an HTML message) and Save Attachments. Moving and the
+/// read state apply to the conversation, which is what the store tracks.
+pub(super) fn message_menu_items(
+    thread: &ThreadView,
+    index: usize,
+    state: &ReaderState,
+) -> Vec<MoreItem> {
+    let Some(message) = thread.messages.get(index) else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    if can_move(thread, state) {
+        items.push(MoreItem::command(
+            "Move to…",
+            "folder",
+            ReaderCommand::MoveTo,
+        ));
+    }
+    items.push(MoreItem::Action(if thread.unread_count > 0 {
+        ReaderAction::new("Mark Read", "eye", "secondary-shift-u", ToggleRead)
+    } else {
+        ReaderAction::new("Mark Unread", "eye-off", "secondary-shift-u", ToggleRead)
+    }));
+    items.push(MoreItem::Separator);
+    items.push(MoreItem::command(
+        if message.body_text.is_none() && message.sanitized_html.is_some() {
+            "View Source"
+        } else {
+            "View Plain Text"
+        },
+        "file-text",
+        ReaderCommand::ViewSource(index),
+    ));
+    if !message.attachments.is_empty() {
+        items.push(MoreItem::Action(ReaderAction::new(
+            "Save Attachments",
+            "save",
+            "secondary-shift-s",
+            SaveAttachments,
+        )));
+    }
+    items
+}
+
+/// The menu a sender's name opens: the address, and commands to copy it.
+pub(super) fn sender_menu_items(sender: &str, index: usize) -> Vec<MoreItem> {
+    let (name, email) = sender_identity(sender);
+    let Some(email) = email else {
+        return Vec::new();
+    };
+    let mut items = vec![
+        MoreItem::Header(email.clone().into()),
+        MoreItem::command("Copy Address", "copy", ReaderCommand::CopyAddress(index)),
+    ];
+    if name != email {
+        items.push(MoreItem::command(
+            "Copy Name and Address",
+            "copy",
+            ReaderCommand::CopyNameAndAddress(index),
+        ));
     }
     items
 }

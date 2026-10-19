@@ -7,9 +7,9 @@ use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext
 use zmail_core::{AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
 use zmail_store::LocalStore;
 
-use super::{Setup, click, click_row, focused_pane, keys, open_workspace_with};
+use super::{Harness, Setup, click, click_row, focused_pane, keys, open_workspace_with};
 use crate::pane::Pane;
-use crate::reader::ReaderView;
+use crate::reader::{PopoverAnchor, ReaderView};
 use crate::{InitialView, WorkspaceView};
 
 fn message(sender: &str, at: &str, is_read: bool, body: &str) -> MessageSnapshot {
@@ -31,8 +31,9 @@ fn message(sender: &str, at: &str, is_read: bool, body: &str) -> MessageSnapshot
     }
 }
 
-/// Replaces the account's mail with one conversation: two read messages
-/// (the second ending in a quote) and an unread reply.
+/// Replaces the account's mail with one Inbox conversation: two read
+/// messages (the second ending in a quote) and an unread reply. Archive
+/// is empty.
 fn seed_conversation(store: &LocalStore) {
     let account_id = store.list_accounts().expect("the accounts load")[0].id;
     let messages = vec![
@@ -62,10 +63,11 @@ fn seed_conversation(store: &LocalStore) {
                 checkpoint: "test".to_owned(),
                 detail: "test".to_owned(),
                 identities: None,
-                mailboxes: vec![MailboxSnapshot {
-                    name: "Inbox".to_owned(),
-                    role: Some("inbox".to_owned()),
-                    threads: vec![ThreadSnapshot {
+                mailboxes: vec![
+                    MailboxSnapshot {
+                        name: "Inbox".to_owned(),
+                        role: Some("inbox".to_owned()),
+                        threads: vec![ThreadSnapshot {
                         remote_thread_id: "roadmap".to_owned(),
                         subject: "Q4 roadmap review".to_owned(),
                         participants:
@@ -78,15 +80,20 @@ fn seed_conversation(store: &LocalStore) {
                         latest_message_at: "2026-03-24T11:00:00Z".to_owned(),
                         messages,
                     }],
-                    ..Default::default()
-                }],
+                        ..Default::default()
+                    },
+                    MailboxSnapshot {
+                        name: "Archive".to_owned(),
+                        role: Some("archive".to_owned()),
+                        ..Default::default()
+                    },
+                ],
             },
         )
         .expect("the mail is stored");
 }
 
-/// Opens the window on the seeded conversation (as a click on it would,
-/// so it is marked read after the delay).
+/// Opens the window on the seeded conversation.
 fn open_conversation(
     cx: &mut TestAppContext,
 ) -> (
@@ -94,14 +101,27 @@ fn open_conversation(
     &mut VisualTestContext,
     Entity<ReaderView>,
 ) {
-    let (view, cx, _harness) = open_workspace_with(
+    let (view, cx, reader, _harness) = open_conversation_with_store(cx);
+    (view, cx, reader)
+}
+
+/// [`open_conversation`], keeping the store.
+fn open_conversation_with_store(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<WorkspaceView>,
+    &mut VisualTestContext,
+    Entity<ReaderView>,
+    Harness,
+) {
+    let (view, cx, harness) = open_workspace_with(
         cx,
         Setup::Account,
         |_| InitialView::Inbox,
         seed_conversation,
     );
     let reader = cx.read_entity(&view, |view, _| view.reader.clone());
-    (view, cx, reader)
+    (view, cx, reader, harness)
 }
 
 /// Which of the conversation's messages are expanded, in order.
@@ -222,4 +242,102 @@ fn quoted_text_folds_behind_a_toggle(cx: &mut TestAppContext) {
         [false, true, true],
         "the toggle does not collapse the message"
     );
+}
+
+fn popover(reader: &Entity<ReaderView>, cx: &mut VisualTestContext) -> Option<PopoverAnchor> {
+    cx.read_entity(reader, |reader, _| reader.popover_anchor())
+}
+
+#[gpui::test]
+fn an_expanded_header_has_the_sender_recipients_reply_and_more(cx: &mut TestAppContext) {
+    let (_view, cx, reader) = open_conversation(cx);
+    for part in [
+        "reader-sender-2",
+        "reader-recipients-2",
+        "reader-reply-2",
+        "reader-message-more-2",
+    ] {
+        assert!(drawn(part, cx), "{part}");
+    }
+    assert!(
+        !drawn("reader-reply-0", cx),
+        "a collapsed message has no buttons"
+    );
+
+    // The recipient summary shows the full lines, and the message stays
+    // open.
+    let shows_details = |cx: &mut VisualTestContext| {
+        cx.read_entity(&reader, |reader, _| {
+            let thread = reader.state().thread.as_ref().expect("a conversation");
+            reader.conversation().shows_details(thread.messages[2].id)
+        })
+    };
+    click("reader-recipients-2", cx);
+    assert!(shows_details(cx));
+    assert_eq!(expanded(&reader, cx), [false, false, true]);
+    click("reader-recipients-2", cx);
+    assert!(!shows_details(cx));
+}
+
+#[gpui::test]
+fn the_sender_menu_copies_the_address(cx: &mut TestAppContext) {
+    let (_view, cx, reader) = open_conversation(cx);
+    click("reader-sender-2", cx);
+    assert_eq!(popover(&reader, cx), Some(PopoverAnchor::Sender(2)));
+    assert_eq!(expanded(&reader, cx), [false, false, true], "still open");
+
+    keys("down enter", cx);
+    assert_eq!(popover(&reader, cx), None);
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("priya@example.test".to_owned())
+    );
+
+    // A second click on the name closes its menu.
+    click("reader-sender-2", cx);
+    assert_eq!(popover(&reader, cx), Some(PopoverAnchor::Sender(2)));
+    click("reader-sender-2", cx);
+    assert_eq!(popover(&reader, cx), None);
+}
+
+#[gpui::test]
+fn a_message_reply_quotes_that_message(cx: &mut TestAppContext) {
+    let (_view, cx, _reader, harness) = open_conversation_with_store(cx);
+    click("reader-message-summary-0", cx);
+    click("reader-reply-0", cx);
+
+    let drafts = harness.store.list_drafts(None).expect("the drafts load");
+    assert_eq!(drafts.len(), 1);
+    let draft = harness
+        .store
+        .draft_detail(drafts[0].id)
+        .expect("the draft loads")
+        .expect("the draft exists");
+    assert!(draft.to.iter().any(|to| to.contains("priya@example.test")));
+    assert!(
+        draft.body.contains("> Attached is the draft roadmap."),
+        "quotes the first message, not the latest: {}",
+        draft.body
+    );
+}
+
+#[gpui::test]
+fn a_message_more_menu_moves_and_shows_the_plain_text(cx: &mut TestAppContext) {
+    let (_view, cx, reader) = open_conversation(cx);
+    click("reader-message-more-2", cx);
+    assert_eq!(popover(&reader, cx), Some(PopoverAnchor::MessageMore(2)));
+    assert_eq!(expanded(&reader, cx), [false, false, true], "still open");
+
+    // Move to… is first; it opens the folder picker below the button.
+    keys("down enter", cx);
+    assert_eq!(popover(&reader, cx), Some(PopoverAnchor::MessageMore(2)));
+    keys("escape", cx);
+    assert_eq!(popover(&reader, cx), None);
+
+    // Move to…, Mark Read, then View Plain Text.
+    click("reader-message-more-2", cx);
+    keys("down down down enter", cx);
+    assert!(drawn("reader-source-text", cx));
+    keys("escape", cx);
+    assert!(!drawn("reader-source-text", cx));
 }

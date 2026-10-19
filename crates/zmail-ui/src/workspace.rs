@@ -35,9 +35,9 @@ use super::{DetailMode, InitialView, ListMode, WorkspaceView};
 use crate::account_setup::{AccountSetupEvent, AccountSetupView};
 use crate::actions::{
     AddAccount, Archive, Cancel, Delete, FocusNextPane, FocusPreviousPane, FocusSearch, Forward,
-    GoBack, MoveToMailbox, NewMessage, Reply, ReplyAll, RetryOutbox, RunSearch, SaveAttachments,
-    ShowDrafts, ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleFlag, ToggleRead, ToggleSidebar,
-    ToggleTheme, Undo,
+    GoBack, MoveToMailbox, NewMessage, Reply, ReplyAll, ReplyToMessage, RetryOutbox, RunSearch,
+    SaveAttachments, ShowDrafts, ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleFlag,
+    ToggleRead, ToggleSidebar, ToggleTheme, Undo,
 };
 use crate::app_menu::AppMenuButton;
 use crate::components::{
@@ -1264,9 +1264,12 @@ impl WorkspaceView {
     }
 
     /// Open a reply or reply-all draft for the selected thread.
+    /// Opens a reply draft to the selected thread's message `message_id`,
+    /// or to its latest message.
     pub(crate) fn reply_to_selected_thread(
         &mut self,
         reply_all: bool,
+        message_id: Option<i64>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1277,7 +1280,7 @@ impl WorkspaceView {
             return;
         };
 
-        match self.create_reply_draft(&thread, reply_all, cx) {
+        match self.create_reply_draft(&thread, message_id, reply_all, cx) {
             Ok(draft_id) => {
                 self.open_draft(draft_id, window, cx);
                 self.list_mode = ListMode::Drafts;
@@ -1372,13 +1375,21 @@ impl WorkspaceView {
     fn create_reply_draft(
         &self,
         thread: &ThreadView,
+        message_id: Option<i64>,
         reply_all: bool,
         cx: &mut Context<Self>,
     ) -> Result<i64> {
-        let latest_message = thread
-            .messages
-            .last()
-            .context("selected thread has no messages to reply to")?;
+        let latest_message = match message_id {
+            Some(message_id) => thread
+                .messages
+                .iter()
+                .find(|message| message.id == message_id)
+                .context("the message to reply to is no longer in the thread")?,
+            None => thread
+                .messages
+                .last()
+                .context("selected thread has no messages to reply to")?,
+        };
         let own_addresses: HashSet<String> = self
             .identities
             .iter()
@@ -1876,13 +1887,24 @@ impl WorkspaceView {
 
     fn reply(&mut self, _: &Reply, window: &mut Window, cx: &mut Context<Self>) {
         if self.command_thread_id().is_some() {
-            self.reply_to_selected_thread(false, window, cx);
+            self.reply_to_selected_thread(false, None, window, cx);
+        }
+    }
+
+    fn reply_to_message(
+        &mut self,
+        action: &ReplyToMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.command_thread_id().is_some() {
+            self.reply_to_selected_thread(false, Some(action.message_id), window, cx);
         }
     }
 
     fn reply_all(&mut self, _: &ReplyAll, window: &mut Window, cx: &mut Context<Self>) {
         if self.command_thread_id().is_some() {
-            self.reply_to_selected_thread(true, window, cx);
+            self.reply_to_selected_thread(true, None, window, cx);
         }
     }
 
@@ -2435,6 +2457,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::reply))
+            .on_action(cx.listener(Self::reply_to_message))
             .on_action(cx.listener(Self::reply_all))
             .on_action(cx.listener(Self::forward))
             .on_action(cx.listener(Self::archive))

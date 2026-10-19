@@ -1,8 +1,9 @@
 //! The message view: one message of the conversation.
 //!
-//! An expanded message shows its header, then the banner slot (status and
-//! sender-safety warnings), the body with its quoted tail folded behind a
-//! "…" toggle, then the attachments slot. A collapsed message is a single
+//! An expanded message shows its header (`header`), the From/To/Date
+//! details when asked for, then the banner slot (status and sender-safety
+//! warnings), the body with its quoted tail folded behind a "…" toggle,
+//! then the attachments slot. A collapsed message is a single
 //! summary line: sender, a snippet and the date. Clicking either header
 //! switches between the two.
 
@@ -10,16 +11,16 @@ use chrono::{DateTime, Local};
 use gpui::{AnyElement, Context, FontWeight, IntoElement, div, prelude::*, px, rgb};
 use zmail_core::{
     ThreadMessage,
-    participants::{parse_address_list, sender_identity},
-    time::{HourCycle, format_full_date, format_list_date},
+    participants::sender_identity,
+    time::{HourCycle, format_list_date},
 };
 
 use super::ReaderView;
+use super::header::{render_details, render_header};
 use super::quoted::split_folded_tail;
 use crate::components::{Avatar, ButtonSize, IconButton};
 use crate::styles::{AVATAR_SIZE, UiColors};
-use crate::tooltip::text_tooltip;
-use crate::widgets::{EllipsisExt, avatar, format_size, label_chip, message_avatar_background};
+use crate::widgets::{EllipsisExt, format_size, label_chip};
 
 /// The avatar size on a collapsed message's summary line.
 const COLLAPSED_AVATAR_SIZE: f32 = 24.0;
@@ -47,12 +48,15 @@ pub(super) struct MessageDisplay {
     pub(super) expanded: bool,
     /// The quoted tail is showing.
     pub(super) unfolded: bool,
+    /// The full From, To and Date lines are showing.
+    pub(super) details: bool,
     /// The message n/p moved to; Enter expands or collapses it.
     pub(super) current: bool,
 }
 
 /// One message as a card: expanded or a summary line.
 pub(super) fn render_message(
+    reader: &ReaderView,
     message: &ThreadMessage,
     display: MessageDisplay,
     context: &MessageContext<'_>,
@@ -73,7 +77,7 @@ pub(super) fn render_message(
         .bg(rgb(colors.surface))
         .overflow_hidden();
     let card = if display.expanded {
-        card.child(expanded_header(message, display, context, cx))
+        card.child(render_header(reader, message, display, context, cx))
             .child(expanded_content(message, display, context, cx))
     } else {
         card.child(collapsed_summary(message, display, context, cx))
@@ -151,85 +155,6 @@ pub(super) fn snippet(body: &str) -> String {
         .collect()
 }
 
-/// An expanded message's header: avatar, sender, recipients and date.
-/// Clicking it collapses the message.
-fn expanded_header(
-    message: &ThreadMessage,
-    display: MessageDisplay,
-    context: &MessageContext<'_>,
-    cx: &mut Context<ReaderView>,
-) -> AnyElement {
-    let colors = &context.colors;
-    let (sender_name, sender_email) = sender_identity(&message.sender);
-    let avatar_color = message_avatar_background(&sender_name, colors);
-    let recipients = participant_names(&message.recipients, context.own_addresses);
-    let date = format_list_date(&message.received_at, &context.now, context.hour_cycle);
-    let full_date = format_full_date(
-        &message.received_at,
-        &context.now.timezone(),
-        context.hour_cycle,
-    );
-    let index = display.index;
-
-    div()
-        .id(("reader-message-header", message.id as u64))
-        .debug_selector(move || format!("reader-message-header-{index}"))
-        .flex()
-        .items_start()
-        .gap_3()
-        .px_4()
-        .pt_4()
-        .pb_3()
-        .cursor_pointer()
-        .on_click(cx.listener(move |reader, _, _, cx| reader.toggle_message(index, cx)))
-        .child(avatar(&sender_name, AVATAR_SIZE, avatar_color, colors))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .w_full()
-                        .ellipsis()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(sender_name),
-                )
-                .when_some(sender_email, |this, email| {
-                    this.child(
-                        div()
-                            .w_full()
-                            .ellipsis()
-                            .text_sm()
-                            .text_color(rgb(colors.muted))
-                            .child(email),
-                    )
-                })
-                .when(!recipients.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(colors.muted))
-                            .ellipsis()
-                            .child(format!("To: {recipients}")),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .id(("reader-message-date", message.id as u64))
-                .flex_none()
-                .whitespace_nowrap()
-                .text_sm()
-                .text_color(rgb(colors.muted))
-                .tooltip(text_tooltip(full_date, *colors))
-                .child(date),
-        )
-        .into_any_element()
-}
-
 /// An expanded message below its header: banners, body, the fold toggle
 /// and the quoted tail, then attachments. Indented to line up with the
 /// sender's name.
@@ -258,6 +183,9 @@ fn expanded_content(
         .pr_4()
         .pb_4()
         .min_w_0()
+        .when(display.details, |this| {
+            this.child(render_details(message, context))
+        })
         .when(!banners.is_empty(), |this| {
             this.child(div().flex().flex_col().gap_2().children(banners))
         })
@@ -424,25 +352,4 @@ fn sender_safety_banner(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyEl
             )
             .into_any_element(),
     ]
-}
-
-/// Display names from an address list, with the user's own addresses
-/// shown as "me": `Alice Johnson, me`.
-pub(super) fn participant_names(addresses: &str, own_addresses: &[String]) -> String {
-    parse_address_list(addresses)
-        .iter()
-        .map(|participant| {
-            let is_me = participant.email.as_deref().is_some_and(|email| {
-                own_addresses
-                    .iter()
-                    .any(|own| own.eq_ignore_ascii_case(email.trim()))
-            });
-            if is_me {
-                "me".to_owned()
-            } else {
-                participant.display_name().to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }

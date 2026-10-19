@@ -1502,12 +1502,23 @@ fn the_reader_more_menu_moves_the_thread(cx: &mut TestAppContext) {
 
     click("reader-more", cx);
     assert!(cx.read_entity(&reader, |reader, _| reader.more_menu().is_some()));
-    // Wide enough for every button, so the menu starts with Move to:
-    // Archive, then Trash.
+    // Wide enough for every button, so the menu holds only Move to…,
+    // which opens the folder picker in its place.
     keys("down enter", cx);
     assert!(cx.read_entity(&reader, |reader, _| reader.more_menu().is_none()));
+    assert_eq!(
+        cx.read_entity(&reader, |reader, _| reader.popover_anchor()),
+        Some(crate::reader::PopoverAnchor::ActionBar),
+        "the picker opened below More"
+    );
+    cx.simulate_input("arch");
+    keys("enter", cx);
     assert_eq!(mailbox_of(&harness, first), harness.archive_id);
     assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
+    assert_eq!(
+        cx.read_entity(&reader, |reader, _| reader.popover_anchor()),
+        None
+    );
 
     // Escape closes the menu without acting.
     click("reader-more", cx);

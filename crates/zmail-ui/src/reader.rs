@@ -8,9 +8,9 @@
 //! the selection and the account.
 //!
 //! The actions are one row of icon buttons above the conversation. The
-//! More menu at its end holds Move to… (one entry per mailbox, until the
-//! Phase 4 folder picker) and, when the pane is narrow, the actions that
-//! no longer fit in the row.
+//! More menu at its end holds Move to… (the searchable folder picker) and,
+//! when the pane is narrow, the actions that no longer fit in the row.
+//! Each expanded message has its own Reply and More buttons too.
 //!
 //! The conversation below is a variable-height `list`, so a long thread
 //! only lays out the messages on screen. n and p move between messages and
@@ -20,31 +20,39 @@
 //! |---|---|
 //! | `actions` | The action bar's buttons and the More menu's entries |
 //! | `conversation` | The conversation list: its items and which messages are expanded |
+//! | `header` | An expanded message's header: sender, recipients, date, Reply and More |
 //! | `message` | The message view: one message, expanded or as a summary line |
+//! | `popover` | The More menus, the sender menu and the Move to… picker |
 //! | `quoted` | Finds the quoted text and signature that fold |
+//! | `source` | The View Plain Text / View Source dialog |
 
 mod actions;
 mod conversation;
+mod header;
 mod message;
+mod popover;
 mod quoted;
+mod source;
 
 use gpui::{
-    App, Context, DismissEvent, Entity, FocusHandle, Focusable, IntoElement, ListAlignment,
-    ListOffset, ListState, MouseButton, Render, Subscription, Window, div, list, prelude::*, px,
-    rgb,
+    App, Context, FocusHandle, Focusable, IntoElement, ListAlignment, ListOffset, ListState,
+    Render, Window, div, list, prelude::*, px, rgb,
 };
 use zmail_core::{MailboxSummary, ThreadView, time::HourCycle};
 
-use self::actions::{MoreItem, action_bar_buttons, more_menu_items};
+use self::actions::{action_bar_buttons, more_menu_items};
 use self::conversation::{
     ConversationItem, ConversationState, render_conversation_header, render_no_conversation,
     render_selection_summary,
 };
 use self::message::{MessageContext, MessageDisplay, render_message};
+use self::popover::OpenPopover;
+pub(crate) use self::popover::PopoverAnchor;
+use self::source::SourceView;
 use crate::actions::{
     NextMessage, PageDown, PageUp, PreviousMessage, ScrollDown, ScrollUp, ToggleMessage,
 };
-use crate::components::{IconButton, Menu, MenuEntry, popover_below};
+use crate::components::{IconButton, ModalState};
 use crate::pane::pane_focus_indicator;
 use crate::styles::UiColors;
 
@@ -85,11 +93,14 @@ pub(crate) struct ReaderView {
     list_state: ListState,
     /// Which messages are expanded and which is current.
     conversation: ConversationState,
-    /// The open More menu and the subscription that closes it.
-    more_menu: Option<(Entity<Menu>, Subscription)>,
-    /// Set when a press on the More button closed the open menu, so the
-    /// click that follows does not reopen it.
-    swallow_more_click: bool,
+    /// The open menu or folder picker.
+    popover: Option<OpenPopover>,
+    /// Set when a press on a popover's trigger closed it, so the click
+    /// that follows does not reopen it.
+    swallow_click: Option<PopoverAnchor>,
+    /// The View Plain Text / View Source dialog.
+    source: Option<SourceView>,
+    source_modal: ModalState,
     /// Test instrumentation: renders.
     #[cfg(test)]
     pub(crate) counters: crate::pane::RenderCounters,
@@ -109,8 +120,10 @@ impl ReaderView {
             state: ReaderState::default(),
             list_state: ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)),
             conversation: ConversationState::default(),
-            more_menu: None,
-            swallow_more_click: false,
+            popover: None,
+            swallow_click: None,
+            source: None,
+            source_modal: ModalState::new(cx),
             #[cfg(test)]
             counters: Default::default(),
         }
@@ -141,7 +154,7 @@ impl ReaderView {
         } else {
             self.conversation = ConversationState::open(thread);
             self.list_state.reset(count);
-            self.more_menu = None;
+            self.popover = None;
         }
         cx.notify();
     }
@@ -158,70 +171,23 @@ impl ReaderView {
         self.state.compact_actions
     }
 
-    /// Whether the More menu is open.
+    /// The action bar's More menu, while it is open.
     #[cfg(test)]
-    pub(crate) fn more_menu(&self) -> Option<Entity<Menu>> {
-        self.more_menu.as_ref().map(|(menu, _)| menu.clone())
+    pub(crate) fn more_menu(&self) -> Option<gpui::Entity<crate::components::Menu>> {
+        self.popover
+            .as_ref()
+            .filter(|popover| popover.anchor == PopoverAnchor::ActionBar)
+            .and_then(|popover| match &popover.content {
+                popover::PopoverContent::Menu(menu) => Some(menu.clone()),
+                popover::PopoverContent::MovePicker(_) => None,
+            })
     }
 
-    /// Opens the More menu and gives it focus. Choosing an entry
-    /// dispatches its action from the reader, like the buttons do.
-    fn open_more_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let items = more_menu_items(self.state.thread.as_ref(), &self.state);
-        if items.is_empty() {
-            return;
-        }
-        let focus_handle = self.focus_handle.clone();
-        let menu = Menu::build(window, cx, |mut menu| {
-            for item in items {
-                menu = match item {
-                    MoreItem::Separator => menu.separator(),
-                    MoreItem::Header(title) => menu.header(title),
-                    MoreItem::Action(action) => {
-                        let focus_handle = focus_handle.clone();
-                        let mut entry = MenuEntry::new(action.label).icon(action.icon);
-                        if let Some(shortcut) = action.shortcut {
-                            entry = entry.shortcut(shortcut);
-                        }
-                        let command = action.action;
-                        menu.entry(entry.on_select(move |window, cx| {
-                            focus_handle.dispatch_action(command.as_ref(), window, cx);
-                        }))
-                    }
-                };
-            }
-            menu
-        });
-        let subscription = cx.subscribe_in(
-            &menu,
-            window,
-            |reader, menu, _: &DismissEvent, window, cx| {
-                // An entry that moved focus elsewhere (none do yet) keeps
-                // it; otherwise focus comes back to the reader.
-                let refocus = menu.focus_handle(cx).contains_focused(window, cx)
-                    || window.focused(cx).is_none();
-                reader.more_menu = None;
-                if refocus {
-                    window.focus(&reader.focus_handle, cx);
-                }
-                cx.notify();
-            },
-        );
-        window.focus(&menu.focus_handle(cx), cx);
-        self.more_menu = Some((menu, subscription));
-        cx.notify();
-    }
-
-    fn toggle_more_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.swallow_more_click) {
-            return;
-        }
-        if self.more_menu.take().is_some() {
-            window.focus(&self.focus_handle, cx);
-            cx.notify();
-        } else {
-            self.open_more_menu(window, cx);
-        }
+    /// Whether `anchor` opened the open popover.
+    fn popover_anchor_is(&self, anchor: PopoverAnchor) -> bool {
+        self.popover
+            .as_ref()
+            .is_some_and(|popover| popover.anchor == anchor)
     }
 
     /// Which messages are expanded and which is current.
@@ -258,6 +224,23 @@ impl ReaderView {
         };
         self.conversation.toggle_expanded(message.id);
         self.conversation.set_current(index);
+        let item = ConversationItem::message_index(index);
+        self.list_state.remeasure_items(item..item + 1);
+        cx.notify();
+    }
+
+    /// Shows or hides the full From, To and Date lines of the message at
+    /// `index`.
+    fn toggle_details(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(message) = self
+            .state
+            .thread
+            .as_ref()
+            .and_then(|thread| thread.messages.get(index))
+        else {
+            return;
+        };
+        self.conversation.toggle_details(message.id);
         let item = ConversationItem::message_index(index);
         self.list_state.remeasure_items(item..item + 1);
         cx.notify();
@@ -359,9 +342,10 @@ impl ReaderView {
                     index,
                     expanded: self.conversation.is_expanded(message.id),
                     unfolded: self.conversation.is_unfolded(message.id),
+                    details: self.conversation.shows_details(message.id),
                     current: self.conversation.current() == Some(index),
                 };
-                render_message(message, display, &context, cx)
+                render_message(self, message, display, &context, cx)
             }
             // The inline reply (UI plan Phase 5) goes here; until then it
             // is the space below the last message.
@@ -443,26 +427,17 @@ impl Render for ReaderView {
                 .children(actions)
                 .when(has_more, |this| {
                     this.child(div().flex_1()).child(
-                        div()
-                            .debug_selector(|| "reader-more".into())
-                            .relative()
-                            .flex_none()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|reader, _, _, _| {
-                                    reader.swallow_more_click = reader.more_menu.is_some();
-                                }),
-                            )
-                            .child(
+                        div().debug_selector(|| "reader-more".into()).child(
+                            self.popover_trigger(
+                                PopoverAnchor::ActionBar,
                                 IconButton::new("reader-more", "ellipsis", "More actions")
-                                    .selected(self.more_menu.is_some())
+                                    .selected(self.popover_anchor_is(PopoverAnchor::ActionBar))
                                     .on_click(cx.listener(|reader, _, window, cx| {
-                                        reader.toggle_more_menu(window, cx);
+                                        reader.toggle_popover(PopoverAnchor::ActionBar, window, cx);
                                     })),
-                            )
-                            .when_some(self.more_menu.as_ref(), |this, (menu, _)| {
-                                this.child(popover_below(menu.clone()))
-                            }),
+                                cx,
+                            ),
+                        ),
                     )
                 }),
             )
@@ -479,5 +454,6 @@ impl Render for ReaderView {
                 .w_full()
                 .into_any_element()
             })
+            .children(self.render_source(&colors, cx))
     }
 }
