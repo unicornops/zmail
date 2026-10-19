@@ -301,7 +301,10 @@ impl ReaderView {
                 .bg(rgb(colors.warning_background))
                 .child(icon("shield-alert", ICON_SIZE_SM, colors.warning))
                 .child(
+                    // Takes the rest of the row and wraps there.
                     div()
+                        .flex_1()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .gap_1()
