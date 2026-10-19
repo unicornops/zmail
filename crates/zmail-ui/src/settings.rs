@@ -33,7 +33,7 @@ use gpui::{
     TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, point, prelude::*, px,
     rgb, size,
 };
-use zmail_core::{AppBootstrap, UpstreamPins};
+use zmail_core::{AccountColor, AppBootstrap, UpstreamPins};
 use zmail_store::LocalStore;
 
 use self::about::AboutSettings;
@@ -49,7 +49,7 @@ use crate::styles::{
     ICON_SIZE_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6, TYPE_BODY, TYPE_BODY_STRONG,
     TYPE_CAPTION, TYPE_TITLE, TypeStyleExt, UiColors,
 };
-use crate::widgets::{EllipsisExt, HoverExt, icon, interactive_background};
+use crate::widgets::{EllipsisExt, HoverExt, account_dot, icon, interactive_background};
 
 /// The key context of the Settings window's root.
 pub(crate) const KEY_CONTEXT: &str = "SettingsWindow";
@@ -551,6 +551,24 @@ impl Focusable for SettingsWindow {
 // Shared section layout
 // ---------------------------------------------------------------------------
 
+/// A setting label with an account's colour dot before it.
+pub(crate) fn dotted_label(color: AccountColor, label: impl IntoElement) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(SPACE_2))
+        .child(account_dot(color))
+        .child(div().min_w_0().child(label))
+}
+
+/// A muted value on the trailing side of a row, such as a version.
+pub(crate) fn row_value(value: impl IntoElement, colors: &UiColors) -> gpui::Div {
+    div()
+        .type_style(TYPE_CAPTION)
+        .text_color(rgb(colors.muted))
+        .child(value)
+}
+
 /// A section's heading.
 pub(crate) fn section_heading(title: &str) -> gpui::Stateful<gpui::Div> {
     div()
@@ -575,7 +593,7 @@ pub(crate) fn group_heading(title: &str, colors: &UiColors) -> gpui::Div {
 /// One setting: its label and a sentence about it on the leading side, the
 /// control on the trailing side, and a divider below.
 pub(crate) fn setting_row(
-    label: impl Into<SharedString>,
+    label: impl IntoElement,
     description: Option<SharedString>,
     control: impl IntoElement,
     colors: &UiColors,
@@ -593,7 +611,7 @@ pub(crate) fn setting_row(
 
 /// A setting's label and description.
 pub(crate) fn setting_text(
-    label: impl Into<SharedString>,
+    label: impl IntoElement,
     description: Option<SharedString>,
     colors: &UiColors,
 ) -> gpui::Div {
@@ -603,7 +621,7 @@ pub(crate) fn setting_text(
         .gap(px(SPACE_1))
         .flex_1()
         .min_w_0()
-        .child(div().type_style(TYPE_BODY_STRONG).child(label.into()))
+        .child(div().type_style(TYPE_BODY_STRONG).child(label))
         .when_some(description, |this, description| {
             this.child(
                 div()

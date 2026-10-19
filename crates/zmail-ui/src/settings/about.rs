@@ -16,17 +16,20 @@
 //! first. The `diagnostics_never_include_mail_or_secrets` test checks it.
 
 use gpui::{
-    ClipboardItem, Context, IntoElement, Render, SharedString, Window, div, prelude::*, px, rgb,
+    ClipboardItem, Context, IntoElement, Render, SharedString, Window, div, prelude::*, px,
 };
 use zmail_core::{
     AccountSummary, OutboxJobState, PendingOp, PendingOpKind, StoreStats, text::count_noun,
 };
 use zmail_store::LocalStore;
 
-use super::{SettingsEvent, SettingsHost, group_heading, section_heading, setting_row};
+use super::{
+    SettingsEvent, SettingsHost, dotted_label, group_heading, row_value, section_heading,
+    setting_row,
+};
 use crate::components::{Button, ButtonSize, ComponentTheme};
-use crate::styles::{SPACE_2, SPACE_3, TYPE_CAPTION, TypeStyleExt, UiColors};
-use crate::widgets::{account_dot, short_sha};
+use crate::styles::{SPACE_2, UiColors};
+use crate::widgets::short_sha;
 
 /// The longest error message the report carries.
 const MAX_REPORT_ERROR_CHARS: usize = 300;
@@ -392,48 +395,37 @@ impl AboutSettings {
                     op.last_error.as_deref().unwrap_or("no error recorded"),
                 )
                 .into();
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_3))
-                    .py(px(SPACE_3))
-                    .border_b_1()
-                    .border_color(rgb(colors.border))
-                    .child(account_dot(color))
-                    .child(super::setting_text(
-                        op_description(&op),
-                        Some(detail),
-                        colors,
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .gap(px(SPACE_2))
-                            .child(
-                                div()
-                                    .debug_selector(move || format!("retry-op-{op_id}"))
-                                    .child(
-                                        Button::new(("retry-op", op_id as u64), "Retry")
-                                            .size(ButtonSize::Small)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.retry_op(op_id, cx)
-                                            })),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .debug_selector(move || format!("discard-op-{op_id}"))
-                                    .child(
-                                        Button::new(("discard-op", op_id as u64), "Discard")
-                                            .size(ButtonSize::Small)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.discard_op(op_id, cx)
-                                            })),
-                                    ),
-                            ),
-                    )
-                    .into_any_element()
+                setting_row(
+                    dotted_label(color, op_description(&op)),
+                    Some(detail),
+                    div()
+                        .flex()
+                        .gap(px(SPACE_2))
+                        .child(
+                            div()
+                                .debug_selector(move || format!("retry-op-{op_id}"))
+                                .child(
+                                    Button::new(("retry-op", op_id as u64), "Retry")
+                                        .size(ButtonSize::Small)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.retry_op(op_id, cx)
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(move || format!("discard-op-{op_id}"))
+                                .child(
+                                    Button::new(("discard-op", op_id as u64), "Discard")
+                                        .size(ButtonSize::Small)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.discard_op(op_id, cx)
+                                        })),
+                                ),
+                        ),
+                    colors,
+                )
+                .into_any_element()
             })
             .collect()
     }
@@ -444,15 +436,7 @@ impl Render for AboutSettings {
         let colors = ComponentTheme::get(cx).colors;
         let diagnostics = &self.diagnostics;
         let line = |label: &'static str, value: String| {
-            setting_row(
-                label,
-                None,
-                div()
-                    .type_style(TYPE_CAPTION)
-                    .text_color(rgb(colors.muted))
-                    .child(value),
-                &colors,
-            )
+            setting_row(label, None, row_value(value, &colors), &colors)
         };
         let version = line(
             "Version",
@@ -467,20 +451,19 @@ impl Render for AboutSettings {
             .map(|account| {
                 let status = &account.account.sync_status;
                 setting_row(
-                    account.account.display_name.clone(),
+                    dotted_label(
+                        account.account.color(),
+                        account.account.display_name.clone(),
+                    ),
                     Some(
-                        format!(
-                            "{} \u{2022} {}",
-                            status.phase.label(),
-                            count_noun(
-                                account.pending_ops,
-                                "change waiting to sync",
-                                "changes waiting to sync"
-                            )
+                        count_noun(
+                            account.pending_ops,
+                            "change waiting to sync",
+                            "changes waiting to sync",
                         )
                         .into(),
                     ),
-                    account_dot(account.account.color()),
+                    row_value(status.phase.label(), &colors),
                     &colors,
                 )
             })
@@ -492,7 +475,7 @@ impl Render for AboutSettings {
             .child(section_heading("About & Diagnostics"))
             .child(version)
             .child(upstream)
-            .child(group_heading("Queues", &colors))
+            .child(group_heading("Store and queues", &colors))
             .child(store)
             .child(outbox)
             .children(accounts)
