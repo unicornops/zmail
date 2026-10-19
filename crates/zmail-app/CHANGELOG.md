@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.13.0](https://github.com/unicornops/zmail/compare/v0.12.0...v0.13.0) (2026-10-19)
+
+
+### Features
+
+* **compose:** inline reply below the conversation, with a pop-out into its own window ([#202](https://github.com/unicornops/zmail/issues/202)) ([2946501](https://github.com/unicornops/zmail/commit/2946501e30fff1d302e86b6d35c4036c6c726a1a))
+* **compose:** new mail in its own window, file-picker and drag-and-drop attachments ([#199](https://github.com/unicornops/zmail/issues/199)) ([534ac3c](https://github.com/unicornops/zmail/commit/534ac3c4ea29b5e795e7c916fd9090d3ee60bde8))
+* **compose:** recipient chips with autocomplete, Cc/Bcc toggles and a From menu ([#195](https://github.com/unicornops/zmail/issues/195)) ([fee3021](https://github.com/unicornops/zmail/commit/fee30216e9a5fc9e6a41ed4731f7f4f701df78b4))
+* **compose:** undo send, holding the outbox job for undo_send_delay ([#200](https://github.com/unicornops/zmail/issues/200)) ([dc6732d](https://github.com/unicornops/zmail/commit/dc6732d6270c4b413c7e08809e22feaabdcc8647))
+* **ui:** attachment cards with Open, Save As and Save All ([#194](https://github.com/unicornops/zmail/issues/194)) ([16ee19f](https://github.com/unicornops/zmail/commit/16ee19fd957604ca339ea07c922a3c0232b4f504))
+* **ui:** readable, selectable message bodies with checked links ([#197](https://github.com/unicornops/zmail/issues/197)) ([1c905d2](https://github.com/unicornops/zmail/commit/1c905d2c9bf1ede130eb157c046c082172cd7d99))
+* **ui:** render the conversation as a list with collapsed read messages ([#190](https://github.com/unicornops/zmail/issues/190)) ([75e8e7f](https://github.com/unicornops/zmail/commit/75e8e7f4c0d68cb3295c1ea7434a2faac30ca5b1))
+* **ui:** tiered sender-safety banners and a remote-content notice in the reader ([#191](https://github.com/unicornops/zmail/issues/191)) ([4514e72](https://github.com/unicornops/zmail/commit/4514e7273356db3c9f5285dc6c05f056854d2a23))
+
 ## [0.12.0](https://github.com/unicornops/zmail/compare/v0.11.0...v0.12.0) (2026-10-19)
 
 
