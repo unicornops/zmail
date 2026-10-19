@@ -5,6 +5,7 @@
 
 ### Features
 
+* **compose:** say when mail queued in the last session has been sent ([#204](https://github.com/unicornops/zmail/issues/204)) ([5d1300a](https://github.com/unicornops/zmail/commit/5d1300a854df9b3b6552745da455fa7f357c275e))
 * **compose:** inline reply below the conversation, with a pop-out into its own window ([#202](https://github.com/unicornops/zmail/issues/202)) ([2946501](https://github.com/unicornops/zmail/commit/2946501e30fff1d302e86b6d35c4036c6c726a1a))
 * **compose:** undo send, holding the outbox job for undo_send_delay ([#200](https://github.com/unicornops/zmail/issues/200)) ([dc6732d](https://github.com/unicornops/zmail/commit/dc6732d6270c4b413c7e08809e22feaabdcc8647))
 * **ui:** attachment cards with Open, Save As and Save All ([#194](https://github.com/unicornops/zmail/issues/194)) ([16ee19f](https://github.com/unicornops/zmail/commit/16ee19fd957604ca339ea07c922a3c0232b4f504))
