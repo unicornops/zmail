@@ -2309,6 +2309,67 @@ fn a_failing_account_offers_fix(cx: &mut TestAppContext) {
     );
 }
 
+/// Queues a one-line draft from the first account and returns the job.
+fn queue_test_message(store: &LocalStore, subject: &str) -> i64 {
+    let account_id = store.list_accounts().expect("accounts")[0].id;
+    let identity = store.list_identities(account_id).expect("identities")[0].id;
+    let draft_id = store
+        .create_draft(&NewDraft {
+            account_id,
+            identity_id: identity,
+            to: vec!["kai@example.test".to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: subject.to_owned(),
+            body: "Hello".to_owned(),
+        })
+        .expect("the draft is stored");
+    store.queue_draft(draft_id).expect("queued")
+}
+
+/// Delivers outbox job `job_id` the way the sync service does.
+fn deliver(store: &LocalStore, job_id: i64) {
+    let claimed = store
+        .claim_due_outbox_job(None)
+        .expect("the claim runs")
+        .expect("a job is due");
+    assert_eq!(claimed.job_id, job_id);
+    store
+        .record_outbox_sent(job_id)
+        .expect("the send is recorded");
+}
+
+#[gpui::test]
+fn mail_queued_in_the_last_session_says_when_it_has_gone(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Inbox,
+        |store| {
+            queue_test_message(store, "Left in the undo window");
+        },
+    );
+    let carried = cx.read_entity(&view, |view, _| view.last_session_jobs.clone());
+    assert_eq!(carried.len(), 1, "the waiting job is from the last session");
+    assert!(
+        toasts(&view, cx).is_empty(),
+        "nothing is said before it sends"
+    );
+
+    deliver(&harness.store, carried[0]);
+    view.update(cx, |view, cx| view.refresh_from_store(cx));
+    assert_eq!(
+        toasts(&view, cx),
+        vec!["1 message from your last session was sent".to_owned()]
+    );
+
+    // Mail sent in this session gets no such notice.
+    let job = queue_test_message(&harness.store, "Sent today");
+    deliver(&harness.store, job);
+    view.update(cx, |view, cx| view.refresh_from_store(cx));
+    assert_eq!(toasts(&view, cx).len(), 1, "no second notice");
+}
+
 #[gpui::test]
 fn the_outbox_row_counts_waiting_mail_and_retries_failures(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::Mail);

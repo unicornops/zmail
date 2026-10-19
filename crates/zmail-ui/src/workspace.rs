@@ -163,6 +163,7 @@ impl WorkspaceView {
             toasts,
             attachments: crate::attachments::AttachmentState::new(cx),
             undo_toast: None,
+            last_session_jobs: Vec::new(),
             compose_windows: Default::default(),
             inline_reply: None,
             mail_refresh_queued: false,
@@ -215,6 +216,17 @@ impl WorkspaceView {
         };
 
         view.prune_open_cache_later(cx);
+
+        // A job still queued or sending now was queued before this window
+        // opened: the sync service sends it, and a toast says so.
+        view.last_session_jobs = view
+            .store
+            .list_outbox_jobs(None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|job| matches!(job.state, OutboxJobState::Queued | OutboxJobState::Sending))
+            .map(|job| job.id)
+            .collect();
 
         // The pane layout follows the window width.
         cx.observe_window_bounds(
@@ -579,6 +591,7 @@ impl WorkspaceView {
         // Drafts and the outbox are Favourites: every account's.
         self.drafts = self.store.list_drafts(None).unwrap_or_default();
         self.outbox_jobs = self.store.list_outbox_jobs(None).unwrap_or_default();
+        self.notice_last_session_sends(cx);
         self.flagged_unread = self
             .store
             .selection_counts(&MailboxSelection::Virtual(VirtualMailbox::Flagged))
@@ -2108,6 +2121,36 @@ impl WorkspaceView {
         self.change_threads(cx, |actions, thread_ids, cx| {
             actions.move_threads(thread_ids, mailbox_id, cx)
         });
+    }
+
+    /// Shows "N messages from your last session were sent" once jobs queued
+    /// before this window opened have been delivered. Jobs that fail or
+    /// retry drop out quietly: the Outbox already shows them.
+    fn notice_last_session_sends(&mut self, cx: &mut Context<Self>) {
+        if self.last_session_jobs.is_empty() {
+            return;
+        }
+        let mut sent = 0;
+        self.last_session_jobs.retain(|job_id| {
+            match self.outbox_jobs.iter().find(|job| job.id == *job_id) {
+                Some(job) if job.state == OutboxJobState::Sent => {
+                    sent += 1;
+                    false
+                }
+                Some(job) => matches!(job.state, OutboxJobState::Queued | OutboxJobState::Sending),
+                None => false,
+            }
+        });
+        if sent > 0 {
+            let message = format!(
+                "{} from your last session {} sent",
+                count_noun(sent, "message", "messages"),
+                if sent == 1 { "was" } else { "were" }
+            );
+            self.toasts.update(cx, |toasts, cx| {
+                toasts.push(Toast::new(message), cx);
+            });
+        }
     }
 
     /// Secondary+Z: reverses the latest mail change.
