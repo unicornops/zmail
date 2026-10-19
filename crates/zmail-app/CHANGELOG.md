@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.12.0](https://github.com/unicornops/zmail/compare/v0.11.0...v0.12.0) (2026-10-19)
+
+
+### Features
+
+* **search:** scope searches to the folder, the account or every account ([#184](https://github.com/unicornops/zmail/issues/184)) ([a2543b4](https://github.com/unicornops/zmail/commit/a2543b407733014adefdc45affc2d830c4c8b624))
+* **ui:** account colours on list rows and density in the sidebar ([#182](https://github.com/unicornops/zmail/issues/182)) ([df9729e](https://github.com/unicornops/zmail/commit/df9729eff1f543694ac7e2e0ee07df429b82d3da))
+* **ui:** skeleton rows, empty states and plain-word outbox rows ([#180](https://github.com/unicornops/zmail/issues/180)) ([4bc5a58](https://github.com/unicornops/zmail/commit/4bc5a5896ee7a064d5fb7f2cb3fee411119e98a7))
+* **ui:** list header with filters and hover quick actions ([#177](https://github.com/unicornops/zmail/issues/177)) ([a7a0ce7](https://github.com/unicornops/zmail/commit/a7a0ce736fc1d561f0958d273eeefbd914a22fb4))
+* **ui:** drag conversations from the list onto sidebar folders ([#183](https://github.com/unicornops/zmail/issues/183)) ([605814a](https://github.com/unicornops/zmail/commit/605814a30ffcef520afc89b1c78b7b656ff309b1))
+* **ui:** right-click menu on message list rows ([#178](https://github.com/unicornops/zmail/issues/178)) ([224361a](https://github.com/unicornops/zmail/commit/224361a2fb4464b3d8cf11fcb436bc53aa0f97d6))
+* **ui:** multi-select in the message list, with a bulk action bar and a Move to picker ([#176](https://github.com/unicornops/zmail/issues/176)) ([feeadc4](https://github.com/unicornops/zmail/commit/feeadc48f6668567f6d80cae0b81a91a56947baf))
+* **ui:** sidebar with unified inbox, favourites and folder trees ([#179](https://github.com/unicornops/zmail/issues/179)) ([2e7a16d](https://github.com/unicornops/zmail/commit/2e7a16dbf8353cf088ba9e374ce0e42a4c5afbb8))
+* **ui:** comfortable and compact message rows ([#175](https://github.com/unicornops/zmail/issues/175)) ([2d53336](https://github.com/unicornops/zmail/commit/2d533367ce3de3dff5d259baa9e63c96c3d21858))
+* **store:** unified inbox and flagged thread lists across accounts ([#174](https://github.com/unicornops/zmail/issues/174)) ([b83e915](https://github.com/unicornops/zmail/commit/b83e91520b3aa440b711ae14d392897d8c48a003))
+* **ui:** undo toast for mail changes, with exact inverses that fold into the write-back queue ([#173](https://github.com/unicornops/zmail/issues/173)) ([46fa375](https://github.com/unicornops/zmail/commit/46fa375503f623229877c02a296ccf19e49a0bd7))
+* **store:** mailbox roles and hierarchy in the mailbox model ([#172](https://github.com/unicornops/zmail/issues/172)) ([dde26f3](https://github.com/unicornops/zmail/commit/dde26f3f3825156f163aef0ec6e5636e444df5f3))
+
 ## [0.11.0](https://github.com/unicornops/zmail/compare/v0.10.0...v0.11.0) (2026-10-18)
 
 
