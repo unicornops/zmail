@@ -3,17 +3,21 @@
 //! [`ComposeView`] is its own entity with its own focus handle and the
 //! `Compose` key context. It edits one draft at a time: the shell opens a
 //! draft with [`ComposeView::load_draft`], edits autosave through
-//! [`MailActions`], and Send queues the draft with the sync service. Status
-//! and errors go to the shell as [`ComposeEvent`]s.
+//! [`MailActions`] once typing pauses for [`AUTOSAVE_DELAY`], and Send
+//! queues the draft with the sync service. Status and errors go to the
+//! shell as [`ComposeEvent`]s.
 //!
 //! [`ComposeState`] holds the open draft's inputs and store-owned fields.
+//! The inputs are built once per draft and never rebuilt from the store
+//! while that draft stays open, so saving and the shell's store refreshes
+//! never move the cursor.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result};
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, IntoElement, Render, StatefulInteractiveElement, Subscription, Window, div,
+    FontWeight, IntoElement, Render, StatefulInteractiveElement, Subscription, Task, Window, div,
     prelude::*, px, rgb,
 };
 use zmail_core::{DraftAttachment, DraftDetail, DraftState, DraftUpdate, IdentitySummary};
@@ -28,6 +32,8 @@ use crate::workspace::split_addresses;
 
 /// The key context the compose pane sets.
 pub(crate) const KEY_CONTEXT: &str = "Compose";
+/// How long typing must pause before the draft autosaves.
+pub(crate) const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
 use crate::styles::{ICON_BUTTON_SIZE, ICON_SIZE_SM, UiColors};
 use crate::widgets::{
     EllipsisExt, empty_state, format_size, icon, input_card, label_chip, section_card,
@@ -159,6 +165,12 @@ pub(crate) struct ComposeView {
     pub(crate) compose: Option<ComposeState>,
     /// Subscriptions to the open draft's inputs.
     input_subscriptions: Vec<Subscription>,
+    /// Set by an edit that has not been saved yet.
+    unsaved_edits: bool,
+    /// The pending autosave. Each edit replaces it, which cancels the one
+    /// before, so the save runs once typing pauses.
+    autosave_task: Task<()>,
+    _quit_subscription: Subscription,
 }
 
 impl EventEmitter<ComposeEvent> for ComposeView {}
@@ -176,6 +188,12 @@ impl ComposeView {
         mail_actions: Entity<MailActions>,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Quitting within the autosave delay of the last keystroke still
+        // keeps it.
+        let quit_subscription = cx.on_app_quit(|this, cx| {
+            this.flush_autosave(cx);
+            async {}
+        });
         Self {
             focus_handle: cx.focus_handle(),
             store,
@@ -184,6 +202,9 @@ impl ComposeView {
             identities: Vec::new(),
             compose: None,
             input_subscriptions: Vec::new(),
+            unsaved_edits: false,
+            autosave_task: Task::ready(()),
+            _quit_subscription: quit_subscription,
         }
     }
 
@@ -205,13 +226,17 @@ impl ComposeView {
     }
 
     /// Opens a draft. Re-opening the draft that is already open keeps its
-    /// inputs, so the cursor stays put.
+    /// inputs, so the cursor stays put; opening another one first saves any
+    /// edits to the open draft still waiting for the autosave.
     pub(crate) fn load_draft(
         &mut self,
         draft_id: i64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
+        if self.draft_id().is_some_and(|open| open != draft_id) {
+            self.flush_autosave(cx);
+        }
         let draft = self
             .store
             .draft_detail(draft_id)?
@@ -282,9 +307,9 @@ impl ComposeView {
                 cx.subscribe_in(
                     input,
                     window,
-                    |this: &mut Self, _, event: &TextInputEvent, _, cx| {
+                    |this: &mut Self, _, event: &TextInputEvent, window, cx| {
                         if *event == TextInputEvent::Changed {
-                            this.autosave(cx);
+                            this.schedule_autosave(window, cx);
                         }
                     },
                 )
@@ -302,7 +327,8 @@ impl ComposeView {
     }
 
     /// Writes the inputs back to the store through [`MailActions`].
-    fn save(&self, cx: &mut Context<Self>) -> Result<()> {
+    fn save(&mut self, cx: &mut Context<Self>) -> Result<()> {
+        self.unsaved_edits = false;
         let Some(compose) = self.compose.as_ref() else {
             return Ok(());
         };
@@ -320,14 +346,27 @@ impl ComposeView {
             .update(cx, |actions, cx| actions.save_draft(draft_id, &update, cx))
     }
 
-    /// Saves after an edit. The shell refreshes the drafts list a moment
-    /// later from the `DraftSaved` event.
-    fn autosave(&mut self, cx: &mut Context<Self>) {
+    /// Saves [`AUTOSAVE_DELAY`] after the latest edit. The shell refreshes
+    /// the drafts list a moment later from the `DraftSaved` event.
+    fn schedule_autosave(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.unsaved_edits = true;
+        self.autosave_task = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(AUTOSAVE_DELAY).await;
+            let _ = this.update(cx, |this, cx| this.flush_autosave(cx));
+        });
+        // The title follows the subject.
+        cx.notify();
+    }
+
+    /// Saves edits still waiting for the autosave now. The pending timer
+    /// then finds nothing to save.
+    pub(crate) fn flush_autosave(&mut self, cx: &mut Context<Self>) {
+        if !self.unsaved_edits {
+            return;
+        }
         if let Err(error) = self.save(cx) {
             cx.emit(ComposeEvent::Error(error.to_string()));
         }
-        // The title follows the subject.
-        cx.notify();
     }
 
     fn save_draft(&mut self, _: &SaveDraft, _: &mut Window, cx: &mut Context<Self>) {
