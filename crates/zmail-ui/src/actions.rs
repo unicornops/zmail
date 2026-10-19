@@ -130,6 +130,12 @@ actions!(
         PageUp,
         /// Scroll the conversation down a page.
         PageDown,
+        /// Move to the next message of the conversation.
+        NextMessage,
+        /// Move to the previous message of the conversation.
+        PreviousMessage,
+        /// Expand or collapse the current message.
+        ToggleMessage,
         // ---- Forms (Compose, AccountSetup) -------------------------------
         // Tab between fields is the text input's own binding.
         /// Send the open draft.

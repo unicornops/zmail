@@ -34,8 +34,14 @@ pub(crate) enum FixtureView {
     /// that failed. (A queued message would be sent, and fail, as soon as
     /// the window opens.)
     Outbox,
-    /// The reader on a longer conversation with an attachment.
+    /// The reader on a longer conversation with an attachment: the read
+    /// messages collapsed, the unread one expanded.
     Reader,
+    /// The same conversation with every message expanded, and the quoted
+    /// text folded.
+    ReaderExpanded,
+    /// The reader on one long message with a signature and quoted text.
+    ReaderLong,
     /// The compose pane on a half-written reply.
     Compose,
     /// The account setup pane with an account already configured.
@@ -64,6 +70,8 @@ impl FixtureView {
             "syncing" => Self::Syncing,
             "outbox" => Self::Outbox,
             "reader" => Self::Reader,
+            "reader-expanded" => Self::ReaderExpanded,
+            "reader-long" => Self::ReaderLong,
             "compose" => Self::Compose,
             "account-setup" => Self::AccountSetup,
             "sidebar" => Self::Sidebar,
@@ -71,7 +79,7 @@ impl FixtureView {
             "multi-select" => Self::MultiSelect,
             "search" => Self::Search,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, compose, account-setup, sidebar, accounts, multi-select or search"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, compose, account-setup, sidebar, accounts, multi-select or search"
             ),
         })
     }
@@ -168,16 +176,17 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         FixtureView::Sidebar => InitialView::Sidebar,
         FixtureView::MultiSelect => InitialView::MultiSelect,
         FixtureView::Reader => {
-            let inbox = store
-                .mailbox_id_by_role(account_id, "inbox")?
-                .context("the fixture inbox is missing")?;
-            let thread = store
-                .list_threads(inbox, 0..100)?
-                .into_iter()
-                .find(|thread| thread.subject == "Q4 roadmap review")
-                .context("the fixture reader thread is missing")?;
-            InitialView::Thread(thread.id)
+            InitialView::Thread(thread_id(store, account_id, "inbox", "Q4 roadmap review")?)
         }
+        FixtureView::ReaderExpanded => {
+            InitialView::ThreadExpanded(thread_id(store, account_id, "inbox", "Q4 roadmap review")?)
+        }
+        FixtureView::ReaderLong => InitialView::Thread(thread_id(
+            store,
+            account_id,
+            "archive",
+            LONG_THREAD_SUBJECT,
+        )?),
         FixtureView::Compose => {
             let identity = store
                 .list_identities(account_id)?
@@ -200,6 +209,19 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
             InitialView::Draft(draft_id)
         }
     })
+}
+
+/// The id of the thread called `subject` in the mailbox with `role`.
+fn thread_id(store: &LocalStore, account_id: i64, role: &str, subject: &str) -> Result<i64> {
+    let mailbox = store
+        .mailbox_id_by_role(account_id, role)?
+        .with_context(|| format!("the fixture {role} is missing"))?;
+    store
+        .list_threads(mailbox, 0..100)?
+        .into_iter()
+        .find(|thread| thread.subject == subject)
+        .map(|thread| thread.id)
+        .with_context(|| format!("the fixture thread {subject:?} is missing"))
 }
 
 /// Queues three replies and moves them to the sending, retrying and
@@ -325,7 +347,11 @@ const INBOX: &[Thread] = &[
                 is_read: true,
                 body: "Looks good overall. Offline search depends on the new index format, \
                        so I'd plan it for November rather than October. Everything else \
-                       seems realistic.\n\nMarcus",
+                       seems realistic.\n\nMarcus\n\n\
+                       On Tue, Priya Raman <priya.raman@example.org> wrote:\n\
+                       > Hi both,\n>\n\
+                       > Attached is the draft Q4 roadmap. Could you mark anything that \
+                       looks too ambitious before Thursday's review?\n>\n> Priya",
                 attachments: &[],
             },
             Message {
@@ -457,18 +483,63 @@ const INBOX: &[Thread] = &[
     },
 ];
 
-const ARCHIVE: &[Thread] = &[Thread {
-    id: "t-archived",
-    subject: "Contract renewal signed",
-    flagged: false,
-    messages: &[Message {
-        sender: "Legal Team <legal@example.com>",
-        minutes_ago: 60 * DAY,
-        is_read: true,
-        body: "The renewal is signed and filed. No action needed.",
-        attachments: &[],
-    }],
-}];
+/// The subject of the `reader-long` conversation.
+const LONG_THREAD_SUBJECT: &str = "Draft release notes for 0.13";
+
+const ARCHIVE: &[Thread] = &[
+    Thread {
+        id: "t-archived",
+        subject: "Contract renewal signed",
+        flagged: false,
+        messages: &[Message {
+            sender: "Legal Team <legal@example.com>",
+            minutes_ago: 60 * DAY,
+            is_read: true,
+            body: "The renewal is signed and filed. No action needed.",
+            attachments: &[],
+        }],
+    },
+    Thread {
+        id: "t-release-notes",
+        subject: LONG_THREAD_SUBJECT,
+        flagged: false,
+        messages: &[Message {
+            sender: "Grace Okafor <grace.okafor@example.com>",
+            minutes_ago: 2 * DAY + 4 * HOUR,
+            is_read: true,
+            body: "Hi Sam,\n\n\
+                   Here is a first draft of the release notes for 0.13. I kept them short \
+                   and grouped the changes by what people will notice, not by crate.\n\n\
+                   Reading mail\n\
+                   Conversations now open with the messages you have read folded into a \
+                   single line, so the newest reply is what you see first. Quoted text and \
+                   signatures fold behind a small toggle, and n and p move between \
+                   messages without reaching for the mouse.\n\n\
+                   Search\n\
+                   Searches can be scoped to the folder, the account or every account, and \
+                   the scope is remembered per window. Results from a server search are \
+                   marked so it is clear which ones are not in the local mirror yet.\n\n\
+                   Message list\n\
+                   Rows have a comfortable and a compact density, hover actions for \
+                   archive, delete, flag and read, and account colours in the Unified \
+                   Inbox. Selecting several conversations shows a bar for acting on all \
+                   of them at once, with undo.\n\n\
+                   Fixes\n\
+                   - The reader no longer wraps its action bar onto two rows.\n\
+                   - Dates in the reader use the same relative format as the list.\n\
+                   - Moving a conversation keeps the list's scroll position.\n\n\
+                   The full changelog is at https://example.com/zmail/changelog and the \
+                   tracking issue has the screenshots. Let me know what you would cut; I \
+                   think the search section could lose a sentence.\n\n\
+                   Thanks,\nGrace\n\n\
+                   --\nGrace Okafor\nRelease manager, Example Ltd\n\n\
+                   On Mon, Sam Taylor <sam.taylor@example.com> wrote:\n\
+                   > Could you draft the release notes for 0.13? Nothing long, the \
+                   highlights are enough.\n>\n> Sam",
+            attachments: &[],
+        }],
+    },
+];
 
 fn fixture_snapshot(now: u64) -> AccountSyncSnapshot {
     let mailbox = |name: &str, role: Option<&str>, threads: &[Thread]| MailboxSnapshot {
@@ -742,6 +813,8 @@ mod tests {
             "syncing",
             "outbox",
             "reader",
+            "reader-expanded",
+            "reader-long",
             "compose",
             "account-setup",
             "sidebar",
@@ -843,6 +916,37 @@ mod tests {
         // Bodies are seeded, so opening the thread never tries to fetch
         // them from a server.
         assert_eq!(store.messages_missing_bodies(thread_id)?, Some(Vec::new()));
+        Ok(())
+    }
+
+    #[test]
+    fn reader_expanded_opens_the_roadmap_thread_expanded() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::ReaderExpanded)?;
+        let InitialView::ThreadExpanded(thread_id) = initial_view else {
+            bail!("the reader-expanded fixture should open a thread, not {initial_view:?}");
+        };
+        let thread = store
+            .thread_view(thread_id)?
+            .context("thread should exist")?;
+        assert_eq!(thread.subject, "Q4 roadmap review");
+        Ok(())
+    }
+
+    #[test]
+    fn reader_long_opens_the_archived_release_notes() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::ReaderLong)?;
+        let InitialView::Thread(thread_id) = initial_view else {
+            bail!("the reader-long fixture should open a thread, not {initial_view:?}");
+        };
+        let thread = store
+            .thread_view(thread_id)?
+            .context("thread should exist")?;
+        assert_eq!(thread.subject, LONG_THREAD_SUBJECT);
+        assert!(
+            thread.messages[0]
+                .rendered_body
+                .contains("\n--\nGrace Okafor")
+        );
         Ok(())
     }
 

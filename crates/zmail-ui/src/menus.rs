@@ -90,6 +90,9 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
     ("zmail::ScrollDown", "reader scrolling key"),
     ("zmail::PageUp", "reader scrolling key"),
     ("zmail::PageDown", "reader scrolling key"),
+    ("zmail::NextMessage", "reader navigation key"),
+    ("zmail::PreviousMessage", "reader navigation key"),
+    ("zmail::ToggleMessage", "reader navigation key"),
     (
         "zmail::FocusNextPane",
         "keyboard focus navigation (Tab, F6)",

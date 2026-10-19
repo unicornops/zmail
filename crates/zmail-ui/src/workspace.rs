@@ -260,11 +260,15 @@ impl WorkspaceView {
             }
             // `show_thread`, not `select_thread`, which would mark the thread
             // read after a delay.
-            InitialView::Thread(thread_id) => {
+            InitialView::Thread(thread_id) | InitialView::ThreadExpanded(thread_id) => {
                 if let Ok(Some(thread)) = view.store.thread_view(thread_id) {
                     view.show_thread(thread_id, thread.mailbox_id, cx);
                     view.refresh_from_store(cx);
                     view.focus_pane(Pane::Detail, window, cx);
+                }
+                if matches!(initial_view, InitialView::ThreadExpanded(_)) {
+                    view.sync_panes(cx);
+                    view.reader.update(cx, |reader, cx| reader.expand_all(cx));
                 }
             }
             InitialView::AccountSetup => view.open_account_setup(window, cx),
