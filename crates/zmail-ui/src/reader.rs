@@ -31,6 +31,7 @@
 //! | `banners` | The remote-content notice and the sender-safety banners |
 
 mod actions;
+mod attachments;
 mod banners;
 mod body;
 mod conversation;

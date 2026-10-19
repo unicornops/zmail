@@ -15,6 +15,7 @@
 //! | `compose` | `ComposeView`: the draft editor; `ComposeWindow`, one window per draft; `RecipientField` chips |
 //! | `account_setup` | `AccountSetupView`: the new-account form |
 //! | `mail_actions` | `MailActions`: store writes, `MailEvent`s and undo |
+//! | `attachments` | opening and saving received attachments (Open, Save As, Save All) |
 //! | `drag` | `DraggedThreads`: conversations dragged from the list onto sidebar folders |
 //! | `move_picker` | `MovePicker`: the searchable Move to… folder picker |
 //! | `actions` | every command as a GPUI action |
@@ -55,6 +56,7 @@ pub use components::gallery::run_gallery;
 mod account_setup;
 mod actions;
 mod app_menu;
+mod attachments;
 mod compose;
 mod diagnostics;
 mod drag;
@@ -297,6 +299,9 @@ struct WorkspaceView {
     app_menu: Entity<AppMenuButton>,
     /// Undo toasts at the bottom of the window.
     toasts: Entity<components::ToastHost>,
+    /// Opening and saving attachments: the warning before opening a
+    /// program, and where Save As starts.
+    attachments: attachments::AttachmentState,
     /// The toast offering to undo the latest mail change, and that change.
     undo_toast: Option<(components::ToastId, mail_actions::UndoId)>,
     /// The open compose windows, by draft, with the subscriptions to their

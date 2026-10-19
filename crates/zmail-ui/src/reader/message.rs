@@ -16,13 +16,13 @@ use zmail_core::{
 };
 
 use super::ReaderView;
-use super::banners;
 use super::body::{BodyContext, render_paragraphs};
 use super::header::{render_details, render_header};
 use super::quoted::split_folded_tail;
+use super::{attachments, banners};
 use crate::components::{Avatar, ButtonSize, IconButton};
 use crate::styles::{AVATAR_SIZE, UiColors};
-use crate::widgets::{EllipsisExt, format_size, label_chip};
+use crate::widgets::EllipsisExt;
 
 /// The avatar size on a collapsed message's summary line.
 const COLLAPSED_AVATAR_SIZE: f32 = 24.0;
@@ -232,23 +232,8 @@ fn message_banners(message: &ThreadMessage, _colors: &UiColors) -> Vec<AnyElemen
     banners::message_banners(message)
 }
 
-/// The attachments slot of an expanded message, below its body.
+/// The attachments slot of an expanded message, below its body: a card
+/// per attachment.
 fn message_attachments(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyElement> {
-    message
-        .attachments
-        .iter()
-        .map(|attachment| {
-            label_chip(
-                format!(
-                    "{} ({})",
-                    attachment.filename,
-                    format_size(attachment.size_bytes)
-                ),
-                Some("paperclip"),
-                colors.button_background,
-                colors.info,
-            )
-            .into_any_element()
-        })
-        .collect()
+    attachments::attachment_cards(message, colors)
 }

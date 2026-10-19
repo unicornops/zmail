@@ -33,6 +33,7 @@ use crate::{DetailMode, InitialView, ListMode, WorkspaceView};
 mod compose;
 mod list;
 mod reader;
+mod reader_attachments;
 mod reader_safety;
 
 /// What the store holds when the window opens.

@@ -101,6 +101,9 @@ MATRIX=(
   "reader-safety-caution-light reader-safety-caution light 1440 920"
   "reader-safety-danger-dark reader-safety-danger dark 1440 920"
   "reader-safety-danger-light reader-safety-danger light 1440 920"
+  "reader-attachments-dark reader-attachments dark 1440 920"
+  "reader-attachments-light reader-attachments light 1440 920"
+  "reader-attachments-dark-720 reader-attachments dark 720 720"
 )
 
 usage() {
