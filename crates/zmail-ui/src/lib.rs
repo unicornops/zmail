@@ -309,6 +309,10 @@ struct WorkspaceView {
     attachments: attachments::AttachmentState,
     /// The toast offering to undo the latest mail change, and that change.
     undo_toast: Option<(components::ToastId, mail_actions::UndoId)>,
+    /// Outbox jobs that were waiting to send when the window opened, so
+    /// queued in an earlier session (for example during its Undo Send
+    /// window). A toast says so once they have gone.
+    last_session_jobs: Vec<i64>,
     /// The inline reply below a conversation, if one is open. The reader
     /// shows it while that conversation is open.
     inline_reply: Option<workspace::InlineReply>,
