@@ -26,8 +26,8 @@
 //! | `layout` | the responsive pane layout: breakpoints and pane widths |
 //! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, `TextInput`, … and the gallery |
 //! | `styles` | design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
-//! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar, pane widths) |
-//! | `widgets` | `toolbar_button`, `input_card`, `list_row`, `icon`, … |
+//! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar, pane widths, density) |
+//! | `widgets` | `toolbar_button`, `input_card`, `empty_state`, `icon`, … |
 //! | `diagnostics` | internal counters kept for the future Settings → About page |
 
 use std::sync::Arc;
@@ -116,6 +116,8 @@ pub enum InitialView {
     /// The inbox with its three newest threads selected, so the bulk
     /// action bar shows.
     MultiSelect,
+    /// The outbox list.
+    Outbox,
 }
 
 /// Runs the native Phase 4 shell.

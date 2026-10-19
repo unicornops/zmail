@@ -23,9 +23,10 @@ use gpui::{
     px, relative, rgb,
 };
 use zmail_core::{
-    SearchHit, ThreadSummary,
-    participants::{participant_names, sender_identity},
-    time::{HourCycle, format_full_date, format_list_date},
+    DraftState, DraftSummary, OutboxJobState, OutboxJobSummary, SearchHit, ThreadSummary,
+    participants::{parse_address_list, participant_names, sender_identity},
+    text::count_noun,
+    time::{HourCycle, format_full_date, format_list_date, parse_timestamp},
 };
 
 use super::selection::{row_background, row_colors};
@@ -56,8 +57,12 @@ pub(super) struct MessageRow {
     pub(super) avatar_name: String,
     pub(super) avatar_address: Option<String>,
     pub(super) subject: String,
-    /// One line of the latest message.
+    /// One line of the latest message, or a draft's or queued message's
+    /// status.
     pub(super) snippet: String,
+    /// How the snippet reads: muted text, or a status that needs
+    /// attention.
+    pub(super) snippet_tone: SnippetTone,
     /// Short relative date ("10:42", "Yesterday", "Mon", "12 Oct").
     pub(super) date: String,
     /// Full timestamp shown when hovering the date.
@@ -73,6 +78,16 @@ pub(super) struct MessageRow {
     /// The account the thread belongs to, in lists that span accounts
     /// (the Unified Inbox); `None` in a single account's mailbox.
     pub(super) account: Option<RowAccount>,
+}
+
+/// The colour of a row's snippet line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum SnippetTone {
+    /// Secondary text.
+    #[default]
+    Muted,
+    /// A problem, such as a message that failed to send.
+    Danger,
 }
 
 /// The account chip of a row in a cross-account list: the account's
@@ -106,6 +121,7 @@ impl MessageRow {
             avatar_address: address,
             subject: display_subject(&thread.subject).to_owned(),
             snippet: thread.preview.clone(),
+            snippet_tone: SnippetTone::Muted,
             date: format_list_date(&thread.latest_message_at, now, hour_cycle),
             date_tooltip: format_full_date(&thread.latest_message_at, &now.timezone(), hour_cycle),
             unread: thread.unread_count > 0,
@@ -132,6 +148,7 @@ impl MessageRow {
             avatar_address: address,
             subject: display_subject(&hit.subject).to_owned(),
             snippet: hit.preview.clone(),
+            snippet_tone: SnippetTone::Muted,
             date: format_list_date(&hit.latest_message_at, now, hour_cycle),
             date_tooltip: format_full_date(&hit.latest_message_at, &now.timezone(), hour_cycle),
             unread: hit.unread_count > 0,
@@ -146,6 +163,100 @@ impl MessageRow {
             } else {
                 hit.mailbox_name.clone()
             }),
+            account: None,
+        }
+    }
+
+    /// The row for a draft: who it is to, its subject, and its state.
+    pub(super) fn draft(
+        id: SharedString,
+        draft: &DraftSummary,
+        now: &chrono::DateTime<chrono::Local>,
+        hour_cycle: HourCycle,
+    ) -> Self {
+        let (sender, avatar_name, avatar_address) =
+            recipient_line(&draft.recipient_summary, &draft.identity_name);
+        let mut status = Vec::new();
+        if draft.state != DraftState::Editing {
+            status.push(draft.state.label().to_owned());
+        }
+        if draft.attachment_count > 0 {
+            status.push(count_noun(
+                draft.attachment_count,
+                "attachment",
+                "attachments",
+            ));
+        }
+        Self {
+            id,
+            sender,
+            avatar_name,
+            avatar_address,
+            subject: display_subject(&draft.subject).to_owned(),
+            snippet: if status.is_empty() {
+                "Draft".to_owned()
+            } else {
+                status.join(" \u{2022} ")
+            },
+            snippet_tone: if draft.state == DraftState::Failed {
+                SnippetTone::Danger
+            } else {
+                SnippetTone::Muted
+            },
+            date: format_list_date(&draft.updated_at, now, hour_cycle),
+            date_tooltip: format_full_date(&draft.updated_at, &now.timezone(), hour_cycle),
+            unread: false,
+            message_count: 0,
+            is_flagged: false,
+            has_attachments: draft.attachment_count > 0,
+            label: None,
+            account: None,
+        }
+    }
+
+    /// The row for a message in the outbox: who it is to, its subject,
+    /// and how sending is going, in plain words.
+    pub(super) fn outbox_job(
+        id: SharedString,
+        job: &OutboxJobSummary,
+        draft: Option<&DraftSummary>,
+        now: &chrono::DateTime<chrono::Local>,
+        hour_cycle: HourCycle,
+    ) -> Self {
+        let (sender, avatar_name, avatar_address) = recipient_line(
+            draft
+                .map(|draft| draft.recipient_summary.as_str())
+                .unwrap_or(""),
+            draft
+                .map(|draft| draft.identity_name.as_str())
+                .unwrap_or(""),
+        );
+        let status = outbox_status(job, now);
+        let updated_at = draft.map(|draft| draft.updated_at.as_str()).unwrap_or("");
+        Self {
+            id,
+            sender,
+            avatar_name,
+            avatar_address,
+            subject: display_subject(draft.map(|draft| draft.subject.as_str()).unwrap_or(""))
+                .to_owned(),
+            snippet: status.text,
+            snippet_tone: if status.failed {
+                SnippetTone::Danger
+            } else {
+                SnippetTone::Muted
+            },
+            date: format_list_date(updated_at, now, hour_cycle),
+            // The server's own words, for whoever wants them.
+            date_tooltip: job
+                .last_error_message
+                .clone()
+                .unwrap_or_else(|| format_full_date(updated_at, &now.timezone(), hour_cycle)),
+            unread: false,
+            message_count: 0,
+            is_flagged: false,
+            has_attachments: draft.is_some_and(|draft| draft.attachment_count > 0),
+            label: None,
             account: None,
         }
     }
@@ -177,6 +288,94 @@ impl MessageRow {
     /// A test selector for one part of the row: `{id}-{part}`.
     fn part(&self, part: &str) -> String {
         format!("{}-{part}", self.id)
+    }
+}
+
+/// The sender line of an outgoing message ("To: Priya Raman +2"), and
+/// the name and address its avatar uses: the first recipient's, or the
+/// sending identity's while there is none.
+///
+/// `summary` is the store's recipient summary: the first recipient, then
+/// " +N" for the others, or "(no recipients)".
+fn recipient_line(summary: &str, identity_name: &str) -> (String, String, Option<String>) {
+    let summary = summary.trim();
+    let (first, others) = match summary.rsplit_once(" +") {
+        Some((first, others)) if others.parse::<usize>().is_ok() => (first, format!(" +{others}")),
+        _ => (summary, String::new()),
+    };
+    match parse_address_list(first).into_iter().next() {
+        Some(first) if summary != "(no recipients)" => {
+            let name = first.display_name().to_owned();
+            (format!("To: {name}{others}"), name, first.email)
+        }
+        _ => (
+            "No recipients yet".to_owned(),
+            identity_name.to_owned(),
+            None,
+        ),
+    }
+}
+
+/// How sending a queued message is going, in plain words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OutboxStatus {
+    pub(super) text: String,
+    /// The last attempt failed.
+    pub(super) failed: bool,
+    /// Offer "Retry now": the message is waiting for a retry, or gave up.
+    pub(super) can_retry: bool,
+}
+
+/// "Sending…", "Failed — retrying in 5 min", "Couldn't send" and so on,
+/// instead of the job's state name and attempt count.
+pub(super) fn outbox_status(
+    job: &OutboxJobSummary,
+    now: &chrono::DateTime<chrono::Local>,
+) -> OutboxStatus {
+    let status = |text: &str, failed, can_retry| OutboxStatus {
+        text: text.to_owned(),
+        failed,
+        can_retry,
+    };
+    match job.state {
+        OutboxJobState::Queued => status("Waiting to send", false, false),
+        OutboxJobState::Sending => status("Sending\u{2026}", false, false),
+        OutboxJobState::Sent => status("Sent", false, false),
+        OutboxJobState::Failed => status("Couldn\u{2019}t send", true, true),
+        OutboxJobState::Retrying => {
+            let wait = job
+                .next_attempt_at
+                .as_deref()
+                .and_then(parse_timestamp)
+                .map(|at| at.with_timezone(&chrono::Utc) - now.with_timezone(&chrono::Utc));
+            let text = match wait {
+                Some(wait) if wait.num_seconds() > 0 => {
+                    format!("Failed \u{2014} retrying in {}", short_duration(wait))
+                }
+                _ => "Failed \u{2014} retrying now".to_owned(),
+            };
+            OutboxStatus {
+                text,
+                failed: true,
+                can_retry: true,
+            }
+        }
+    }
+}
+
+/// "30 sec", "5 min", "2 h", "3 days": rounded up, so a wait never
+/// reads shorter than it is.
+fn short_duration(duration: chrono::TimeDelta) -> String {
+    let seconds = duration.num_seconds().max(1);
+    let ceil = |unit: i64| (seconds + unit - 1) / unit;
+    if seconds < 60 {
+        format!("{seconds} sec")
+    } else if seconds < 60 * 60 {
+        format!("{} min", ceil(60))
+    } else if seconds < 24 * 60 * 60 {
+        format!("{} h", ceil(60 * 60))
+    } else {
+        count_noun(ceil(24 * 60 * 60) as usize, "day", "days")
     }
 }
 
@@ -310,7 +509,7 @@ fn comfortable_row(
                         .h(px(ROW_PREVIEW_LINE_HEIGHT))
                         .type_style(TYPE_BODY)
                         .line_height(px(ROW_PREVIEW_LINE_HEIGHT))
-                        .text_color(rgb(colors.muted))
+                        .text_color(rgb(snippet_color(&row, colors)))
                         .ellipsis()
                         .child(row.snippet.clone()),
                 ),
@@ -365,12 +564,19 @@ fn subject_and_snippet(row: &MessageRow, colors: &UiColors) -> StyledText {
     }
     let text = format!("{}{COMPACT_SNIPPET_SEPARATOR}{snippet}", row.subject);
     let muted = HighlightStyle {
-        color: Some(rgb(colors.muted).into()),
+        color: Some(rgb(snippet_color(row, colors)).into()),
         ..HighlightStyle::default()
     };
     let start = row.subject.len();
     let end = text.len();
     StyledText::new(text).with_highlights([(start..end, muted)])
+}
+
+fn snippet_color(row: &MessageRow, colors: &UiColors) -> u32 {
+    match row.snippet_tone {
+        SnippetTone::Muted => colors.muted,
+        SnippetTone::Danger => colors.danger,
+    }
 }
 
 fn sender(row: &MessageRow, colors: &UiColors) -> gpui::Div {
@@ -605,5 +811,119 @@ mod tests {
         assert_eq!(row.subject, "(no subject)");
         assert_eq!(row.label.as_deref(), Some("Archive \u{2022} on server"));
         assert!(!row.unread);
+    }
+
+    fn job(state: OutboxJobState, next_attempt_at: Option<&str>) -> OutboxJobSummary {
+        OutboxJobSummary {
+            id: 3,
+            draft_id: 4,
+            account_id: 1,
+            state,
+            attempt_count: 3,
+            next_attempt_at: next_attempt_at.map(str::to_owned),
+            last_error_message: Some("421 4.7.0 try again later".to_owned()),
+        }
+    }
+
+    #[test]
+    fn outbox_status_reads_in_plain_words() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-18T10:00:00Z")
+            .expect("a timestamp")
+            .with_timezone(&chrono::Local);
+        let text = |state, next: Option<&str>| outbox_status(&job(state, next), &now).text;
+        assert_eq!(text(OutboxJobState::Queued, None), "Waiting to send");
+        assert_eq!(text(OutboxJobState::Sending, None), "Sending\u{2026}");
+        assert_eq!(
+            text(OutboxJobState::Retrying, Some("2026-10-18T10:05:00Z")),
+            "Failed \u{2014} retrying in 5 min"
+        );
+        assert_eq!(
+            text(OutboxJobState::Retrying, Some("2026-10-18T10:04:01Z")),
+            "Failed \u{2014} retrying in 5 min",
+            "waits round up"
+        );
+        assert_eq!(
+            text(OutboxJobState::Retrying, Some("2026-10-18T10:00:30Z")),
+            "Failed \u{2014} retrying in 30 sec"
+        );
+        assert_eq!(
+            text(OutboxJobState::Retrying, Some("2026-10-18T12:00:00Z")),
+            "Failed \u{2014} retrying in 2 h"
+        );
+        assert_eq!(
+            text(OutboxJobState::Retrying, Some("2026-10-18T09:00:00Z")),
+            "Failed \u{2014} retrying now"
+        );
+        assert_eq!(text(OutboxJobState::Failed, None), "Couldn\u{2019}t send");
+        // No state names, attempt counts or job ids.
+        for state in [
+            OutboxJobState::Queued,
+            OutboxJobState::Sending,
+            OutboxJobState::Retrying,
+            OutboxJobState::Failed,
+        ] {
+            let status = text(state, Some("2026-10-18T10:05:00Z"));
+            assert!(
+                !status.contains("attempt") && !status.contains('3'),
+                "{status}"
+            );
+        }
+        let failed = outbox_status(&job(OutboxJobState::Failed, None), &now);
+        assert!(failed.failed && failed.can_retry);
+        let sending = outbox_status(&job(OutboxJobState::Sending, None), &now);
+        assert!(!sending.failed && !sending.can_retry);
+    }
+
+    #[test]
+    fn outgoing_rows_name_their_recipients() {
+        assert_eq!(
+            recipient_line("Priya Raman <priya@example.org> +2", "Sam"),
+            (
+                "To: Priya Raman +2".to_owned(),
+                "Priya Raman".to_owned(),
+                Some("priya@example.org".to_owned())
+            )
+        );
+        assert_eq!(
+            recipient_line("kai@example.org", "Sam").0,
+            "To: kai@example.org"
+        );
+        assert_eq!(
+            recipient_line("(no recipients)", "Sam"),
+            ("No recipients yet".to_owned(), "Sam".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn a_failed_outbox_row_says_so_in_the_danger_colour() {
+        let now = chrono::Local::now();
+        let draft = DraftSummary {
+            id: 4,
+            account_id: 1,
+            identity_id: 1,
+            identity_name: "Sam".to_owned(),
+            recipient_summary: "Priya Raman <priya@example.org>".to_owned(),
+            subject: "Q4 estimates".to_owned(),
+            attachment_count: 1,
+            state: DraftState::Failed,
+            updated_at: "2026-10-18T09:00:00Z".to_owned(),
+        };
+        let row = MessageRow::outbox_job(
+            "outbox-row-3".into(),
+            &job(OutboxJobState::Failed, None),
+            Some(&draft),
+            &now,
+            HourCycle::H24,
+        );
+        assert_eq!(row.sender, "To: Priya Raman");
+        assert_eq!(row.subject, "Q4 estimates");
+        assert_eq!(row.snippet, "Couldn\u{2019}t send");
+        assert_eq!(row.snippet_tone, SnippetTone::Danger);
+        assert!(row.has_attachments);
+        assert_eq!(row.date_tooltip, "421 4.7.0 try again later");
+
+        let row = MessageRow::draft("draft-row-4".into(), &draft, &now, HourCycle::H24);
+        assert_eq!(row.snippet, "Failed \u{2022} 1 attachment");
+        assert_eq!(row.snippet_tone, SnippetTone::Danger);
     }
 }
