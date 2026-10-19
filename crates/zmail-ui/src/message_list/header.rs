@@ -16,7 +16,7 @@ use super::{ListMode, MessageListView};
 use crate::actions::{RetryOutbox, SearchAllAccounts, SearchInAccount, SearchInFolder};
 use crate::components::{Badge, Button, ButtonSize, Menu, MenuEntry, popover_below_end};
 use crate::pane::{dispatch_from, pane_focus_indicator};
-use crate::search::SearchLevel;
+use crate::search::{DateRange, SearchFilter, SearchFilters, SearchLevel};
 use crate::styles::UiColors;
 use crate::widgets::{EllipsisExt, empty_state};
 
@@ -176,6 +176,7 @@ impl MessageListView {
                 )
                 .when(self.state.mode == ListMode::Search, |this| {
                     this.child(self.render_scope_control())
+                        .child(self.render_search_filters(cx))
                 }),
         )
         .when(can_filter, |this| this.child(self.render_filter_button(cx)))
@@ -254,6 +255,147 @@ impl MessageListView {
             .children(account)
             .children(all)
             .into_any_element()
+    }
+
+    /// The search filter chips: from:, has:attachment, unread and a date
+    /// range. Each shows whether the query has its clause and edits the
+    /// query (see `search/filters.rs`).
+    fn render_search_filters(&self, cx: &mut Context<Self>) -> AnyElement {
+        let filters = SearchFilters::of(&self.state.search_query);
+        let chip = |selector: &'static str, button: Button, filter: SearchFilter| {
+            div()
+                .flex_none()
+                .debug_selector(move || selector.into())
+                .child(button.size(ButtonSize::Small).ghost().on_click(cx.listener(
+                    move |_, _, _, cx| {
+                        cx.emit(super::MessageListEvent::FilterSearch(filter));
+                    },
+                )))
+        };
+        let from = chip(
+            "search-filter-from",
+            Button::new(
+                "search-filter-from",
+                filters
+                    .from
+                    .as_ref()
+                    .map(|from| format!("From: {from}"))
+                    .unwrap_or_else(|| "From".to_owned()),
+            )
+            .icon("user")
+            .selected(filters.from.is_some())
+            .tooltip(if filters.from.is_some() {
+                "Remove the from: filter"
+            } else {
+                "Type a sender after from:"
+            }),
+            SearchFilter::From,
+        );
+        let attachment = chip(
+            "search-filter-attachment",
+            Button::new("search-filter-attachment", "Has attachment")
+                .icon("paperclip")
+                .selected(filters.has_attachment)
+                .tooltip("has:attachment"),
+            SearchFilter::HasAttachment,
+        );
+        let unread = chip(
+            "search-filter-unread",
+            Button::new("search-filter-unread", "Unread")
+                .icon("mail")
+                .selected(filters.unread)
+                .tooltip("is:unread"),
+            SearchFilter::Unread,
+        );
+        div()
+            .id("search-filters")
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .mt_1()
+            .role(Role::Group)
+            .aria_label("Search filters")
+            .child(from)
+            .child(attachment)
+            .child(unread)
+            .child(self.render_date_chip(&filters, cx))
+            .into_any_element()
+    }
+
+    /// The date chip and its menu of ranges.
+    fn render_date_chip(&self, filters: &SearchFilters, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .relative()
+            .flex_none()
+            .debug_selector(|| "search-filter-date".into())
+            // As with the filter button: a press that closes the menu
+            // must not reopen it.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|list, _, _, _| {
+                    list.swallow_date_click = list.date_menu.is_some();
+                }),
+            )
+            .child(
+                Button::new("search-filter-date", filters.date_label())
+                    .icon("calendar")
+                    .size(ButtonSize::Small)
+                    .ghost()
+                    .selected(filters.date_text.is_some())
+                    .tooltip("Or type after:2026-01-31 before:2026-03-01")
+                    .on_click(cx.listener(|list, _, window, cx| {
+                        list.toggle_date_menu(window, cx);
+                    })),
+            )
+            .when_some(self.date_menu.as_ref(), |this, (menu, _)| {
+                this.child(popover_below_end(menu.clone()))
+            })
+            .into_any_element()
+    }
+
+    fn toggle_date_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.swallow_date_click) {
+            return;
+        }
+        if self.date_menu.take().is_some() {
+            window.focus(&self.focus_handle, cx);
+            cx.notify();
+            return;
+        }
+        let this = cx.weak_entity();
+        let current = SearchFilters::of(&self.state.search_query).date_range;
+        let menu = Menu::build(window, cx, |mut menu| {
+            for range in DateRange::ALL {
+                let this = this.clone();
+                menu = menu.entry(
+                    MenuEntry::new(range.label())
+                        .checked(Some(range) == current)
+                        .on_select(move |_, cx| {
+                            this.update(cx, |_, cx| {
+                                cx.emit(super::MessageListEvent::FilterSearch(SearchFilter::Date(
+                                    range,
+                                )));
+                            })
+                            .ok();
+                        }),
+                );
+            }
+            let index = DateRange::ALL
+                .iter()
+                .position(|range| Some(*range) == current)
+                .unwrap_or_default();
+            menu.with_selected(index)
+        });
+        let subscription =
+            cx.subscribe_in(&menu, window, |list, _, _: &DismissEvent, window, cx| {
+                list.date_menu = None;
+                window.focus(&list.focus_handle, cx);
+                cx.notify();
+            });
+        window.focus(&menu.focus_handle(cx), cx);
+        self.date_menu = Some((menu, subscription));
+        cx.notify();
     }
 
     /// The filter button: a quiet "All", or the active filter highlighted.

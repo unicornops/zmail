@@ -337,6 +337,27 @@ fn large_mailbox_search_timings() -> Result<()> {
         }
     }
 
+    // Scrolling the results reads one more page each time, re-reading
+    // the pages before it (the read is one ordered query with a growing
+    // limit).
+    println!("\n| paging (pages of {LIVE_PAGE}) | results | warm (median of 5) |");
+    println!("|---|---|---|");
+    for query in ["b", "budget", "from:alice", "is:unread"] {
+        for pages in [1, 2, 5, 10] {
+            let limit = pages * LIVE_PAGE;
+            let timed = || -> Result<(usize, Duration)> {
+                let started = Instant::now();
+                let hits = store.search_threads_at(account_id, query, limit, &now())?;
+                Ok((hits.len(), started.elapsed()))
+            };
+            let mut runs = (0..5).map(|_| timed()).collect::<Result<Vec<_>>>()?;
+            runs.sort_by_key(|(_, elapsed)| *elapsed);
+            let (hits, warm) = runs[2];
+            slowest = slowest.max(warm);
+            println!("| `{query}` × {pages} | {hits} | {warm:.1?} |");
+        }
+    }
+
     // Indexing hot paths: queue lookups and per-message hydration, which
     // rebuild one thread document each.
     let started = Instant::now();

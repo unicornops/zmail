@@ -295,3 +295,133 @@ fn showing_a_mailbox_ends_the_search(cx: &mut TestAppContext) {
     assert_eq!(list_mode(&view, cx), ListMode::Mail);
     assert_eq!(text(&search_input(&view, cx), cx), "");
 }
+
+/// An Inbox of `count` threads that all match "report", newest first.
+fn seed_reports(count: usize) -> impl FnOnce(&zmail_store::LocalStore) {
+    move |store| {
+        let account_id = store.list_accounts().expect("accounts load")[0].id;
+        let threads = (0..count)
+            .map(|index| {
+                let mut thread = super::thread_snapshot(0);
+                let at = format!("2026-03-01T{:02}:{:02}:00Z", index / 60, index % 60);
+                thread.remote_thread_id = format!("report-{index}");
+                thread.subject = format!("Weekly report {index}");
+                thread.latest_message_at = at.clone();
+                for message in &mut thread.messages {
+                    message.remote_id = format!("report-message-{index}");
+                    message.subject = thread.subject.clone();
+                    message.received_at = at.clone();
+                }
+                thread
+            })
+            .collect();
+        store
+            .replace_account_snapshot(
+                account_id,
+                &zmail_core::AccountSyncSnapshot {
+                    checkpoint: "test".to_owned(),
+                    detail: "test".to_owned(),
+                    identities: None,
+                    mailboxes: vec![zmail_core::MailboxSnapshot {
+                        name: "Inbox".to_owned(),
+                        role: Some("inbox".to_owned()),
+                        threads,
+                        ..Default::default()
+                    }],
+                },
+            )
+            .expect("the mail is stored");
+    }
+}
+
+#[gpui::test]
+fn results_page_in_as_the_list_scrolls(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = super::open_workspace_with(
+        cx,
+        Setup::Account,
+        |_| crate::InitialView::Inbox,
+        seed_reports(250),
+    );
+    keys("secondary-f", cx);
+    cx.simulate_input("report");
+    keys("enter", cx);
+    let count =
+        |cx: &mut VisualTestContext| cx.read_entity(&view, |view, _| view.search_results.len());
+    assert_eq!(count(cx), 100, "one page to start with");
+
+    // Moving to the last loaded result scrolls it into view, which reads
+    // the next page; the end of the results stops asking.
+    keys("down", cx);
+    assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+    for expected in [200, 250, 250] {
+        keys("end", cx);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(count(cx), expected);
+    }
+    assert!(!cx.read_entity(&view, |view, _| view.search_context.has_more));
+    // Newest first, all the way down.
+    let (_, subjects) = results(&view, cx);
+    assert_eq!(
+        subjects.first().map(String::as_str),
+        Some("Weekly report 249")
+    );
+    assert_eq!(subjects.last().map(String::as_str), Some("Weekly report 0"));
+}
+
+#[gpui::test]
+fn filter_chips_edit_the_query_text(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+    let search = search_input(&view, cx);
+    keys("secondary-f", cx);
+    cx.simulate_input("report");
+    keys("enter", cx);
+    assert_eq!(results(&view, cx).1.len(), 3);
+    let filters = |cx: &mut VisualTestContext| {
+        cx.read_entity(&view, |view, _| {
+            crate::search::SearchFilters::of(&view.search_results_query)
+        })
+    };
+
+    // Unread and Has attachment toggle their clause, and search at once.
+    click("search-filter-unread", cx);
+    assert_eq!(text(&search, cx), "report is:unread");
+    assert!(filters(cx).unread);
+    assert_eq!(results(&view, cx).1.len(), 3);
+    click("search-filter-attachment", cx);
+    assert_eq!(text(&search, cx), "report is:unread has:attachment");
+    assert!(results(&view, cx).1.is_empty(), "nothing has an attachment");
+    click("search-filter-unread", cx);
+    click("search-filter-attachment", cx);
+    assert_eq!(text(&search, cx), "report");
+    assert_eq!(results(&view, cx).1.len(), 3);
+
+    // Typing the operator lights the chip: the text is the state.
+    keys("secondary-f", cx);
+    cx.simulate_input("is:unread report");
+    wait(SEARCH_DEBOUNCE, cx);
+    assert!(filters(cx).unread);
+    click("search-filter-unread", cx);
+    assert_eq!(text(&search, cx), "report");
+
+    // From hands the field over to type the sender.
+    click("search-filter-from", cx);
+    assert_eq!(text(&search, cx), "report from:");
+    assert!(search_is_focused(&view, cx));
+    cx.simulate_input("kai");
+    wait(SEARCH_DEBOUNCE, cx);
+    assert_eq!(filters(cx).from.as_deref(), Some("kai"));
+    assert_eq!(results(&view, cx).1.len(), 3);
+    click("search-filter-from", cx);
+    assert_eq!(text(&search, cx), "report");
+
+    // The date chip's menu sets a range, and Any time removes it.
+    click("search-filter-date", cx);
+    keys("down enter", cx);
+    assert_eq!(text(&search, cx), "report after:7d");
+    assert_eq!(filters(cx).date_label(), "Last 7 days");
+    click("search-filter-date", cx);
+    keys("up enter", cx);
+    assert_eq!(text(&search, cx), "report");
+    assert_eq!(results(&view, cx).1.len(), 3);
+}

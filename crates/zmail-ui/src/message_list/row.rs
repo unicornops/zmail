@@ -18,9 +18,11 @@
 //!
 //! On hover the list passes quick actions, which take the date's place.
 
+use std::ops::Range;
+
 use gpui::{
-    AnyElement, HighlightStyle, IntoElement, SharedString, Stateful, StyledText, div, prelude::*,
-    px, relative, rgb,
+    AnyElement, FontWeight, HighlightStyle, IntoElement, SharedString, Stateful, StyledText, div,
+    prelude::*, px, relative, rgb,
 };
 use zmail_core::{
     AccountColor, DraftState, DraftSummary, OutboxJobState, OutboxJobSummary, SearchHit,
@@ -33,6 +35,7 @@ use zmail_core::{
 use super::selection::{row_background, row_colors};
 use crate::components::tooltip::TooltipExt;
 use crate::components::{Avatar, Badge, BadgeTone};
+use crate::search::{RowMatches, SearchHighlighter};
 use crate::styles::{
     DensityTokens, ICON_SIZE_SM, ROW_PREVIEW_LINE_HEIGHT, ROW_SENDER_LINE_HEIGHT,
     ROW_TITLE_LINE_HEIGHT, TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TypeStyleExt,
@@ -79,6 +82,8 @@ pub(super) struct MessageRow {
     /// The account the thread belongs to, in lists that span accounts
     /// (the Unified Inbox); `None` in a single account's mailbox.
     pub(super) account: Option<RowAccount>,
+    /// A search result's matches in the subject and snippet.
+    pub(super) matches: RowMatches,
 }
 
 /// The colour of a row's snippet line.
@@ -131,24 +136,33 @@ impl MessageRow {
             has_attachments: thread.has_attachments,
             label: None,
             account: None,
+            matches: RowMatches::default(),
         }
     }
 
-    /// The row for a search result, labelled with its mailbox.
+    /// The row for a search result, labelled with its mailbox, with the
+    /// query's matches highlighted.
     pub(super) fn search_hit(
         id: SharedString,
         hit: &SearchHit,
+        highlighter: &SearchHighlighter,
         now: &chrono::DateTime<chrono::Local>,
         hour_cycle: HourCycle,
     ) -> Self {
         let (name, address) = sender_identity(&hit.latest_sender);
+        let subject = display_subject(&hit.subject).to_owned();
+        let (snippet, snippet_matches) = highlighter.snippet(&hit.preview);
         Self {
             id,
             sender: name.clone(),
             avatar_name: name,
             avatar_address: address,
-            subject: display_subject(&hit.subject).to_owned(),
-            snippet: hit.preview.clone(),
+            matches: RowMatches {
+                subject: highlighter.subject(&subject),
+                snippet: snippet_matches,
+            },
+            subject,
+            snippet,
             snippet_tone: SnippetTone::Muted,
             date: format_list_date(&hit.latest_message_at, now, hour_cycle),
             date_tooltip: format_full_date(&hit.latest_message_at, &now.timezone(), hour_cycle),
@@ -212,6 +226,7 @@ impl MessageRow {
             has_attachments: draft.attachment_count > 0,
             label: None,
             account: None,
+            matches: RowMatches::default(),
         }
     }
 
@@ -259,6 +274,7 @@ impl MessageRow {
             has_attachments: draft.is_some_and(|draft| draft.attachment_count > 0),
             label: None,
             account: None,
+            matches: RowMatches::default(),
         }
     }
 
@@ -500,7 +516,12 @@ fn comfortable_row(
                                 .type_style(TYPE_BODY)
                                 .line_height(px(ROW_TITLE_LINE_HEIGHT))
                                 .ellipsis()
-                                .child(row.subject.clone()),
+                                .child(highlighted(
+                                    &row.subject,
+                                    &row.matches.subject,
+                                    None,
+                                    colors,
+                                )),
                         )
                         .children(status_icons(&row, colors)),
                 )
@@ -512,7 +533,12 @@ fn comfortable_row(
                         .line_height(px(ROW_PREVIEW_LINE_HEIGHT))
                         .text_color(rgb(snippet_color(&row, colors)))
                         .ellipsis()
-                        .child(row.snippet.clone()),
+                        .child(highlighted(
+                            &row.snippet,
+                            &row.matches.snippet,
+                            None,
+                            colors,
+                        )),
                 ),
         )
 }
@@ -561,16 +587,79 @@ fn compact_row(
 fn subject_and_snippet(row: &MessageRow, colors: &UiColors) -> StyledText {
     let snippet = row.snippet.trim();
     if snippet.is_empty() {
-        return StyledText::new(row.subject.clone());
+        return highlighted(&row.subject, &row.matches.subject, None, colors);
     }
     let text = format!("{}{COMPACT_SNIPPET_SEPARATOR}{snippet}", row.subject);
     let muted = HighlightStyle {
         color: Some(rgb(snippet_color(row, colors)).into()),
         ..HighlightStyle::default()
     };
-    let start = row.subject.len();
-    let end = text.len();
-    StyledText::new(text).with_highlights([(start..end, muted)])
+    // The snippet's matches, moved to where its trimmed text starts.
+    let lead = row.snippet.len() - row.snippet.trim_start().len();
+    let start = row.subject.len() + COMPACT_SNIPPET_SEPARATOR.len();
+    let matches = row
+        .matches
+        .subject
+        .iter()
+        .cloned()
+        .chain(row.matches.snippet.iter().filter_map(|range| {
+            let from = range.start.max(lead) - lead;
+            let to = range.end.saturating_sub(lead).min(snippet.len());
+            (from < to).then(|| start + from..start + to)
+        }))
+        .collect::<Vec<_>>();
+    highlighted(
+        &text,
+        &matches,
+        Some((row.subject.len()..text.len(), muted)),
+        colors,
+    )
+}
+
+/// `text` with its search `matches` marked: bold, in the row's text colour,
+/// on the warning tint (on the focused selection's accent fill the tint
+/// would clash, so bold and underlined instead). `base` styles one stretch
+/// of the rest, such as a compact row's muted snippet.
+fn highlighted(
+    text: &str,
+    matches: &[Range<usize>],
+    base: Option<(Range<usize>, HighlightStyle)>,
+    colors: &UiColors,
+) -> StyledText {
+    let on_selection = colors.background == colors.selection_background;
+    let matched = HighlightStyle {
+        color: Some(rgb(colors.foreground).into()),
+        font_weight: Some(FontWeight::BOLD),
+        background_color: (!on_selection).then(|| rgb(colors.warning_background).into()),
+        underline: on_selection.then(|| gpui::UnderlineStyle {
+            thickness: px(1.),
+            color: Some(rgb(colors.foreground).into()),
+            wavy: false,
+        }),
+        ..HighlightStyle::default()
+    };
+    // Sorted, non-overlapping runs: the matches, and the base style in
+    // the gaps between them.
+    let mut runs = Vec::new();
+    let mut at = 0;
+    let gap = |from: usize, to: usize, runs: &mut Vec<(Range<usize>, HighlightStyle)>| {
+        if let Some((range, style)) = &base {
+            let (from, to) = (from.max(range.start), to.min(range.end));
+            if from < to {
+                runs.push((from..to, *style));
+            }
+        }
+    };
+    for range in matches {
+        if range.start < at || range.end > text.len() {
+            continue;
+        }
+        gap(at, range.start, &mut runs);
+        runs.push((range.clone(), matched));
+        at = range.end;
+    }
+    gap(at, text.len(), &mut runs);
+    StyledText::new(text.to_owned()).with_highlights(runs)
 }
 
 fn snippet_color(row: &MessageRow, colors: &UiColors) -> u32 {
@@ -800,11 +889,47 @@ mod tests {
             latest_message_at: "2026-03-20T09:15:00Z".to_owned(),
             from_server: true,
         };
-        let row = MessageRow::search_hit("search-row-2".into(), &hit, &now, HourCycle::H24);
+        let row = MessageRow::search_hit(
+            "search-row-2".into(),
+            &hit,
+            &SearchHighlighter::new("kai"),
+            &now,
+            HourCycle::H24,
+        );
         assert_eq!(row.sender, "kai@example.org");
         assert_eq!(row.subject, "(no subject)");
         assert_eq!(row.label.as_deref(), Some("Archive \u{2022} on server"));
         assert!(!row.unread);
+    }
+
+    #[test]
+    fn search_hits_mark_the_query_in_subject_and_snippet() {
+        let now = chrono::Local::now();
+        let hit = SearchHit {
+            account_id: 1,
+            mailbox_id: 1,
+            mailbox_name: "Inbox".to_owned(),
+            thread_id: 2,
+            subject: "Budget review".to_owned(),
+            latest_sender: "kai@example.org".to_owned(),
+            participants: String::new(),
+            preview: "Please review the budget spreadsheet".to_owned(),
+            unread_count: 1,
+            is_flagged: false,
+            has_attachments: false,
+            latest_message_at: "2026-03-20T09:15:00Z".to_owned(),
+            from_server: false,
+        };
+        let row = MessageRow::search_hit(
+            "search-row-2".into(),
+            &hit,
+            &SearchHighlighter::new("budg -review"),
+            &now,
+            HourCycle::H24,
+        );
+        assert_eq!(row.matches.subject, vec![0..6]);
+        assert_eq!(row.matches.snippet, vec![18..24]);
+        assert_eq!(&row.snippet[18..24], "budget");
     }
 
     fn job(state: OutboxJobState, next_attempt_at: Option<&str>) -> OutboxJobSummary {

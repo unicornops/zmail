@@ -26,6 +26,8 @@
 //! escaped FTS5 expression, and the protocol adapters map them onto IMAP
 //! `SEARCH` keys and JMAP `Email/query` filters.
 
+use std::ops::Range;
+
 use chrono::{Days, Months, NaiveDate, NaiveTime, TimeDelta, TimeZone};
 
 /// A parsed search query: every clause must match.
@@ -177,6 +179,18 @@ impl SearchQuery {
     /// Parses a query typed by the user. Never fails: anything that is not
     /// a recognised operator becomes plain text.
     pub fn parse(input: &str) -> Self {
+        Self {
+            clauses: Self::parse_spans(input)
+                .into_iter()
+                .map(|(_, clause)| clause)
+                .collect(),
+        }
+    }
+
+    /// Parses like [`Self::parse`], keeping the byte range of `input` each
+    /// clause was typed in (its `-`, operator name and quotes included),
+    /// so the text can be edited clause by clause ([`without_clauses`]).
+    pub fn parse_spans(input: &str) -> Vec<(Range<usize>, SearchClause)> {
         let mut clauses = Vec::new();
         let mut rest = input;
         loop {
@@ -184,13 +198,14 @@ impl SearchQuery {
             if rest.is_empty() {
                 break;
             }
+            let start = input.len() - rest.len();
             let (clause, remaining) = parse_clause(rest);
             rest = remaining;
             if let Some(clause) = clause {
-                clauses.push(clause);
+                clauses.push((start..input.len() - rest.len(), clause));
             }
         }
-        Self { clauses }
+        clauses
     }
 
     /// Whether the query has no clauses at all.
@@ -222,6 +237,42 @@ impl SearchQuery {
             !clause.negated
                 && matches!(&clause.term, SearchTerm::Text(text) if text.is_searchable())
         })
+    }
+}
+
+/// `input` without the clauses `remove` picks, each taken out with the
+/// whitespace after it. Everything else stays as typed, including text
+/// that is not a clause yet (such as a `from:` still waiting for its
+/// value). Search filter chips edit the query this way, so the query text
+/// stays the one source of truth.
+pub fn without_clauses(input: &str, remove: impl Fn(&SearchClause) -> bool) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut kept_from = 0;
+    let mut removed = false;
+    for (span, clause) in SearchQuery::parse_spans(input) {
+        if !remove(&clause) {
+            continue;
+        }
+        output.push_str(&input[kept_from..span.start]);
+        let after = &input[span.end..];
+        kept_from = span.end + (after.len() - after.trim_start().len());
+        removed = true;
+    }
+    output.push_str(&input[kept_from..]);
+    if removed {
+        output.truncate(output.trim_end().len());
+    }
+    output
+}
+
+/// `input` with `clause` (query text such as `is:unread`) added at the
+/// end, after a space.
+pub fn with_clause(input: &str, clause: &str) -> String {
+    let input = input.trim_end();
+    if input.is_empty() {
+        clause.to_owned()
+    } else {
+        format!("{input} {clause}")
     }
 }
 
@@ -622,6 +673,49 @@ mod tests {
     }
 
     #[test]
+    fn spans_cover_each_clause_as_typed() {
+        let input = "  -from:\"Zoë Ünal\" is:unread  budget 日本 from:";
+        let spans = SearchQuery::parse_spans(input)
+            .into_iter()
+            .map(|(span, _)| &input[span])
+            .collect::<Vec<_>>();
+        // The trailing `from:` has no value yet, so it is not a clause.
+        assert_eq!(
+            spans,
+            vec!["-from:\"Zoë Ünal\"", "is:unread", "budget", "日本"]
+        );
+    }
+
+    #[test]
+    fn clauses_come_out_and_go_in_as_text() {
+        let unread = |clause: &SearchClause| clause.term == SearchTerm::Unread;
+        assert_eq!(
+            without_clauses("budget is:unread  from:alice", unread),
+            "budget from:alice"
+        );
+        assert_eq!(without_clauses("budget is:unread ", unread), "budget");
+        assert_eq!(without_clauses("is:unread", unread), "");
+        // Text that is not a clause yet stays, as does unrelated spacing.
+        assert_eq!(
+            without_clauses("is:UNREAD  from: -is:unread x  ", |clause| {
+                clause.term == SearchTerm::Unread && !clause.negated
+            }),
+            "from: -is:unread x"
+        );
+        assert_eq!(without_clauses("budget  ", unread), "budget  ");
+
+        assert_eq!(with_clause("", "is:unread"), "is:unread");
+        assert_eq!(with_clause("budget  ", "is:unread"), "budget is:unread");
+        assert_eq!(
+            SearchQuery::parse(&with_clause("from:alice", "has:attachment")).clauses,
+            vec![
+                positive(SearchTerm::From(SearchText::word("alice"))),
+                positive(SearchTerm::HasAttachment),
+            ]
+        );
+    }
+
+    #[test]
     fn arbitrary_input_never_panics() {
         // A deterministic generator over the characters the parser treats
         // specially, plus multi-byte and whitespace characters.
@@ -640,6 +734,8 @@ mod tests {
             }
             state = state.wrapping_add(1);
             let query = SearchQuery::parse(&input);
+            // Removing every clause leaves only what was not a clause.
+            assert!(SearchQuery::parse(&without_clauses(&input, |_| true)).is_empty());
             for clause in &query.clauses {
                 if let SearchTerm::Text(text) = &clause.term {
                     assert!(!text.value.is_empty(), "{input:?}");

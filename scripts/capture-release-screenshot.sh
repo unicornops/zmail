@@ -110,6 +110,8 @@ MATRIX=(
   "multi-select-light multi-select light 1440 920"
   "search-dark search dark 1440 920"
   "search-light search light 1440 920"
+  "search-filters-dark search-filters dark 1440 920"
+  "search-filters-light search-filters light 1440 920"
   "inbox-dark-1920 inbox dark 1920 1080"
   "inbox-light-1920 inbox light 1920 1080"
   "reader-dark-1920 reader dark 1920 1080"

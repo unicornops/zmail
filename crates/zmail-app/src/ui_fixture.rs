@@ -76,6 +76,9 @@ pub(crate) enum FixtureView {
     /// The `accounts` view with a search across the Unified Inbox, so the
     /// scope control and account chips show.
     Search,
+    /// The `search` view with filter chips on (unread, a date range) and
+    /// the query's matches highlighted in the rows.
+    SearchFilters,
     /// The reader on a message whose Reply-To is a subdomain of the
     /// sender's: the info sender-safety banner.
     ReaderSafetyInfo,
@@ -89,6 +92,9 @@ pub(crate) enum FixtureView {
     /// types, one of them a program.
     ReaderAttachments,
 }
+
+/// The `search-filters` view's query: words to highlight and two chips.
+const SEARCH_FILTERS_QUERY: &str = "search is:unread after:30d";
 
 impl FixtureView {
     pub(crate) fn parse(value: &str) -> Result<Self> {
@@ -122,12 +128,13 @@ impl FixtureView {
             "accounts" => Self::Accounts,
             "multi-select" => Self::MultiSelect,
             "search" => Self::Search,
+            "search-filters" => Self::SearchFilters,
             "reader-safety-info" => Self::ReaderSafetyInfo,
             "reader-safety-caution" => Self::ReaderSafetyCaution,
             "reader-safety-danger" => Self::ReaderSafetyDanger,
             "reader-attachments" => Self::ReaderAttachments,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, reader-safety-info, reader-safety-caution, reader-safety-danger or reader-attachments"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger or reader-attachments"
             ),
         })
     }
@@ -234,6 +241,10 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         FixtureView::Search => {
             seed_more_accounts(store, account_id, now)?;
             InitialView::Search("release")
+        }
+        FixtureView::SearchFilters => {
+            seed_more_accounts(store, account_id, now)?;
+            InitialView::Search(SEARCH_FILTERS_QUERY)
         }
         FixtureView::AccountSetup => InitialView::AddAccount,
         FixtureView::Onboarding(step) => {
@@ -1085,6 +1096,7 @@ mod tests {
             "accounts",
             "multi-select",
             "search",
+            "search-filters",
             "reader-safety-info",
             "reader-safety-caution",
             "reader-safety-danger",
@@ -1315,6 +1327,21 @@ mod tests {
             .map(|hit| hit.account_id)
             .collect::<std::collections::HashSet<_>>();
         assert!(accounts.len() > 1, "{hits:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn search_filters_finds_unread_recent_hits() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::SearchFilters)?;
+        assert_eq!(initial_view, InitialView::Search(SEARCH_FILTERS_QUERY));
+        let unified = MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Inbox));
+        let hits = store.search_threads_in(
+            &zmail_core::SearchScope::Folder(unified),
+            SEARCH_FILTERS_QUERY,
+            50,
+        )?;
+        assert!(hits.len() > 1, "{hits:?}");
+        assert!(hits.iter().all(|hit| hit.unread_count > 0));
         Ok(())
     }
 
