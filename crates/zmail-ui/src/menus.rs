@@ -110,7 +110,11 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
     ("zmail::SaveAccount", "the account form's own Save button"),
     (
         "zmail::MoveToMailbox",
-        "needs a mailbox; the Move to… picker (#118) adds the menu entry",
+        "needs a mailbox; the reader's More menu opens the Move to… picker",
+    ),
+    (
+        "zmail::ReplyToMessage",
+        "needs a message; Message → Reply replies to the latest",
     ),
     ("zmail::RemoveAttachment", "needs an attachment argument"),
     ("zmail::SelectIdentity", "needs an identity argument"),

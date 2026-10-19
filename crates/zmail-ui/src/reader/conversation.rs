@@ -30,6 +30,8 @@ pub(crate) struct ConversationState {
     expanded: HashSet<i64>,
     /// Message ids whose quoted tail is showing.
     unfolded: HashSet<i64>,
+    /// Message ids showing their full From, To and Date lines.
+    details: HashSet<i64>,
     /// The index of the message n/p moved to, which Enter toggles.
     current: Option<usize>,
 }
@@ -83,6 +85,10 @@ impl ConversationState {
         self.unfolded.contains(&message_id)
     }
 
+    pub(crate) fn shows_details(&self, message_id: i64) -> bool {
+        self.details.contains(&message_id)
+    }
+
     pub(crate) fn current(&self) -> Option<usize> {
         self.current
     }
@@ -102,6 +108,13 @@ impl ConversationState {
     pub(super) fn toggle_unfolded(&mut self, message_id: i64) {
         if !self.unfolded.remove(&message_id) {
             self.unfolded.insert(message_id);
+        }
+    }
+
+    /// Shows or hides a message's full From, To and Date lines.
+    pub(super) fn toggle_details(&mut self, message_id: i64) {
+        if !self.details.remove(&message_id) {
+            self.details.insert(message_id);
         }
     }
 

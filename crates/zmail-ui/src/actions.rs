@@ -158,6 +158,15 @@ pub struct MoveToMailbox {
     pub mailbox_id: i64,
 }
 
+/// Reply to one message of the open conversation (its header's Reply
+/// button), rather than to the latest.
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = zmail, no_json)]
+pub struct ReplyToMessage {
+    /// Local message id.
+    pub message_id: i64,
+}
+
 /// Remove one attachment from the open draft.
 #[derive(Clone, Debug, PartialEq, Eq, Action)]
 #[action(namespace = zmail, no_json)]
@@ -178,6 +187,7 @@ pub struct SelectIdentity {
 #[cfg(test)]
 pub(crate) const ACTIONS_WITHOUT_KEYS: &[(&str, &str)] = &[
     ("zmail::MoveToMailbox", "needs a mailbox argument"),
+    ("zmail::ReplyToMessage", "needs a message argument"),
     ("zmail::RemoveAttachment", "needs an attachment argument"),
     ("zmail::SelectIdentity", "needs an identity argument"),
     (
