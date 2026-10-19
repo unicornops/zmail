@@ -3,7 +3,10 @@
 
 use std::time::Duration;
 
-use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
+use gpui::{
+    AppContext as _, Bounds, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
+    VisualTestContext, point, px,
+};
 use zmail_core::{AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
 use zmail_store::LocalStore;
 
@@ -32,17 +35,26 @@ fn message(sender: &str, at: &str, is_read: bool, body: &str) -> MessageSnapshot
 }
 
 /// Replaces the account's mail with one Inbox conversation: two read
-/// messages (the second ending in a quote) and an unread reply. Archive
-/// is empty.
+/// messages (an HTML one with a mismatched link, then one ending in a
+/// quote) and an unread two-paragraph reply. Archive is empty.
 fn seed_conversation(store: &LocalStore) {
     let account_id = store.list_accounts().expect("the accounts load")[0].id;
     let messages = vec![
-        message(
-            "Priya Raman <priya@example.test>",
-            "2026-03-24T09:00:00Z",
-            true,
-            "Attached is the draft roadmap.\n\nPriya",
-        ),
+        MessageSnapshot {
+            // HTML only, with a link whose text shows another site.
+            body_text: None,
+            sanitized_html: Some(
+                "<p>Attached is the draft roadmap.</p>\
+                 <p><a href=\"blocked://evil.example/login\">https://bank.example/login</a></p>"
+                    .to_owned(),
+            ),
+            ..message(
+                "Priya Raman <priya@example.test>",
+                "2026-03-24T09:00:00Z",
+                true,
+                "Attached is the draft roadmap.",
+            )
+        },
         message(
             "Marcus Chen <marcus@example.test>",
             "2026-03-24T10:00:00Z",
@@ -53,7 +65,8 @@ fn seed_conversation(store: &LocalStore) {
             "Priya Raman <priya@example.test>",
             "2026-03-24T11:00:00Z",
             false,
-            "Thanks, I moved offline search to November.",
+            "Thanks, I moved offline search to November.\n\n\
+             The plan is at https://example.com/roadmap for now.",
         ),
     ];
     store
@@ -340,4 +353,128 @@ fn a_message_more_menu_moves_and_shows_the_plain_text(cx: &mut TestAppContext) {
     assert!(drawn("reader-source-text", cx));
     keys("escape", cx);
     assert!(!drawn("reader-source-text", cx));
+}
+
+/// The bounds of the element `selector` names.
+fn paragraph(selector: &'static str, cx: &mut VisualTestContext) -> Bounds<Pixels> {
+    cx.debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} is drawn"))
+}
+
+fn selected(reader: &Entity<ReaderView>, cx: &mut VisualTestContext) -> Option<String> {
+    cx.read_entity(reader, |reader, _| reader.selected_text())
+}
+
+/// Presses at `from`, drags to `to` and releases.
+fn drag(from: Point<Pixels>, to: Point<Pixels>, cx: &mut VisualTestContext) {
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn dragging_selects_body_text_and_secondary_c_copies_it(cx: &mut TestAppContext) {
+    let (view, cx, reader) = open_conversation(cx);
+    let first = paragraph("reader-paragraph-2-0", cx);
+    let second = paragraph("reader-paragraph-2-1", cx);
+    assert!(
+        second.top() > first.bottom(),
+        "paragraphs have space between them"
+    );
+
+    // Across the first paragraph, past its end.
+    let middle = first.top() + first.size.height / 2.;
+    drag(
+        point(first.left() + px(1.), middle),
+        point(first.right() + px(40.), middle),
+        cx,
+    );
+    assert_eq!(
+        selected(&reader, cx).as_deref(),
+        Some("Thanks, I moved offline search to November.")
+    );
+    assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
+    keys("secondary-c", cx);
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("Thanks, I moved offline search to November.".to_owned())
+    );
+
+    // Into the next paragraph and below the text: to the end of the body,
+    // with the blank line between.
+    drag(
+        point(first.left() + px(1.), middle),
+        point(second.left(), second.bottom() + px(30.)),
+        cx,
+    );
+    let text = selected(&reader, cx).expect("a selection");
+    assert!(text.starts_with("Thanks"), "{text}");
+    assert!(text.ends_with("for now."), "{text}");
+    assert!(text.contains(".\n\nThe plan"), "{text}");
+
+    // A press outside the text clears it.
+    click("reader-subject", cx);
+    assert_eq!(selected(&reader, cx), None);
+
+    // Secondary+A selects the current message's text.
+    keys("secondary-a", cx);
+    assert!(selected(&reader, cx).is_some_and(|text| text.ends_with("for now.")));
+}
+
+#[gpui::test]
+fn a_link_shows_its_real_target_before_opening(cx: &mut TestAppContext) {
+    let (_view, cx, reader) = open_conversation(cx);
+    let prompt = |cx: &mut VisualTestContext| {
+        cx.read_entity(&reader, |reader, _| {
+            reader
+                .link_prompt()
+                .map(|prompt| (prompt.target.clone(), prompt.shown_host.clone()))
+        })
+    };
+
+    // The HTML message's second line is a link showing bank.example that
+    // goes to evil.example.
+    click("reader-message-summary-0", cx);
+    let body = paragraph("reader-paragraph-0-0", cx);
+    let link = point(body.left() + px(12.), body.bottom() - px(6.));
+    cx.simulate_click(link, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        prompt(cx),
+        Some((
+            "https://evil.example/login".to_owned(),
+            Some("bank.example".to_owned())
+        ))
+    );
+    assert!(drawn("reader-link-target", cx));
+    assert!(drawn("reader-link-warning", cx));
+    assert_eq!(cx.opened_url(), None, "nothing opens without confirming");
+
+    keys("escape", cx);
+    assert_eq!(prompt(cx), None);
+    assert_eq!(cx.opened_url(), None);
+
+    // A link whose text is its target opens without a warning, once
+    // confirmed.
+    let reply = paragraph("reader-paragraph-2-1", cx);
+    let link = point(
+        reply.left() + px(160.),
+        reply.top() + reply.size.height / 2.,
+    );
+    cx.simulate_click(link, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        prompt(cx),
+        Some(("https://example.com/roadmap".to_owned(), None))
+    );
+    assert!(!drawn("reader-link-warning", cx));
+    click("reader-link-open", cx);
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://example.com/roadmap")
+    );
+    assert_eq!(prompt(cx), None);
 }

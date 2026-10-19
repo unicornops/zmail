@@ -16,6 +16,7 @@ use zmail_core::{
 };
 
 use super::ReaderView;
+use super::body::{BodyContext, render_paragraphs};
 use super::header::{render_details, render_header};
 use super::quoted::split_folded_tail;
 use crate::components::{Avatar, ButtonSize, IconButton};
@@ -60,6 +61,7 @@ pub(super) fn render_message(
     message: &ThreadMessage,
     display: MessageDisplay,
     context: &MessageContext<'_>,
+    body: &BodyContext<'_>,
     cx: &mut Context<ReaderView>,
 ) -> AnyElement {
     let colors = &context.colors;
@@ -78,7 +80,7 @@ pub(super) fn render_message(
         .overflow_hidden();
     let card = if display.expanded {
         card.child(render_header(reader, message, display, context, cx))
-            .child(expanded_content(message, display, context, cx))
+            .child(expanded_content(message, display, context, body, cx))
     } else {
         card.child(collapsed_summary(message, display, context, cx))
     };
@@ -162,10 +164,10 @@ fn expanded_content(
     message: &ThreadMessage,
     display: MessageDisplay,
     context: &MessageContext<'_>,
+    body: &BodyContext<'_>,
     cx: &mut Context<ReaderView>,
 ) -> AnyElement {
     let colors = &context.colors;
-    let (visible, folded) = split_folded_tail(&message.rendered_body);
     let banners = message_banners(message, colors);
     let attachments = message_attachments(message, colors);
     let index = display.index;
@@ -189,8 +191,8 @@ fn expanded_content(
         .when(!banners.is_empty(), |this| {
             this.child(div().flex().flex_col().gap_2().children(banners))
         })
-        .child(div().w_full().min_w_0().text_sm().child(visible.to_owned()))
-        .when_some(folded, |this, folded| {
+        .child(render_paragraphs(body, false, cx))
+        .when(body.model.fold_start.is_some(), |this| {
             // In a row, so the toggle is only as wide as its button.
             this.child(
                 div().flex().child(
@@ -214,14 +216,7 @@ fn expanded_content(
                 ),
             )
             .when(display.unfolded, |this| {
-                this.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .text_sm()
-                        .text_color(rgb(colors.muted))
-                        .child(folded.to_owned()),
-                )
+                this.child(render_paragraphs(body, true, cx))
             })
         })
         .when(!attachments.is_empty(), |this| {

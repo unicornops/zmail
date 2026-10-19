@@ -47,7 +47,9 @@
     "bindings": {
       "n": "zmail::NextMessage",
       "p": "zmail::PreviousMessage",
-      "enter": "zmail::ToggleMessage"
+      "enter": "zmail::ToggleMessage",
+      "secondary-c": "text_input::Copy",
+      "secondary-a": "text_input::SelectAll"
     }
   },
   {
@@ -69,7 +71,9 @@
     "bindings": {
       "n": "zmail::NextMessage",
       "p": "zmail::PreviousMessage",
-      "enter": "zmail::ToggleMessage"
+      "enter": "zmail::ToggleMessage",
+      "secondary-c": "text_input::Copy",
+      "secondary-a": "text_input::SelectAll"
     }
   },
   {
@@ -102,7 +106,9 @@
     "bindings": {
       "n": "zmail::NextMessage",
       "p": "zmail::PreviousMessage",
-      "enter": "zmail::ToggleMessage"
+      "enter": "zmail::ToggleMessage",
+      "secondary-c": "text_input::Copy",
+      "secondary-a": "text_input::SelectAll"
     }
   },
   {
