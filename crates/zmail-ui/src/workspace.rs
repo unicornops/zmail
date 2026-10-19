@@ -34,10 +34,10 @@ use zmail_sync::SyncService;
 use super::{DetailMode, InitialView, ListMode, WorkspaceView};
 use crate::account_setup::{AccountSetupEvent, AccountSetupView};
 use crate::actions::{
-    AddAccount, Archive, Cancel, Delete, FocusNextPane, FocusPreviousPane, FocusSearch, Forward,
-    GoBack, MoveToMailbox, NewMessage, Reply, ReplyAll, ReplyToMessage, RetryOutbox, RunSearch,
-    SaveAttachments, ShowDrafts, ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleFlag,
-    ToggleRead, ToggleSidebar, ToggleTheme, Undo,
+    AddAccount, Archive, Cancel, Delete, DismissSenderWarning, FocusNextPane, FocusPreviousPane,
+    FocusSearch, Forward, GoBack, MoveToMailbox, NewMessage, Reply, ReplyAll, ReplyToMessage,
+    RetryOutbox, RunSearch, SaveAttachments, ShowDrafts, ShowMail, ShowOutbox, SyncAccount,
+    SyncAll, ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme, Undo,
 };
 use crate::app_menu::AppMenuButton;
 use crate::components::{
@@ -2046,6 +2046,22 @@ impl WorkspaceView {
         }
     }
 
+    /// "Looks safe" on a sender-safety banner: hides it for that message.
+    fn dismiss_sender_warning(
+        &mut self,
+        action: &DismissSenderWarning,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.store.dismiss_sender_warning(action.message_id) {
+            Ok(_) => {
+                self.refresh_from_store(cx);
+                cx.notify();
+            }
+            Err(error) => self.show_error(format!("{error:#}"), cx),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Workspace commands
     // -----------------------------------------------------------------------
@@ -2597,6 +2613,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::toggle_flag))
             .on_action(cx.listener(Self::toggle_read))
             .on_action(cx.listener(Self::save_attachments))
+            .on_action(cx.listener(Self::dismiss_sender_warning))
             .on_action(cx.listener(Self::move_to_mailbox))
             .size_full()
             .font_family(PlatformStyle::current().ui_font.family())

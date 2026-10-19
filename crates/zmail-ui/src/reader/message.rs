@@ -1,8 +1,8 @@
 //! The message view: one message of the conversation.
 //!
 //! An expanded message shows its header (`header`), the From/To/Date
-//! details when asked for, then the banner slot (status and sender-safety
-//! warnings), the body with its quoted tail folded behind a "…" toggle,
+//! details when asked for, then the banner slot (the sender-safety
+//! banner), the body with its quoted tail folded behind a "…" toggle,
 //! then the attachments slot. A collapsed message is a single
 //! summary line: sender, a snippet and the date. Clicking either header
 //! switches between the two.
@@ -16,6 +16,7 @@ use zmail_core::{
 };
 
 use super::ReaderView;
+use super::banners;
 use super::body::{BodyContext, render_paragraphs};
 use super::header::{render_details, render_header};
 use super::quoted::split_folded_tail;
@@ -226,22 +227,9 @@ fn expanded_content(
 }
 
 /// The banner slot of an expanded message, between its header and body:
-/// the status chips and the sender-safety warning.
-fn message_banners(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyElement> {
-    let mut banners = Vec::new();
-    let status_badges = message_status_badges(message, colors);
-    if !status_badges.is_empty() {
-        banners.push(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .children(status_badges)
-                .into_any_element(),
-        );
-    }
-    banners.extend(sender_safety_banner(message, colors));
-    banners
+/// the sender-safety banner.
+fn message_banners(message: &ThreadMessage, _colors: &UiColors) -> Vec<AnyElement> {
+    banners::message_banners(message)
 }
 
 /// The attachments slot of an expanded message, below its body.
@@ -263,88 +251,4 @@ fn message_attachments(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyEle
             .into_any_element()
         })
         .collect()
-}
-
-fn message_status_badges(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyElement> {
-    // The render mode (plain text, sanitized HTML, preview) is an internal
-    // detail; it stays on `ThreadMessage` for diagnostics but is not shown.
-    let mut badges = Vec::new();
-
-    if !message.is_read {
-        badges.push(
-            label_chip(
-                "Unread",
-                Some("eye-off"),
-                colors.button_background,
-                colors.accent,
-            )
-            .into_any_element(),
-        );
-    }
-
-    if message.is_flagged {
-        badges.push(
-            label_chip(
-                "Flagged",
-                Some("flag"),
-                colors.button_background,
-                colors.warning,
-            )
-            .into_any_element(),
-        );
-    }
-
-    if message.has_remote_content {
-        badges.push(
-            label_chip(
-                "Remote content blocked",
-                Some("shield"),
-                colors.button_background,
-                colors.danger,
-            )
-            .into_any_element(),
-        );
-    }
-
-    badges
-}
-
-/// Renders the inline phishing-warning banner for a message's sender
-/// identity (issue #91): lookalike From domains and Reply-To mismatches.
-/// Information-first and non-blocking, matching the remote-content
-/// stance in docs/phase5-hardening.md.
-fn sender_safety_banner(message: &ThreadMessage, colors: &UiColors) -> Vec<AnyElement> {
-    let report = zmail_security::sender_safety::analyze_sender_identity(
-        &message.sender,
-        message.reply_to.as_deref(),
-    );
-    if report.is_safe() {
-        return Vec::new();
-    }
-
-    vec![
-        div()
-            .px_3()
-            .py_2()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(colors.warning))
-            .bg(rgb(colors.warning_background))
-            .flex()
-            .flex_col()
-            .gap_1()
-            .children(
-                report
-                    .warnings()
-                    .into_iter()
-                    .map(|warning| {
-                        div()
-                            .text_sm()
-                            .text_color(rgb(colors.warning))
-                            .child(warning)
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .into_any_element(),
-    ]
 }

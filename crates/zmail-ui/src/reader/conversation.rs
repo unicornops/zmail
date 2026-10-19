@@ -15,8 +15,9 @@ use std::collections::HashSet;
 use gpui::{AnyElement, FontWeight, IntoElement, div, prelude::*, rgb};
 use zmail_core::{ThreadView, text::count_noun};
 
+use super::banners;
 use crate::styles::UiColors;
-use crate::widgets::{empty_state, label_chip};
+use crate::widgets::empty_state;
 
 /// What the reader remembers about the open conversation: which messages
 /// are expanded, which show their quoted text, and which is current.
@@ -216,57 +217,8 @@ pub(super) fn render_conversation_header(thread: &ThreadView, colors: &UiColors)
         .into_any_element()
 }
 
-/// The conversation's banner slot, under the subject.
-fn conversation_banners(thread: &ThreadView, colors: &UiColors) -> Vec<AnyElement> {
-    let mut badges = Vec::new();
-
-    if thread.unread_count > 0 {
-        badges.push(
-            label_chip(
-                format!("{} unread", thread.unread_count),
-                Some("eye-off"),
-                colors.button_background,
-                colors.accent,
-            )
-            .into_any_element(),
-        );
-    }
-
-    if thread.is_flagged {
-        badges.push(
-            label_chip(
-                "Flagged",
-                Some("flag"),
-                colors.button_background,
-                colors.warning,
-            )
-            .into_any_element(),
-        );
-    }
-
-    if thread.has_attachments {
-        badges.push(
-            label_chip(
-                "Attachments",
-                Some("paperclip"),
-                colors.button_background,
-                colors.info,
-            )
-            .into_any_element(),
-        );
-    }
-
-    if thread.has_remote_content {
-        badges.push(
-            label_chip(
-                "Remote content blocked",
-                Some("shield"),
-                colors.button_background,
-                colors.danger,
-            )
-            .into_any_element(),
-        );
-    }
-
-    badges
+/// The conversation's banner slot, under the subject: the remote-content
+/// notice.
+fn conversation_banners(thread: &ThreadView, _colors: &UiColors) -> Vec<AnyElement> {
+    banners::conversation_banners(thread)
 }

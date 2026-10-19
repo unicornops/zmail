@@ -43,7 +43,10 @@ pub use typography::{
 
 use zmail_core::{ThemeAppearance, ThemeSummary};
 
-use self::contrast::{MIN_NON_TEXT_CONTRAST, ensure_contrast, readable_on};
+use self::contrast::{MIN_NON_TEXT_CONTRAST, ensure_contrast, mix, readable_on};
+
+/// How much of `info` tints [`UiColors::info_background`].
+const INFO_BACKGROUND_TINT: f32 = 0.14;
 
 // ---------------------------------------------------------------------------
 // Spacing — 4-px grid
@@ -334,6 +337,9 @@ pub struct UiColors {
     pub success_background: u32,
     /// Tinted background for error banners.
     pub danger_background: u32,
+    /// Tinted background for information banners. Themes have no token
+    /// for it, so it is `info` mixed lightly into the background.
+    pub info_background: u32,
     /// Danger / error foreground colour for icons and text.
     pub danger: u32,
     /// Warning foreground colour for icons and text.
@@ -390,6 +396,7 @@ impl UiColors {
         let foreground = over_background(&theme.foreground, light::FOREGROUND, dark::FOREGROUND);
         let accent = over_background(&theme.accent, light::ACCENT, dark::ACCENT);
         let accent_foreground = readable_on(accent, &[background, foreground]);
+        let info = over_background(&theme.info, light::INFO, dark::INFO);
 
         Self {
             background,
@@ -431,7 +438,8 @@ impl UiColors {
             danger: over_background(&theme.danger, light::DANGER, dark::DANGER),
             warning: over_background(&theme.warning, light::WARNING, dark::WARNING),
             success: over_background(&theme.success, light::SUCCESS, dark::SUCCESS),
-            info: over_background(&theme.info, light::INFO, dark::INFO),
+            info,
+            info_background: mix(background, info, INFO_BACKGROUND_TINT),
             control_border: ensure_contrast(
                 border,
                 &[background, surface],

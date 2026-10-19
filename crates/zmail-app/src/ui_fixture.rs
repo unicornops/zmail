@@ -5,7 +5,9 @@
 //! in-memory secret store and no sync, so the captures need no network, mail
 //! server or keychain and look the same on every run apart from the relative
 //! dates. Every name and address is made up and uses the reserved
-//! `example.com`, `example.org` and `example.net` domains.
+//! `example.com`, `example.org` and `example.net` domains, apart from the
+//! sender of the `reader-safety-danger` view, which has to imitate a real
+//! domain (`paypa1.com`) to trigger the impersonation warning.
 
 use anyhow::{Context, Result, bail};
 use zmail_core::{
@@ -66,6 +68,15 @@ pub(crate) enum FixtureView {
     /// The `accounts` view with a search across the Unified Inbox, so the
     /// scope control and account chips show.
     Search,
+    /// The reader on a message whose Reply-To is a subdomain of the
+    /// sender's: the info sender-safety banner.
+    ReaderSafetyInfo,
+    /// The reader on a message whose Reply-To is an unrelated domain: the
+    /// caution banner.
+    ReaderSafetyCaution,
+    /// The reader on a lookalike sender with blocked remote content: the
+    /// danger banner and the remote-content notice.
+    ReaderSafetyDanger,
 }
 
 impl FixtureView {
@@ -89,8 +100,11 @@ impl FixtureView {
             "accounts" => Self::Accounts,
             "multi-select" => Self::MultiSelect,
             "search" => Self::Search,
+            "reader-safety-info" => Self::ReaderSafetyInfo,
+            "reader-safety-caution" => Self::ReaderSafetyCaution,
+            "reader-safety-danger" => Self::ReaderSafetyDanger,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-selection, reader-link-warning, compose, compose-invalid, account-setup, sidebar, accounts, multi-select or search"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-selection, reader-link-warning, compose, compose-invalid, account-setup, sidebar, accounts, multi-select, search, reader-safety-info, reader-safety-caution or reader-safety-danger"
             ),
         })
     }
@@ -153,6 +167,9 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
     if view == FixtureView::InboxEmpty {
         snapshot.mailboxes[0].threads.clear();
     }
+    if let Some(thread) = safety_thread(view, now) {
+        snapshot.mailboxes[0].threads.insert(0, thread);
+    }
     store
         .replace_account_snapshot(account_id, &snapshot)
         .context("failed to seed the fixture mailboxes")?;
@@ -210,6 +227,11 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
             "archive",
             LINK_THREAD_SUBJECT,
         )?),
+        FixtureView::ReaderSafetyInfo
+        | FixtureView::ReaderSafetyCaution
+        | FixtureView::ReaderSafetyDanger => {
+            InitialView::Thread(thread_id(store, account_id, "inbox", SAFETY_SUBJECT)?)
+        }
         FixtureView::Compose => {
             let identity = store
                 .list_identities(account_id)?
@@ -266,6 +288,55 @@ fn thread_id(store: &LocalStore, account_id: i64, role: &str, subject: &str) -> 
         .find(|thread| thread.subject == subject)
         .map(|thread| thread.id)
         .with_context(|| format!("the fixture thread {subject:?} is missing"))
+}
+
+/// Subject of the sender-safety views' thread.
+const SAFETY_SUBJECT: &str = "Action needed: confirm your payment details";
+
+/// The newest Inbox thread of a sender-safety view: its sender, Reply-To
+/// and whether it has blocked remote content.
+fn safety_thread(view: FixtureView, now: u64) -> Option<ThreadSnapshot> {
+    let (sender, reply_to, remote_content) = match view {
+        FixtureView::ReaderSafetyInfo => (
+            "Example Billing <billing@example.com>",
+            "Billing replies <replies@billing.example.com>",
+            false,
+        ),
+        FixtureView::ReaderSafetyCaution => (
+            "Example Billing <billing@example.com>",
+            "Accounts <accounts@example.net>",
+            false,
+        ),
+        FixtureView::ReaderSafetyDanger => (
+            "PayPal Service <service@paypa1.com>",
+            "Accounts <accounts@example.net>",
+            true,
+        ),
+        _ => return None,
+    };
+    let mut thread = thread_snapshot(
+        &Thread {
+            id: "t-safety",
+            subject: SAFETY_SUBJECT,
+            flagged: false,
+            messages: &[Message {
+                sender: "",
+                minutes_ago: 5 * MINUTE,
+                is_read: false,
+                body: "We could not process your last payment. Reply to this message \
+                       with your card details within 24 hours to keep your account open.",
+                attachments: &[],
+            }],
+        },
+        now,
+    );
+    thread.participants = sender.to_owned();
+    for message in &mut thread.messages {
+        message.sender = sender.to_owned();
+        message.reply_to = Some(reply_to.to_owned());
+        message.has_remote_content = remote_content;
+    }
+    Some(thread)
 }
 
 /// Queues three replies and moves them to the sending, retrying and
@@ -895,6 +966,9 @@ mod tests {
             "accounts",
             "multi-select",
             "search",
+            "reader-safety-info",
+            "reader-safety-caution",
+            "reader-safety-danger",
         ] {
             FixtureView::parse(name)?;
         }
@@ -904,6 +978,31 @@ mod tests {
         assert_eq!(parse_theme(Some("light"))?, Some(ThemeAppearance::Light));
         assert_eq!(parse_theme(Some("dark"))?, Some(ThemeAppearance::Dark));
         assert!(parse_theme(Some("sepia")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn safety_views_open_a_message_at_each_tier() -> Result<()> {
+        use zmail_security::sender_safety::{SafetyTier, analyze_sender_identity};
+
+        for (view, tier, remote_content) in [
+            (FixtureView::ReaderSafetyInfo, SafetyTier::Info, false),
+            (FixtureView::ReaderSafetyCaution, SafetyTier::Caution, false),
+            (FixtureView::ReaderSafetyDanger, SafetyTier::Danger, true),
+        ] {
+            let (store, initial_view) = seeded(view)?;
+            let InitialView::Thread(thread_id) = initial_view else {
+                bail!("{view:?} should open a thread");
+            };
+            let thread = store
+                .thread_view(thread_id)?
+                .context("the safety thread should exist")?;
+            assert_eq!(thread.subject, SAFETY_SUBJECT);
+            assert_eq!(thread.has_remote_content, remote_content, "{view:?}");
+            let message = &thread.messages[0];
+            let report = analyze_sender_identity(&message.sender, message.reply_to.as_deref());
+            assert_eq!(report.tier(), Some(tier), "{view:?}");
+        }
         Ok(())
     }
 

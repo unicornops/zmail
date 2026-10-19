@@ -7,9 +7,24 @@
 //! both, information-first and never blocking, per the security posture
 //! in `docs/phase5-hardening.md`.
 
+/// How serious a sender-identity finding is, lowest first. The reader
+/// shows one banner per message, at the highest tier that applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SafetyTier {
+    /// Worth knowing, rarely a problem: replies go to another part of the
+    /// sender's own domain (`news.example.com` for `example.com`).
+    Info,
+    /// Check before replying: replies go to an unrelated domain.
+    Caution,
+    /// Likely impersonation: the From domain imitates a well-known one.
+    Danger,
+}
+
 /// A warning about the sender identity of a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SenderSafetyReport {
+    /// The From domain, lowercased, when the From header has one.
+    pub from_domain: Option<String>,
     /// The From domain looks like a well-known domain but is not it.
     pub lookalike_of: Option<String>,
     /// The Reply-To addresses point at a different domain than From.
@@ -20,6 +35,26 @@ impl SenderSafetyReport {
     /// Whether any warning applies.
     pub fn is_safe(&self) -> bool {
         self.lookalike_of.is_none() && self.reply_to_mismatch.is_none()
+    }
+
+    /// The highest tier that applies, or `None` when the sender looks
+    /// safe. A lookalike From domain is [`SafetyTier::Danger`]; a Reply-To
+    /// on an unrelated domain is [`SafetyTier::Caution`], and one on a
+    /// parent or subdomain of the From domain is [`SafetyTier::Info`].
+    pub fn tier(&self) -> Option<SafetyTier> {
+        if self.lookalike_of.is_some() {
+            return Some(SafetyTier::Danger);
+        }
+        let reply_to = self.reply_to_mismatch.as_deref()?;
+        let related = self
+            .from_domain
+            .as_deref()
+            .is_some_and(|from| domains_related(from, reply_to));
+        Some(if related {
+            SafetyTier::Info
+        } else {
+            SafetyTier::Caution
+        })
     }
 
     /// Human-readable warning lines for the reader, in priority order.
@@ -37,6 +72,20 @@ impl SenderSafetyReport {
         }
         warnings
     }
+}
+
+/// Whether one domain is the other or a subdomain of it, in either
+/// direction (`mail.example.com` and `example.com`). Sibling subdomains
+/// (`a.example.com`, `b.example.com`) do not count: without a public
+/// suffix list `example.co.uk` and `evil.co.uk` would look related too.
+fn domains_related(first: &str, second: &str) -> bool {
+    let is_within = |inner: &str, outer: &str| {
+        inner == outer
+            || inner
+                .strip_suffix(outer)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    };
+    is_within(first, second) || is_within(second, first)
 }
 
 /// Well-known domains most often impersonated in phishing.
@@ -151,6 +200,7 @@ pub fn analyze_sender_identity(from: &str, reply_to: Option<&str>) -> SenderSafe
     };
 
     SenderSafetyReport {
+        from_domain,
         lookalike_of,
         reply_to_mismatch,
     }
@@ -258,6 +308,41 @@ mod tests {
         let report =
             analyze_sender_identity("Support <support@paypal.com>", Some("support@paypal.com"));
         assert!(report.is_safe());
+    }
+
+    #[test]
+    fn tiers_rank_impersonation_above_reply_to_mismatches() {
+        let safe = analyze_sender_identity("news@lwn.net", Some("news@lwn.net"));
+        assert_eq!(safe.tier(), None);
+
+        let lookalike = analyze_sender_identity("security@paypa1.com", None);
+        assert_eq!(lookalike.tier(), Some(SafetyTier::Danger));
+        assert_eq!(lookalike.from_domain.as_deref(), Some("paypa1.com"));
+
+        let unrelated = analyze_sender_identity("billing@paypal.com", Some("evil@evil.example"));
+        assert_eq!(unrelated.tier(), Some(SafetyTier::Caution));
+
+        // A Reply-To on a subdomain (or the parent) of the From domain is
+        // still shown, but only as information.
+        let subdomain = analyze_sender_identity(
+            "GitHub <noreply@github.com>",
+            Some("reply@reply.github.com"),
+        );
+        assert_eq!(subdomain.tier(), Some(SafetyTier::Info));
+        let parent = analyze_sender_identity("news@mail.example.com", Some("team@example.com"));
+        assert_eq!(parent.tier(), Some(SafetyTier::Info));
+
+        // Look-alike suffixes and siblings are not related.
+        let suffix = analyze_sender_identity("a@example.com", Some("b@notexample.com"));
+        assert_eq!(suffix.tier(), Some(SafetyTier::Caution));
+        let sibling = analyze_sender_identity("a@one.example.com", Some("b@two.example.com"));
+        assert_eq!(sibling.tier(), Some(SafetyTier::Caution));
+
+        // Impersonation wins when both apply.
+        let both = analyze_sender_identity("security@paypa1.com", Some("evil@evil.example"));
+        assert_eq!(both.tier(), Some(SafetyTier::Danger));
+        assert!(SafetyTier::Info < SafetyTier::Caution);
+        assert!(SafetyTier::Caution < SafetyTier::Danger);
     }
 
     #[test]

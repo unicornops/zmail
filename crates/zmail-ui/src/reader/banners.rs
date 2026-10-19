@@ -1,0 +1,236 @@
+//! The reader's banners: the remote-content notice above the conversation
+//! and the sender-safety banner on each message.
+//!
+//! Sender safety comes from `zmail_security::sender_safety` (#108). Each
+//! message gets at most one banner, at the highest tier that applies:
+//!
+//! | Finding | Tier |
+//! |---|---|
+//! | The From domain imitates a well-known domain | Danger |
+//! | Reply-To is on an unrelated domain | Caution |
+//! | Reply-To is on a parent or subdomain of the From domain | Info |
+//!
+//! "Looks safe" hides the banner for that message only (stored with the
+//! message); "Show details" shows the evidence the banner is based on.
+
+use gpui::{AnyElement, IntoElement, SharedString, div, prelude::*};
+use zmail_core::{
+    ThreadMessage, ThreadView,
+    participants::{parse_address_list, sender_identity},
+};
+use zmail_security::sender_safety::{SafetyTier, SenderSafetyReport, analyze_sender_identity};
+
+use crate::actions::DismissSenderWarning;
+use crate::components::{Banner, BannerTone, Button, ButtonSize};
+
+/// The notice under the subject: one neutral line when the conversation
+/// has remote content, which stays blocked.
+pub(crate) fn conversation_banners(thread: &ThreadView) -> Vec<AnyElement> {
+    if !thread.has_remote_content {
+        return Vec::new();
+    }
+    vec![
+        Banner::new(
+            ("remote-content", thread.id as u64),
+            "Remote content is blocked in this conversation to protect your privacy.",
+        )
+        .into_any_element(),
+    ]
+}
+
+/// The sender-safety banner for `message`, unless its sender looks safe or
+/// the user dismissed it.
+pub(crate) fn message_banners(message: &ThreadMessage) -> Vec<AnyElement> {
+    sender_safety_banner(message)
+        .map(IntoElement::into_any_element)
+        .into_iter()
+        .collect()
+}
+
+/// What a sender-safety banner says: its tier, title, sentence and the
+/// evidence under "Show details".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SenderWarning {
+    pub(crate) tier: SafetyTier,
+    pub(crate) title: &'static str,
+    pub(crate) message: String,
+    pub(crate) details: Vec<(&'static str, String)>,
+}
+
+/// The warning for `message`, or `None` when there is nothing to show.
+pub(crate) fn sender_warning(message: &ThreadMessage) -> Option<SenderWarning> {
+    if message.sender_warning_dismissed {
+        return None;
+    }
+    let report = analyze_sender_identity(&message.sender, message.reply_to.as_deref());
+    describe(&report, &message.sender, message.reply_to.as_deref())
+}
+
+fn describe(
+    report: &SenderSafetyReport,
+    from: &str,
+    reply_to: Option<&str>,
+) -> Option<SenderWarning> {
+    let tier = report.tier()?;
+    let from_domain = report.from_domain.clone().unwrap_or_default();
+    let from_address = sender_identity(from).1.unwrap_or_else(|| from.to_owned());
+    let reply_to_addresses = reply_to
+        .map(|reply_to| {
+            parse_address_list(reply_to)
+                .into_iter()
+                .filter_map(|participant| participant.email)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|addresses| !addresses.is_empty());
+
+    let mut details = vec![("From", from_address)];
+    let (title, message) = match tier {
+        SafetyTier::Danger => {
+            let known = report.lookalike_of.clone().unwrap_or_default();
+            details.push(("Sender's domain", from_domain));
+            details.push(("Looks like", known.clone()));
+            (
+                "Possible impersonation",
+                format!(
+                    "The sender's domain imitates {known}, so this message may not be from them."
+                ),
+            )
+        }
+        SafetyTier::Caution => {
+            let reply_domain = report.reply_to_mismatch.clone().unwrap_or_default();
+            (
+                "Replies go somewhere else",
+                format!(
+                    "Replying sends your message to {reply_domain}, not to the sender's domain."
+                ),
+            )
+        }
+        SafetyTier::Info => {
+            let reply_domain = report.reply_to_mismatch.clone().unwrap_or_default();
+            (
+                "Replies go to a related address",
+                format!(
+                    "Replies go to {reply_domain}, a related domain, rather than {from_domain}."
+                ),
+            )
+        }
+    };
+    if report.reply_to_mismatch.is_some()
+        && let Some(addresses) = reply_to_addresses
+    {
+        details.push(("Replies go to (Reply-To)", addresses));
+    }
+    Some(SenderWarning {
+        tier,
+        title,
+        message,
+        details,
+    })
+}
+
+fn sender_safety_banner(message: &ThreadMessage) -> Option<Banner> {
+    let warning = sender_warning(message)?;
+    let message_id = message.id;
+    let tone = match warning.tier {
+        SafetyTier::Info => BannerTone::Info,
+        SafetyTier::Caution => BannerTone::Caution,
+        SafetyTier::Danger => BannerTone::Danger,
+    };
+    let mut banner = Banner::new(("sender-safety", message_id as u64), warning.message)
+        .tone(tone)
+        .title(warning.title)
+        .action(
+            div()
+                .debug_selector(|| format!("sender-safety-dismiss-{message_id}"))
+                .child(
+                    Button::new(("sender-safety-dismiss", message_id as u64), "Looks safe")
+                        .icon("check")
+                        .size(ButtonSize::Small)
+                        .tooltip(SharedString::from("Hide this warning for this message"))
+                        .on_click(move |_, window, cx| {
+                            window
+                                .dispatch_action(Box::new(DismissSenderWarning { message_id }), cx);
+                        }),
+                ),
+        );
+    for (label, value) in warning.details {
+        banner = banner.detail(label, value);
+    }
+    Some(banner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn warning(from: &str, reply_to: Option<&str>) -> Option<SenderWarning> {
+        let report = analyze_sender_identity(from, reply_to);
+        describe(&report, from, reply_to)
+    }
+
+    #[test]
+    fn safe_senders_get_no_banner() {
+        assert_eq!(warning("Kai <kai@example.com>", None), None);
+        assert_eq!(
+            warning("Kai <kai@example.com>", Some("kai@example.com")),
+            None
+        );
+    }
+
+    #[test]
+    fn lookalike_domains_are_danger_with_both_domains_as_evidence() {
+        let warning =
+            warning("PayPal Security <security@paypa1.com>", None).expect("a lookalike is flagged");
+        assert_eq!(warning.tier, SafetyTier::Danger);
+        assert_eq!(warning.title, "Possible impersonation");
+        assert!(warning.message.contains("paypal.com"));
+        assert_eq!(
+            warning.details,
+            vec![
+                ("From", "security@paypa1.com".to_owned()),
+                ("Sender's domain", "paypa1.com".to_owned()),
+                ("Looks like", "paypal.com".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn unrelated_reply_to_is_caution_with_both_addresses() {
+        let warning = warning(
+            "Billing <billing@example.com>",
+            Some("Billing <collect@evil.example>"),
+        )
+        .expect("the mismatch is flagged");
+        assert_eq!(warning.tier, SafetyTier::Caution);
+        assert!(warning.message.contains("evil.example"));
+        assert_eq!(
+            warning.details,
+            vec![
+                ("From", "billing@example.com".to_owned()),
+                (
+                    "Replies go to (Reply-To)",
+                    "collect@evil.example".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn related_reply_to_is_info() {
+        let warning = warning("news@example.com", Some("reply@lists.example.com"))
+            .expect("the related domain is still shown");
+        assert_eq!(warning.tier, SafetyTier::Info);
+        assert_eq!(warning.title, "Replies go to a related address");
+    }
+
+    #[test]
+    fn lookalike_and_reply_to_show_one_danger_banner_with_all_evidence() {
+        let warning = warning("security@paypa1.com", Some("evil@evil.example")).expect("flagged");
+        assert_eq!(warning.tier, SafetyTier::Danger);
+        assert_eq!(
+            warning.details.last(),
+            Some(&("Replies go to (Reply-To)", "evil@evil.example".to_owned()))
+        );
+    }
+}

@@ -28,8 +28,10 @@
 //! | `body` | A message body: paragraphs at a readable measure, the selection |
 //! | `selectable` | `SelectableText`: a paragraph the mouse can select |
 //! | `links` | A body's links and the dialog that opens one |
+//! | `banners` | The remote-content notice and the sender-safety banners |
 
 mod actions;
+mod banners;
 mod body;
 mod conversation;
 mod header;
