@@ -77,8 +77,23 @@ MATRIX=(
   "compose-invalid-light compose-invalid light 760 680"
   "undo-send-dark undo-send dark 1440 920"
   "undo-send-light undo-send light 1440 920"
-  "account-setup-dark account-setup dark 1440 920"
-  "account-setup-light account-setup light 1440 920"
+  "account-setup-dark account-setup dark 640 780"
+  "account-setup-light account-setup light 640 780"
+  "onboarding-provider-dark onboarding-provider dark 1440 920"
+  "onboarding-provider-light onboarding-provider light 1440 920"
+  "onboarding-credentials-dark onboarding-credentials dark 1440 920"
+  "onboarding-credentials-light onboarding-credentials light 1440 920"
+  "onboarding-discovering-dark onboarding-discovering dark 1440 920"
+  "onboarding-consent-dark onboarding-consent dark 1440 920"
+  "onboarding-consent-light onboarding-consent light 1440 920"
+  "onboarding-result-dark onboarding-result dark 1440 920"
+  "onboarding-manual-dark onboarding-manual dark 1440 920"
+  "onboarding-manual-light onboarding-manual light 1440 920"
+  "onboarding-manual-cleartext-dark onboarding-manual-cleartext dark 1440 920"
+  "onboarding-colour-dark onboarding-colour dark 1440 920"
+  "onboarding-colour-light onboarding-colour light 1440 920"
+  "onboarding-syncing-dark onboarding-syncing dark 1440 920"
+  "onboarding-manual-dark-720 onboarding-manual dark 720 720"
   "inbox-dark-720 inbox dark 720 720"
   "inbox-light-720 inbox light 720 720"
   "reader-dark-720 reader dark 720 720"
@@ -147,12 +162,13 @@ cleanup() {
 }
 
 # The title of the window a fixture view is captured from: the main
-# window, or for the compose views the compose window the draft opens in,
-# which is titled with the draft's subject.
+# window, the compose window a compose view's draft opens in (titled with
+# the draft's subject), or the Add Account window.
 window_title_for() {
   case "$1" in
     compose) echo "Re: Q4 roadmap review" ;;
     compose-invalid) echo "Offline search demo" ;;
+    account-setup) echo "Add Account" ;;
     *) echo "${WINDOW_TITLE}" ;;
   esac
 }

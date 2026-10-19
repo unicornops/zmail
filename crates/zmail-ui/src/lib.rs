@@ -13,7 +13,7 @@
 //! | `message_list` | `MessageListView`: threads, search results, drafts, outbox; its multi-row selection and bulk bar |
 //! | `reader` | `ReaderView`: the open conversation and its actions |
 //! | `compose` | `ComposeView`: the draft editor; `ComposeWindow`, one window per draft; `RecipientField` chips |
-//! | `account_setup` | `AccountSetupView`: the new-account form |
+//! | `account_setup` | `AccountSetupView`: first-run onboarding and the add-account flow, with autodiscovery; `AddAccountWindow` |
 //! | `mail_actions` | `MailActions`: store writes, `MailEvent`s and undo |
 //! | `attachments` | opening and saving received attachments (Open, Save As, Save All) |
 //! | `drag` | `DraggedThreads`: conversations dragged from the list onto sidebar folders |
@@ -54,6 +54,7 @@ use crate::components::title_bar::TRAFFIC_LIGHT_POSITION;
 pub use components::gallery::run_gallery;
 
 mod account_setup;
+pub use account_setup::OnboardingStep;
 mod actions;
 mod app_menu;
 mod attachments;
@@ -104,7 +105,7 @@ pub const APP_ID: &str = "ie.unicornops.zmail";
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum InitialView {
     /// The first mailbox of the first account, with its newest thread open
-    /// (or account setup when no account exists yet).
+    /// (or the first-run onboarding when no account exists yet).
     #[default]
     Inbox,
     /// This stored draft in a compose window.
@@ -124,8 +125,11 @@ pub enum InitialView {
     /// The reader on this thread with the open-link dialog showing for the
     /// first link of its current message.
     ThreadLinkPrompt(i64),
-    /// The account setup pane, even when accounts already exist.
-    AccountSetup,
+    /// The Add Account window over the inbox, at its provider step.
+    AddAccount,
+    /// The first-run onboarding at this step, even when accounts exist
+    /// (the colour and first-sync steps need one).
+    Onboarding(OnboardingStep),
     /// The inbox with keyboard focus in the sidebar, which opens it as an
     /// overlay in a window too narrow for the sidebar pane.
     Sidebar,
@@ -165,6 +169,13 @@ pub fn run(
             let store = store.clone();
             let sync_service = sync_service.clone();
             let secrets = secrets.clone();
+            // The add-account flow reads these from any window.
+            cx.set_global(account_setup::AccountSetupServices {
+                store: store.clone(),
+                secrets: secrets.clone(),
+                sync_service: sync_service.clone(),
+                network: zmail_autodiscover::Network::system(),
+            });
 
             if let Err(error) = cx.open_window(
                 WindowOptions {
@@ -281,7 +292,6 @@ pub(crate) enum ListMode {
 pub(crate) enum DetailMode {
     Reader,
     Compose,
-    AccountSetup,
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +314,10 @@ struct WorkspaceView {
     message_list: Entity<MessageListView>,
     reader: Entity<ReaderView>,
     compose: Entity<ComposeView>,
-    account_setup: Entity<AccountSetupView>,
+    /// The first-run onboarding, which fills the window instead of the
+    /// panes until it finishes. Present when the window opened with no
+    /// account.
+    onboarding: Option<(Entity<AccountSetupView>, Subscription)>,
     /// The toolbar search field.
     search_query: Entity<TextInput>,
     /// The command menu button (Windows and Linux; macOS uses the menu

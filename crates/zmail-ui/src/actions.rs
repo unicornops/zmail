@@ -17,7 +17,7 @@
 //! | `ComposeWindow` | a compose window's root |
 //! | `Compose` | the open draft |
 //! | `RecipientField` | a To, Cc or Bcc field (`showing_suggestions` while its suggestions show) |
-//! | `AccountSetup` | the account form |
+//! | `AccountSetup` | the add-account flow |
 //! | `TextInput` | any text field (owned by the text input component) |
 //!
 //! The application commands at the top (Quit, Hide, Minimize, …) have no
@@ -149,8 +149,9 @@ actions!(
         ShowCc,
         /// Show the Bcc field of the open draft and move focus to it.
         ShowBcc,
-        /// Save the account form and start the first sync.
-        SaveAccount,
+        /// Continue the add-account flow to its next step (storing the
+        /// account at the end of the server settings).
+        ContinueSetup,
     ]
 );
 

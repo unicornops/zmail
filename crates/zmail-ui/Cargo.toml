@@ -15,6 +15,7 @@ serde_json.workspace = true
 unicode-segmentation.workspace = true
 url.workspace = true
 zmail-auth = { path = "../zmail-auth" }
+zmail-autodiscover = { path = "../zmail-autodiscover" }
 zmail-core = { path = "../zmail-core" }
 zmail-notify = { path = "../zmail-notify" }
 zmail-security = { path = "../zmail-security" }

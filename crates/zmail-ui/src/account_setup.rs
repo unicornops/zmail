@@ -1,397 +1,209 @@
-//! The account setup pane: the new-account form.
+//! Adding a mail account: first-run onboarding and the Add Account window.
 //!
-//! [`AccountSetupView`] is its own entity with its own focus handle and the
-//! `AccountSetup` key context. It validates the form, stores the account
-//! and its credentials, starts the first sync (or the OAuth2 browser flow),
-//! and reports the result to the shell as an [`AccountSetupEvent`]. It is
-//! the piece a future Settings window will host.
+//! [`AccountSetupView`] walks through the steps of [`Stage`]:
 //!
-//! [`AccountSetupState`] holds the form's inputs and choices,
-//! [`AccountFormValues`] a snapshot of them that validation and
-//! [`build_account_from_form`] work on.
+//! 1. **Welcome** (first run only).
+//! 2. **Provider:** Google, Microsoft 365, Fastmail, iCloud or Other.
+//! 3. **Sign in:** name, address and password. OAuth2 and its client
+//!    fields sit under Advanced until zmail has client IDs of its own
+//!    (#89); Microsoft 365, which refuses passwords, opens it.
+//! 4. **Finding settings:** a provider preset needs none. For Other,
+//!    `zmail_autodiscover` runs one step at a time off the main thread with
+//!    progress, and stops to ask before the ISPDB lookup, which sends the
+//!    domain to Mozilla.
+//! 5. **Result**, or the **manual form** when nothing was found (or the
+//!    user wants to edit): separate host and port fields and a security
+//!    Select per server. TLS is the default; an unencrypted connection
+//!    needs an explicit opt-in.
+//! 6. **Colour**, then the **first sync** with progress.
+//!
+//! The account is stored at the end of step 5. On first launch the main
+//! window shows this view instead of its panes; afterwards
+//! [`open_add_account`] opens it in an Add Account window of its own, from
+//! the sidebar, the menus or Settings → Accounts. The view reads its
+//! services from the [`AccountSetupServices`] global, so any window can
+//! host it.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::Result;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, Render, SharedString, Subscription, Window, div, prelude::*, rgb,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Global,
+    SharedString, Subscription, Task, Window,
 };
-use url::Url;
-use zmail_auth::OAuth2Preset;
-use zmail_core::{
-    AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutgoingConfig, ProtocolKind,
-    SubmissionSecurity, SyncPhase,
-};
+use zmail_autodiscover::{Discovery, EmailAddress, MailSettings, Provider, Step};
+use zmail_core::{AccountColor, ProtocolKind, SyncPhase};
 use zmail_security::SecretStore;
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
-use crate::actions::SaveAccount;
-use crate::components::{TextInput, TextInputEvent};
-use crate::pane::pane_focus_indicator;
-use crate::styles::{ICON_SIZE_SM, UiColors};
-use crate::widgets::{EllipsisExt, icon, input_card, section_card, toolbar_button};
-use crate::workspace::split_addresses;
+use crate::actions::{Cancel, ContinueSetup};
+use crate::components::{Select, SelectEvent, TextInputEvent};
 
-/// The key context the account form sets.
+mod fixture;
+mod form;
+mod render;
+mod window;
+
+pub(crate) use form::{AccountField, AccountFormValues, Check, validate_account_form};
+#[cfg(test)]
+pub(crate) use window::open_window;
+
+use form::{
+    AccountForm, AccountSetupSecret, IMAP_SECURITY, SMTP_SECURITY, build_account_from_form,
+    security_label,
+};
+
+/// The key context the view sets.
 pub(crate) const KEY_CONTEXT: &str = "AccountSetup";
 
+/// How often the first-sync step re-reads the account's sync status.
+const SYNC_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
 // ---------------------------------------------------------------------------
-// AccountField
+// Services and entry points
 // ---------------------------------------------------------------------------
 
-/// Identifies one text field of the account setup form, for validation
-/// errors and focus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum AccountField {
-    DisplayName,
-    Endpoint,
-    Username,
-    Password,
-    OauthClientId,
-    OauthClientSecret,
-    OauthAuthorizationEndpoint,
-    OauthTokenEndpoint,
-    OauthScopes,
-    DiskBudget,
-    IdentityName,
-    IdentityEmail,
-    Signature,
-    AliasEmails,
-    SmtpHost,
-    SmtpPort,
-    SmtpSecurity,
-    SmtpUsername,
+/// What adding an account needs from the app. `zmail_ui::run` (and the
+/// main window, for tests) installs it as a global.
+#[derive(Clone)]
+pub(crate) struct AccountSetupServices {
+    pub(crate) store: Arc<LocalStore>,
+    pub(crate) secrets: Arc<dyn SecretStore>,
+    pub(crate) sync_service: SyncService,
+    /// What autodiscovery talks to; tests swap in fakes.
+    pub(crate) network: zmail_autodiscover::Network,
 }
 
-impl AccountField {
-    /// Every field, in form order.
-    pub(crate) const ALL: [AccountField; 18] = [
-        AccountField::DisplayName,
-        AccountField::Endpoint,
-        AccountField::Username,
-        AccountField::Password,
-        AccountField::OauthClientId,
-        AccountField::OauthClientSecret,
-        AccountField::OauthAuthorizationEndpoint,
-        AccountField::OauthTokenEndpoint,
-        AccountField::OauthScopes,
-        AccountField::DiskBudget,
-        AccountField::IdentityName,
-        AccountField::IdentityEmail,
-        AccountField::Signature,
-        AccountField::AliasEmails,
-        AccountField::SmtpHost,
-        AccountField::SmtpPort,
-        AccountField::SmtpSecurity,
-        AccountField::SmtpUsername,
-    ];
+impl Global for AccountSetupServices {}
 
-    /// The visible label, also the field's accessible name.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            AccountField::DisplayName => "Display Name",
-            AccountField::Endpoint => "Endpoint",
-            AccountField::Username => "Username",
-            AccountField::Password => "Password",
-            AccountField::OauthClientId => "OAuth2 Client Id",
-            AccountField::OauthClientSecret => "OAuth2 Client Secret",
-            AccountField::OauthAuthorizationEndpoint => "Authorization Endpoint",
-            AccountField::OauthTokenEndpoint => "Token Endpoint",
-            AccountField::OauthScopes => "Scopes",
-            AccountField::DiskBudget => "Disk Budget (MiB)",
-            AccountField::IdentityName => "Primary Identity Name",
-            AccountField::IdentityEmail => "Primary Identity Email",
-            AccountField::Signature => "Signature",
-            AccountField::AliasEmails => "Additional Identity Emails",
-            AccountField::SmtpHost => "SMTP Host",
-            AccountField::SmtpPort => "SMTP Port",
-            AccountField::SmtpSecurity => "SMTP Security",
-            AccountField::SmtpUsername => "SMTP Username",
-        }
-    }
+/// Opens the add-account flow in the Add Account window, at the provider
+/// step, or brings that window forward when it is already open. Settings →
+/// Accounts, the sidebar and the Account menu all come here.
+pub(crate) fn open_add_account(cx: &mut App) {
+    open_add_account_with_notice(None, cx);
+}
 
-    /// Placeholder text. The endpoint's depends on the protocol; see
-    /// [`endpoint_placeholder`].
-    fn placeholder(self) -> &'static str {
-        match self {
-            AccountField::DisplayName => "Work Mail",
-            AccountField::Endpoint => endpoint_placeholder(ProtocolKind::Imap),
-            AccountField::Username => "name@example.com",
-            AccountField::Password => "App password or account secret",
-            AccountField::OauthClientId => "Provider application client id",
-            AccountField::OauthClientSecret => "Optional for public clients",
-            AccountField::OauthAuthorizationEndpoint => "https://provider.example.test/authorize",
-            AccountField::OauthTokenEndpoint => "https://provider.example.test/token",
-            AccountField::OauthScopes => "Space-separated, for example: email",
-            AccountField::DiskBudget => "Empty for unlimited",
-            AccountField::IdentityName => "Jane Doe",
-            AccountField::IdentityEmail => "jane@example.com",
-            AccountField::Signature => "Regards,\nJane",
-            AccountField::AliasEmails => "alias@example.com, billing@example.com",
-            AccountField::SmtpHost => "smtp.example.com",
-            AccountField::SmtpPort => "587",
-            AccountField::SmtpSecurity => "plain, starttls, or implicit_tls",
-            AccountField::SmtpUsername => "Optional override for SMTP auth",
-        }
-    }
-
-    /// Whether Enter in this field submits the form (the last field of
-    /// each section).
-    pub(crate) fn submits_form(self) -> bool {
-        matches!(
-            self,
-            AccountField::Password
-                | AccountField::OauthClientSecret
-                | AccountField::AliasEmails
-                | AccountField::SmtpUsername
-        )
-    }
+/// [`open_add_account`], explaining at the top why it opened when the user
+/// did not ask for it (an account that can't sync, say).
+pub(crate) fn open_add_account_with_notice(notice: Option<SharedString>, cx: &mut App) {
+    window::open(notice, cx);
 }
 
 // ---------------------------------------------------------------------------
-// AccountFormValues
+// Stages
 // ---------------------------------------------------------------------------
 
-/// A snapshot of the account setup form's values, which validation and
-/// account building work on.
+/// A step of the flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stage {
+    /// What zmail is, and a Get Started button (first run only).
+    Welcome,
+    /// Pick the provider.
+    Provider,
+    /// Name, address and password (or OAuth2 under Advanced).
+    Credentials,
+    /// Autodiscovery with progress.
+    Discovering,
+    /// May zmail ask Mozilla's ISPDB?
+    Consent,
+    /// What discovery found, and where.
+    Result,
+    /// Server settings by hand.
+    Manual,
+    /// The account is stored: pick its colour.
+    Colour,
+    /// The first sync, with progress.
+    Syncing,
+}
+
+/// A state of the flow for the UI screenshot matrix
+/// (`zmail-app launch-ui-fixture`), filled with made-up values and no
+/// network. See `account_setup/fixture.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnboardingStep {
+    /// The welcome step.
+    Welcome,
+    /// The provider choice.
+    Provider,
+    /// Google's sign-in step, with its app password note.
+    Credentials,
+    /// Autodiscovery part way through.
+    Discovering,
+    /// The ISPDB consent question.
+    Consent,
+    /// Settings found in the domain's own autoconfig file.
+    Result,
+    /// The manual form after discovery found nothing.
+    Manual,
+    /// The manual form with an unencrypted SMTP server chosen.
+    ManualCleartext,
+    /// The colour step for the first seeded account.
+    Colour,
+    /// The first sync of the first seeded account.
+    Syncing,
+}
+
+/// What the flow tells its host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AccountFormValues {
-    pub(crate) protocol: ProtocolKind,
-    pub(crate) auth: AuthKind,
-    pub(crate) oauth_preset: Option<OAuth2Preset>,
-    pub(crate) display_name: String,
-    pub(crate) endpoint: String,
-    pub(crate) username: String,
-    pub(crate) password: String,
-    pub(crate) oauth_client_id: String,
-    pub(crate) oauth_client_secret: String,
-    pub(crate) oauth_authorization_endpoint: String,
-    pub(crate) oauth_token_endpoint: String,
-    pub(crate) oauth_scopes: String,
-    pub(crate) disk_budget_mb: String,
-    pub(crate) identity_name: String,
-    pub(crate) identity_email: String,
-    pub(crate) signature: String,
-    pub(crate) alias_emails: String,
-    pub(crate) smtp_host: String,
-    pub(crate) smtp_port: String,
-    pub(crate) smtp_security: String,
-    pub(crate) smtp_username: String,
+pub(crate) enum AccountSetupEvent {
+    /// The account was stored; `message` tells the user what happens next.
+    /// The flow carries on with the colour and first-sync steps.
+    Added { account_id: i64, message: String },
+    /// The user finished (or, before any account was stored, cancelled)
+    /// the flow.
+    Finished { account_id: Option<i64> },
+    /// Storing the account failed.
+    Error(String),
 }
 
-impl Default for AccountFormValues {
-    /// The values a new form starts with.
-    fn default() -> Self {
-        Self {
-            protocol: ProtocolKind::Imap,
-            auth: AuthKind::Password,
-            oauth_preset: None,
-            display_name: String::new(),
-            // Empty, so the protocol-specific placeholder shows instead of
-            // an IMAP URL that JMAP accounts would have to delete.
-            endpoint: String::new(),
-            username: String::new(),
-            password: String::new(),
-            oauth_client_id: String::new(),
-            oauth_client_secret: String::new(),
-            // Custom provider endpoints, used by JMAP accounts: no consumer
-            // provider presets offer JMAP.
-            oauth_authorization_endpoint: String::new(),
-            oauth_token_endpoint: String::new(),
-            oauth_scopes: "email".to_owned(),
-            // Empty means unlimited; a number is the budget in MiB that
-            // the post-sync eviction pass enforces.
-            disk_budget_mb: String::new(),
-            identity_name: String::new(),
-            identity_email: String::new(),
-            signature: "Regards,".to_owned(),
-            alias_emails: String::new(),
-            smtp_host: String::new(),
-            smtp_port: "587".to_owned(),
-            smtp_security: "starttls".to_owned(),
-            smtp_username: String::new(),
-        }
-    }
-}
-
-impl AccountFormValues {
-    /// The value of one field.
-    fn value(&self, field: AccountField) -> &str {
-        match field {
-            AccountField::DisplayName => &self.display_name,
-            AccountField::Endpoint => &self.endpoint,
-            AccountField::Username => &self.username,
-            AccountField::Password => &self.password,
-            AccountField::OauthClientId => &self.oauth_client_id,
-            AccountField::OauthClientSecret => &self.oauth_client_secret,
-            AccountField::OauthAuthorizationEndpoint => &self.oauth_authorization_endpoint,
-            AccountField::OauthTokenEndpoint => &self.oauth_token_endpoint,
-            AccountField::OauthScopes => &self.oauth_scopes,
-            AccountField::DiskBudget => &self.disk_budget_mb,
-            AccountField::IdentityName => &self.identity_name,
-            AccountField::IdentityEmail => &self.identity_email,
-            AccountField::Signature => &self.signature,
-            AccountField::AliasEmails => &self.alias_emails,
-            AccountField::SmtpHost => &self.smtp_host,
-            AccountField::SmtpPort => &self.smtp_port,
-            AccountField::SmtpSecurity => &self.smtp_security,
-            AccountField::SmtpUsername => &self.smtp_username,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AccountSetupState
-// ---------------------------------------------------------------------------
-
-/// In-memory form state for the new-account setup wizard.
-///
-/// Each text field is its own [`TextInput`] entity, which owns its text,
-/// cursor and undo history. The `protocol` field drives which additional
-/// SMTP fields are shown, and `auth` switches between password entry and
-/// the OAuth2 provider flow.
-pub(crate) struct AccountSetupState {
-    pub(crate) protocol: ProtocolKind,
-    pub(crate) auth: AuthKind,
-    /// Chosen OAuth2 provider preset; `None` until a provider button is
-    /// picked, which also fills the endpoint and SMTP defaults.
-    pub(crate) oauth_preset: Option<OAuth2Preset>,
-    inputs: BTreeMap<AccountField, Entity<TextInput>>,
-    /// Validation errors shown under their fields; editing a field clears
-    /// its error.
-    pub(crate) errors: BTreeMap<AccountField, String>,
-    /// Why the form opened when the user did not ask for it, for example
-    /// Compose with no account.
-    pub(crate) notice: Option<SharedString>,
-}
-
-/// Endpoint placeholder for the selected protocol.
-pub(crate) fn endpoint_placeholder(protocol: ProtocolKind) -> &'static str {
-    match protocol {
-        ProtocolKind::Imap => "imaps://mail.example.com:993",
-        ProtocolKind::Jmap => "https://mail.example.com/.well-known/jmap",
-    }
-}
-
-/// The IMAP endpoint a provider preset uses.
-pub(crate) fn preset_endpoint(preset: OAuth2Preset) -> &'static str {
-    match preset {
-        OAuth2Preset::Gmail => "imaps://imap.gmail.com:993",
-        OAuth2Preset::Microsoft365 => "imaps://outlook.office365.com:993",
-    }
-}
-
-/// The SMTP submission defaults a provider preset fills in.
-pub(crate) fn preset_smtp(preset: OAuth2Preset) -> (&'static str, &'static str, &'static str) {
-    match preset {
-        OAuth2Preset::Gmail => ("smtp.gmail.com", "465", "implicit_tls"),
-        OAuth2Preset::Microsoft365 => ("smtp.office365.com", "587", "starttls"),
-    }
-}
-
-impl AccountSetupState {
-    /// A new, empty form with its default values.
-    pub(crate) fn new(cx: &mut App) -> Self {
-        let defaults = AccountFormValues::default();
-        let inputs = AccountField::ALL
-            .into_iter()
-            .map(|field| {
-                let value = defaults.value(field).to_owned();
-                let input = cx.new(|cx| {
-                    let input = TextInput::new(cx)
-                        .label(field.label())
-                        .placeholder(field.placeholder());
-                    let input = match field {
-                        AccountField::Password | AccountField::OauthClientSecret => input.masked(),
-                        AccountField::Signature => input.multiline().rows(3, 8),
-                        _ => input,
-                    };
-                    input.with_text(value)
-                });
-                (field, input)
-            })
-            .collect();
-        Self {
-            protocol: defaults.protocol,
-            auth: defaults.auth,
-            oauth_preset: defaults.oauth_preset,
-            inputs,
-            errors: BTreeMap::new(),
-            notice: None,
-        }
-    }
-
-    /// The input entity for `field`.
-    pub(crate) fn input(&self, field: AccountField) -> &Entity<TextInput> {
-        &self.inputs[&field]
-    }
-
-    /// Replace a field's text, as the provider presets do.
-    pub(crate) fn set_text(&self, field: AccountField, text: &str, cx: &mut App) {
-        self.input(field)
-            .update(cx, |input, cx| input.set_text(text, cx));
-    }
-
-    /// Switch the protocol, updating the protocol-specific placeholder.
-    pub(crate) fn set_protocol(&mut self, protocol: ProtocolKind, cx: &mut App) {
-        self.protocol = protocol;
-        self.input(AccountField::Endpoint).update(cx, |input, cx| {
-            input.set_placeholder(endpoint_placeholder(protocol), cx);
-        });
-    }
-
-    /// Snapshot the form's current values.
-    pub(crate) fn values(&self, cx: &App) -> AccountFormValues {
-        let text = |field: AccountField| self.input(field).read(cx).text().to_owned();
-        AccountFormValues {
-            protocol: self.protocol,
-            auth: self.auth,
-            oauth_preset: self.oauth_preset,
-            display_name: text(AccountField::DisplayName),
-            endpoint: text(AccountField::Endpoint),
-            username: text(AccountField::Username),
-            password: text(AccountField::Password),
-            oauth_client_id: text(AccountField::OauthClientId),
-            oauth_client_secret: text(AccountField::OauthClientSecret),
-            oauth_authorization_endpoint: text(AccountField::OauthAuthorizationEndpoint),
-            oauth_token_endpoint: text(AccountField::OauthTokenEndpoint),
-            oauth_scopes: text(AccountField::OauthScopes),
-            disk_budget_mb: text(AccountField::DiskBudget),
-            identity_name: text(AccountField::IdentityName),
-            identity_email: text(AccountField::IdentityEmail),
-            signature: text(AccountField::Signature),
-            alias_emails: text(AccountField::AliasEmails),
-            smtp_host: text(AccountField::SmtpHost),
-            smtp_port: text(AccountField::SmtpPort),
-            smtp_security: text(AccountField::SmtpSecurity),
-            smtp_username: text(AccountField::SmtpUsername),
-        }
-    }
+/// The first sync's progress, read from the store.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SyncProgress {
+    pub(crate) phase: Option<SyncPhase>,
+    pub(crate) detail: String,
+    pub(crate) error: Option<String>,
+    pub(crate) folders: usize,
+    pub(crate) conversations: usize,
+    /// The sync has finished at least once.
+    pub(crate) done: bool,
 }
 
 // ---------------------------------------------------------------------------
 // AccountSetupView
 // ---------------------------------------------------------------------------
 
-/// What happened in the account form.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AccountSetupEvent {
-    /// The account was stored; `message` tells the user what happens next.
-    Added { account_id: i64, message: String },
-    /// Storing the account failed.
-    Error(String),
-}
-
 pub(crate) struct AccountSetupView {
     focus_handle: FocusHandle,
-    store: Arc<LocalStore>,
-    secrets: Arc<dyn SecretStore>,
-    sync_service: SyncService,
-    pub(crate) form: AccountSetupState,
-    /// Subscriptions to the form inputs' events.
-    _input_subscriptions: Vec<Subscription>,
+    /// Whether this is the main window's first-run onboarding (it starts
+    /// at Welcome and can't be cancelled) rather than the Add Account
+    /// window.
+    first_run: bool,
+    pub(crate) stage: Stage,
+    /// The stages Back returns to.
+    history: Vec<Stage>,
+    pub(crate) form: AccountForm,
+    /// Why the flow opened when the user did not ask for it.
+    pub(crate) notice: Option<SharedString>,
+    /// Whether the sign-in step shows its Advanced (OAuth2) fields.
+    pub(crate) advanced_open: bool,
+    pub(crate) discovery: Option<Discovery>,
+    /// The discovery step running now.
+    pub(crate) running_step: Option<Step>,
+    discovery_task: Option<Task<()>>,
+    /// What discovery (or a preset) found, shown on the result step.
+    pub(crate) found: Option<MailSettings>,
+    /// The manual form's controls.
+    pub(crate) protocol_select: Entity<Select>,
+    pub(crate) imap_security_select: Entity<Select>,
+    pub(crate) smtp_security_select: Entity<Select>,
+    /// The stored account, from the colour step on.
+    pub(crate) account_id: Option<i64>,
+    pub(crate) color: AccountColor,
+    pub(crate) sync: SyncProgress,
+    sync_task: Option<Task<()>>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<AccountSetupEvent> for AccountSetupView {}
@@ -403,51 +215,91 @@ impl Focusable for AccountSetupView {
 }
 
 impl AccountSetupView {
-    pub(crate) fn new(
-        store: Arc<LocalStore>,
-        secrets: Arc<dyn SecretStore>,
-        sync_service: SyncService,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let form = AccountSetupState::new(cx);
-        let subscriptions = Self::watch_inputs(&form, window, cx);
+    /// A new flow: first-run onboarding starts at Welcome, the Add Account
+    /// window at the provider step.
+    pub(crate) fn new(first_run: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let form = AccountForm::new(cx);
+        let protocol_select =
+            cx.new(|cx| Select::new(["IMAP and SMTP", "JMAP"], Some(0), cx).label("Protocol"));
+        let imap_security_select = cx.new(|cx| {
+            Select::new(IMAP_SECURITY.map(security_label), Some(0), cx).label("IMAP security")
+        });
+        let smtp_security_select = cx.new(|cx| {
+            Select::new(SMTP_SECURITY.map(security_label), Some(0), cx).label("SMTP security")
+        });
+        let mut subscriptions = Self::watch_inputs(&form, window, cx);
+        subscriptions.push(
+            cx.subscribe(&protocol_select, |this, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(index) = event;
+                this.form.protocol = if *index == 1 {
+                    ProtocolKind::Jmap
+                } else {
+                    ProtocolKind::Imap
+                };
+                cx.notify();
+            }),
+        );
+        subscriptions.push(cx.subscribe(
+            &imap_security_select,
+            |this, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(index) = event;
+                if let Some(security) = IMAP_SECURITY.get(*index) {
+                    this.form.set_imap_security(*security, cx);
+                    cx.notify();
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe(
+            &smtp_security_select,
+            |this, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(index) = event;
+                if let Some(security) = SMTP_SECURITY.get(*index) {
+                    this.form.set_smtp_security(*security, cx);
+                    cx.notify();
+                }
+            },
+        ));
         Self {
             focus_handle: cx.focus_handle(),
-            store,
-            secrets,
-            sync_service,
+            first_run,
+            stage: if first_run {
+                Stage::Welcome
+            } else {
+                Stage::Provider
+            },
+            history: Vec::new(),
             form,
-            _input_subscriptions: subscriptions,
+            notice: None,
+            advanced_open: false,
+            discovery: None,
+            running_step: None,
+            discovery_task: None,
+            found: None,
+            protocol_select,
+            imap_security_select,
+            smtp_security_select,
+            account_id: None,
+            color: AccountColor::Blue,
+            sync: SyncProgress::default(),
+            sync_task: None,
+            _subscriptions: subscriptions,
         }
     }
 
-    /// Shows the form, optionally explaining why it opened when the user
-    /// did not ask for it, and focuses the first field.
-    pub(crate) fn open(
-        &mut self,
-        notice: Option<SharedString>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.form.notice = notice;
-        self.focus_first_field(window, cx);
+    /// Sets the note shown at the top of the flow.
+    pub(crate) fn set_notice(&mut self, notice: Option<SharedString>, cx: &mut Context<Self>) {
+        self.notice = notice;
         cx.notify();
     }
 
-    /// Focuses the form's first field.
-    pub(crate) fn focus_first_field(&self, window: &mut Window, cx: &mut App) {
-        focus_input(self.form.input(AccountField::DisplayName), window, cx);
-    }
-
-    /// Subscribes to the inputs: editing a field clears its error, and
-    /// Enter in the last field of a section submits the form.
+    /// Subscribes to the text inputs: editing a field clears its error,
+    /// and Enter continues to the next step.
     fn watch_inputs(
-        form: &AccountSetupState,
+        form: &AccountForm,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
-        AccountField::ALL
+        AccountField::TEXT
             .into_iter()
             .map(|field| {
                 cx.subscribe_in(
@@ -459,992 +311,536 @@ impl AccountSetupView {
                                 cx.notify();
                             }
                         }
-                        TextInputEvent::Submitted => {
-                            if field.submits_form() {
-                                this.submit(window, cx);
-                            }
-                        }
+                        TextInputEvent::Submitted => this.advance(window, cx),
                     },
                 )
             })
             .collect()
     }
 
-    fn save_account(&mut self, _: &SaveAccount, window: &mut Window, cx: &mut Context<Self>) {
-        self.submit(window, cx);
+    // -----------------------------------------------------------------------
+    // Moving between stages
+    // -----------------------------------------------------------------------
+
+    /// Moves to `stage`, remembering the current one for Back.
+    fn go(&mut self, stage: Stage, window: &mut Window, cx: &mut Context<Self>) {
+        if stage != self.stage {
+            self.history.push(self.stage);
+            self.stage = stage;
+        }
+        self.focus_stage(window, cx);
+        cx.notify();
     }
 
-    /// Validates and submits the form: stores the account and its secret,
-    /// then starts the first sync or the OAuth2 browser flow.
-    pub(crate) fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let form = self.form.values(cx);
-        let errors = validate_account_form(&form);
-        self.form.errors = errors.into_iter().collect();
-        if let Some(first) = self.form.errors.keys().next().copied() {
-            // Errors show under their fields; focus the first one.
-            focus_input(self.form.input(first), window, cx);
-            cx.notify();
+    /// Focuses the first thing to act on in the current stage.
+    pub(crate) fn focus_stage(&self, window: &mut Window, cx: &mut App) {
+        let field = match self.stage {
+            Stage::Credentials => Some(if self.form.text(AccountField::Email, cx).is_empty() {
+                AccountField::Name
+            } else {
+                AccountField::Password
+            }),
+            Stage::Manual => Some(match self.form.protocol {
+                ProtocolKind::Imap => AccountField::ImapHost,
+                ProtocolKind::Jmap => AccountField::JmapUrl,
+            }),
+            _ => None,
+        };
+        match field {
+            Some(field) => self
+                .form
+                .input(field)
+                .update(cx, |input, cx| input.focus(window, cx)),
+            None => window.focus(&self.focus_handle, cx),
+        }
+    }
+
+    /// Back: the previous stage. Leaving discovery stops it; nothing goes
+    /// back past a stored account.
+    pub(crate) fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.account_id.is_some() {
             return;
         }
-        match self.store_account(&form) {
+        // Discovery and consent are not places to go back to: Back from
+        // the result or the manual form returns to the sign-in step.
+        while let Some(stage) = self.history.pop() {
+            if !matches!(stage, Stage::Discovering | Stage::Consent) {
+                self.stage = stage;
+                self.discovery_task = None;
+                self.running_step = None;
+                self.focus_stage(window, cx);
+                cx.notify();
+                return;
+            }
+        }
+    }
+
+    /// Whether Back has somewhere to go.
+    pub(crate) fn can_go_back(&self) -> bool {
+        self.account_id.is_none()
+            && self
+                .history
+                .iter()
+                .any(|stage| !matches!(stage, Stage::Discovering | Stage::Consent))
+    }
+
+    /// Escape: back a step, or close the Add Account window from its first
+    /// step.
+    fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.can_go_back() {
+            self.back(window, cx);
+        } else if !self.first_run && self.account_id.is_none() {
+            cx.emit(AccountSetupEvent::Finished { account_id: None });
+        }
+    }
+
+    fn continue_action(&mut self, _: &ContinueSetup, window: &mut Window, cx: &mut Context<Self>) {
+        self.advance(window, cx);
+    }
+
+    /// The current stage's main action (Enter, Secondary+Enter, or its
+    /// primary button).
+    pub(crate) fn advance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.stage {
+            Stage::Welcome => self.go(Stage::Provider, window, cx),
+            // Picking a provider is the action here.
+            Stage::Provider | Stage::Discovering | Stage::Consent => {}
+            Stage::Credentials => self.submit_credentials(window, cx),
+            Stage::Result | Stage::Manual => self.save(window, cx),
+            Stage::Colour => self.confirm_colour(window, cx),
+            Stage::Syncing => self.finish(cx),
+        }
+    }
+
+    /// The provider step: remember the choice and ask for the sign-in.
+    pub(crate) fn choose_provider(
+        &mut self,
+        provider: Option<Provider>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.form.provider = provider;
+        // Microsoft 365 refuses passwords: start on OAuth2, whose client
+        // fields are under Advanced.
+        let oauth = provider.is_some_and(Provider::needs_oauth2);
+        self.form.use_oauth = oauth;
+        self.advanced_open = oauth;
+        self.form.errors.clear();
+        self.go(Stage::Credentials, window, cx);
+    }
+
+    /// Shows or hides the Advanced fields.
+    pub(crate) fn toggle_advanced(&mut self, cx: &mut Context<Self>) {
+        self.advanced_open = !self.advanced_open;
+        cx.notify();
+    }
+
+    /// Switches between password and OAuth2 sign-in.
+    pub(crate) fn set_use_oauth(&mut self, use_oauth: bool, cx: &mut Context<Self>) {
+        self.form.use_oauth = use_oauth;
+        self.form.errors.clear();
+        cx.notify();
+    }
+
+    /// Turns the cleartext opt-in on or off.
+    pub(crate) fn toggle_cleartext(&mut self, cx: &mut Context<Self>) {
+        self.form.allow_cleartext = !self.form.allow_cleartext;
+        self.form.errors.remove(&AccountField::AllowCleartext);
+        cx.notify();
+    }
+
+    /// Shows the errors from a check, focusing the first text field with
+    /// one. Returns whether there were any.
+    fn show_errors(
+        &mut self,
+        errors: Vec<(AccountField, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.form.errors = errors.into_iter().collect();
+        if let Some(field) = self
+            .form
+            .errors
+            .keys()
+            .find(|field| AccountField::TEXT.contains(field))
+        {
+            self.form
+                .input(*field)
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+        !self.form.errors.is_empty()
+    }
+
+    /// The sign-in step's Continue: a provider preset fills the servers
+    /// and stores the account; Other runs autodiscovery.
+    fn submit_credentials(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let values = self.form.values(cx);
+        if self.show_errors(
+            validate_account_form(&values, Check::Credentials),
+            window,
+            cx,
+        ) {
+            return;
+        }
+        let Ok(email) = EmailAddress::parse(&values.email) else {
+            return;
+        };
+        match values.provider {
+            Some(provider) => {
+                let settings = provider.settings(&email);
+                self.form.apply_settings(&settings, cx);
+                self.sync_selects(cx);
+                self.found = Some(settings);
+                self.save(window, cx);
+            }
+            None => self.start_discovery(email, window, cx),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Autodiscovery
+    // -----------------------------------------------------------------------
+
+    /// Starts discovery for `email`.
+    fn start_discovery(
+        &mut self,
+        email: EmailAddress,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let network = &cx.global::<AccountSetupServices>().network;
+        self.discovery = Some(Discovery::new(email, network.dns.is_some()));
+        self.found = None;
+        self.go(Stage::Discovering, window, cx);
+        self.run_next_step(window, cx);
+    }
+
+    /// Runs discovery's next step in the background, or moves on when it
+    /// has a result, needs consent, or has run out of steps.
+    fn run_next_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(discovery) = &self.discovery else {
+            return;
+        };
+        if discovery.needs_consent() {
+            self.go(Stage::Consent, window, cx);
+            return;
+        }
+        let Some(step) = discovery.next_step() else {
+            self.finish_discovery(window, cx);
+            return;
+        };
+        let email = discovery.email().clone();
+        let network = cx.global::<AccountSetupServices>().network.clone();
+        self.running_step = Some(step);
+        let run = cx
+            .background_spawn(async move { zmail_autodiscover::run_step(step, &email, &network) });
+        self.discovery_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = run.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.running_step = None;
+                if let Some(discovery) = &mut this.discovery {
+                    discovery.record(step, result);
+                }
+                this.run_next_step(window, cx);
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// The consent step's answer.
+    pub(crate) fn answer_consent(
+        &mut self,
+        granted: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(discovery) = &mut self.discovery else {
+            return;
+        };
+        discovery.set_ispdb_consent(granted);
+        // Consent is a pause in discovery, not a stage Back returns to.
+        self.stage = Stage::Discovering;
+        self.run_next_step(window, cx);
+        cx.notify();
+    }
+
+    /// Discovery is over: show what it found, or the manual form.
+    fn finish_discovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(discovery) = &self.discovery else {
+            return;
+        };
+        match discovery.result() {
+            Some(settings) => {
+                self.form.apply_settings(&settings, cx);
+                self.sync_selects(cx);
+                self.found = Some(settings);
+                self.go(Stage::Result, window, cx);
+            }
+            None => {
+                let email = discovery.email().clone();
+                let (imap, smtp) = discovery.partial();
+                let (imap, smtp) = (imap.cloned(), smtp.cloned());
+                if let Some(imap) = imap {
+                    self.form.apply_imap(&imap.value, cx);
+                }
+                if let Some(smtp) = smtp {
+                    self.form.apply_smtp(&smtp.value, cx);
+                }
+                self.form.prefill_guesses(&email, cx);
+                self.sync_selects(cx);
+                self.go(Stage::Manual, window, cx);
+            }
+        }
+    }
+
+    /// The result step's "Edit settings": the manual form, filled in.
+    pub(crate) fn edit_manually(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.go(Stage::Manual, window, cx);
+    }
+
+    /// Puts the manual form's Selects in step with the form's values.
+    fn sync_selects(&mut self, cx: &mut Context<Self>) {
+        let protocol = match self.form.protocol {
+            ProtocolKind::Imap => 0,
+            ProtocolKind::Jmap => 1,
+        };
+        let imap = IMAP_SECURITY
+            .iter()
+            .position(|security| *security == self.form.imap_security);
+        let smtp = SMTP_SECURITY
+            .iter()
+            .position(|security| *security == self.form.smtp_security);
+        self.protocol_select
+            .update(cx, |select, cx| select.set_selected(Some(protocol), cx));
+        self.imap_security_select
+            .update(cx, |select, cx| select.set_selected(imap, cx));
+        self.smtp_security_select
+            .update(cx, |select, cx| select.set_selected(smtp, cx));
+    }
+
+    // -----------------------------------------------------------------------
+    // Storing the account
+    // -----------------------------------------------------------------------
+
+    /// Validates everything and stores the account, then moves to the
+    /// colour step.
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let values = self.form.values(cx);
+        let errors = validate_account_form(&values, Check::All);
+        if !errors.is_empty() {
+            // Server problems are fixed in the manual form; sign-in ones
+            // where they were typed.
+            let stage = if errors.iter().any(|(field, _)| {
+                matches!(
+                    field,
+                    AccountField::Name
+                        | AccountField::Email
+                        | AccountField::Password
+                        | AccountField::OauthClientId
+                        | AccountField::OauthClientSecret
+                        | AccountField::OauthAuthorizationEndpoint
+                        | AccountField::OauthTokenEndpoint
+                        | AccountField::OauthScopes
+                )
+            }) {
+                self.advanced_open |= values.use_oauth;
+                Stage::Credentials
+            } else {
+                Stage::Manual
+            };
+            self.go(stage, window, cx);
+            self.show_errors(errors, window, cx);
+            return;
+        }
+        let services = cx.global::<AccountSetupServices>().clone();
+        match store_account(&services, &values) {
             Ok((account_id, message)) => {
-                self.form = AccountSetupState::new(cx);
-                self._input_subscriptions = Self::watch_inputs(&self.form, window, cx);
+                self.account_id = Some(account_id);
+                self.color = AccountColor::derived(account_id);
+                self.history.clear();
                 cx.emit(AccountSetupEvent::Added {
                     account_id,
                     message,
                 });
+                self.go(Stage::Colour, window, cx);
             }
             Err(error) => cx.emit(AccountSetupEvent::Error(error.to_string())),
         }
+    }
+
+    /// The colour step: pick a colour.
+    pub(crate) fn pick_colour(&mut self, color: AccountColor, cx: &mut Context<Self>) {
+        self.color = color;
         cx.notify();
     }
 
-    /// Stores a validated form and returns the new account id and the
-    /// status message for the user.
-    fn store_account(&self, form: &AccountFormValues) -> Result<(i64, String)> {
-        let (account, secret) = build_account_from_form(form)?;
-        let account_id = self.store.insert_account(&account)?;
-        // The optional disk budget applies after the account exists.
-        if let Some(budget_mb) = parse_disk_budget_mb(&form.disk_budget_mb)? {
-            self.store
-                .set_account_disk_budget(account_id, Some(budget_mb))?;
-        }
-        let message = match secret {
-            AccountSetupSecret::Password(secret) => {
-                self.secrets.set_account_secret(account_id, &secret)?;
-                let _ = self.sync_service.sync_account(account_id);
-                format!("{} added.", account.display_name)
-            }
-            AccountSetupSecret::OAuth2(client) => {
-                // The browser flow blocks for up to its redirect timeout, so
-                // it runs off the GUI thread; the account's sync status marks
-                // the wait, and the grant (tokens, client config, expiry) is
-                // persisted before the first sync starts. Syncing here would
-                // only record a missing-credentials failure.
-                let _ = self.store.begin_sync_attempt(
-                    account_id,
-                    SyncPhase::Connecting,
-                    "Waiting for browser authorization",
-                );
-                self.spawn_oauth2_authorization(account_id, client);
-                format!(
-                    "{} added. Finish signing in in your browser; the account syncs once you approve access.",
-                    account.display_name
-                )
-            }
+    /// The colour step's Continue: store the colour (only when it differs
+    /// from the derived one, so the default stays derived) and start
+    /// watching the first sync.
+    fn confirm_colour(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(account_id) = self.account_id else {
+            return;
         };
-        // Start the new account's background watcher immediately instead of
-        // waiting for the next app launch.
-        let _ = self.sync_service.sync_watchers();
-        Ok((account_id, message))
+        let derived = AccountColor::derived(account_id);
+        let color = (self.color != derived).then_some(self.color);
+        let store = cx.global::<AccountSetupServices>().store.clone();
+        if let Err(error) = store.set_account_color(account_id, color) {
+            cx.emit(AccountSetupEvent::Error(error.to_string()));
+        }
+        // The account's colour shows in the sidebar straight away.
+        cx.emit(AccountSetupEvent::Added {
+            account_id,
+            message: String::new(),
+        });
+        self.go(Stage::Syncing, window, cx);
+        self.watch_sync(window, cx);
     }
 
-    /// Runs the OAuth2 browser flow on a background thread and stores the
-    /// resulting grant, so the GUI never blocks on the redirect wait.
-    fn spawn_oauth2_authorization(&self, account_id: i64, client: zmail_auth::OAuth2Client) {
-        let store = self.store.clone();
-        let secrets = self.secrets.clone();
-        let sync_service = self.sync_service.clone();
-        let spawn = std::thread::Builder::new()
-            .name("zmail-oauth2-setup".to_owned())
-            .spawn(move || {
-                let tokens = match client.authorize_interactively() {
-                    Ok(tokens) => tokens,
-                    Err(error) => {
-                        let _ = store.record_sync_failure(
-                            account_id,
-                            "Browser authorization failed",
-                            error.to_string(),
-                        );
-                        return;
-                    }
+    /// Re-reads the account's sync status until the first sync finishes.
+    fn watch_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_sync(cx);
+        self.sync_task = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(SYNC_POLL_INTERVAL).await;
+                let Ok(done) = this.update(cx, |this, cx| {
+                    this.refresh_sync(cx);
+                    this.sync.done || this.sync.error.is_some()
+                }) else {
+                    return;
                 };
-                if let Err(error) = zmail_sync::persist_oauth2_grant(
-                    &store,
-                    secrets.as_ref(),
-                    account_id,
-                    &client,
-                    &tokens,
-                ) {
+                if done {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Reads the first sync's progress from the store.
+    pub(crate) fn refresh_sync(&mut self, cx: &mut Context<Self>) {
+        let Some(account_id) = self.account_id else {
+            return;
+        };
+        let store = cx.global::<AccountSetupServices>().store.clone();
+        let Some(account) = store.list_accounts().ok().and_then(|accounts| {
+            accounts
+                .into_iter()
+                .find(|account| account.id == account_id)
+        }) else {
+            return;
+        };
+        let mailboxes = store.list_mailboxes(account_id).unwrap_or_default();
+        let status = account.sync_status;
+        let progress = SyncProgress {
+            phase: Some(status.phase),
+            detail: status.detail,
+            error: (status.phase == SyncPhase::Failed)
+                .then(|| status.last_error_message.unwrap_or_default()),
+            folders: mailboxes.len(),
+            conversations: mailboxes.iter().map(|mailbox| mailbox.total_threads).sum(),
+            done: status.phase == SyncPhase::Idle && status.last_success_at.is_some(),
+        };
+        if progress != self.sync {
+            self.sync = progress;
+            cx.notify();
+        }
+    }
+
+    /// The last step's Done: the host closes the flow.
+    fn finish(&mut self, cx: &mut Context<Self>) {
+        self.sync_task = None;
+        cx.emit(AccountSetupEvent::Finished {
+            account_id: self.account_id,
+        });
+    }
+}
+
+/// Stores a validated form and returns the new account id and the status
+/// message for the user. Then starts the first sync, or the OAuth2 browser
+/// flow that ends in it.
+fn store_account(
+    services: &AccountSetupServices,
+    form: &AccountFormValues,
+) -> Result<(i64, String)> {
+    let (account, secret) = build_account_from_form(form)?;
+    let account_id = services.store.insert_account(&account)?;
+    let message = match secret {
+        AccountSetupSecret::Password(secret) => {
+            services.secrets.set_account_secret(account_id, &secret)?;
+            let _ = services.sync_service.sync_account(account_id);
+            format!("{} added.", account.display_name)
+        }
+        AccountSetupSecret::OAuth2(client) => {
+            // The browser flow blocks for up to its redirect timeout, so it
+            // runs off the GUI thread; the account's sync status marks the
+            // wait, and the grant (tokens, client config, expiry) is
+            // persisted before the first sync starts. Syncing here would
+            // only record a missing-credentials failure.
+            let _ = services.store.begin_sync_attempt(
+                account_id,
+                SyncPhase::Connecting,
+                "Waiting for browser authorization",
+            );
+            spawn_oauth2_authorization(services, account_id, client);
+            format!(
+                "{} added. Finish signing in in your browser; the account syncs once you approve access.",
+                account.display_name
+            )
+        }
+    };
+    // Start the new account's background watcher immediately instead of
+    // waiting for the next app launch.
+    let _ = services.sync_service.sync_watchers();
+    Ok((account_id, message))
+}
+
+/// Runs the OAuth2 browser flow on a background thread and stores the
+/// resulting grant, so the GUI never blocks on the redirect wait.
+fn spawn_oauth2_authorization(
+    services: &AccountSetupServices,
+    account_id: i64,
+    client: zmail_auth::OAuth2Client,
+) {
+    let store = services.store.clone();
+    let secrets = services.secrets.clone();
+    let sync_service = services.sync_service.clone();
+    let spawn = std::thread::Builder::new()
+        .name("zmail-oauth2-setup".to_owned())
+        .spawn(move || {
+            let tokens = match client.authorize_interactively() {
+                Ok(tokens) => tokens,
+                Err(error) => {
                     let _ = store.record_sync_failure(
                         account_id,
-                        "Storing the authorization failed",
+                        "Browser authorization failed",
                         error.to_string(),
                     );
                     return;
                 }
-                let _ = sync_service.sync_account(account_id);
-                let _ = sync_service.sync_watchers();
-            });
-        if let Err(error) = spawn {
-            let _ = self.store.record_sync_failure(
+            };
+            if let Err(error) = zmail_sync::persist_oauth2_grant(
+                &store,
+                secrets.as_ref(),
                 account_id,
-                "Browser authorization failed",
-                error.to_string(),
-            );
-        }
-    }
-}
-
-impl Render for AccountSetupView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = *cx.global::<UiColors>();
-        let focused = self.focus_handle.contains_focused(window, cx);
-        let focus_handle = self.focus_handle.clone();
-
-        div()
-            .id("account-setup")
-            .key_context(KEY_CONTEXT)
-            .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::save_account))
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(colors.background))
-            .child(
-                pane_focus_indicator(
-                    div()
-                        .px_4()
-                        .py_3()
-                        .border_b_1()
-                        .border_color(rgb(colors.border)),
-                    focused,
-                    &colors,
-                )
-                .child("Account Setup"),
-            )
-            .child(
-                div()
-                    .id("account-setup-scroll")
-                    .flex_1()
-                    // A flex column stretches its content to the pane width,
-                    // so form fields size to the pane rather than to their
-                    // own content.
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .px_4()
-                    .py_4()
-                    .child(render_account_setup_detail(&self.form, &colors, cx)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(rgb(colors.border))
-                    .child(toolbar_button(
-                        "Save Account",
-                        Some("check-circle"),
-                        colors.button_background,
-                        colors.border,
-                        colors.foreground,
-                        move |_, window, cx| focus_handle.dispatch_action(&SaveAccount, window, cx),
-                    )),
-            )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// render_account_setup_detail
-// ---------------------------------------------------------------------------
-
-/// Render the account setup form: connection fields, identity fields, and
-/// (for IMAP) SMTP submission fields.
-///
-/// Returns a [`gpui::Div`] ready to be placed inside the detail pane's
-/// scrollable content area.
-fn render_account_setup_detail(
-    form: &AccountSetupState,
-    colors: &UiColors,
-    cx: &mut Context<AccountSetupView>,
-) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_4()
-        .w_full()
-        .min_w_0()
-        .when_some(form.notice.clone(), |this, notice| {
-            this.child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py_3()
-                    .rounded_md()
-                    .bg(rgb(colors.surface))
-                    .border_1()
-                    .border_color(rgb(colors.info))
-                    .child(icon("user-plus", ICON_SIZE_SM, colors.info))
-                    .child(div().flex_1().min_w_0().child(notice)),
-            )
-        })
-        .child(
-            section_card("Connection", colors)
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .children(account_protocol_buttons(form.protocol, colors, cx)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .children(account_auth_buttons(form, colors, cx)),
-                )
-                .children(
-                    if form.auth == AuthKind::OAuth2 && form.protocol == ProtocolKind::Imap {
-                        vec![
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .children(account_oauth_provider_buttons(form, colors, cx)),
-                    oauth_client_fields(form, colors),
-                    div()
-                        .w_full()
-                        .rounded_md()
-                        .bg(rgb(colors.background))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .px_3()
-                        .py_2()
-                        .child(
-                            // One line on purpose: multi-line wrapped text in
-                            // this form makes GPUI 0.2.2 size the card from a
-                            // stale text measurement (the card grows by
-                            // hundreds of pixels). Revisit after the GPUI
-                            // upgrade.
-                            div()
-                                .w_full()
-                                .ellipsis()
-                                .text_sm()
-                                .text_color(rgb(colors.muted))
-                                .child(
-                                    "Saving opens your provider's sign-in page in the browser.",
-                                ),
-                        ),
-                ]
-                    } else if form.auth == AuthKind::OAuth2 && form.protocol == ProtocolKind::Jmap {
-                        vec![
-                    oauth_client_fields(form, colors),
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(
-                            div().flex_1().min_w_0().child(
-                                account_input(form, AccountField::OauthAuthorizationEndpoint, colors),
-                            ),
-                        )
-                        .child(
-                            div().flex_1().min_w_0().child(
-                                account_input(form, AccountField::OauthTokenEndpoint, colors),
-                            ),
-                        ),
-                    div().child(
-                        account_input(form, AccountField::OauthScopes, colors),
-                    ),
-                    div()
-                        .w_full()
-                        .rounded_md()
-                        .bg(rgb(colors.background))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .px_3()
-                        .py_2()
-                        .child(
-                            // One line on purpose: multi-line wrapped text in
-                            // this form makes GPUI 0.2.2 size the card from a
-                            // stale text measurement (the card grows by
-                            // hundreds of pixels). Revisit after the GPUI
-                            // upgrade.
-                            div()
-                                .w_full()
-                                .ellipsis()
-                                .text_sm()
-                                .text_color(rgb(colors.muted))
-                                .child(
-                                    "Saving opens your provider's sign-in page in the browser.",
-                                ),
-                        ),
-                ]
-                    } else {
-                        Vec::new()
-                    },
-                )
-                .child(account_input(form, AccountField::DisplayName, colors))
-                .child(account_input(form, AccountField::Endpoint, colors))
-                .child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(div().flex_1().min_w_0().child(account_input(form, AccountField::Username, colors)))
-                        .children(if form.auth == AuthKind::Password {
-                            vec![div().flex_1().min_w_0().child(account_input(form, AccountField::Password, colors))]
-                        } else {
-                            Vec::new()
-                        }),
-                ),
-        )
-        .child(account_input(form, AccountField::DiskBudget, colors))
-        .child(
-            section_card("Identity", colors)
-                .child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(div().flex_1().min_w_0().child(account_input(form, AccountField::IdentityName, colors)))
-                        .child(div().flex_1().min_w_0().child(account_input(form, AccountField::IdentityEmail, colors))),
-                )
-                .child(account_input(form, AccountField::AliasEmails, colors))
-                .child(account_input(form, AccountField::Signature, colors)),
-        )
-        // JMAP submits through the account's own endpoint, so the SMTP
-        // section only appears for IMAP accounts.
-        .when(form.protocol == ProtocolKind::Imap, |this| {
-            this.child(
-                section_card("Outgoing Mail (SMTP)", colors).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(account_input(form, AccountField::SmtpHost, colors))
-                        .child(
-                            div()
-                                .flex()
-                                .gap_3()
-                                .child(div().flex_1().min_w_0().child(account_input(form, AccountField::SmtpPort, colors)))
-                                .child(div().flex_1().min_w_0().child(account_input(form, AccountField::SmtpSecurity, colors))),
-                        )
-                        .child(account_input(form, AccountField::SmtpUsername, colors)),
-                ),
-            )
-        })
-}
-
-// ---------------------------------------------------------------------------
-// account_protocol_buttons
-// ---------------------------------------------------------------------------
-
-/// Build the protocol toggle buttons ("IMAP + SMTP" / "JMAP") rendered inside
-/// the connection section of the account-setup form.
-fn account_protocol_buttons(
-    protocol: ProtocolKind,
-    colors: &UiColors,
-    cx: &mut Context<AccountSetupView>,
-) -> Vec<AnyElement> {
-    vec![
-        toolbar_button(
-            "IMAP + SMTP",
-            Some("server"),
-            if protocol == ProtocolKind::Imap {
-                colors.selected_background
-            } else {
-                colors.button_background
-            },
-            if protocol == ProtocolKind::Imap {
-                colors.accent
-            } else {
-                colors.border
-            },
-            colors.foreground,
-            cx.listener(|this: &mut AccountSetupView, _, _, cx| {
-                this.form.set_protocol(ProtocolKind::Imap, cx);
-                cx.notify();
-            }),
-        )
-        .into_any_element(),
-        toolbar_button(
-            "JMAP",
-            Some("server"),
-            if protocol == ProtocolKind::Jmap {
-                colors.selected_background
-            } else {
-                colors.button_background
-            },
-            if protocol == ProtocolKind::Jmap {
-                colors.accent
-            } else {
-                colors.border
-            },
-            colors.foreground,
-            cx.listener(|this: &mut AccountSetupView, _, _, cx| {
-                this.form.set_protocol(ProtocolKind::Jmap, cx);
-                // Provider presets carry IMAP endpoints and SMTP submission
-                // defaults; they do not apply to JMAP accounts.
-                this.form.oauth_preset = None;
-                cx.notify();
-            }),
-        )
-        .into_any_element(),
-    ]
-}
-
-// ---------------------------------------------------------------------------
-// account_auth_buttons / account_oauth_provider_buttons
-// ---------------------------------------------------------------------------
-
-/// Renders the shared OAuth2 client id and optional client secret inputs.
-fn oauth_client_fields(form: &AccountSetupState, colors: &UiColors) -> gpui::Div {
-    div()
-        .flex()
-        .gap_3()
-        .child(div().flex_1().min_w_0().child(account_input(
-            form,
-            AccountField::OauthClientId,
-            colors,
-        )))
-        .child(div().flex_1().min_w_0().child(account_input(
-            form,
-            AccountField::OauthClientSecret,
-            colors,
-        )))
-}
-
-/// Build the auth-kind toggle buttons ("Password" / "OAuth2") rendered
-/// inside the connection section for IMAP accounts.
-fn account_auth_buttons(
-    form: &AccountSetupState,
-    colors: &UiColors,
-    cx: &mut Context<AccountSetupView>,
-) -> Vec<AnyElement> {
-    vec![
-        toolbar_button(
-            "Password",
-            Some("key"),
-            if form.auth == AuthKind::Password {
-                colors.selected_background
-            } else {
-                colors.button_background
-            },
-            if form.auth == AuthKind::Password {
-                colors.accent
-            } else {
-                colors.border
-            },
-            colors.foreground,
-            cx.listener(|this: &mut AccountSetupView, _, _, cx| {
-                this.form.auth = AuthKind::Password;
-                this.form.oauth_preset = None;
-                cx.notify();
-            }),
-        )
-        .into_any_element(),
-        toolbar_button(
-            "OAuth2",
-            Some("key"),
-            if form.auth == AuthKind::OAuth2 {
-                colors.selected_background
-            } else {
-                colors.button_background
-            },
-            if form.auth == AuthKind::OAuth2 {
-                colors.accent
-            } else {
-                colors.border
-            },
-            colors.foreground,
-            cx.listener(|this: &mut AccountSetupView, _, _, cx| {
-                this.form.auth = AuthKind::OAuth2;
-                cx.notify();
-            }),
-        )
-        .into_any_element(),
-    ]
-}
-
-/// Build the OAuth2 provider toggle buttons ("Gmail" / "Microsoft 365").
-///
-/// Picking a provider fills the endpoint and SMTP submission defaults so
-/// the wizard stays one-click for the two consumer presets.
-fn account_oauth_provider_buttons(
-    form: &AccountSetupState,
-    colors: &UiColors,
-    cx: &mut Context<AccountSetupView>,
-) -> Vec<AnyElement> {
-    [OAuth2Preset::Gmail, OAuth2Preset::Microsoft365]
-        .into_iter()
-        .map(|preset| {
-            toolbar_button(
-                preset.name(),
-                Some("server"),
-                if form.oauth_preset == Some(preset) {
-                    colors.selected_background
-                } else {
-                    colors.button_background
-                },
-                if form.oauth_preset == Some(preset) {
-                    colors.accent
-                } else {
-                    colors.border
-                },
-                colors.foreground,
-                cx.listener(move |this: &mut AccountSetupView, _, _, cx| {
-                    this.form.oauth_preset = Some(preset);
-                    let form = &this.form;
-                    form.set_text(AccountField::Endpoint, preset_endpoint(preset), cx);
-                    let (host, port, security) = preset_smtp(preset);
-                    form.set_text(AccountField::SmtpHost, host, cx);
-                    form.set_text(AccountField::SmtpPort, port, cx);
-                    form.set_text(AccountField::SmtpSecurity, security, cx);
-                    cx.notify();
-                }),
-            )
-            .into_any_element()
-        })
-        .collect()
-}
-
-/// An account-setup input with its label and, when the last submit found
-/// a problem with it, the error underneath.
-fn account_input(form: &AccountSetupState, field: AccountField, colors: &UiColors) -> gpui::Div {
-    let danger = colors.danger;
-    input_card(field.label(), form.input(field), colors).when_some(
-        form.errors.get(&field).cloned(),
-        move |this, error| {
-            this.child(
-                div()
-                    .w_full()
-                    .text_sm()
-                    .text_color(rgb(danger))
-                    .ellipsis()
-                    .child(error),
-            )
-        },
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Building and validating the account
-// ---------------------------------------------------------------------------
-
-/// Moves keyboard focus to a text input.
-fn focus_input(input: &Entity<TextInput>, window: &mut Window, cx: &mut App) {
-    input.update(cx, |input, cx| input.focus(window, cx));
-}
-
-/// Build a [`NewAccount`] plus the form's credential plan.
-pub(crate) fn build_account_from_form(
-    form: &AccountFormValues,
-) -> Result<(NewAccount, AccountSetupSecret)> {
-    let display_name = required_text("Display name", &form.display_name)?;
-    let endpoint = required_text("Endpoint", &form.endpoint)?;
-    validate_endpoint(form.protocol, &endpoint)?;
-    let username = required_text("Username", &form.username)?;
-
-    // JMAP accounts authenticate with a password; bearer-token auth for
-    // JMAP is not wired yet.
-    // JMAP accounts can authenticate with a password or an OAuth2
-    // bearer token; no consumer presets offer JMAP, so OAuth2 uses the
-    // provider's own endpoints entered in the form.
-    let (auth, secret) = if form.protocol == ProtocolKind::Jmap {
-        match form.auth {
-            AuthKind::Password => (
-                AuthKind::Password,
-                AccountSetupSecret::Password(required_text("Password", &form.password)?),
-            ),
-            AuthKind::OAuth2 => {
-                let client = custom_oauth2_client_from_form(form)?;
-                (AuthKind::OAuth2, AccountSetupSecret::OAuth2(client))
+                &client,
+                &tokens,
+            ) {
+                let _ = store.record_sync_failure(
+                    account_id,
+                    "Storing the authorization failed",
+                    error.to_string(),
+                );
+                return;
             }
-        }
-    } else {
-        match form.auth {
-            AuthKind::Password => (
-                AuthKind::Password,
-                AccountSetupSecret::Password(required_text("Password", &form.password)?),
-            ),
-            AuthKind::OAuth2 => {
-                let preset = form
-                    .oauth_preset
-                    .context("Choose an OAuth2 provider (Gmail or Microsoft 365)")?;
-                let client_id = required_text("OAuth2 client id", &form.oauth_client_id)?;
-                let client_secret = trimmed_or_none(&form.oauth_client_secret);
-                let client = preset.client(client_id, client_secret, OAUTH2_REDIRECT_PORT);
-                (AuthKind::OAuth2, AccountSetupSecret::OAuth2(client))
-            }
-        }
-    };
-    let identity_name = if form.identity_name.trim().is_empty() {
-        display_name.clone()
-    } else {
-        form.identity_name.trim().to_owned()
-    };
-    let identity_email = if form.identity_email.trim().is_empty() {
-        username.clone()
-    } else {
-        form.identity_email.trim().to_owned()
-    };
-    let mut identities = vec![NewIdentity {
-        display_name: identity_name.clone(),
-        email_address: identity_email,
-        signature: form.signature.clone(),
-        is_primary: true,
-    }];
-    for (index, alias) in split_addresses(&form.alias_emails).into_iter().enumerate() {
-        identities.push(NewIdentity {
-            display_name: format!("{identity_name} Alias {}", index + 1),
-            email_address: alias,
-            signature: String::new(),
-            is_primary: false,
+            let _ = sync_service.sync_account(account_id);
+            let _ = sync_service.sync_watchers();
         });
-    }
-
-    let outgoing = match form.protocol {
-        ProtocolKind::Imap => {
-            let mut outgoing = OutgoingConfig::smtp_default(derive_host(&endpoint));
-            outgoing.host = Some(required_text("SMTP host", &form.smtp_host)?);
-            outgoing.port = Some(
-                required_text("SMTP port", &form.smtp_port)?
-                    .parse::<u16>()
-                    .context("SMTP port must be an integer")?,
-            );
-            outgoing.security = Some(parse_submission_security(&form.smtp_security)?);
-            outgoing.username = Some(if form.smtp_username.trim().is_empty() {
-                username.clone()
-            } else {
-                form.smtp_username.trim().to_owned()
-            });
-            outgoing
-        }
-        ProtocolKind::Jmap => OutgoingConfig::jmap_default(),
-    };
-
-    Ok((
-        NewAccount {
-            display_name,
-            protocol: form.protocol,
-            auth,
-            endpoint,
-            username,
-            cache_policy: CachePolicySummary::performance_first(),
-            outgoing: Some(outgoing),
-            identities,
-        },
-        secret,
-    ))
-}
-
-/// Loopback port the UI OAuth2 flow listens on for the provider redirect,
-/// matching the CLI default.
-const OAUTH2_REDIRECT_PORT: u16 = 8357;
-
-/// Credentials the account setup form collected for a new account.
-pub(crate) enum AccountSetupSecret {
-    /// Password or app password, stored directly.
-    Password(String),
-    /// The OAuth2 client whose browser flow runs after the account is stored.
-    OAuth2(zmail_auth::OAuth2Client),
-}
-
-/// Parses the account setup form's disk budget: empty means unlimited.
-fn parse_disk_budget_mb(value: &str) -> Result<Option<u64>> {
-    match value.trim() {
-        "" => Ok(None),
-        trimmed => trimmed
-            .parse::<u64>()
-            .map(Some)
-            .context("the disk budget must be a whole number of MiB"),
-    }
-}
-
-/// Returns the trimmed text, or `None` when it is empty or whitespace-only.
-fn trimmed_or_none(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
-/// Builds the provider-agnostic OAuth2 client for JMAP accounts from the
-/// form's custom endpoint fields.
-fn custom_oauth2_client_from_form(form: &AccountFormValues) -> Result<zmail_auth::OAuth2Client> {
-    let client_id = required_text("OAuth2 client id", &form.oauth_client_id)?;
-    let client_secret = trimmed_or_none(&form.oauth_client_secret);
-    let authorization_endpoint = required_text(
-        "OAuth2 authorization endpoint",
-        &form.oauth_authorization_endpoint,
-    )?;
-    let token_endpoint = required_text("OAuth2 token endpoint", &form.oauth_token_endpoint)?;
-    let scopes = form
-        .oauth_scopes
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    Ok(zmail_auth::OAuth2Client {
-        client_id,
-        client_secret,
-        authorization_endpoint,
-        token_endpoint,
-        scopes,
-        redirect_port: OAUTH2_REDIRECT_PORT,
-        extra_authorize_params: Vec::new(),
-    })
-}
-
-/// Checks the account setup form and returns an error message for each
-/// field that needs fixing, so the form can show them beside the fields.
-/// It mirrors the checks in [`build_account_from_form`].
-pub(crate) fn validate_account_form(form: &AccountFormValues) -> Vec<(AccountField, String)> {
-    let mut errors = Vec::new();
-    let mut require = |field: AccountField, value: &str, message: &str| {
-        if value.trim().is_empty() {
-            errors.push((field, message.to_owned()));
-            false
-        } else {
-            true
-        }
-    };
-
-    require(
-        AccountField::DisplayName,
-        &form.display_name,
-        "Enter a name for this account.",
-    );
-    let has_endpoint = require(
-        AccountField::Endpoint,
-        &form.endpoint,
-        match form.protocol {
-            ProtocolKind::Imap => {
-                "Enter the IMAP server, for example imaps://mail.example.com:993."
-            }
-            ProtocolKind::Jmap => "Enter the JMAP session URL.",
-        },
-    );
-    require(
-        AccountField::Username,
-        &form.username,
-        "Enter the username you sign in with.",
-    );
-    match form.auth {
-        AuthKind::Password => {
-            require(
-                AccountField::Password,
-                &form.password,
-                "Enter the password or app password.",
-            );
-        }
-        AuthKind::OAuth2 => {
-            require(
-                AccountField::OauthClientId,
-                &form.oauth_client_id,
-                "Enter the OAuth2 client id.",
-            );
-            if form.protocol == ProtocolKind::Jmap {
-                require(
-                    AccountField::OauthAuthorizationEndpoint,
-                    &form.oauth_authorization_endpoint,
-                    "Enter the authorization endpoint.",
-                );
-                require(
-                    AccountField::OauthTokenEndpoint,
-                    &form.oauth_token_endpoint,
-                    "Enter the token endpoint.",
-                );
-            }
-        }
-    }
-    if form.protocol == ProtocolKind::Imap {
-        require(
-            AccountField::SmtpHost,
-            &form.smtp_host,
-            "Enter the SMTP server.",
+    if let Err(error) = spawn {
+        let _ = services.store.record_sync_failure(
+            account_id,
+            "Browser authorization failed",
+            error.to_string(),
         );
-    }
-
-    if has_endpoint && let Err(error) = validate_endpoint(form.protocol, form.endpoint.trim()) {
-        errors.push((AccountField::Endpoint, error.to_string()));
-    }
-    if form.auth == AuthKind::OAuth2
-        && form.protocol == ProtocolKind::Imap
-        && form.oauth_preset.is_none()
-    {
-        errors.push((
-            AccountField::OauthClientId,
-            "Choose Gmail or Microsoft 365 above.".to_owned(),
-        ));
-    }
-    if parse_disk_budget_mb(&form.disk_budget_mb).is_err() {
-        errors.push((
-            AccountField::DiskBudget,
-            "Enter a whole number of MiB, or leave it empty.".to_owned(),
-        ));
-    }
-    if form.protocol == ProtocolKind::Imap {
-        if form.smtp_port.trim().parse::<u16>().is_err() {
-            errors.push((
-                AccountField::SmtpPort,
-                "Enter a port number, for example 587.".to_owned(),
-            ));
-        }
-        if parse_submission_security(&form.smtp_security).is_err() {
-            errors.push((
-                AccountField::SmtpSecurity,
-                "Use plain, starttls or implicit_tls.".to_owned(),
-            ));
-        }
-    }
-    errors
-}
-
-/// Return `Ok(trimmed)` or an error if `value` is empty or whitespace-only.
-fn required_text(label: &str, value: &str) -> Result<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        bail!("{label} must not be empty");
-    }
-    Ok(trimmed.to_owned())
-}
-
-/// Validate that `endpoint` is a well-formed URL with the correct scheme for
-/// `protocol`.
-fn validate_endpoint(protocol: ProtocolKind, endpoint: &str) -> Result<()> {
-    let parsed =
-        Url::parse(endpoint).with_context(|| format!("failed to parse endpoint {endpoint}"))?;
-    match protocol {
-        ProtocolKind::Imap => {
-            if !matches!(parsed.scheme(), "imap" | "imaps") {
-                bail!("IMAP endpoints must use imap:// or imaps://");
-            }
-        }
-        ProtocolKind::Jmap => {
-            if !matches!(parsed.scheme(), "http" | "https") {
-                bail!("JMAP endpoints must use http:// or https://");
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Parse a submission security mode string (case-insensitive).
-fn parse_submission_security(value: &str) -> Result<SubmissionSecurity> {
-    SubmissionSecurity::parse(&value.trim().to_ascii_lowercase())
-        .with_context(|| format!("unknown submission security mode {value}"))
-}
-
-/// Extract the host component from an endpoint URL, defaulting to
-/// `"localhost"` if parsing fails.
-fn derive_host(endpoint: &str) -> String {
-    Url::parse(endpoint)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-        .unwrap_or_else(|| "localhost".to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        AccountField, AccountFormValues, custom_oauth2_client_from_form, parse_disk_budget_mb,
-        validate_account_form,
-    };
-
-    #[test]
-    fn validate_account_form_reports_errors_per_field() {
-        let form = AccountFormValues::default();
-        let errors = validate_account_form(&form);
-        let fields = errors.iter().map(|(field, _)| *field).collect::<Vec<_>>();
-        assert!(fields.contains(&AccountField::DisplayName));
-        assert!(fields.contains(&AccountField::Endpoint));
-        assert!(fields.contains(&AccountField::Username));
-        assert!(fields.contains(&AccountField::Password));
-        assert!(fields.contains(&AccountField::SmtpHost));
-
-        let mut form = AccountFormValues {
-            display_name: "Work".to_owned(),
-            endpoint: "https://wrong.example.com".to_owned(),
-            username: "me@example.com".to_owned(),
-            password: "secret".to_owned(),
-            smtp_host: "smtp.example.com".to_owned(),
-            smtp_port: "not-a-port".to_owned(),
-            ..AccountFormValues::default()
-        };
-        let errors = validate_account_form(&form);
-        assert_eq!(
-            errors.iter().map(|(field, _)| *field).collect::<Vec<_>>(),
-            vec![AccountField::Endpoint, AccountField::SmtpPort],
-            "only the wrong scheme and the bad port are reported: {errors:?}"
-        );
-
-        form.endpoint = "imaps://mail.example.com:993".to_owned();
-        form.smtp_port = "587".to_owned();
-        assert!(validate_account_form(&form).is_empty());
-
-        // JMAP accounts need no SMTP settings.
-        let form = AccountFormValues {
-            protocol: zmail_core::ProtocolKind::Jmap,
-            display_name: "Fastmail".to_owned(),
-            endpoint: "https://api.example.com/.well-known/jmap".to_owned(),
-            username: "me@example.com".to_owned(),
-            password: "secret".to_owned(),
-            smtp_port: String::new(),
-            ..AccountFormValues::default()
-        };
-        assert!(validate_account_form(&form).is_empty());
-    }
-
-    #[test]
-    fn disk_budget_parses_empty_as_unlimited() {
-        assert_eq!(parse_disk_budget_mb("").expect("empty parses"), None);
-        assert_eq!(parse_disk_budget_mb("  ").expect("blank parses"), None);
-        assert_eq!(
-            parse_disk_budget_mb(" 512 ").expect("a number parses"),
-            Some(512)
-        );
-        assert!(parse_disk_budget_mb("512x").is_err(), "garbage is rejected");
-        assert!(
-            parse_disk_budget_mb("-1").is_err(),
-            "negatives are rejected"
-        );
-    }
-
-    #[test]
-    fn custom_oauth2_client_from_form_validates_and_builds() {
-        let mut form = AccountFormValues {
-            oauth_client_id: "client-1".to_owned(),
-            ..AccountFormValues::default()
-        };
-
-        // Missing provider endpoints are rejected with a clear label.
-        let error = custom_oauth2_client_from_form(&form)
-            .expect_err("the authorization endpoint should be required");
-        assert!(
-            format!("{error}").contains("OAuth2 authorization endpoint"),
-            "the error should name the missing field: {error}"
-        );
-
-        form.oauth_authorization_endpoint = "https://provider.test/authorize".to_owned();
-        let error = custom_oauth2_client_from_form(&form)
-            .expect_err("the token endpoint should be required");
-        assert!(
-            format!("{error}").contains("OAuth2 token endpoint"),
-            "the error should name the missing field: {error}"
-        );
-
-        form.oauth_token_endpoint = "https://provider.test/token".to_owned();
-        form.oauth_scopes = "email profile".to_owned();
-        let client = custom_oauth2_client_from_form(&form).expect("the custom client should build");
-        assert_eq!(client.client_id, "client-1");
-        assert_eq!(
-            client.authorization_endpoint,
-            "https://provider.test/authorize"
-        );
-        assert_eq!(client.token_endpoint, "https://provider.test/token");
-        assert_eq!(
-            client.scopes,
-            vec!["email".to_owned(), "profile".to_owned()]
-        );
-        assert!(client.client_secret.is_none());
     }
 }

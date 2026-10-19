@@ -15,8 +15,8 @@ use std::{collections::HashSet, time::Duration};
 use anyhow::{Context as _, Result, bail};
 use gpui::{
     AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight,
-    IntoElement, MouseButton, Render, SharedString, StyleRefinement, Styled, Window,
-    WindowAppearance, div, hsla, prelude::*, px, rgb,
+    IntoElement, MouseButton, Render, StyleRefinement, Styled, Window, WindowAppearance, div, hsla,
+    prelude::*, px, rgb,
 };
 use std::sync::Arc;
 use zmail_core::{
@@ -32,7 +32,10 @@ use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
 use super::{DetailMode, InitialView, ListMode, WorkspaceView};
-use crate::account_setup::{AccountSetupEvent, AccountSetupView};
+use crate::account_setup::{
+    AccountSetupEvent, AccountSetupServices, AccountSetupView, open_add_account,
+    open_add_account_with_notice,
+};
 use crate::actions::{
     AddAccount, Archive, Cancel, Delete, DismissSenderWarning, FocusNextPane, FocusPreviousPane,
     FocusSearch, Forward, GoBack, MoveToMailbox, NewMessage, Reply, ReplyAll, ReplyToMessage,
@@ -116,9 +119,16 @@ impl WorkspaceView {
                 cx,
             )
         });
-        let account_setup = cx.new(|cx| {
-            AccountSetupView::new(store.clone(), secrets, sync_service.clone(), window, cx)
-        });
+        // The add-account flow (here and in its own window) reads these.
+        // `run` installs them first; tests rely on this.
+        if !cx.has_global::<AccountSetupServices>() {
+            cx.set_global(AccountSetupServices {
+                store: store.clone(),
+                secrets,
+                sync_service: sync_service.clone(),
+                network: zmail_autodiscover::Network::system(),
+            });
+        }
         let search_query = cx.new(|cx| {
             TextInput::new(cx)
                 .compact()
@@ -144,7 +154,6 @@ impl WorkspaceView {
             cx.subscribe_in(&sidebar, window, Self::on_sidebar_event),
             cx.subscribe_in(&message_list, window, Self::on_message_list_event),
             cx.subscribe_in(&compose, window, Self::on_compose_event),
-            cx.subscribe_in(&account_setup, window, Self::on_account_setup_event),
             // Whatever changed in the shell, the panes get the new state.
             cx.observe_self(|this, cx| this.sync_panes(cx)),
         ];
@@ -160,7 +169,7 @@ impl WorkspaceView {
             message_list,
             reader,
             compose,
-            account_setup,
+            onboarding: None,
             search_query,
             app_menu,
             toasts,
@@ -270,15 +279,8 @@ impl WorkspaceView {
         .detach();
 
         view.refresh_from_store(cx);
-        if view.accounts.is_empty() {
-            view.detail_mode = DetailMode::AccountSetup;
-            view.account_setup.update(cx, |form, cx| {
-                form.open(
-                    Some("Add your first mail account to get started.".into()),
-                    window,
-                    cx,
-                );
-            });
+        if view.accounts.is_empty() || matches!(initial_view, InitialView::Onboarding(_)) {
+            view.start_onboarding(window, cx);
         } else {
             window.focus(&view.message_list.focus_handle(cx), cx);
         }
@@ -336,7 +338,19 @@ impl WorkspaceView {
                     _ => {}
                 });
             }
-            InitialView::AccountSetup => view.open_account_setup(window, cx),
+            InitialView::AddAccount => {
+                // Once the main window is up.
+                cx.defer_in(window, |_, _, cx| {
+                    crate::account_setup::open_add_account(cx)
+                });
+            }
+            InitialView::Onboarding(step) => {
+                if let Some((onboarding, _)) = &view.onboarding {
+                    onboarding.update(cx, |onboarding, cx| {
+                        onboarding.show_fixture(step, window, cx)
+                    });
+                }
+            }
             InitialView::Sidebar => view.focus_pane(Pane::Sidebar, window, cx),
             InitialView::MultiSelect => {
                 if let Some(selection) = view.mailbox_selection()
@@ -1060,9 +1074,6 @@ impl WorkspaceView {
         self.virtual_mailbox = None;
         self.list_selection = ListSelection::default();
         self.list_mail(cx);
-        if matches!(self.detail_mode, DetailMode::AccountSetup) {
-            self.detail_mode = DetailMode::Reader;
-        }
         self.refresh_from_store(cx);
         cx.notify();
     }
@@ -1313,11 +1324,16 @@ impl WorkspaceView {
     /// Open the compose pane for a new draft, creating the draft in the store.
     pub(crate) fn open_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(account_id) = self.selected_account_id else {
-            self.open_account_setup_with_notice(
-                Some("Add a mail account first. You can write messages once it is set up.".into()),
-                window,
-                cx,
-            );
+            // With no account the onboarding is already showing.
+            if self.onboarding.is_none() {
+                open_add_account_with_notice(
+                    Some(
+                        "Add a mail account first. You can write messages once it is set up."
+                            .into(),
+                    ),
+                    cx,
+                );
+            }
             return;
         };
         let Some(identity) = self
@@ -1909,10 +1925,10 @@ impl WorkspaceView {
     // Account setup
     // -----------------------------------------------------------------------
 
-    /// The "Fix…" action on an account whose sync fails: open the account
-    /// form with the error. There is no Settings → Accounts page yet
-    /// (#120), so this is the form that exists.
-    fn fix_account(&mut self, account_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+    /// The "Fix…" action on an account whose sync fails: open the Add
+    /// Account window with the error. Settings → Accounts takes this over
+    /// once it can re-authenticate an account (#120).
+    fn fix_account(&mut self, account_id: i64, cx: &mut Context<Self>) {
         let Some(account) = self
             .accounts
             .iter()
@@ -1926,26 +1942,28 @@ impl WorkspaceView {
             .clone()
             .unwrap_or_else(|| "the last sync failed".to_owned());
         let notice = format!("{} can't sync: {error}", account.display_name);
-        self.open_account_setup_with_notice(Some(notice.into()), window, cx);
+        open_add_account_with_notice(Some(notice.into()), cx);
     }
 
-    /// Switch to the account setup pane.
-    pub(crate) fn open_account_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_account_setup_with_notice(None, window, cx);
+    /// Shows the first-run onboarding in place of the panes.
+    fn start_onboarding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let onboarding = cx.new(|cx| AccountSetupView::new(true, window, cx));
+        let subscription = cx.subscribe_in(&onboarding, window, Self::on_onboarding_event);
+        onboarding.update(cx, |onboarding, cx| onboarding.focus_stage(window, cx));
+        self.onboarding = Some((onboarding, subscription));
+        cx.notify();
     }
 
-    /// Switch to the account setup pane, explaining why it opened when the
-    /// user did not ask for it.
-    pub(crate) fn open_account_setup_with_notice(
-        &mut self,
-        notice: Option<SharedString>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.detail_mode = DetailMode::AccountSetup;
-        self.single_pane = SinglePane::Detail;
-        self.account_setup
-            .update(cx, |form, cx| form.open(notice, window, cx));
+    /// An account was added, here or in the Add Account window: show it.
+    pub(crate) fn account_added(&mut self, account_id: i64, message: &str, cx: &mut Context<Self>) {
+        self.selected_account_id = Some(account_id);
+        self.virtual_mailbox = None;
+        self.detail_mode = DetailMode::Reader;
+        self.list_mail(cx);
+        if !message.is_empty() {
+            self.show_status(message.to_owned(), cx);
+        }
+        self.refresh_from_store(cx);
         cx.notify();
     }
 
@@ -2315,7 +2333,13 @@ impl WorkspaceView {
     }
 
     fn add_account(&mut self, _: &AddAccount, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_account_setup(window, cx);
+        match &self.onboarding {
+            // The first-run onboarding already is the add-account flow.
+            Some((onboarding, _)) => onboarding.update(cx, |onboarding, cx| {
+                onboarding.focus_stage(window, cx);
+            }),
+            None => open_add_account(cx),
+        }
     }
 
     fn show_mail(&mut self, _: &ShowMail, window: &mut Window, cx: &mut Context<Self>) {
@@ -2403,11 +2427,6 @@ impl WorkspaceView {
             }
         } else if self.store_error.is_some() {
             self.dismiss_error(cx);
-        } else if matches!(self.detail_mode, DetailMode::AccountSetup) && !self.accounts.is_empty()
-        {
-            self.detail_mode = DetailMode::Reader;
-            self.focus_pane(Pane::MessageList, window, cx);
-            cx.notify();
         } else if self.status_message.is_some() {
             self.status_message = None;
             cx.notify();
@@ -2426,7 +2445,6 @@ impl WorkspaceView {
         match self.detail_mode {
             DetailMode::Reader => self.reader.focus_handle(cx),
             DetailMode::Compose => self.compose.focus_handle(cx),
-            DetailMode::AccountSetup => self.account_setup.focus_handle(cx),
         }
     }
 
@@ -2472,9 +2490,6 @@ impl WorkspaceView {
                 DetailMode::Compose => self
                     .compose
                     .update(cx, |compose, cx| compose.focus_pane(window, cx)),
-                DetailMode::AccountSetup => self
-                    .account_setup
-                    .update(cx, |form, cx| form.focus_first_field(window, cx)),
             },
         }
         cx.notify();
@@ -2566,7 +2581,7 @@ impl WorkspaceView {
             SidebarEvent::ShowOutbox => self.set_list_mode(ListMode::Outbox, cx),
             SidebarEvent::RetryOutbox => self.retry_failed_outbox(window, cx),
             SidebarEvent::ToggleCollapsed(ref node) => self.toggle_sidebar_node(node, cx),
-            SidebarEvent::FixAccount(account_id) => self.fix_account(account_id, window, cx),
+            SidebarEvent::FixAccount(account_id) => self.fix_account(account_id, cx),
             // A drop is an ordinary, undoable move.
             SidebarEvent::DropThreads {
                 ref thread_ids,
@@ -2670,7 +2685,7 @@ impl WorkspaceView {
         }
     }
 
-    fn on_account_setup_event(
+    fn on_onboarding_event(
         &mut self,
         _: &Entity<AccountSetupView>,
         event: &AccountSetupEvent,
@@ -2682,12 +2697,12 @@ impl WorkspaceView {
                 account_id,
                 message,
             } => {
-                self.selected_account_id = Some(*account_id);
-                self.detail_mode = DetailMode::Reader;
-                self.list_mail(cx);
-                self.show_status(message.clone(), cx);
-                self.refresh_from_store(cx);
+                self.account_added(*account_id, message, cx);
                 self.schedule_refresh(window, cx);
+            }
+            AccountSetupEvent::Finished { .. } => {
+                self.onboarding = None;
+                self.refresh_from_store(cx);
                 self.focus_pane(Pane::MessageList, window, cx);
             }
             AccountSetupEvent::Error(error) => self.show_error(error, cx),
@@ -2733,7 +2748,6 @@ impl WorkspaceView {
         let detail: AnyView = match self.detail_mode {
             DetailMode::Reader => self.reader.clone().into(),
             DetailMode::Compose => self.compose.clone().into(),
-            DetailMode::AccountSetup => self.account_setup.clone().into(),
         };
         let panes = div().relative().flex().flex_1().overflow_hidden();
         let panes = match layout.mode {
@@ -2908,10 +2922,18 @@ impl Render for WorkspaceView {
                                 PlatformStyle::current().menu != MenuPlacement::MenuBar,
                                 |this| this.trailing(self.app_menu.clone()),
                             )
-                            .child(self.render_toolbar(&colors, cx)),
+                            .when(self.onboarding.is_none(), |this| {
+                                this.child(self.render_toolbar(&colors, cx))
+                            }),
                     )
-                    // ---- The panes, each its own cached view ------------------
-                    .child(self.render_panes(layout, &colors, cx))
+                    // ---- The panes, each its own cached view, or the
+                    // first-run onboarding instead ---------------------------
+                    .map(|this| match &self.onboarding {
+                        Some((onboarding, _)) => {
+                            this.child(div().flex_1().min_h_0().child(onboarding.clone()))
+                        }
+                        None => this.child(self.render_panes(layout, &colors, cx)),
+                    })
                     // ---- Status / error banners at the bottom ----------------
                     .when_some(self.status_message.clone(), |this, message| {
                         this.child(status_banner(
@@ -2961,20 +2983,9 @@ impl Render for WorkspaceView {
 // Private utility functions
 // ---------------------------------------------------------------------------
 
-/// Split a comma-separated address string into individual trimmed addresses,
-/// discarding empty entries.
 /// Whether an outbox message failed and waits for a retry.
 fn is_retryable(state: OutboxJobState) -> bool {
     matches!(state, OutboxJobState::Failed | OutboxJobState::Retrying)
-}
-
-pub(crate) fn split_addresses(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect()
 }
 
 /// How long after the last pane resize the widths are saved.

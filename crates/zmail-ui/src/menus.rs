@@ -103,7 +103,10 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
         "keyboard focus navigation (Tab, F6)",
     ),
     ("zmail::Cancel", "Escape closes whatever is on top"),
-    ("zmail::SaveAccount", "the account form's own Save button"),
+    (
+        "zmail::ContinueSetup",
+        "the add-account flow's own Continue button",
+    ),
     (
         "zmail::MoveToMailbox",
         "needs a mailbox; the reader's More menu opens the Move to… picker",

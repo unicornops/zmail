@@ -1714,7 +1714,7 @@ fn print_help() {
     println!("  zmail-app launch-imap-fixture ENDPOINT USERNAME SECRET EMAIL");
     println!("  zmail-app launch-ui-fixture VIEW [dark|light|system]");
     println!("                            Open a seeded UI state for screenshots: empty,");
-    println!("                            inbox, reader, compose or account-setup");
+    println!("                            inbox, reader, compose, account-setup or onboarding-*");
     println!("  zmail-app add-imap        Add and sync a real IMAP account");
     println!("  zmail-app add-jmap        Add and sync a real JMAP account");
     println!("  zmail-app list-accounts   Show configured accounts");
