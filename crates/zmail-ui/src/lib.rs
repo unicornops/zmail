@@ -348,9 +348,18 @@ struct WorkspaceView {
     /// The query that produced `search_results`, shown in the list header
     /// (the search field itself may have been edited since).
     search_results_query: String,
+    /// The query the latest search runs, whose results may still be
+    /// loading (`search_results_query` is the one they show).
+    search_pending_query: String,
     /// Where the shown search looks (folder, account or every account)
     /// and its running server searches.
     search_context: search::SearchContext,
+    /// The live search waiting for typing to pause (see `search.rs`). Each
+    /// edit replaces it, which cancels the one before.
+    search_typing: gpui::Task<()>,
+    /// The local search read running in the background. A newer read
+    /// replaces it, which cancels it.
+    search_read: gpui::Task<()>,
     /// The account the shell acts on: the selected mailbox's, or in a
     /// virtual mailbox the open thread's.
     selected_account_id: Option<i64>,

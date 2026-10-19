@@ -32,15 +32,16 @@ use std::{
 };
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, KeyBinding,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    Role, ScrollWheelEvent, SharedString, Style, TextAlign, TextRun, UTF16Selection,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
+    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, Role, ScrollWheelEvent, SharedString, Style, TextAlign, TextRun, UTF16Selection,
     UnderlineStyle, Window, WrappedLine, actions, div, fill, point, prelude::*, px, relative, rgb,
     size, transparent_black,
 };
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
+use super::{ButtonSize, IconButton};
 use crate::styles::{ICON_SIZE_SM, TOOLBAR_BUTTON_HEIGHT, UiColors};
 use crate::widgets::icon;
 
@@ -231,6 +232,9 @@ pub(crate) struct TextInput {
     placeholder: SharedString,
     label: Option<SharedString>,
     leading_icon: Option<&'static str>,
+    /// The accessible name of the clear button a non-empty field shows,
+    /// when it has one.
+    clear_label: Option<SharedString>,
     multiline: bool,
     masked: bool,
     disabled: bool,
@@ -281,6 +285,7 @@ impl TextInput {
             placeholder: SharedString::default(),
             label: None,
             leading_icon: None,
+            clear_label: None,
             multiline: false,
             masked: false,
             disabled: false,
@@ -324,6 +329,14 @@ impl TextInput {
     /// An icon drawn before the text, for example `"search"`.
     pub(crate) fn leading_icon(mut self, name: &'static str) -> Self {
         self.leading_icon = Some(name);
+        self
+    }
+
+    /// A clear button at the end of a non-empty field, named `label`.
+    /// Clicking it empties the field as one undoable edit, emits
+    /// [`TextInputEvent::Changed`] and leaves focus in the field.
+    pub(crate) fn clearable(mut self, label: impl Into<SharedString>) -> Self {
+        self.clear_label = Some(label.into());
         self
     }
 
@@ -447,6 +460,13 @@ impl TextInput {
         if !self.disabled {
             window.focus(&self.focus_handle, cx);
         }
+    }
+
+    /// Empties the field as the user would (one undoable edit that emits
+    /// [`TextInputEvent::Changed`]), unlike [`Self::set_text`].
+    pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
+        self.marked_range = None;
+        self.edit_and_place_cursor(0..self.content.len(), "", EditKind::Other, cx);
     }
 }
 
@@ -1719,8 +1739,35 @@ impl Render for TextInput {
                             .flex_1()
                             .min_w_0()
                             .child(TextElement { input: cx.entity() }),
+                    )
+                    .when_some(
+                        self.clear_label
+                            .clone()
+                            .filter(|_| !self.disabled && !self.content.is_empty()),
+                        |this, label| this.child(self.render_clear_button(label, cx)),
                     ),
             )
+    }
+}
+
+impl TextInput {
+    /// The clear button of a [`Self::clearable`] field.
+    fn render_clear_button(&self, label: SharedString, cx: &mut Context<Self>) -> AnyElement {
+        let id = ElementId::NamedInteger("text-input-clear".into(), cx.entity_id().as_u64());
+        div()
+            .flex_none()
+            .debug_selector(|| "text-input-clear".into())
+            // The press would otherwise place the cursor in the field.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                IconButton::new(id, "x", label)
+                    .size(ButtonSize::Small)
+                    .on_click(cx.listener(|input, _, window, cx| {
+                        input.clear(cx);
+                        input.focus(window, cx);
+                    })),
+            )
+            .into_any_element()
     }
 }
 

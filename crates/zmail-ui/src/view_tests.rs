@@ -35,6 +35,7 @@ mod list;
 mod reader;
 mod reader_attachments;
 mod reader_safety;
+mod search;
 
 /// What the store holds when the window opens.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -700,9 +701,10 @@ fn typing_in_a_text_input_never_triggers_pane_shortcuts(cx: &mut TestAppContext)
 
     cx.simulate_input("abc");
     // Keys the list and reader bind (delete, arrows, archive, flag, read,
-    // undo) edit the text or do nothing while the field has focus.
+    // undo) edit the text or do nothing while the field has focus. Down
+    // moves into the search results (see view_tests/search.rs).
     keys(
-        "down up home end delete secondary-e secondary-shift-l secondary-shift-u",
+        "up home end delete secondary-e secondary-shift-l secondary-shift-u",
         cx,
     );
     cx.simulate_input("d");
@@ -772,7 +774,7 @@ fn escape_closes_overlays(cx: &mut TestAppContext) {
     )));
     assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
 
-    // The search field, then the search results.
+    // The search field: Escape clears it and leaves search.
     keys("secondary-f", cx);
     cx.simulate_input("Quarterly");
     keys("enter", cx);
@@ -783,6 +785,18 @@ fn escape_closes_overlays(cx: &mut TestAppContext) {
     keys("escape", cx);
     assert!(!search_is_focused(&view, cx));
     assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.list_mode),
+        ListMode::Mail
+    );
+
+    // The search results, from the list.
+    keys("secondary-f", cx);
+    cx.simulate_input("Quarterly");
+    keys("enter", cx);
+    view.update_in(cx, |view, window, cx| {
+        view.focus_pane(Pane::MessageList, window, cx)
+    });
     keys("escape", cx);
     assert_eq!(
         cx.read_entity(&view, |view, _| view.list_mode),

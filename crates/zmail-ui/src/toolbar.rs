@@ -111,7 +111,7 @@ impl RenderOnce for Toolbar {
             )
             // ---- Centre: search ------------------------------------------
             // The field fills the space between the two ends, up to a
-            // comfortable width; Enter in it runs the search.
+            // comfortable width; it searches as you type (see search.rs).
             .child(
                 div()
                     .flex()
