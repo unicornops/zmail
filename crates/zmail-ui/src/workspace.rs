@@ -2434,9 +2434,13 @@ impl WorkspaceView {
                 undo_delay,
                 ..
             } => {
-                // The pane lets go of the queued draft; Undo brings it back.
+                // The pane lets go of the queued draft (Undo brings it back)
+                // and, beside the mail list, goes back to the conversation.
                 self.compose
                     .update(cx, |compose, cx| compose.close_draft(cx));
+                if self.list_mode == ListMode::Mail {
+                    self.detail_mode = DetailMode::Reader;
+                }
                 self.show_undo_send_toast(draft_id, job_id, undo_delay, false, cx);
                 self.refresh_from_store(cx);
                 self.schedule_refresh(window, cx);
