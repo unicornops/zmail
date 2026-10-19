@@ -1112,6 +1112,39 @@ mod store_tests {
     }
 
     #[test]
+    fn body_texts_come_back_for_the_threads_asked() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        store
+            .replace_account_snapshot(account, &snapshot(MAIL))
+            .expect("snapshot should apply");
+        let hits = store
+            .search_threads(account, "budget", 10)
+            .expect("search should run");
+        let ids = hits.iter().map(|hit| hit.thread_id).collect::<Vec<_>>();
+        assert!(!ids.is_empty());
+        let texts = store.thread_body_texts(&ids).expect("bodies should load");
+        let budget = hits
+            .iter()
+            .find(|hit| hit.subject == "Quarterly budget review")
+            .expect("the budget thread matches");
+        assert!(texts.contains(&(
+            budget.thread_id,
+            "Please review the budget spreadsheet before Friday.".to_owned()
+        )));
+        // Only the threads asked for, and never a missing body.
+        assert!(texts.iter().all(|(thread, _)| ids.contains(thread)));
+        assert!(
+            store
+                .thread_body_texts(&[])
+                .expect("nothing to load")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn indexing_queue_is_newest_first_and_skips_failures() {
         let store = LocalStore::open_ephemeral().expect("store should open");
         let account = store

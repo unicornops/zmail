@@ -425,3 +425,66 @@ fn filter_chips_edit_the_query_text(cx: &mut TestAppContext) {
     assert_eq!(text(&search, cx), "report");
     assert_eq!(results(&view, cx).1.len(), 3);
 }
+
+#[gpui::test]
+fn a_body_match_shows_an_excerpt_in_place_of_the_snippet(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = super::open_workspace_with(
+        cx,
+        Setup::Account,
+        |_| crate::InitialView::Inbox,
+        |store| {
+            seed_reports(2)(store);
+            // The first report's body says more than its stored snippet.
+            let thread = store
+                .search_threads(
+                    store.list_accounts().expect("accounts")[0].id,
+                    "\"report 0\"",
+                    1,
+                )
+                .expect("the search runs")[0]
+                .thread_id;
+            let message = store
+                .thread_view(thread)
+                .expect("the thread loads")
+                .expect("the thread exists")
+                .messages[0]
+                .id;
+            store
+                .hydrate_message_body(
+                    message,
+                    &zmail_core::HydratedBody {
+                        body_text: Some(format!(
+                            "{}Then a kittiwake landed\non the sill.",
+                            "Numbers for the week, as usual. ".repeat(4)
+                        )),
+                        sanitized_html: None,
+                        has_remote_content: false,
+                        body_preview: "Numbers attached".to_owned(),
+                        attachments: Vec::new(),
+                    },
+                )
+                .expect("the body is stored");
+        },
+    );
+    let previews = |cx: &mut VisualTestContext| {
+        cx.read_entity(&view, |view, _| {
+            view.search_results
+                .iter()
+                .map(|hit| hit.preview.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    keys("secondary-f", cx);
+    cx.simulate_input("kittiwake");
+    keys("enter", cx);
+    assert_eq!(
+        previews(cx),
+        vec!["\u{2026}week, as usual. Then a kittiwake landed on the sill.".to_owned()]
+    );
+
+    // A snippet that already shows the match stays as stored.
+    keys("secondary-f", cx);
+    cx.simulate_input("numbers");
+    keys("enter", cx);
+    assert_eq!(previews(cx), vec!["Numbers attached".to_owned(); 2]);
+}

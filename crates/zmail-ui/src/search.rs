@@ -27,11 +27,12 @@
 //! last sync still syncs the account at most once per
 //! `zmail_sync::SEARCH_SYNC_COOLDOWN`.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::Result;
 use gpui::{AppContext as _, Context, Task, Window};
 use zmail_core::{MailboxSelection, SearchHit, SearchScope, search::SearchQuery};
+use zmail_store::LocalStore;
 
 use super::{DetailMode, ListMode, WorkspaceView};
 use crate::actions::{SearchAllAccounts, SearchInAccount, SearchInFolder};
@@ -395,7 +396,10 @@ impl WorkspaceView {
         let limit = self.search_context.limit.max(SEARCH_PAGE);
         match read {
             Read::Now => {
-                let results = self.store.search_threads_in(&scope, &query, limit);
+                let results = self
+                    .store
+                    .search_threads_in(&scope, &query, limit)
+                    .map(|hits| with_body_excerpts(&self.store, hits, &query));
                 self.search_read = Task::ready(());
                 self.show_search_results(generation, query, results, cx);
             }
@@ -404,7 +408,9 @@ impl WorkspaceView {
                 self.search_read = cx.spawn(async move |this, cx| {
                     let (query, results) = cx
                         .background_spawn(async move {
-                            let results = store.search_threads_in(&scope, &query, limit);
+                            let results = store
+                                .search_threads_in(&scope, &query, limit)
+                                .map(|hits| with_body_excerpts(&store, hits, &query));
                             (query, results)
                         })
                         .await;
@@ -537,6 +543,43 @@ impl WorkspaceView {
             self.set_search_level(SearchLevel::AllAccounts, cx);
         }
     }
+}
+
+/// `hits` with each snippet that does not show why the hit matched
+/// replaced by an excerpt of the thread's body around the match, when the
+/// body is stored. Free text matches in bodies the stored snippet (the
+/// start of the latest message) often leaves out.
+fn with_body_excerpts(store: &LocalStore, mut hits: Vec<SearchHit>, query: &str) -> Vec<SearchHit> {
+    let highlighter = SearchHighlighter::new(query);
+    if !highlighter.marks_text() {
+        return hits;
+    }
+    let unexplained = hits
+        .iter()
+        .filter(|hit| highlighter.text(&hit.preview).is_empty())
+        .map(|hit| hit.thread_id)
+        .collect::<Vec<_>>();
+    if unexplained.is_empty() {
+        return hits;
+    }
+    // A failed read leaves the stored snippets.
+    let Ok(bodies) = store.thread_body_texts(&unexplained) else {
+        return hits;
+    };
+    let mut excerpts = HashMap::new();
+    for (thread_id, body) in &bodies {
+        if !excerpts.contains_key(thread_id)
+            && let Some(excerpt) = highlighter.body_excerpt(body)
+        {
+            excerpts.insert(*thread_id, excerpt);
+        }
+    }
+    for hit in &mut hits {
+        if let Some(excerpt) = excerpts.remove(&hit.thread_id) {
+            hit.preview = excerpt;
+        }
+    }
+    hits
 }
 
 #[cfg(test)]

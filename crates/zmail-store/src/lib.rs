@@ -2486,6 +2486,32 @@ impl LocalStore {
         .context("failed to check for unindexed messages")
     }
 
+    /// The stored plain-text bodies of the messages in `thread_ids`, as
+    /// `(thread id, body)` pairs, newest first within each thread, so
+    /// search results can show where their text matched. Messages without
+    /// a text body (not downloaded yet, or HTML only) are left out.
+    pub fn thread_body_texts(&self, thread_ids: &[i64]) -> Result<Vec<(i64, String)>> {
+        let conn = self.connection()?;
+        let mut texts = Vec::new();
+        // Well under SQLite's bound-parameter limit per statement.
+        for chunk in thread_ids.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let mut statement = conn.prepare(&format!(
+                "SELECT thread_id, body_text FROM messages \
+                 WHERE thread_id IN ({placeholders}) AND body_text IS NOT NULL \
+                 ORDER BY thread_id, received_at DESC, id DESC"
+            ))?;
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(chunk), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to read message bodies")?;
+            texts.extend(rows);
+        }
+        Ok(texts)
+    }
+
     /// Returns the account's mailboxes as `(server name, role)` pairs in
     /// sidebar order, for choosing which mailboxes a server search covers.
     pub fn mailbox_names_and_roles(

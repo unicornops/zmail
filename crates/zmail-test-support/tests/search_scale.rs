@@ -358,6 +358,24 @@ fn large_mailbox_search_timings() -> Result<()> {
         }
     }
 
+    // A page's body excerpts: the stored bodies of the results whose own
+    // snippet does not show the match (at most a page of them).
+    let page = store
+        .search_threads_at(account_id, "kittiwake", LIVE_PAGE, &now())?
+        .into_iter()
+        .map(|hit| hit.thread_id)
+        .collect::<Vec<_>>();
+    let mut runs = (0..5)
+        .map(|_| -> Result<(usize, Duration)> {
+            let started = Instant::now();
+            let texts = store.thread_body_texts(&page)?;
+            Ok((texts.len(), started.elapsed()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    runs.sort_by_key(|(_, elapsed)| *elapsed);
+    let (bodies, body_read) = runs[2];
+    slowest = slowest.max(body_read);
+
     // Indexing hot paths: queue lookups and per-message hydration, which
     // rebuild one thread document each.
     let started = Instant::now();
@@ -382,6 +400,10 @@ fn large_mailbox_search_timings() -> Result<()> {
     let hydrate = started.elapsed() / candidates.len().max(1) as u32;
     println!("\n| operation | time |");
     println!("|---|---|");
+    println!(
+        "| `thread_body_texts` ({} threads, {bodies} bodies) | {body_read:.1?} |",
+        page.len()
+    );
     println!("| `index_candidates` (25) | {queue:.1?} |");
     println!("| `search_needs_server` ({needs_server}) | {needs:.1?} |");
     println!(

@@ -23,6 +23,10 @@ const SNIPPET_LEAD: usize = 24;
 /// characters is shortened to start near the match.
 const SNIPPET_MATCH_AT_MOST: usize = 48;
 
+/// Characters a body excerpt shows: more than a row has room for, so
+/// the row's own truncation decides where it ends.
+const EXCERPT_CHARS: usize = 240;
+
 /// What one result row highlights.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RowMatches {
@@ -76,6 +80,38 @@ impl SearchHighlighter {
         highlighter
     }
 
+    /// Whether the query marks anything outside the subject, so a body
+    /// excerpt could show it.
+    pub(crate) fn marks_text(&self) -> bool {
+        !self.anywhere.is_empty()
+    }
+
+    /// A one-line excerpt of `body` around its first match, for a result
+    /// whose stored snippet does not show why it matched. Whitespace runs
+    /// (line breaks included) become single spaces; ellipses mark cut ends.
+    pub(crate) fn body_excerpt(&self, body: &str) -> Option<String> {
+        let first = self.text(body).into_iter().next()?;
+        let start = lead_in_start(body, first.start);
+        let end = body[start..]
+            .char_indices()
+            .nth(EXCERPT_CHARS)
+            .map_or(body.len(), |(index, _)| start + index);
+        let mut excerpt = String::new();
+        if start > 0 {
+            excerpt.push('\u{2026}');
+        }
+        excerpt.push_str(
+            &body[start..end]
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        if end < body.len() {
+            excerpt.push('\u{2026}');
+        }
+        Some(excerpt)
+    }
+
     /// The matches in a subject.
     pub(crate) fn subject(&self, text: &str) -> Vec<Range<usize>> {
         matches(text, self.anywhere.iter().chain(&self.subject))
@@ -97,22 +133,7 @@ impl SearchHighlighter {
         if text[..first.start].chars().count() <= SNIPPET_MATCH_AT_MOST {
             return (text.to_owned(), found);
         }
-        // Start SNIPPET_LEAD characters before the match, at a word start
-        // when there is one in that stretch.
-        let lead_start = text[..first.start]
-            .char_indices()
-            .rev()
-            .nth(SNIPPET_LEAD - 1)
-            .map(|(index, _)| index)
-            .unwrap_or(0);
-        let cut = text[lead_start..first.start]
-            .find(char::is_whitespace)
-            .map(|offset| {
-                let after = lead_start + offset;
-                after + (text[after..].len() - text[after..].trim_start().len())
-            })
-            .filter(|cut| *cut <= first.start)
-            .unwrap_or(lead_start);
+        let cut = lead_in_start(text, first.start);
         let shown = format!("\u{2026}{}", &text[cut..]);
         let shift = '\u{2026}'.len_utf8();
         let ranges = found
@@ -121,6 +142,24 @@ impl SearchHighlighter {
             .collect();
         (shown, ranges)
     }
+}
+
+/// Where text shown from a match at `at` starts: SNIPPET_LEAD characters
+/// before it, moved on to a word start when that stretch has one, or the
+/// start of the text when the match is nearer than that.
+fn lead_in_start(text: &str, at: usize) -> usize {
+    // A match this near the start keeps the text from its start.
+    let Some((lead_start, _)) = text[..at].char_indices().rev().nth(SNIPPET_LEAD - 1) else {
+        return 0;
+    };
+    text[lead_start..at]
+        .find(char::is_whitespace)
+        .map(|offset| {
+            let after = lead_start + offset;
+            after + (text[after..].len() - text[after..].trim_start().len())
+        })
+        .filter(|cut| *cut <= at)
+        .unwrap_or(lead_start)
 }
 
 /// The ranges of `text` any pattern matches, sorted and merged.
@@ -250,6 +289,33 @@ mod tests {
             marked(hostile, &SearchHighlighter::new("bold").text(hostile)),
             "<b>[bold]</b> **[bold]**"
         );
+    }
+
+    #[test]
+    fn body_excerpts_show_the_first_match_on_one_line() {
+        let highlighter = SearchHighlighter::new("release");
+        assert_eq!(highlighter.body_excerpt("Nothing to see"), None);
+        assert_eq!(
+            highlighter
+                .body_excerpt("The release\nis   ready")
+                .as_deref(),
+            Some("The release is ready")
+        );
+        let body = format!(
+            "{}Some notes before the release checklist.\n\n{}",
+            "Lorem ipsum dolor sit amet. ".repeat(4),
+            "More text after it. ".repeat(20)
+        );
+        let excerpt = highlighter.body_excerpt(&body).expect("an excerpt");
+        assert!(excerpt.starts_with("\u{2026}"), "{excerpt}");
+        assert!(excerpt.ends_with("\u{2026}"), "{excerpt}");
+        assert!(!excerpt.contains('\n'));
+        // The row then shows it with the match in view.
+        let (shown, ranges) = highlighter.snippet(&excerpt);
+        assert_eq!(shown, excerpt);
+        assert_eq!(&shown[ranges[0].clone()], "release");
+        // No free text: nothing to excerpt.
+        assert!(!SearchHighlighter::new("subject:release is:unread").marks_text());
     }
 
     #[test]
