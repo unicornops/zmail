@@ -373,7 +373,7 @@ impl WorkspaceView {
                     .count(),
             },
             tree: self.sidebar_tree.clone(),
-            density: Default::default(),
+            density: self.density,
         };
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_state(sidebar_state, cx));

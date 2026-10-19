@@ -674,8 +674,8 @@ impl MessageListView {
                     self.state
                         .row_account_name(thread.account_id)
                         .map(|name| RowAccount {
+                            id: thread.account_id,
                             name: name.to_owned(),
-                            color: None,
                         });
 
                 // The hovered row shows quick actions for that row; the
