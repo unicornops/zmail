@@ -21,7 +21,7 @@ use crate::widgets::{EllipsisExt, format_size, icon};
 
 /// Width of an attachment card; cards wrap onto more rows in a narrow
 /// pane.
-const CARD_WIDTH: f32 = 260.0;
+const CARD_WIDTH: f32 = 300.0;
 
 /// Side of the square behind a card's type icon.
 const TYPE_ICON_FRAME: f32 = 36.0;
@@ -159,7 +159,7 @@ impl AttachmentKind {
             .trim()
             .to_ascii_lowercase();
         let (icon, label) = if executable {
-            ("file-terminal", "Program or script")
+            ("file-terminal", "Program")
         } else {
             by_extension(&extension)
                 .or_else(|| by_mime(&mime))
@@ -187,12 +187,12 @@ fn by_extension(extension: &str) -> Option<(&'static str, &'static str)> {
         "zip" | "gz" | "tgz" | "tar" | "bz2" | "xz" | "7z" | "rar" | "zst" => {
             ("file-archive", "Archive")
         }
-        "ics" | "ical" | "ifb" => ("calendar", "Calendar invite"),
+        "ics" | "ical" | "ifb" => ("calendar", "Calendar"),
         "json" | "xml" | "html" | "htm" | "css" | "yaml" | "yml" | "toml" | "diff" | "patch" => {
             ("file-code", "Code")
         }
         "asc" | "pgp" | "gpg" | "sig" | "p7s" | "p7m" | "pem" | "crt" | "cer" => {
-            ("file-key", "Key or signature")
+            ("file-key", "Signature")
         }
         _ => return None,
     })
@@ -204,7 +204,7 @@ fn by_mime(mime: &str) -> Option<(&'static str, &'static str)> {
         ("image", _) => ("file-image", "Image"),
         ("video", _) => ("file-video-camera", "Video"),
         ("audio", _) => ("file-music", "Audio"),
-        ("text", "calendar") => ("calendar", "Calendar invite"),
+        ("text", "calendar") => ("calendar", "Calendar"),
         ("text", "html" | "xml" | "css") => ("file-code", "Code"),
         ("text", _) => ("file-text", "Text"),
         ("application", "pdf") => ("file-text", "PDF"),
@@ -212,7 +212,7 @@ fn by_mime(mime: &str) -> Option<(&'static str, &'static str)> {
             ("file-archive", "Archive")
         }
         ("application", "pgp-signature" | "pgp-keys" | "pkcs7-signature") => {
-            ("file-key", "Key or signature")
+            ("file-key", "Signature")
         }
         ("application", "json" | "xml") => ("file-code", "Code"),
         _ => return None,
