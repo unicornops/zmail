@@ -1,5 +1,6 @@
 //! Secret storage and security defaults for Zmail.
 
+pub mod attachment_safety;
 pub mod sender_safety;
 
 use std::{

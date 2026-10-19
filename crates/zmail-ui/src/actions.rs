@@ -121,7 +121,8 @@ actions!(
         ToggleFlag,
         /// Mark the selected conversation read or unread.
         ToggleRead,
-        /// Save every attachment of the selected conversation.
+        /// Save every attachment of the selected conversation into a folder
+        /// the user picks (Save All).
         SaveAttachments,
         // ---- Reader --------------------------------------------------------
         /// Scroll the conversation up a little.
@@ -181,6 +182,32 @@ pub struct RemoveAttachment {
     pub attachment_id: i64,
 }
 
+/// Open a received attachment with the system's default app, after a
+/// warning if it is a program or script.
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = zmail, no_json)]
+pub struct OpenAttachment {
+    /// Received attachment id.
+    pub attachment_id: i64,
+}
+
+/// Save a received attachment where the user picks.
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = zmail, no_json)]
+pub struct SaveAttachmentAs {
+    /// Received attachment id.
+    pub attachment_id: i64,
+}
+
+/// Save every attachment of one message into a folder the user picks
+/// (the message's More menu).
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = zmail, no_json)]
+pub struct SaveMessageAttachments {
+    /// Message id.
+    pub message_id: i64,
+}
+
 /// Hide a message's sender-safety banner ("Looks safe"). The choice is
 /// stored with the message; other messages from the sender still warn.
 #[derive(Clone, Debug, PartialEq, Eq, Action)]
@@ -205,6 +232,9 @@ pub(crate) const ACTIONS_WITHOUT_KEYS: &[(&str, &str)] = &[
     ("zmail::ReplyToMessage", "needs a message argument"),
     ("zmail::RemoveAttachment", "needs an attachment argument"),
     ("zmail::SelectIdentity", "needs an identity argument"),
+    ("zmail::OpenAttachment", "needs an attachment argument"),
+    ("zmail::SaveAttachmentAs", "needs an attachment argument"),
+    ("zmail::SaveMessageAttachments", "needs a message argument"),
     (
         "zmail::DismissSenderWarning",
         "needs a message argument; it is the banner's Looks safe button",

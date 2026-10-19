@@ -143,6 +143,7 @@ impl WorkspaceView {
             search_query,
             app_menu,
             toasts,
+            attachments: crate::attachments::AttachmentState::new(cx),
             undo_toast: None,
             compose_windows: Default::default(),
             mail_refresh_queued: false,
@@ -1453,51 +1454,6 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Saves every attachment of the selected thread into the store's
-    /// `saved-attachments` directory and reports the destination.
-    pub(crate) fn save_selected_thread_attachments(&mut self, cx: &mut Context<Self>) {
-        let Some(thread) = self.selected_thread_view() else {
-            self.store_error
-                .get_or_insert_with(|| "Select a thread first.".to_owned());
-            cx.notify();
-            return;
-        };
-
-        let destination = self
-            .store
-            .path()
-            .parent()
-            .map(|parent| parent.join("saved-attachments"))
-            .unwrap_or_else(|| std::path::PathBuf::from("saved-attachments"));
-
-        let mut saved = 0usize;
-        let mut last_error = None;
-        for message in &thread.messages {
-            for attachment in &message.attachments {
-                match self.store.save_attachment(attachment.id, &destination) {
-                    Ok(_) => saved += 1,
-                    Err(error) => last_error = Some(error.to_string()),
-                }
-            }
-        }
-
-        if let Some(error) = last_error {
-            self.store_error = Some(error);
-        } else if saved == 0 {
-            self.store_error = Some("The selected thread has no attachments.".to_owned());
-        } else {
-            self.show_status(
-                format!(
-                    "Saved {} to {}.",
-                    count_noun(saved, "attachment", "attachments"),
-                    destination.display()
-                ),
-                cx,
-            );
-        }
-        cx.notify();
-    }
-
     fn create_reply_draft(
         &self,
         thread: &ThreadView,
@@ -2042,7 +1998,7 @@ impl WorkspaceView {
 
     fn save_attachments(&mut self, _: &SaveAttachments, _: &mut Window, cx: &mut Context<Self>) {
         if self.command_thread_id().is_some() {
-            self.save_selected_thread_attachments(cx);
+            self.save_all_attachments(None, cx);
         }
     }
 
@@ -2613,6 +2569,9 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::toggle_flag))
             .on_action(cx.listener(Self::toggle_read))
             .on_action(cx.listener(Self::save_attachments))
+            .on_action(cx.listener(Self::open_attachment))
+            .on_action(cx.listener(Self::save_attachment_as))
+            .on_action(cx.listener(Self::save_message_attachments))
             .on_action(cx.listener(Self::dismiss_sender_warning))
             .on_action(cx.listener(Self::move_to_mailbox))
             .size_full()
@@ -2671,6 +2630,7 @@ impl Render for WorkspaceView {
                         )
                     }),
             )
+            .children(self.render_open_warning(cx))
             .child(self.toasts.clone());
         // The Linux client-side decoration frame (nothing elsewhere); it
         // also paints the window background.

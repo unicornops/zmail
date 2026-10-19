@@ -2022,13 +2022,10 @@ impl LocalStore {
         Ok(changed > 0)
     }
 
-    /// Copies a received attachment into `destination_dir` using its original
-    /// filename and returns the written path.
-    pub fn save_attachment(
-        &self,
-        attachment_id: i64,
-        destination_dir: impl AsRef<Path>,
-    ) -> Result<PathBuf> {
+    /// The stored blob of a received attachment and its original filename.
+    /// The filename comes from the sender: sanitise it before it names a
+    /// file (`zmail_security::attachment_safety::sanitize_filename`).
+    pub fn attachment_blob(&self, attachment_id: i64) -> Result<(PathBuf, String)> {
         let conn = self.connection()?;
         let (filename, storage_path) = conn
             .query_row(
@@ -2046,10 +2043,12 @@ impl LocalStore {
         drop(conn);
 
         let relative = Path::new(&storage_path);
-        if relative
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
+        if relative.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        }) {
             bail!("attachment {attachment_id} has an invalid storage path");
         }
         let source = self.attachment_storage_dir().join(relative);
@@ -2059,7 +2058,17 @@ impl LocalStore {
                 source.display()
             );
         }
+        Ok((source, filename))
+    }
 
+    /// Copies a received attachment into `destination_dir` using its original
+    /// filename and returns the written path.
+    pub fn save_attachment(
+        &self,
+        attachment_id: i64,
+        destination_dir: impl AsRef<Path>,
+    ) -> Result<PathBuf> {
+        let (source, filename) = self.attachment_blob(attachment_id)?;
         let destination_dir = destination_dir.as_ref();
         fs::create_dir_all(destination_dir)
             .with_context(|| format!("failed to create {}", destination_dir.display()))?;

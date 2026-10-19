@@ -116,6 +116,18 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
     ("zmail::RemoveAttachment", "needs an attachment argument"),
     ("zmail::SelectIdentity", "needs an identity argument"),
     (
+        "zmail::OpenAttachment",
+        "the Open button on one attachment card",
+    ),
+    (
+        "zmail::SaveAttachmentAs",
+        "the Save As button on one attachment card",
+    ),
+    (
+        "zmail::SaveMessageAttachments",
+        "Save Attachments in one message's More menu",
+    ),
+    (
         "zmail::DismissSenderWarning",
         "the Looks safe button on one message's sender-safety banner",
     ),

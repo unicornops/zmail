@@ -7,7 +7,8 @@ use zmail_core::{MailboxSummary, ThreadView, participants::sender_identity};
 
 use super::ReaderState;
 use crate::actions::{
-    Archive, Delete, Forward, Reply, ReplyAll, SaveAttachments, ToggleFlag, ToggleRead,
+    Archive, Delete, Forward, Reply, ReplyAll, SaveAttachments, SaveMessageAttachments, ToggleFlag,
+    ToggleRead,
 };
 use crate::components::IconButton;
 use crate::styles::UiColors;
@@ -269,12 +270,17 @@ pub(super) fn message_menu_items(
         ReaderCommand::ViewSource(index),
     ));
     if !message.attachments.is_empty() {
-        items.push(MoreItem::Action(ReaderAction::new(
-            "Save Attachments",
-            "save",
-            "secondary-shift-s",
-            SaveAttachments,
-        )));
+        // This message's files only; Cmd/Ctrl+Shift+S (SaveAttachments)
+        // saves the whole conversation's.
+        items.push(MoreItem::Action(ReaderAction {
+            label: "Save Attachments…".into(),
+            icon: "save",
+            shortcut: None,
+            action: Box::new(SaveMessageAttachments {
+                message_id: message.id,
+            }),
+            compact: false,
+        }));
     }
     items
 }

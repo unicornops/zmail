@@ -77,6 +77,9 @@ pub(crate) enum FixtureView {
     /// The reader on a lookalike sender with blocked remote content: the
     /// danger banner and the remote-content notice.
     ReaderSafetyDanger,
+    /// The reader on a message with several attachments of different
+    /// types, one of them a program.
+    ReaderAttachments,
 }
 
 impl FixtureView {
@@ -103,8 +106,9 @@ impl FixtureView {
             "reader-safety-info" => Self::ReaderSafetyInfo,
             "reader-safety-caution" => Self::ReaderSafetyCaution,
             "reader-safety-danger" => Self::ReaderSafetyDanger,
+            "reader-attachments" => Self::ReaderAttachments,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-selection, reader-link-warning, compose, compose-invalid, account-setup, sidebar, accounts, multi-select, search, reader-safety-info, reader-safety-caution or reader-safety-danger"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-selection, reader-link-warning, compose, compose-invalid, account-setup, sidebar, accounts, multi-select, search, reader-safety-info, reader-safety-caution, reader-safety-danger or reader-attachments"
             ),
         })
     }
@@ -170,6 +174,11 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
     if let Some(thread) = safety_thread(view, now) {
         snapshot.mailboxes[0].threads.insert(0, thread);
     }
+    if view == FixtureView::ReaderAttachments {
+        snapshot.mailboxes[0]
+            .threads
+            .insert(0, attachments_thread(now));
+    }
     store
         .replace_account_snapshot(account_id, &snapshot)
         .context("failed to seed the fixture mailboxes")?;
@@ -232,6 +241,9 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         | FixtureView::ReaderSafetyDanger => {
             InitialView::Thread(thread_id(store, account_id, "inbox", SAFETY_SUBJECT)?)
         }
+        FixtureView::ReaderAttachments => {
+            InitialView::Thread(thread_id(store, account_id, "inbox", ATTACHMENTS_SUBJECT)?)
+        }
         FixtureView::Compose => {
             let identity = store
                 .list_identities(account_id)?
@@ -288,6 +300,56 @@ fn thread_id(store: &LocalStore, account_id: i64, role: &str, subject: &str) -> 
         .find(|thread| thread.subject == subject)
         .map(|thread| thread.id)
         .with_context(|| format!("the fixture thread {subject:?} is missing"))
+}
+
+/// Subject of the `reader-attachments` view's thread.
+const ATTACHMENTS_SUBJECT: &str = "Files for Thursday's design review";
+
+/// The `reader-attachments` view's thread: one message with a document,
+/// a spreadsheet, images, an archive, a calendar invite and a program,
+/// at sizes from bytes to megabytes. (Only the metadata is seeded; there
+/// are no blobs to open or save.)
+fn attachments_thread(now: u64) -> ThreadSnapshot {
+    const FILES: &[(&str, &str, u64)] = &[
+        ("Design review notes.pdf", "application/pdf", 1_258_291),
+        (
+            "Q4 estimates.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            48_640,
+        ),
+        ("settings-mockup.png", "image/png", 3_407_872),
+        ("sidebar-icons.zip", "application/zip", 21_495_808),
+        ("review.ics", "text/calendar", 912),
+        ("install-preview.exe", "application/octet-stream", 8_912_896),
+    ];
+    let mut thread = thread_snapshot(
+        &Thread {
+            id: "t-attachments",
+            subject: ATTACHMENTS_SUBJECT,
+            flagged: false,
+            messages: &[Message {
+                sender: "Priya Raman <priya.raman@example.org>",
+                minutes_ago: 20 * MINUTE,
+                is_read: false,
+                body: "Hi Sam,\n\nEverything for Thursday is attached: the notes, the \
+                       estimates, the mock-up and the icon set. The calendar invite has \
+                       the room.\n\nPriya",
+                attachments: &[],
+            }],
+        },
+        now,
+    );
+    thread.has_attachments = true;
+    thread.messages[0].attachments = FILES
+        .iter()
+        .map(|(filename, content_type, size_bytes)| MessageAttachment {
+            filename: (*filename).to_owned(),
+            content_type: (*content_type).to_owned(),
+            size_bytes: *size_bytes,
+            storage_path: format!("fixture/{filename}"),
+        })
+        .collect();
+    thread
 }
 
 /// Subject of the sender-safety views' thread.
@@ -969,6 +1031,7 @@ mod tests {
             "reader-safety-info",
             "reader-safety-caution",
             "reader-safety-danger",
+            "reader-attachments",
         ] {
             FixtureView::parse(name)?;
         }
@@ -978,6 +1041,20 @@ mod tests {
         assert_eq!(parse_theme(Some("light"))?, Some(ThemeAppearance::Light));
         assert_eq!(parse_theme(Some("dark"))?, Some(ThemeAppearance::Dark));
         assert!(parse_theme(Some("sepia")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn reader_attachments_opens_a_message_with_several_attachments() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::ReaderAttachments)?;
+        let InitialView::Thread(thread_id) = initial_view else {
+            bail!("reader-attachments should open a thread");
+        };
+        let thread = store
+            .thread_view(thread_id)?
+            .context("the attachments thread should exist")?;
+        assert_eq!(thread.subject, ATTACHMENTS_SUBJECT);
+        assert!(thread.messages[0].attachments.len() >= 5);
         Ok(())
     }
 
