@@ -22,7 +22,6 @@ use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
 use crate::account_setup::AccountField;
-use crate::actions::SaveDraft;
 use crate::components::{self, TextInput, text_input};
 use crate::keymap;
 use crate::layout::{LayoutMode, SinglePane};
@@ -30,6 +29,7 @@ use crate::pane::Pane;
 use crate::styles::{DETAIL_MIN_WIDTH, MESSAGE_LIST_WIDTH, SIDEBAR_WIDTH};
 use crate::{DetailMode, InitialView, ListMode, WorkspaceView};
 
+mod compose;
 mod list;
 
 /// What the store holds when the window opens.
@@ -392,7 +392,7 @@ fn mailbox_of(harness: &Harness, thread_id: i64) -> Option<i64> {
 }
 
 /// The open draft's inputs: To, body and attachment path.
-fn compose_inputs(
+pub(super) fn compose_inputs(
     view: &Entity<WorkspaceView>,
     cx: &mut VisualTestContext,
 ) -> (i64, Entity<TextInput>, Entity<TextInput>, Entity<TextInput>) {
@@ -415,91 +415,6 @@ fn compose_inputs(
 // ---------------------------------------------------------------------------
 // Text input integration (from the TextInput change)
 // ---------------------------------------------------------------------------
-
-#[gpui::test]
-fn compose_autosave_keeps_the_cursor_and_the_attachment_path(cx: &mut TestAppContext) {
-    let (view, cx, harness) = open_workspace(cx, Setup::Account);
-    cx.update(|window, cx| view.update(cx, |view, cx| view.open_compose(window, cx)));
-    cx.run_until_parked();
-    let (draft_id, to, body, attachment_path) = compose_inputs(&view, cx);
-    assert!(
-        cx.update(|window, cx| to.focus_handle(cx).is_focused(window)),
-        "Compose focuses the To field"
-    );
-
-    // Edit the middle of the body: every keystroke autosaves.
-    focus(&body, cx);
-    cx.simulate_input("Hello world");
-    cx.simulate_keystrokes("left left left left left");
-    cx.simulate_input("big ");
-    assert_eq!(text(&body, cx), "Hello big world");
-    assert_eq!(cursor(&body, cx), "Hello big ".len());
-    let stored = harness
-        .store
-        .draft_detail(draft_id)
-        .expect("the draft loads")
-        .expect("the draft exists");
-    assert_eq!(stored.body, "Hello big world");
-
-    // Half-type an attachment path, then let the debounced refresh and the
-    // five-second background refresh run.
-    focus(&attachment_path, cx);
-    cx.simulate_input("/tmp/half");
-    cx.executor().advance_clock(Duration::from_secs(6));
-    cx.run_until_parked();
-
-    let (_, _, same_body, same_path) = compose_inputs(&view, cx);
-    assert!(
-        same_body == body && same_path == attachment_path,
-        "the refresh does not rebuild the compose inputs"
-    );
-    assert_eq!(text(&body, cx), "Hello big world");
-    assert_eq!(
-        cursor(&body, cx),
-        "Hello big ".len(),
-        "the cursor stays put"
-    );
-    assert_eq!(text(&attachment_path, cx), "/tmp/half");
-    cx.simulate_input("way");
-    assert_eq!(text(&attachment_path, cx), "/tmp/halfway");
-
-    // Saving explicitly keeps the inputs too.
-    cx.dispatch_action(SaveDraft);
-    cx.run_until_parked();
-    assert_eq!(cursor(&body, cx), "Hello big ".len());
-    let (_, _, same_body, _) = compose_inputs(&view, cx);
-    assert!(
-        same_body == body,
-        "saving does not rebuild the compose inputs"
-    );
-}
-
-#[gpui::test]
-fn compose_subject_updates_the_drafts_list_after_autosave(cx: &mut TestAppContext) {
-    let (view, cx, _harness) = open_workspace(cx, Setup::Account);
-    cx.update(|window, cx| view.update(cx, |view, cx| view.open_compose(window, cx)));
-    cx.run_until_parked();
-    let subject = cx.read_entity(&view, |view, cx| {
-        view.compose
-            .read(cx)
-            .compose
-            .as_ref()
-            .expect("a draft is open")
-            .subject
-            .clone()
-    });
-    focus(&subject, cx);
-    cx.simulate_input("Quarterly report");
-    cx.executor().advance_clock(Duration::from_secs(1));
-    cx.run_until_parked();
-    let subjects = cx.read_entity(&view, |view, _| {
-        view.drafts
-            .iter()
-            .map(|draft| draft.subject.clone())
-            .collect::<Vec<_>>()
-    });
-    assert_eq!(subjects, vec!["Quarterly report".to_owned()]);
-}
 
 #[gpui::test]
 fn search_field_enter_runs_the_search(cx: &mut TestAppContext) {
