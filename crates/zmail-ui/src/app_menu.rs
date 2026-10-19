@@ -216,10 +216,11 @@ mod tests {
         Context, FocusHandle, IntoElement, Render, TestAppContext, VisualTestContext, Window, div,
     };
 
+    use zmail_core::preferences::KeymapName;
+
     use super::*;
     use crate::actions::Reply;
     use crate::components::test_support::init;
-    use crate::components::text_input;
 
     /// A window root that handles Reply (like the workspace) and holds the
     /// app-menu button.
@@ -244,8 +245,7 @@ mod tests {
     fn open_root(cx: &mut TestAppContext) -> (Entity<Root>, &mut VisualTestContext) {
         init(cx);
         cx.update(|cx| {
-            crate::keymap::bind_default_keymap(cx);
-            text_input::init(cx);
+            crate::keymap::bind_keymap(KeymapName::Default, cx);
         });
         let (root, cx) = cx.add_window_view(|window, cx| {
             let focus_handle = cx.focus_handle();

@@ -125,7 +125,9 @@ actions!(
     ]
 );
 
-/// Installs the text input key bindings. Call once at startup.
+/// Installs the text input key bindings on their own, for component tests.
+/// The app binds them with the rest through [`crate::keymap::bind_keymap`].
+#[cfg(test)]
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys(key_bindings());
 }

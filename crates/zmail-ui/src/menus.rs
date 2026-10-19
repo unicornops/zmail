@@ -378,7 +378,13 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     cx.on_action(|_: &Minimize, cx| update_active_window(cx, Window::minimize_window));
     cx.on_action(|_: &Zoom, cx| update_active_window(cx, Window::zoom_window));
+    refresh_menu_bar(cx);
+}
 
+/// Sets the macOS menu bar from the menu model, which also reads each
+/// item's key equivalent from the keymap: call it again whenever the keymap
+/// changes. Other platforms' menu buttons read the keymap when they open.
+pub(crate) fn refresh_menu_bar(cx: &mut App) {
     if PlatformStyle::current().menu == MenuPlacement::MenuBar {
         cx.set_menus(MenuModel::new(Platform::current()).native_menus());
     }

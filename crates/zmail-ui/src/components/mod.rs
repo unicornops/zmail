@@ -25,7 +25,6 @@ pub(crate) mod toast;
 pub(crate) mod tooltip;
 pub(crate) mod window_frame;
 
-pub(crate) use actions::init;
 pub(crate) use avatar::Avatar;
 pub(crate) use badge::{Badge, BadgeTone};
 pub(crate) use banner::{Banner, BannerTone};

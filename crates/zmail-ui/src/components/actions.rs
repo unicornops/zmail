@@ -35,12 +35,19 @@ pub(crate) const SELECT_CONTEXT: &str = "Select";
 /// Key context of an open [`Modal`](super::Modal).
 pub(crate) const MODAL_CONTEXT: &str = "Modal";
 
-/// Register the components' default key bindings. Call once at startup.
+/// Register the components' default key bindings on their own (the
+/// gallery and component tests). The app binds them with the rest through
+/// [`crate::keymap::bind_keymap`].
 pub(crate) fn init(cx: &mut App) {
+    cx.bind_keys(key_bindings());
+}
+
+/// The components' default key bindings, each scoped to its component.
+pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     let menu = Some(MENU_CONTEXT);
     let select = Some(SELECT_CONTEXT);
     let modal = Some(MODAL_CONTEXT);
-    cx.bind_keys([
+    vec![
         KeyBinding::new("down", SelectNext, menu),
         KeyBinding::new("up", SelectPrevious, menu),
         KeyBinding::new("home", SelectFirst, menu),
@@ -59,5 +66,5 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("escape", Cancel, modal),
         KeyBinding::new("tab", FocusNext, modal),
         KeyBinding::new("shift-tab", FocusPrevious, modal),
-    ]);
+    ]
 }

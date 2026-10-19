@@ -19,7 +19,7 @@
 //! | `drag` | `DraggedThreads`: conversations dragged from the list onto sidebar folders |
 //! | `move_picker` | `MovePicker`: the searchable Move to… folder picker |
 //! | `actions` | every command as a GPUI action |
-//! | `keymap` | loads `keymaps/default.json` (and `keymaps/macos.json` on macOS) |
+//! | `keymap` | loads `keymaps/default.json` (and `keymaps/macos.json` on macOS); binds and switches the saved keymap |
 //! | `menus` | `MenuModel`, the command menus; the native macOS menu bar; app-wide commands (Quit, Hide, …) |
 //! | `app_menu` | `AppMenuButton`: the menu model behind a hamburger/overflow button (Windows, Linux) |
 //! | `fonts` | registers the bundled Inter font on Linux |
@@ -156,9 +156,7 @@ pub fn run(
         .with_assets(asset_source)
         .run(move |cx: &mut App| {
             fonts::register_ui_font(cx);
-            components::init(cx);
-            components::text_input::init(cx);
-            keymap::bind_default_keymap(cx);
+            keymap::bind_keymap(saved_keymap(&store), cx);
             // After the keymap: the macOS menu bar reads key equivalents
             // from it.
             menus::init(cx);
@@ -219,6 +217,16 @@ pub fn run(
                 panic!("failed to open the Phase 4 window: {error:#}");
             }
         });
+}
+
+/// The keymap saved in the UI preferences. An unreadable record means the
+/// standard keymap; the workspace reports the store error when it loads the
+/// rest of the preferences.
+fn saved_keymap(store: &LocalStore) -> zmail_core::preferences::KeymapName {
+    store
+        .ui_preferences()
+        .map(|preferences| preferences.keymap)
+        .unwrap_or_default()
 }
 
 /// The decorations to ask the window system for (only Linux reads this;
