@@ -18,8 +18,9 @@
 //! [`ACTIONS_NOT_IN_MENUS`] with the reason, so a new command cannot be
 //! left out by accident.
 //!
-//! The Help menu lists Keyboard Shortcuts; About and Diagnostics join it
-//! with the views those entries open.
+//! The Help menu lists Keyboard Shortcuts. Settings… sits in the macOS
+//! application menu and, elsewhere, in the File menu; About & Diagnostics
+//! is a section of the Settings window.
 
 use gpui::{
     Action, App, KeyBinding, KeyContext, Keymap, Menu as NativeMenu, MenuItem as NativeMenuItem,
@@ -29,10 +30,11 @@ use zmail_core::APP_NAME;
 
 use crate::actions::{
     AddAccount, AddAttachment, Archive, Delete, FocusSearch, Forward, GoBack, Hide, HideOthers,
-    Minimize, NewMessage, Quit, Reply, ReplyAll, RetryOutbox, SaveAttachments, SaveDraft,
-    SearchAllAccounts, SearchInAccount, SearchInFolder, Send, ShowAll, ShowBcc, ShowCc, ShowDrafts,
-    ShowKeyboardShortcuts, ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleCommandPalette,
-    ToggleDensity, ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme, Undo, Zoom,
+    Minimize, NewMessage, OpenSettings, Quit, Reply, ReplyAll, RetryOutbox, SaveAttachments,
+    SaveDraft, SearchAllAccounts, SearchInAccount, SearchInFolder, Send, ShowAll, ShowBcc, ShowCc,
+    ShowDrafts, ShowKeyboardShortcuts, ShowMail, ShowOutbox, SyncAccount, SyncAll,
+    ToggleCommandPalette, ToggleDensity, ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme, Undo,
+    Zoom,
 };
 use crate::components::text_input;
 use crate::styles::{MenuPlacement, Platform, PlatformStyle};
@@ -193,6 +195,8 @@ impl MenuModel {
             sections.push(MenuSection {
                 name: APP_NAME,
                 items: vec![
+                    app_command("Settings…", OpenSettings),
+                    MenuModelItem::Separator,
                     app_command("Hide Zmail", Hide),
                     app_command("Hide Others", HideOthers),
                     app_command("Show All", ShowAll),
@@ -207,7 +211,12 @@ impl MenuModel {
             command("Add Account…", AddAccount),
         ];
         if !macos {
-            file.extend([MenuModelItem::Separator, app_command("Quit", Quit)]);
+            file.extend([
+                MenuModelItem::Separator,
+                app_command("Settings…", OpenSettings),
+                MenuModelItem::Separator,
+                app_command("Quit", Quit),
+            ]);
         }
         sections.push(MenuSection {
             name: "File",
@@ -310,7 +319,8 @@ impl MenuModel {
     }
 
     /// The model as GPUI menus for `cx.set_menus`. The application menu
-    /// also gets the system Services submenu.
+    /// also gets the system Services submenu, after Settings… as macOS
+    /// apps have it.
     pub(crate) fn native_menus(&self) -> Vec<NativeMenu> {
         self.sections
             .iter()
@@ -330,8 +340,13 @@ impl MenuModel {
                     })
                     .collect();
                 if section.name == APP_NAME {
+                    let after_settings = section
+                        .items
+                        .iter()
+                        .position(|item| matches!(item, MenuModelItem::Separator))
+                        .map_or(0, |separator| separator + 1);
                     items.splice(
-                        0..0,
+                        after_settings..after_settings,
                         [
                             NativeMenuItem::os_submenu("Services", SystemMenuType::Services),
                             NativeMenuItem::separator(),
@@ -392,6 +407,7 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     cx.on_action(|_: &Minimize, cx| update_active_window(cx, Window::minimize_window));
     cx.on_action(|_: &Zoom, cx| update_active_window(cx, Window::zoom_window));
+    cx.on_action(|_: &OpenSettings, cx| crate::settings::open(None, cx));
     refresh_menu_bar(cx);
 }
 
@@ -609,7 +625,10 @@ mod tests {
         assert_eq!(menus.len(), model.sections.len());
         let app_menu = &menus[0];
         assert_eq!(app_menu.name.as_ref(), "Zmail");
-        assert!(matches!(app_menu.items[0], NativeMenuItem::SystemMenu(_)));
+        assert!(
+            matches!(&app_menu.items[0], NativeMenuItem::Action { name, .. } if name.as_ref() == "Settings…")
+        );
+        assert!(matches!(app_menu.items[2], NativeMenuItem::SystemMenu(_)));
         let edit = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "Edit")

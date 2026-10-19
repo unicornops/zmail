@@ -1548,6 +1548,7 @@ fn build_bootstrap(runtime: zmail_core::RuntimeSummary) -> Result<AppBootstrap> 
     let alternate_theme = load_theme_summary(PHASE0_LIGHT_THEME, "light")?;
 
     Ok(AppBootstrap {
+        app_version: env!("CARGO_PKG_VERSION").to_owned(),
         runtime,
         theme,
         alternate_theme,

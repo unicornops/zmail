@@ -45,7 +45,7 @@ HARNESS_STARTED=0
 # is the palette open over it; `cheat-sheet` is the keyboard shortcuts with
 # the Gmail keymap on. The compose views are
 # captured from their compose window (see window_title_for), at its default
-# 760x680.
+# 760x680, and the settings views from the Settings window.
 MATRIX=(
   "empty-dark empty dark 1440 920"
   "empty-light empty light 1440 920"
@@ -131,6 +131,12 @@ MATRIX=(
   "reader-attachments-dark reader-attachments dark 1440 920"
   "reader-attachments-light reader-attachments light 1440 920"
   "reader-attachments-dark-720 reader-attachments dark 720 720"
+  "settings-appearance-dark settings-appearance dark 820 600"
+  "settings-appearance-light settings-appearance light 820 600"
+  "settings-sending-dark settings-sending dark 820 600"
+  "settings-sending-light settings-sending light 820 600"
+  "settings-about-dark settings-about dark 820 900"
+  "settings-about-light settings-about light 820 900"
 )
 
 usage() {
@@ -171,12 +177,13 @@ cleanup() {
 
 # The title of the window a fixture view is captured from: the main
 # window, the compose window a compose view's draft opens in (titled with
-# the draft's subject), or the Add Account window.
+# the draft's subject), the Add Account window, or the Settings window.
 window_title_for() {
   case "$1" in
     compose) echo "Re: Q4 roadmap review" ;;
     compose-invalid) echo "Offline search demo" ;;
     account-setup) echo "Add Account" ;;
+    settings-*) echo "Settings" ;;
     *) echo "${WINDOW_TITLE}" ;;
   esac
 }

@@ -43,6 +43,8 @@ actions!(
         Minimize,
         /// Zoom (maximise or restore) the active window.
         Zoom,
+        /// Open the Settings window.
+        OpenSettings,
         // ---- Workspace --------------------------------------------------
         /// Start a new message.
         NewMessage,

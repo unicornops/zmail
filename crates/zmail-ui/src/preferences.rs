@@ -1,13 +1,15 @@
 //! Reads and writes the persisted [`UiPreferences`] for the workspace.
 //!
-//! The theme mode, the sidebar's collapsed state, the pane widths and the
-//! list density are wired up so far; the reading pane and the rest are
-//! stored by `zmail-store` and get wired as the views that use them land.
+//! The theme mode, the imported theme, the sidebar's collapsed state, the
+//! pane widths, the list density and the reading pane are wired up so far;
+//! the rest are stored by `zmail-store` and get wired as the views that use
+//! them land. The Settings window writes the preferences to the store and
+//! then calls [`WorkspaceView::apply_preferences`].
 
 use gpui::{Context, Window, WindowAppearance};
 use zmail_core::{
     ThemeAppearance,
-    preferences::{Density, PaneWidths, ThemeMode, UiPreferences},
+    preferences::{Density, PaneWidths, ReadingPanePosition, ThemeMode, UiPreferences},
 };
 
 use crate::actions::ToggleDensity;
@@ -15,9 +17,11 @@ use crate::actions::ToggleDensity;
 use super::WorkspaceView;
 
 impl WorkspaceView {
-    /// Applies the saved theme mode at startup: an explicit light or dark
-    /// choice wins, and `System` follows the window's appearance.
+    /// Applies the saved theme at startup: the imported theme if there is
+    /// one, then the theme mode. An explicit light or dark choice wins, and
+    /// `System` follows the window's appearance.
     pub(crate) fn apply_theme_preference(&mut self, system: WindowAppearance) {
+        self.load_imported_theme();
         let mode = match self.store.ui_preferences() {
             Ok(preferences) => preferences.theme_mode,
             Err(error) => {
@@ -25,15 +29,40 @@ impl WorkspaceView {
                 ThemeMode::System
             }
         };
-        match forced_appearance(mode) {
-            Some(appearance) => {
-                self.follow_system_appearance(window_appearance(appearance));
-                self.theme_overridden = true;
+        self.theme_overridden = forced_appearance(mode).is_some();
+        self.use_theme_variant(forced_appearance(mode).unwrap_or(theme_appearance(system)));
+    }
+
+    /// Reads the imported Zed theme family from the store. One that no
+    /// longer imports (stored by a version with different rules) is
+    /// dropped with an error, and the bundled themes apply.
+    fn load_imported_theme(&mut self) {
+        self.imported_theme = match self.store.custom_theme() {
+            Ok(Some(json)) => match zmail_theme::import_theme_family(&json) {
+                Ok(theme) => Some(theme),
+                Err(error) => {
+                    self.store_error = Some(format!("Could not load the imported theme: {error}"));
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(error) => {
+                self.store_error = Some(format!("Could not load the imported theme: {error:#}"));
+                None
             }
-            None => {
-                self.follow_system_appearance(system);
-            }
+        };
+    }
+
+    /// Re-reads the saved preferences and applies them to this window and
+    /// every other: Settings calls this after each change.
+    pub(crate) fn apply_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let reading_pane = self.reading_pane;
+        self.apply_theme_preference(window.appearance());
+        self.apply_layout_preferences();
+        if self.reading_pane != reading_pane {
+            self.reading_pane_changed(window, cx);
         }
+        self.apply_theme(cx);
     }
 
     /// Applies the saved layout at startup: whether the sidebar is hidden
@@ -43,6 +72,7 @@ impl WorkspaceView {
             Ok(preferences) => {
                 self.sidebar_collapsed = preferences.sidebar_collapsed;
                 self.density = preferences.density;
+                self.reading_pane = supported_reading_pane(preferences.reading_pane);
                 self.sidebar_tree = preferences.sidebar_tree;
                 if let Some(width) = preferences.pane_widths.sidebar {
                     self.sidebar_width = width;
@@ -107,6 +137,7 @@ impl WorkspaceView {
         }) {
             self.store_error = Some(format!("Could not save the row density: {error:#}"));
         }
+        crate::settings::preferences_changed(cx);
         cx.notify();
     }
 
@@ -147,6 +178,16 @@ impl WorkspaceView {
     }
 }
 
+/// The reading-pane positions the layout supports: beside the list, or
+/// none. A list-above-reader layout (`Bottom`) is not built yet, so it
+/// shows the reader beside the list.
+pub(crate) fn supported_reading_pane(position: ReadingPanePosition) -> ReadingPanePosition {
+    match position {
+        ReadingPanePosition::Off => ReadingPanePosition::Off,
+        ReadingPanePosition::Right | ReadingPanePosition::Bottom => ReadingPanePosition::Right,
+    }
+}
+
 /// The appearance a theme mode forces, or `None` to follow the system.
 fn forced_appearance(mode: ThemeMode) -> Option<ThemeAppearance> {
     match mode {
@@ -156,23 +197,23 @@ fn forced_appearance(mode: ThemeMode) -> Option<ThemeAppearance> {
     }
 }
 
-fn theme_appearance(appearance: WindowAppearance) -> ThemeAppearance {
+pub(crate) fn theme_appearance(appearance: WindowAppearance) -> ThemeAppearance {
     match appearance {
         WindowAppearance::Light | WindowAppearance::VibrantLight => ThemeAppearance::Light,
         WindowAppearance::Dark | WindowAppearance::VibrantDark => ThemeAppearance::Dark,
     }
 }
 
-fn window_appearance(appearance: ThemeAppearance) -> WindowAppearance {
-    match appearance {
-        ThemeAppearance::Light => WindowAppearance::Light,
-        ThemeAppearance::Dark => WindowAppearance::Dark,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window_appearance(appearance: ThemeAppearance) -> WindowAppearance {
+        match appearance {
+            ThemeAppearance::Light => WindowAppearance::Light,
+            ThemeAppearance::Dark => WindowAppearance::Dark,
+        }
+    }
 
     #[test]
     fn theme_modes_map_to_appearances() {

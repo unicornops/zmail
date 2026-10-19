@@ -335,6 +335,10 @@ CREATE TABLE IF NOT EXISTS app_settings (
 /// `app_settings` key holding the serialised [`UiPreferences`].
 const UI_PREFERENCES_KEY: &str = "ui_preferences";
 
+/// `app_settings` key holding the imported Zed theme family, as the JSON
+/// the user picked.
+const CUSTOM_THEME_KEY: &str = "custom_theme";
+
 /// Rebuilds the full-text index as one document per thread keyed by the
 /// thread id (the FTS rowid), with the senders and recipients of its
 /// messages as their own columns for `from:` and `to:`.
@@ -984,6 +988,40 @@ impl LocalStore {
             .commit()
             .context("failed to commit the UI preferences")?;
         Ok(preferences)
+    }
+
+    /// Returns the imported Zed theme family JSON, if the user imported
+    /// one (Settings → Appearance).
+    pub fn custom_theme(&self) -> Result<Option<String>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![CUSTOM_THEME_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("failed to load the imported theme")
+    }
+
+    /// Saves an imported Zed theme family's JSON, or with `None` goes back
+    /// to the bundled themes. The caller validates the JSON first.
+    pub fn set_custom_theme(&self, json: Option<&str>) -> Result<()> {
+        let conn = self.connection()?;
+        match json {
+            Some(json) => conn.execute(
+                "INSERT INTO app_settings(key, value, updated_at) \
+                 VALUES (?1, ?2, CURRENT_TIMESTAMP) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, \
+                 updated_at = excluded.updated_at",
+                params![CUSTOM_THEME_KEY, json],
+            ),
+            None => conn.execute(
+                "DELETE FROM app_settings WHERE key = ?1",
+                params![CUSTOM_THEME_KEY],
+            ),
+        }
+        .context("failed to save the imported theme")?;
+        Ok(())
     }
 
     /// Returns the account's configured disk budget in bytes, when set.
@@ -6305,6 +6343,28 @@ mod tests {
         assert!(
             !directory.exists(),
             "the directory is removed with the last handle"
+        );
+    }
+
+    #[test]
+    fn the_imported_theme_is_stored_apart_from_the_preferences() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        assert_eq!(store.custom_theme().expect("loads"), None);
+        store
+            .set_custom_theme(Some(r#"{"name":"Mine"}"#))
+            .expect("saves");
+        store
+            .update_ui_preferences(|preferences| preferences.undo_send_delay_secs = 5)
+            .expect("the preferences save");
+        assert_eq!(
+            store.custom_theme().expect("loads").as_deref(),
+            Some(r#"{"name":"Mine"}"#)
+        );
+        store.set_custom_theme(None).expect("clears");
+        assert_eq!(store.custom_theme().expect("loads"), None);
+        assert_eq!(
+            store.ui_preferences().expect("loads").undo_send_delay_secs,
+            5
         );
     }
 

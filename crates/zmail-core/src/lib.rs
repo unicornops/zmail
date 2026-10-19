@@ -1694,6 +1694,8 @@ pub struct UpstreamPins {
 /// Bootstrapped data passed into the GPUI shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppBootstrap {
+    /// The app's version, as released (for Settings → About).
+    pub app_version: String,
     /// Background runtime summary.
     pub runtime: RuntimeSummary,
     /// Active theme summary.

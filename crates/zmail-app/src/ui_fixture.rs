@@ -19,7 +19,7 @@ use zmail_core::{
     time::utc_timestamp,
 };
 use zmail_store::LocalStore;
-use zmail_ui::{InitialView, OnboardingStep};
+use zmail_ui::{InitialView, OnboardingStep, SettingsSection};
 
 /// The UI state a fixture launch opens in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +99,13 @@ pub(crate) enum FixtureView {
     /// The inbox with the Gmail keymap on and the keyboard shortcut cheat
     /// sheet open.
     CheatSheet,
+    /// The Settings window on Appearance.
+    SettingsAppearance,
+    /// The Settings window on Sending.
+    SettingsSending,
+    /// The Settings window on About & Diagnostics, with three accounts,
+    /// outbox jobs and two changes the server refused.
+    SettingsAbout,
 }
 
 /// The `search-filters` view's query: words to highlight and two chips.
@@ -143,8 +150,11 @@ impl FixtureView {
             "reader-attachments" => Self::ReaderAttachments,
             "command-palette" => Self::CommandPalette,
             "cheat-sheet" => Self::CheatSheet,
+            "settings-appearance" => Self::SettingsAppearance,
+            "settings-sending" => Self::SettingsSending,
+            "settings-about" => Self::SettingsAbout,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette or cheat-sheet"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-appearance, settings-sending or settings-about"
             ),
         })
     }
@@ -275,6 +285,14 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
                     .context("failed to record the fixture sync phase")?;
             }
             InitialView::Onboarding(step)
+        }
+        FixtureView::SettingsAppearance => InitialView::Settings(SettingsSection::Appearance),
+        FixtureView::SettingsSending => InitialView::Settings(SettingsSection::Sending),
+        FixtureView::SettingsAbout => {
+            seed_more_accounts(store, account_id, now)?;
+            seed_outbox(store, account_id)?;
+            seed_dead_ops(store, account_id)?;
+            InitialView::Settings(SettingsSection::About)
         }
         FixtureView::Sidebar => InitialView::Sidebar,
         FixtureView::MultiSelect => InitialView::MultiSelect,
@@ -489,6 +507,28 @@ fn safety_thread(view: FixtureView, now: u64) -> Option<ThreadSnapshot> {
 
 /// Queues three replies and moves them to the sending, retrying and
 /// failed states.
+/// Two inbox changes the server refused for good: marked read, then
+/// flagged, both dead-lettered after their retries.
+fn seed_dead_ops(store: &LocalStore, account_id: i64) -> Result<()> {
+    let inbox = store
+        .mailbox_id_by_role(account_id, "inbox")?
+        .context("the fixture account has an inbox")?;
+    let threads = store.list_threads(inbox, 0..2)?;
+    let [first, second] = threads.as_slice() else {
+        bail!("the fixture inbox has two threads");
+    };
+    store.set_thread_read(first.id, true)?;
+    store.set_thread_flagged(second.id, true)?;
+    let errors = [
+        "NO [CANNOT] The message no longer exists on the server",
+        "NO [LIMIT] Too many flags on this mailbox",
+    ];
+    for (op, error) in store.list_pending_ops(account_id)?.iter().zip(errors) {
+        store.mark_pending_op_dead(op.id, error)?;
+    }
+    Ok(())
+}
+
 fn seed_outbox(store: &LocalStore, account_id: i64) -> Result<()> {
     let identity = store
         .list_identities(account_id)?
@@ -1123,6 +1163,9 @@ mod tests {
             "reader-attachments",
             "command-palette",
             "cheat-sheet",
+            "settings-appearance",
+            "settings-sending",
+            "settings-about",
         ] {
             FixtureView::parse(name)?;
         }
@@ -1132,6 +1175,19 @@ mod tests {
         assert_eq!(parse_theme(Some("light"))?, Some(ThemeAppearance::Light));
         assert_eq!(parse_theme(Some("dark"))?, Some(ThemeAppearance::Dark));
         assert!(parse_theme(Some("sepia")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn settings_about_has_refused_changes_to_show() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::SettingsAbout)?;
+        assert_eq!(
+            initial_view,
+            InitialView::Settings(zmail_ui::SettingsSection::About)
+        );
+        let account_id = store.list_accounts()?[0].id;
+        assert_eq!(store.dead_op_count(account_id)?, 2);
+        assert_eq!(store.list_accounts()?.len(), 3);
         Ok(())
     }
 

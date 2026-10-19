@@ -1,7 +1,8 @@
 [
   {
     "bindings": {
-      "secondary-q": "zmail::Quit"
+      "secondary-q": "zmail::Quit",
+      "secondary-,": "zmail::OpenSettings"
     }
   },
   {
@@ -157,6 +158,13 @@
     "bindings": {
       "secondary-enter": "zmail::ContinueSetup",
       "escape": "zmail::Cancel"
+    }
+  },
+  {
+    "context": "SettingsNav",
+    "bindings": {
+      "down": "zmail::SelectNext",
+      "up": "zmail::SelectPrevious"
     }
   }
 ]

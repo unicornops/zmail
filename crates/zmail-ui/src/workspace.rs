@@ -23,6 +23,7 @@ use zmail_core::{
     AccountSummary, AppBootstrap, IdentitySummary, MailboxRole, MailboxSelection, MailboxSummary,
     NewDraft, OutboxJobState, StoreStats, SyncPhase, ThemeAppearance, ThreadMessage, ThreadView,
     VirtualMailbox,
+    preferences::ReadingPanePosition,
     text::count_noun,
     time::{HourCycle, format_full_date, next_local_midnight},
 };
@@ -159,6 +160,7 @@ impl WorkspaceView {
             cx.observe_self(|this, cx| this.sync_panes(cx)),
         ];
 
+        let bootstrap_themes = (bootstrap.theme.clone(), bootstrap.alternate_theme.clone());
         let mut view = Self {
             bootstrap,
             store,
@@ -193,8 +195,6 @@ impl WorkspaceView {
             mailboxes: Vec::new(),
             drafts: Vec::new(),
             outbox_jobs: Vec::new(),
-            pending_op_count: 0,
-            dead_op_count: 0,
             command_palette: None,
             palette_modal: components::ModalState::new(cx),
             shortcuts_modal: components::ModalState::new(cx),
@@ -223,9 +223,12 @@ impl WorkspaceView {
             thread_view_cache: None,
             refresh_scheduled: false,
             theme_overridden: false,
+            bundled_themes: [bootstrap_themes.0, bootstrap_themes.1],
+            imported_theme: None,
             hour_cycle,
             sidebar_collapsed: false,
             density: Default::default(),
+            reading_pane: Default::default(),
             sidebar_width: SIDEBAR_WIDTH,
             list_width: MESSAGE_LIST_WIDTH,
             pane_widths_generation: 0,
@@ -236,6 +239,12 @@ impl WorkspaceView {
         };
 
         view.prune_open_cache_later(cx);
+
+        // The Settings window works with this window's store and applies
+        // its changes here.
+        if let Some(handle) = window.window_handle().downcast::<WorkspaceView>() {
+            crate::settings::SettingsHost::install(&view.bootstrap, view.store.clone(), handle, cx);
+        }
 
         // A job still queued or sending now was queued before this window
         // opened: the sync service sends it, and a toast says so.
@@ -277,7 +286,7 @@ impl WorkspaceView {
             window,
             |this: &mut WorkspaceView, window: &mut Window, cx: &mut Context<Self>| {
                 if !this.theme_overridden && this.follow_system_appearance(window.appearance()) {
-                    this.apply_theme(window, cx);
+                    this.apply_theme(cx);
                 }
             },
         )
@@ -297,6 +306,7 @@ impl WorkspaceView {
                 | InitialView::Search(_)
                 | InitialView::CommandPalette(_)
                 | InitialView::KeyboardShortcuts
+                | InitialView::Settings(_)
         ) {
             view.restore_last_mailbox(cx);
         }
@@ -371,6 +381,10 @@ impl WorkspaceView {
                 }
             }
             InitialView::Outbox => view.show_outbox(&ShowOutbox, window, cx),
+            // Once the main window is up.
+            InitialView::Settings(section) => cx.defer_in(window, move |_, _, cx| {
+                crate::settings::open(Some(section), cx);
+            }),
             InitialView::Search(query) => {
                 view.search_query
                     .update(cx, |input, cx| input.set_text(query, cx));
@@ -645,14 +659,6 @@ impl WorkspaceView {
         // Re-run the shown search so read state, flags and moves made since
         // it ran show up in the results.
         self.refresh_search_results(cx);
-        self.pending_op_count = self
-            .selected_account_id
-            .and_then(|account_id| self.store.pending_op_count(account_id).ok())
-            .unwrap_or(0);
-        self.dead_op_count = self
-            .selected_account_id
-            .and_then(|account_id| self.store.dead_op_count(account_id).ok())
-            .unwrap_or(0);
 
         self.selected_mailbox_id = self
             .selected_mailbox_id
@@ -906,12 +912,28 @@ impl WorkspaceView {
     /// The pane layout for the current window width and the user's pane
     /// widths.
     pub(crate) fn pane_layout(&self) -> PaneLayout {
-        PaneLayout::compute(
+        let layout = PaneLayout::compute(
             self.viewport_width,
             self.sidebar_width,
             self.list_width,
             self.sidebar_collapsed,
-        )
+        );
+        match self.reading_pane {
+            ReadingPanePosition::Off => layout.without_reading_pane(),
+            ReadingPanePosition::Right | ReadingPanePosition::Bottom => layout,
+        }
+    }
+
+    /// Follows a change of reading pane: turning it off shows whichever of
+    /// the list and the detail pane had focus.
+    pub(crate) fn reading_pane_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pane_layout().stacked {
+            self.single_pane = match self.focused_pane(window, cx) {
+                Some(Pane::Detail) => SinglePane::Detail,
+                _ => SinglePane::List,
+            };
+        }
+        cx.notify();
     }
 
     /// Whether the sidebar is showing, as a pane or as an overlay.
@@ -926,8 +948,8 @@ impl WorkspaceView {
 
     /// Follows a window resize: the sidebar overlay closes once the
     /// sidebar is a pane again (or opens if the sidebar had focus when it
-    /// stopped being one), and entering the single-pane layout shows
-    /// whichever pane had focus.
+    /// stopped being one), and entering a stacked layout shows whichever
+    /// pane had focus.
     fn on_window_resized(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
         if width == self.viewport_width {
             return;
@@ -941,7 +963,7 @@ impl WorkspaceView {
         } else if before.sidebar.is_some() && focused == Some(Pane::Sidebar) {
             self.sidebar_overlay_open = true;
         }
-        if after.mode == LayoutMode::Single && before.mode != LayoutMode::Single {
+        if after.stacked && !before.stacked {
             match focused {
                 Some(Pane::Detail) => self.single_pane = SinglePane::Detail,
                 Some(Pane::MessageList) => self.single_pane = SinglePane::List,
@@ -984,14 +1006,14 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Back, in the single-pane layout: from the detail pane to the list.
+    /// Back, in a stacked layout: from the detail pane to the list.
     fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
         self.go_back_to_list(window, cx);
     }
 
     /// Returns whether there was somewhere to go back to.
     fn go_back_to_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.pane_layout().mode != LayoutMode::Single || self.single_pane != SinglePane::Detail {
+        if !self.pane_layout().stacked || self.single_pane != SinglePane::Detail {
             return false;
         }
         self.focus_pane(Pane::MessageList, window, cx);
@@ -1048,44 +1070,58 @@ impl WorkspaceView {
     // Theme
     // -----------------------------------------------------------------------
 
-    /// Switch to the bundled theme variant that matches the system
-    /// appearance, if it is not active already. Returns whether it changed.
+    /// Switch to the theme variant that matches the system appearance, if
+    /// it is not active already. Returns whether it changed.
     pub(crate) fn follow_system_appearance(&mut self, appearance: WindowAppearance) -> bool {
-        let wanted = match appearance {
-            WindowAppearance::Light | WindowAppearance::VibrantLight => ThemeAppearance::Light,
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => ThemeAppearance::Dark,
-        };
-        if self.bootstrap.theme.appearance != wanted
-            && self.bootstrap.alternate_theme.appearance == wanted
-        {
-            std::mem::swap(
-                &mut self.bootstrap.theme,
-                &mut self.bootstrap.alternate_theme,
-            );
-            true
-        } else {
-            false
-        }
+        self.use_theme_variant(crate::preferences::theme_appearance(appearance))
     }
 
-    /// Publishes the active theme's colours and redraws every pane: panes
-    /// are cached, so a colour change has to bypass their caches.
-    fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Make the `appearance` variant the active theme: the imported
+    /// theme's, or else the bundled one. Returns whether it changed; with
+    /// no variant for `appearance` (a fixture pinned to one) it stays.
+    pub(crate) fn use_theme_variant(&mut self, appearance: ThemeAppearance) -> bool {
+        let imported = self
+            .imported_theme
+            .as_ref()
+            .and_then(|theme| match appearance {
+                ThemeAppearance::Dark => theme.dark.as_ref(),
+                ThemeAppearance::Light => theme.light.as_ref(),
+            });
+        let Some(wanted) = imported.or_else(|| {
+            self.bundled_themes
+                .iter()
+                .find(|theme| theme.appearance == appearance)
+        }) else {
+            return false;
+        };
+        if *wanted == self.bootstrap.theme {
+            return false;
+        }
+        self.bootstrap.theme = wanted.clone();
+        true
+    }
+
+    /// Publishes the active theme's colours and redraws every window:
+    /// panes are cached, so a colour change has to bypass their caches,
+    /// and the compose and Settings windows draw with the same colours.
+    pub(crate) fn apply_theme(&mut self, cx: &mut Context<Self>) {
         components::ComponentTheme::sync(&self.bootstrap.theme, cx);
         cx.set_global(UiColors::from_theme(&self.bootstrap.theme));
-        window.refresh();
+        cx.refresh_windows();
         cx.notify();
     }
 
-    /// Swap the active theme with the bundled alternate variant.
+    /// Switch between the light and dark variants.
     fn toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
         self.theme_overridden = true;
-        std::mem::swap(
-            &mut self.bootstrap.theme,
-            &mut self.bootstrap.alternate_theme,
-        );
+        let other = match self.bootstrap.theme.appearance {
+            ThemeAppearance::Light => ThemeAppearance::Dark,
+            ThemeAppearance::Dark => ThemeAppearance::Light,
+        };
+        self.use_theme_variant(other);
         self.persist_theme_choice(window.appearance());
-        self.apply_theme(window, cx);
+        self.apply_theme(cx);
+        crate::settings::preferences_changed(cx);
     }
 
     // -----------------------------------------------------------------------
@@ -2698,10 +2734,10 @@ impl WorkspaceView {
                 self.retry_selected_outbox(window, cx);
             }
             MessageListEvent::Activate => self.focus_pane(Pane::Detail, window, cx),
-            // In the single-pane layout a click opens the row's detail;
+            // In a stacked layout a click opens the row's detail;
             // elsewhere the detail is already beside the list.
             MessageListEvent::RowClicked => {
-                if self.pane_layout().mode == LayoutMode::Single {
+                if self.pane_layout().stacked {
                     self.focus_pane(Pane::Detail, window, cx);
                 }
             }
@@ -2798,7 +2834,13 @@ fn fill_style() -> StyleRefinement {
     StyleRefinement::default().size_full()
 }
 
-/// Height of the single-pane layout's back bar.
+/// The list or detail pane of a stacked layout: all the room beside the
+/// sidebar, if it shows.
+fn stacked_style() -> StyleRefinement {
+    StyleRefinement::default().flex_1().min_w_0().h_full()
+}
+
+/// Height of a stacked layout's back bar.
 const BACK_BAR_HEIGHT: f32 = 44.0;
 
 impl WorkspaceView {
@@ -2814,31 +2856,38 @@ impl WorkspaceView {
             DetailMode::Reader => self.reader.clone().into(),
             DetailMode::Compose => self.compose.clone().into(),
         };
-        let panes = div().relative().flex().flex_1().overflow_hidden();
-        let panes = match layout.mode {
-            LayoutMode::Single => match self.single_pane {
-                SinglePane::List => panes.child(self.message_list.clone().cached(fill_style())),
+        let panes = div()
+            .relative()
+            .flex()
+            .flex_1()
+            .overflow_hidden()
+            .when_some(layout.sidebar, |this, width| {
+                this.child(self.sidebar.clone().cached(fixed_pane_style(width)))
+                    .child(
+                        SplitHandle::new("sidebar-split", width)
+                            .range(SIDEBAR_MIN_WIDTH, layout.sidebar_max)
+                            .default_width(SIDEBAR_WIDTH)
+                            .on_resize(cx.listener(|this, width: &f32, _, cx| {
+                                this.resize_sidebar(*width, cx);
+                            })),
+                    )
+            });
+        let panes = if layout.stacked {
+            match self.single_pane {
+                SinglePane::List => panes.child(self.message_list.clone().cached(stacked_style())),
                 SinglePane::Detail => panes.child(
                     div()
                         .flex()
                         .flex_col()
-                        .size_full()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
                         .child(self.render_back_bar(colors))
                         .child(detail.cached(StyleRefinement::default().flex_1().w_full())),
                 ),
-            },
-            LayoutMode::Wide | LayoutMode::Overlay => panes
-                .when_some(layout.sidebar, |this, width| {
-                    this.child(self.sidebar.clone().cached(fixed_pane_style(width)))
-                        .child(
-                            SplitHandle::new("sidebar-split", width)
-                                .range(SIDEBAR_MIN_WIDTH, layout.sidebar_max)
-                                .default_width(SIDEBAR_WIDTH)
-                                .on_resize(cx.listener(|this, width: &f32, _, cx| {
-                                    this.resize_sidebar(*width, cx);
-                                })),
-                        )
-                })
+            }
+        } else {
+            panes
                 .child(
                     self.message_list
                         .clone()
@@ -2852,7 +2901,7 @@ impl WorkspaceView {
                             this.resize_list(*width, cx);
                         })),
                 )
-                .child(detail.cached(detail_style())),
+                .child(detail.cached(detail_style()))
         };
         let overlay = self.sidebar_overlay_open && layout.sidebar.is_none();
         let scrim = if components::ComponentTheme::get(cx).is_light {
@@ -2889,8 +2938,8 @@ impl WorkspaceView {
         })
     }
 
-    /// The single-pane layout's bar above the detail pane: a back button
-    /// to the list, named after it.
+    /// A stacked layout's bar above the detail pane: a back button to the
+    /// list, named after it.
     fn render_back_bar(&self, colors: &UiColors) -> impl IntoElement {
         let title = self.list_title();
         div()

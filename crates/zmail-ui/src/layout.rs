@@ -7,6 +7,11 @@
 //! | 760–1099px | list and detail; the sidebar opens over them ([`LayoutMode::Overlay`]) |
 //! | below 760px | one pane at a time, with a back button ([`LayoutMode::Single`]) |
 //!
+//! With the reading pane turned off (Settings → Appearance), the list and
+//! the detail pane take turns in the space beside the sidebar at every
+//! width, as they do in the single-pane layout
+//! ([`PaneLayout::without_reading_pane`]).
+//!
 //! The user's sidebar and list widths (dragged with the split handles and
 //! saved in the UI preferences) are clamped to what the window can fit
 //! while the detail pane keeps [`DETAIL_MIN_WIDTH`]. The saved widths
@@ -51,7 +56,7 @@ impl LayoutMode {
     }
 }
 
-/// Which pane [`LayoutMode::Single`] shows.
+/// Which pane a stacked layout ([`PaneLayout::stacked`]) shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum SinglePane {
     /// The message list.
@@ -78,6 +83,9 @@ pub(crate) struct PaneLayout {
     pub(crate) list_max: f32,
     /// What is left for the detail pane.
     pub(crate) detail: f32,
+    /// The list and the detail pane share one space and take turns: the
+    /// single-pane layout, or any layout without a reading pane.
+    pub(crate) stacked: bool,
 }
 
 impl PaneLayout {
@@ -98,6 +106,7 @@ impl PaneLayout {
                 list: viewport,
                 list_max: MESSAGE_LIST_MAX_WIDTH,
                 detail: viewport,
+                stacked: true,
             };
         }
 
@@ -123,7 +132,20 @@ impl PaneLayout {
             list,
             list_max,
             detail: (rest - list).max(0.0),
+            stacked: false,
         }
+    }
+
+    /// This layout with no reading pane: the list and the detail pane
+    /// each get all the room beside the sidebar, one at a time.
+    pub(crate) fn without_reading_pane(mut self) -> Self {
+        let content = self.list + self.detail;
+        if !self.stacked {
+            self.list = content;
+            self.detail = content;
+            self.stacked = true;
+        }
+        self
     }
 }
 
@@ -191,6 +213,26 @@ mod tests {
         let silly = PaneLayout::compute(1440.0, 5.0, 5000.0, false);
         assert_eq!(silly.sidebar, Some(SIDEBAR_MIN_WIDTH));
         assert_eq!(silly.list, MESSAGE_LIST_MAX_WIDTH);
+    }
+
+    #[test]
+    fn without_a_reading_pane_list_and_detail_share_the_room() {
+        let off = layout(1440.0).without_reading_pane();
+        assert!(off.stacked);
+        assert_eq!(off.sidebar, Some(SIDEBAR_WIDTH));
+        assert_eq!(
+            (off.list, off.detail),
+            (1440.0 - SIDEBAR_WIDTH, 1440.0 - SIDEBAR_WIDTH)
+        );
+
+        let overlay = layout(900.0).without_reading_pane();
+        assert_eq!(
+            (overlay.sidebar, overlay.list, overlay.detail),
+            (None, 900.0, 900.0)
+        );
+
+        assert_eq!(layout(720.0).without_reading_pane(), layout(720.0));
+        assert!(!layout(1440.0).stacked);
     }
 
     #[test]
