@@ -50,6 +50,9 @@ actions!(
         AddAccount,
         /// Show the selected mailbox's conversations.
         ShowMail,
+        /// Show the inbox: the Unified Inbox when there are several
+        /// accounts, else the account's Inbox.
+        GoToInbox,
         /// Show the drafts list.
         ShowDrafts,
         /// Show the outbox.
@@ -244,6 +247,10 @@ pub(crate) const ACTIONS_WITHOUT_KEYS: &[(&str, &str)] = &[
     (
         "zmail::ToggleDensity",
         "a View menu setting, rarely switched; no key to collide with",
+    ),
+    (
+        "zmail::GoToInbox",
+        "the Gmail keymap's g i; otherwise the sidebar and the palette's Go to Inbox",
     ),
     (
         "zmail::ShowAll",

@@ -28,8 +28,10 @@
 //! The user picks a [`KeymapName`] (saved in the UI preferences): the
 //! standard keymap, or the Gmail keymap, which layers single-key shortcuts
 //! on top of it. [`bind_keymap`] binds everything the app binds for one of
-//! them, and [`use_keymap`] switches at runtime without a restart. A user
-//! keymap file is still to come.
+//! them, and [`use_keymap`] switches at runtime without a restart. The
+//! Gmail keys are mostly plain letters, so they only apply in the message
+//! list and reader (and a few window-wide) and never while a text field
+//! has focus. A user keymap file is still to come.
 
 use std::rc::Rc;
 
@@ -46,6 +48,15 @@ pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../keymaps/default.json");
 
 /// macOS-only bindings, loaded after the default keymap on macOS.
 pub(crate) const MACOS_KEYMAP: &str = include_str!("../keymaps/macos.json");
+
+/// The Gmail keymap's single-key shortcuts, loaded on top of the platform
+/// keymaps. Only New Message's c and Go to Inbox's g i are window-wide; z
+/// for Undo is bound in the panes so the Edit menu keeps showing the
+/// standard Undo chord (see `menus::menu_binding`). Every section excludes text fields (`!TextInput`), so the keys
+/// type normally there, and the open overlays (`!Modal`, `!Menu`,
+/// `!Select`) and compose (`!Compose`), whose controls would otherwise
+/// pass the keys on to the conversation behind them.
+pub(crate) const GMAIL_KEYMAP: &str = include_str!("../keymaps/gmail.json");
 
 /// The bundled keymaps this platform loads, in order.
 pub(crate) fn platform_keymaps() -> &'static [&'static str] {
@@ -115,11 +126,11 @@ pub(crate) fn parse_keymap(source: &str, cx: &App) -> Result<Vec<KeyBinding>> {
 /// The bundled keymaps `keymap` loads on this platform, in order: later
 /// files win over earlier ones where both bind a key in the same context.
 pub(crate) fn keymaps_for(keymap: KeymapName) -> Vec<&'static str> {
-    match keymap {
-        // The Gmail layer (`keymaps/gmail.json`) lands with its own PR;
-        // until then the choice binds the standard keys.
-        KeymapName::Default | KeymapName::Gmail => platform_keymaps().to_vec(),
+    let mut sources = platform_keymaps().to_vec();
+    if keymap == KeymapName::Gmail {
+        sources.push(GMAIL_KEYMAP);
     }
+    sources
 }
 
 /// The keymap the app has bound, so views can say which one is active.
@@ -180,7 +191,8 @@ mod tests {
     use zmail_store::LocalStore;
 
     use super::{
-        DEFAULT_KEYMAP, MACOS_KEYMAP, active_keymap, bind_keymap, parse_keymap, use_keymap,
+        DEFAULT_KEYMAP, GMAIL_KEYMAP, MACOS_KEYMAP, active_keymap, bind_keymap, parse_keymap,
+        use_keymap,
     };
     use crate::actions::{ACTIONS_WITHOUT_KEYS, NewMessage};
     use crate::components::text_input;
@@ -213,6 +225,10 @@ mod tests {
         assert_eq!(count(cx), standard);
         cx.update(|cx| bind_keymap(KeymapName::Gmail, cx));
         cx.update(|cx| assert_eq!(active_keymap(cx), KeymapName::Gmail));
+        assert!(
+            count(cx) > standard,
+            "the Gmail layer adds to the standard keys"
+        );
         cx.update(|cx| bind_keymap(KeymapName::Default, cx));
         assert_eq!(count(cx), standard, "switching back drops the Gmail layer");
     }
@@ -238,7 +254,7 @@ mod tests {
 
     #[gpui::test]
     fn the_bundled_keymaps_load(cx: &mut TestAppContext) {
-        for source in [DEFAULT_KEYMAP, MACOS_KEYMAP] {
+        for source in [DEFAULT_KEYMAP, MACOS_KEYMAP, GMAIL_KEYMAP] {
             let bindings = cx
                 .update(|cx| parse_keymap(source, cx))
                 .expect("the bundled keymap parses");
@@ -303,6 +319,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[gpui::test]
+    fn gmail_keys_never_apply_in_text_fields_or_overlays(cx: &mut TestAppContext) {
+        // Plain letters would otherwise fire while typing, or act on the
+        // conversation behind an open menu, dialog or compose form.
+        let bindings = cx
+            .update(|cx| parse_keymap(GMAIL_KEYMAP, cx))
+            .expect("the Gmail keymap parses");
+        for binding in &bindings {
+            let context = binding
+                .predicate()
+                .map(|predicate| predicate.to_string())
+                .unwrap_or_default();
+            for excluded in ["!TextInput", "!Modal", "!Menu", "!Select", "!Compose"] {
+                assert!(
+                    context.contains(excluded),
+                    "{:?} in {context:?} lacks {excluded}",
+                    binding.keystrokes()
+                );
+            }
+        }
+        let sequences = bindings
+            .iter()
+            .filter(|binding| binding.keystrokes().len() > 1)
+            .count();
+        assert_eq!(sequences, 1, "g i is the one two-key sequence");
     }
 
     #[gpui::test]

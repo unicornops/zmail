@@ -20,8 +20,8 @@ use gpui::{
 };
 use std::sync::Arc;
 use zmail_core::{
-    AccountSummary, AppBootstrap, IdentitySummary, MailboxSelection, MailboxSummary, NewDraft,
-    OutboxJobState, StoreStats, SyncPhase, ThemeAppearance, ThreadMessage, ThreadView,
+    AccountSummary, AppBootstrap, IdentitySummary, MailboxRole, MailboxSelection, MailboxSummary,
+    NewDraft, OutboxJobState, StoreStats, SyncPhase, ThemeAppearance, ThreadMessage, ThreadView,
     VirtualMailbox,
     text::count_noun,
     time::{HourCycle, format_full_date, next_local_midnight},
@@ -38,9 +38,9 @@ use crate::account_setup::{
 };
 use crate::actions::{
     AddAccount, Archive, Cancel, Delete, DismissSenderWarning, FocusNextPane, FocusPreviousPane,
-    FocusSearch, Forward, GoBack, MoveToMailbox, NewMessage, Reply, ReplyAll, ReplyToMessage,
-    RetryOutbox, SaveAttachments, ShowDrafts, ShowMail, ShowOutbox, SyncAccount, SyncAll,
-    ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme, Undo,
+    FocusSearch, Forward, GoBack, GoToInbox, MoveToMailbox, NewMessage, Reply, ReplyAll,
+    ReplyToMessage, RetryOutbox, SaveAttachments, SelectNext, SelectPrevious, ShowDrafts, ShowMail,
+    ShowOutbox, SyncAccount, SyncAll, ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme, Undo,
 };
 use crate::app_menu::AppMenuButton;
 use crate::components::{
@@ -2364,6 +2364,43 @@ impl WorkspaceView {
         self.focus_pane(Pane::MessageList, window, cx);
     }
 
+    /// Shows the Unified Inbox when there are several accounts, else the
+    /// account's Inbox (the Gmail keymap's g i).
+    fn go_to_inbox(&mut self, _: &GoToInbox, window: &mut Window, cx: &mut Context<Self>) {
+        if self.accounts.len() > 1 {
+            self.select_virtual_mailbox(VirtualMailbox::Unified(MailboxRole::Inbox), cx);
+        } else {
+            let account_id = self
+                .selected_account_id
+                .or_else(|| self.accounts.first().map(|account| account.id));
+            let Some(inbox) = self.all_mailboxes.iter().find(|mailbox| {
+                Some(mailbox.account_id) == account_id && mailbox.role == Some(MailboxRole::Inbox)
+            }) else {
+                return;
+            };
+            self.select_mailbox(inbox.id, cx);
+        }
+        self.focus_pane(Pane::MessageList, window, cx);
+    }
+
+    /// The next and previous row reach here only from the reader (the
+    /// list and sidebar handle their own): move through the list behind
+    /// the open conversation.
+    fn select_next_conversation(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.message_list
+            .update(cx, |list, cx| list.select_adjacent(true, cx));
+    }
+
+    fn select_previous_conversation(
+        &mut self,
+        _: &SelectPrevious,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.message_list
+            .update(cx, |list, cx| list.select_adjacent(false, cx));
+    }
+
     fn show_drafts(&mut self, _: &ShowDrafts, window: &mut Window, cx: &mut Context<Self>) {
         self.show_drafts_list(cx);
         self.focus_pane(Pane::MessageList, window, cx);
@@ -2897,6 +2934,9 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::new_message))
             .on_action(cx.listener(Self::add_account))
             .on_action(cx.listener(Self::show_mail))
+            .on_action(cx.listener(Self::go_to_inbox))
+            .on_action(cx.listener(Self::select_next_conversation))
+            .on_action(cx.listener(Self::select_previous_conversation))
             .on_action(cx.listener(Self::show_drafts))
             .on_action(cx.listener(Self::show_outbox))
             .on_action(cx.listener(Self::retry_outbox))
