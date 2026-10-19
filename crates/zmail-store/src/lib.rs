@@ -28,6 +28,7 @@ use zmail_core::{
 };
 use zmail_security::sanitize_html_for_display;
 
+mod address_history;
 mod search;
 
 /// The storage stance recorded during Phase 2.
@@ -52,6 +53,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0015_background_indexing", BACKGROUND_INDEXING_SCHEMA),
     ("0016_server_search_hits", SERVER_SEARCH_HITS_SCHEMA),
     ("0017_mailbox_hierarchy", MAILBOX_HIERARCHY_SCHEMA),
+    (
+        "0019_address_history",
+        address_history::ADDRESS_HISTORY_SCHEMA,
+    ),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -481,6 +486,7 @@ impl LocalStore {
             ephemeral_dir: None,
         };
         store.apply_migrations()?;
+        store.rebuild_address_history_if_pending()?;
         Ok(store)
     }
 
@@ -2567,6 +2573,7 @@ impl LocalStore {
 
         let existing_mailboxes = load_account_mailbox_ids(&transaction, account_id)?;
         let pending_remote_ids = load_pending_op_remote_ids(&transaction, account_id)?;
+        let mut mail_changed = snapshot.identities.is_some();
 
         for (sort_order, mailbox) in snapshot.mailboxes.iter().enumerate() {
             let mailbox_id = match existing_mailboxes.get(&mailbox.name) {
@@ -2628,6 +2635,7 @@ impl LocalStore {
                 &pending_remote_ids,
             )?;
             let pruned = prune_mailbox_threads(&transaction, mailbox_id, &kept_thread_ids)?;
+            mail_changed |= threads_changed || pruned;
             if threads_changed || pruned {
                 transaction
                     .execute(
@@ -2659,9 +2667,15 @@ impl LocalStore {
                     .with_context(|| {
                         format!("failed to remove the {name} mailbox missing from the snapshot")
                     })?;
+                mail_changed = true;
             }
         }
 
+        // Autocomplete follows the mail: the history is rebuilt from the
+        // mirror whenever the snapshot changed it.
+        if mail_changed {
+            address_history::rebuild_account_address_history(&transaction, account_id)?;
+        }
         flush_search_index(&transaction)?;
         transaction
             .commit()
@@ -3871,6 +3885,23 @@ impl LocalStore {
             "#,
             params![draft_id, DraftState::Sent.as_str(), now, now],
         )?;
+        // The recipients join the address history now, before the sent
+        // copy syncs back.
+        let (account_id, recipients) = transaction.query_row(
+            "SELECT account_id, to_json, cc_json, bcc_json FROM drafts WHERE id = ?1",
+            params![draft_id],
+            |row| {
+                let mut recipients = Vec::new();
+                for column in 1..=3 {
+                    recipients.extend(
+                        recipients_from_json(row.get::<_, String>(column)?)
+                            .map_err(to_from_sql_error)?,
+                    );
+                }
+                Ok((row.get::<_, i64>(0)?, recipients))
+            },
+        )?;
+        address_history::record_outbox_recipients(&transaction, account_id, &recipients, &now)?;
         transaction
             .commit()
             .context("failed to commit the outbox success transaction")
