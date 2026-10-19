@@ -466,6 +466,7 @@ impl CommandPalette {
                         .id(("command-palette-entry", position))
                         .debug_selector(move || format!("command-palette-{position}"))
                         .flex()
+                        .w_full()
                         .items_center()
                         .gap(px(SPACE_2))
                         .h(px(ROW_HEIGHT))
@@ -551,6 +552,7 @@ impl Render for CommandPalette {
                                 }),
                             )
                             .track_scroll(&self.scroll)
+                            .w_full()
                             .h(px(ROW_HEIGHT * visible as f32)),
                         )
                     })

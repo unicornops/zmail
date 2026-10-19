@@ -5,7 +5,7 @@ use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestCo
 use zmail_core::{MailboxSelection, VirtualMailbox};
 
 use super::{Setup, focused_pane, keys, mailbox_of, open_workspace, open_workspace_on};
-use crate::command_palette::CommandPalette;
+use crate::command_palette::{CommandPalette, PALETTE_WIDTH};
 use crate::pane::Pane;
 use crate::{InitialView, WorkspaceView};
 
@@ -230,8 +230,14 @@ fn the_window_can_open_with_the_palette_showing(cx: &mut TestAppContext) {
         open_workspace_on(cx, Setup::Mail, |_| InitialView::CommandPalette("archive"));
     let palette = palette(&view, cx).expect("the palette is open");
     assert_eq!(labels(&palette, cx), ["Archive", "Go to Archive"]);
+    let row = cx
+        .debug_bounds("command-palette-0")
+        .expect("its rows are drawn");
+    // Rows span the card, so the highlight is a full bar and the
+    // shortcuts line up at the trailing edge.
     assert!(
-        cx.debug_bounds("command-palette-0").is_some(),
-        "its rows are drawn"
+        f32::from(row.size.width) > PALETTE_WIDTH - 40.0,
+        "row width {:?}",
+        row.size.width
     );
 }
