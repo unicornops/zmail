@@ -18,6 +18,7 @@ const FILES: &[(&str, &str, &[u8])] = &[
     ("report.pdf", "application/pdf", b"%PDF report"),
     ("notes.txt", "text/plain", b"plain notes"),
     ("setup.exe", "application/octet-stream", b"MZ program"),
+    ("login.html", "text/html", b"<form action=x>"),
 ];
 
 /// One thread whose message carries [`FILES`], with their blobs written
@@ -220,6 +221,24 @@ fn a_program_opens_only_after_the_warning(cx: &mut TestAppContext) {
     let opened = t.opened();
     assert_eq!(opened.len(), 1);
     assert_eq!(fs::read(&opened[0]).expect("the copy reads"), b"MZ program");
+}
+
+#[gpui::test]
+fn a_web_page_opens_only_after_the_warning(cx: &mut TestAppContext) {
+    let mut t = open(cx);
+    let id = t.id("login.html");
+
+    click_on(format!("attachment-open-{id}"), t.cx);
+    assert!(t.warning_pending(), "a web page warns like a program");
+    assert!(t.opened().is_empty(), "nothing opens yet");
+
+    click("attachment-open-anyway", t.cx);
+    let opened = t.opened();
+    assert_eq!(opened.len(), 1);
+    assert_eq!(
+        fs::read(&opened[0]).expect("the copy reads"),
+        b"<form action=x>"
+    );
 }
 
 #[gpui::test]

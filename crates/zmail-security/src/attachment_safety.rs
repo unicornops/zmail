@@ -3,8 +3,8 @@
 //!
 //! A received attachment's name comes from the sender. Before it names a
 //! file on disk it goes through [`sanitize_filename`], and before the
-//! reader hands a file to the operating system to open,
-//! [`is_executable_or_script`] decides whether the user is warned first.
+//! reader hands a file to the operating system to open, [`open_risk`]
+//! decides whether the user is warned first.
 
 /// What a file is called when its name sanitises to nothing.
 pub const FALLBACK_FILENAME: &str = "attachment";
@@ -262,22 +262,76 @@ const EXECUTABLE_CONTENT_TYPES: &[&str] = &[
     "application/vnd.ms-powerpoint.presentation.macroenabled.12",
 ];
 
-/// Whether opening the attachment could run code: a program, installer,
-/// script, shortcut, disk image or macro-enabled Office document, judged
-/// by the extension of its sanitised name or by its MIME type. The reader
-/// warns before opening one of these.
-pub fn is_executable_or_script(filename: &str, content_type: &str) -> bool {
+/// Extensions of web pages and vector images, which open in a browser and
+/// can run scripts there. Phishing mail sends them as fake sign-in pages.
+const ACTIVE_WEB_EXTENSIONS: &[&str] = &[
+    "html", "htm", "xhtml", "xht", "shtml", "mht", "mhtml", "svg", "svgz",
+];
+
+/// MIME types of web pages and vector images, for attachments whose name
+/// has no telling extension.
+const ACTIVE_WEB_CONTENT_TYPES: &[&str] = &[
+    "text/html",
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/x-mimearchive",
+    "multipart/related",
+];
+
+/// What opening an attachment risks, from the most to the least serious.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenRisk {
+    /// A program, installer, script, shortcut, disk image or
+    /// macro-enabled document ([`is_executable_or_script`]).
+    Program,
+    /// A web page or vector image, which opens in a browser and can run
+    /// scripts there.
+    ActiveContent,
+    /// Nothing that runs code when opened.
+    None,
+}
+
+/// How risky it is to open the attachment. Anything but
+/// [`OpenRisk::None`] gets a warning before the reader opens it.
+pub fn open_risk(filename: &str, content_type: &str) -> OpenRisk {
+    if is_executable_or_script(filename, content_type) {
+        return OpenRisk::Program;
+    }
+    let (extension, mime) = extension_and_mime(filename, content_type);
+    if ACTIVE_WEB_EXTENSIONS.contains(&extension.as_str())
+        || ACTIVE_WEB_CONTENT_TYPES.contains(&mime.as_str())
+    {
+        OpenRisk::ActiveContent
+    } else {
+        OpenRisk::None
+    }
+}
+
+/// The lower-case extension of the sanitised name (empty without one) and
+/// the lower-case MIME type without parameters.
+fn extension_and_mime(filename: &str, content_type: &str) -> (String, String) {
     let name = sanitize_filename(filename).to_ascii_lowercase();
-    let by_extension = name
+    let extension = name
         .rsplit_once('.')
-        .is_some_and(|(_, extension)| EXECUTABLE_EXTENSIONS.contains(&extension));
+        .map(|(_, extension)| extension.to_owned())
+        .unwrap_or_default();
     let mime = content_type
         .split(';')
         .next()
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
-    by_extension || EXECUTABLE_CONTENT_TYPES.contains(&mime.as_str())
+    (extension, mime)
+}
+
+/// Whether opening the attachment could run code: a program, installer,
+/// script, shortcut, disk image or macro-enabled Office document, judged
+/// by the extension of its sanitised name or by its MIME type. The reader
+/// warns before opening one of these.
+pub fn is_executable_or_script(filename: &str, content_type: &str) -> bool {
+    let (extension, mime) = extension_and_mime(filename, content_type);
+    EXECUTABLE_EXTENSIONS.contains(&extension.as_str())
+        || EXECUTABLE_CONTENT_TYPES.contains(&mime.as_str())
 }
 
 #[cfg(test)]
@@ -440,6 +494,36 @@ mod tests {
                 "{name} should not be flagged"
             );
         }
+    }
+
+    #[test]
+    fn web_pages_and_svg_are_active_content() {
+        for (name, content_type) in [
+            ("login.html", "application/octet-stream"),
+            ("Invoice.HTM", "application/octet-stream"),
+            ("page.xhtml", "application/octet-stream"),
+            ("saved.mht", "application/octet-stream"),
+            ("logo.svg", "image/svg+xml"),
+            ("logo.svgz", "application/octet-stream"),
+            ("statement", "text/html; charset=utf-8"),
+            ("diagram", "image/svg+xml"),
+        ] {
+            assert_eq!(
+                open_risk(name, content_type),
+                OpenRisk::ActiveContent,
+                "{name} should be active content"
+            );
+        }
+    }
+
+    #[test]
+    fn programs_outrank_active_content_and_documents_carry_no_risk() {
+        assert_eq!(open_risk("setup.exe", "text/html"), OpenRisk::Program);
+        assert_eq!(open_risk("page.hta", "text/html"), OpenRisk::Program);
+        assert_eq!(open_risk("report.pdf", "application/pdf"), OpenRisk::None);
+        assert_eq!(open_risk("photo.png", "image/png"), OpenRisk::None);
+        assert_eq!(open_risk("archive.zip", "application/zip"), OpenRisk::None);
+        assert!(!is_executable_or_script("login.html", "text/html"));
     }
 
     #[test]
