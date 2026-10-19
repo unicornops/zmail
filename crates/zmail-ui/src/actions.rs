@@ -50,7 +50,7 @@ actions!(
         AddAccount,
         /// Show the selected mailbox's conversations.
         ShowMail,
-        /// Show the inbox: the Unified Inbox when there are several
+        /// Go to the inbox: the Unified Inbox when there are several
         /// accounts, else the account's Inbox.
         GoToInbox,
         /// Show the drafts list.
@@ -61,6 +61,9 @@ actions!(
         RetryOutbox,
         /// Open the command palette, or close it if it is open.
         ToggleCommandPalette,
+        /// Show the keyboard shortcut cheat sheet, or close it if it is
+        /// open.
+        ShowKeyboardShortcuts,
         /// Move focus to the search field.
         FocusSearch,
         /// Search only the folder the search started in.

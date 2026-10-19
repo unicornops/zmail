@@ -14,7 +14,9 @@ use zmail_core::{
     AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxRole, MailboxSelection,
     MailboxSnapshot, MessageAttachment, MessageSnapshot, NewAccount, NewDraft, NewIdentity,
     OutgoingConfig, ProtocolKind, SyncPhase, ThemeAppearance, ThreadSnapshot, VirtualMailbox,
-    participants::thread_participants, preferences::Density, time::utc_timestamp,
+    participants::thread_participants,
+    preferences::{Density, KeymapName},
+    time::utc_timestamp,
 };
 use zmail_store::LocalStore;
 use zmail_ui::{InitialView, OnboardingStep};
@@ -94,6 +96,9 @@ pub(crate) enum FixtureView {
     /// The `accounts` view with the command palette open and "arch" typed:
     /// commands and folders across accounts, matched letters highlighted.
     CommandPalette,
+    /// The inbox with the Gmail keymap on and the keyboard shortcut cheat
+    /// sheet open.
+    CheatSheet,
 }
 
 /// The `search-filters` view's query: words to highlight and two chips.
@@ -137,8 +142,9 @@ impl FixtureView {
             "reader-safety-danger" => Self::ReaderSafetyDanger,
             "reader-attachments" => Self::ReaderAttachments,
             "command-palette" => Self::CommandPalette,
+            "cheat-sheet" => Self::CheatSheet,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments or command-palette"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette or cheat-sheet"
             ),
         })
     }
@@ -249,6 +255,12 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         FixtureView::CommandPalette => {
             seed_more_accounts(store, account_id, now)?;
             InitialView::CommandPalette("arch")
+        }
+        FixtureView::CheatSheet => {
+            store
+                .update_ui_preferences(|preferences| preferences.keymap = KeymapName::Gmail)
+                .context("failed to save the fixture keymap")?;
+            InitialView::KeyboardShortcuts
         }
         FixtureView::SearchFilters => {
             seed_more_accounts(store, account_id, now)?;
@@ -1110,6 +1122,7 @@ mod tests {
             "reader-safety-danger",
             "reader-attachments",
             "command-palette",
+            "cheat-sheet",
         ] {
             FixtureView::parse(name)?;
         }

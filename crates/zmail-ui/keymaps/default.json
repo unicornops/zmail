@@ -8,6 +8,7 @@
     "context": "Workspace",
     "bindings": {
       "secondary-k": "zmail::ToggleCommandPalette",
+      "secondary-/": "zmail::ShowKeyboardShortcuts",
       "secondary-n": "zmail::NewMessage",
       "secondary-shift-a": "zmail::AddAccount",
       "secondary-1": "zmail::ShowMail",

@@ -39,8 +39,9 @@ use crate::account_setup::{
 use crate::actions::{
     AddAccount, Archive, Cancel, Delete, DismissSenderWarning, FocusNextPane, FocusPreviousPane,
     FocusSearch, Forward, GoBack, GoToInbox, MoveToMailbox, NewMessage, Reply, ReplyAll,
-    ReplyToMessage, RetryOutbox, SaveAttachments, SelectNext, SelectPrevious, ShowDrafts, ShowMail,
-    ShowOutbox, SyncAccount, SyncAll, ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme, Undo,
+    ReplyToMessage, RetryOutbox, SaveAttachments, SelectNext, SelectPrevious, ShowDrafts,
+    ShowKeyboardShortcuts, ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleFlag, ToggleRead,
+    ToggleSidebar, ToggleTheme, Undo,
 };
 use crate::app_menu::AppMenuButton;
 use crate::components::{
@@ -196,6 +197,8 @@ impl WorkspaceView {
             dead_op_count: 0,
             command_palette: None,
             palette_modal: components::ModalState::new(cx),
+            shortcuts_modal: components::ModalState::new(cx),
+            shortcut_groups: Vec::new(),
             search_results: Vec::new(),
             search_results_query: String::new(),
             search_pending_query: String::new(),
@@ -293,6 +296,7 @@ impl WorkspaceView {
                 | InitialView::Sidebar
                 | InitialView::Search(_)
                 | InitialView::CommandPalette(_)
+                | InitialView::KeyboardShortcuts
         ) {
             view.restore_last_mailbox(cx);
         }
@@ -383,6 +387,9 @@ impl WorkspaceView {
                             .update(cx, |palette, cx| palette.set_query(query, cx));
                     }
                 });
+            }
+            InitialView::KeyboardShortcuts => {
+                view.toggle_keyboard_shortcuts(&ShowKeyboardShortcuts, window, cx);
             }
         }
         view.sync_panes(cx);
@@ -2931,6 +2938,7 @@ impl Render for WorkspaceView {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_command_palette))
+            .on_action(cx.listener(Self::toggle_keyboard_shortcuts))
             .on_action(cx.listener(Self::new_message))
             .on_action(cx.listener(Self::add_account))
             .on_action(cx.listener(Self::show_mail))
@@ -3035,6 +3043,7 @@ impl Render for WorkspaceView {
             )
             .children(self.render_open_warning(cx))
             .children(self.render_command_palette(cx))
+            .children(self.render_keyboard_shortcuts(cx))
             .child(self.toasts.clone());
         // The Linux client-side decoration frame (nothing elsewhere); it
         // also paints the window background.

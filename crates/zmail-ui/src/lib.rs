@@ -20,6 +20,7 @@
 //! | `move_picker` | `MovePicker`: the searchable Move to… folder picker |
 //! | `command_palette` | `CommandPalette`: Secondary+K's search over commands, folders and accounts |
 //! | `fuzzy` | the palette's fuzzy matcher |
+//! | `cheat_sheet` | the keyboard shortcut cheat sheet, grouped from the bound keymap |
 //! | `actions` | every command as a GPUI action |
 //! | `keymap` | loads `keymaps/default.json` (and `keymaps/macos.json` on macOS); binds and switches the saved keymap |
 //! | `menus` | `MenuModel`, the command menus; the native macOS menu bar; app-wide commands (Quit, Hide, …) |
@@ -60,6 +61,7 @@ pub use account_setup::OnboardingStep;
 mod actions;
 mod app_menu;
 mod attachments;
+mod cheat_sheet;
 mod command_palette;
 mod compose;
 mod diagnostics;
@@ -147,6 +149,8 @@ pub enum InitialView {
     /// The last mailbox with the command palette open and this query typed
     /// into it.
     CommandPalette(&'static str),
+    /// The last mailbox with the keyboard shortcut cheat sheet open.
+    KeyboardShortcuts,
 }
 
 /// Runs the native Phase 4 shell.
@@ -336,6 +340,10 @@ struct WorkspaceView {
     command_palette: Option<command_palette::OpenPalette>,
     /// The palette's modal (focus trap and restore).
     palette_modal: components::ModalState,
+    /// The keyboard shortcut cheat sheet's modal.
+    shortcuts_modal: components::ModalState,
+    /// What the open cheat sheet lists, read from the keymap as it opened.
+    shortcut_groups: Vec<cheat_sheet::ShortcutGroup>,
     /// Opening and saving attachments: the warning before opening a
     /// program, and where Save As starts.
     attachments: attachments::AttachmentState,
