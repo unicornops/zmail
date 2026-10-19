@@ -235,6 +235,7 @@ pub(crate) struct TextInput {
     masked: bool,
     disabled: bool,
     compact: bool,
+    borderless: bool,
     min_rows: usize,
     max_rows: usize,
     /// Selected byte range of `content`, always on grapheme boundaries
@@ -284,6 +285,7 @@ impl TextInput {
             masked: false,
             disabled: false,
             compact: false,
+            borderless: false,
             min_rows: DEFAULT_MIN_ROWS,
             max_rows: DEFAULT_MAX_ROWS,
             selected_range: 0..0,
@@ -351,6 +353,13 @@ impl TextInput {
     /// A shorter field for toolbars.
     pub(crate) fn compact(mut self) -> Self {
         self.compact = true;
+        self
+    }
+
+    /// Draw only the text, with no border, fill or focus ring, for a field
+    /// embedded in a larger control that draws its own (recipient chips).
+    pub(crate) fn borderless(mut self) -> Self {
+        self.borderless = true;
         self
     }
 
@@ -1671,9 +1680,9 @@ impl Render for TextInput {
             })
             .w_full()
             .min_w_0()
-            .p(px(1.))
-            .rounded_lg()
-            .bg(ring)
+            .when(!self.borderless, |this| {
+                this.p(px(1.)).rounded_lg().bg(ring)
+            })
             .child(
                 div()
                     .flex()
@@ -1682,16 +1691,19 @@ impl Render for TextInput {
                     .gap_2()
                     .w_full()
                     .min_w_0()
-                    .px_3()
                     .when(self.compact, |this| {
                         // The ring adds 1px on each side.
                         this.h(px(TOOLBAR_BUTTON_HEIGHT - 2.))
                     })
                     .when(!self.compact, |this| this.py_2())
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(border))
-                    .bg(rgb(field_background))
+                    .when(self.borderless, |this| this.px_1())
+                    .when(!self.borderless, |this| {
+                        this.px_3()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(border))
+                            .bg(rgb(field_background))
+                    })
                     .text_color(rgb(text_color))
                     .when(self.disabled, |this| this.opacity(0.6))
                     .cursor(if self.disabled {

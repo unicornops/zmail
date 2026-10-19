@@ -30,8 +30,9 @@ use zmail_core::APP_NAME;
 use crate::actions::{
     AddAccount, Archive, Delete, FocusSearch, Forward, GoBack, Hide, HideOthers, Minimize,
     NewMessage, Quit, Reply, ReplyAll, RetryOutbox, SaveAttachments, SaveDraft, SearchAllAccounts,
-    SearchInAccount, SearchInFolder, Send, ShowAll, ShowDrafts, ShowMail, ShowOutbox, SyncAccount,
-    SyncAll, ToggleDensity, ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme, Undo, Zoom,
+    SearchInAccount, SearchInFolder, Send, ShowAll, ShowBcc, ShowCc, ShowDrafts, ShowMail,
+    ShowOutbox, SyncAccount, SyncAll, ToggleDensity, ToggleFlag, ToggleRead, ToggleSidebar,
+    ToggleTheme, Undo, Zoom,
 };
 use crate::components::text_input;
 use crate::styles::{MenuPlacement, Platform, PlatformStyle};
@@ -254,6 +255,8 @@ impl MenuModel {
                 MenuModelItem::Separator,
                 command("Send", Send),
                 command("Save Draft", SaveDraft),
+                command("Add Cc", ShowCc),
+                command("Add Bcc", ShowBcc),
             ],
         });
 

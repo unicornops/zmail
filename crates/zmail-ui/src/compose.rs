@@ -7,7 +7,8 @@
 //! queues the draft with the sync service. Status and errors go to the
 //! shell as [`ComposeEvent`]s.
 //!
-//! [`ComposeState`] holds the open draft's inputs and store-owned fields.
+//! [`ComposeState`] holds the open draft's inputs and store-owned fields;
+//! [`recipients`] has the To, Cc and Bcc chip fields.
 //! The inputs are built once per draft and never rebuilt from the store
 //! while that draft stays open, so saving and the shell's store refreshes
 //! never move the cursor.
@@ -24,17 +25,26 @@ use zmail_core::{DraftAttachment, DraftDetail, DraftState, DraftUpdate, Identity
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
-use crate::actions::{AddAttachment, RemoveAttachment, SaveDraft, SelectIdentity, Send};
-use crate::components::{TextInput, TextInputEvent};
+use crate::actions::{
+    AddAttachment, RemoveAttachment, SaveDraft, SelectIdentity, Send, ShowBcc, ShowCc,
+};
+use crate::components::{Button, ButtonSize, Select, SelectEvent, TextInput, TextInputEvent};
 use crate::mail_actions::MailActions;
 use crate::pane::{dispatch_from, pane_focus_indicator};
-use crate::workspace::split_addresses;
+
+mod recipients;
+
+pub(crate) use recipients::{RecipientField, RecipientFieldEvent};
 
 /// The key context the compose pane sets.
 pub(crate) const KEY_CONTEXT: &str = "Compose";
+/// Height of a header field row (From, To, Cc, Bcc, Subject).
+const FIELD_ROW_HEIGHT: f32 = 40.0;
+/// Width of the header field labels, so the fields line up.
+const FIELD_LABEL_WIDTH: f32 = 56.0;
 /// How long typing must pause before the draft autosaves.
 pub(crate) const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
-use crate::styles::{ICON_BUTTON_SIZE, ICON_SIZE_SM, UiColors};
+use crate::styles::{ICON_BUTTON_SIZE, ICON_SIZE_SM, SPACE_3, TYPE_BODY, TypeStyleExt, UiColors};
 use crate::widgets::{
     EllipsisExt, empty_state, format_size, icon, input_card, label_chip, section_card,
     status_banner, toolbar_button,
@@ -47,18 +57,24 @@ use crate::widgets::{
 /// In-memory form state for a draft being actively composed.
 ///
 /// The text fields are [`TextInput`] entities that own the text the user is
-/// editing, with its cursor, selection and undo history. Store refreshes
-/// only update the store-owned fields ([`ComposeState::update_from_draft`]),
-/// so autosave and the background refresh never move the cursor or clear a
-/// half-typed attachment path.
+/// editing, with its cursor, selection and undo history, and the To, Cc
+/// and Bcc fields are [`RecipientField`]s holding the recipient chips.
+/// Store refreshes only update the store-owned fields
+/// ([`ComposeState::update_from_draft`]), so autosave and the background
+/// refresh never move the cursor, drop a chip or clear a half-typed
+/// attachment path.
 pub(crate) struct ComposeState {
     pub(crate) draft_id: i64,
     pub(crate) account_id: i64,
     pub(crate) identity_id: i64,
     pub(crate) identity_email: String,
-    pub(crate) to: Entity<TextInput>,
-    pub(crate) cc: Entity<TextInput>,
-    pub(crate) bcc: Entity<TextInput>,
+    pub(crate) to: Entity<RecipientField>,
+    pub(crate) cc: Entity<RecipientField>,
+    pub(crate) bcc: Entity<RecipientField>,
+    /// Whether the Cc and Bcc fields show. They hide behind toggles until
+    /// used, and show whenever the draft has recipients there.
+    pub(crate) show_cc: bool,
+    pub(crate) show_bcc: bool,
     pub(crate) subject: Entity<TextInput>,
     pub(crate) body: Entity<TextInput>,
     pub(crate) attachment_path: Entity<TextInput>,
@@ -70,54 +86,47 @@ pub(crate) struct ComposeState {
 impl ComposeState {
     /// Construct a [`ComposeState`] from a store-fetched [`DraftDetail`],
     /// creating its inputs.
-    pub(crate) fn from_draft(draft: DraftDetail, cx: &mut App) -> Self {
-        let single_line =
-            |cx: &mut App, label: &'static str, placeholder: &'static str, text: String| {
-                cx.new(|cx| {
-                    TextInput::new(cx)
-                        .label(label)
-                        .placeholder(placeholder)
-                        .with_text(text)
-                })
+    pub(crate) fn from_draft(
+        draft: DraftDetail,
+        store: &Arc<LocalStore>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        let recipients =
+            |label: &'static str, values: &[String], window: &mut Window, cx: &mut App| {
+                cx.new(|cx| RecipientField::new(store.clone(), label, values, window, cx))
             };
         Self {
             draft_id: draft.id,
             account_id: draft.account_id,
             identity_id: draft.identity_id,
             identity_email: draft.identity_email,
-            to: single_line(
-                cx,
-                "To",
-                "alice@example.com, bob@example.com",
-                draft.to.join(", "),
-            ),
-            cc: single_line(
-                cx,
-                "Cc",
-                "Optional carbon copy recipients",
-                draft.cc.join(", "),
-            ),
-            bcc: single_line(
-                cx,
-                "Bcc",
-                "Optional blind copy recipients",
-                draft.bcc.join(", "),
-            ),
-            subject: single_line(cx, "Subject", "Message subject", draft.subject),
+            to: recipients("To", &draft.to, window, cx),
+            cc: recipients("Cc", &draft.cc, window, cx),
+            bcc: recipients("Bcc", &draft.bcc, window, cx),
+            show_cc: !draft.cc.is_empty(),
+            show_bcc: !draft.bcc.is_empty(),
+            subject: cx.new(|cx| {
+                TextInput::new(cx)
+                    .borderless()
+                    .label("Subject")
+                    .placeholder("Subject")
+                    .with_text(draft.subject)
+            }),
             body: cx.new(|cx| {
                 TextInput::new(cx)
+                    .borderless()
                     .multiline()
-                    .rows(10, 30)
-                    .label("Body")
-                    .placeholder("Write your message...")
+                    .rows(12, 40)
+                    .label("Message")
+                    .placeholder("Write your message…")
                     .with_text(draft.body)
             }),
-            attachment_path: single_line(
-                cx,
-                "Attachment Path",
-                "/path/to/attachment.pdf",
-                String::new(),
-            ),
+            attachment_path: cx.new(|cx| {
+                TextInput::new(cx)
+                    .label("Attachment Path")
+                    .placeholder("/path/to/attachment.pdf")
+            }),
             attachments: draft.attachments,
             state: draft.state,
             last_error_message: draft.last_error_message,
@@ -134,9 +143,14 @@ impl ComposeState {
         self.last_error_message = draft.last_error_message;
     }
 
-    /// The inputs whose text is part of the saved draft.
-    pub(crate) fn draft_inputs(&self) -> [&Entity<TextInput>; 5] {
-        [&self.to, &self.cc, &self.bcc, &self.subject, &self.body]
+    /// The text inputs whose text is part of the saved draft.
+    pub(crate) fn draft_inputs(&self) -> [&Entity<TextInput>; 2] {
+        [&self.subject, &self.body]
+    }
+
+    /// The recipient fields.
+    pub(crate) fn recipient_fields(&self) -> [&Entity<RecipientField>; 3] {
+        [&self.to, &self.cc, &self.bcc]
     }
 }
 
@@ -162,6 +176,8 @@ pub(crate) struct ComposeView {
     mail_actions: Entity<MailActions>,
     /// The selected account's identities, for the From choice.
     identities: Vec<IdentitySummary>,
+    /// The From menu, when the account has more than one identity.
+    from_menu: Option<(Entity<Select>, Subscription)>,
     pub(crate) compose: Option<ComposeState>,
     /// Subscriptions to the open draft's inputs.
     input_subscriptions: Vec<Subscription>,
@@ -200,12 +216,19 @@ impl ComposeView {
             sync_service,
             mail_actions,
             identities: Vec::new(),
+            from_menu: None,
             compose: None,
             input_subscriptions: Vec::new(),
             unsaved_edits: false,
             autosave_task: Task::ready(()),
             _quit_subscription: quit_subscription,
         }
+    }
+
+    /// Whether the From menu shows.
+    #[cfg(test)]
+    pub(crate) fn has_from_menu(&self) -> bool {
+        self.from_menu.is_some()
     }
 
     /// The open draft's id.
@@ -221,8 +244,43 @@ impl ComposeView {
     ) {
         if self.identities != identities {
             self.identities = identities;
+            self.from_menu = None;
+            self.sync_from_menu(cx);
             cx.notify();
         }
+    }
+
+    /// Builds the From menu when there is more than one identity to choose
+    /// from, and keeps it on the draft's identity.
+    fn sync_from_menu(&mut self, cx: &mut Context<Self>) {
+        if self.identities.len() <= 1 {
+            self.from_menu = None;
+            return;
+        }
+        let selected = self.compose.as_ref().and_then(|compose| {
+            self.identities
+                .iter()
+                .position(|identity| identity.id == compose.identity_id)
+        });
+        if let Some((menu, _)) = self.from_menu.as_ref() {
+            if menu.read(cx).selected_index() != selected {
+                menu.update(cx, |menu, cx| menu.set_selected(selected, cx));
+            }
+            return;
+        }
+        let options = self
+            .identities
+            .iter()
+            .map(identity_label)
+            .collect::<Vec<_>>();
+        let menu = cx.new(|cx| Select::new(options, selected, cx).label("From"));
+        let subscription = cx.subscribe(&menu, |this, _, event: &SelectEvent, cx| {
+            let SelectEvent::Changed(index) = *event;
+            if let Some(identity_id) = this.identities.get(index).map(|identity| identity.id) {
+                this.choose_identity(identity_id, cx);
+            }
+        });
+        self.from_menu = Some((menu, subscription));
     }
 
     /// Opens a draft. Re-opening the draft that is already open keeps its
@@ -244,11 +302,12 @@ impl ComposeView {
         match self.compose.as_mut() {
             Some(compose) if compose.draft_id == draft_id => compose.update_from_draft(draft),
             _ => {
-                let compose = ComposeState::from_draft(draft, cx);
+                let compose = ComposeState::from_draft(draft, &self.store, window, cx);
                 self.input_subscriptions = Self::watch_inputs(&compose, window, cx);
                 self.compose = Some(compose);
             }
         }
+        self.sync_from_menu(cx);
         cx.notify();
         Ok(())
     }
@@ -261,6 +320,7 @@ impl ComposeView {
             && let Ok(Some(draft)) = self.store.draft_detail(compose.draft_id)
         {
             compose.update_from_draft(draft);
+            self.sync_from_menu(cx);
             cx.notify();
         }
     }
@@ -268,7 +328,7 @@ impl ComposeView {
     /// Focuses the To field.
     pub(crate) fn focus_to(&self, window: &mut Window, cx: &mut App) {
         if let Some(compose) = self.compose.as_ref() {
-            focus_input(&compose.to, window, cx);
+            compose.to.update(cx, |field, cx| field.focus(window, cx));
         }
     }
 
@@ -315,6 +375,15 @@ impl ComposeView {
                 )
             })
             .collect();
+        subscriptions.extend(compose.recipient_fields().into_iter().map(|field| {
+            cx.subscribe_in(
+                field,
+                window,
+                |this: &mut Self, _, event: &RecipientFieldEvent, window, cx| match event {
+                    RecipientFieldEvent::Changed => this.schedule_autosave(window, cx),
+                },
+            )
+        }));
         subscriptions.push(cx.subscribe(
             &compose.attachment_path,
             |this: &mut Self, _, event: &TextInputEvent, cx| {
@@ -333,11 +402,12 @@ impl ComposeView {
             return Ok(());
         };
         let text = |input: &Entity<TextInput>| input.read(cx).text().to_owned();
+        let recipients = |field: &Entity<RecipientField>| field.read(cx).recipients(cx);
         let update = DraftUpdate {
             identity_id: compose.identity_id,
-            to: split_addresses(&text(&compose.to)),
-            cc: split_addresses(&text(&compose.cc)),
-            bcc: split_addresses(&text(&compose.bcc)),
+            to: recipients(&compose.to),
+            cc: recipients(&compose.cc),
+            bcc: recipients(&compose.bcc),
             subject: text(&compose.subject),
             body: text(&compose.body),
         };
@@ -459,14 +529,19 @@ impl ComposeView {
     }
 
     fn select_identity(&mut self, action: &SelectIdentity, _: &mut Window, cx: &mut Context<Self>) {
+        self.choose_identity(action.identity_id, cx);
+    }
+
+    /// Sends the draft from another of the account's identities.
+    fn choose_identity(&mut self, identity_id: i64, cx: &mut Context<Self>) {
         let Some(compose) = self.compose.as_mut() else {
             return;
         };
-        compose.identity_id = action.identity_id;
+        compose.identity_id = identity_id;
         if let Some(identity) = self
             .identities
             .iter()
-            .find(|identity| identity.id == action.identity_id)
+            .find(|identity| identity.id == identity_id)
         {
             compose.identity_email = identity.email_address.clone();
         }
@@ -475,6 +550,31 @@ impl ComposeView {
             Err(error) => cx.emit(ComposeEvent::Error(error.to_string())),
         }
         cx.notify();
+    }
+
+    fn show_cc(&mut self, _: &ShowCc, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(compose) = self.compose.as_mut() {
+            compose.show_cc = true;
+            compose.cc.update(cx, |field, cx| field.focus(window, cx));
+            cx.notify();
+        }
+    }
+
+    fn show_bcc(&mut self, _: &ShowBcc, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(compose) = self.compose.as_mut() {
+            compose.show_bcc = true;
+            compose.bcc.update(cx, |field, cx| field.focus(window, cx));
+            cx.notify();
+        }
+    }
+}
+
+/// How an identity reads in the From menu.
+fn identity_label(identity: &IdentitySummary) -> String {
+    if identity.display_name.trim().is_empty() {
+        identity.email_address.clone()
+    } else {
+        format!("{} <{}>", identity.display_name, identity.email_address)
     }
 }
 
@@ -497,6 +597,8 @@ impl Render for ComposeView {
             .on_action(cx.listener(Self::add_attachment))
             .on_action(cx.listener(Self::remove_attachment))
             .on_action(cx.listener(Self::select_identity))
+            .on_action(cx.listener(Self::show_cc))
+            .on_action(cx.listener(Self::show_bcc))
             .size_full()
             .flex()
             .flex_col()
@@ -526,7 +628,7 @@ impl Render for ComposeView {
                     .py_4()
                     .child(render_compose_detail(
                         self.compose.as_ref(),
-                        &self.identities,
+                        self.from_menu.as_ref().map(|(menu, _)| menu),
                         &self.focus_handle,
                         &colors,
                         cx,
@@ -554,12 +656,12 @@ impl Render for ComposeView {
 // render_compose_detail
 // ---------------------------------------------------------------------------
 
-/// Render the compose form: identity selector, address fields, subject, body,
-/// and attachment path input.  Returns an [`AnyElement`] ready to be placed
-/// inside a scrollable container.
+/// Render the compose form: the header fields, body and attachments.
+/// Returns an [`AnyElement`] ready to be placed inside a scrollable
+/// container.
 fn render_compose_detail(
     compose: Option<&ComposeState>,
-    identities: &[IdentitySummary],
+    from_menu: Option<&Entity<Select>>,
     focus_handle: &FocusHandle,
     colors: &UiColors,
     cx: &App,
@@ -622,14 +724,7 @@ fn render_compose_detail(
                 colors,
             ))
         })
-        .child(render_identity_section(
-            compose,
-            identities,
-            focus_handle,
-            colors,
-        ))
-        .child(render_recipients_section(compose, colors))
-        .child(render_body_section(compose, colors))
+        .child(render_fields(compose, from_menu, focus_handle, colors))
         .child(render_attachments_section(compose, focus_handle, colors))
         .into_any_element()
 }
@@ -672,113 +767,75 @@ fn compose_action_buttons(
     ]
 }
 
-/// The sender identity. With one identity it is a plain "From" line; with
-/// several, each is a selectable row and the chosen one is marked. Either
-/// way each identity appears once.
-fn render_identity_section(
+/// The header fields, one row each, then the body: From (only when the
+/// account has more than one identity), To with the Cc and Bcc toggles, Cc
+/// and Bcc once shown, and Subject.
+fn render_fields(
     compose: &ComposeState,
-    identities: &[IdentitySummary],
+    from_menu: Option<&Entity<Select>>,
     focus_handle: &FocusHandle,
     colors: &UiColors,
 ) -> gpui::Div {
-    if identities.len() <= 1 {
-        let (name, email) = identities
-            .first()
-            .map(|identity| {
-                (
-                    identity.display_name.clone(),
-                    identity.email_address.clone(),
-                )
-            })
-            .unwrap_or_else(|| (String::new(), compose.identity_email.clone()));
-        return section_card("From", colors).child(identity_row(&name, &email, false, colors));
-    }
+    let row = |label: &'static str| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(SPACE_3))
+            .min_h(px(FIELD_ROW_HEIGHT))
+            .border_b_1()
+            .border_color(rgb(colors.border))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(FIELD_LABEL_WIDTH))
+                    .type_style(TYPE_BODY)
+                    .text_color(rgb(colors.muted))
+                    .child(label),
+            )
+    };
+    let toggle = |id: &'static str, label: &'static str, tooltip: &'static str| {
+        Button::new(id, label)
+            .ghost()
+            .size(ButtonSize::Small)
+            .tooltip(tooltip)
+    };
 
-    section_card("From", colors).child(div().flex().flex_col().gap_2().children(
-        identities.iter().map(|identity| {
-            let identity_id = identity.id;
-            let selected = identity.id == compose.identity_id;
-
-            div()
-                .id(("compose-identity", identity.id as u64))
-                .cursor_pointer()
-                .rounded_md()
-                .on_click(dispatch_from(focus_handle, SelectIdentity { identity_id }))
-                .child(identity_row(
-                    &identity.display_name,
-                    &identity.email_address,
-                    selected,
-                    colors,
-                ))
-        }),
-    ))
-}
-
-/// One identity: name and address, highlighted and ticked when selected.
-fn identity_row(name: &str, email: &str, selected: bool, colors: &UiColors) -> gpui::Div {
     div()
-        .rounded_md()
-        .bg(rgb(if selected {
-            colors.selected_background
-        } else {
-            colors.background
-        }))
-        .border_1()
-        .border_color(rgb(if selected {
-            colors.accent
-        } else {
-            colors.border
-        }))
-        .px_3()
-        .py_3()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w_0()
+        .when_some(from_menu, |this, menu| {
+            this.child(row("From").child(div().flex_1().min_w_0().child(menu.clone())))
+        })
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(icon(
-                    "user",
-                    ICON_SIZE_SM,
-                    if selected {
-                        colors.accent
-                    } else {
-                        colors.muted
-                    },
-                ))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .when(!name.is_empty(), |this| {
-                            this.child(div().ellipsis().child(name.to_owned()))
-                        })
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(colors.muted))
-                                .ellipsis()
-                                .child(email.to_owned()),
+            row("To")
+                .child(compose.to.clone())
+                .when(!compose.show_cc, |this| {
+                    this.child(
+                        div().debug_selector(|| "compose-show-cc".into()).child(
+                            toggle("compose-show-cc", "Cc", "Add Cc recipients")
+                                .on_click(dispatch_from(focus_handle, ShowCc)),
                         ),
-                )
-                .when(selected, |this| {
-                    this.child(icon("check-circle", ICON_SIZE_SM, colors.success))
+                    )
+                })
+                .when(!compose.show_bcc, |this| {
+                    this.child(
+                        div().debug_selector(|| "compose-show-bcc".into()).child(
+                            toggle("compose-show-bcc", "Bcc", "Add Bcc recipients")
+                                .on_click(dispatch_from(focus_handle, ShowBcc)),
+                        ),
+                    )
                 }),
         )
-}
-
-fn render_recipients_section(compose: &ComposeState, colors: &UiColors) -> gpui::Div {
-    section_card("Recipients", colors)
-        .child(input_card("To", &compose.to, colors))
-        .child(input_card("Cc", &compose.cc, colors))
-        .child(input_card("Bcc", &compose.bcc, colors))
-        .child(input_card("Subject", &compose.subject, colors))
-}
-
-fn render_body_section(compose: &ComposeState, colors: &UiColors) -> gpui::Div {
-    section_card("Message", colors).child(input_card("Body", &compose.body, colors))
+        .when(compose.show_cc, |this| {
+            this.child(row("Cc").child(compose.cc.clone()))
+        })
+        .when(compose.show_bcc, |this| {
+            this.child(row("Bcc").child(compose.bcc.clone()))
+        })
+        .child(row("Subject").child(div().flex_1().min_w_0().child(compose.subject.clone())))
+        .child(div().pt(px(SPACE_3)).child(compose.body.clone()))
 }
 
 fn render_attachments_section(
