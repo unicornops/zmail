@@ -6,13 +6,20 @@
 ### Features
 
 * **compose:** inline reply below the conversation, with a pop-out into its own window ([#202](https://github.com/unicornops/zmail/issues/202)) ([2946501](https://github.com/unicornops/zmail/commit/2946501e30fff1d302e86b6d35c4036c6c726a1a))
-* **compose:** new mail in its own window, file-picker and drag-and-drop attachments ([#199](https://github.com/unicornops/zmail/issues/199)) ([534ac3c](https://github.com/unicornops/zmail/commit/534ac3c4ea29b5e795e7c916fd9090d3ee60bde8))
-* **compose:** recipient chips with autocomplete, Cc/Bcc toggles and a From menu ([#195](https://github.com/unicornops/zmail/issues/195)) ([fee3021](https://github.com/unicornops/zmail/commit/fee30216e9a5fc9e6a41ed4731f7f4f701df78b4))
 * **compose:** undo send, holding the outbox job for undo_send_delay ([#200](https://github.com/unicornops/zmail/issues/200)) ([dc6732d](https://github.com/unicornops/zmail/commit/dc6732d6270c4b413c7e08809e22feaabdcc8647))
 * **ui:** attachment cards with Open, Save As and Save All ([#194](https://github.com/unicornops/zmail/issues/194)) ([16ee19f](https://github.com/unicornops/zmail/commit/16ee19fd957604ca339ea07c922a3c0232b4f504))
-* **ui:** readable, selectable message bodies with checked links ([#197](https://github.com/unicornops/zmail/issues/197)) ([1c905d2](https://github.com/unicornops/zmail/commit/1c905d2c9bf1ede130eb157c046c082172cd7d99))
-* **ui:** render the conversation as a list with collapsed read messages ([#190](https://github.com/unicornops/zmail/issues/190)) ([75e8e7f](https://github.com/unicornops/zmail/commit/75e8e7f4c0d68cb3295c1ea7434a2faac30ca5b1))
 * **ui:** tiered sender-safety banners and a remote-content notice in the reader ([#191](https://github.com/unicornops/zmail/issues/191)) ([4514e72](https://github.com/unicornops/zmail/commit/4514e7273356db3c9f5285dc6c05f056854d2a23))
+* **compose:** new mail in its own window, file-picker and drag-and-drop attachments ([#199](https://github.com/unicornops/zmail/issues/199)) ([534ac3c](https://github.com/unicornops/zmail/commit/534ac3c4ea29b5e795e7c916fd9090d3ee60bde8))
+* **compose:** recipient chips with autocomplete, Cc/Bcc toggles and a From menu ([#195](https://github.com/unicornops/zmail/issues/195)) ([fee3021](https://github.com/unicornops/zmail/commit/fee30216e9a5fc9e6a41ed4731f7f4f701df78b4))
+* **store:** frecency-ranked address history for recipient autocomplete ([#192](https://github.com/unicornops/zmail/issues/192)) ([ebf13de](https://github.com/unicornops/zmail/commit/ebf13deaae2b6a5180b062868d84627f344369d7))
+* **ui:** readable, selectable message bodies with checked links ([#197](https://github.com/unicornops/zmail/issues/197)) ([1c905d2](https://github.com/unicornops/zmail/commit/1c905d2c9bf1ede130eb157c046c082172cd7d99))
+* **ui:** message headers with sender menu, recipients, Reply and More ([#193](https://github.com/unicornops/zmail/issues/193)) ([52b1c0e](https://github.com/unicornops/zmail/commit/52b1c0e7c1f9a4e9c6e32b6a8eb435ca974a89ce))
+* **ui:** render the conversation as a list with collapsed read messages ([#190](https://github.com/unicornops/zmail/issues/190)) ([75e8e7f](https://github.com/unicornops/zmail/commit/75e8e7f4c0d68cb3295c1ea7434a2faac30ca5b1))
+
+### Bug Fixes
+
+* **reader:** warn before opening web pages and SVGs, and prune opened copies at startup ([#203](https://github.com/unicornops/zmail/issues/203)) ([3d6f35e](https://github.com/unicornops/zmail/commit/3d6f35e1920f9410081b3441e412cfa643cef4f9))
+* **compose:** autosave a second after typing pauses, never on every keystroke ([#189](https://github.com/unicornops/zmail/issues/189)) ([3f8b1cd](https://github.com/unicornops/zmail/commit/3f8b1cdcc27dc1ba4f08d8f45728058332cb25f5))
 
 ## [0.12.0](https://github.com/unicornops/zmail/compare/v0.11.0...v0.12.0) (2026-10-19)
 
