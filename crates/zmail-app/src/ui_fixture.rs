@@ -54,6 +54,8 @@ pub(crate) enum FixtureView {
     /// A new message whose recipients include addresses that are not
     /// valid, highlighted as chips to fix.
     ComposeInvalid,
+    /// A reply just sent, with the Undo Send toast showing.
+    UndoSend,
     /// The account setup pane with an account already configured.
     AccountSetup,
     /// The seeded inbox with keyboard focus in the sidebar, so a window
@@ -98,6 +100,7 @@ impl FixtureView {
             "reader-link-warning" => Self::ReaderLinkWarning,
             "compose" => Self::Compose,
             "compose-invalid" => Self::ComposeInvalid,
+            "undo-send" => Self::UndoSend,
             "account-setup" => Self::AccountSetup,
             "sidebar" => Self::Sidebar,
             "accounts" => Self::Accounts,
@@ -108,7 +111,7 @@ impl FixtureView {
             "reader-safety-danger" => Self::ReaderSafetyDanger,
             "reader-attachments" => Self::ReaderAttachments,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-selection, reader-link-warning, compose, compose-invalid, account-setup, sidebar, accounts, multi-select, search, reader-safety-info, reader-safety-caution, reader-safety-danger or reader-attachments"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, sidebar, accounts, multi-select, search, reader-safety-info, reader-safety-caution, reader-safety-danger or reader-attachments"
             ),
         })
     }
@@ -264,6 +267,23 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
                     .to_owned(),
             })?;
             InitialView::Draft(draft_id)
+        }
+        FixtureView::UndoSend => {
+            let identity = store
+                .list_identities(account_id)?
+                .into_iter()
+                .next()
+                .context("the fixture account has no identity")?;
+            let draft_id = store.create_draft(&NewDraft {
+                account_id,
+                identity_id: identity.id,
+                to: vec!["Priya Raman <priya.raman@example.org>".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Re: Q4 roadmap review".to_owned(),
+                body: "Thanks Priya, see you Thursday.\n\nSam".to_owned(),
+            })?;
+            InitialView::Sending(draft_id)
         }
         FixtureView::ComposeInvalid => {
             let identity = store
@@ -1023,6 +1043,7 @@ mod tests {
             "reader-link-warning",
             "compose",
             "compose-invalid",
+            "undo-send",
             "account-setup",
             "sidebar",
             "accounts",

@@ -1347,11 +1347,20 @@ fn conversation_actions_have_keys_and_undo(cx: &mut TestAppContext) {
     assert_eq!(draft.subject, "Re: Quarterly report 0");
     assert_eq!(draft.to, vec!["Kai Santos <kai@example.test>".to_owned()]);
 
-    // Send queues it.
+    // Send queues it, with Undo while it waits.
     keys("secondary-enter", cx);
     assert_eq!(
-        cx.read_entity(&view, |view, _| view.status_message.clone()),
-        Some("Message queued for sending.".to_owned())
+        toasts(&view, cx).last().map(String::as_str),
+        Some("Sending message…")
+    );
+    assert_ne!(
+        harness
+            .store
+            .draft_detail(draft_id)
+            .expect("the draft loads")
+            .expect("the draft exists")
+            .state,
+        zmail_core::DraftState::Editing
     );
 }
 
