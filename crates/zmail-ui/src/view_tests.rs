@@ -23,6 +23,7 @@ use zmail_sync::SyncService;
 
 use crate::account_setup::AccountField;
 use crate::components::{self, TextInput, text_input};
+use crate::compose::ComposeView;
 use crate::keymap;
 use crate::layout::{LayoutMode, SinglePane};
 use crate::pane::Pane;
@@ -392,11 +393,49 @@ fn mailbox_of(harness: &Harness, thread_id: i64) -> Option<i64> {
         .map(|thread| thread.mailbox_id)
 }
 
-/// The open draft's inputs: To, body and attachment path.
+/// The only open compose window's editor, and a test context for that
+/// window.
+pub(super) fn compose_window(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+) -> (Entity<ComposeView>, VisualTestContext) {
+    let handle = cx.read_entity(view, |view, _| {
+        assert_eq!(view.compose_windows.len(), 1, "one compose window is open");
+        view.compose_windows
+            .values()
+            .next()
+            .map(|(handle, _)| *handle)
+            .expect("a compose window")
+    });
+    let compose = handle
+        .read_with(cx, |root, _| root.compose().clone())
+        .expect("the compose window is open");
+    let window_cx = VisualTestContext::from_window(handle.into(), cx);
+    (compose, window_cx)
+}
+
+/// The toasts showing in the only open compose window.
+pub(super) fn compose_window_toasts(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+) -> Vec<String> {
+    let handle = cx.read_entity(view, |view, _| {
+        view.compose_windows
+            .values()
+            .next()
+            .map(|(handle, _)| *handle)
+            .expect("a compose window")
+    });
+    handle
+        .read_with(cx, |root, cx| root.toast_messages(cx))
+        .expect("the compose window is open")
+}
+
+/// The compose pane's draft and its To and body inputs.
 pub(super) fn compose_inputs(
     view: &Entity<WorkspaceView>,
     cx: &mut VisualTestContext,
-) -> (i64, Entity<TextInput>, Entity<TextInput>, Entity<TextInput>) {
+) -> (i64, Entity<TextInput>, Entity<TextInput>) {
     cx.read_entity(view, |view, cx| {
         let compose = view
             .compose
@@ -408,7 +447,6 @@ pub(super) fn compose_inputs(
             compose.draft_id,
             compose.to.read(cx).input().clone(),
             compose.body.clone(),
-            compose.attachment_path.clone(),
         )
     })
 }
@@ -570,10 +608,21 @@ fn tab_and_f6_cycle_focus_between_panes(cx: &mut TestAppContext) {
     assert_eq!(focused_pane(&view, cx), Some(Pane::Sidebar));
 
     // Moving into compose focuses its first field, ready to type.
-    keys("secondary-n", cx);
-    keys("f6 f6 f6", cx);
+    keys("secondary-2", cx);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_compose_in_pane_for_test(window, cx);
+        })
+    });
+    cx.run_until_parked();
+    for _ in 0..3 {
+        if focused_pane(&view, cx) == Some(Pane::Detail) {
+            break;
+        }
+        keys("f6", cx);
+    }
     assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
-    let (_, to, _, _) = compose_inputs(&view, cx);
+    let (_, to, _) = compose_inputs(&view, cx);
     assert!(cx.update(|window, cx| to.focus_handle(cx).is_focused(window)));
 }
 
@@ -790,14 +839,24 @@ fn every_toolbar_action_is_dispatchable_by_keybinding(cx: &mut TestAppContext) {
     assert_eq!(modes(cx).1, DetailMode::AccountSetup);
     keys("escape", cx);
 
-    // Compose.
+    // Compose opens a window with focus in To.
     keys("secondary-n", cx);
-    assert_eq!(modes(cx), (ListMode::Drafts, DetailMode::Compose));
-    let (_, to, _, _) = compose_inputs(&view, cx);
-    assert!(cx.update(|window, cx| to.focus_handle(cx).is_focused(window)));
-    // Save Draft works from inside a text field.
-    keys("secondary-s", cx);
-    assert_eq!(status(cx), "Draft saved.");
+    let (compose, mut window_cx) = compose_window(&view, cx);
+    let to = window_cx.read_entity(&compose, |compose, cx| {
+        compose
+            .compose
+            .as_ref()
+            .expect("a draft is open")
+            .to
+            .read(cx)
+            .input()
+            .clone()
+    });
+    assert!(window_cx.update(|window, cx| to.focus_handle(cx).is_focused(window)));
+    // Save Draft works from inside a text field, and says so in the
+    // compose window.
+    keys("secondary-s", &mut window_cx);
+    assert_eq!(compose_window_toasts(&view, cx), ["Draft saved."]);
 }
 
 /// The messages of the visible toasts, oldest first.
@@ -1276,7 +1335,7 @@ fn conversation_actions_have_keys_and_undo(cx: &mut TestAppContext) {
         cx.read_entity(&view, |view, _| view.detail_mode),
         DetailMode::Compose
     );
-    let (draft_id, _, body, _) = compose_inputs(&view, cx);
+    let (draft_id, _, body) = compose_inputs(&view, cx);
     assert!(cx.update(|window, cx| body.focus_handle(cx).is_focused(window)));
     let draft = harness
         .store
@@ -1415,10 +1474,10 @@ fn toolbar_buttons_dispatch_their_actions(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::Mail);
 
     click("toolbar-compose", cx);
-    assert!(cx.read_entity(&view, |view, _| matches!(
-        view.detail_mode,
-        DetailMode::Compose
-    )));
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.compose_windows.len()),
+        1
+    );
 
     // The sidebar toggle hides the sidebar and remembers it.
     assert!(cx.debug_bounds("sidebar-drafts").is_some());
@@ -1678,8 +1737,8 @@ fn the_single_pane_layout_goes_to_the_reader_and_back(cx: &mut TestAppContext) {
         assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
     }
 
-    // Compose shows the draft, and back returns to the list.
-    keys("secondary-n", cx);
+    // A reply shows the draft, and back returns to the list.
+    keys("secondary-r", cx);
     assert!(cx.read_entity(&view, |view, _| {
         view.single_pane == SinglePane::Detail && view.detail_mode == DetailMode::Compose
     }));

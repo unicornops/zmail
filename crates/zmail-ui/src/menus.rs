@@ -28,11 +28,11 @@ use gpui::{
 use zmail_core::APP_NAME;
 
 use crate::actions::{
-    AddAccount, Archive, Delete, FocusSearch, Forward, GoBack, Hide, HideOthers, Minimize,
-    NewMessage, Quit, Reply, ReplyAll, RetryOutbox, SaveAttachments, SaveDraft, SearchAllAccounts,
-    SearchInAccount, SearchInFolder, Send, ShowAll, ShowBcc, ShowCc, ShowDrafts, ShowMail,
-    ShowOutbox, SyncAccount, SyncAll, ToggleDensity, ToggleFlag, ToggleRead, ToggleSidebar,
-    ToggleTheme, Undo, Zoom,
+    AddAccount, AddAttachment, Archive, Delete, FocusSearch, Forward, GoBack, Hide, HideOthers,
+    Minimize, NewMessage, Quit, Reply, ReplyAll, RetryOutbox, SaveAttachments, SaveDraft,
+    SearchAllAccounts, SearchInAccount, SearchInFolder, Send, ShowAll, ShowBcc, ShowCc, ShowDrafts,
+    ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleDensity, ToggleFlag, ToggleRead,
+    ToggleSidebar, ToggleTheme, Undo, Zoom,
 };
 use crate::components::text_input;
 use crate::styles::{MenuPlacement, Platform, PlatformStyle};
@@ -104,10 +104,6 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
     ),
     ("zmail::Cancel", "Escape closes whatever is on top"),
     ("zmail::RunSearch", "Enter in the search field submits it"),
-    (
-        "zmail::AddAttachment",
-        "Enter in the attachment field submits it",
-    ),
     ("zmail::SaveAccount", "the account form's own Save button"),
     (
         "zmail::MoveToMailbox",
@@ -255,6 +251,7 @@ impl MenuModel {
                 MenuModelItem::Separator,
                 command("Send", Send),
                 command("Save Draft", SaveDraft),
+                command("Attach Files…", AddAttachment),
                 command("Add Cc", ShowCc),
                 command("Add Bcc", ShowBcc),
             ],

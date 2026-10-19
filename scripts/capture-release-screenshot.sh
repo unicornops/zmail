@@ -41,7 +41,9 @@ HARNESS_STARTED=0
 # state such as a message row's quick actions. The inbox and reader are also captured at each layout
 # breakpoint: 720 (one pane at a time), 900 (sidebar as an overlay) and
 # 1920 (wide); `sidebar` is the overlay open at 900. `accounts` is three
-# accounts with nested folders on the Unified Inbox.
+# accounts with nested folders on the Unified Inbox. The compose views are
+# captured from their compose window (see window_title_for), at its default
+# 760x680.
 MATRIX=(
   "empty-dark empty dark 1440 920"
   "empty-light empty light 1440 920"
@@ -67,10 +69,10 @@ MATRIX=(
   "reader-selection-light reader-selection light 1440 920"
   "reader-link-warning-dark reader-link-warning dark 1440 920"
   "reader-link-warning-light reader-link-warning light 1440 920"
-  "compose-dark compose dark 1440 920"
-  "compose-light compose light 1440 920"
-  "compose-invalid-dark compose-invalid dark 1440 920"
-  "compose-invalid-light compose-invalid light 1440 920"
+  "compose-dark compose dark 760 680"
+  "compose-light compose light 760 680"
+  "compose-invalid-dark compose-invalid dark 760 680"
+  "compose-invalid-light compose-invalid light 760 680"
   "account-setup-dark account-setup dark 1440 920"
   "account-setup-light account-setup light 1440 920"
   "inbox-dark-720 inbox dark 720 720"
@@ -131,9 +133,22 @@ cleanup() {
   exit "${exit_code}"
 }
 
-# Prints the id of the app's visible window once it is mapped, waiting up
-# to 90 seconds; fails if the app exits first.
+# The title of the window a fixture view is captured from: the main
+# window, or for the compose views the compose window the draft opens in,
+# which is titled with the draft's subject.
+window_title_for() {
+  case "$1" in
+    compose) echo "Re: Q4 roadmap review" ;;
+    compose-invalid) echo "Offline search demo" ;;
+    *) echo "${WINDOW_TITLE}" ;;
+  esac
+}
+
+# Prints the id of the app's visible window titled $1 (default: the main
+# window) once it is mapped, waiting up to 90 seconds; fails if the app
+# exits first.
 wait_for_window() {
+  local title="${1:-${WINDOW_TITLE}}"
   local window_id=""
   for _ in $(seq 1 90); do
     if ! kill -0 "${APP_PID}" 2>/dev/null; then
@@ -142,7 +157,7 @@ wait_for_window() {
       return 1
     fi
 
-    window_id="$(xdotool search --onlyvisible --name "^${WINDOW_TITLE}\$" 2>/dev/null | head -n 1 || true)"
+    window_id="$(xdotool search --onlyvisible --name "^${title}\$" 2>/dev/null | head -n 1 || true)"
     if [[ -n "${window_id}" ]]; then
       echo "${window_id}"
       return 0
@@ -151,7 +166,7 @@ wait_for_window() {
     sleep 1
   done
 
-  echo "timed out waiting for the ${WINDOW_TITLE} window" >&2
+  echo "timed out waiting for the ${title} window" >&2
   cat "${APP_LOG}" >&2
   return 1
 }
@@ -206,7 +221,7 @@ capture_state() {
   APP_PID=$!
 
   local window_id
-  window_id="$(wait_for_window)"
+  window_id="$(wait_for_window "$(window_title_for "${view}")")"
   xdotool windowactivate "${window_id}" >/dev/null 2>&1 || true
   xdotool windowmove "${window_id}" 0 0 >/dev/null 2>&1 || true
   xdotool windowsize "${window_id}" "${width}" "${height}"

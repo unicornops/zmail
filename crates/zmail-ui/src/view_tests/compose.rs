@@ -1,17 +1,23 @@
-//! Compose (UI plan Phase 5): autosave that never moves the cursor,
-//! recipient chips with autocomplete, and the Cc, Bcc and From fields.
+//! Compose (UI plan Phase 5): the compose window, autosave that never
+//! moves the cursor, recipient chips with autocomplete, the Cc, Bcc and
+//! From fields, and attachments.
 
 use std::time::Duration;
 
 use gpui::{
-    AppContext as _, ClipboardItem, Entity, Focusable as _, TestAppContext, VisualTestContext,
+    AppContext as _, ClipboardItem, Entity, FileDropEvent, Focusable as _, TestAppContext,
+    VisualTestContext, point, px,
 };
 use zmail_core::{AccountSyncSnapshot, NewDraft, NewIdentity};
 
-use super::{Harness, Setup, click, compose_inputs, cursor, focus, keys, open_workspace, text};
-use crate::WorkspaceView;
-use crate::actions::{SaveDraft, ShowBcc, ShowCc};
-use crate::compose::{AUTOSAVE_DELAY, ComposeState, RecipientField};
+use super::{
+    Harness, Setup, click, click_on, compose_inputs, compose_window, compose_window_toasts, cursor,
+    focus, keys, open_workspace, text,
+};
+use crate::actions::{AddAttachment, SaveDraft, ShowBcc, ShowCc};
+use crate::components::TextInput;
+use crate::compose::{AUTOSAVE_DELAY, ComposeState, ComposeView, RecipientField};
+use crate::{DetailMode, WorkspaceView};
 
 /// The stored body of a draft.
 fn stored_body(harness: &Harness, draft_id: i64) -> String {
@@ -29,24 +35,92 @@ fn wait(duration: Duration, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-#[gpui::test]
-fn autosave_waits_for_a_pause_and_keeps_the_cursor(cx: &mut TestAppContext) {
-    let (view, cx, harness) = open_workspace(cx, Setup::Account);
+/// Reads something from a compose view's open draft.
+fn state<T>(
+    compose: &Entity<ComposeView>,
+    cx: &mut VisualTestContext,
+    read: impl FnOnce(&ComposeState, &gpui::App) -> T,
+) -> T {
+    cx.read_entity(compose, |compose, cx| {
+        read(compose.compose.as_ref().expect("a draft is open"), cx)
+    })
+}
+
+/// A compose view's draft and its To and body inputs.
+fn inputs(
+    compose: &Entity<ComposeView>,
+    cx: &mut VisualTestContext,
+) -> (i64, Entity<TextInput>, Entity<TextInput>) {
+    state(compose, cx, |compose, cx| {
+        (
+            compose.draft_id,
+            compose.to.read(cx).input().clone(),
+            compose.body.clone(),
+        )
+    })
+}
+
+/// A recipient field's chips as saved, and which are valid.
+fn chips(field: &Entity<RecipientField>, cx: &mut VisualTestContext) -> Vec<(String, bool)> {
+    cx.read_entity(field, |field, _| {
+        field
+            .chips()
+            .iter()
+            .map(|chip| (chip.header_value(), chip.is_valid()))
+            .collect()
+    })
+}
+
+fn suggestions(field: &Entity<RecipientField>, cx: &mut VisualTestContext) -> Vec<String> {
+    cx.read_entity(field, |field, _| {
+        field
+            .suggestions()
+            .iter()
+            .map(|suggestion| suggestion.email.clone())
+            .collect()
+    })
+}
+
+/// Opens a new message, which opens in a compose window with focus in
+/// To. Returns the main window's context and the compose window's editor
+/// and context.
+fn new_draft(
+    setup: Setup,
+    cx: &mut TestAppContext,
+) -> (
+    Entity<WorkspaceView>,
+    &mut VisualTestContext,
+    Entity<ComposeView>,
+    VisualTestContext,
+    Harness,
+) {
+    let (view, cx, harness) = open_workspace(cx, setup);
     cx.update(|window, cx| view.update(cx, |view, cx| view.open_compose(window, cx)));
     cx.run_until_parked();
-    let (draft_id, to, body, attachment_path) = compose_inputs(&view, cx);
+    let (compose, mut window_cx) = compose_window(&view, cx);
+    // Focus events (leaving a field) only fire in an active window.
+    window_cx.update(|window, _| window.activate_window());
+    window_cx.run_until_parked();
+    (view, cx, compose, window_cx, harness)
+}
+
+#[gpui::test]
+fn autosave_waits_for_a_pause_and_keeps_the_cursor(cx: &mut TestAppContext) {
+    let (_view, _cx, compose, mut w, harness) = new_draft(Setup::Account, cx);
+    let w = &mut w;
+    let (draft_id, to, body) = inputs(&compose, w);
     assert!(
-        cx.update(|window, cx| to.focus_handle(cx).is_focused(window)),
+        w.update(|window, cx| to.focus_handle(cx).is_focused(window)),
         "Compose focuses the To field"
     );
 
     // Type, then edit the middle of the body.
-    focus(&body, cx);
-    cx.simulate_input("Hello world");
-    cx.simulate_keystrokes("left left left left left");
-    cx.simulate_input("big ");
-    assert_eq!(text(&body, cx), "Hello big world");
-    assert_eq!(cursor(&body, cx), "Hello big ".len());
+    focus(&body, w);
+    w.simulate_input("Hello world");
+    w.simulate_keystrokes("left left left left left");
+    w.simulate_input("big ");
+    assert_eq!(text(&body, w), "Hello big world");
+    assert_eq!(cursor(&body, w), "Hello big ".len());
     assert_eq!(
         stored_body(&harness, draft_id),
         "",
@@ -54,44 +128,36 @@ fn autosave_waits_for_a_pause_and_keeps_the_cursor(cx: &mut TestAppContext) {
     );
 
     // Keep typing just inside the delay: the save keeps waiting.
-    wait(AUTOSAVE_DELAY - Duration::from_millis(100), cx);
-    cx.simulate_input("and ");
-    wait(AUTOSAVE_DELAY - Duration::from_millis(100), cx);
+    wait(AUTOSAVE_DELAY - Duration::from_millis(100), w);
+    w.simulate_input("and ");
+    wait(AUTOSAVE_DELAY - Duration::from_millis(100), w);
     assert_eq!(stored_body(&harness, draft_id), "");
 
     // A pause saves, and the save, the debounced refresh and the
     // five-second background refresh leave the inputs and cursor alone.
-    wait(Duration::from_millis(200), cx);
+    wait(Duration::from_millis(200), w);
     assert_eq!(stored_body(&harness, draft_id), "Hello big and world");
-    wait(Duration::from_secs(6), cx);
-    let (_, _, same_body, same_path) = compose_inputs(&view, cx);
+    wait(Duration::from_secs(6), w);
+    let (_, _, same_body) = inputs(&compose, w);
     assert!(
-        same_body == body && same_path == attachment_path,
+        same_body == body,
         "the refresh does not rebuild the compose inputs"
     );
-    assert_eq!(text(&body, cx), "Hello big and world");
+    assert_eq!(text(&body, w), "Hello big and world");
     assert_eq!(
-        cursor(&body, cx),
+        cursor(&body, w),
         "Hello big and ".len(),
         "the cursor stays put"
     );
-    cx.simulate_input("x");
-    assert_eq!(text(&body, cx), "Hello big and xworld");
-
-    // A half-typed attachment path survives the refreshes too.
-    focus(&attachment_path, cx);
-    cx.simulate_input("/tmp/half");
-    wait(Duration::from_secs(6), cx);
-    assert_eq!(text(&attachment_path, cx), "/tmp/half");
+    w.simulate_input("x");
+    assert_eq!(text(&body, w), "Hello big and xworld");
 
     // Saving explicitly saves at once and keeps the inputs.
-    focus(&body, cx);
-    cx.simulate_input("y");
-    cx.dispatch_action(SaveDraft);
-    cx.run_until_parked();
-    assert_eq!(stored_body(&harness, draft_id), "Hello big and xyworld");
-    assert_eq!(cursor(&body, cx), "Hello big and xy".len());
-    let (_, _, same_body, _) = compose_inputs(&view, cx);
+    w.dispatch_action(SaveDraft);
+    w.run_until_parked();
+    assert_eq!(stored_body(&harness, draft_id), "Hello big and xworld");
+    assert_eq!(cursor(&body, w), "Hello big and x".len());
+    let (_, _, same_body) = inputs(&compose, w);
     assert!(
         same_body == body,
         "saving does not rebuild the compose inputs"
@@ -101,9 +167,13 @@ fn autosave_waits_for_a_pause_and_keeps_the_cursor(cx: &mut TestAppContext) {
 #[gpui::test]
 fn opening_another_draft_saves_the_last_keystrokes(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::Account);
-    cx.update(|window, cx| view.update(cx, |view, cx| view.open_compose(window, cx)));
+    let draft_id = cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_compose_in_pane_for_test(window, cx)
+        })
+    });
     cx.run_until_parked();
-    let (draft_id, _, body, _) = compose_inputs(&view, cx);
+    let (_, _, body) = compose_inputs(&view, cx);
     focus(&body, cx);
     cx.simulate_input("Unsaved");
 
@@ -133,21 +203,13 @@ fn opening_another_draft_saves_the_last_keystrokes(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_drafts_list_follows_the_subject_after_autosave(cx: &mut TestAppContext) {
-    let (view, cx, _harness) = open_workspace(cx, Setup::Account);
-    cx.update(|window, cx| view.update(cx, |view, cx| view.open_compose(window, cx)));
-    cx.run_until_parked();
-    let subject = cx.read_entity(&view, |view, cx| {
-        view.compose
-            .read(cx)
-            .compose
-            .as_ref()
-            .expect("a draft is open")
-            .subject
-            .clone()
-    });
-    focus(&subject, cx);
-    cx.simulate_input("Quarterly report");
+fn the_drafts_list_and_window_title_follow_the_subject(cx: &mut TestAppContext) {
+    let (view, cx, compose, mut w, _harness) = new_draft(Setup::Account, cx);
+    let subject = state(&compose, &mut w, |compose, _| compose.subject.clone());
+    assert_eq!(w.window_title().as_deref(), Some("New Message"));
+    focus(&subject, &mut w);
+    w.simulate_input("Quarterly report");
+    assert_eq!(w.window_title().as_deref(), Some("Quarterly report"));
     // The autosave, then the shell's debounced refresh.
     wait(AUTOSAVE_DELAY + Duration::from_secs(1), cx);
     let subjects = cx.read_entity(&view, |view, _| {
@@ -159,62 +221,12 @@ fn the_drafts_list_follows_the_subject_after_autosave(cx: &mut TestAppContext) {
     assert_eq!(subjects, vec!["Quarterly report".to_owned()]);
 }
 
-/// Reads something from the open draft's compose state.
-fn compose<T>(
-    view: &Entity<WorkspaceView>,
-    cx: &mut VisualTestContext,
-    read: impl FnOnce(&ComposeState) -> T,
-) -> T {
-    cx.read_entity(view, |view, cx| {
-        read(
-            view.compose
-                .read(cx)
-                .compose
-                .as_ref()
-                .expect("a draft is open"),
-        )
-    })
-}
-
-/// A recipient field's chips as saved, and which are valid.
-fn chips(field: &Entity<RecipientField>, cx: &mut VisualTestContext) -> Vec<(String, bool)> {
-    cx.read_entity(field, |field, _| {
-        field
-            .chips()
-            .iter()
-            .map(|chip| (chip.header_value(), chip.is_valid()))
-            .collect()
-    })
-}
-
-fn suggestions(field: &Entity<RecipientField>, cx: &mut VisualTestContext) -> Vec<String> {
-    cx.read_entity(field, |field, _| {
-        field
-            .suggestions()
-            .iter()
-            .map(|suggestion| suggestion.email.clone())
-            .collect()
-    })
-}
-
-/// Opens a new draft with focus in To.
-fn new_draft(
-    setup: Setup,
-    cx: &mut TestAppContext,
-) -> (Entity<WorkspaceView>, &mut VisualTestContext, Harness) {
-    let (view, cx, harness) = open_workspace(cx, setup);
-    // Focus events (leaving a field) only fire in an active window.
-    cx.update(|window, _| window.activate_window());
-    cx.update(|window, cx| view.update(cx, |view, cx| view.open_compose(window, cx)));
-    cx.run_until_parked();
-    (view, cx, harness)
-}
-
 #[gpui::test]
 fn separators_enter_and_leaving_the_field_make_chips(cx: &mut TestAppContext) {
-    let (view, cx, harness) = new_draft(Setup::Account, cx);
-    let to = compose(&view, cx, |compose| compose.to.clone());
-    let input = compose_inputs(&view, cx).1;
+    let (_view, _cx, compose, mut w, harness) = new_draft(Setup::Account, cx);
+    let cx = &mut w;
+    let to = state(&compose, cx, |compose, _| compose.to.clone());
+    let input = inputs(&compose, cx).1;
 
     cx.simulate_input("alice@example.com,");
     cx.simulate_input("\"Lee, Carol\" <carol@example.com>;");
@@ -240,7 +252,7 @@ fn separators_enter_and_leaving_the_field_make_chips(cx: &mut TestAppContext) {
     assert_eq!(chips(&to, cx).len(), 4);
 
     wait(AUTOSAVE_DELAY, cx);
-    let draft_id = compose_inputs(&view, cx).0;
+    let draft_id = inputs(&compose, cx).0;
     let stored = harness
         .store
         .draft_detail(draft_id)
@@ -259,8 +271,9 @@ fn separators_enter_and_leaving_the_field_make_chips(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn backspace_and_the_remove_button_take_chips_away(cx: &mut TestAppContext) {
-    let (view, cx, _harness) = new_draft(Setup::Account, cx);
-    let to = compose(&view, cx, |compose| compose.to.clone());
+    let (_view, _cx, compose, mut w, _harness) = new_draft(Setup::Account, cx);
+    let cx = &mut w;
+    let to = state(&compose, cx, |compose, _| compose.to.clone());
     cx.simulate_input("a@example.com, b@example.com, c@example.com, d");
     // Backspace edits the typed text first, then removes the last chip.
     keys("backspace", cx);
@@ -285,9 +298,10 @@ fn backspace_and_the_remove_button_take_chips_away(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn pasting_a_list_makes_a_chip_of_each_address(cx: &mut TestAppContext) {
-    let (view, cx, _harness) = new_draft(Setup::Account, cx);
-    let to = compose(&view, cx, |compose| compose.to.clone());
-    let input = compose_inputs(&view, cx).1;
+    let (_view, _cx, compose, mut w, _harness) = new_draft(Setup::Account, cx);
+    let cx = &mut w;
+    let to = state(&compose, cx, |compose, _| compose.to.clone());
+    let input = inputs(&compose, cx).1;
     cx.write_to_clipboard(ClipboardItem::new_string(
         "Ann <ann@example.com>; ben@example.com\ncat@example.com".to_owned(),
     ));
@@ -314,9 +328,10 @@ fn pasting_a_list_makes_a_chip_of_each_address(cx: &mut TestAppContext) {
 #[gpui::test]
 fn autocomplete_suggests_from_the_address_history(cx: &mut TestAppContext) {
     // The Inbox has mail from Kai Santos <kai@example.test>.
-    let (view, cx, _harness) = new_draft(Setup::Mail, cx);
-    let to = compose(&view, cx, |compose| compose.to.clone());
-    let input = compose_inputs(&view, cx).1;
+    let (_view, _cx, compose, mut w, _harness) = new_draft(Setup::Mail, cx);
+    let cx = &mut w;
+    let to = state(&compose, cx, |compose, _| compose.to.clone());
+    let input = inputs(&compose, cx).1;
 
     cx.simulate_input("sant");
     assert_eq!(suggestions(&to, cx), ["kai@example.test"]);
@@ -345,8 +360,9 @@ fn autocomplete_suggests_from_the_address_history(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn clicking_a_suggestion_adds_it(cx: &mut TestAppContext) {
-    let (view, cx, _harness) = new_draft(Setup::Mail, cx);
-    let to = compose(&view, cx, |compose| compose.to.clone());
+    let (_view, _cx, compose, mut w, _harness) = new_draft(Setup::Mail, cx);
+    let cx = &mut w;
+    let to = state(&compose, cx, |compose, _| compose.to.clone());
     cx.simulate_input("kai");
     click("suggestion-To-0", cx);
     assert_eq!(
@@ -358,9 +374,12 @@ fn clicking_a_suggestion_adds_it(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn cc_and_bcc_hide_behind_toggles(cx: &mut TestAppContext) {
-    let (view, cx, _harness) = new_draft(Setup::Account, cx);
+    let (_view, _cx, compose, mut w, _harness) = new_draft(Setup::Account, cx);
+    let cx = &mut w;
     let shown = |cx: &mut VisualTestContext| {
-        compose(&view, cx, |compose| (compose.show_cc, compose.show_bcc))
+        state(&compose, cx, |compose, _| {
+            (compose.show_cc, compose.show_bcc)
+        })
     };
     assert_eq!(shown(cx), (false, false));
     assert!(cx.debug_bounds("recipient-Cc-0").is_none());
@@ -369,7 +388,7 @@ fn cc_and_bcc_hide_behind_toggles(cx: &mut TestAppContext) {
     click("compose-show-cc", cx);
     assert_eq!(shown(cx), (true, false));
     assert!(cx.debug_bounds("compose-show-cc").is_none());
-    let cc = compose(&view, cx, |compose| compose.cc.clone());
+    let cc = state(&compose, cx, |compose, _| compose.cc.clone());
     assert!(
         cx.update(|window, cx| cc.focus_handle(cx).is_focused(window)),
         "the Cc field takes focus"
@@ -409,18 +428,19 @@ fn a_draft_with_cc_opens_with_the_field_shown(cx: &mut TestAppContext) {
         .expect("the draft is created");
     cx.update(|window, cx| view.update(cx, |view, cx| view.open_draft(draft_id, window, cx)));
     cx.run_until_parked();
+    let pane = cx.read_entity(&view, |view, _| view.compose.clone());
     assert_eq!(
-        compose(&view, cx, |compose| (compose.show_cc, compose.show_bcc)),
+        state(&pane, cx, |compose, _| (compose.show_cc, compose.show_bcc)),
         (true, false)
     );
 }
 
 #[gpui::test]
 fn the_from_menu_shows_only_with_more_than_one_identity(cx: &mut TestAppContext) {
-    let (view, cx, harness) = new_draft(Setup::Account, cx);
-    let has_menu = |cx: &mut VisualTestContext| {
-        cx.read_entity(&view, |view, cx| view.compose.read(cx).has_from_menu())
-    };
+    let (_view, _cx, compose, mut w, harness) = new_draft(Setup::Account, cx);
+    let cx = &mut w;
+    let has_menu =
+        |cx: &mut VisualTestContext| cx.read_entity(&compose, |compose, _| compose.has_from_menu());
     assert!(!has_menu(cx));
 
     let account_id = harness.store.list_accounts().expect("accounts load")[0].id;
@@ -445,7 +465,187 @@ fn the_from_menu_shows_only_with_more_than_one_identity(cx: &mut TestAppContext)
             },
         )
         .expect("the identities are stored");
-    // The shell's background refresh picks the new identity up.
+    // The shell's background refresh reaches the compose window too.
     wait(Duration::from_secs(6), cx);
     assert!(has_menu(cx));
+}
+
+/// Writes a small file to attach and returns its path.
+fn attachment_file(harness: &Harness, name: &str) -> std::path::PathBuf {
+    let directory = harness
+        .store
+        .path()
+        .parent()
+        .expect("the store has a directory")
+        .join("to-attach");
+    std::fs::create_dir_all(&directory).expect("the directory is created");
+    let path = directory.join(name);
+    std::fs::write(&path, b"Q4 numbers").expect("the file is written");
+    path
+}
+
+fn attachment_names(compose: &Entity<ComposeView>, cx: &mut VisualTestContext) -> Vec<String> {
+    state(compose, cx, |compose, _| {
+        compose
+            .attachments
+            .iter()
+            .map(|attachment| attachment.filename.clone())
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn new_mail_opens_in_its_own_window_and_escape_keeps_the_draft(cx: &mut TestAppContext) {
+    let (view, main, compose, mut w, harness) = new_draft(Setup::Account, cx);
+    // The main window carries on as it was.
+    assert_eq!(
+        main.read_entity(&view, |view, _| view.detail_mode),
+        DetailMode::Reader
+    );
+    let (draft_id, _, body) = inputs(&compose, &mut w);
+    focus(&body, &mut w);
+    w.simulate_input("Kept");
+
+    // Composing again opens a second window: one window per draft.
+    main.update(|window, cx| view.update(cx, |view, cx| view.open_compose(window, cx)));
+    main.run_until_parked();
+    assert_eq!(
+        main.read_entity(&view, |view, _| view.compose_windows.len()),
+        2
+    );
+
+    // Escape closes the window and saves what was typed, even inside the
+    // autosave delay.
+    keys("escape", &mut w);
+    assert_eq!(stored_body(&harness, draft_id), "Kept");
+    assert_eq!(
+        main.read_entity(&view, |view, _| view.compose_windows.len()),
+        1
+    );
+    assert!(
+        harness
+            .store
+            .list_drafts(None)
+            .expect("drafts load")
+            .iter()
+            .any(|draft| draft.id == draft_id),
+        "the draft stays in Drafts"
+    );
+}
+
+#[gpui::test]
+fn closing_the_window_keeps_the_draft(cx: &mut TestAppContext) {
+    let (view, main, compose, mut w, harness) = new_draft(Setup::Account, cx);
+    let (draft_id, _, body) = inputs(&compose, &mut w);
+    focus(&body, &mut w);
+    w.simulate_input("Typed just before closing");
+    // The close button asks the window whether it may close (and the
+    // draft saves then); the test platform leaves the closing to us.
+    assert!(w.simulate_close(), "the window agrees to close");
+    assert_eq!(stored_body(&harness, draft_id), "Typed just before closing");
+    w.update(|window, _| window.remove_window());
+    w.run_until_parked();
+    assert_eq!(stored_body(&harness, draft_id), "Typed just before closing");
+    assert!(main.read_entity(&view, |view, _| view.compose_windows.is_empty()));
+}
+
+#[gpui::test]
+fn a_draft_is_edited_in_one_place(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Account);
+    let draft_id = cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_compose_in_pane_for_test(window, cx)
+        })
+    });
+    cx.run_until_parked();
+    let pane = cx.read_entity(&view, |view, _| view.compose.clone());
+
+    // Open in Window moves the draft out of the pane.
+    click("compose-pop-out", cx);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.compose_windows.len()),
+        1
+    );
+    assert_eq!(
+        cx.read_entity(&pane, |pane, _| (pane.draft_id(), pane.showing_in_window())),
+        (None, Some(draft_id))
+    );
+    // Selecting it again in the list keeps it in its window.
+    cx.update(|window, cx| view.update(cx, |view, cx| view.open_draft(draft_id, window, cx)));
+    cx.run_until_parked();
+    assert_eq!(cx.read_entity(&pane, |pane, _| pane.draft_id()), None);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.compose_windows.len()),
+        1
+    );
+
+    // Once the window closes, the pane edits it again.
+    let (_, mut w) = compose_window(&view, cx);
+    keys("escape", &mut w);
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_entity(&pane, |pane, _| pane.draft_id()),
+        Some(draft_id)
+    );
+}
+
+#[gpui::test]
+fn attachments_come_from_the_file_picker_and_dropped_files(cx: &mut TestAppContext) {
+    let (_view, _main, compose, mut w, harness) = new_draft(Setup::Account, cx);
+    let w = &mut w;
+    let report = attachment_file(&harness, "report.pdf");
+    let notes = attachment_file(&harness, "notes.txt");
+
+    // Attach Files… opens the system picker; its files become cards.
+    let picked = vec![report.clone(), notes.clone()];
+    w.dispatch_action(AddAttachment);
+    w.run_until_parked();
+    assert!(w.did_prompt_for_paths());
+    w.simulate_path_prompt_response(move |options| {
+        assert!(options.files && options.multiple && !options.directories);
+        Some(picked)
+    });
+    w.run_until_parked();
+    assert_eq!(attachment_names(&compose, w), ["report.pdf", "notes.txt"]);
+
+    // A cancelled picker attaches nothing.
+    keys("secondary-shift-a", w);
+    w.simulate_path_prompt_response(|_| None);
+    w.run_until_parked();
+    assert_eq!(attachment_names(&compose, w).len(), 2);
+
+    // Remove takes a card away.
+    let first = state(&compose, w, |compose, _| compose.attachments[0].id);
+    click_on(format!("compose-attachment-remove-{first}"), w);
+    assert_eq!(attachment_names(&compose, w), ["notes.txt"]);
+
+    // Files dropped onto the window are attached.
+    let position = point(px(300.), px(300.));
+    w.simulate_event(FileDropEvent::Entered {
+        position,
+        paths: gpui::ExternalPaths(vec![report].into()),
+    });
+    w.simulate_event(FileDropEvent::Submit { position });
+    w.run_until_parked();
+    assert_eq!(attachment_names(&compose, w), ["notes.txt", "report.pdf"]);
+}
+
+#[gpui::test]
+fn send_closes_the_window_and_queues_the_message(cx: &mut TestAppContext) {
+    let (view, main, compose, mut w, harness) = new_draft(Setup::Account, cx);
+    let (draft_id, _, _) = inputs(&compose, &mut w);
+    // Sending with no recipients explains why, in the compose window.
+    keys("secondary-enter", &mut w);
+    assert_eq!(compose_window_toasts(&view, main).len(), 1);
+
+    w.simulate_input("kai@example.test,");
+    keys("secondary-enter", &mut w);
+    assert!(main.read_entity(&view, |view, _| view.compose_windows.is_empty()));
+    let draft = harness
+        .store
+        .draft_detail(draft_id)
+        .expect("the draft loads")
+        .expect("the draft exists");
+    assert_eq!(draft.to, ["kai@example.test"]);
+    assert_ne!(draft.state, zmail_core::DraftState::Editing);
 }
