@@ -31,8 +31,8 @@ use crate::actions::{
     AddAccount, AddAttachment, Archive, Delete, FocusSearch, Forward, GoBack, Hide, HideOthers,
     Minimize, NewMessage, Quit, Reply, ReplyAll, RetryOutbox, SaveAttachments, SaveDraft,
     SearchAllAccounts, SearchInAccount, SearchInFolder, Send, ShowAll, ShowBcc, ShowCc, ShowDrafts,
-    ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleDensity, ToggleFlag, ToggleRead,
-    ToggleSidebar, ToggleTheme, Undo, Zoom,
+    ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleCommandPalette, ToggleDensity, ToggleFlag,
+    ToggleRead, ToggleSidebar, ToggleTheme, Undo, Zoom,
 };
 use crate::components::text_input;
 use crate::styles::{MenuPlacement, Platform, PlatformStyle};
@@ -231,6 +231,8 @@ impl MenuModel {
         sections.push(MenuSection {
             name: "View",
             items: vec![
+                command("Command Palette…", ToggleCommandPalette),
+                MenuModelItem::Separator,
                 command("Mail", ShowMail),
                 command("Drafts", ShowDrafts),
                 command("Outbox", ShowOutbox),

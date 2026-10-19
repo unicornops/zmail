@@ -194,6 +194,8 @@ impl WorkspaceView {
             outbox_jobs: Vec::new(),
             pending_op_count: 0,
             dead_op_count: 0,
+            command_palette: None,
+            palette_modal: components::ModalState::new(cx),
             search_results: Vec::new(),
             search_results_query: String::new(),
             search_pending_query: String::new(),
@@ -287,7 +289,10 @@ impl WorkspaceView {
 
         if matches!(
             initial_view,
-            InitialView::Inbox | InitialView::Sidebar | InitialView::Search(_)
+            InitialView::Inbox
+                | InitialView::Sidebar
+                | InitialView::Search(_)
+                | InitialView::CommandPalette(_)
         ) {
             view.restore_last_mailbox(cx);
         }
@@ -367,6 +372,17 @@ impl WorkspaceView {
                     .update(cx, |input, cx| input.set_text(query, cx));
                 view.search_on_open(cx);
                 view.focus_pane(Pane::MessageList, window, cx);
+            }
+            InitialView::CommandPalette(query) => {
+                // Once the window is up: the palette asks the drawn frame
+                // which commands can run.
+                cx.defer_in(window, move |view, window, cx| {
+                    view.open_command_palette(window, cx);
+                    if let Some(open) = &view.command_palette {
+                        open.palette()
+                            .update(cx, |palette, cx| palette.set_query(query, cx));
+                    }
+                });
             }
         }
         view.sync_panes(cx);
@@ -2877,6 +2893,7 @@ impl Render for WorkspaceView {
             .relative()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::new_message))
             .on_action(cx.listener(Self::add_account))
             .on_action(cx.listener(Self::show_mail))
@@ -2977,6 +2994,7 @@ impl Render for WorkspaceView {
                     }),
             )
             .children(self.render_open_warning(cx))
+            .children(self.render_command_palette(cx))
             .child(self.toasts.clone());
         // The Linux client-side decoration frame (nothing elsewhere); it
         // also paints the window background.

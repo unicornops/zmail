@@ -9195,6 +9195,7 @@ mod tests {
             keymap: KeymapName::Gmail,
             undo_send_delay_secs: 5,
             indexing: Default::default(),
+            recent_commands: vec!["virtual:flagged".to_owned()],
         };
         store
             .save_ui_preferences(&preferences)

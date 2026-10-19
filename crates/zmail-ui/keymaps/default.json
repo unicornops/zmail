@@ -7,6 +7,7 @@
   {
     "context": "Workspace",
     "bindings": {
+      "secondary-k": "zmail::ToggleCommandPalette",
       "secondary-n": "zmail::NewMessage",
       "secondary-shift-a": "zmail::AddAccount",
       "secondary-1": "zmail::ShowMail",
@@ -139,6 +140,15 @@
       "down": "zmail_components::SelectNext",
       "up": "zmail_components::SelectPrevious",
       "escape": "zmail_components::Cancel"
+    }
+  },
+  {
+    "context": "CommandPalette",
+    "bindings": {
+      "down": "zmail_components::SelectNext",
+      "up": "zmail_components::SelectPrevious",
+      "pagedown": "zmail_components::SelectLast",
+      "pageup": "zmail_components::SelectFirst"
     }
   },
   {

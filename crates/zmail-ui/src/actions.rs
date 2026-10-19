@@ -18,6 +18,7 @@
 //! | `Compose` | the open draft |
 //! | `RecipientField` | a To, Cc or Bcc field (`showing_suggestions` while its suggestions show) |
 //! | `AccountSetup` | the add-account flow |
+//! | `CommandPalette` | the command palette's search field and results |
 //! | `TextInput` | any text field (owned by the text input component) |
 //!
 //! The application commands at the top (Quit, Hide, Minimize, …) have no
@@ -55,6 +56,8 @@ actions!(
         ShowOutbox,
         /// Retry sending the selected outbox message.
         RetryOutbox,
+        /// Open the command palette, or close it if it is open.
+        ToggleCommandPalette,
         /// Move focus to the search field.
         FocusSearch,
         /// Search only the folder the search started in.
