@@ -9,7 +9,7 @@
 //! - No credentials, no cookies, and no query string with the address: the
 //!   files discovery reads are per domain.
 
-use std::{io::Read as _, time::Duration};
+use std::{io::Read as _, sync::OnceLock, time::Duration};
 
 use url::Url;
 
@@ -45,24 +45,39 @@ pub trait Fetch: Send + Sync {
 }
 
 /// The real [`Fetch`]: a blocking reqwest client with the limits above.
+///
+/// The client (and the thread reqwest's blocking client runs) is only
+/// built on the first fetch, so creating a fetcher at startup costs
+/// nothing.
 pub struct HttpsFetcher {
-    client: Result<reqwest::blocking::Client, String>,
+    client: OnceLock<Result<reqwest::blocking::Client, String>>,
 }
 
 impl HttpsFetcher {
-    /// Builds the client. A build failure (no TLS roots, say) surfaces on
-    /// the first fetch rather than here.
+    /// A fetcher whose client is built on first use.
     pub fn new() -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .https_only(true)
-            .timeout(TIMEOUT)
-            .connect_timeout(Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
-            .user_agent(concat!("zmail-autodiscover/", env!("CARGO_PKG_VERSION")))
-            .referer(false)
-            .build()
-            .map_err(|error| format!("couldn't prepare the HTTPS client: {error}"));
-        Self { client }
+        Self {
+            client: OnceLock::new(),
+        }
+    }
+
+    /// The client, built on first use. A build failure (no TLS roots, say)
+    /// is returned by every fetch.
+    fn client(&self) -> Result<&reqwest::blocking::Client, String> {
+        self.client
+            .get_or_init(|| {
+                reqwest::blocking::Client::builder()
+                    .https_only(true)
+                    .timeout(TIMEOUT)
+                    .connect_timeout(Duration::from_secs(5))
+                    .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+                    .user_agent(concat!("zmail-autodiscover/", env!("CARGO_PKG_VERSION")))
+                    .referer(false)
+                    .build()
+                    .map_err(|error| format!("couldn't prepare the HTTPS client: {error}"))
+            })
+            .as_ref()
+            .map_err(Clone::clone)
     }
 }
 
@@ -77,8 +92,8 @@ impl Fetch for HttpsFetcher {
         if url.scheme() != "https" {
             return Err(format!("refusing a non-HTTPS URL: {url}"));
         }
-        let client = self.client.as_ref().map_err(Clone::clone)?;
-        let response = client
+        let response = self
+            .client()?
             .get(url.clone())
             .send()
             .map_err(|error| describe_error(&error))?;
