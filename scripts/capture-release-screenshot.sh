@@ -95,6 +95,12 @@ MATRIX=(
   "inbox-light-1920 inbox light 1920 1080"
   "reader-dark-1920 reader dark 1920 1080"
   "reader-light-1920 reader light 1920 1080"
+  "reader-safety-info-dark reader-safety-info dark 1440 920"
+  "reader-safety-info-light reader-safety-info light 1440 920"
+  "reader-safety-caution-dark reader-safety-caution dark 1440 920"
+  "reader-safety-caution-light reader-safety-caution light 1440 920"
+  "reader-safety-danger-dark reader-safety-danger dark 1440 920"
+  "reader-safety-danger-light reader-safety-danger light 1440 920"
 )
 
 usage() {

@@ -115,6 +115,10 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
     ),
     ("zmail::RemoveAttachment", "needs an attachment argument"),
     ("zmail::SelectIdentity", "needs an identity argument"),
+    (
+        "zmail::DismissSenderWarning",
+        "the Looks safe button on one message's sender-safety banner",
+    ),
 ];
 
 /// `zmail::` actions only the macOS menus list: the system conventions

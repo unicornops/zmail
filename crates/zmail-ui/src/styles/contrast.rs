@@ -177,10 +177,13 @@ mod tests {
         }
 
         // Status banners: body text plus the status colour's own text.
+        // The reader's sender-safety banners use the info, warning and
+        // danger pairs, and draw their title and icon in the status colour.
         for (name, banner, status) in [
             ("danger", c.danger_background, c.danger),
             ("warning", c.warning_background, c.warning),
             ("success", c.success_background, c.success),
+            ("info", c.info_background, c.info),
         ] {
             push(
                 format!("foreground text on the {name} banner"),
@@ -191,6 +194,13 @@ mod tests {
             push(
                 format!("{name} text on its banner"),
                 status,
+                banner,
+                MIN_TEXT_CONTRAST,
+            );
+            // Banner details label their evidence in muted text.
+            push(
+                format!("muted text on the {name} banner"),
+                c.muted,
                 banner,
                 MIN_TEXT_CONTRAST,
             );

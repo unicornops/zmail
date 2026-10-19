@@ -5,6 +5,7 @@
 pub(crate) mod actions;
 pub(crate) mod avatar;
 pub(crate) mod badge;
+pub(crate) mod banner;
 pub(crate) mod button;
 pub(crate) mod gallery;
 pub(crate) mod kbd;
@@ -27,6 +28,7 @@ pub(crate) mod window_frame;
 pub(crate) use actions::init;
 pub(crate) use avatar::Avatar;
 pub(crate) use badge::{Badge, BadgeTone};
+pub(crate) use banner::{Banner, BannerTone};
 pub(crate) use button::{Button, ButtonSize, ButtonVariant, IconButton};
 pub(crate) use kbd::Kbd;
 pub(crate) use menu::{Menu, MenuEntry};

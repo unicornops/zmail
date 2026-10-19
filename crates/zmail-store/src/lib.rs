@@ -54,6 +54,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0016_server_search_hits", SERVER_SEARCH_HITS_SCHEMA),
     ("0017_mailbox_hierarchy", MAILBOX_HIERARCHY_SCHEMA),
     (
+        "0018_sender_warning_dismissed",
+        SENDER_WARNING_DISMISSED_SCHEMA,
+    ),
+    (
         "0019_address_history",
         address_history::ADDRESS_HISTORY_SCHEMA,
     ),
@@ -440,6 +444,12 @@ CREATE INDEX IF NOT EXISTS idx_pending_ops_state ON pending_ops(account_id, stat
 const MAILBOX_HIERARCHY_SCHEMA: &str = r#"
 ALTER TABLE mailboxes ADD COLUMN delimiter TEXT;
 ALTER TABLE mailboxes ADD COLUMN parent_name TEXT;
+"#;
+
+/// "Looks safe" on a message's sender-safety banner hides it for that
+/// message only; it is not a per-sender allowlist.
+const SENDER_WARNING_DISMISSED_SCHEMA: &str = r#"
+ALTER TABLE messages ADD COLUMN sender_warning_dismissed INTEGER NOT NULL DEFAULT 0;
 "#;
 
 /// Orders mailboxes with the special-use roles first, in
@@ -1901,7 +1911,8 @@ impl LocalStore {
                 messages.is_read,
                 messages.is_flagged,
                 messages.has_remote_content,
-                messages.received_at
+                messages.received_at,
+                messages.sender_warning_dismissed
             FROM messages
             WHERE messages.thread_id = ?1
             ORDER BY messages.received_at ASC, messages.id ASC
@@ -1933,6 +1944,7 @@ impl LocalStore {
                     is_read: row.get::<_, bool>(8)?,
                     is_flagged: row.get::<_, bool>(9)?,
                     has_remote_content: row.get::<_, bool>(10)?,
+                    sender_warning_dismissed: row.get::<_, bool>(12)?,
                     received_at: row.get(11)?,
                     attachments: Vec::new(),
                 })
@@ -1993,6 +2005,21 @@ impl LocalStore {
             has_remote_content,
             messages,
         }))
+    }
+
+    /// Hides a message's sender-safety warning ("Looks safe"). Returns
+    /// whether the message exists.
+    pub fn dismiss_sender_warning(&self, message_id: i64) -> Result<bool> {
+        let conn = self.connection()?;
+        let changed = conn
+            .execute(
+                "UPDATE messages SET sender_warning_dismissed = 1 WHERE id = ?1",
+                params![message_id],
+            )
+            .with_context(|| {
+                format!("failed to dismiss the sender warning of message {message_id}")
+            })?;
+        Ok(changed > 0)
     }
 
     /// Copies a received attachment into `destination_dir` using its original
@@ -4322,6 +4349,21 @@ fn apply_default_signature(body: &str, signature: &str) -> String {
     signature.trim().to_owned()
 }
 
+/// Remote ids of a thread's messages whose sender warning was dismissed.
+fn dismissed_sender_warnings(conn: &Connection, thread_id: i64) -> Result<HashSet<String>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT remote_id FROM messages \
+             WHERE thread_id = ?1 AND sender_warning_dismissed = 1 AND remote_id <> ''",
+        )
+        .context("failed to prepare the dismissed sender warnings query")?;
+    let remote_ids = statement
+        .query_map(params![thread_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()
+        .context("failed to load the dismissed sender warnings")?;
+    Ok(remote_ids)
+}
+
 fn sanitize_filename(filename: &str) -> String {
     filename
         .chars()
@@ -5065,6 +5107,13 @@ fn merge_mailbox_threads(
             })
             .collect();
 
+        // "Looks safe" on a sender warning is local state the server
+        // cannot re-supply; carry it over by remote id.
+        let dismissed_warnings = match existing_thread_id {
+            Some(existing_id) => dismissed_sender_warnings(transaction, existing_id)?,
+            None => HashSet::new(),
+        };
+
         let thread_row_id = match existing_thread_id {
             Some(existing_id) => {
                 transaction
@@ -5160,9 +5209,10 @@ fn merge_mailbox_threads(
                     has_remote_content,
                     is_read,
                     is_flagged,
-                    received_at
+                    received_at,
+                    sender_warning_dismissed
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                 "#,
                     params![
                         thread_row_id,
@@ -5179,6 +5229,8 @@ fn merge_mailbox_threads(
                         is_read,
                         is_flagged,
                         message.received_at,
+                        !message.remote_id.is_empty()
+                            && dismissed_warnings.contains(&message.remote_id),
                     ],
                 )
                 .context("failed to insert the message during the snapshot merge")?;
@@ -6431,6 +6483,57 @@ mod tests {
         );
         assert_eq!(report.lookalike_of, Some("paypal.com".to_owned()));
         assert_eq!(report.reply_to_mismatch, Some("evil.example".to_owned()));
+    }
+
+    #[test]
+    fn dismissing_a_sender_warning_persists_per_message() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let snapshot =
+            merge_test_snapshot("Check your account", "Body", "thread-1", "message-1", None);
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+        let threads = store
+            .list_threads(mailbox_id_by_name(&store, account_id, "Inbox"), 0..50)
+            .expect("threads should load");
+        let view = store
+            .thread_view(threads[0].id)
+            .expect("thread should load")
+            .expect("thread should exist");
+        let message_id = view.messages[0].id;
+        assert!(!view.messages[0].sender_warning_dismissed);
+
+        assert!(
+            store
+                .dismiss_sender_warning(message_id)
+                .expect("dismissal should save")
+        );
+        let view = store
+            .thread_view(threads[0].id)
+            .expect("thread should load")
+            .expect("thread should exist");
+        assert!(view.messages[0].sender_warning_dismissed);
+
+        // A sync that rewrites the thread (here a changed preview) keeps
+        // the choice: messages are re-inserted with new row ids.
+        let mut resync = snapshot.clone();
+        resync.mailboxes[0].threads[0].preview = "A changed preview".to_owned();
+        store
+            .replace_account_snapshot(account_id, &resync)
+            .expect("snapshot should apply again");
+        let view = store
+            .thread_view(threads[0].id)
+            .expect("thread should load")
+            .expect("thread should exist");
+        assert!(view.messages[0].sender_warning_dismissed);
+        assert!(
+            !store
+                .dismiss_sender_warning(i64::MAX)
+                .expect("a missing message is not an error")
+        );
     }
 
     #[test]

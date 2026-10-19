@@ -181,6 +181,15 @@ pub struct RemoveAttachment {
     pub attachment_id: i64,
 }
 
+/// Hide a message's sender-safety banner ("Looks safe"). The choice is
+/// stored with the message; other messages from the sender still warn.
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = zmail, no_json)]
+pub struct DismissSenderWarning {
+    /// Message id.
+    pub message_id: i64,
+}
+
 /// Send the open draft from another of the account's identities.
 #[derive(Clone, Debug, PartialEq, Eq, Action)]
 #[action(namespace = zmail, no_json)]
@@ -196,6 +205,10 @@ pub(crate) const ACTIONS_WITHOUT_KEYS: &[(&str, &str)] = &[
     ("zmail::ReplyToMessage", "needs a message argument"),
     ("zmail::RemoveAttachment", "needs an attachment argument"),
     ("zmail::SelectIdentity", "needs an identity argument"),
+    (
+        "zmail::DismissSenderWarning",
+        "needs a message argument; it is the banner's Looks safe button",
+    ),
     (
         "zmail::ToggleDensity",
         "a View menu setting, rarely switched; no key to collide with",
