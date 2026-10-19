@@ -12,7 +12,7 @@ use zmail_core::{AccountSyncSnapshot, NewDraft, NewIdentity};
 
 use super::{
     Harness, Setup, click, click_on, compose_inputs, compose_window, compose_window_toasts, cursor,
-    focus, keys, open_workspace, text,
+    focus, inline_reply, keys, open_workspace, text,
 };
 use crate::actions::{AddAttachment, SaveDraft, ShowBcc, ShowCc};
 use crate::components::TextInput;
@@ -754,12 +754,126 @@ fn undo_after_sending_started_says_it_is_too_late(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn undoing_a_reply_sent_from_the_pane_reopens_it_there(cx: &mut TestAppContext) {
+fn reply_opens_inline_below_the_conversation(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    // The footer offers Reply until a reply is open.
+    assert!(cx.debug_bounds("reader-footer-reply").is_some());
+    click("reader-footer-reply", cx);
+    let reply = inline_reply(&view, cx).expect("an inline reply");
+    assert!(cx.debug_bounds("reader-inline-reply").is_some());
+    assert!(cx.debug_bounds("reader-footer-reply").is_none());
+    let (draft_id, _, body) = inputs(&reply, cx);
+    assert!(
+        cx.update(|window, cx| body.focus_handle(cx).is_focused(window)),
+        "the cursor is in the body"
+    );
+    assert_eq!(cursor(&body, cx), 0, "above the quoted message");
+    // The list and the reader stay as they were.
+    assert_eq!(
+        cx.read_entity(&view, |view, _| (view.list_mode, view.detail_mode)),
+        (crate::ListMode::Mail, DetailMode::Reader)
+    );
+    // No Subject inline: the reply keeps the conversation's.
+    assert_eq!(
+        harness
+            .store
+            .draft_detail(draft_id)
+            .expect("the draft loads")
+            .expect("the draft exists")
+            .subject,
+        "Re: Quarterly report 0"
+    );
+
+    // The reply grows with its text, and the conversation list makes room.
+    let height = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("reader-inline-reply")
+            .expect("the reply is drawn")
+            .size
+            .height
+    };
+    let before = height(cx);
+    keys("enter enter enter enter enter enter enter enter", cx);
+    assert!(height(cx) > before, "{:?} > {before:?}", height(cx));
+
+    // Typing autosaves; another conversation hides the reply and showing
+    // this one again brings it back as it was.
+    cx.simulate_input("Thanks Kai");
+    wait(AUTOSAVE_DELAY, cx);
+    assert!(stored_body(&harness, draft_id).contains("Thanks Kai"));
+    let show = |thread_id: i64, cx: &mut VisualTestContext| {
+        view.update(cx, |view, cx| {
+            view.selected_thread_id = Some(thread_id);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    };
+    show(harness.threads[1], cx);
+    assert!(inline_reply(&view, cx).is_none());
+    show(harness.threads[0], cx);
+    assert_eq!(inline_reply(&view, cx), Some(reply));
+}
+
+#[gpui::test]
+fn the_pop_out_button_moves_the_reply_into_a_window(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+    keys("secondary-r", cx);
+    let reply = inline_reply(&view, cx).expect("an inline reply");
+    let (draft_id, _, _) = inputs(&reply, cx);
+    cx.simulate_input("Half a thought");
+    click("compose-pop-out", cx);
+
+    assert!(inline_reply(&view, cx).is_none());
+    assert!(cx.debug_bounds("reader-footer-reply").is_some());
+    let (compose, mut w) = compose_window(&view, cx);
+    let (window_draft, _, body) = inputs(&compose, &mut w);
+    assert_eq!(window_draft, draft_id);
+    assert!(text(&body, &mut w).starts_with("Half a thought"));
+    assert!(
+        w.update(|window, cx| body.focus_handle(cx).is_focused(window)),
+        "the body keeps focus in the window"
+    );
+}
+
+#[gpui::test]
+fn undoing_an_inline_reply_puts_it_back_below_the_conversation(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::Mail);
     keys("secondary-r", cx);
-    let (draft_id, _, _) = compose_inputs(&view, cx);
+    let (draft_id, _, _) = inputs(&inline_reply(&view, cx).expect("a reply"), cx);
     keys("secondary-enter", cx);
+    assert!(inline_reply(&view, cx).is_none());
+    assert_eq!(super::toasts(&view, cx), ["Sending message…"]);
+
+    super::click_toast_undo(&view, cx);
+    let reply = inline_reply(&view, cx).expect("the reply is back");
+    assert_eq!(inputs(&reply, cx).0, draft_id);
+    assert_eq!(
+        draft_state(&harness, draft_id),
+        zmail_core::DraftState::Editing
+    );
+    assert!(cx.read_entity(&view, |view, _| view.compose_windows.is_empty()));
+}
+
+#[gpui::test]
+fn undoing_a_reply_sent_from_the_pane_reopens_it_there(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let draft_id = cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_compose_in_pane_for_test(window, cx)
+        })
+    });
+    cx.run_until_parked();
     let pane = cx.read_entity(&view, |view, _| view.compose.clone());
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.compose
+                .as_ref()
+                .expect("a draft")
+                .to
+                .update(cx, |field, cx| field.focus(window, cx))
+        })
+    });
+    cx.simulate_input("kai@example.test,");
+    keys("secondary-enter", cx);
     assert_eq!(cx.read_entity(&pane, |pane, _| pane.draft_id()), None);
     assert_eq!(super::toasts(&view, cx), ["Sending message…"]);
 
@@ -772,7 +886,6 @@ fn undoing_a_reply_sent_from_the_pane_reopens_it_there(cx: &mut TestAppContext) 
         draft_state(&harness, draft_id),
         zmail_core::DraftState::Editing
     );
-    assert!(cx.read_entity(&view, |view, _| view.compose_windows.is_empty()));
 }
 
 #[gpui::test]

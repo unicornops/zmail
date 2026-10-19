@@ -60,6 +60,24 @@ use crate::styles::{
 };
 use crate::widgets::{EllipsisExt, HoverExt, icon, status_banner};
 
+/// The inline reply open below a conversation.
+pub(crate) struct InlineReply {
+    pub(crate) thread_id: i64,
+    pub(crate) compose: Entity<ComposeView>,
+    _subscription: gpui::Subscription,
+}
+
+/// Where Undo Send puts the draft back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReopenIn {
+    /// Its compose window.
+    Window,
+    /// The compose pane.
+    Pane,
+    /// The inline reply below this conversation.
+    Reply(i64),
+}
+
 /// The key context the shell sets on the window root.
 pub(crate) const KEY_CONTEXT: &str = "Workspace";
 
@@ -146,6 +164,7 @@ impl WorkspaceView {
             attachments: crate::attachments::AttachmentState::new(cx),
             undo_toast: None,
             compose_windows: Default::default(),
+            inline_reply: None,
             mail_refresh_queued: false,
             account: None,
             accounts: Vec::new(),
@@ -263,6 +282,13 @@ impl WorkspaceView {
                     cx.defer_in(window, move |view, window, cx| {
                         view.open_draft_in_window(draft_id, false, window, cx);
                     });
+                }
+            }
+            InitialView::Reply(thread_id) => {
+                if let Ok(Some(thread)) = view.store.thread_view(thread_id) {
+                    view.show_thread(thread_id, thread.mailbox_id, cx);
+                    view.refresh_from_store(cx);
+                    view.reply_to_selected_thread(false, None, window, cx);
                 }
             }
             InitialView::Sending(draft_id) => {
@@ -462,6 +488,11 @@ impl WorkspaceView {
             mailboxes: self.mailboxes.clone(),
             own_addresses,
             compact_actions: self.detail_width() < READER_COMPACT_ACTIONS_BELOW,
+            reply: self
+                .inline_reply
+                .as_ref()
+                .filter(|reply| Some(reply.thread_id) == self.selected_thread_id)
+                .map(|reply| reply.compose.clone()),
         };
         self.reader
             .update(cx, |reader, cx| reader.set_state(reader_state, cx));
@@ -1130,6 +1161,7 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.release_draft(draft_id, cx);
         if self.compose_window(draft_id, cx).is_some() {
             self.compose
                 .update(cx, |compose, cx| compose.show_in_window(draft_id, cx));
@@ -1353,7 +1385,9 @@ impl WorkspaceView {
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             return;
         }
-        // A draft is edited in one place: the pane lets go of it first.
+        // A draft is edited in one place: the pane and the inline reply let
+        // go of it first.
+        self.release_draft(draft_id, cx);
         let in_pane = self.compose.read(cx).draft_id() == Some(draft_id);
         if in_pane {
             self.compose
@@ -1406,7 +1440,7 @@ impl WorkspaceView {
             ..
         } = event
         {
-            self.show_undo_send_toast(draft_id, job_id, undo_delay, true, cx);
+            self.show_undo_send_toast(draft_id, job_id, undo_delay, ReopenIn::Window, cx);
             self.refresh_from_store(cx);
             cx.notify();
         }
@@ -1421,7 +1455,7 @@ impl WorkspaceView {
         draft_id: i64,
         job_id: i64,
         undo_delay: Duration,
-        reopen_in_window: bool,
+        reopen: ReopenIn,
         cx: &mut Context<Self>,
     ) {
         if undo_delay.is_zero() {
@@ -1440,7 +1474,7 @@ impl WorkspaceView {
                     cx.defer(move |cx| {
                         let _ = main_window.update(cx, |_, window, cx| {
                             workspace.update(cx, |this, cx| {
-                                this.undo_send(draft_id, job_id, reopen_in_window, window, cx)
+                                this.undo_send(draft_id, job_id, reopen, window, cx)
                             })
                         });
                     });
@@ -1456,7 +1490,7 @@ impl WorkspaceView {
         &mut self,
         draft_id: i64,
         job_id: i64,
-        reopen_in_window: bool,
+        reopen: ReopenIn,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1465,12 +1499,20 @@ impl WorkspaceView {
             .update(cx, |actions, cx| actions.cancel_send(job_id, draft_id, cx))
         {
             Ok(true) => {
-                if reopen_in_window {
-                    self.open_draft_in_window(draft_id, false, window, cx);
-                } else {
-                    self.open_draft(draft_id, window, cx);
-                    self.compose
-                        .update(cx, |compose, cx| compose.focus_pane(window, cx));
+                match reopen {
+                    // A reply goes back below its conversation if that is
+                    // still the one showing, else into a window.
+                    ReopenIn::Reply(thread_id) if self.selected_thread_id == Some(thread_id) => {
+                        self.open_inline_reply(thread_id, draft_id, window, cx);
+                    }
+                    ReopenIn::Window | ReopenIn::Reply(_) => {
+                        self.open_draft_in_window(draft_id, false, window, cx);
+                    }
+                    ReopenIn::Pane => {
+                        self.open_draft(draft_id, window, cx);
+                        self.compose
+                            .update(cx, |compose, cx| compose.focus_pane(window, cx));
+                    }
                 }
                 self.toasts.update(cx, |toasts, cx| {
                     toasts.push(Toast::new("Sending undone"), cx);
@@ -1506,25 +1548,117 @@ impl WorkspaceView {
 
         match self.create_reply_draft(&thread, message_id, reply_all, cx) {
             Ok(draft_id) => {
-                self.open_draft(draft_id, window, cx);
-                self.list_mode = ListMode::Drafts;
+                // The reply opens below the conversation, in the reader.
+                self.detail_mode = DetailMode::Reader;
                 self.single_pane = SinglePane::Detail;
-                // The reply starts above the quoted message.
-                self.compose
-                    .update(cx, |compose, cx| compose.focus_body_start(window, cx));
-                self.show_status(
-                    if reply_all {
-                        "Reply-all draft ready.".to_owned()
-                    } else {
-                        "Reply draft ready.".to_owned()
-                    },
-                    cx,
-                );
+                self.open_inline_reply(thread.id, draft_id, window, cx);
                 self.refresh_from_store(cx);
             }
             Err(error) => self.store_error = Some(error.to_string()),
         }
         cx.notify();
+    }
+
+    /// Opens `draft_id` as the inline reply below conversation `thread_id`,
+    /// with the cursor at the start of the body, above the quoted message.
+    /// Only one conversation has an inline reply at a time; opening another
+    /// saves the previous one, which stays in Drafts.
+    pub(crate) fn open_inline_reply(
+        &mut self,
+        thread_id: i64,
+        draft_id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_inline_reply(cx);
+        self.release_draft(draft_id, cx);
+        let compose = cx.new(|cx| {
+            ComposeView::new(
+                self.store.clone(),
+                self.sync_service.clone(),
+                self.mail_actions.clone(),
+                Presentation::Inline,
+                cx,
+            )
+        });
+        let loaded = compose.update(cx, |compose, cx| {
+            let loaded = compose.load_draft(draft_id, window, cx);
+            compose.focus_body_start(window, cx);
+            loaded
+        });
+        if let Err(error) = loaded {
+            self.show_error(error.to_string(), cx);
+            return;
+        }
+        let subscription = cx.subscribe_in(&compose, window, move |this, _, event, window, cx| {
+            this.on_inline_reply_event(thread_id, event, window, cx)
+        });
+        self.inline_reply = Some(InlineReply {
+            thread_id,
+            compose,
+            _subscription: subscription,
+        });
+        self.sync_panes(cx);
+        self.reader.update(cx, |reader, cx| reader.reveal_reply(cx));
+        cx.notify();
+    }
+
+    /// Saves and closes the inline reply, if one is open.
+    pub(crate) fn close_inline_reply(&mut self, cx: &mut Context<Self>) {
+        if let Some(reply) = self.inline_reply.take() {
+            reply
+                .compose
+                .update(cx, |compose, cx| compose.flush_autosave(cx));
+            cx.notify();
+        }
+    }
+
+    /// A draft is edited in one place: before the pane or a window opens
+    /// `draft_id`, the inline reply lets go of it.
+    fn release_draft(&mut self, draft_id: i64, cx: &mut Context<Self>) {
+        if self
+            .inline_reply
+            .as_ref()
+            .is_some_and(|reply| reply.compose.read(cx).draft_id() == Some(draft_id))
+        {
+            self.close_inline_reply(cx);
+        }
+    }
+
+    fn on_inline_reply_event(
+        &mut self,
+        thread_id: i64,
+        event: &ComposeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match *event {
+            ComposeEvent::Status(ref message) => self.show_status(message.clone(), cx),
+            ComposeEvent::Error(ref error) => self.show_error(error, cx),
+            ComposeEvent::Queued {
+                draft_id,
+                job_id,
+                undo_delay,
+                ..
+            } => {
+                self.inline_reply = None;
+                self.show_undo_send_toast(
+                    draft_id,
+                    job_id,
+                    undo_delay,
+                    ReopenIn::Reply(thread_id),
+                    cx,
+                );
+                self.refresh_from_store(cx);
+                cx.notify();
+            }
+            // The pop-out button: the reply moves into its own window.
+            ComposeEvent::PopOut { draft_id } => {
+                self.close_inline_reply(cx);
+                self.open_draft_in_window(draft_id, true, window, cx);
+            }
+            ComposeEvent::ShowWindow { .. } => {}
+        }
     }
 
     /// Open a forward draft for the selected thread.
@@ -2443,7 +2577,7 @@ impl WorkspaceView {
                 if self.list_mode == ListMode::Mail {
                     self.detail_mode = DetailMode::Reader;
                 }
-                self.show_undo_send_toast(draft_id, job_id, undo_delay, false, cx);
+                self.show_undo_send_toast(draft_id, job_id, undo_delay, ReopenIn::Pane, cx);
                 self.refresh_from_store(cx);
                 self.schedule_refresh(window, cx);
                 cx.notify();

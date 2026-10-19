@@ -46,8 +46,8 @@ mod source;
 use std::{collections::HashMap, rc::Rc};
 
 use gpui::{
-    App, Context, FocusHandle, Focusable, IntoElement, ListAlignment, ListOffset, ListState,
-    MouseButton, Render, Window, div, list, prelude::*, px, rgb,
+    App, Context, Entity, FocusHandle, Focusable, IntoElement, ListAlignment, ListOffset,
+    ListState, MouseButton, Render, Subscription, Window, div, list, prelude::*, px, rgb,
 };
 use zmail_core::{MailboxSummary, ThreadView, time::HourCycle};
 
@@ -63,10 +63,12 @@ use self::popover::OpenPopover;
 pub(crate) use self::popover::PopoverAnchor;
 use self::source::SourceView;
 use crate::actions::{
-    NextMessage, PageDown, PageUp, PreviousMessage, ScrollDown, ScrollUp, ToggleMessage,
+    Forward, NextMessage, PageDown, PageUp, PreviousMessage, Reply, ReplyAll, ScrollDown, ScrollUp,
+    ToggleMessage,
 };
-use crate::components::{IconButton, ModalState};
-use crate::pane::pane_focus_indicator;
+use crate::components::{Button, IconButton, ModalState};
+use crate::compose::ComposeView;
+use crate::pane::{dispatch_from, pane_focus_indicator};
 use crate::styles::UiColors;
 
 /// The key context the reader sets.
@@ -96,6 +98,10 @@ pub(crate) struct ReaderState {
     /// How many conversations the list has selected. With more than one,
     /// the reader shows the count instead of a conversation.
     pub(crate) selected_count: usize,
+    /// The inline reply to this conversation, shown below its last
+    /// message. Without one, the footer offers Reply, Reply All and
+    /// Forward.
+    pub(crate) reply: Option<Entity<ComposeView>>,
 }
 
 pub(crate) struct ReaderView {
@@ -126,6 +132,9 @@ pub(crate) struct ReaderView {
     /// The open-link dialog.
     link_prompt: Option<LinkPrompt>,
     link_modal: ModalState,
+    /// Re-measures the footer whenever the inline reply changes, since it
+    /// grows with its text.
+    reply_observation: Option<Subscription>,
     /// Test instrumentation: renders.
     #[cfg(test)]
     pub(crate) counters: crate::pane::RenderCounters,
@@ -155,6 +164,7 @@ impl ReaderView {
             press_selected: false,
             link_prompt: None,
             link_modal: ModalState::new(cx),
+            reply_observation: None,
             #[cfg(test)]
             counters: Default::default(),
         }
@@ -168,6 +178,15 @@ impl ReaderView {
             return;
         }
         let old_count = self.list_state.item_count();
+        if self.state.reply != state.reply {
+            self.reply_observation = state.reply.as_ref().map(|reply| {
+                cx.observe(reply, |reader, _, cx| {
+                    let footer = reader.list_state.item_count().saturating_sub(1);
+                    reader.list_state.remeasure_items(footer..footer + 1);
+                    cx.notify();
+                })
+            });
+        }
         self.state = state;
         let thread = self.state.thread.as_ref();
         let count = thread.map_or(0, |thread| ConversationItem::count(thread.messages.len()));
@@ -235,6 +254,15 @@ impl ReaderView {
     #[cfg(test)]
     pub(crate) fn conversation(&self) -> &ConversationState {
         &self.conversation
+    }
+
+    /// Scrolls the inline reply into view.
+    pub(crate) fn reveal_reply(&mut self, cx: &mut Context<Self>) {
+        let count = self.list_state.item_count();
+        if count > 0 {
+            self.list_state.scroll_to_reveal_item(count - 1);
+            cx.notify();
+        }
     }
 
     /// Expands every message of the open conversation.
@@ -401,11 +429,19 @@ impl ReaderView {
                 };
                 render_message(self, message, display, &context, &body, cx)
             }
-            // The inline reply (UI plan Phase 5) goes here; until then it
-            // is the space below the last message.
+            // The inline reply, or the buttons that start one.
             ConversationItem::Footer => div()
                 .debug_selector(|| "reader-footer".into())
-                .h(px(SCROLL_STEP))
+                .px_4()
+                .pt_2()
+                .pb(px(SCROLL_STEP))
+                .child(match self.state.reply.clone() {
+                    Some(reply) => div()
+                        .debug_selector(|| "reader-inline-reply".into())
+                        .child(reply)
+                        .into_any_element(),
+                    None => render_reply_bar(&self.focus_handle).into_any_element(),
+                })
                 .into_any_element(),
         }
     }
@@ -425,6 +461,32 @@ impl ReaderView {
     fn page_down(&mut self, _: &PageDown, _: &mut Window, cx: &mut Context<Self>) {
         self.scroll_by(self.page_height(), cx);
     }
+}
+
+/// The footer's buttons when no reply is open: Reply opens the inline
+/// reply below the conversation.
+fn render_reply_bar(focus_handle: &FocusHandle) -> impl IntoElement {
+    let button = |id: &'static str, label: &'static str, icon: &'static str| {
+        Button::new(id, label).icon(icon)
+    };
+    div()
+        .flex()
+        .flex_wrap()
+        .gap_2()
+        .child(
+            div().debug_selector(|| "reader-footer-reply".into()).child(
+                button("reader-footer-reply", "Reply", "reply")
+                    .on_click(dispatch_from(focus_handle, Reply)),
+            ),
+        )
+        .child(
+            button("reader-footer-reply-all", "Reply All", "reply-all")
+                .on_click(dispatch_from(focus_handle, ReplyAll)),
+        )
+        .child(
+            button("reader-footer-forward", "Forward", "forward")
+                .on_click(dispatch_from(focus_handle, Forward)),
+        )
 }
 
 impl Render for ReaderView {
