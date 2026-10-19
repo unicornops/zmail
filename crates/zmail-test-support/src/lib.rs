@@ -411,8 +411,8 @@ impl DockerMailHarness {
                 .send();
 
             if response_is_success(&domain)
-                && response_is_success(&primary)
-                && response_is_success(&sender)
+                && user_is_provisioned(&primary)
+                && user_is_provisioned(&sender)
             {
                 return Ok(());
             }
@@ -547,6 +547,19 @@ fn describe_response(
         Ok(response) => response.status().to_string(),
         Err(error) => error.to_string(),
     }
+}
+
+/// James answers 409 Conflict to a PUT for a user that already exists. The
+/// stack is wiped before every start, so an existing user was created by an
+/// earlier round of this loop, with the same password; retrying would only
+/// ever see 409 again.
+fn user_is_provisioned(
+    result: &std::result::Result<reqwest::blocking::Response, reqwest::Error>,
+) -> bool {
+    response_is_success(result)
+        || result
+            .as_ref()
+            .is_ok_and(|response| response.status() == reqwest::StatusCode::CONFLICT)
 }
 
 fn response_is_success(
