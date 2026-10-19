@@ -375,6 +375,10 @@ impl SettingsWindow {
             self.section = section;
             self.scroll.set_offset(point(px(0.0), px(0.0)));
             self.refresh(cx);
+            if section == SettingsSection::Accounts {
+                self.accounts
+                    .update(cx, |accounts, cx| accounts.measure_usage(cx));
+            }
         }
         cx.notify();
     }

@@ -58,7 +58,9 @@ const SELECT_WIDTH: f32 = 200.0;
 struct AccountCard {
     account: AccountSummary,
     auth: AuthKind,
-    usage_bytes: u64,
+    /// Bytes of bodies and attachments kept, once measured
+    /// ([`AccountsSettings::measure_usage`]).
+    usage_bytes: Option<u64>,
     color: Entity<Select>,
     budget: Entity<Select>,
     /// The budgets `budget` lists: [`CACHE_BUDGETS`], plus the saved one
@@ -119,10 +121,36 @@ impl AccountsSettings {
             _subscriptions: subscriptions,
         };
         this.refresh(cx);
+        this.measure_usage(cx);
         this
     }
 
-    /// Re-read the accounts, their status and cache use.
+    /// Measure each account's cache use in the background. It reads every
+    /// stored body, so it runs when the section opens and after a budget
+    /// change, not on every refresh.
+    pub(crate) fn measure_usage(&mut self, cx: &mut Context<Self>) {
+        let store = SettingsHost::get(cx).store.clone();
+        let ids: Vec<i64> = self.cards.iter().map(|card| card.account.id).collect();
+        let measuring = cx.background_spawn(async move {
+            ids.into_iter()
+                .map(|id| (id, store.account_blob_usage(id).ok()))
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let usage = measuring.await;
+            let _ = this.update(cx, |this, cx| {
+                for (id, bytes) in usage {
+                    if let Some(card) = this.cards.iter_mut().find(|card| card.account.id == id) {
+                        card.usage_bytes = bytes;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Re-read the accounts and their status.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         let store = SettingsHost::get(cx).store.clone();
         let accounts = store.list_accounts().unwrap_or_default();
@@ -133,7 +161,6 @@ impl AccountsSettings {
                 .ok()
                 .flatten()
                 .map(|bytes| bytes / (1024 * 1024));
-            let usage_bytes = store.account_blob_usage(account.id).unwrap_or(0);
             let auth = store
                 .sync_target(account.id)
                 .ok()
@@ -166,7 +193,6 @@ impl AccountsSettings {
                 .update(cx, |select, cx| select.set_selected(selected, cx));
             card.account = account;
             card.auth = auth;
-            card.usage_bytes = usage_bytes;
             cards.push(card);
         }
         self.cards = cards;
@@ -197,7 +223,7 @@ impl AccountsSettings {
         AccountCard {
             account: account.clone(),
             auth: AuthKind::default(),
-            usage_bytes: 0,
+            usage_bytes: None,
             color,
             budget,
             budget_options: options,
@@ -305,6 +331,7 @@ impl AccountsSettings {
                         ))),
                     }
                     this.refresh(cx);
+                    this.measure_usage(cx);
                 });
             })
             .detach();
@@ -537,9 +564,12 @@ impl AccountsSettings {
             (Some(error), true) => format!("{}: {error}", status.phase.label()),
             _ => format!("{} \u{2022} {}", status.phase.label(), status.detail),
         };
+        let usage = card
+            .usage_bytes
+            .map(|bytes| format!(" Using {} now.", format_size(bytes)))
+            .unwrap_or_default();
         let budget_description: SharedString = format!(
-            "Downloaded message bodies and attachments kept on this computer. Over the limit, the oldest are cleared and download again when opened. Using {} now.",
-            format_size(card.usage_bytes)
+            "Downloaded message bodies and attachments kept on this computer. Over the limit, the oldest are cleared and download again when opened.{usage}"
         )
         .into();
         let focused = self.focused_account == Some(account_id);
