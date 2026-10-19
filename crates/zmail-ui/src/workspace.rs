@@ -195,6 +195,8 @@ impl WorkspaceView {
             _subscriptions: subscriptions,
         };
 
+        view.prune_open_cache_later(cx);
+
         // The pane layout follows the window width.
         cx.observe_window_bounds(
             window,

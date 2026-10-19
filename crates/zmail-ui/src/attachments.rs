@@ -3,8 +3,10 @@
 //!
 //! - **Open** copies the attachment into a private cache directory (owner
 //!   only on macOS and Linux) and hands it to the system's default app. A
-//!   program or script (`attachment_safety::is_executable_or_script`)
-//!   gets a warning first, and opens only on "Open Anyway".
+//!   program or script, or a web page or SVG that would run scripts in the
+//!   browser (`attachment_safety::open_risk`), gets a warning first, and
+//!   opens only on "Open Anyway". Copies older than a day are removed when
+//!   the window opens ([`prune_open_cache`]).
 //! - **Save As** asks for a path with the platform save dialog, which
 //!   itself asks before replacing an existing file.
 //! - **Save All** ([`SaveAttachments`](crate::actions::SaveAttachments)
@@ -19,13 +21,14 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime},
 };
 
 use gpui::{
     AnyElement, App, Context, IntoElement, PathPromptOptions, SharedString, Window, div, prelude::*,
 };
 use zmail_core::{ReceivedAttachment, text::count_noun};
-use zmail_security::attachment_safety::{is_executable_or_script, sanitize_filename};
+use zmail_security::attachment_safety::{OpenRisk, open_risk, sanitize_filename};
 
 use crate::WorkspaceView;
 use crate::actions::{OpenAttachment, SaveAttachmentAs, SaveMessageAttachments};
@@ -34,6 +37,10 @@ use crate::components::{Button, Modal, ModalState};
 /// Directory under the store's directory that opened attachments are
 /// copied into.
 const OPEN_CACHE_DIR: &str = "opened-attachments";
+
+/// How long an opened copy stays in the open cache: the app it was handed
+/// to has long finished reading it by then.
+const OPEN_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How many numbered names Save All tries before giving up on a file.
 const MAX_NUMBERED_NAMES: u32 = 999;
@@ -81,7 +88,7 @@ impl WorkspaceView {
             .find(|attachment| attachment.id == attachment_id)
     }
 
-    /// Open: warn first for programs and scripts, otherwise open now.
+    /// Open: warn first for anything that can run code, otherwise open now.
     pub(crate) fn open_attachment(
         &mut self,
         action: &OpenAttachment,
@@ -92,7 +99,7 @@ impl WorkspaceView {
             self.show_error("That attachment is no longer in the open conversation.", cx);
             return;
         };
-        if is_executable_or_script(&attachment.filename, &attachment.content_type) {
+        if open_risk(&attachment.filename, &attachment.content_type) != OpenRisk::None {
             self.attachments.pending_open = Some(attachment);
             self.attachments.open_warning.open(window, cx);
             cx.notify();
@@ -296,7 +303,22 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// The warning shown before opening a program or script.
+    /// Removes opened copies older than a day from the open cache, in the
+    /// background. Called once when the window opens.
+    pub(crate) fn prune_open_cache_later(&self, cx: &mut Context<Self>) {
+        let cache_root = self.store_dir().join(OPEN_CACHE_DIR);
+        cx.background_spawn(async move {
+            let cutoff = SystemTime::now()
+                .checked_sub(OPEN_CACHE_MAX_AGE)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            // A failed prune leaves files behind; it never blocks opening.
+            let _ = prune_open_cache(&cache_root, cutoff);
+        })
+        .detach();
+    }
+
+    /// The warning shown before opening a program, a script, or a web page
+    /// or SVG that would run scripts in the browser.
     pub(crate) fn render_open_warning(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.attachments.open_warning.is_open() {
             return None;
@@ -311,10 +333,10 @@ impl WorkspaceView {
                 "Open \u{201C}{}\u{201D}?",
                 sanitize_filename(&attachment.filename)
             ))
-            .description(
-                "This kind of file can run programs on your computer. Open it only if you \
-                 expected it and trust the sender.",
-            )
+            .description(open_warning_text(open_risk(
+                &attachment.filename,
+                &attachment.content_type,
+            )))
             .footer(
                 div()
                     .debug_selector(|| "attachment-open-cancel".into())
@@ -386,6 +408,55 @@ pub(crate) fn copy_to_open_cache(
     Ok(destination)
 }
 
+/// The open warning's explanation for a file of `risk`.
+fn open_warning_text(risk: OpenRisk) -> &'static str {
+    match risk {
+        OpenRisk::ActiveContent => {
+            "This file opens in your web browser and can run scripts there. Fake sign-in \
+             pages are often sent this way. Open it only if you expected it and trust the \
+             sender."
+        }
+        OpenRisk::Program | OpenRisk::None => {
+            "This kind of file can run programs on your computer. Open it only if you \
+             expected it and trust the sender."
+        }
+    }
+}
+
+/// Removes every attachment directory in the open cache whose files are
+/// all older than `cutoff`, and returns how many it removed. A missing
+/// cache is not an error.
+pub(crate) fn prune_open_cache(cache_root: &Path, cutoff: SystemTime) -> io::Result<usize> {
+    let entries = match fs::read_dir(cache_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let directory = entry?.path();
+        if directory.is_dir() && newest_modification(&directory)? < cutoff {
+            fs::remove_dir_all(&directory)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// The latest modification time of the files in `directory`, or the
+/// directory's own when it is empty.
+fn newest_modification(directory: &Path) -> io::Result<SystemTime> {
+    let mut newest = None;
+    for entry in fs::read_dir(directory)? {
+        let modified = entry?.metadata()?.modified()?;
+        newest = Some(newest.map_or(modified, |newest: SystemTime| newest.max(modified)));
+    }
+    match newest {
+        Some(newest) => Ok(newest),
+        None => fs::metadata(directory)?.modified(),
+    }
+}
+
 /// Creates `directory` if needed and makes it owner-only on Unix (also when
 /// it already existed). Windows keeps the per-user ACL of the app data
 /// directory it sits in.
@@ -452,6 +523,44 @@ fn copy_new(source: &Path, destination: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn age_file(path: &Path, age: Duration) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("the file opens for writing")
+            .set_modified(SystemTime::now() - age)
+            .expect("the modification time is set");
+    }
+
+    #[test]
+    fn pruning_removes_only_copies_older_than_the_cutoff() {
+        let root = scratch("prune");
+        let source = root.join("source.pdf");
+        fs::write(&source, b"pdf").expect("the source is written");
+        let cache = root.join(OPEN_CACHE_DIR);
+        let old = copy_to_open_cache(&source, &cache, 1, "old.pdf").expect("old copy");
+        let fresh = copy_to_open_cache(&source, &cache, 2, "fresh.pdf").expect("fresh copy");
+        age_file(&old, Duration::from_secs(2 * 24 * 60 * 60));
+
+        let cutoff = SystemTime::now() - OPEN_CACHE_MAX_AGE;
+        assert_eq!(prune_open_cache(&cache, cutoff).expect("prune"), 1);
+        assert!(!old.exists());
+        assert!(!cache.join("1").exists());
+        assert!(fresh.exists());
+
+        assert_eq!(
+            prune_open_cache(&root.join("missing"), cutoff).expect("a missing cache"),
+            0
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn web_pages_get_their_own_open_warning() {
+        assert!(open_warning_text(OpenRisk::ActiveContent).contains("web browser"));
+        assert!(open_warning_text(OpenRisk::Program).contains("run programs"));
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
