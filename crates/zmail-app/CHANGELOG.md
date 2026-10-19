@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.12.0](https://github.com/unicornops/zmail/compare/v0.11.0...v0.12.0) (2026-10-19)
+
+
+### Features
+
+* **search:** scope searches to the folder, the account or every account ([#184](https://github.com/unicornops/zmail/issues/184)) ([a2543b4](https://github.com/unicornops/zmail/commit/a2543b407733014adefdc45affc2d830c4c8b624))
+* **store:** mailbox roles and hierarchy in the mailbox model ([#172](https://github.com/unicornops/zmail/issues/172)) ([dde26f3](https://github.com/unicornops/zmail/commit/dde26f3f3825156f163aef0ec6e5636e444df5f3))
+* **ui:** comfortable and compact message rows ([#175](https://github.com/unicornops/zmail/issues/175)) ([2d53336](https://github.com/unicornops/zmail/commit/2d533367ce3de3dff5d259baa9e63c96c3d21858))
+* **ui:** multi-select in the message list, with a bulk action bar and a Move to picker ([#176](https://github.com/unicornops/zmail/issues/176)) ([feeadc4](https://github.com/unicornops/zmail/commit/feeadc48f6668567f6d80cae0b81a91a56947baf))
+* **ui:** sidebar with unified inbox, favourites and folder trees ([#179](https://github.com/unicornops/zmail/issues/179)) ([2e7a16d](https://github.com/unicornops/zmail/commit/2e7a16dbf8353cf088ba9e374ce0e42a4c5afbb8))
+* **ui:** skeleton rows, empty states and plain-word outbox rows ([#180](https://github.com/unicornops/zmail/issues/180)) ([4bc5a58](https://github.com/unicornops/zmail/commit/4bc5a5896ee7a064d5fb7f2cb3fee411119e98a7))
+
 ## [0.11.0](https://github.com/unicornops/zmail/compare/v0.10.0...v0.11.0) (2026-10-18)
 
 
