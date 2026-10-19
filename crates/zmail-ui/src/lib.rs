@@ -111,6 +111,12 @@ pub enum InitialView {
     Thread(i64),
     /// The reader on this thread with every message expanded.
     ThreadExpanded(i64),
+    /// The reader on this thread with the second paragraph of its current
+    /// message selected.
+    ThreadSelection(i64),
+    /// The reader on this thread with the open-link dialog showing for the
+    /// first link of its current message.
+    ThreadLinkPrompt(i64),
     /// The account setup pane, even when accounts already exist.
     AccountSetup,
     /// The inbox with keyboard focus in the sidebar, which opens it as an

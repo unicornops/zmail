@@ -42,6 +42,11 @@ pub(crate) enum FixtureView {
     ReaderExpanded,
     /// The reader on one long message with a signature and quoted text.
     ReaderLong,
+    /// The long message with a paragraph selected.
+    ReaderSelection,
+    /// An HTML message whose link shows one site and goes to another,
+    /// with the open-link dialog warning about it.
+    ReaderLinkWarning,
     /// The compose pane on a half-written reply.
     Compose,
     /// The account setup pane with an account already configured.
@@ -72,6 +77,8 @@ impl FixtureView {
             "reader" => Self::Reader,
             "reader-expanded" => Self::ReaderExpanded,
             "reader-long" => Self::ReaderLong,
+            "reader-selection" => Self::ReaderSelection,
+            "reader-link-warning" => Self::ReaderLinkWarning,
             "compose" => Self::Compose,
             "account-setup" => Self::AccountSetup,
             "sidebar" => Self::Sidebar,
@@ -79,7 +86,7 @@ impl FixtureView {
             "multi-select" => Self::MultiSelect,
             "search" => Self::Search,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, compose, account-setup, sidebar, accounts, multi-select or search"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-selection, reader-link-warning, compose, account-setup, sidebar, accounts, multi-select or search"
             ),
         })
     }
@@ -186,6 +193,18 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
             account_id,
             "archive",
             LONG_THREAD_SUBJECT,
+        )?),
+        FixtureView::ReaderSelection => InitialView::ThreadSelection(thread_id(
+            store,
+            account_id,
+            "archive",
+            LONG_THREAD_SUBJECT,
+        )?),
+        FixtureView::ReaderLinkWarning => InitialView::ThreadLinkPrompt(thread_id(
+            store,
+            account_id,
+            "archive",
+            LINK_THREAD_SUBJECT,
         )?),
         FixtureView::Compose => {
             let identity = store
@@ -486,6 +505,9 @@ const INBOX: &[Thread] = &[
 /// The subject of the `reader-long` conversation.
 const LONG_THREAD_SUBJECT: &str = "Draft release notes for 0.13";
 
+/// The subject of the `reader-link-warning` conversation.
+const LINK_THREAD_SUBJECT: &str = "Unusual sign-in to your account";
+
 const ARCHIVE: &[Thread] = &[
     Thread {
         id: "t-archived",
@@ -536,6 +558,23 @@ const ARCHIVE: &[Thread] = &[
                    On Mon, Sam Taylor <sam.taylor@example.com> wrote:\n\
                    > Could you draft the release notes for 0.13? Nothing long, the \
                    highlights are enough.\n>\n> Sam",
+            attachments: &[],
+        }],
+    },
+    Thread {
+        id: "t-sign-in",
+        subject: LINK_THREAD_SUBJECT,
+        flagged: false,
+        messages: &[Message {
+            sender: "Account Security <security@bank-example.net>",
+            minutes_ago: 9 * DAY,
+            is_read: true,
+            // HTML (see `thread_snapshot`): the link shows one site and
+            // goes to another.
+            body: "<p>Hello Sam,</p><p>We noticed an unusual sign-in to your account. To \
+                   keep it safe, confirm your details within 24 hours:</p>\
+                   <p><a href=\"https://bank-example.net/verify?id=8812\">\
+                   https://bank.example.com/login</a></p><p>Account Security</p>",
             attachments: &[],
         }],
     },
@@ -731,8 +770,15 @@ fn thread_snapshot(thread: &Thread, now: u64) -> ThreadSnapshot {
         .iter()
         .enumerate()
         .map(|(index, message)| {
-            let preview = message
+            // A body starting with a tag is HTML, stored sanitized as the
+            // adapters store an HTML-only message.
+            let html = message
                 .body
+                .starts_with('<')
+                .then(|| zmail_security::sanitize_html_for_display(message.body));
+            let preview = html
+                .as_ref()
+                .map_or(message.body, |html| html.text.as_str())
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -744,8 +790,8 @@ fn thread_snapshot(thread: &Thread, now: u64) -> ThreadSnapshot {
                 recipients: format!("{OWN_NAME} <{OWN_EMAIL}>"),
                 subject: thread.subject.to_owned(),
                 body_preview: preview.chars().take(160).collect(),
-                body_text: Some(message.body.to_owned()),
-                sanitized_html: None,
+                body_text: html.is_none().then(|| message.body.to_owned()),
+                sanitized_html: html.map(|html| html.html),
                 has_remote_content: false,
                 is_read: message.is_read,
                 is_flagged: thread.flagged,
@@ -815,6 +861,8 @@ mod tests {
             "reader",
             "reader-expanded",
             "reader-long",
+            "reader-selection",
+            "reader-link-warning",
             "compose",
             "account-setup",
             "sidebar",
@@ -946,6 +994,30 @@ mod tests {
             thread.messages[0]
                 .rendered_body
                 .contains("\n--\nGrace Okafor")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reader_link_warning_opens_an_html_message_with_a_link() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::ReaderLinkWarning)?;
+        let InitialView::ThreadLinkPrompt(thread_id) = initial_view else {
+            bail!("the reader-link-warning fixture should open a thread, not {initial_view:?}");
+        };
+        let thread = store
+            .thread_view(thread_id)?
+            .context("thread should exist")?;
+        let message = &thread.messages[0];
+        assert_eq!(message.body_text, None);
+        let html = message
+            .sanitized_html
+            .as_deref()
+            .context("the HTML is stored")?;
+        assert!(html.contains("blocked://bank-example.net/verify"), "{html}");
+        assert!(
+            message
+                .rendered_body
+                .contains("https://bank.example.com/login")
         );
         Ok(())
     }

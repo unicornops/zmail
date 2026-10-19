@@ -543,9 +543,132 @@ fn decode_character_reference(reference: &str) -> Option<char> {
     char::from_u32(value).map(|ch| if ch.is_control() { ' ' } else { ch })
 }
 
+/// A link in sanitized HTML: the text a reader sees and where it points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HtmlLink {
+    /// The link's visible text, as [`sanitize_html_for_display`] renders it.
+    pub text: String,
+    /// The `href` value with character references decoded. Remote
+    /// addresses read `blocked://…`, as the sanitizer stored them.
+    pub href: String,
+}
+
+/// Lists the `<a href>` links of sanitized HTML (the `html` of
+/// [`SanitizedHtml`]) in document order.
+///
+/// This only reads the markup; it loads nothing. The reader uses it to make
+/// a link's text clickable and to show the real target, and opens a link
+/// only after the user clicks it and confirms.
+pub fn html_links(html: &str) -> Vec<HtmlLink> {
+    let html = strip_tag_block(html, "title");
+    let lower = html.to_ascii_lowercase();
+    let mut links = Vec::new();
+    let mut cursor = 0;
+    while let Some(start) = find_anchor_start(&lower, cursor) {
+        let Some(tag_end) = tag_end(&html, start) else {
+            break;
+        };
+        let close = lower[tag_end..]
+            .find("</a")
+            .map_or(html.len(), |offset| tag_end + offset);
+        if let Some(href) = attribute_value(&html[start..tag_end], "href") {
+            links.push(HtmlLink {
+                text: html_to_text(&html[tag_end..close]),
+                href,
+            });
+        }
+        cursor = close.max(tag_end);
+    }
+    links
+}
+
+/// The next `<a` tag at or after `from` (not `<abbr`, `<area`, …).
+fn find_anchor_start(lower: &str, from: usize) -> Option<usize> {
+    let mut cursor = from;
+    while let Some(offset) = lower[cursor..].find("<a") {
+        let start = cursor + offset;
+        match lower[start + 2..].chars().next() {
+            Some(next) if next.is_whitespace() || next == '>' || next == '/' => {
+                return Some(start);
+            }
+            None => return None,
+            _ => cursor = start + 2,
+        }
+    }
+    None
+}
+
+/// The index just past the `>` that ends the tag starting at `start`,
+/// skipping `>` inside quoted attribute values.
+fn tag_end(html: &str, start: usize) -> Option<usize> {
+    let mut attribute_quote = AttributeQuote::default();
+    html[start + 1..]
+        .char_indices()
+        .find(|&(_, ch)| attribute_quote.ends_tag(ch))
+        .map(|(offset, ch)| start + 1 + offset + ch.len_utf8())
+}
+
+/// The decoded value of attribute `wanted` in the start tag `tag`
+/// (`<a href="…" …>`), if the tag has it.
+fn attribute_value(tag: &str, wanted: &str) -> Option<String> {
+    let inner = tag.strip_prefix('<')?.trim_end_matches('>');
+    // Skip the tag name.
+    let mut rest = inner.trim_start_matches(|ch: char| !ch.is_whitespace() && ch != '/');
+    loop {
+        rest = rest.trim_start_matches(|ch: char| ch.is_whitespace() || ch == '/');
+        if rest.is_empty() {
+            return None;
+        }
+        let name_end = rest
+            .find(|ch: char| ch.is_whitespace() || ch == '=' || ch == '/')
+            .unwrap_or(rest.len());
+        let name = &rest[..name_end];
+        rest = rest[name_end..].trim_start();
+        let mut value = "";
+        if let Some(after_equals) = rest.strip_prefix('=') {
+            let after_equals = after_equals.trim_start();
+            match after_equals.chars().next() {
+                Some(quote @ ('"' | '\'')) => {
+                    let body = &after_equals[1..];
+                    let end = body.find(quote).unwrap_or(body.len());
+                    value = &body[..end];
+                    rest = body.get(end + 1..).unwrap_or("");
+                }
+                _ => {
+                    let end = after_equals
+                        .find(char::is_whitespace)
+                        .unwrap_or(after_equals.len());
+                    value = &after_equals[..end];
+                    rest = &after_equals[end..];
+                }
+            }
+        }
+        if name.eq_ignore_ascii_case(wanted) {
+            return Some(decode_character_references(value).trim().to_owned());
+        }
+    }
+}
+
+/// Decodes the character references in an attribute value.
+fn decode_character_references(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '&' {
+            push_character_reference(&mut decoded, &mut chars);
+        } else {
+            decoded.push(ch);
+        }
+    }
+    decoded
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{InMemorySecretStore, SecretSlot, SecretStore, sanitize_html_for_display};
+    use super::{
+        HtmlLink, InMemorySecretStore, SecretSlot, SecretStore, html_links,
+        sanitize_html_for_display,
+    };
 
     #[test]
     fn in_memory_store_round_trips_secrets() {
@@ -696,5 +819,46 @@ mod tests {
             sanitized.text,
             "AT&T & friends \u{2014} it\u{2019}s <fine> !"
         );
+    }
+
+    #[test]
+    fn html_links_list_text_and_targets_in_order() {
+        let sanitized = sanitize_html_for_display(
+            r#"<p>Pay your <a class="btn" href="https://evil.example/pay?a=1&amp;b=2">PayPal invoice</a>
+            or <A HREF='mailto:help@example.com'>write to us</A>.
+            <abbr title="x">abbr</abbr> <a name="top">no href</a>
+            <a href=https://example.org/plain>plain</a>
+            <a href="https://example.org/img"><img src="https://example.org/i.png"></a></p>"#,
+        );
+        let link = |text: &str, href: &str| HtmlLink {
+            text: text.to_owned(),
+            href: href.to_owned(),
+        };
+        assert_eq!(
+            html_links(&sanitized.html),
+            [
+                link("PayPal invoice", "blocked://evil.example/pay?a=1&b=2"),
+                link("write to us", "mailto:help@example.com"),
+                link("plain", "blocked://example.org/plain"),
+                link("", "blocked://example.org/img"),
+            ]
+        );
+        // Every link text is in the rendered text, so the reader can find
+        // it there.
+        for link in html_links(&sanitized.html) {
+            assert!(sanitized.text.contains(&link.text), "{link:?}");
+        }
+    }
+
+    #[test]
+    fn html_links_survive_a_quoted_angle_bracket_and_no_closing_tag() {
+        assert_eq!(
+            html_links(r#"<a title="a > b" href="blocked://example.org/x">Example"#),
+            [HtmlLink {
+                text: "Example".to_owned(),
+                href: "blocked://example.org/x".to_owned(),
+            }]
+        );
+        assert!(html_links("<a").is_empty());
     }
 }

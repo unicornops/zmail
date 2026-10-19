@@ -25,26 +25,36 @@
 //! | `popover` | The More menus, the sender menu and the Move to… picker |
 //! | `quoted` | Finds the quoted text and signature that fold |
 //! | `source` | The View Plain Text / View Source dialog |
+//! | `body` | A message body: paragraphs at a readable measure, the selection |
+//! | `selectable` | `SelectableText`: a paragraph the mouse can select |
+//! | `links` | A body's links and the dialog that opens one |
 
 mod actions;
+mod body;
 mod conversation;
 mod header;
+mod links;
 mod message;
 mod popover;
 mod quoted;
+mod selectable;
 mod source;
+
+use std::{collections::HashMap, rc::Rc};
 
 use gpui::{
     App, Context, FocusHandle, Focusable, IntoElement, ListAlignment, ListOffset, ListState,
-    Render, Window, div, list, prelude::*, px, rgb,
+    MouseButton, Render, Window, div, list, prelude::*, px, rgb,
 };
 use zmail_core::{MailboxSummary, ThreadView, time::HourCycle};
 
 use self::actions::{action_bar_buttons, more_menu_items};
+use self::body::{BodyContext, BodyModel, BodySelection};
 use self::conversation::{
     ConversationItem, ConversationState, render_conversation_header, render_no_conversation,
     render_selection_summary,
 };
+use self::links::LinkPrompt;
 use self::message::{MessageContext, MessageDisplay, render_message};
 use self::popover::OpenPopover;
 pub(crate) use self::popover::PopoverAnchor;
@@ -101,6 +111,18 @@ pub(crate) struct ReaderView {
     /// The View Plain Text / View Source dialog.
     source: Option<SourceView>,
     source_modal: ModalState,
+    /// Each message's prepared body, while the conversation is open.
+    bodies: HashMap<i64, Rc<BodyModel>>,
+    /// The selected text, inside one message's body.
+    selection: Option<BodySelection>,
+    /// The mouse is dragging out the selection.
+    dragging: bool,
+    /// A paragraph took the current mouse press, so the reader's own press
+    /// handler keeps the selection it started.
+    press_selected: bool,
+    /// The open-link dialog.
+    link_prompt: Option<LinkPrompt>,
+    link_modal: ModalState,
     /// Test instrumentation: renders.
     #[cfg(test)]
     pub(crate) counters: crate::pane::RenderCounters,
@@ -124,6 +146,12 @@ impl ReaderView {
             swallow_click: None,
             source: None,
             source_modal: ModalState::new(cx),
+            bodies: HashMap::new(),
+            selection: None,
+            dragging: false,
+            press_selected: false,
+            link_prompt: None,
+            link_modal: ModalState::new(cx),
             #[cfg(test)]
             counters: Default::default(),
         }
@@ -143,6 +171,13 @@ impl ReaderView {
         if self.conversation.is_for(thread) {
             if let Some(thread) = thread {
                 self.conversation.update(thread);
+                // A body that changed (downloaded since) is prepared again.
+                self.bodies.retain(|id, body| {
+                    thread
+                        .messages
+                        .iter()
+                        .any(|message| message.id == *id && message.rendered_body == *body.text)
+                });
             }
             // The messages may have changed height (a body downloaded, a
             // message arrived); the scroll position stays.
@@ -155,6 +190,9 @@ impl ReaderView {
             self.conversation = ConversationState::open(thread);
             self.list_state.reset(count);
             self.popover = None;
+            self.bodies.clear();
+            self.selection = None;
+            self.dragging = false;
         }
         cx.notify();
     }
@@ -318,19 +356,21 @@ impl ReaderView {
 
     /// One item of the conversation list.
     fn render_item(
-        &self,
+        &mut self,
         index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = *cx.global::<UiColors>();
-        let Some(thread) = self.state.thread.as_ref() else {
+        let Some(thread) = self.state.thread.clone() else {
             return div().into_any_element();
         };
+        let thread = &thread;
         match ConversationItem::at(index, thread.messages.len()) {
             ConversationItem::Header => render_conversation_header(thread, &colors),
             ConversationItem::Message(index) => {
                 let message = &thread.messages[index];
+                let model = self.body_model(message);
                 let context = MessageContext {
                     now: chrono::Local::now(),
                     hour_cycle: self.hour_cycle,
@@ -345,7 +385,18 @@ impl ReaderView {
                     details: self.conversation.shows_details(message.id),
                     current: self.conversation.current() == Some(index),
                 };
-                render_message(self, message, display, &context, cx)
+                let body = BodyContext {
+                    message_id: message.id,
+                    index,
+                    model: &model,
+                    selection: self.selection_in(message.id),
+                    dragging: self.dragging
+                        && self
+                            .selection
+                            .is_some_and(|selection| selection.message_id == message.id),
+                    colors,
+                };
+                render_message(self, message, display, &context, &body, cx)
             }
             // The inline reply (UI plan Phase 5) goes here; until then it
             // is the space below the last message.
@@ -401,6 +452,14 @@ impl Render for ReaderView {
             .on_action(cx.listener(Self::next_message))
             .on_action(cx.listener(Self::previous_message))
             .on_action(cx.listener(Self::toggle_current_message))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::select_all))
+            // After any paragraph's own press handler: a press no
+            // paragraph took clears the selection.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|reader, _, _, cx| reader.press_outside_text(cx)),
+            )
             .size_full()
             .flex()
             .flex_col()
@@ -455,5 +514,6 @@ impl Render for ReaderView {
                 .into_any_element()
             })
             .children(self.render_source(&colors, cx))
+            .children(self.render_link_prompt(&colors, cx))
     }
 }
