@@ -193,8 +193,11 @@ impl WorkspaceView {
             self.end_search(cx);
             return;
         }
-        let showing =
-            matches!(self.list_mode, ListMode::Search) && self.search_results_query == query;
+        // The list shows this query's results, and no read for another
+        // query is still running.
+        let showing = matches!(self.list_mode, ListMode::Search)
+            && self.search_results_query == query
+            && self.search_pending_query == query;
         if showing {
             self.search_servers_in_scope(cx);
         } else {

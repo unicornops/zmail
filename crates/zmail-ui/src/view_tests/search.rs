@@ -111,6 +111,23 @@ fn stale_results_never_replace_newer_ones(cx: &mut TestAppContext) {
         ("report 2".to_owned(), vec!["Quarterly report 2".to_owned()])
     );
 
+    // Enter on text the shown results match, while a read for other text
+    // is still running, searches the text again rather than keeping the
+    // running read.
+    view.update(cx, |view, cx| {
+        view.search_query
+            .update(cx, |input, cx| input.set_text("report 0", cx));
+        view.submit_search(cx);
+        view.search_query
+            .update(cx, |input, cx| input.set_text("report 2", cx));
+        view.submit_search(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        results(&view, cx),
+        ("report 2".to_owned(), vec!["Quarterly report 2".to_owned()])
+    );
+
     // A read for an earlier generation that arrives late is dropped.
     let current = generation(&view, cx);
     view.update(cx, |view, cx| {
