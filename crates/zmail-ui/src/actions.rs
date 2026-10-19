@@ -199,6 +199,15 @@ pub struct SaveAttachmentAs {
     pub attachment_id: i64,
 }
 
+/// Save every attachment of one message into a folder the user picks
+/// (the message's More menu).
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = zmail, no_json)]
+pub struct SaveMessageAttachments {
+    /// Message id.
+    pub message_id: i64,
+}
+
 /// Hide a message's sender-safety banner ("Looks safe"). The choice is
 /// stored with the message; other messages from the sender still warn.
 #[derive(Clone, Debug, PartialEq, Eq, Action)]
@@ -225,6 +234,7 @@ pub(crate) const ACTIONS_WITHOUT_KEYS: &[(&str, &str)] = &[
     ("zmail::SelectIdentity", "needs an identity argument"),
     ("zmail::OpenAttachment", "needs an attachment argument"),
     ("zmail::SaveAttachmentAs", "needs an attachment argument"),
+    ("zmail::SaveMessageAttachments", "needs a message argument"),
     (
         "zmail::DismissSenderWarning",
         "needs a message argument; it is the banner's Looks safe button",

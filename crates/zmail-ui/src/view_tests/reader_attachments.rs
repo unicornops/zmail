@@ -10,7 +10,7 @@ use zmail_core::{
 use zmail_store::LocalStore;
 
 use super::{Harness, Setup, click, click_on, open_workspace_with};
-use crate::actions::SaveAttachments;
+use crate::actions::{SaveAttachments, SaveMessageAttachments};
 use crate::{InitialView, WorkspaceView};
 
 /// The seeded attachments: file name, MIME type and contents.
@@ -273,5 +273,29 @@ fn save_all_saves_every_file_without_overwriting(cx: &mut TestAppContext) {
         fs::read(folder.join("setup.exe")).expect("reads"),
         b"MZ program"
     );
+    let _ = fs::remove_dir_all(&folder);
+}
+
+#[gpui::test]
+fn save_all_for_one_message_saves_its_files(cx: &mut TestAppContext) {
+    let t = open(cx);
+    let folder = scratch("save-message");
+    let message_id = t
+        .harness
+        .store
+        .thread_view(thread_and_attachments(&t.harness).0)
+        .expect("the thread loads")
+        .expect("the thread exists")
+        .messages[0]
+        .id;
+
+    t.cx.dispatch_action(SaveMessageAttachments { message_id });
+    t.cx.run_until_parked();
+    let chosen = folder.clone();
+    t.cx.simulate_path_prompt_response(move |_| Some(vec![chosen]));
+    t.cx.run_until_parked();
+    for (name, _, bytes) in FILES {
+        assert_eq!(fs::read(folder.join(name)).expect("reads"), *bytes);
+    }
     let _ = fs::remove_dir_all(&folder);
 }

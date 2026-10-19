@@ -7,9 +7,9 @@
 //!   gets a warning first, and opens only on "Open Anyway".
 //! - **Save As** asks for a path with the platform save dialog, which
 //!   itself asks before replacing an existing file.
-//! - **Save All** ([`SaveAttachments`](crate::actions::SaveAttachments))
-//!   asks for a folder and saves every attachment of the conversation
-//!   there. A name that is taken gets a number ("report (1).pdf"); no
+//! - **Save All** ([`SaveAttachments`](crate::actions::SaveAttachments)
+//!   for the conversation, [`SaveMessageAttachments`] for one message)
+//!   asks for a folder and saves every attachment there. A name that is taken gets a number ("report (1).pdf"); no
 //!   file is ever overwritten.
 //!
 //! Every name written to disk goes through
@@ -28,7 +28,7 @@ use zmail_core::{ReceivedAttachment, text::count_noun};
 use zmail_security::attachment_safety::{is_executable_or_script, sanitize_filename};
 
 use crate::WorkspaceView;
-use crate::actions::{OpenAttachment, SaveAttachmentAs};
+use crate::actions::{OpenAttachment, SaveAttachmentAs, SaveMessageAttachments};
 use crate::components::{Button, Modal, ModalState};
 
 /// Directory under the store's directory that opened attachments are
@@ -198,10 +198,21 @@ impl WorkspaceView {
         .detach();
     }
 
+    /// Save All for one message: its More menu's Save Attachments.
+    pub(crate) fn save_message_attachments(
+        &mut self,
+        action: &SaveMessageAttachments,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_all_attachments(Some(action.message_id), cx);
+    }
+
     /// Save All: asks for a folder and saves every attachment of the open
-    /// conversation into it, never overwriting a file. The More menu and
-    /// the Save Attachments command (`SaveAttachments`) call this.
-    pub(crate) fn save_all_attachments(&mut self, cx: &mut Context<Self>) {
+    /// conversation (or of its message `message_id`) into it, never
+    /// overwriting a file. The Save Attachments command
+    /// (`SaveAttachments`) saves the whole conversation.
+    pub(crate) fn save_all_attachments(&mut self, message_id: Option<i64>, cx: &mut Context<Self>) {
         let Some(thread) = self.selected_thread_view() else {
             return self.show_error("Select a conversation first.", cx);
         };
@@ -209,6 +220,7 @@ impl WorkspaceView {
         for attachment in thread
             .messages
             .iter()
+            .filter(|message| message_id.is_none_or(|id| message.id == id))
             .flat_map(|message| &message.attachments)
         {
             match self.store.attachment_blob(attachment.id) {
@@ -217,7 +229,14 @@ impl WorkspaceView {
             }
         }
         if files.is_empty() {
-            return self.show_error("This conversation has no attachments.", cx);
+            return self.show_error(
+                if message_id.is_some() {
+                    "This message has no attachments."
+                } else {
+                    "This conversation has no attachments."
+                },
+                cx,
+            );
         }
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: false,

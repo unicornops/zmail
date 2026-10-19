@@ -1998,7 +1998,7 @@ impl WorkspaceView {
 
     fn save_attachments(&mut self, _: &SaveAttachments, _: &mut Window, cx: &mut Context<Self>) {
         if self.command_thread_id().is_some() {
-            self.save_all_attachments(cx);
+            self.save_all_attachments(None, cx);
         }
     }
 
@@ -2571,6 +2571,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::save_attachments))
             .on_action(cx.listener(Self::open_attachment))
             .on_action(cx.listener(Self::save_attachment_as))
+            .on_action(cx.listener(Self::save_message_attachments))
             .on_action(cx.listener(Self::dismiss_sender_warning))
             .on_action(cx.listener(Self::move_to_mailbox))
             .size_full()

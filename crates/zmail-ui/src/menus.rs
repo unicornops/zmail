@@ -124,6 +124,10 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
         "the Save As button on one attachment card",
     ),
     (
+        "zmail::SaveMessageAttachments",
+        "Save Attachments in one message's More menu",
+    ),
+    (
         "zmail::DismissSenderWarning",
         "the Looks safe button on one message's sender-safety banner",
     ),
