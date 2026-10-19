@@ -12,25 +12,38 @@
 //! Phase 4 folder picker) and, when the pane is narrow, the actions that
 //! no longer fit in the row.
 //!
+//! The conversation below is a variable-height `list`, so a long thread
+//! only lays out the messages on screen. n and p move between messages and
+//! Enter expands or collapses the current one.
+//!
 //! | Module | Contents |
 //! |---|---|
 //! | `actions` | The action bar's buttons and the More menu's entries |
-//! | `conversation` | The conversation view: subject, metadata, messages |
-//! | `message` | The message view: one message's header, status and body |
+//! | `conversation` | The conversation list: its items and which messages are expanded |
+//! | `message` | The message view: one message, expanded or as a summary line |
+//! | `quoted` | Finds the quoted text and signature that fold |
 
 mod actions;
 mod conversation;
 mod message;
+mod quoted;
 
 use gpui::{
-    App, Context, DismissEvent, Entity, FocusHandle, Focusable, IntoElement, MouseButton, Render,
-    ScrollHandle, Subscription, Window, div, point, prelude::*, px, rgb,
+    App, Context, DismissEvent, Entity, FocusHandle, Focusable, IntoElement, ListAlignment,
+    ListOffset, ListState, MouseButton, Render, Subscription, Window, div, list, prelude::*, px,
+    rgb,
 };
 use zmail_core::{MailboxSummary, ThreadView, time::HourCycle};
 
 use self::actions::{MoreItem, action_bar_buttons, more_menu_items};
-use self::conversation::{render_reader_detail, render_selection_summary};
-use crate::actions::{PageDown, PageUp, ScrollDown, ScrollUp};
+use self::conversation::{
+    ConversationItem, ConversationState, render_conversation_header, render_no_conversation,
+    render_selection_summary,
+};
+use self::message::{MessageContext, MessageDisplay, render_message};
+use crate::actions::{
+    NextMessage, PageDown, PageUp, PreviousMessage, ScrollDown, ScrollUp, ToggleMessage,
+};
 use crate::components::{IconButton, Menu, MenuEntry, popover_below};
 use crate::pane::pane_focus_indicator;
 use crate::styles::UiColors;
@@ -43,6 +56,10 @@ const SCROLL_STEP: f32 = 48.;
 
 /// Height of the reader's action bar.
 const ACTION_BAR_HEIGHT: f32 = 48.0;
+
+/// How far beyond the visible messages the conversation list lays out, so
+/// scrolling does not show messages popping in.
+const LIST_OVERDRAW: f32 = 400.;
 
 /// What the shell shows in the reader.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -64,7 +81,10 @@ pub(crate) struct ReaderView {
     focus_handle: FocusHandle,
     hour_cycle: HourCycle,
     state: ReaderState,
-    scroll_handle: ScrollHandle,
+    /// The conversation list's scroll position and measured item heights.
+    list_state: ListState,
+    /// Which messages are expanded and which is current.
+    conversation: ConversationState,
     /// The open More menu and the subscription that closes it.
     more_menu: Option<(Entity<Menu>, Subscription)>,
     /// Set when a press on the More button closed the open menu, so the
@@ -87,7 +107,8 @@ impl ReaderView {
             focus_handle: cx.focus_handle(),
             hour_cycle,
             state: ReaderState::default(),
-            scroll_handle: ScrollHandle::new(),
+            list_state: ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)),
+            conversation: ConversationState::default(),
             more_menu: None,
             swallow_more_click: false,
             #[cfg(test)]
@@ -96,16 +117,30 @@ impl ReaderView {
     }
 
     /// Replaces what the reader shows; re-renders only when it changed. A
-    /// different thread starts at the top.
+    /// different thread starts at the top, with its latest and unread
+    /// messages expanded.
     pub(crate) fn set_state(&mut self, state: ReaderState, cx: &mut Context<Self>) {
         if self.state == state {
             return;
         }
-        let thread_changed = self.state.thread.as_ref().map(|thread| thread.id)
-            != state.thread.as_ref().map(|thread| thread.id);
+        let old_count = self.list_state.item_count();
         self.state = state;
-        if thread_changed {
-            self.scroll_handle.set_offset(point(px(0.), px(0.)));
+        let thread = self.state.thread.as_ref();
+        let count = thread.map_or(0, |thread| ConversationItem::count(thread.messages.len()));
+        if self.conversation.is_for(thread) {
+            if let Some(thread) = thread {
+                self.conversation.update(thread);
+            }
+            // The messages may have changed height (a body downloaded, a
+            // message arrived); the scroll position stays.
+            if count == old_count {
+                self.list_state.remeasure();
+            } else {
+                self.list_state.splice(0..old_count, count);
+            }
+        } else {
+            self.conversation = ConversationState::open(thread);
+            self.list_state.reset(count);
             self.more_menu = None;
         }
         cx.notify();
@@ -189,18 +224,152 @@ impl ReaderView {
         }
     }
 
+    /// Which messages are expanded and which is current.
+    #[cfg(test)]
+    pub(crate) fn conversation(&self) -> &ConversationState {
+        &self.conversation
+    }
+
+    /// Expands every message of the open conversation.
+    pub(crate) fn expand_all(&mut self, cx: &mut Context<Self>) {
+        if let Some(thread) = self.state.thread.as_ref() {
+            self.conversation.expand_all(thread);
+            self.list_state.remeasure();
+            cx.notify();
+        }
+    }
+
+    fn message_count(&self) -> usize {
+        self.state
+            .thread
+            .as_ref()
+            .map_or(0, |thread| thread.messages.len())
+    }
+
+    /// Expands or collapses the message at `index` and makes it current.
+    fn toggle_message(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(message) = self
+            .state
+            .thread
+            .as_ref()
+            .and_then(|thread| thread.messages.get(index))
+        else {
+            return;
+        };
+        self.conversation.toggle_expanded(message.id);
+        self.conversation.set_current(index);
+        let item = ConversationItem::message_index(index);
+        self.list_state.remeasure_items(item..item + 1);
+        cx.notify();
+    }
+
+    /// Shows or hides the quoted text of the message at `index`.
+    fn toggle_fold(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(message) = self
+            .state
+            .thread
+            .as_ref()
+            .and_then(|thread| thread.messages.get(index))
+        else {
+            return;
+        };
+        self.conversation.toggle_unfolded(message.id);
+        let item = ConversationItem::message_index(index);
+        self.list_state.remeasure_items(item..item + 1);
+        cx.notify();
+    }
+
+    /// Makes the message at `index` current and scrolls it to the top.
+    fn go_to_message(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.conversation.set_current(index);
+        self.list_state.scroll_to(ListOffset {
+            item_ix: ConversationItem::message_index(index),
+            offset_in_item: px(0.),
+        });
+        cx.notify();
+    }
+
+    fn next_message(&mut self, _: &NextMessage, _: &mut Window, cx: &mut Context<Self>) {
+        let count = self.message_count();
+        if count == 0 {
+            return;
+        }
+        let next = self
+            .conversation
+            .current()
+            .map_or(0, |current| (current + 1).min(count - 1));
+        self.go_to_message(next, cx);
+    }
+
+    fn previous_message(&mut self, _: &PreviousMessage, _: &mut Window, cx: &mut Context<Self>) {
+        if self.message_count() == 0 {
+            return;
+        }
+        let previous = self
+            .conversation
+            .current()
+            .map_or(0, |current| current.saturating_sub(1));
+        self.go_to_message(previous, cx);
+    }
+
+    fn toggle_current_message(
+        &mut self,
+        _: &ToggleMessage,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(current) = self.conversation.current() {
+            self.toggle_message(current, cx);
+        }
+    }
+
     fn scroll_by(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let offset = self.scroll_handle.offset();
-        let max = self.scroll_handle.max_offset().y;
-        // Offsets grow negative as the content scrolls up.
-        let y = (offset.y - px(delta)).clamp(-max, px(0.));
-        self.scroll_handle.set_offset(point(offset.x, y));
+        self.list_state.scroll_by(px(delta));
         cx.notify();
     }
 
     fn page_height(&self) -> f32 {
-        let height: f32 = self.scroll_handle.bounds().size.height.into();
+        let height: f32 = self.list_state.viewport_bounds().size.height.into();
         (height - SCROLL_STEP).max(SCROLL_STEP)
+    }
+
+    /// One item of the conversation list.
+    fn render_item(
+        &self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = *cx.global::<UiColors>();
+        let Some(thread) = self.state.thread.as_ref() else {
+            return div().into_any_element();
+        };
+        match ConversationItem::at(index, thread.messages.len()) {
+            ConversationItem::Header => render_conversation_header(thread, &colors),
+            ConversationItem::Message(index) => {
+                let message = &thread.messages[index];
+                let context = MessageContext {
+                    now: chrono::Local::now(),
+                    hour_cycle: self.hour_cycle,
+                    own_addresses: &self.state.own_addresses,
+                    colors,
+                    focused: self.focus_handle.contains_focused(window, cx),
+                };
+                let display = MessageDisplay {
+                    index,
+                    expanded: self.conversation.is_expanded(message.id),
+                    unfolded: self.conversation.is_unfolded(message.id),
+                    current: self.conversation.current() == Some(index),
+                };
+                render_message(message, display, &context, cx)
+            }
+            // The inline reply (UI plan Phase 5) goes here; until then it
+            // is the space below the last message.
+            ConversationItem::Footer => div()
+                .debug_selector(|| "reader-footer".into())
+                .h(px(SCROLL_STEP))
+                .into_any_element(),
+        }
     }
 
     fn scroll_up(&mut self, _: &ScrollUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -245,6 +414,9 @@ impl Render for ReaderView {
             .on_action(cx.listener(Self::scroll_down))
             .on_action(cx.listener(Self::page_up))
             .on_action(cx.listener(Self::page_down))
+            .on_action(cx.listener(Self::next_message))
+            .on_action(cx.listener(Self::previous_message))
+            .on_action(cx.listener(Self::toggle_current_message))
             .size_full()
             .flex()
             .flex_col()
@@ -294,26 +466,18 @@ impl Render for ReaderView {
                     )
                 }),
             )
-            .child(
-                div()
-                    .id("reader-scroll")
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll_handle)
-                    .px_4()
-                    .py_4()
-                    .child(if self.state.selected_count > 1 {
-                        render_selection_summary(self.state.selected_count, &colors)
-                    } else {
-                        render_reader_detail(
-                            thread,
-                            self.hour_cycle,
-                            &self.state.own_addresses,
-                            &colors,
-                        )
-                    }),
-            )
+            .child(if self.state.selected_count > 1 {
+                render_selection_summary(self.state.selected_count, &colors)
+            } else if thread.is_none() {
+                render_no_conversation(&colors)
+            } else {
+                list(
+                    self.list_state.clone(),
+                    cx.processor(|reader, index, window, cx| reader.render_item(index, window, cx)),
+                )
+                .flex_1()
+                .w_full()
+                .into_any_element()
+            })
     }
 }

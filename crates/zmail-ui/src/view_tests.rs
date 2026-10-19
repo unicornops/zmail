@@ -31,6 +31,7 @@ use crate::{DetailMode, InitialView, ListMode, WorkspaceView};
 
 mod compose;
 mod list;
+mod reader;
 
 /// What the store holds when the window opens.
 #[derive(Clone, Copy, PartialEq, Eq)]

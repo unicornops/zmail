@@ -109,6 +109,8 @@ pub enum InitialView {
     Draft(i64),
     /// The reader on this thread, without marking it read.
     Thread(i64),
+    /// The reader on this thread with every message expanded.
+    ThreadExpanded(i64),
     /// The account setup pane, even when accounts already exist.
     AccountSetup,
     /// The inbox with keyboard focus in the sidebar, which opens it as an
