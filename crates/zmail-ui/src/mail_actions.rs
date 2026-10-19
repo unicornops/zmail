@@ -59,6 +59,9 @@ pub(crate) enum MailEvent {
     DraftAttachmentsChanged { draft_id: i64 },
     /// An outbox job was requeued for another delivery attempt.
     OutboxJobRetried { job_id: i64 },
+    /// A queued message was taken back before it was sent (Undo Send);
+    /// its draft can be edited again.
+    SendCancelled { draft_id: i64 },
     /// A change was recorded; the label describes it, for example
     /// "3 conversations archived". `can_undo` is false for a change that
     /// cannot be reversed (a permanent delete).
@@ -487,6 +490,21 @@ impl MailActions {
         self.store.remove_draft_attachment(attachment_id)?;
         cx.emit(MailEvent::DraftAttachmentsChanged { draft_id });
         Ok(())
+    }
+
+    /// Takes a queued message back before it is sent (Undo Send). Returns
+    /// `false` when it is too late: delivery has started.
+    pub(crate) fn cancel_send(
+        &mut self,
+        job_id: i64,
+        draft_id: i64,
+        cx: &mut Context<Self>,
+    ) -> Result<bool> {
+        let cancelled = self.store.cancel_queued_outbox_job(job_id)?;
+        if cancelled {
+            cx.emit(MailEvent::SendCancelled { draft_id });
+        }
+        Ok(cancelled)
     }
 
     /// Requeues a failed outbox job. The caller asks the sync service to

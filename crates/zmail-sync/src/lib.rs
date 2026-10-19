@@ -744,13 +744,36 @@ impl SyncService {
 
     /// Queues a draft and immediately schedules outbox processing for its account.
     pub fn queue_draft_and_send(&self, draft_id: i64) -> Result<i64> {
+        self.queue_draft_and_send_after(draft_id, Duration::ZERO)
+    }
+
+    /// Queues a draft to send once `delay` (the undo-send window) has
+    /// passed, and returns its outbox job id.
+    ///
+    /// The store will not hand the job out before then, whoever asks: this
+    /// call's own pass, a sync, the outbox poll, a restart or a wake from
+    /// sleep. Until a pass claims it,
+    /// [`LocalStore::cancel_queued_outbox_job`] can take it back. A pass is
+    /// scheduled for just after the window ends, so the message goes out
+    /// then rather than at the next poll.
+    pub fn queue_draft_and_send_after(&self, draft_id: i64, delay: Duration) -> Result<i64> {
         let draft = self
             .inner
             .store
             .draft_detail(draft_id)?
             .with_context(|| format!("draft {draft_id} does not exist"))?;
-        let job_id = self.inner.store.queue_draft(draft_id)?;
-        self.process_outbox(Some(draft.account_id))?;
+        let job_id = self.inner.store.queue_draft_after(draft_id, delay)?;
+        if delay.is_zero() {
+            self.process_outbox(Some(draft.account_id))?;
+        } else {
+            let service = self.clone();
+            let account_id = draft.account_id;
+            self.inner.handle.spawn(async move {
+                // The store rounds the due time up to the next second.
+                sleep(delay + Duration::from_secs(1)).await;
+                let _ = service.process_due_outbox_jobs(Some(account_id)).await;
+            });
+        }
         Ok(job_id)
     }
 
@@ -1507,6 +1530,160 @@ mod tests {
         assert!(
             started_at.elapsed() < Duration::from_millis(250),
             "scheduling outbox processing should stay non-blocking for the caller"
+        );
+    }
+
+    /// A demo account with one draft, and the draft's id.
+    fn store_with_draft() -> (Arc<LocalStore>, i64, i64) {
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity_id = store.list_identities(account_id).expect("identities load")[0].id;
+        let draft_id = store
+            .create_draft(&zmail_core::NewDraft {
+                account_id,
+                identity_id,
+                to: vec!["dest@example.com".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Undo send".to_owned(),
+                body: "Held back".to_owned(),
+            })
+            .expect("draft should be created");
+        (store, account_id, draft_id)
+    }
+
+    /// How many delivery attempts the outbox job has had.
+    fn attempts(store: &LocalStore, job_id: i64) -> usize {
+        store
+            .list_outbox_jobs(None)
+            .expect("jobs load")
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .expect("the job exists")
+            .attempt_count
+    }
+
+    #[test]
+    fn a_held_message_is_never_sent_before_its_time() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the runtime starts");
+        let (store, account_id, draft_id) = store_with_draft();
+        let secrets: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::default());
+        let service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
+        let job_id = service
+            .queue_draft_and_send_after(draft_id, Duration::from_secs(60))
+            .expect("the draft queues");
+
+        // An outbox pass, as Send and every finished sync run.
+        assert_eq!(
+            service
+                .process_outbox_and_wait(None)
+                .expect("the pass runs"),
+            0
+        );
+        // A wake from sleep or a network change: the watchers reconnect and
+        // resync, which runs another pass.
+        service.signal_wake();
+        assert_eq!(
+            service
+                .process_outbox_and_wait(Some(account_id))
+                .expect("the pass runs"),
+            0
+        );
+        // An app restart: a new service's outbox poll passes at once, and
+        // the startup syncs (which fail here, with no credentials) too.
+        let restarted = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+        restarted
+            .bootstrap_existing_accounts()
+            .expect("the syncs start");
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            restarted
+                .process_outbox_and_wait(None)
+                .expect("the pass runs"),
+            0
+        );
+        assert_eq!(attempts(&store, job_id), 0, "nothing was attempted");
+        assert_eq!(
+            store
+                .draft_detail(draft_id)
+                .expect("the draft loads")
+                .expect("the draft exists")
+                .state,
+            zmail_core::DraftState::Queued
+        );
+
+        // Once due, the next pass takes it (and, with no credentials here,
+        // records a failed attempt).
+        store.retry_outbox_job(job_id).expect("the job becomes due");
+        service
+            .process_outbox_and_wait(None)
+            .expect("the pass runs");
+        assert_eq!(attempts(&store, job_id), 1);
+    }
+
+    #[test]
+    fn a_held_message_goes_out_when_its_window_ends() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the runtime starts");
+        let (store, _, draft_id) = store_with_draft();
+        let service = SyncService::new(
+            runtime.handle().clone(),
+            store.clone(),
+            Arc::new(InMemorySecretStore::default()),
+        );
+        let job_id = service
+            .queue_draft_and_send_after(draft_id, Duration::from_secs(1))
+            .expect("the draft queues");
+        assert_eq!(attempts(&store, job_id), 0);
+        // The scheduled pass runs about a second after the window, well
+        // before the five-second outbox poll would.
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while attempts(&store, job_id) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(attempts(&store, job_id), 1);
+    }
+
+    #[test]
+    fn undo_takes_a_held_message_back() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the runtime starts");
+        let (store, _, draft_id) = store_with_draft();
+        let service = SyncService::new(
+            runtime.handle().clone(),
+            store.clone(),
+            Arc::new(InMemorySecretStore::default()),
+        );
+        let job_id = service
+            .queue_draft_and_send_after(draft_id, Duration::from_secs(1))
+            .expect("the draft queues");
+        assert!(
+            store
+                .cancel_queued_outbox_job(job_id)
+                .expect("the cancel runs")
+        );
+        // The pass scheduled for the end of the window finds nothing.
+        thread::sleep(Duration::from_millis(2500));
+        assert!(store.list_outbox_jobs(None).expect("jobs load").is_empty());
+        assert_eq!(
+            store
+                .draft_detail(draft_id)
+                .expect("the draft loads")
+                .expect("the draft exists")
+                .state,
+            zmail_core::DraftState::Editing
         );
     }
 

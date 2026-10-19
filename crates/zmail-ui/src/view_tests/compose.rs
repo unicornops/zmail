@@ -649,3 +649,146 @@ fn send_closes_the_window_and_queues_the_message(cx: &mut TestAppContext) {
     assert_eq!(draft.to, ["kai@example.test"]);
     assert_ne!(draft.state, zmail_core::DraftState::Editing);
 }
+
+/// The outbox jobs' ids.
+fn outbox(harness: &Harness) -> Vec<i64> {
+    harness
+        .store
+        .list_outbox_jobs(None)
+        .expect("jobs load")
+        .into_iter()
+        .map(|job| job.id)
+        .collect()
+}
+
+fn draft_state(harness: &Harness, draft_id: i64) -> zmail_core::DraftState {
+    harness
+        .store
+        .draft_detail(draft_id)
+        .expect("the draft loads")
+        .expect("the draft exists")
+        .state
+}
+
+#[gpui::test]
+fn undo_send_holds_the_message_and_reopens_its_window(cx: &mut TestAppContext) {
+    let (view, main, compose, mut w, harness) = new_draft(Setup::Account, cx);
+    let (draft_id, _, _) = inputs(&compose, &mut w);
+    w.simulate_input("kai@example.test,");
+    keys("secondary-enter", &mut w);
+
+    // The window closes; the main window offers Undo while the message
+    // waits out the default ten seconds.
+    assert!(main.read_entity(&view, |view, _| view.compose_windows.is_empty()));
+    assert_eq!(super::toasts(&view, main), ["Sending message…"]);
+    assert_eq!(outbox(&harness).len(), 1);
+    assert_eq!(
+        draft_state(&harness, draft_id),
+        zmail_core::DraftState::Queued
+    );
+
+    // Undo takes it back and reopens the draft in a window.
+    super::click_toast_undo(&view, main);
+    assert!(outbox(&harness).is_empty());
+    assert_eq!(
+        draft_state(&harness, draft_id),
+        zmail_core::DraftState::Editing
+    );
+    let (reopened, mut w) = compose_window(&view, main);
+    assert_eq!(inputs(&reopened, &mut w).0, draft_id);
+    assert_eq!(
+        state(&reopened, &mut w, |compose, cx| compose
+            .to
+            .read(cx)
+            .recipients(cx)),
+        ["kai@example.test"]
+    );
+    assert_eq!(super::toasts(&view, main), ["Sending undone"]);
+}
+
+#[gpui::test]
+fn the_undo_toast_lasts_as_long_as_the_undo_window(cx: &mut TestAppContext) {
+    let (view, main, _compose, mut w, harness) = new_draft(Setup::Account, cx);
+    // A five-second window.
+    let mut preferences = harness.store.ui_preferences().expect("preferences load");
+    preferences.undo_send_delay_secs = 5;
+    harness
+        .store
+        .save_ui_preferences(&preferences)
+        .expect("preferences save");
+    w.simulate_input("kai@example.test,");
+    keys("secondary-enter", &mut w);
+    assert_eq!(super::toasts(&view, main), ["Sending message…"]);
+    wait(Duration::from_millis(4900), main);
+    assert_eq!(super::toasts(&view, main), ["Sending message…"]);
+    wait(Duration::from_millis(200), main);
+    assert!(super::toasts(&view, main).is_empty());
+}
+
+#[gpui::test]
+fn undo_after_sending_started_says_it_is_too_late(cx: &mut TestAppContext) {
+    let (view, main, compose, mut w, harness) = new_draft(Setup::Account, cx);
+    let (draft_id, _, _) = inputs(&compose, &mut w);
+    w.simulate_input("kai@example.test,");
+    keys("secondary-enter", &mut w);
+    // The outbox claims the job (as it would once the window ends).
+    let job_id = outbox(&harness)[0];
+    harness.store.retry_outbox_job(job_id).expect("due now");
+    let account_id = harness.store.list_accounts().expect("accounts load")[0].id;
+    harness
+        .store
+        .claim_due_outbox_job(Some(account_id))
+        .expect("claim works")
+        .expect("the job is claimed");
+
+    super::click_toast_undo(&view, main);
+    assert_eq!(
+        super::toasts(&view, main),
+        ["Too late to undo: the message has started sending."]
+    );
+    assert_eq!(
+        draft_state(&harness, draft_id),
+        zmail_core::DraftState::Sending
+    );
+    assert!(main.read_entity(&view, |view, _| view.compose_windows.is_empty()));
+}
+
+#[gpui::test]
+fn undoing_a_reply_sent_from_the_pane_reopens_it_there(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    keys("secondary-r", cx);
+    let (draft_id, _, _) = compose_inputs(&view, cx);
+    keys("secondary-enter", cx);
+    let pane = cx.read_entity(&view, |view, _| view.compose.clone());
+    assert_eq!(cx.read_entity(&pane, |pane, _| pane.draft_id()), None);
+    assert_eq!(super::toasts(&view, cx), ["Sending message…"]);
+
+    super::click_toast_undo(&view, cx);
+    assert_eq!(
+        cx.read_entity(&pane, |pane, _| pane.draft_id()),
+        Some(draft_id)
+    );
+    assert_eq!(
+        draft_state(&harness, draft_id),
+        zmail_core::DraftState::Editing
+    );
+    assert!(cx.read_entity(&view, |view, _| view.compose_windows.is_empty()));
+}
+
+#[gpui::test]
+fn with_undo_send_off_the_message_goes_at_once(cx: &mut TestAppContext) {
+    let (view, main, _compose, mut w, harness) = new_draft(Setup::Account, cx);
+    let mut preferences = harness.store.ui_preferences().expect("preferences load");
+    preferences.undo_send_delay_secs = 0;
+    harness
+        .store
+        .save_ui_preferences(&preferences)
+        .expect("preferences save");
+    w.simulate_input("kai@example.test,");
+    keys("secondary-enter", &mut w);
+    assert!(super::toasts(&view, main).is_empty());
+    assert_eq!(
+        main.read_entity(&view, |view, _| view.status_message.clone()),
+        Some("Message queued for sending.".to_owned())
+    );
+}

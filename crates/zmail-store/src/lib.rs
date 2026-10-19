@@ -3601,6 +3601,18 @@ impl LocalStore {
 
     /// Queues a draft for background delivery and returns the new outbox job identifier.
     pub fn queue_draft(&self, draft_id: i64) -> Result<i64> {
+        self.queue_draft_after(draft_id, Duration::ZERO)
+    }
+
+    /// Queues a draft for delivery no sooner than `delay` from now (the
+    /// undo-send window) and returns the new outbox job identifier.
+    ///
+    /// The job's `next_attempt_at` is set to the first whole second at or
+    /// after the delay ends, and [`Self::claim_due_outbox_job`] never
+    /// claims a job before then, so the message cannot leave early;
+    /// [`Self::cancel_queued_outbox_job`] can take it back until it is
+    /// claimed.
+    pub fn queue_draft_after(&self, draft_id: i64, delay: Duration) -> Result<i64> {
         let mut conn = self.connection()?;
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3639,6 +3651,11 @@ impl LocalStore {
         }
 
         let now = utc_now_timestamp();
+        let due = if delay.is_zero() {
+            now.clone()
+        } else {
+            utc_timestamp_at_least(delay)
+        };
         transaction.execute(
             r#"
             INSERT INTO outbox_jobs(
@@ -3657,7 +3674,7 @@ impl LocalStore {
                 draft_id,
                 draft.0,
                 OutboxJobState::Queued.as_str(),
-                now,
+                due,
                 now,
                 now,
             ],
@@ -3680,6 +3697,53 @@ impl LocalStore {
             .commit()
             .context("failed to commit the outbox queue transaction")?;
         Ok(job_id)
+    }
+
+    /// Takes back a queued message that has not started sending (Undo
+    /// Send): the outbox job is deleted and its draft can be edited again.
+    ///
+    /// Returns `false`, changing nothing, when it is too late: the job has
+    /// been claimed for delivery (or has gone). Claiming and cancelling
+    /// both take the write lock first, so a message is never both sent and
+    /// cancelled.
+    pub fn cancel_queued_outbox_job(&self, job_id: i64) -> Result<bool> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin the outbox cancel transaction")?;
+        let job = transaction
+            .query_row(
+                "SELECT draft_id, state FROM outbox_jobs WHERE id = ?1",
+                params![job_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        outbox_job_state_from_db(row.get::<_, String>(1)?)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((draft_id, OutboxJobState::Queued)) = job else {
+            return Ok(false);
+        };
+        let now = utc_now_timestamp();
+        transaction.execute("DELETE FROM outbox_jobs WHERE id = ?1", params![job_id])?;
+        transaction.execute(
+            r#"
+            UPDATE drafts
+            SET
+                state = ?2,
+                queued_at = NULL,
+                last_error_message = NULL,
+                updated_at = ?3
+            WHERE id = ?1
+            "#,
+            params![draft_id, DraftState::Editing.as_str(), now],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the outbox cancel transaction")?;
+        Ok(true)
     }
 
     /// Lists outbox jobs for one account or across the workspace.
@@ -4514,6 +4578,17 @@ fn extract_host(endpoint: &str) -> Option<String> {
                 value.split(':').next().unwrap_or(value).to_owned()
             }
         })
+}
+
+/// The first whole second at or after `duration` from now, so a job
+/// scheduled with it is never due early.
+fn utc_timestamp_at_least(duration: Duration) -> String {
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .saturating_add(duration);
+    let seconds = at.as_secs() + u64::from(at.subsec_nanos() > 0);
+    utc_timestamp_from_epoch(seconds)
 }
 
 fn utc_timestamp_after(duration: Duration) -> String {
@@ -8848,6 +8923,118 @@ mod tests {
             .expect("draft should exist");
         assert_eq!(sent.state, DraftState::Sent);
         assert!(sent.sent_at.is_some());
+    }
+
+    #[test]
+    fn undo_send_holds_the_job_until_its_time_and_can_take_it_back() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity_id = store.list_identities(account_id).expect("identities load")[0].id;
+        let draft = |subject: &str| {
+            store
+                .create_draft(&NewDraft {
+                    account_id,
+                    identity_id,
+                    to: vec!["recipient@example.test".to_owned()],
+                    cc: Vec::new(),
+                    bcc: Vec::new(),
+                    subject: subject.to_owned(),
+                    body: "Body".to_owned(),
+                })
+                .expect("draft should be created")
+        };
+        let state = |draft_id| {
+            store
+                .draft_detail(draft_id)
+                .expect("draft loads")
+                .expect("draft exists")
+                .state
+        };
+
+        // Queued ten seconds ahead: due no sooner than that, and not
+        // claimable before.
+        let draft_id = draft("Undo me");
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        let job_id = store
+            .queue_draft_after(draft_id, Duration::from_secs(10))
+            .expect("draft should queue");
+        let job = &store.list_outbox_jobs(Some(account_id)).expect("jobs load")[0];
+        let due =
+            zmail_core::time::parse_timestamp(job.next_attempt_at.as_deref().expect("a due time"))
+                .expect("the due time parses")
+                .timestamp() as u64;
+        assert!(due >= before + 10, "due {due}, queued at {before}");
+        assert_eq!(state(draft_id), DraftState::Queued);
+        assert!(
+            store
+                .claim_due_outbox_job(Some(account_id))
+                .expect("claim works")
+                .is_none(),
+            "nothing is sent inside the undo window"
+        );
+
+        // Undo: the job goes and the draft can be edited again.
+        assert!(
+            store
+                .cancel_queued_outbox_job(job_id)
+                .expect("cancel works")
+        );
+        assert!(
+            store
+                .list_outbox_jobs(Some(account_id))
+                .expect("jobs load")
+                .is_empty()
+        );
+        assert_eq!(state(draft_id), DraftState::Editing);
+        store
+            .update_draft(
+                draft_id,
+                &zmail_core::DraftUpdate {
+                    identity_id,
+                    to: vec!["recipient@example.test".to_owned()],
+                    cc: Vec::new(),
+                    bcc: Vec::new(),
+                    subject: "Undo me, edited".to_owned(),
+                    body: "Body".to_owned(),
+                },
+            )
+            .expect("the draft is editable again");
+        // Cancelling twice is too late, not an error.
+        assert!(
+            !store
+                .cancel_queued_outbox_job(job_id)
+                .expect("cancel works")
+        );
+
+        // Once the job is claimed it is too late to take back.
+        let job_id = store
+            .queue_draft_after(draft_id, Duration::from_secs(10))
+            .expect("draft should queue again");
+        // (Retry makes a job due now, as the window ending would.)
+        store.retry_outbox_job(job_id).expect("job becomes due");
+        let claimed = store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("claim works")
+            .expect("the due job is claimed");
+        assert_eq!(claimed.job_id, job_id);
+        assert!(
+            !store
+                .cancel_queued_outbox_job(job_id)
+                .expect("cancel works")
+        );
+        assert_eq!(state(draft_id), DraftState::Sending);
+        store.record_outbox_sent(job_id).expect("sent");
+        assert!(
+            !store
+                .cancel_queued_outbox_job(job_id)
+                .expect("cancel works")
+        );
+        assert_eq!(state(draft_id), DraftState::Sent);
     }
 
     #[test]

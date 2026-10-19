@@ -109,6 +109,9 @@ pub enum InitialView {
     Inbox,
     /// This stored draft in a compose window.
     Draft(i64),
+    /// This stored draft just sent from the compose pane, with the Undo
+    /// Send toast showing.
+    Sending(i64),
     /// The reader on this thread, without marking it read.
     Thread(i64),
     /// The reader on this thread with every message expanded.

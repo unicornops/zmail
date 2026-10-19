@@ -171,8 +171,15 @@ pub(crate) enum ComposeEvent {
     Status(String),
     /// Something failed.
     Error(String),
-    /// The draft was queued for sending.
-    Queued { draft_id: i64, account_id: i64 },
+    /// The draft was queued for sending. It leaves after `undo_delay`
+    /// (the undo-send window); until then the outbox job `job_id` can be
+    /// cancelled.
+    Queued {
+        draft_id: i64,
+        account_id: i64,
+        job_id: i64,
+        undo_delay: Duration,
+    },
     /// The pane's Open in Window: move this draft into its own window.
     PopOut { draft_id: i64 },
     /// The pane's Show Window, for a draft already open in a window.
@@ -499,6 +506,14 @@ impl ComposeView {
     }
 
     fn send(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
+        self.send_draft(cx);
+    }
+
+    /// Saves the draft and queues it to send once the undo-send window
+    /// ([`UiPreferences::undo_send_delay`]) has passed.
+    ///
+    /// [`UiPreferences::undo_send_delay`]: zmail_core::preferences::UiPreferences::undo_send_delay
+    pub(crate) fn send_draft(&mut self, cx: &mut Context<Self>) {
         let Some((draft_id, account_id)) = self
             .compose
             .as_ref()
@@ -511,17 +526,21 @@ impl ComposeView {
             cx.emit(ComposeEvent::Error(error.to_string()));
             return;
         }
-        match self.sync_service.queue_draft_and_send(draft_id) {
-            Ok(_job_id) => {
-                let _ = self.sync_service.process_outbox(Some(account_id));
-                cx.emit(ComposeEvent::Status(
-                    "Message queued for sending.".to_owned(),
-                ));
-                cx.emit(ComposeEvent::Queued {
-                    draft_id,
-                    account_id,
-                });
-            }
+        let undo_delay = self
+            .store
+            .ui_preferences()
+            .map(|preferences| preferences.undo_send_delay())
+            .unwrap_or_default();
+        match self
+            .sync_service
+            .queue_draft_and_send_after(draft_id, undo_delay)
+        {
+            Ok(job_id) => cx.emit(ComposeEvent::Queued {
+                draft_id,
+                account_id,
+                job_id,
+                undo_delay,
+            }),
             Err(error) => cx.emit(ComposeEvent::Error(error.to_string())),
         }
     }

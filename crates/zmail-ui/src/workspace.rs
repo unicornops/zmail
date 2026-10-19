@@ -265,6 +265,14 @@ impl WorkspaceView {
                     });
                 }
             }
+            InitialView::Sending(draft_id) => {
+                if let Ok(Some(draft)) = view.store.draft_detail(draft_id) {
+                    view.select_account(draft.account_id, cx);
+                    view.open_draft(draft_id, window, cx);
+                    view.compose
+                        .update(cx, |compose, cx| compose.send_draft(cx));
+                }
+            }
             // `show_thread`, not `select_thread`, which would mark the thread
             // read after a delay.
             InitialView::Thread(thread_id)
@@ -1388,12 +1396,94 @@ impl WorkspaceView {
     }
 
     /// Events from a compose window's editor. Its status and errors show in
-    /// that window; the shell refreshes once the draft is queued.
+    /// that window; once the draft is queued (and the window closes), the
+    /// Undo Send toast shows here.
     fn on_window_compose_event(&mut self, event: &ComposeEvent, cx: &mut Context<Self>) {
-        if let ComposeEvent::Queued { .. } = event {
-            self.show_status("Message queued for sending.".to_owned(), cx);
+        if let &ComposeEvent::Queued {
+            draft_id,
+            job_id,
+            undo_delay,
+            ..
+        } = event
+        {
+            self.show_undo_send_toast(draft_id, job_id, undo_delay, true, cx);
             self.refresh_from_store(cx);
             cx.notify();
+        }
+    }
+
+    /// The toast for a message waiting out its undo-send window, with
+    /// Undo. It stays exactly as long as the window, so Undo is offered
+    /// until the message leaves. With no window, a plain status says the
+    /// message is on its way.
+    fn show_undo_send_toast(
+        &mut self,
+        draft_id: i64,
+        job_id: i64,
+        undo_delay: Duration,
+        reopen_in_window: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if undo_delay.is_zero() {
+            self.show_status("Message queued for sending.".to_owned(), cx);
+            return;
+        }
+        let workspace = cx.entity().downgrade();
+        let toast =
+            Toast::new("Sending message…")
+                .duration(undo_delay)
+                .on_undo(move |window, cx| {
+                    // The toast host is mid-update while this runs; undo once
+                    // it is done, in the main window.
+                    let workspace = workspace.clone();
+                    let main_window = window.window_handle();
+                    cx.defer(move |cx| {
+                        let _ = main_window.update(cx, |_, window, cx| {
+                            workspace.update(cx, |this, cx| {
+                                this.undo_send(draft_id, job_id, reopen_in_window, window, cx)
+                            })
+                        });
+                    });
+                });
+        self.toasts.update(cx, |toasts, cx| {
+            toasts.push(toast, cx);
+        });
+    }
+
+    /// Undo Send: takes the message back and reopens its draft where it
+    /// was written.
+    fn undo_send(
+        &mut self,
+        draft_id: i64,
+        job_id: i64,
+        reopen_in_window: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self
+            .mail_actions
+            .update(cx, |actions, cx| actions.cancel_send(job_id, draft_id, cx))
+        {
+            Ok(true) => {
+                if reopen_in_window {
+                    self.open_draft_in_window(draft_id, false, window, cx);
+                } else {
+                    self.open_draft(draft_id, window, cx);
+                    self.compose
+                        .update(cx, |compose, cx| compose.focus_pane(window, cx));
+                }
+                self.toasts.update(cx, |toasts, cx| {
+                    toasts.push(Toast::new("Sending undone"), cx);
+                });
+            }
+            Ok(false) => self.toasts.update(cx, |toasts, cx| {
+                toasts.push(
+                    Toast::new("Too late to undo: the message has started sending.")
+                        .kind(ToastKind::Error),
+                    cx,
+                );
+            }),
+            Err(error) => self.show_error(error.to_string(), cx),
         }
     }
 
@@ -2231,7 +2321,8 @@ impl WorkspaceView {
             | MailEvent::ThreadReadChanged { .. }
             | MailEvent::DraftCreated { .. }
             | MailEvent::DraftAttachmentsChanged { .. }
-            | MailEvent::OutboxJobRetried { .. } => {
+            | MailEvent::OutboxJobRetried { .. }
+            | MailEvent::SendCancelled { .. } => {
                 // A change to many threads emits an event for each; the
                 // store is read once, after the last.
                 if !self.mail_refresh_queued {
@@ -2339,7 +2430,20 @@ impl WorkspaceView {
         match event {
             ComposeEvent::Status(message) => self.show_status(message.clone(), cx),
             ComposeEvent::Error(error) => self.show_error(error, cx),
-            ComposeEvent::Queued { .. } => {
+            &ComposeEvent::Queued {
+                draft_id,
+                job_id,
+                undo_delay,
+                ..
+            } => {
+                // The pane lets go of the queued draft (Undo brings it back)
+                // and, beside the mail list, goes back to the conversation.
+                self.compose
+                    .update(cx, |compose, cx| compose.close_draft(cx));
+                if self.list_mode == ListMode::Mail {
+                    self.detail_mode = DetailMode::Reader;
+                }
+                self.show_undo_send_toast(draft_id, job_id, undo_delay, false, cx);
                 self.refresh_from_store(cx);
                 self.schedule_refresh(window, cx);
                 cx.notify();

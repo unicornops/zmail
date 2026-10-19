@@ -73,6 +73,8 @@ MATRIX=(
   "compose-light compose light 760 680"
   "compose-invalid-dark compose-invalid dark 760 680"
   "compose-invalid-light compose-invalid light 760 680"
+  "undo-send-dark undo-send dark 1440 920"
+  "undo-send-light undo-send light 1440 920"
   "account-setup-dark account-setup dark 1440 920"
   "account-setup-light account-setup light 1440 920"
   "inbox-dark-720 inbox dark 720 720"
