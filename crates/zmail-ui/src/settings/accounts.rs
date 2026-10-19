@@ -28,7 +28,8 @@ use zmail_security::SecretSlot;
 use zmail_store::AccountRemovalImpact;
 
 use super::{
-    SettingsEvent, SettingsHost, section_heading, setting_row, setting_text, update_workspace,
+    SettingsEvent, SettingsHost, dotted_label, section_heading, setting_row, setting_text,
+    update_workspace,
 };
 use crate::components::{
     Banner, BannerTone, Button, ButtonSize, ComponentTheme, Modal, ModalState, Select, SelectEvent,
@@ -38,7 +39,7 @@ use crate::styles::{
     ICON_SIZE_SM, RADIUS_LG, SPACE_1, SPACE_2, SPACE_3, SPACE_4, TYPE_BODY_STRONG, TYPE_CAPTION,
     TypeStyleExt, UiColors,
 };
-use crate::widgets::{EllipsisExt, account_dot, format_size, icon, sync_badge};
+use crate::widgets::{EllipsisExt, format_size, icon, sync_badge};
 
 /// The cache budgets offered, in MiB; `None` is no limit.
 const CACHE_BUDGETS: [Option<u64>; 7] = [
@@ -598,7 +599,6 @@ impl AccountsSettings {
                     .pb(px(SPACE_3))
                     .border_b_1()
                     .border_color(rgb(colors.border))
-                    .child(account_dot(account.color()))
                     .child(
                         div()
                             .flex()
@@ -606,12 +606,13 @@ impl AccountsSettings {
                             .gap(px(SPACE_1))
                             .flex_1()
                             .min_w_0()
-                            .child(
+                            .child(dotted_label(
+                                account.color(),
                                 div()
                                     .type_style(TYPE_BODY_STRONG)
                                     .ellipsis()
                                     .child(account.display_name.clone()),
-                            )
+                            ))
                             .child(
                                 div()
                                     .type_style(TYPE_CAPTION)
