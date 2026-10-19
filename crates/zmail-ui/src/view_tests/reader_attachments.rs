@@ -9,7 +9,7 @@ use zmail_core::{
 };
 use zmail_store::LocalStore;
 
-use super::{Harness, Setup, click, click_on, open_workspace_with};
+use super::{Harness, Setup, click, click_on, keys, open_workspace_with};
 use crate::actions::{SaveAttachments, SaveMessageAttachments};
 use crate::{InitialView, WorkspaceView};
 
@@ -291,6 +291,28 @@ fn save_all_for_one_message_saves_its_files(cx: &mut TestAppContext) {
 
     t.cx.dispatch_action(SaveMessageAttachments { message_id });
     t.cx.run_until_parked();
+    let chosen = folder.clone();
+    t.cx.simulate_path_prompt_response(move |_| Some(vec![chosen]));
+    t.cx.run_until_parked();
+    for (name, _, bytes) in FILES {
+        assert_eq!(fs::read(folder.join(name)).expect("reads"), *bytes);
+    }
+    let _ = fs::remove_dir_all(&folder);
+}
+
+#[gpui::test]
+fn the_message_more_menu_saves_that_messages_files(cx: &mut TestAppContext) {
+    let t = open(cx);
+    let folder = scratch("message-menu");
+
+    click("reader-message-more-0", t.cx);
+    // Mark Read, View Plain Text, then Save Attachments… (no other
+    // folder to move to, so no Move to…).
+    keys("down down down enter", t.cx);
+    assert!(
+        t.cx.did_prompt_for_paths(),
+        "Save Attachments asks for a folder"
+    );
     let chosen = folder.clone();
     t.cx.simulate_path_prompt_response(move |_| Some(vec![chosen]));
     t.cx.run_until_parked();
