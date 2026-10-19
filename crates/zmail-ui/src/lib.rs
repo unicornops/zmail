@@ -112,6 +112,8 @@ pub enum InitialView {
     /// This stored draft just sent from the compose pane, with the Undo
     /// Send toast showing.
     Sending(i64),
+    /// This thread in the reader with an inline reply open below it.
+    Reply(i64),
     /// The reader on this thread, without marking it read.
     Thread(i64),
     /// The reader on this thread with every message expanded.
@@ -307,6 +309,9 @@ struct WorkspaceView {
     attachments: attachments::AttachmentState,
     /// The toast offering to undo the latest mail change, and that change.
     undo_toast: Option<(components::ToastId, mail_actions::UndoId)>,
+    /// The inline reply below a conversation, if one is open. The reader
+    /// shows it while that conversation is open.
+    inline_reply: Option<workspace::InlineReply>,
     /// The open compose windows, by draft, with the subscriptions to their
     /// editors.
     compose_windows: std::collections::HashMap<

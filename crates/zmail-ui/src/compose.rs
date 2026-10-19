@@ -41,8 +41,8 @@ use crate::components::{Button, ButtonSize, Select, SelectEvent, TextInput, Text
 use crate::mail_actions::MailActions;
 use crate::pane::{dispatch_from, pane_focus_indicator};
 use crate::styles::{
-    ICON_BUTTON_SIZE, ICON_SIZE_SM, PlatformStyle, SPACE_3, SendButtonPlacement, TYPE_BODY,
-    TypeStyleExt, UiColors,
+    ICON_BUTTON_SIZE, ICON_SIZE_SM, PlatformStyle, RADIUS_LG, SPACE_3, SendButtonPlacement,
+    TYPE_BODY, TypeStyleExt, UiColors,
 };
 use crate::widgets::{EllipsisExt, empty_state, format_size, icon, label_chip, status_banner};
 
@@ -99,6 +99,7 @@ impl ComposeState {
     /// creating its inputs.
     pub(crate) fn from_draft(
         draft: DraftDetail,
+        presentation: Presentation,
         store: &Arc<LocalStore>,
         window: &mut Window,
         cx: &mut App,
@@ -128,7 +129,14 @@ impl ComposeState {
                 TextInput::new(cx)
                     .borderless()
                     .multiline()
-                    .rows(12, 40)
+                    .rows(
+                        if presentation == Presentation::Inline {
+                            6
+                        } else {
+                            12
+                        },
+                        40,
+                    )
                     .label("Message")
                     .placeholder("Write your message…")
                     .with_text(draft.body)
@@ -194,6 +202,10 @@ pub(crate) enum Presentation {
     /// A compose window, whose title bar holds the title and, on macOS and
     /// Linux, Send.
     Window,
+    /// The inline reply at the bottom of the open conversation: a card that
+    /// grows with its text, without the title or Subject, with Send below
+    /// and a button that pops the reply out into its own window.
+    Inline,
 }
 
 pub(crate) struct ComposeView {
@@ -366,7 +378,8 @@ impl ComposeView {
         match self.compose.as_mut() {
             Some(compose) if compose.draft_id == draft_id => compose.update_from_draft(draft),
             _ => {
-                let compose = ComposeState::from_draft(draft, &self.store, window, cx);
+                let compose =
+                    ComposeState::from_draft(draft, self.presentation, &self.store, window, cx);
                 self.input_subscriptions = Self::watch_inputs(&compose, window, cx);
                 self.compose = Some(compose);
             }
@@ -686,9 +699,10 @@ impl Render for ComposeView {
         let focused = self.focus_handle.contains_focused(window, cx);
         let draft_open = self.compose.is_some();
         let pane = self.presentation == Presentation::Pane;
+        let inline = self.presentation == Presentation::Inline;
         // In a window, Send sits in the title bar unless the platform puts
         // it at the bottom of the compose body (Windows).
-        let bottom_send = pane
+        let bottom_send = self.presentation != Presentation::Window
             || PlatformStyle::current().send_button == SendButtonPlacement::ComposeBottomLeading;
 
         div()
@@ -708,10 +722,22 @@ impl Render for ComposeView {
                         style.bg(rgb(colors.selected_background))
                     })
             })
-            .size_full()
             .flex()
             .flex_col()
             .bg(rgb(colors.background))
+            // Inline, the card sizes to its content: the conversation list
+            // around it scrolls.
+            .when(!inline, |this| this.size_full())
+            .when(inline, |this| {
+                this.w_full()
+                    .rounded(px(RADIUS_LG))
+                    .border_1()
+                    .border_color(rgb(if focused {
+                        colors.focus_ring
+                    } else {
+                        colors.border
+                    }))
+            })
             .when(pane, |this| {
                 this.child(
                     pane_focus_indicator(
@@ -726,7 +752,13 @@ impl Render for ComposeView {
                     .child("Compose"),
                 )
             })
-            .child(
+            .child(if inline {
+                div()
+                    .px_4()
+                    .pt_2()
+                    .child(self.render_detail(&colors, cx))
+                    .into_any_element()
+            } else {
                 div()
                     .id("compose-scroll")
                     .flex_1()
@@ -737,8 +769,9 @@ impl Render for ComposeView {
                     .overflow_y_scroll()
                     .px_4()
                     .py_4()
-                    .child(self.render_detail(&colors, cx)),
-            )
+                    .child(self.render_detail(&colors, cx))
+                    .into_any_element()
+            })
             .when(draft_open && bottom_send, |this| {
                 this.child(
                     div()
@@ -748,8 +781,9 @@ impl Render for ComposeView {
                         .gap_2()
                         .px_4()
                         .py_3()
-                        .border_t_1()
-                        .border_color(rgb(colors.border))
+                        .when(!inline, |this| {
+                            this.border_t_1().border_color(rgb(colors.border))
+                        })
                         .children(self.render_action_buttons(cx)),
                 )
             })
@@ -838,6 +872,7 @@ impl ComposeView {
             .child(render_fields(
                 compose,
                 self.from_menu.as_ref().map(|(menu, _)| menu),
+                self.presentation != Presentation::Inline,
                 &self.focus_handle,
                 colors,
             ))
@@ -852,8 +887,8 @@ impl ComposeView {
     }
 
     /// The buttons along the bottom: Send first (bottom-left, the Windows
-    /// placement), then Attach; the pane adds Save Draft and Open in
-    /// Window.
+    /// placement), then Attach; the pane adds Save Draft, and the pane and
+    /// the inline reply end with Open in Window.
     fn render_action_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let focus_handle = &self.focus_handle;
         let mut buttons = vec![
@@ -876,22 +911,24 @@ impl ComposeView {
                     .on_click(dispatch_from(focus_handle, SaveDraft))
                     .into_any_element(),
             );
-            if let Some(draft_id) = self.draft_id() {
-                buttons.push(div().flex_1().into_any_element());
-                buttons.push(
-                    div()
-                        .debug_selector(|| "compose-pop-out".into())
-                        .child(
-                            Button::new("compose-pop-out", "Open in Window")
-                                .ghost()
-                                .icon("external-link")
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.emit(ComposeEvent::PopOut { draft_id })
-                                })),
-                        )
-                        .into_any_element(),
-                );
-            }
+        }
+        if self.presentation != Presentation::Window
+            && let Some(draft_id) = self.draft_id()
+        {
+            buttons.push(div().flex_1().into_any_element());
+            buttons.push(
+                div()
+                    .debug_selector(|| "compose-pop-out".into())
+                    .child(
+                        Button::new("compose-pop-out", "Open in Window")
+                            .ghost()
+                            .icon("external-link")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(ComposeEvent::PopOut { draft_id })
+                            })),
+                    )
+                    .into_any_element(),
+            );
         }
         buttons
     }
@@ -899,10 +936,12 @@ impl ComposeView {
 
 /// The header fields, one row each, then the body: From (only when the
 /// account has more than one identity), To with the Cc and Bcc toggles, Cc
-/// and Bcc once shown, and Subject.
+/// and Bcc once shown, and Subject (not in the inline reply, which keeps
+/// the conversation's).
 fn render_fields(
     compose: &ComposeState,
     from_menu: Option<&Entity<Select>>,
+    show_subject: bool,
     focus_handle: &FocusHandle,
     colors: &UiColors,
 ) -> gpui::Div {
@@ -964,7 +1003,11 @@ fn render_fields(
         .when(compose.show_bcc, |this| {
             this.child(row("Bcc").child(compose.bcc.clone()))
         })
-        .child(row("Subject").child(div().flex_1().min_w_0().child(compose.subject.clone())))
+        .when(show_subject, |this| {
+            this.child(
+                row("Subject").child(div().flex_1().min_w_0().child(compose.subject.clone())),
+            )
+        })
         .child(div().pt(px(SPACE_3)).child(compose.body.clone()))
 }
 

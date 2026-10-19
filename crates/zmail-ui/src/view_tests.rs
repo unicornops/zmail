@@ -433,6 +433,15 @@ pub(super) fn compose_window_toasts(
         .expect("the compose window is open")
 }
 
+/// The inline reply below the open conversation, if one shows.
+pub(super) fn inline_reply(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+) -> Option<Entity<ComposeView>> {
+    let reader = cx.read_entity(view, |view, _| view.reader.clone());
+    cx.read_entity(&reader, |reader, _| reader.state().reply.clone())
+}
+
 /// The compose pane's draft and its To and body inputs.
 pub(super) fn compose_inputs(
     view: &Entity<WorkspaceView>,
@@ -1327,7 +1336,8 @@ fn conversation_actions_have_keys_and_undo(cx: &mut TestAppContext) {
     keys("secondary-z", cx);
     assert_eq!(mailbox_of(&harness, first), harness.inbox_id);
 
-    // Reply opens a draft with the cursor in the body.
+    // Reply opens a draft below the conversation, with the cursor in the
+    // body.
     view.update(cx, |view, cx| {
         view.selected_thread_id = Some(first);
         cx.notify();
@@ -1335,9 +1345,13 @@ fn conversation_actions_have_keys_and_undo(cx: &mut TestAppContext) {
     keys("secondary-r", cx);
     assert_eq!(
         cx.read_entity(&view, |view, _| view.detail_mode),
-        DetailMode::Compose
+        DetailMode::Reader
     );
-    let (draft_id, _, body) = compose_inputs(&view, cx);
+    let reply = inline_reply(&view, cx).expect("an inline reply");
+    let (draft_id, body) = cx.read_entity(&reply, |reply, _| {
+        let compose = reply.compose.as_ref().expect("a draft is open");
+        (compose.draft_id, compose.body.clone())
+    });
     assert!(cx.update(|window, cx| body.focus_handle(cx).is_focused(window)));
     let draft = harness
         .store
@@ -1611,13 +1625,15 @@ fn a_narrow_reader_moves_actions_into_more(cx: &mut TestAppContext) {
     resize(800., cx);
     assert!(compact(cx));
 
-    // Reply All is now the first entry of More.
+    // Reply All is now the first entry of More; the reply opens below
+    // the conversation.
     click("reader-more", cx);
     keys("down enter", cx);
     assert_eq!(
         cx.read_entity(&view, |view, _| (view.list_mode, view.detail_mode)),
-        (ListMode::Drafts, DetailMode::Compose)
+        (ListMode::Mail, DetailMode::Reader)
     );
+    assert!(inline_reply(&view, cx).is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -1748,11 +1764,13 @@ fn the_single_pane_layout_goes_to_the_reader_and_back(cx: &mut TestAppContext) {
         assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
     }
 
-    // A reply shows the draft, and back returns to the list.
+    // A reply shows the conversation with the reply below it, and back
+    // returns to the list.
     keys("secondary-r", cx);
     assert!(cx.read_entity(&view, |view, _| {
-        view.single_pane == SinglePane::Detail && view.detail_mode == DetailMode::Compose
+        view.single_pane == SinglePane::Detail && view.detail_mode == DetailMode::Reader
     }));
+    assert!(inline_reply(&view, cx).is_some());
     click("single-pane-back", cx);
     assert_eq!(
         cx.read_entity(&view, |view, _| view.single_pane),

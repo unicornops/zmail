@@ -49,6 +49,8 @@ pub(crate) enum FixtureView {
     /// An HTML message whose link shows one site and goes to another,
     /// with the open-link dialog warning about it.
     ReaderLinkWarning,
+    /// The reader's conversation with an inline reply open below it.
+    ReaderReply,
     /// A half-written reply in its compose window.
     Compose,
     /// A new message whose recipients include addresses that are not
@@ -98,6 +100,7 @@ impl FixtureView {
             "reader-long" => Self::ReaderLong,
             "reader-selection" => Self::ReaderSelection,
             "reader-link-warning" => Self::ReaderLinkWarning,
+            "reader-reply" => Self::ReaderReply,
             "compose" => Self::Compose,
             "compose-invalid" => Self::ComposeInvalid,
             "undo-send" => Self::UndoSend,
@@ -111,7 +114,7 @@ impl FixtureView {
             "reader-safety-danger" => Self::ReaderSafetyDanger,
             "reader-attachments" => Self::ReaderAttachments,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, sidebar, accounts, multi-select, search, reader-safety-info, reader-safety-caution, reader-safety-danger or reader-attachments"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, sidebar, accounts, multi-select, search, reader-safety-info, reader-safety-caution, reader-safety-danger or reader-attachments"
             ),
         })
     }
@@ -246,6 +249,9 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         }
         FixtureView::ReaderAttachments => {
             InitialView::Thread(thread_id(store, account_id, "inbox", ATTACHMENTS_SUBJECT)?)
+        }
+        FixtureView::ReaderReply => {
+            InitialView::Reply(thread_id(store, account_id, "inbox", "Q4 roadmap review")?)
         }
         FixtureView::Compose => {
             let identity = store
@@ -1041,6 +1047,7 @@ mod tests {
             "reader-long",
             "reader-selection",
             "reader-link-warning",
+            "reader-reply",
             "compose",
             "compose-invalid",
             "undo-send",

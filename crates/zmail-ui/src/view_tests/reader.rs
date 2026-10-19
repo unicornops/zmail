@@ -314,10 +314,18 @@ fn the_sender_menu_copies_the_address(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_message_reply_quotes_that_message(cx: &mut TestAppContext) {
-    let (_view, cx, _reader, harness) = open_conversation_with_store(cx);
+fn a_message_reply_quotes_that_message_in_the_inline_reply(cx: &mut TestAppContext) {
+    let (view, cx, _reader, harness) = open_conversation_with_store(cx);
     click("reader-message-summary-0", cx);
     click("reader-reply-0", cx);
+
+    // The reply opens below the conversation, not in the compose pane.
+    let reply = super::inline_reply(&view, cx).expect("an inline reply");
+    assert!(drawn("reader-inline-reply", cx));
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.detail_mode),
+        crate::DetailMode::Reader
+    );
 
     let drafts = harness.store.list_drafts(None).expect("the drafts load");
     assert_eq!(drafts.len(), 1);
@@ -331,6 +339,10 @@ fn a_message_reply_quotes_that_message(cx: &mut TestAppContext) {
         draft.body.contains("> Attached is the draft roadmap."),
         "quotes the first message, not the latest: {}",
         draft.body
+    );
+    assert_eq!(
+        cx.read_entity(&reply, |reply, _| reply.draft_id()),
+        Some(drafts[0].id)
     );
 }
 
