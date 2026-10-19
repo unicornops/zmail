@@ -1,5 +1,5 @@
 //! Store performance benchmarks for snapshot merges, thread paging,
-//! search, and the write-back queue.
+//! search, address autocomplete, and the write-back queue.
 //!
 //! Run with `cargo bench -p zmail-store`; the harness is deliberately not
 //! part of CI so the quality job stays fast.
@@ -12,7 +12,7 @@ use zmail_core::{
 use zmail_store::LocalStore;
 
 /// Builds a snapshot with one mailbox holding `thread_count` one-message
-/// conversations with distinct remote ids.
+/// conversations with distinct remote ids, from 500 different senders.
 fn synthetic_snapshot(thread_count: usize) -> AccountSyncSnapshot {
     let threads = (0..thread_count)
         .map(|index| ThreadSnapshot {
@@ -27,7 +27,7 @@ fn synthetic_snapshot(thread_count: usize) -> AccountSyncSnapshot {
             messages: vec![MessageSnapshot {
                 remote_id: format!("bench-message-{index}"),
                 identity_email: "bench@example.com".to_owned(),
-                sender: "Bench Sender".to_owned(),
+                sender: format!("Bench Sender {0} <sender{0}@example.com>", index % 500),
                 reply_to: None,
                 recipients: "recipient@example.com".to_owned(),
                 subject: format!("Benchmark subject {index}"),
@@ -91,6 +91,38 @@ fn snapshot_no_change_remerge(bencher: Bencher, thread_count: usize) {
         store
             .replace_account_snapshot(account_id, &snapshot)
             .expect("snapshot should re-merge");
+    });
+}
+
+/// A sync that brings one new message, which also rebuilds the account's
+/// address history from the mirror.
+#[divan::bench(args = [1_000, 5_000, 20_000])]
+fn snapshot_one_new_message(bencher: Bencher, thread_count: usize) {
+    let (store, account_id) = seeded_store(thread_count);
+    let mut with_new = synthetic_snapshot(thread_count + 1);
+    let without_new = synthetic_snapshot(thread_count);
+    let mut grow = true;
+    bencher.bench_local(|| {
+        // Alternate, so every iteration changes the mirror.
+        let snapshot = if grow {
+            &mut with_new
+        } else {
+            &mut without_new.clone()
+        };
+        store
+            .replace_account_snapshot(account_id, snapshot)
+            .expect("snapshot should merge");
+        grow = !grow;
+    });
+}
+
+#[divan::bench(args = [1_000, 5_000, 20_000])]
+fn address_autocomplete(bencher: Bencher, thread_count: usize) {
+    let (store, _) = seeded_store(thread_count);
+    bencher.bench(|| {
+        store
+            .address_suggestions("bench sender 4", 8)
+            .expect("suggestions should load");
     });
 }
 

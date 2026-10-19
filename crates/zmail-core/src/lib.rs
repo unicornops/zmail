@@ -677,6 +677,28 @@ pub struct DraftAttachment {
     pub storage_path: String,
 }
 
+/// An address offered by recipient autocomplete, from the local address
+/// history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddressSuggestion {
+    /// The display name last seen with the address, if any.
+    pub name: Option<String>,
+    /// The address, lowercased.
+    pub email: String,
+}
+
+impl AddressSuggestion {
+    /// The suggestion as an address list entry, for example
+    /// `Alice Johnson <alice@example.com>`.
+    pub fn to_header_value(&self) -> String {
+        participants::Participant {
+            name: self.name.clone(),
+            email: Some(self.email.clone()),
+        }
+        .to_header_value()
+    }
+}
+
 /// Fully loaded draft used for compose and send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftDetail {
