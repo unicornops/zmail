@@ -63,8 +63,6 @@ pub(super) fn render_message(
     let card = div()
         .id(("reader-message", message.id as u64))
         .debug_selector(move || format!("reader-message-{index}"))
-        .mx_4()
-        .mb_3()
         .rounded_lg()
         .border_1()
         .border_color(rgb(if display.current && context.focused {
@@ -74,14 +72,14 @@ pub(super) fn render_message(
         }))
         .bg(rgb(colors.surface))
         .overflow_hidden();
-    if display.expanded {
+    let card = if display.expanded {
         card.child(expanded_header(message, display, context, cx))
             .child(expanded_content(message, display, context, cx))
-            .into_any_element()
     } else {
         card.child(collapsed_summary(message, display, context, cx))
-            .into_any_element()
-    }
+    };
+    // Padding, not margin: the list measures an item without its margins.
+    div().px_4().pb_2().child(card).into_any_element()
 }
 
 /// A collapsed message: avatar, sender, snippet and date on one line.
