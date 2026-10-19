@@ -115,7 +115,17 @@
     "context": "Compose",
     "bindings": {
       "secondary-enter": "zmail::Send",
-      "secondary-s": "zmail::SaveDraft"
+      "secondary-s": "zmail::SaveDraft",
+      "secondary-shift-c": "zmail::ShowCc",
+      "secondary-shift-b": "zmail::ShowBcc"
+    }
+  },
+  {
+    "context": "RecipientField && showing_suggestions",
+    "bindings": {
+      "down": "zmail_components::SelectNext",
+      "up": "zmail_components::SelectPrevious",
+      "escape": "zmail_components::Cancel"
     }
   },
   {

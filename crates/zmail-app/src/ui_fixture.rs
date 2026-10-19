@@ -49,6 +49,9 @@ pub(crate) enum FixtureView {
     ReaderLinkWarning,
     /// The compose pane on a half-written reply.
     Compose,
+    /// A new message whose recipients include addresses that are not
+    /// valid, highlighted as chips to fix.
+    ComposeInvalid,
     /// The account setup pane with an account already configured.
     AccountSetup,
     /// The seeded inbox with keyboard focus in the sidebar, so a window
@@ -80,13 +83,14 @@ impl FixtureView {
             "reader-selection" => Self::ReaderSelection,
             "reader-link-warning" => Self::ReaderLinkWarning,
             "compose" => Self::Compose,
+            "compose-invalid" => Self::ComposeInvalid,
             "account-setup" => Self::AccountSetup,
             "sidebar" => Self::Sidebar,
             "accounts" => Self::Accounts,
             "multi-select" => Self::MultiSelect,
             "search" => Self::Search,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-selection, reader-link-warning, compose, account-setup, sidebar, accounts, multi-select or search"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-selection, reader-link-warning, compose, compose-invalid, account-setup, sidebar, accounts, multi-select or search"
             ),
         })
     }
@@ -224,6 +228,27 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
                        redesign after it so we can reuse the new components.\n\n\
                        I'll bring the estimates to Thursday's review.\n\nSam"
                     .to_owned(),
+            })?;
+            InitialView::Draft(draft_id)
+        }
+        FixtureView::ComposeInvalid => {
+            let identity = store
+                .list_identities(account_id)?
+                .into_iter()
+                .next()
+                .context("the fixture account has no identity")?;
+            let draft_id = store.create_draft(&NewDraft {
+                account_id,
+                identity_id: identity.id,
+                to: vec![
+                    "Priya Raman <priya.raman@example.org>".to_owned(),
+                    "tomas.ortega@example..org".to_owned(),
+                    "Marcus Chen <marcus.chen@example.net>".to_owned(),
+                ],
+                cc: vec!["design team".to_owned()],
+                bcc: Vec::new(),
+                subject: "Offline search demo".to_owned(),
+                body: "Hi all,\n\nThe offline search build is ready to try.\n\nSam".to_owned(),
             })?;
             InitialView::Draft(draft_id)
         }
@@ -864,6 +889,7 @@ mod tests {
             "reader-selection",
             "reader-link-warning",
             "compose",
+            "compose-invalid",
             "account-setup",
             "sidebar",
             "accounts",

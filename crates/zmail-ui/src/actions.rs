@@ -144,6 +144,10 @@ actions!(
         SaveDraft,
         /// Attach the file named in the attachment field.
         AddAttachment,
+        /// Show the Cc field of the open draft and move focus to it.
+        ShowCc,
+        /// Show the Bcc field of the open draft and move focus to it.
+        ShowBcc,
         /// Save the account form and start the first sync.
         SaveAccount,
     ]

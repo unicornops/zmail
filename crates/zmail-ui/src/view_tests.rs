@@ -406,7 +406,7 @@ pub(super) fn compose_inputs(
             .expect("a draft is open");
         (
             compose.draft_id,
-            compose.to.clone(),
+            compose.to.read(cx).input().clone(),
             compose.body.clone(),
             compose.attachment_path.clone(),
         )

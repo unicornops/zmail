@@ -69,6 +69,8 @@ MATRIX=(
   "reader-link-warning-light reader-link-warning light 1440 920"
   "compose-dark compose dark 1440 920"
   "compose-light compose light 1440 920"
+  "compose-invalid-dark compose-invalid dark 1440 920"
+  "compose-invalid-light compose-invalid light 1440 920"
   "account-setup-dark account-setup dark 1440 920"
   "account-setup-light account-setup light 1440 920"
   "inbox-dark-720 inbox dark 720 720"
