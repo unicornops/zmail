@@ -47,7 +47,7 @@ pub(crate) enum FixtureView {
     /// An HTML message whose link shows one site and goes to another,
     /// with the open-link dialog warning about it.
     ReaderLinkWarning,
-    /// The compose pane on a half-written reply.
+    /// A half-written reply in its compose window.
     Compose,
     /// A new message whose recipients include addresses that are not
     /// valid, highlighted as chips to fix.

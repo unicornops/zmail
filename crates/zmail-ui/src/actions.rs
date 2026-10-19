@@ -14,7 +14,9 @@
 //! | `Sidebar` | accounts and mailboxes |
 //! | `MessageList` | threads, search results, drafts, outbox |
 //! | `Reader` | the open conversation |
+//! | `ComposeWindow` | a compose window's root |
 //! | `Compose` | the open draft |
+//! | `RecipientField` | a To, Cc or Bcc field (`showing_suggestions` while its suggestions show) |
 //! | `AccountSetup` | the account form |
 //! | `TextInput` | any text field (owned by the text input component) |
 //!
@@ -142,7 +144,7 @@ actions!(
         Send,
         /// Save the open draft.
         SaveDraft,
-        /// Attach the file named in the attachment field.
+        /// Pick files to attach to the open draft.
         AddAttachment,
         /// Show the Cc field of the open draft and move focus to it.
         ShowCc,
@@ -206,9 +208,5 @@ pub(crate) const ACTIONS_WITHOUT_KEYS: &[(&str, &str)] = &[
     (
         "zmail::Zoom",
         "the macOS menu bar has no standard key for it",
-    ),
-    (
-        "zmail::AddAttachment",
-        "Enter in the attachment field submits it",
     ),
 ];

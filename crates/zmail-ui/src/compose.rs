@@ -1,11 +1,20 @@
-//! The compose pane: the open draft.
+//! Compose: the draft editor, in the detail pane or a window of its own.
 //!
 //! [`ComposeView`] is its own entity with its own focus handle and the
 //! `Compose` key context. It edits one draft at a time: the shell opens a
 //! draft with [`ComposeView::load_draft`], edits autosave through
 //! [`MailActions`] once typing pauses for [`AUTOSAVE_DELAY`], and Send
-//! queues the draft with the sync service. Status and errors go to the
-//! shell as [`ComposeEvent`]s.
+//! queues the draft with the sync service. Status and errors go to whoever
+//! hosts it as [`ComposeEvent`]s.
+//!
+//! New mail opens in a [`ComposeWindow`] (see [`window`]), one window per
+//! draft; the detail pane hosts replies and drafts picked from the Drafts
+//! list, and can pop a draft out into its own window. A draft is only ever
+//! open in one place.
+//!
+//! Attachments come from the system file picker (`prompt_for_paths`) or
+//! files dropped onto the editor (`ExternalPaths`), and show as cards with
+//! a Remove button.
 //!
 //! [`ComposeState`] holds the open draft's inputs and store-owned fields;
 //! [`recipients`] has the To, Cc and Bcc chip fields.
@@ -13,13 +22,13 @@
 //! while that draft stays open, so saving and the shell's store refreshes
 //! never move the cursor.
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result};
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, IntoElement, Render, StatefulInteractiveElement, Subscription, Task, Window, div,
-    prelude::*, px, rgb,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, ExternalPaths, FocusHandle,
+    Focusable, FontWeight, IntoElement, PathPromptOptions, Render, Role, SharedString,
+    StatefulInteractiveElement, Subscription, Task, Window, div, prelude::*, px, rgb,
 };
 use zmail_core::{DraftAttachment, DraftDetail, DraftState, DraftUpdate, IdentitySummary};
 use zmail_store::LocalStore;
@@ -31,10 +40,17 @@ use crate::actions::{
 use crate::components::{Button, ButtonSize, Select, SelectEvent, TextInput, TextInputEvent};
 use crate::mail_actions::MailActions;
 use crate::pane::{dispatch_from, pane_focus_indicator};
+use crate::styles::{
+    ICON_BUTTON_SIZE, ICON_SIZE_SM, PlatformStyle, SPACE_3, SendButtonPlacement, TYPE_BODY,
+    TypeStyleExt, UiColors,
+};
+use crate::widgets::{EllipsisExt, empty_state, format_size, icon, label_chip, status_banner};
 
 mod recipients;
+pub(crate) mod window;
 
 pub(crate) use recipients::{RecipientField, RecipientFieldEvent};
+pub(crate) use window::ComposeWindow;
 
 /// The key context the compose pane sets.
 pub(crate) const KEY_CONTEXT: &str = "Compose";
@@ -42,13 +58,10 @@ pub(crate) const KEY_CONTEXT: &str = "Compose";
 const FIELD_ROW_HEIGHT: f32 = 40.0;
 /// Width of the header field labels, so the fields line up.
 const FIELD_LABEL_WIDTH: f32 = 56.0;
+/// Width of an attachment card.
+const ATTACHMENT_CARD_WIDTH: f32 = 240.0;
 /// How long typing must pause before the draft autosaves.
 pub(crate) const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
-use crate::styles::{ICON_BUTTON_SIZE, ICON_SIZE_SM, SPACE_3, TYPE_BODY, TypeStyleExt, UiColors};
-use crate::widgets::{
-    EllipsisExt, empty_state, format_size, icon, input_card, label_chip, section_card,
-    status_banner, toolbar_button,
-};
 
 // ---------------------------------------------------------------------------
 // ComposeState
@@ -61,8 +74,7 @@ use crate::widgets::{
 /// and Bcc fields are [`RecipientField`]s holding the recipient chips.
 /// Store refreshes only update the store-owned fields
 /// ([`ComposeState::update_from_draft`]), so autosave and the background
-/// refresh never move the cursor, drop a chip or clear a half-typed
-/// attachment path.
+/// refresh never move the cursor or drop a chip.
 pub(crate) struct ComposeState {
     pub(crate) draft_id: i64,
     pub(crate) account_id: i64,
@@ -77,7 +89,6 @@ pub(crate) struct ComposeState {
     pub(crate) show_bcc: bool,
     pub(crate) subject: Entity<TextInput>,
     pub(crate) body: Entity<TextInput>,
-    pub(crate) attachment_path: Entity<TextInput>,
     pub(crate) attachments: Vec<DraftAttachment>,
     pub(crate) state: DraftState,
     pub(crate) last_error_message: Option<String>,
@@ -122,11 +133,6 @@ impl ComposeState {
                     .placeholder("Write your message…")
                     .with_text(draft.body)
             }),
-            attachment_path: cx.new(|cx| {
-                TextInput::new(cx)
-                    .label("Attachment Path")
-                    .placeholder("/path/to/attachment.pdf")
-            }),
             attachments: draft.attachments,
             state: draft.state,
             last_error_message: draft.last_error_message,
@@ -166,7 +172,21 @@ pub(crate) enum ComposeEvent {
     /// Something failed.
     Error(String),
     /// The draft was queued for sending.
-    Queued { account_id: i64 },
+    Queued { draft_id: i64, account_id: i64 },
+    /// The pane's Open in Window: move this draft into its own window.
+    PopOut { draft_id: i64 },
+    /// The pane's Show Window, for a draft already open in a window.
+    ShowWindow { draft_id: i64 },
+}
+
+/// Where a [`ComposeView`] is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Presentation {
+    /// The detail pane of the main window, under a pane header.
+    Pane,
+    /// A compose window, whose title bar holds the title and, on macOS and
+    /// Linux, Send.
+    Window,
 }
 
 pub(crate) struct ComposeView {
@@ -174,11 +194,15 @@ pub(crate) struct ComposeView {
     store: Arc<LocalStore>,
     sync_service: SyncService,
     mail_actions: Entity<MailActions>,
-    /// The selected account's identities, for the From choice.
+    presentation: Presentation,
+    /// The draft's account's identities, for the From choice.
     identities: Vec<IdentitySummary>,
     /// The From menu, when the account has more than one identity.
     from_menu: Option<(Entity<Select>, Subscription)>,
     pub(crate) compose: Option<ComposeState>,
+    /// In the pane: the selected draft, which is open in its own window
+    /// instead.
+    in_window: Option<i64>,
     /// Subscriptions to the open draft's inputs.
     input_subscriptions: Vec<Subscription>,
     /// Set by an edit that has not been saved yet.
@@ -202,6 +226,7 @@ impl ComposeView {
         store: Arc<LocalStore>,
         sync_service: SyncService,
         mail_actions: Entity<MailActions>,
+        presentation: Presentation,
         cx: &mut Context<Self>,
     ) -> Self {
         // Quitting within the autosave delay of the last keystroke still
@@ -215,9 +240,11 @@ impl ComposeView {
             store,
             sync_service,
             mail_actions,
+            presentation,
             identities: Vec::new(),
             from_menu: None,
             compose: None,
+            in_window: None,
             input_subscriptions: Vec::new(),
             unsaved_edits: false,
             autosave_task: Task::ready(()),
@@ -236,18 +263,46 @@ impl ComposeView {
         self.compose.as_ref().map(|compose| compose.draft_id)
     }
 
-    /// Replaces the identities offered in From.
-    pub(crate) fn set_identities(
-        &mut self,
-        identities: Vec<IdentitySummary>,
-        cx: &mut Context<Self>,
-    ) {
+    /// In the pane: the draft shown as open in its own window.
+    pub(crate) fn showing_in_window(&self) -> Option<i64> {
+        self.in_window
+    }
+
+    /// The draft's title: its subject, or "New Message".
+    pub(crate) fn title(&self, cx: &App) -> String {
+        self.compose
+            .as_ref()
+            .map(|compose| compose.subject.read(cx).text().trim().to_owned())
+            .filter(|subject| !subject.is_empty())
+            .unwrap_or_else(|| "New Message".to_owned())
+    }
+
+    /// Loads the identities of the draft's account, for From.
+    fn load_identities(&mut self, account_id: i64, cx: &mut Context<Self>) {
+        let identities = self.store.list_identities(account_id).unwrap_or_default();
         if self.identities != identities {
             self.identities = identities;
             self.from_menu = None;
-            self.sync_from_menu(cx);
-            cx.notify();
         }
+        self.sync_from_menu(cx);
+    }
+
+    /// Saves and closes the open draft, leaving the editor empty.
+    pub(crate) fn close_draft(&mut self, cx: &mut Context<Self>) {
+        self.flush_autosave(cx);
+        self.compose = None;
+        self.in_window = None;
+        self.input_subscriptions.clear();
+        self.from_menu = None;
+        cx.notify();
+    }
+
+    /// In the pane: shows that `draft_id` is open in its own window, with a
+    /// button to bring that window forward, instead of editing it here.
+    pub(crate) fn show_in_window(&mut self, draft_id: i64, cx: &mut Context<Self>) {
+        self.close_draft(cx);
+        self.in_window = Some(draft_id);
+        cx.notify();
     }
 
     /// Builds the From menu when there is more than one identity to choose
@@ -299,6 +354,8 @@ impl ComposeView {
             .store
             .draft_detail(draft_id)?
             .context("This draft no longer exists.")?;
+        self.in_window = None;
+        let account_id = draft.account_id;
         match self.compose.as_mut() {
             Some(compose) if compose.draft_id == draft_id => compose.update_from_draft(draft),
             _ => {
@@ -307,7 +364,7 @@ impl ComposeView {
                 self.compose = Some(compose);
             }
         }
-        self.sync_from_menu(cx);
+        self.load_identities(account_id, cx);
         cx.notify();
         Ok(())
     }
@@ -319,8 +376,9 @@ impl ComposeView {
         if let Some(compose) = self.compose.as_mut()
             && let Ok(Some(draft)) = self.store.draft_detail(compose.draft_id)
         {
+            let account_id = draft.account_id;
             compose.update_from_draft(draft);
-            self.sync_from_menu(cx);
+            self.load_identities(account_id, cx);
             cx.notify();
         }
     }
@@ -353,8 +411,7 @@ impl ComposeView {
         }
     }
 
-    /// Subscribes to the inputs: edits autosave the draft, and Enter in the
-    /// attachment path adds the attachment.
+    /// Subscribes to the inputs: edits autosave the draft.
     fn watch_inputs(
         compose: &ComposeState,
         window: &mut Window,
@@ -384,14 +441,6 @@ impl ComposeView {
                 },
             )
         }));
-        subscriptions.push(cx.subscribe(
-            &compose.attachment_path,
-            |this: &mut Self, _, event: &TextInputEvent, cx| {
-                if *event == TextInputEvent::Submitted {
-                    this.add_attachment_from_input(cx);
-                }
-            },
-        ));
         subscriptions
     }
 
@@ -468,46 +517,75 @@ impl ComposeView {
                 cx.emit(ComposeEvent::Status(
                     "Message queued for sending.".to_owned(),
                 ));
-                cx.emit(ComposeEvent::Queued { account_id });
+                cx.emit(ComposeEvent::Queued {
+                    draft_id,
+                    account_id,
+                });
             }
             Err(error) => cx.emit(ComposeEvent::Error(error.to_string())),
         }
     }
 
-    fn add_attachment(&mut self, _: &AddAttachment, _: &mut Window, cx: &mut Context<Self>) {
-        self.add_attachment_from_input(cx);
+    /// Attach Files…: picks files with the system file picker.
+    fn add_attachment(&mut self, _: &AddAttachment, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compose.is_none() {
+            return;
+        }
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let paths = match picked.await {
+                Ok(Ok(Some(paths))) => paths,
+                // Cancelled, or the picker went away.
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |_, cx| {
+                        cx.emit(ComposeEvent::Error(format!(
+                            "The file picker could not open: {error}"
+                        )));
+                    });
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| this.attach_paths(paths, cx));
+        })
+        .detach();
     }
 
-    /// Adds the file at the path in the attachment input.
-    fn add_attachment_from_input(&mut self, cx: &mut Context<Self>) {
-        let Some((draft_id, path_input)) = self
-            .compose
-            .as_ref()
-            .map(|compose| (compose.draft_id, compose.attachment_path.clone()))
-        else {
-            cx.emit(ComposeEvent::Error("No draft is open.".to_owned()));
+    /// Files dropped onto the editor.
+    fn on_drop_paths(&mut self, paths: &ExternalPaths, _: &mut Window, cx: &mut Context<Self>) {
+        self.attach_paths(paths.paths().to_vec(), cx);
+    }
+
+    /// Copies each file into the draft as an attachment. Folders and
+    /// unreadable files are reported and skipped.
+    pub(crate) fn attach_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(draft_id) = self.draft_id() else {
             return;
         };
         if let Err(error) = self.save(cx) {
             cx.emit(ComposeEvent::Error(error.to_string()));
             return;
         }
-        let path = path_input.read(cx).text().trim().to_owned();
-        if path.is_empty() {
-            cx.emit(ComposeEvent::Error(
-                "Enter an attachment path first.".to_owned(),
-            ));
-            return;
-        }
-        match self.mail_actions.update(cx, |actions, cx| {
-            actions.add_draft_attachment(draft_id, &path, cx)
-        }) {
-            Ok(_) => {
-                path_input.update(cx, |input, cx| input.set_text("", cx));
-                self.refresh_from_store(cx);
+        for path in paths {
+            if path.is_dir() {
+                cx.emit(ComposeEvent::Error(format!(
+                    "{} is a folder; attach the files in it instead.",
+                    path.display()
+                )));
+                continue;
             }
-            Err(error) => cx.emit(ComposeEvent::Error(error.to_string())),
+            if let Err(error) = self.mail_actions.update(cx, |actions, cx| {
+                actions.add_draft_attachment(draft_id, &path, cx)
+            }) {
+                cx.emit(ComposeEvent::Error(error.to_string()));
+            }
         }
+        self.refresh_from_store(cx);
     }
 
     fn remove_attachment(
@@ -587,6 +665,12 @@ impl Render for ComposeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = *cx.global::<UiColors>();
         let focused = self.focus_handle.contains_focused(window, cx);
+        let draft_open = self.compose.is_some();
+        let pane = self.presentation == Presentation::Pane;
+        // In a window, Send sits in the title bar unless the platform puts
+        // it at the bottom of the compose body (Windows).
+        let bottom_send = pane
+            || PlatformStyle::current().send_button == SendButtonPlacement::ComposeBottomLeading;
 
         div()
             .id("compose")
@@ -599,22 +683,30 @@ impl Render for ComposeView {
             .on_action(cx.listener(Self::select_identity))
             .on_action(cx.listener(Self::show_cc))
             .on_action(cx.listener(Self::show_bcc))
+            .when(draft_open, |this| {
+                this.on_drop(cx.listener(Self::on_drop_paths))
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                        style.bg(rgb(colors.selected_background))
+                    })
+            })
             .size_full()
             .flex()
             .flex_col()
             .bg(rgb(colors.background))
-            .child(
-                pane_focus_indicator(
-                    div()
-                        .px_4()
-                        .py_3()
-                        .border_b_1()
-                        .border_color(rgb(colors.border)),
-                    focused,
-                    &colors,
+            .when(pane, |this| {
+                this.child(
+                    pane_focus_indicator(
+                        div()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgb(colors.border)),
+                        focused,
+                        &colors,
+                    )
+                    .child("Compose"),
                 )
-                .child("Compose"),
-            )
+            })
             .child(
                 div()
                     .id("compose-scroll")
@@ -626,145 +718,164 @@ impl Render for ComposeView {
                     .overflow_y_scroll()
                     .px_4()
                     .py_4()
-                    .child(render_compose_detail(
-                        self.compose.as_ref(),
-                        self.from_menu.as_ref().map(|(menu, _)| menu),
-                        &self.focus_handle,
-                        &colors,
-                        cx,
-                    )),
+                    .child(self.render_detail(&colors, cx)),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(rgb(colors.border))
-                    .children(compose_action_buttons(
-                        self.compose.is_some(),
-                        &self.focus_handle,
-                        &colors,
-                    )),
-            )
+            .when(draft_open && bottom_send, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .px_4()
+                        .py_3()
+                        .border_t_1()
+                        .border_color(rgb(colors.border))
+                        .children(self.render_action_buttons(cx)),
+                )
+            })
     }
 }
 
-// ---------------------------------------------------------------------------
-// render_compose_detail
-// ---------------------------------------------------------------------------
+impl ComposeView {
+    /// The form, or what the pane shows with no draft open.
+    fn render_detail(&self, colors: &UiColors, cx: &mut Context<Self>) -> AnyElement {
+        let Some(compose) = self.compose.as_ref() else {
+            if let Some(draft_id) = self.in_window {
+                return div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_3()
+                    .child(empty_state(
+                        "Open in its own window",
+                        "This draft is being edited in a compose window.",
+                        "pen-square",
+                        None,
+                        colors,
+                    ))
+                    .child(
+                        Button::new("compose-show-window", "Show Window").on_click(cx.listener(
+                            move |_, _, _, cx| cx.emit(ComposeEvent::ShowWindow { draft_id }),
+                        )),
+                    )
+                    .into_any_element();
+            }
+            return empty_state(
+                "No draft open",
+                "Press Compose or select a draft to edit it here.",
+                "pen-square",
+                None,
+                colors,
+            );
+        };
 
-/// Render the compose form: the header fields, body and attachments.
-/// Returns an [`AnyElement`] ready to be placed inside a scrollable
-/// container.
-fn render_compose_detail(
-    compose: Option<&ComposeState>,
-    from_menu: Option<&Entity<Select>>,
-    focus_handle: &FocusHandle,
-    colors: &UiColors,
-    cx: &App,
-) -> AnyElement {
-    let Some(compose) = compose else {
-        return empty_state(
-            "No draft open",
-            "Press Compose or select a draft to edit it here.",
-            "pen-square",
-            None,
-            colors,
-        );
-    };
+        // "Editing" is the normal state of an open draft; only call out the
+        // states that need attention.
+        let state_chip = (compose.state != DraftState::Editing).then(|| {
+            label_chip(
+                compose.state.label(),
+                Some("file-text"),
+                colors.button_background,
+                colors.info,
+            )
+        });
+        // A window shows the title in its title bar.
+        let title = (self.presentation == Presentation::Pane).then(|| self.title(cx));
 
-    let subject = compose.subject.read(cx).text().trim().to_owned();
-    let title = if subject.is_empty() {
-        "New message".to_owned()
-    } else {
-        subject
-    };
-    // "Editing" is the normal state of an open draft; only call out the
-    // states that need attention.
-    let state_chip = (compose.state != DraftState::Editing).then(|| {
-        label_chip(
-            compose.state.label(),
-            Some("file-text"),
-            colors.button_background,
-            colors.info,
-        )
-    });
-
-    div()
-        .flex()
-        .flex_col()
-        .gap_4()
-        .w_full()
-        .min_w_0()
-        .child(
-            div()
-                .flex()
-                .justify_between()
-                .items_start()
-                .gap_4()
-                .child(
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .w_full()
+            .min_w_0()
+            .when(title.is_some() || state_chip.is_some(), |this| {
+                this.child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_xl()
-                        .font_weight(FontWeight::BOLD)
-                        .child(title),
+                        .flex()
+                        .justify_between()
+                        .items_start()
+                        .gap_4()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_xl()
+                                .font_weight(FontWeight::BOLD)
+                                .children(title),
+                        )
+                        .children(state_chip),
                 )
-                .children(state_chip),
-        )
-        .when_some(compose.last_error_message.as_ref(), |this, error| {
-            this.child(status_banner(
-                &format!("Last send error: {error}"),
-                "alert-circle",
-                colors.danger,
-                colors.danger_background,
+            })
+            .when_some(compose.last_error_message.as_ref(), |this, error| {
+                this.child(status_banner(
+                    &format!("Last send error: {error}"),
+                    "alert-circle",
+                    colors.danger,
+                    colors.danger_background,
+                    colors,
+                ))
+            })
+            .child(render_fields(
+                compose,
+                self.from_menu.as_ref().map(|(menu, _)| menu),
+                &self.focus_handle,
                 colors,
             ))
-        })
-        .child(render_fields(compose, from_menu, focus_handle, colors))
-        .child(render_attachments_section(compose, focus_handle, colors))
-        .into_any_element()
-}
-
-// ---------------------------------------------------------------------------
-// compose_action_buttons
-// ---------------------------------------------------------------------------
-
-/// The Send and Save Draft buttons at the bottom of the pane, so they stay
-/// visible however long the draft is.
-///
-/// Returns an empty [`Vec`] when no draft is open.
-fn compose_action_buttons(
-    draft_open: bool,
-    focus_handle: &FocusHandle,
-    colors: &UiColors,
-) -> Vec<AnyElement> {
-    if !draft_open {
-        return Vec::new();
+            .when(!compose.attachments.is_empty(), |this| {
+                this.child(render_attachments(
+                    &compose.attachments,
+                    &self.focus_handle,
+                    colors,
+                ))
+            })
+            .into_any_element()
     }
-    vec![
-        toolbar_button(
-            "Send",
-            Some("send"),
-            colors.accent,
-            colors.accent,
-            colors.background,
-            dispatch_from(focus_handle, Send),
-        )
-        .into_any_element(),
-        toolbar_button(
-            "Save Draft",
-            Some("file-text"),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
-            dispatch_from(focus_handle, SaveDraft),
-        )
-        .into_any_element(),
-    ]
+
+    /// The buttons along the bottom: Send first (bottom-left, the Windows
+    /// placement), then Attach; the pane adds Save Draft and Open in
+    /// Window.
+    fn render_action_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let focus_handle = &self.focus_handle;
+        let mut buttons = vec![
+            Button::new("compose-send", "Send")
+                .primary()
+                .icon("send")
+                .shortcut("secondary-enter")
+                .on_click(dispatch_from(focus_handle, Send))
+                .into_any_element(),
+            Button::new("compose-attach", "Attach")
+                .icon("paperclip")
+                .tooltip("Attach files")
+                .on_click(dispatch_from(focus_handle, AddAttachment))
+                .into_any_element(),
+        ];
+        if self.presentation == Presentation::Pane {
+            buttons.push(
+                Button::new("compose-save", "Save Draft")
+                    .icon("file-text")
+                    .on_click(dispatch_from(focus_handle, SaveDraft))
+                    .into_any_element(),
+            );
+            if let Some(draft_id) = self.draft_id() {
+                buttons.push(div().flex_1().into_any_element());
+                buttons.push(
+                    div()
+                        .debug_selector(|| "compose-pop-out".into())
+                        .child(
+                            Button::new("compose-pop-out", "Open in Window")
+                                .ghost()
+                                .icon("external-link")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(ComposeEvent::PopOut { draft_id })
+                                })),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+        buttons
+    }
 }
 
 /// The header fields, one row each, then the body: From (only when the
@@ -838,55 +949,17 @@ fn render_fields(
         .child(div().pt(px(SPACE_3)).child(compose.body.clone()))
 }
 
-fn render_attachments_section(
-    compose: &ComposeState,
+/// The draft's attachments, as cards with a Remove button.
+fn render_attachments(
+    attachments: &[DraftAttachment],
     focus_handle: &FocusHandle,
     colors: &UiColors,
 ) -> gpui::Div {
-    section_card("Attachments", colors)
-        .child(input_card(
-            "Attachment Path",
-            &compose.attachment_path,
-            colors,
-        ))
-        .child(div().flex().flex_wrap().gap_2().child(toolbar_button(
-            "Add Attachment",
-            Some("paperclip"),
-            colors.button_background,
-            colors.border,
-            colors.foreground,
-            dispatch_from(focus_handle, AddAttachment),
-        )))
-        .child(if compose.attachments.is_empty() {
-            div()
-                .rounded_md()
-                .bg(rgb(colors.background))
-                .border_1()
-                .border_color(rgb(colors.border))
-                .px_3()
-                .py_3()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(icon("paperclip", ICON_SIZE_SM, colors.muted))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(colors.muted))
-                                .child("No attachments added yet."),
-                        ),
-                )
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .children(compose.attachments.iter().map(|attachment| {
-                    render_attachment_card(attachment, focus_handle, colors).into_any_element()
-                }))
-        })
+    div().flex().flex_wrap().gap_2().children(
+        attachments
+            .iter()
+            .map(|attachment| render_attachment_card(attachment, focus_handle, colors)),
+    )
 }
 
 fn render_attachment_card(
@@ -897,6 +970,7 @@ fn render_attachment_card(
     let attachment_id = attachment.id;
 
     div()
+        .w(px(ATTACHMENT_CARD_WIDTH))
         .rounded_md()
         .bg(rgb(colors.background))
         .border_1()
@@ -942,6 +1016,14 @@ fn render_attachment_card(
                 .child(
                     div()
                         .id(("compose-attachment-remove", attachment.id as u64))
+                        .debug_selector(move || {
+                            format!("compose-attachment-remove-{attachment_id}")
+                        })
+                        .role(Role::Button)
+                        .aria_label(SharedString::from(format!(
+                            "Remove {}",
+                            attachment.filename
+                        )))
                         .flex()
                         .flex_none()
                         .items_center()

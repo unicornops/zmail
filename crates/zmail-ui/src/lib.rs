@@ -12,7 +12,7 @@
 //! | `sidebar` | `SidebarView`: accounts and mailboxes |
 //! | `message_list` | `MessageListView`: threads, search results, drafts, outbox; its multi-row selection and bulk bar |
 //! | `reader` | `ReaderView`: the open conversation and its actions |
-//! | `compose` | `ComposeView`: the open draft |
+//! | `compose` | `ComposeView`: the draft editor; `ComposeWindow`, one window per draft; `RecipientField` chips |
 //! | `account_setup` | `AccountSetupView`: the new-account form |
 //! | `mail_actions` | `MailActions`: store writes, `MailEvent`s and undo |
 //! | `drag` | `DraggedThreads`: conversations dragged from the list onto sidebar folders |
@@ -105,7 +105,7 @@ pub enum InitialView {
     /// (or account setup when no account exists yet).
     #[default]
     Inbox,
-    /// The compose pane on this stored draft.
+    /// This stored draft in a compose window.
     Draft(i64),
     /// The reader on this thread, without marking it read.
     Thread(i64),
@@ -227,7 +227,7 @@ pub fn run(
 ///   manager's title bar.
 ///
 /// `ZMAIL_WINDOW_DECORATIONS=server` or `=client` overrides the choice.
-fn window_decorations() -> WindowDecorations {
+pub(crate) fn window_decorations() -> WindowDecorations {
     decorations_for(
         std::env::var("ZMAIL_WINDOW_DECORATIONS").ok().as_deref(),
         std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
@@ -299,6 +299,15 @@ struct WorkspaceView {
     toasts: Entity<components::ToastHost>,
     /// The toast offering to undo the latest mail change, and that change.
     undo_toast: Option<(components::ToastId, mail_actions::UndoId)>,
+    /// The open compose windows, by draft, with the subscriptions to their
+    /// editors.
+    compose_windows: std::collections::HashMap<
+        i64,
+        (
+            gpui::WindowHandle<compose::ComposeWindow>,
+            [Subscription; 2],
+        ),
+    >,
     /// Set while a store refresh for mail events is queued, so a change to
     /// many threads refreshes once.
     mail_refresh_queued: bool,

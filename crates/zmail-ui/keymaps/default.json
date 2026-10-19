@@ -117,7 +117,14 @@
       "secondary-enter": "zmail::Send",
       "secondary-s": "zmail::SaveDraft",
       "secondary-shift-c": "zmail::ShowCc",
-      "secondary-shift-b": "zmail::ShowBcc"
+      "secondary-shift-b": "zmail::ShowBcc",
+      "secondary-shift-a": "zmail::AddAttachment"
+    }
+  },
+  {
+    "context": "ComposeWindow",
+    "bindings": {
+      "escape": "zmail::Cancel"
     }
   },
   {

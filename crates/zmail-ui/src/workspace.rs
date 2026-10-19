@@ -43,7 +43,7 @@ use crate::app_menu::AppMenuButton;
 use crate::components::{
     self, IconButton, SplitHandle, TextInput, TextInputEvent, TitleBar, Toast, ToastHost, ToastKind,
 };
-use crate::compose::{ComposeEvent, ComposeView};
+use crate::compose::{ComposeEvent, ComposeView, ComposeWindow, Presentation};
 use crate::layout::{LayoutMode, PaneLayout, SinglePane};
 use crate::mail_actions::{MailActions, MailEvent, UndoEntry, UndoId};
 use crate::message_list::{
@@ -94,6 +94,7 @@ impl WorkspaceView {
                 store.clone(),
                 sync_service.clone(),
                 mail_actions.clone(),
+                Presentation::Pane,
                 cx,
             )
         });
@@ -143,6 +144,7 @@ impl WorkspaceView {
             app_menu,
             toasts,
             undo_toast: None,
+            compose_windows: Default::default(),
             mail_refresh_queued: false,
             account: None,
             accounts: Vec::new(),
@@ -250,12 +252,14 @@ impl WorkspaceView {
         match initial_view {
             InitialView::Inbox => {}
             // A mailto launch pre-selects the draft's account and opens the
-            // compose pane on the pre-filled draft.
+            // pre-filled draft in a compose window.
             InitialView::Draft(draft_id) => {
                 if let Ok(Some(draft)) = view.store.draft_detail(draft_id) {
                     view.select_account(draft.account_id, cx);
-                    view.open_draft(draft_id, window, cx);
-                    view.focus_pane(Pane::Detail, window, cx);
+                    // Once the main window is up.
+                    cx.defer_in(window, move |view, window, cx| {
+                        view.open_draft_in_window(draft_id, false, window, cx);
+                    });
                 }
             }
             // `show_thread`, not `select_thread`, which would mark the thread
@@ -450,10 +454,6 @@ impl WorkspaceView {
         };
         self.reader
             .update(cx, |reader, cx| reader.set_state(reader_state, cx));
-
-        let identities = self.identities.clone();
-        self.compose
-            .update(cx, |compose, cx| compose.set_identities(identities, cx));
     }
 
     // -----------------------------------------------------------------------
@@ -588,10 +588,16 @@ impl WorkspaceView {
             .filter(|selected_id| self.outbox_jobs.iter().any(|job| job.id == *selected_id))
             .or_else(|| self.outbox_jobs.first().map(|job| job.id));
 
-        // Only the store-owned parts of the open draft refresh: the text
+        // Only the store-owned parts of the open drafts refresh: the text
         // inputs keep the user's text, cursor and undo history.
         self.compose
             .update(cx, |compose, cx| compose.refresh_from_store(cx));
+        for (handle, _) in self.compose_windows.values() {
+            let _ = handle.update(cx, |root, _, cx| {
+                root.compose()
+                    .update(cx, |compose, cx| compose.refresh_from_store(cx))
+            });
+        }
         // The list's cached page of rows re-reads, and re-renders only if a
         // row changed.
         self.message_list
@@ -1104,13 +1110,23 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Opens a draft in the compose pane.
+    /// Opens a draft in the compose pane, or, when it is open in a compose
+    /// window, shows that in the pane instead (a draft is edited in one
+    /// place only).
     pub(crate) fn open_draft(
         &mut self,
         draft_id: i64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.compose_window(draft_id, cx).is_some() {
+            self.compose
+                .update(cx, |compose, cx| compose.show_in_window(draft_id, cx));
+            self.selected_draft_id = Some(draft_id);
+            self.detail_mode = DetailMode::Compose;
+            cx.notify();
+            return;
+        }
         match self
             .compose
             .update(cx, |compose, cx| compose.load_draft(draft_id, window, cx))
@@ -1257,16 +1273,125 @@ impl WorkspaceView {
             .update(cx, |actions, cx| actions.create_draft(&draft, cx))
         {
             Ok(draft_id) => {
-                self.open_draft(draft_id, window, cx);
-                self.list_mode = ListMode::Drafts;
-                self.single_pane = SinglePane::Detail;
-                self.compose
-                    .update(cx, |compose, cx| compose.focus_to(window, cx));
+                self.open_draft_in_window(draft_id, false, window, cx);
                 self.refresh_from_store(cx);
             }
             Err(error) => self.store_error = Some(error.to_string()),
         }
         cx.notify();
+    }
+
+    /// Creates an empty draft and opens it in the compose pane, as the
+    /// drafts list does, for tests of the pane.
+    #[cfg(test)]
+    pub(crate) fn open_compose_in_pane_for_test(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> i64 {
+        let identity = self.default_compose_identity().expect("an identity");
+        let account_id = self.selected_account_id.expect("an account");
+        let draft_id = self
+            .mail_actions
+            .update(cx, |actions, cx| {
+                actions.create_draft(
+                    &NewDraft {
+                        account_id,
+                        identity_id: identity.id,
+                        to: Vec::new(),
+                        cc: Vec::new(),
+                        bcc: Vec::new(),
+                        subject: String::new(),
+                        body: String::new(),
+                    },
+                    cx,
+                )
+            })
+            .expect("the draft is created");
+        self.open_draft(draft_id, window, cx);
+        draft_id
+    }
+
+    /// The compose window editing `draft_id`, if one is open.
+    pub(crate) fn compose_window(
+        &mut self,
+        draft_id: i64,
+        cx: &mut App,
+    ) -> Option<gpui::WindowHandle<ComposeWindow>> {
+        let (handle, _) = self.compose_windows.get(&draft_id)?;
+        let handle = *handle;
+        if handle.update(cx, |_, _, _| ()).is_ok() {
+            Some(handle)
+        } else {
+            self.compose_windows.remove(&draft_id);
+            None
+        }
+    }
+
+    /// Opens `draft_id` in a compose window of its own, or brings its window
+    /// forward when it already has one. Focus goes to To, or to the start
+    /// of the body when `focus_body` is set.
+    pub(crate) fn open_draft_in_window(
+        &mut self,
+        draft_id: i64,
+        focus_body: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.compose_window(draft_id, cx) {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            return;
+        }
+        // A draft is edited in one place: the pane lets go of it first.
+        let in_pane = self.compose.read(cx).draft_id() == Some(draft_id);
+        if in_pane {
+            self.compose
+                .update(cx, |compose, cx| compose.show_in_window(draft_id, cx));
+        }
+        let opened = ComposeWindow::open(
+            draft_id,
+            focus_body,
+            self.store.clone(),
+            self.sync_service.clone(),
+            self.mail_actions.clone(),
+            cx,
+        )
+        .and_then(|handle| {
+            let root = handle.entity(cx)?;
+            let compose = root.read(cx).compose().clone();
+            Ok((handle, root, compose))
+        });
+        match opened {
+            Ok((handle, root, compose)) => {
+                let subscriptions = [
+                    cx.subscribe(&compose, |this, _, event: &ComposeEvent, cx| {
+                        this.on_window_compose_event(event, cx)
+                    }),
+                    // The window closed: the pane may edit the draft again.
+                    cx.observe_release_in(&root, window, move |this, _, window, cx| {
+                        this.compose_windows.remove(&draft_id);
+                        if this.compose.read(cx).showing_in_window() == Some(draft_id) {
+                            this.open_draft(draft_id, window, cx);
+                        }
+                        this.refresh_from_store(cx);
+                        cx.notify();
+                    }),
+                ];
+                self.compose_windows
+                    .insert(draft_id, (handle, subscriptions));
+            }
+            Err(error) => self.show_error(error.to_string(), cx),
+        }
+    }
+
+    /// Events from a compose window's editor. Its status and errors show in
+    /// that window; the shell refreshes once the draft is queued.
+    fn on_window_compose_event(&mut self, event: &ComposeEvent, cx: &mut Context<Self>) {
+        if let ComposeEvent::Queued { .. } = event {
+            self.show_status("Message queued for sending.".to_owned(), cx);
+            self.refresh_from_store(cx);
+            cx.notify();
+        }
     }
 
     /// Open a reply or reply-all draft for the selected thread.
@@ -1320,12 +1445,7 @@ impl WorkspaceView {
 
         match self.create_forward_draft(&thread, cx) {
             Ok(draft_id) => {
-                self.open_draft(draft_id, window, cx);
-                self.list_mode = ListMode::Drafts;
-                self.single_pane = SinglePane::Detail;
-                self.compose
-                    .update(cx, |compose, cx| compose.focus_to(window, cx));
-                self.show_status("Forward draft ready.".to_owned(), cx);
+                self.open_draft_in_window(draft_id, false, window, cx);
                 self.refresh_from_store(cx);
             }
             Err(error) => self.store_error = Some(error.to_string()),
@@ -2249,6 +2369,12 @@ impl WorkspaceView {
                 self.refresh_from_store(cx);
                 self.schedule_refresh(window, cx);
                 cx.notify();
+            }
+            ComposeEvent::PopOut { draft_id } => {
+                self.open_draft_in_window(*draft_id, false, window, cx);
+            }
+            ComposeEvent::ShowWindow { draft_id } => {
+                self.open_draft_in_window(*draft_id, false, window, cx);
             }
         }
     }
