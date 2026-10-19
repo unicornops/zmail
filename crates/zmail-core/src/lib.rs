@@ -1013,6 +1013,21 @@ pub enum MailboxSelection {
     Virtual(VirtualMailbox),
 }
 
+/// Where a search looks. Searches start in the folder the list shows and
+/// can widen to its account or to every account; an `in:` clause in the
+/// query names the folder instead (see
+/// [`search::SearchQuery::mailbox_clause`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SearchScope {
+    /// One mailbox, or a virtual mailbox such as the Unified Inbox (every
+    /// account's inbox) or Flagged.
+    Folder(MailboxSelection),
+    /// Every mailbox of one account.
+    Account(i64),
+    /// Every mailbox of every account.
+    AllAccounts,
+}
+
 /// Which of a list's threads to show: the message list's filter menu.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ThreadFilter {
@@ -1254,6 +1269,8 @@ pub struct MessageFlagState {
 /// Search hit returned by the local Phase 3 mail search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHit {
+    /// Account the thread belongs to.
+    pub account_id: i64,
     /// Mailbox identifier.
     pub mailbox_id: i64,
     /// Mailbox name.

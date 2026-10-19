@@ -57,6 +57,12 @@ actions!(
         FocusSearch,
         /// Search local mail for the text in the search field.
         RunSearch,
+        /// Search only the folder the search started in.
+        SearchInFolder,
+        /// Widen the search to the folder's whole account.
+        SearchInAccount,
+        /// Widen the search to every account.
+        SearchAllAccounts,
         /// Sync the selected account.
         SyncAccount,
         /// Sync every account.

@@ -7,15 +7,16 @@
 //! mailbox is shown.
 
 use gpui::{
-    AnyElement, Context, DismissEvent, Focusable, FontWeight, IntoElement, MouseButton, Window,
-    div, prelude::*, rgb,
+    AnyElement, Context, DismissEvent, Focusable, FontWeight, IntoElement, MouseButton, Role,
+    Window, div, prelude::*, rgb,
 };
 use zmail_core::{ThreadFilter, text::count_noun};
 
 use super::{ListMode, MessageListView};
-use crate::actions::RetryOutbox;
+use crate::actions::{RetryOutbox, SearchAllAccounts, SearchInAccount, SearchInFolder};
 use crate::components::{Badge, Button, ButtonSize, Menu, MenuEntry, popover_below_end};
 use crate::pane::{dispatch_from, pane_focus_indicator};
+use crate::search::SearchLevel;
 use crate::styles::UiColors;
 use crate::widgets::{EllipsisExt, empty_state};
 
@@ -172,7 +173,10 @@ impl MessageListView {
                         .text_color(rgb(colors.muted))
                         .ellipsis()
                         .child(subtitle),
-                ),
+                )
+                .when(self.state.mode == ListMode::Search, |this| {
+                    this.child(self.render_scope_control())
+                }),
         )
         .when(can_filter, |this| this.child(self.render_filter_button(cx)))
         // Retry lives with the outbox it acts on.
@@ -186,6 +190,70 @@ impl MessageListView {
             )
         })
         .into_any_element()
+    }
+
+    /// Where the search looks: the folder it started in, that folder's
+    /// account, or every account. An `in:` clause in the query takes the
+    /// folder's place and says so, so the control and the query never
+    /// silently disagree.
+    fn render_scope_control(&self) -> AnyElement {
+        let scope = &self.state.search_scope;
+        let chip = |selector: &'static str, button: Button| {
+            div()
+                .flex_none()
+                .debug_selector(move || selector.into())
+                .child(button.size(ButtonSize::Small).ghost())
+        };
+        let folder = match (&scope.in_clause, &scope.folder) {
+            (Some(value), _) => Some(chip(
+                "search-scope-in",
+                Button::new("search-scope-in", format!("in:{value}"))
+                    .selected(scope.level == SearchLevel::Folder)
+                    .tooltip("The in: operator in the query chooses the folder"),
+            )),
+            (None, Some(name)) => Some(chip(
+                "search-scope-folder",
+                Button::new("search-scope-folder", name.clone())
+                    .selected(scope.level == SearchLevel::Folder)
+                    .shortcut("secondary-alt-1")
+                    .on_click(dispatch_from(&self.focus_handle, SearchInFolder)),
+            )),
+            (None, None) => None,
+        };
+        let account = scope.account.as_ref().map(|name| {
+            chip(
+                "search-scope-account",
+                Button::new("search-scope-account", name.clone())
+                    .selected(
+                        scope.level == SearchLevel::Account
+                            || (scope.level == SearchLevel::Folder && scope.folder.is_none()),
+                    )
+                    .shortcut("secondary-alt-2")
+                    .on_click(dispatch_from(&self.focus_handle, SearchInAccount)),
+            )
+        });
+        let all = scope.many_accounts.then(|| {
+            chip(
+                "search-scope-all",
+                Button::new("search-scope-all", "All accounts")
+                    .selected(scope.level == SearchLevel::AllAccounts)
+                    .shortcut("secondary-alt-3")
+                    .on_click(dispatch_from(&self.focus_handle, SearchAllAccounts)),
+            )
+        });
+        div()
+            .id("search-scope")
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .mt_1()
+            .role(Role::RadioGroup)
+            .aria_label("Search scope")
+            .children(folder)
+            .children(account)
+            .children(all)
+            .into_any_element()
     }
 
     /// The filter button: a quiet "All", or the active filter highlighted.

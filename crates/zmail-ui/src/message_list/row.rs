@@ -784,6 +784,7 @@ mod tests {
     fn search_hits_are_labelled_with_their_mailbox() {
         let now = chrono::Local::now();
         let hit = SearchHit {
+            account_id: 1,
             mailbox_id: 1,
             mailbox_name: "Archive".to_owned(),
             thread_id: 2,

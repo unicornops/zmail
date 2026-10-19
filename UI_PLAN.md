@@ -391,7 +391,10 @@ Store dependencies are marked **[store]**.
 5. **Loading and empty states.**
    - Skeleton rows during the first sync of a mailbox.
    - "You're all caught up" for an empty inbox.
-   - "No results in Inbox — Search all mail" for a search with no results.
+   - A search with no results says where it looked and widens one step:
+     "No results in Inbox — Search Work", then "No results in Work — Search all
+     accounts" (with more than one account), then "Clear search". Searches start
+     in the current folder (decided by Rob, October 2026; see Phase 7).
    - Each empty state has one action.
 6. **Drafts and Outbox rows** reuse the message row. Outbox status reads in plain words:
    "Sending…", "Failed — retrying in 5 min", "Retry now".
@@ -475,7 +478,12 @@ Store dependencies are marked **[store]**.
 3. **Search.**
    - `/` or Secondary+F focuses search. Search runs live (debounced 150ms) against local
      full-text search. A clear button and Esc exit.
-   - Scope chips: this mailbox / all mail / all accounts.
+   - Scope chips: this folder (the default for every new search) / this account /
+     all accounts. The Unified Inbox's folder is every account's inbox, and
+     Flagged is a folder of its own. An explicit `in:` operator wins over the
+     folder chip, which then shows the operator. The server fallback follows the
+     scope (one folder's mailboxes, one account, or each account in turn).
+     Shipped in Phase 3 with the scope control under the list header.
    - Filter chips: from:, has:attachment, unread, date.
    - Results use the normal rows with matches highlighted.
 
