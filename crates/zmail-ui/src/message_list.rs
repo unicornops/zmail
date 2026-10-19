@@ -28,8 +28,8 @@ use gpui::{
 };
 use std::sync::Arc;
 use zmail_core::{
-    DraftSummary, MailboxRole, MailboxSelection, MailboxSummary, OutboxJobSummary, SearchHit,
-    ThreadFilter, ThreadSummary, preferences::Density, time::HourCycle,
+    AccountColor, DraftSummary, MailboxRole, MailboxSelection, MailboxSummary, OutboxJobSummary,
+    SearchHit, ThreadFilter, ThreadSummary, preferences::Density, time::HourCycle,
 };
 use zmail_store::LocalStore;
 
@@ -75,6 +75,7 @@ pub(crate) struct ListMailbox {
 pub(crate) struct AccountLabel {
     pub(crate) id: i64,
     pub(crate) name: String,
+    pub(crate) color: AccountColor,
 }
 
 /// What the shell shows in the list.
@@ -84,7 +85,7 @@ pub(crate) struct MessageListState {
     pub(crate) has_accounts: bool,
     pub(crate) mailbox: Option<ListMailbox>,
     /// Every account, to name the account each row of a cross-account
-    /// list comes from (see [`MessageListState::row_account_name`]).
+    /// list comes from (see [`MessageListState::row_account`]).
     pub(crate) accounts: Vec<AccountLabel>,
     /// The user's own addresses, shown as "me".
     pub(crate) own_addresses: Vec<String>,
@@ -112,9 +113,9 @@ pub(crate) struct MessageListState {
 }
 
 impl MessageListState {
-    /// The account a thread row comes from, named only in lists that span
+    /// The account a thread row comes from, shown only in lists that span
     /// accounts (the Unified Inbox, Flagged, Sent).
-    pub(crate) fn row_account_name(&self, account_id: i64) -> Option<&str> {
+    pub(crate) fn row_account(&self, account_id: i64) -> Option<&AccountLabel> {
         let spans_accounts = matches!(
             self.mailbox.as_ref().map(|mailbox| mailbox.selection),
             Some(MailboxSelection::Virtual(_))
@@ -122,7 +123,6 @@ impl MessageListState {
         self.accounts
             .iter()
             .find(|account| spans_accounts && account.id == account_id)
-            .map(|account| account.name.as_str())
     }
 }
 
@@ -679,13 +679,14 @@ impl MessageListView {
                     &now,
                     self.hour_cycle,
                 );
-                row.account =
-                    self.state
-                        .row_account_name(thread.account_id)
-                        .map(|name| RowAccount {
-                            id: thread.account_id,
-                            name: name.to_owned(),
-                        });
+                row.account = self
+                    .state
+                    .row_account(thread.account_id)
+                    .map(|account| RowAccount {
+                        id: account.id,
+                        name: account.name.clone(),
+                        color: account.color,
+                    });
 
                 // The hovered row shows quick actions for that row; the
                 // selection hooks act on the selection.
@@ -764,6 +765,7 @@ impl MessageListView {
                                 .map(|account| RowAccount {
                                     id: account.id,
                                     name: account.name.clone(),
+                                    color: account.color,
                                 });
                         }
                         let quick_actions = (self.hovered_thread == Some(thread_id))

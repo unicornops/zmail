@@ -23,7 +23,8 @@ use gpui::{
     px, relative, rgb,
 };
 use zmail_core::{
-    DraftState, DraftSummary, OutboxJobState, OutboxJobSummary, SearchHit, ThreadSummary,
+    AccountColor, DraftState, DraftSummary, OutboxJobState, OutboxJobSummary, SearchHit,
+    ThreadSummary,
     participants::{parse_address_list, participant_names, sender_identity},
     text::count_noun,
     time::{HourCycle, format_full_date, format_list_date, parse_timestamp},
@@ -96,6 +97,7 @@ pub(super) enum SnippetTone {
 pub(super) struct RowAccount {
     pub(super) id: i64,
     pub(super) name: String,
+    pub(super) color: AccountColor,
 }
 
 impl MessageRow {
@@ -635,7 +637,7 @@ fn status_icons(row: &MessageRow, colors: &UiColors) -> Vec<gpui::Div> {
                     let part = row.part("account");
                     move || part
                 })
-                .child(account_dot(account.id))
+                .child(account_dot(account.color))
                 .child(
                     div()
                         .min_w_0()

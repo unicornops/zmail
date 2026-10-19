@@ -8,7 +8,7 @@ use gpui::{
     AnyElement, App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, SharedString,
     Stateful, StatefulInteractiveElement, Styled, Svg, Window, div, prelude::*, px, rgb, svg,
 };
-use zmail_core::SyncPhase;
+use zmail_core::{AccountColor, SyncPhase};
 
 use crate::components::TextInput;
 use crate::styles::{
@@ -353,21 +353,20 @@ pub(crate) fn status_banner(
 // account_color
 // ---------------------------------------------------------------------------
 
-/// An account's colour: derived from its id with no setting, so the first
-/// accounts all differ and an account keeps its colour across launches.
-pub(crate) fn account_color(account_id: i64) -> u32 {
-    let index = account_id.rem_euclid(ACCOUNT_COLORS.len() as i64) as usize;
-    // Ids start at 1; the first account gets the first colour.
-    ACCOUNT_COLORS[(index + ACCOUNT_COLORS.len() - 1) % ACCOUNT_COLORS.len()]
+/// The RGB value of an account colour (see [`AccountSummary::color`]).
+///
+/// [`AccountSummary::color`]: zmail_core::AccountSummary::color
+pub(crate) fn account_color(color: AccountColor) -> u32 {
+    ACCOUNT_COLORS[color.index()]
 }
 
 /// A small dot in an account's colour.
-pub(crate) fn account_dot(account_id: i64) -> gpui::Div {
+pub(crate) fn account_dot(color: AccountColor) -> gpui::Div {
     div()
         .flex_none()
         .size(px(ACCOUNT_DOT_SIZE))
         .rounded_full()
-        .bg(rgb(account_color(account_id)))
+        .bg(rgb(account_color(color)))
 }
 
 // ---------------------------------------------------------------------------

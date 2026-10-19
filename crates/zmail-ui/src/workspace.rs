@@ -461,6 +461,7 @@ impl WorkspaceView {
                 .map(|account| AccountLabel {
                     id: account.id,
                     name: account.display_name.clone(),
+                    color: account.color(),
                 })
                 .collect(),
             own_addresses: own_addresses.clone(),

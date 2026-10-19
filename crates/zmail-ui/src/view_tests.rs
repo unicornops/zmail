@@ -1923,7 +1923,9 @@ fn the_unified_inbox_lists_every_account_and_follows_the_open_thread(cx: &mut Te
     let mailbox = state.mailbox.clone().expect("the list shows a mailbox");
     assert_eq!(mailbox.name, "Unified Inbox");
     assert_eq!(mailbox.total_threads, 5);
-    assert_eq!(state.row_account_name(work), Some("Work"));
+    let row_account = state.row_account(work).expect("rows name the account");
+    assert_eq!(row_account.name, "Work");
+    assert_eq!(row_account.color, zmail_core::AccountColor::Blue);
 
     // Down moves to Work's newest thread: the account follows it.
     keys("down", cx);
@@ -2026,7 +2028,7 @@ fn picking_another_accounts_mailbox_switches_the_account(cx: &mut TestAppContext
     assert_eq!(identities, ["me@example.org"], "replies come from Home");
     let state = cx.read_entity(&view, |view, cx| view.message_list.read(cx).state().clone());
     assert_eq!(
-        state.row_account_name(harness.home_account_id.expect("Home")),
+        state.row_account(harness.home_account_id.expect("Home")),
         None,
         "one account's mailbox does not name the account on each row"
     );
