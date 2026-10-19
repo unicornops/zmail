@@ -15,8 +15,9 @@ use zmail_core::{AccountColor, ProtocolKind, SyncPhase};
 use super::{AccountField, AccountSetupView, KEY_CONTEXT, Stage};
 use crate::components::{Banner, BannerTone, Button, ButtonSize, ComponentTheme};
 use crate::styles::{
-    ICON_SIZE_LG, ICON_SIZE_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6, SPACE_8, TYPE_BODY,
-    TYPE_BODY_STRONG, TYPE_CAPTION, TYPE_HEADLINE, TypeStyleExt, UiColors,
+    EMPTY_STATE_ICON_FRAME_SIZE, ICON_SIZE_LG, ICON_SIZE_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4,
+    SPACE_6, SPACE_8, TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TYPE_HEADLINE, TypeStyleExt,
+    UiColors,
 };
 use crate::widgets::{account_color, icon, input_card, section_card};
 
@@ -61,7 +62,7 @@ impl Render for AccountSetupView {
             Stage::Colour => self.render_colour(&colors, cx),
             Stage::Syncing => self.render_syncing(&colors),
         };
-        let footer = self.render_footer(&colors, cx);
+        let footer = self.render_footer(cx);
 
         div()
             .id("account-setup")
@@ -97,18 +98,20 @@ impl Render for AccountSetupView {
                             .child(body),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .justify_center()
-                    .px(px(SPACE_6))
-                    .py(px(SPACE_3))
-                    .border_t_1()
-                    .border_color(rgb(colors.border))
-                    .bg(rgb(colors.surface))
-                    .child(footer),
-            )
+            .when_some(footer, |this, footer| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .justify_center()
+                        .px(px(SPACE_6))
+                        .py(px(SPACE_3))
+                        .border_t_1()
+                        .border_color(rgb(colors.border))
+                        .bg(rgb(colors.surface))
+                        .child(footer),
+                )
+            })
     }
 }
 
@@ -239,7 +242,16 @@ impl AccountSetupView {
             .gap(px(SPACE_4))
             .pt(px(SPACE_8))
             .text_center()
-            .child(icon("app-icon", ICON_SIZE_LG * 3.0, colors.accent))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(EMPTY_STATE_ICON_FRAME_SIZE))
+                    .rounded_full()
+                    .bg(rgb(colors.button_background))
+                    .child(icon("mail", ICON_SIZE_LG * 1.5, colors.accent)),
+            )
             .child(heading(
                 "Welcome to Zmail",
                 "A fast mail client that keeps your mail on this computer. Remote images and trackers stay blocked until you allow them.",
@@ -388,7 +400,8 @@ impl AccountSetupView {
             .flex_col()
             .gap(px(SPACE_3))
             .child(
-                div().debug_selector(|| "account-setup-advanced".into()).child(
+                // A row, so the button keeps its own width.
+                div().flex().debug_selector(|| "account-setup-advanced".into()).child(
                     Button::new("account-setup-advanced", "Advanced")
                         .ghost()
                         .icon(if open { "chevron-down" } else { "chevron-right" })
@@ -717,9 +730,10 @@ impl AccountSetupView {
                     .title("Settings not found"),
                 )
             })
+            // Above the servers, where it can't be scrolled past.
+            .when(cleartext, |this| this.child(self.render_cleartext_warning(colors, cx)))
             .child(labelled("Protocol", self.protocol_select.clone(), colors).max_w(px(240.0)))
             .children(servers)
-            .when(cleartext, |this| this.child(self.render_cleartext_warning(colors, cx)))
             .into_any_element()
     }
 
@@ -888,8 +902,8 @@ impl AccountSetupView {
     }
 
     /// The footer: Back on the left, the stage's actions on the right.
-    fn render_footer(&self, colors: &UiColors, cx: &mut Context<Self>) -> gpui::Div {
-        let _ = colors;
+    /// `None` when the stage has neither (its actions are in the body).
+    fn render_footer(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let primary = |id: &'static str, label: &'static str, cx: &mut Context<Self>| {
             div().debug_selector(move || id.into()).child(
                 Button::new(id, label)
@@ -953,7 +967,10 @@ impl AccountSetupView {
                 .into_any_element(),
             ],
         };
-        column()
+        if actions.is_empty() && !self.can_go_back() {
+            return None;
+        }
+        let footer = column()
             .flex_row()
             .items_center()
             .gap(px(SPACE_2))
@@ -970,7 +987,8 @@ impl AccountSetupView {
                 )
             })
             .child(div().flex_1())
-            .children(actions)
+            .children(actions);
+        Some(footer)
     }
 }
 
