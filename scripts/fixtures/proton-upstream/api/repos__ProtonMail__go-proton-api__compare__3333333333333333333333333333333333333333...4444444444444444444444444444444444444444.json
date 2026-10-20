@@ -1,0 +1,17 @@
+{
+  "status": "diverged",
+  "files": [
+    {
+      "filename": "auth.go",
+      "status": "modified"
+    },
+    {
+      "filename": "message.go",
+      "status": "modified"
+    },
+    {
+      "filename": "server/auth.go",
+      "status": "modified"
+    }
+  ]
+}

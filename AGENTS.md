@@ -116,6 +116,11 @@ GPUI pin:
 - The weekly `zed-upstream` workflow (`scripts/bump-zed-gpui.sh`) opens a `chore(deps): bump Zed GPUI to vX.Y.Z` pull request when Zed ships a newer stable release; see `docs/upstream/zed.md` for manual bumps.
 - Start the app with `gpui_platform::application()`. Do not use `Application::new_inaccessible`, which disables AccessKit screen-reader support.
 
+Proton upstream:
+
+- Native Proton support ports Proton Mail Bridge and go-proton-api at the commits pinned between the `proton-pin` markers in `docs/upstream/proton.md`; `docs/upstream/proton-ports.toml` lists each ported upstream file and its zmail counterpart. Add an entry whenever you port a file.
+- The weekly `proton-upstream` workflow (`scripts/check-proton-upstream.sh`) opens or updates one issue listing the ported files that changed upstream since the pins, with diff links, and any change to Bridge's SPKI pins. It never opens pull requests. `scripts/test-check-proton-upstream.sh` checks the script offline against `scripts/fixtures/proton-upstream`.
+
 ## Commit Policy
 
 Conventional Commits must always be used.

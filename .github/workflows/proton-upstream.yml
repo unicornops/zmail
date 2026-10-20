@@ -1,0 +1,73 @@
+name: Proton Upstream
+
+# Keeps zmail's Proton port in step with Proton Mail Bridge and
+# go-proton-api (docs/upstream/proton.md). When Bridge ships a release past
+# the pins, this opens - or updates - a single issue listing the changed
+# upstream files that docs/upstream/proton-ports.toml says zmail ports, with
+# diff links, and any change to Bridge's SPKI pins. It never opens pull
+# requests: porting upstream changes is a review job.
+on:
+  schedule:
+    # Mondays, 06:43 UTC (after zed-upstream).
+    - cron: "43 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Bridge release tag to compare with (e.g. v3.28.0); empty means the latest release"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: proton-upstream
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check Proton upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+
+      - name: Self-test against fixtures
+        run: scripts/test-check-proton-upstream.sh
+
+      - name: Compare the pins with the latest Bridge release
+        id: check
+        env:
+          # Read-only calls against the public ProtonMail repositories.
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          ISSUE_BODY_FILE: ${{ runner.temp }}/proton-upstream-issue.md
+        run: scripts/check-proton-upstream.sh "${INPUT_TAG}"
+
+      - name: Open or update the upstream issue
+        if: steps.check.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ steps.check.outputs.title }}
+          BODY_FILE: ${{ steps.check.outputs.body_file }}
+        run: |
+          set -euo pipefail
+          marker="<!-- proton-upstream-check -->"
+          number="$(gh issue list --state open --limit 200 --json number,body \
+            --jq "map(select(.body | contains(\"${marker}\"))) | .[0].number // \"\"")"
+          if [[ -z "${number}" ]]; then
+            gh issue create --title "${TITLE}" --body-file "${BODY_FILE}"
+            exit 0
+          fi
+          # Leave an unchanged issue alone, so a weekly re-run sends no
+          # notification.
+          current="$(gh issue view "${number}" --json title,body --jq '.title + "\n" + .body')"
+          if [[ "${current}" == "${TITLE}"$'\n'"$(cat "${BODY_FILE}")" ]]; then
+            echo "Issue #${number} is already up to date."
+          else
+            gh issue edit "${number}" --title "${TITLE}" --body-file "${BODY_FILE}"
+            echo "Updated issue #${number}"
+          fi
