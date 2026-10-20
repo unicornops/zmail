@@ -5,14 +5,21 @@
 
 ### Features
 
-* **onboarding:** first-run onboarding and the Add Account window ([#216](https://github.com/unicornops/zmail/issues/216)) ([10ed407](https://github.com/unicornops/zmail/commit/10ed40783ace019954030ef7d86e224553e56f95))
-* **search:** filter chips, highlighted matches and paged results ([#213](https://github.com/unicornops/zmail/issues/213)) ([02504c7](https://github.com/unicornops/zmail/commit/02504c7f9d4f6bc1165a51dd1e8fc8ed922f907b))
-* **ui:** command palette on Secondary+K ([#210](https://github.com/unicornops/zmail/issues/210)) ([74fa8d7](https://github.com/unicornops/zmail/commit/74fa8d7ecf4dd442f119698b6593717fc25544e3))
-* **ui:** keyboard shortcut cheat sheet ([#215](https://github.com/unicornops/zmail/issues/215)) ([68a3166](https://github.com/unicornops/zmail/commit/68a316633b1963dfa7cd85c40cd767dcdd967b33))
-* **ui:** Settings → Accounts with colour, cache budget, re-auth and remove ([#217](https://github.com/unicornops/zmail/issues/217)) ([f81c1e7](https://github.com/unicornops/zmail/commit/f81c1e79012da3be91f8087d775a25b833a5913d))
 * **ui:** Settings → Keyboard with the keymap choice and a searchable shortcut list ([#222](https://github.com/unicornops/zmail/issues/222)) ([6a8eeb4](https://github.com/unicornops/zmail/commit/6a8eeb4d99cfc9c3edc24e67ded1ce305b135c2a))
 * **ui:** Settings → Privacy with a sender-warning level ([#218](https://github.com/unicornops/zmail/issues/218)) ([1992f3b](https://github.com/unicornops/zmail/commit/1992f3b510c075f814e580b1a0867b2683e9f6c0))
+* **ui:** Settings → Accounts with colour, cache budget, re-auth and remove ([#217](https://github.com/unicornops/zmail/issues/217)) ([f81c1e7](https://github.com/unicornops/zmail/commit/f81c1e79012da3be91f8087d775a25b833a5913d))
+* **autodiscover:** look up SRV and MX records with hickory-resolver ([#221](https://github.com/unicornops/zmail/issues/221)) ([a480c0e](https://github.com/unicornops/zmail/commit/a480c0e387b6691cde20368de11da05e2c280576))
 * **ui:** Settings window with Appearance, Sending and About & Diagnostics ([#211](https://github.com/unicornops/zmail/issues/211)) ([e3798c5](https://github.com/unicornops/zmail/commit/e3798c5193587b106de592e37e4098ee6a53a53e))
+* **ui:** keyboard shortcut cheat sheet ([#215](https://github.com/unicornops/zmail/issues/215)) ([68a3166](https://github.com/unicornops/zmail/commit/68a316633b1963dfa7cd85c40cd767dcdd967b33))
+* **keymap:** optional Gmail keymap ([#212](https://github.com/unicornops/zmail/issues/212)) ([a80ac70](https://github.com/unicornops/zmail/commit/a80ac70757db9cb50d4eaec099d84a84cffd9359))
+* **ui:** command palette on Secondary+K ([#210](https://github.com/unicornops/zmail/issues/210)) ([74fa8d7](https://github.com/unicornops/zmail/commit/74fa8d7ecf4dd442f119698b6593717fc25544e3))
+* **search:** filter chips, highlighted matches and paged results ([#213](https://github.com/unicornops/zmail/issues/213)) ([02504c7](https://github.com/unicornops/zmail/commit/02504c7f9d4f6bc1165a51dd1e8fc8ed922f907b))
+* **onboarding:** first-run onboarding and the Add Account window ([#216](https://github.com/unicornops/zmail/issues/216)) ([10ed407](https://github.com/unicornops/zmail/commit/10ed40783ace019954030ef7d86e224553e56f95))
+* **search:** live search as you type, with a clear button and keyboard flow ([#209](https://github.com/unicornops/zmail/issues/209)) ([bcf2dfd](https://github.com/unicornops/zmail/commit/bcf2dfd4e3840f0701c7913c316b8596b3e840a6))
+* **store:** per-account colour override ([#207](https://github.com/unicornops/zmail/issues/207)) ([09113a2](https://github.com/unicornops/zmail/commit/09113a2cf641c856df52fb725f4333b49c154e46))
+* **keymap:** bind the saved keymap and switch it at runtime ([#206](https://github.com/unicornops/zmail/issues/206)) ([7c2cd91](https://github.com/unicornops/zmail/commit/7c2cd913bc5986a7a051b7e495dff91f8c3fbe7f))
+* **search:** queue unknown-hit syncs behind a running sync with request_sync ([#214](https://github.com/unicornops/zmail/issues/214)) ([a5863f8](https://github.com/unicornops/zmail/commit/a5863f8bea272c38dc57362d1e35599fa6604300))
+* **autodiscover:** add the zmail-autodiscover crate ([#208](https://github.com/unicornops/zmail/issues/208)) ([d19c261](https://github.com/unicornops/zmail/commit/d19c2615b59f3a39ecb665ea9149858ed9950c5a))
 
 ## [0.13.0](https://github.com/unicornops/zmail/compare/v0.12.0...v0.13.0) (2026-10-19)
 
