@@ -2,6 +2,7 @@
   "crates/zmail-app": "0.13.0",
   "crates/zmail-assets": "0.0.1",
   "crates/zmail-auth": "0.0.1",
+  "crates/zmail-autodiscover": "0.0.1",
   "crates/zmail-core": "0.0.1",
   "crates/zmail-imap": "0.0.1",
   "crates/zmail-index": "0.0.1",

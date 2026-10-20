@@ -62,6 +62,8 @@ Recommended Rust workspace layout:
   - JMAP protocol adapter, capability handling, sync strategy, and JMAP submission support where available.
 - `crates/zmail-auth`
   - OAuth2 flows, token refresh, account onboarding helpers.
+- `crates/zmail-autodiscover`
+  - Account autodiscovery from an email address: the domain's autoconfig and `.well-known/jmap`, ISPDB with consent, hostname guesses, and DNS SRV/MX once a resolver is chosen.
 - `crates/zmail-security`
   - Secret storage abstraction, TLS policy, HTML sanitization, attachment safety policy.
 - `crates/zmail-index`

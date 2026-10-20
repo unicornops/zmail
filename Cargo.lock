@@ -8012,6 +8012,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zmail-autodiscover"
+version = "0.0.1"
+dependencies = [
+ "reqwest",
+ "roxmltree 0.21.1",
+ "url",
+]
+
+[[package]]
 name = "zmail-core"
 version = "0.0.1"
 dependencies = [

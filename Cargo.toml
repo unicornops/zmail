@@ -3,6 +3,7 @@ members = [
     "crates/zmail-app",
     "crates/zmail-assets",
     "crates/zmail-auth",
+    "crates/zmail-autodiscover",
     "crates/zmail-core",
     "crates/zmail-imap",
     "crates/zmail-index",
@@ -43,6 +44,9 @@ mail-send = { version = "0.6.2", default-features = false, features = ["builder"
 mail-parser = "0.11.2"
 notify-rust = "4"
 rand = "0.8"
+# Autoconfig XML. Already in the tree through GPUI (usvg); it never fetches
+# external entities, and zmail-autodiscover also turns DTDs off.
+roxmltree = "0.21.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 sha2 = "0.10"
 rpassword = "7.4.0"
