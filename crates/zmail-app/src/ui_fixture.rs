@@ -91,6 +91,9 @@ pub(crate) enum FixtureView {
     /// The reader on a message with several attachments of different
     /// types, one of them a program.
     ReaderAttachments,
+    /// The `accounts` view with the command palette open and "arch" typed:
+    /// commands and folders across accounts, matched letters highlighted.
+    CommandPalette,
 }
 
 /// The `search-filters` view's query: words to highlight and two chips.
@@ -133,8 +136,9 @@ impl FixtureView {
             "reader-safety-caution" => Self::ReaderSafetyCaution,
             "reader-safety-danger" => Self::ReaderSafetyDanger,
             "reader-attachments" => Self::ReaderAttachments,
+            "command-palette" => Self::CommandPalette,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger or reader-attachments"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments or command-palette"
             ),
         })
     }
@@ -241,6 +245,10 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         FixtureView::Search => {
             seed_more_accounts(store, account_id, now)?;
             InitialView::Search("release")
+        }
+        FixtureView::CommandPalette => {
+            seed_more_accounts(store, account_id, now)?;
+            InitialView::CommandPalette("arch")
         }
         FixtureView::SearchFilters => {
             seed_more_accounts(store, account_id, now)?;
@@ -1101,6 +1109,7 @@ mod tests {
             "reader-safety-caution",
             "reader-safety-danger",
             "reader-attachments",
+            "command-palette",
         ] {
             FixtureView::parse(name)?;
         }

@@ -32,6 +32,7 @@ use crate::{DetailMode, InitialView, ListMode, WorkspaceView};
 mod compose;
 mod list;
 mod onboarding;
+mod palette;
 mod reader;
 mod reader_attachments;
 mod reader_safety;

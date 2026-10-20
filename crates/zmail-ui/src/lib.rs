@@ -18,6 +18,8 @@
 //! | `attachments` | opening and saving received attachments (Open, Save As, Save All) |
 //! | `drag` | `DraggedThreads`: conversations dragged from the list onto sidebar folders |
 //! | `move_picker` | `MovePicker`: the searchable Move to… folder picker |
+//! | `command_palette` | `CommandPalette`: Secondary+K's search over commands, folders and accounts |
+//! | `fuzzy` | the palette's fuzzy matcher |
 //! | `actions` | every command as a GPUI action |
 //! | `keymap` | loads `keymaps/default.json` (and `keymaps/macos.json` on macOS); binds and switches the saved keymap |
 //! | `menus` | `MenuModel`, the command menus; the native macOS menu bar; app-wide commands (Quit, Hide, …) |
@@ -58,10 +60,12 @@ pub use account_setup::OnboardingStep;
 mod actions;
 mod app_menu;
 mod attachments;
+mod command_palette;
 mod compose;
 mod diagnostics;
 mod drag;
 mod fonts;
+mod fuzzy;
 mod keymap;
 mod layout;
 mod mail_actions;
@@ -140,6 +144,9 @@ pub enum InitialView {
     Outbox,
     /// The last mailbox with this query searched in it.
     Search(&'static str),
+    /// The last mailbox with the command palette open and this query typed
+    /// into it.
+    CommandPalette(&'static str),
 }
 
 /// Runs the native Phase 4 shell.
@@ -325,6 +332,10 @@ struct WorkspaceView {
     app_menu: Entity<AppMenuButton>,
     /// Undo toasts at the bottom of the window.
     toasts: Entity<components::ToastHost>,
+    /// The command palette, while it is open.
+    command_palette: Option<command_palette::OpenPalette>,
+    /// The palette's modal (focus trap and restore).
+    palette_modal: components::ModalState,
     /// Opening and saving attachments: the warning before opening a
     /// program, and where Save As starts.
     attachments: attachments::AttachmentState,

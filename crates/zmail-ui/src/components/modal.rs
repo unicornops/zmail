@@ -1,5 +1,6 @@
-//! `Modal` (a centred dialog) and `Sheet` (attached to the top of the
-//! window, macOS style), with a backdrop and a focus trap.
+//! `Modal` (a centred dialog), `Sheet` (attached to the top of the
+//! window, macOS style) and `Palette` (a bare card near the top of the
+//! window, for the command palette), with a backdrop and a focus trap.
 //!
 //! - Focus moves into the modal when it opens ([`ModalState::open`]) and
 //!   back to where it was when it closes ([`ModalState::close`]).
@@ -55,7 +56,15 @@ pub(crate) enum ModalKind {
     Dialog,
     /// Hanging from the top edge of the window (macOS sheet).
     Sheet,
+    /// A fixed distance below the top of the window, so it stays put as
+    /// its content changes height, with no header or padding: the content
+    /// is the whole card. The title is still its accessible name.
+    Palette,
 }
+
+/// Space between the top of the window and a [`ModalKind::Palette`] card,
+/// as a fraction of the window height.
+const PALETTE_TOP: f32 = 0.12;
 
 /// Open/closed state and focus bookkeeping for one modal.
 pub(crate) struct ModalState {
@@ -211,6 +220,12 @@ impl Modal {
         self
     }
 
+    /// A bare card near the top of the window (see [`ModalKind::Palette`]).
+    pub(crate) fn palette(mut self) -> Self {
+        self.kind = ModalKind::Palette;
+        self
+    }
+
     /// The heading, also the dialog's accessible name.
     pub(crate) fn title(mut self, title: impl Into<SharedString>) -> Self {
         self.title = title.into();
@@ -259,12 +274,13 @@ impl ParentElement for Modal {
 }
 
 impl RenderOnce for Modal {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = ComponentTheme::get(cx);
         let colors = theme.colors;
         let viewport = window.viewport_size();
         let backdrop = hsla(0.0, 0.0, 0.0, if theme.is_light { 0.3 } else { 0.5 });
         let sheet = self.kind == ModalKind::Sheet;
+        let palette = self.kind == ModalKind::Palette;
 
         let dismiss = self.on_dismiss.clone();
         let backdrop_dismiss = self
@@ -313,24 +329,31 @@ impl RenderOnce for Modal {
                 }
             })
             .text_color(rgb(colors.foreground))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(SPACE_2))
-                    .px(px(SPACE_6))
-                    .pt(px(SPACE_6))
-                    .pb(px(SPACE_4))
-                    .child(div().type_style(TYPE_TITLE).child(self.title))
-                    .when_some(self.description, |this, description| {
-                        this.child(
-                            div()
-                                .type_style(TYPE_BODY)
-                                .text_color(rgb(colors.muted))
-                                .child(description),
-                        )
-                    }),
-            )
+            .when(palette, |this| {
+                this.overflow_hidden()
+                    .type_style(TYPE_BODY)
+                    .children(self.children.drain(..))
+            })
+            .when(!palette, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(SPACE_2))
+                        .px(px(SPACE_6))
+                        .pt(px(SPACE_6))
+                        .pb(px(SPACE_4))
+                        .child(div().type_style(TYPE_TITLE).child(self.title))
+                        .when_some(self.description, |this, description| {
+                            this.child(
+                                div()
+                                    .type_style(TYPE_BODY)
+                                    .text_color(rgb(colors.muted))
+                                    .child(description),
+                            )
+                        }),
+                )
+            })
             .when(!self.children.is_empty(), |this| {
                 this.child(
                     div()
@@ -370,6 +393,8 @@ impl RenderOnce for Modal {
                     .map(|this| {
                         if sheet {
                             this.items_start()
+                        } else if palette {
+                            this.items_start().pt(viewport.height * PALETTE_TOP)
                         } else {
                             this.items_center()
                         }

@@ -141,6 +141,9 @@ pub const DEFAULT_UNDO_SEND_DELAY_SECS: u32 = 10;
 /// Longest undo-send delay the app honours, in seconds.
 pub const MAX_UNDO_SEND_DELAY_SECS: u32 = 30;
 
+/// The most entries [`UiPreferences::recent_commands`] keeps.
+pub const MAX_RECENT_COMMANDS: usize = 8;
+
 /// Persisted UI preferences. See the module documentation for how older and
 /// newer records load.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -178,6 +181,11 @@ pub struct UiPreferences {
     /// Background body indexing switches.
     #[serde(deserialize_with = "lenient")]
     pub indexing: IndexingPreferences,
+    /// The command palette's recently used entries, most recent first, as
+    /// the palette's own keys (`"action:zmail::Archive"`, `"mailbox:42"`).
+    /// Update it through [`UiPreferences::note_recent_command`].
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Vec::is_empty")]
+    pub recent_commands: Vec<String>,
 }
 
 impl Default for UiPreferences {
@@ -193,6 +201,7 @@ impl Default for UiPreferences {
             keymap: KeymapName::default(),
             undo_send_delay_secs: DEFAULT_UNDO_SEND_DELAY_SECS,
             indexing: IndexingPreferences::default(),
+            recent_commands: Vec::new(),
         }
     }
 }
@@ -210,6 +219,14 @@ impl UiPreferences {
         // Every field is a plain enum, number, bool or option of those, so
         // serialisation cannot fail; the fallback keeps this panic-free.
         serde_json::to_string(self).unwrap_or_else(|_| "{}".to_owned())
+    }
+
+    /// Moves `key` to the front of the recently used palette entries,
+    /// keeping at most [`MAX_RECENT_COMMANDS`].
+    pub fn note_recent_command(&mut self, key: &str) {
+        self.recent_commands.retain(|recent| recent != key);
+        self.recent_commands.insert(0, key.to_owned());
+        self.recent_commands.truncate(MAX_RECENT_COMMANDS);
     }
 
     /// The undo-send delay, clamped to [`MAX_UNDO_SEND_DELAY_SECS`].
@@ -281,6 +298,7 @@ mod tests {
                 on_battery: true,
                 on_metered: true,
             },
+            recent_commands: vec!["mailbox:42".to_owned(), "action:zmail::Archive".to_owned()],
         }
     }
 
@@ -389,6 +407,29 @@ mod tests {
             UiPreferences::from_json("not json"),
             UiPreferences::default()
         );
+    }
+
+    #[test]
+    fn recent_commands_move_to_the_front_and_are_capped() {
+        let mut prefs = UiPreferences::default();
+        for index in 0..MAX_RECENT_COMMANDS + 3 {
+            prefs.note_recent_command(&format!("mailbox:{index}"));
+        }
+        assert_eq!(prefs.recent_commands.len(), MAX_RECENT_COMMANDS);
+        assert_eq!(
+            prefs.recent_commands[0],
+            format!("mailbox:{}", MAX_RECENT_COMMANDS + 2)
+        );
+        prefs.note_recent_command("mailbox:5");
+        assert_eq!(prefs.recent_commands[0], "mailbox:5");
+        assert_eq!(
+            prefs.recent_commands.len(),
+            MAX_RECENT_COMMANDS,
+            "no duplicates"
+        );
+        let bad = UiPreferences::from_json(r#"{"recent_commands":[1,2],"density":"compact"}"#);
+        assert!(bad.recent_commands.is_empty());
+        assert_eq!(bad.density, Density::Compact);
     }
 
     #[test]

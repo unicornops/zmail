@@ -1006,7 +1006,7 @@ impl SidebarView {
 
 /// A folder's name in the tree: its last path segment, except that the
 /// Inbox is always "Inbox" (IMAP servers call it "INBOX").
-fn folder_label(mailbox: &MailboxSummary) -> String {
+pub(crate) fn folder_label(mailbox: &MailboxSummary) -> String {
     match mailbox.role {
         Some(MailboxRole::Inbox) if mailbox.parent.is_none() => {
             MailboxRole::Inbox.label().to_owned()

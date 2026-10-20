@@ -41,7 +41,8 @@ HARNESS_STARTED=0
 # state such as a message row's quick actions. The inbox and reader are also captured at each layout
 # breakpoint: 720 (one pane at a time), 900 (sidebar as an overlay) and
 # 1920 (wide); `sidebar` is the overlay open at 900. `accounts` is three
-# accounts with nested folders on the Unified Inbox. The compose views are
+# accounts with nested folders on the Unified Inbox, and `command-palette`
+# is the palette open over it. The compose views are
 # captured from their compose window (see window_title_for), at its default
 # 760x680.
 MATRIX=(
@@ -112,6 +113,8 @@ MATRIX=(
   "search-light search light 1440 920"
   "search-filters-dark search-filters dark 1440 920"
   "search-filters-light search-filters light 1440 920"
+  "command-palette-dark command-palette dark 1440 920"
+  "command-palette-light command-palette light 1440 920"
   "inbox-dark-1920 inbox dark 1920 1080"
   "inbox-light-1920 inbox light 1920 1080"
   "reader-dark-1920 reader dark 1920 1080"
