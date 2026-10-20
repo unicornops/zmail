@@ -17,7 +17,7 @@ use gpui::{
     anchored, deferred, div, prelude::*, px, rgb,
 };
 
-use crate::styles::{RADIUS_LG, SPACE_1, SPACE_2};
+use crate::styles::{RADIUS_LG, SPACE_1, SPACE_2, rems_from_px};
 
 use super::theme::ComponentTheme;
 
@@ -40,7 +40,8 @@ impl Popover {
         }
     }
 
-    /// Set the minimum width.
+    /// Set the minimum width at the default text size; it grows with the
+    /// text size.
     pub(crate) fn min_width(mut self, width: Pixels) -> Self {
         self.min_width = Some(width);
         self
@@ -60,7 +61,9 @@ impl RenderOnce for Popover {
             .flex()
             .flex_col()
             .p(px(SPACE_1))
-            .when_some(self.min_width, |this, width| this.min_w(width))
+            .when_some(self.min_width, |this, width| {
+                this.min_w(rems_from_px(f32::from(width)))
+            })
             .rounded(px(RADIUS_LG))
             .bg(rgb(colors.surface))
             .border_1()

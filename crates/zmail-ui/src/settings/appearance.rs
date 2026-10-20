@@ -1,5 +1,5 @@
 //! Settings → Appearance: the theme mode, an imported Zed theme, the list
-//! density, the reading pane and motion.
+//! density, the reading pane, motion and the text size.
 //!
 //! Importing reads a Zed theme family file the user picks
 //! (`prompt_for_paths`) and checks it with
@@ -14,7 +14,9 @@ use gpui::{
     Context, Entity, IntoElement, PathPromptOptions, Render, SharedString, Subscription, Window,
     div, prelude::*, px,
 };
-use zmail_core::preferences::{Density, MotionMode, ReadingPanePosition, ThemeMode, UiPreferences};
+use zmail_core::preferences::{
+    Density, MotionMode, ReadingPanePosition, TEXT_SIZES, ThemeMode, UiPreferences,
+};
 use zmail_theme::{MAX_THEME_FILE_BYTES, import_theme_family};
 
 use super::{
@@ -57,6 +59,7 @@ pub(crate) struct AppearanceSettings {
     density: Entity<Select>,
     reading_pane: Entity<Select>,
     motion: Entity<Select>,
+    text_size: Entity<Select>,
     /// The imported theme family's name, or `None` for the bundled themes.
     imported_theme: Option<String>,
     /// Why the last import failed, shown until the next import or reset.
@@ -81,6 +84,11 @@ impl AppearanceSettings {
             cx,
         );
         let motion = select(MOTIONS.map(|(_, label)| label).to_vec(), "Motion", cx);
+        let text_size = cx.new(|cx| {
+            Select::new(TEXT_SIZES.map(|size| format!("{size}%")).to_vec(), None, cx)
+                .label("Text size")
+                .width(px(SELECT_WIDTH))
+        });
         let subscriptions = vec![
             cx.subscribe(&theme_mode, |_, _, event: &SelectEvent, cx| {
                 let SelectEvent::Changed(index) = *event;
@@ -110,12 +118,20 @@ impl AppearanceSettings {
                     preferences.motion = motion;
                 });
             }),
+            cx.subscribe(&text_size, |_, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(index) = *event;
+                let size = TEXT_SIZES[index];
+                save(cx, "the text size", move |preferences| {
+                    preferences.text_size_percent = size;
+                });
+            }),
         ];
         let mut this = Self {
             theme_mode,
             density,
             reading_pane,
             motion,
+            text_size,
             imported_theme: None,
             import_error: None,
             _subscriptions: subscriptions,
@@ -161,6 +177,14 @@ impl AppearanceSettings {
                 cx,
             )
         });
+        self.text_size.update(cx, |select, cx| {
+            select.set_selected(
+                TEXT_SIZES
+                    .iter()
+                    .position(|size| *size == preferences.text_size()),
+                cx,
+            )
+        });
         self.imported_theme = store
             .custom_theme()
             .ok()
@@ -196,6 +220,12 @@ impl AppearanceSettings {
     #[cfg(test)]
     pub(crate) fn motion_select(&self) -> Entity<Select> {
         self.motion.clone()
+    }
+
+    /// The text size picker, for tests to drive.
+    #[cfg(test)]
+    pub(crate) fn text_size_select(&self) -> Entity<Select> {
+        self.text_size.clone()
     }
 
     /// Ask for a theme file and import it.
@@ -338,6 +368,12 @@ impl Render for AppearanceSettings {
                         .into(),
                 ),
                 self.reading_pane.clone(),
+                &colors,
+            ))
+            .child(setting_row(
+                "Text size",
+                Some("Makes text larger in every window.".into()),
+                self.text_size.clone(),
                 &colors,
             ))
             .child(setting_row(

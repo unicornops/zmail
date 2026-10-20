@@ -43,7 +43,7 @@ use crate::mail_actions::MailActions;
 use crate::pane::{dispatch_from, pane_focus_indicator};
 use crate::styles::{
     ICON_BUTTON_SIZE, ICON_SIZE_SM, PlatformStyle, RADIUS_LG, SPACE_3, SendButtonPlacement,
-    TYPE_BODY, TypeStyleExt, UiColors,
+    TYPE_BODY, TypeStyleExt, UiColors, rems_from_px,
 };
 use crate::widgets::{EllipsisExt, empty_state, format_size, icon, label_chip, status_banner};
 
@@ -960,7 +960,7 @@ fn render_fields(
             .child(
                 div()
                     .flex_none()
-                    .w(px(FIELD_LABEL_WIDTH))
+                    .w(rems_from_px(FIELD_LABEL_WIDTH))
                     .type_style(TYPE_BODY)
                     .text_color(rgb(colors.muted))
                     .child(label),
@@ -1036,7 +1036,8 @@ fn render_attachment_card(
     let attachment_id = attachment.id;
 
     div()
-        .w(px(ATTACHMENT_CARD_WIDTH))
+        .w(rems_from_px(ATTACHMENT_CARD_WIDTH))
+        .max_w_full()
         .rounded_md()
         .bg(rgb(colors.background))
         .border_1()

@@ -26,7 +26,9 @@ use gpui::{
 };
 
 use crate::a11y::{A11yFlags, AccessibleExt, Politeness};
-use crate::styles::{ICON_SIZE_SM, RADIUS_LG, SPACE_2, SPACE_3, SPACE_4, TYPE_BODY, TypeStyleExt};
+use crate::styles::{
+    ICON_SIZE_SM, RADIUS_LG, SPACE_2, SPACE_3, SPACE_4, TYPE_BODY, TextScale, TypeStyleExt,
+};
 use crate::widgets::icon;
 
 use super::button::{Button, ButtonSize, IconButton};
@@ -247,9 +249,13 @@ pub(crate) fn toast_politeness(kind: ToastKind) -> Politeness {
 }
 
 impl Render for ToastHost {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ComponentTheme::get(cx);
         let colors = theme.colors;
+        // Wider with larger text, but never wider than the window.
+        let max_width = TextScale::get(cx)
+            .scale(TOAST_MAX_WIDTH)
+            .min(f32::from(window.viewport_size().width) - SPACE_4 * 2.0);
         let toasts: Vec<_> = self
             .toasts
             .iter()
@@ -280,7 +286,7 @@ impl Render for ToastHost {
                     .flex()
                     .items_center()
                     .gap(px(SPACE_3))
-                    .max_w(px(TOAST_MAX_WIDTH))
+                    .max_w(px(max_width))
                     .pl(px(SPACE_4))
                     .pr(px(SPACE_2))
                     .py(px(SPACE_2))

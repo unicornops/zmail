@@ -22,6 +22,9 @@
 //! the window's bottom edge, so rounded bottom corners would show the
 //! panes' square corners poking out (GTK 3 and KDE's Breeze draw windows
 //! the same way).
+//!
+//! Every root view calls it, so it also sets the window's rem size from
+//! the text size ([`TextScale`]).
 
 use gpui::{
     App, Bounds, CursorStyle, Div, Global, HitboxBehavior, Hsla, IntoElement, MouseButton, Pixels,
@@ -31,6 +34,7 @@ use gpui::{
 
 use super::theme::ComponentTheme;
 use super::title_bar::WindowChrome;
+use crate::styles::TextScale;
 
 /// Width of the transparent band around a client-decorated window that
 /// holds its shadow and resize edges.
@@ -46,12 +50,15 @@ struct HoveredResizeEdge(ResizeEdge);
 impl Global for HoveredResizeEdge {}
 
 /// Wrap the window's root element in the client-side decoration frame
-/// when the window needs one. Call from the root view's `render`.
+/// when the window needs one, and size the window's text. Call from the
+/// root view's `render`.
 pub(crate) fn window_frame(
     element: impl IntoElement,
     window: &mut Window,
     cx: &mut App,
 ) -> Stateful<Div> {
+    // Layout runs after `render`, so the whole frame lays out at it.
+    window.set_rem_size(TextScale::get(cx).rem_size());
     let chrome = WindowChrome::of(window, cx);
     let theme = ComponentTheme::get(cx);
     let tiling = chrome.tiling();

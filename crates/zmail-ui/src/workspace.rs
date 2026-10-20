@@ -237,6 +237,7 @@ impl WorkspaceView {
             sender_warnings: Default::default(),
             motion: Default::default(),
             system_motion_read: gpui::Task::ready(()),
+            text_size: zmail_core::preferences::DEFAULT_TEXT_SIZE,
             sidebar_width: SIDEBAR_WIDTH,
             list_width: MESSAGE_LIST_WIDTH,
             pane_widths_generation: 0,
@@ -307,6 +308,7 @@ impl WorkspaceView {
         view.apply_layout_preferences();
         view.apply_motion(cx);
         view.read_system_motion(cx);
+        view.apply_text_size(cx);
         cx.set_global(themed_colors(&view.bootstrap.theme, cx));
         cx.observe_window_appearance(
             window,
@@ -2977,7 +2979,7 @@ impl WorkspaceView {
             .flex_none()
             .items_center()
             .gap_2()
-            .h(px(BACK_BAR_HEIGHT))
+            .min_h(px(BACK_BAR_HEIGHT))
             .px_2()
             .bg(rgb(colors.surface))
             .border_b_1()

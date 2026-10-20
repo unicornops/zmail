@@ -37,7 +37,11 @@ fn main() -> Result<()> {
             secret,
             email,
         } => launch_imap_fixture(&endpoint, &username, &secret, &email),
-        Command::LaunchUiFixture { view, theme } => launch_ui_fixture(view, theme),
+        Command::LaunchUiFixture {
+            view,
+            theme,
+            text_size,
+        } => launch_ui_fixture(view, theme, text_size),
         Command::AddImap => add_account(ProtocolKind::Imap),
         Command::AddJmap => add_account(ProtocolKind::Jmap),
         Command::ListAccounts => list_accounts(),
@@ -98,6 +102,7 @@ enum Command {
     LaunchUiFixture {
         view: ui_fixture::FixtureView,
         theme: Option<ThemeAppearance>,
+        text_size: Option<u16>,
     },
     Backup {
         directory: Option<String>,
@@ -177,7 +182,12 @@ impl Command {
                     &args.next().context("launch-ui-fixture requires a view")?,
                 )?;
                 let theme = ui_fixture::parse_theme(args.next().as_deref())?;
-                Ok(Self::LaunchUiFixture { view, theme })
+                let text_size = ui_fixture::parse_text_size(args.next().as_deref())?;
+                Ok(Self::LaunchUiFixture {
+                    view,
+                    theme,
+                    text_size,
+                })
             }
             "add-imap" => Ok(Self::AddImap),
             "add-jmap" => Ok(Self::AddJmap),
@@ -615,14 +625,21 @@ fn launch_imap_fixture(endpoint: &str, username: &str, secret: &str, email: &str
 /// The store is in memory and seeded with synthetic mail, secrets stay in
 /// memory and nothing syncs, so the launch needs no network or keychain.
 /// `theme` pins the light or dark variant instead of following the system
-/// appearance.
-fn launch_ui_fixture(view: ui_fixture::FixtureView, theme: Option<ThemeAppearance>) -> Result<()> {
+/// appearance, and `text_size` saves that text size (in percent).
+fn launch_ui_fixture(
+    view: ui_fixture::FixtureView,
+    theme: Option<ThemeAppearance>,
+    text_size: Option<u16>,
+) -> Result<()> {
     install_panic_log();
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(LocalStore::open_ephemeral().context("failed to open the fixture store")?);
     let initial_view = ui_fixture::seed(&store, view, ui_fixture::anchor_time())?;
     if view.high_contrast() {
         zmail_ui::simulate_high_contrast();
+    }
+    if let Some(size) = text_size {
+        store.update_ui_preferences(|preferences| preferences.text_size_percent = size)?;
     }
     let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
     let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
@@ -1716,9 +1733,10 @@ fn print_help() {
     println!("Zmail commands:");
     println!("  zmail-app                 Launch the desktop app");
     println!("  zmail-app launch-imap-fixture ENDPOINT USERNAME SECRET EMAIL");
-    println!("  zmail-app launch-ui-fixture VIEW [dark|light|system]");
+    println!("  zmail-app launch-ui-fixture VIEW [dark|light|system] [TEXT_SIZE]");
     println!("                            Open a seeded UI state for screenshots: empty,");
-    println!("                            inbox, reader, compose, account-setup or onboarding-*");
+    println!("                            inbox, reader, compose, account-setup or onboarding-*,");
+    println!("                            optionally at a text size in percent (100 to 200)");
     println!("  zmail-app add-imap        Add and sync a real IMAP account");
     println!("  zmail-app add-jmap        Add and sync a real JMAP account");
     println!("  zmail-app list-accounts   Show configured accounts");

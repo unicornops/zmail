@@ -18,7 +18,7 @@ use crate::components::{Banner, BannerTone, Button, ButtonSize, ComponentTheme};
 use crate::styles::{
     EMPTY_STATE_ICON_FRAME_SIZE, ICON_SIZE_LG, ICON_SIZE_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4,
     SPACE_6, SPACE_8, TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TYPE_HEADLINE, TypeStyleExt,
-    UiColors,
+    UiColors, rems_from_px,
 };
 use crate::widgets::{account_color, icon, input_card, section_card};
 
@@ -122,7 +122,7 @@ fn column() -> gpui::Div {
         .flex()
         .flex_col()
         .w_full()
-        .max_w(px(COLUMN_WIDTH))
+        .max_w(rems_from_px(COLUMN_WIDTH))
         .min_w_0()
 }
 
@@ -209,7 +209,12 @@ fn pair(wide: impl IntoElement, narrow: impl IntoElement, narrow_width: f32) -> 
         .gap(px(SPACE_3))
         .w_full()
         .child(div().flex_1().min_w_0().child(wide))
-        .child(div().flex_none().w(px(narrow_width)).child(narrow))
+        .child(
+            div()
+                .flex_none()
+                .w(rems_from_px(narrow_width))
+                .child(narrow),
+        )
 }
 
 /// A muted caption.
@@ -750,7 +755,7 @@ impl AccountSetupView {
             })
             // Above the servers, where it can't be scrolled past.
             .when(cleartext, |this| this.child(self.render_cleartext_warning(colors, cx)))
-            .child(labelled("Protocol", self.protocol_select.clone(), colors).max_w(px(240.0)))
+            .child(labelled("Protocol", self.protocol_select.clone(), colors).max_w(rems_from_px(240.0)))
             .children(servers)
             .into_any_element()
     }

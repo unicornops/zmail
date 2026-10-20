@@ -15,7 +15,7 @@ use crate::actions::{OpenAttachment, SaveAttachmentAs};
 use crate::components::{ButtonSize, IconButton};
 use crate::styles::{
     ICON_SIZE_MD, RADIUS_MD, SPACE_0_5, SPACE_2, SPACE_3, TYPE_BODY, TYPE_CAPTION, TypeStyleExt,
-    UiColors,
+    UiColors, rems_from_px,
 };
 use crate::tooltip::text_tooltip;
 use crate::widgets::{EllipsisExt, format_size, icon};
@@ -66,7 +66,7 @@ fn attachment_card(attachment: &ReceivedAttachment, colors: &UiColors) -> impl I
         .flex()
         .items_center()
         .gap(px(SPACE_3))
-        .w(px(CARD_WIDTH))
+        .w(rems_from_px(CARD_WIDTH))
         .max_w_full()
         .min_w_0()
         .px(px(SPACE_2))

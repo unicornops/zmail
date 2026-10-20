@@ -39,7 +39,7 @@ use crate::components::{
 };
 use crate::drag::DraggedThreads;
 use crate::pane::{dispatch_from, pane_focus_indicator};
-use crate::styles::{DensityTokens, ICON_SIZE_SM, SIDEBAR_TREE_INDENT, UiColors};
+use crate::styles::{DensityTokens, ICON_SIZE_SM, SIDEBAR_TREE_INDENT, TextScale, UiColors};
 use crate::tooltip::text_tooltip;
 use crate::widgets::{HoverExt, account_dot, icon, interactive_background, sync_badge};
 
@@ -512,7 +512,7 @@ impl Render for SidebarView {
         let children = rows
             .iter()
             .map(|row| match row {
-                SidebarRow::Section(section) => self.render_section(*section, &colors),
+                SidebarRow::Section(section) => self.render_section(*section, &colors, cx),
                 SidebarRow::Item {
                     item,
                     depth,
@@ -583,11 +583,11 @@ impl Render for SidebarView {
 }
 
 impl SidebarView {
-    fn tokens(&self) -> DensityTokens {
-        DensityTokens::for_density(self.state.density)
+    fn tokens(&self, cx: &App) -> DensityTokens {
+        DensityTokens::for_density(self.state.density).scaled(TextScale::get(cx).0)
     }
 
-    fn render_section(&self, section: Section, colors: &UiColors) -> AnyElement {
+    fn render_section(&self, section: Section, colors: &UiColors, cx: &App) -> AnyElement {
         let label = match section {
             Section::Favourites => "Favourites",
             Section::Accounts => "Accounts",
@@ -596,9 +596,9 @@ impl SidebarView {
             .flex()
             .items_center()
             .justify_between()
-            .h(px(self.tokens().sidebar_row_height))
+            .h(px(self.tokens(cx).sidebar_row_height))
             .mt_2()
-            .px(px(self.tokens().sidebar_row_padding_x))
+            .px(px(self.tokens(cx).sidebar_row_padding_x))
             .text_xs()
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(rgb(colors.muted))
@@ -654,7 +654,7 @@ impl SidebarView {
         colors: &UiColors,
         cx: &mut Context<Self>,
     ) -> Stateful<gpui::Div> {
-        let tokens = self.tokens();
+        let tokens = self.tokens(cx);
         let selector = id.to_string();
         let clicked = item.clone();
         let RowState {

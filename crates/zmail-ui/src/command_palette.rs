@@ -43,7 +43,7 @@ use crate::pane::Pane;
 use crate::sidebar::{folder_label, mailbox_icon_name};
 use crate::styles::{
     ICON_SIZE_SM, Platform, RADIUS_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_8, TYPE_BODY, TYPE_CAPTION,
-    TypeStyleExt,
+    TypeStyleExt, rems_from_px,
 };
 use crate::widgets::{EllipsisExt, icon};
 
@@ -479,7 +479,7 @@ impl CommandPalette {
                         .w_full()
                         .items_center()
                         .gap(px(SPACE_2))
-                        .h(px(ROW_HEIGHT))
+                        .h(rems_from_px(ROW_HEIGHT))
                         .px(px(SPACE_2))
                         .rounded(px(RADIUS_SM))
                         .accessible(Role::ListBoxOption, accessible_name)
@@ -553,6 +553,10 @@ impl Render for CommandPalette {
             .flex()
             .flex_col()
             .w_full()
+            // Shrinks with the card when large text makes the list
+            // taller than the window; the list then scrolls.
+            .flex_1()
+            .min_h_0()
             .child(
                 div()
                     .p(px(SPACE_2))
@@ -564,6 +568,9 @@ impl Render for CommandPalette {
                 div()
                     .id("command-palette-results")
                     .accessible(Role::ListBox, "Commands, folders and accounts")
+                    .flex()
+                    .flex_col()
+                    .min_h_0()
                     .p(px(SPACE_1))
                     .when(count > 0, |this| {
                         this.child(
@@ -576,7 +583,8 @@ impl Render for CommandPalette {
                             )
                             .track_scroll(&self.scroll)
                             .w_full()
-                            .h(px(ROW_HEIGHT * visible as f32)),
+                            .min_h_0()
+                            .h(rems_from_px(ROW_HEIGHT * visible as f32)),
                         )
                     })
                     .when(count == 0, |this| {

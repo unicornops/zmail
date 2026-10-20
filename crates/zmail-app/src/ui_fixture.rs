@@ -15,7 +15,7 @@ use zmail_core::{
     MailboxSnapshot, MessageAttachment, MessageSnapshot, NewAccount, NewDraft, NewIdentity,
     OutgoingConfig, ProtocolKind, SyncPhase, ThemeAppearance, ThreadSnapshot, VirtualMailbox,
     participants::thread_participants,
-    preferences::{Density, KeymapName},
+    preferences::{Density, KeymapName, TEXT_SIZES},
     time::utc_timestamp,
 };
 use zmail_store::LocalStore;
@@ -189,6 +189,18 @@ pub(crate) fn parse_theme(value: Option<&str>) -> Result<Option<ThemeAppearance>
         Some("light") => Some(ThemeAppearance::Light),
         Some(other) => bail!("unknown fixture theme {other}; expected dark, light or system"),
     })
+}
+
+/// Parses the optional text size argument, in percent: one of the sizes
+/// Settings → Appearance offers.
+pub(crate) fn parse_text_size(value: Option<&str>) -> Result<Option<u16>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value.parse::<u16>() {
+        Ok(size) if TEXT_SIZES.contains(&size) => Ok(Some(size)),
+        _ => bail!("unknown fixture text size {value}; expected one of {TEXT_SIZES:?}"),
+    }
 }
 
 /// Identity the seeded account sends as.
@@ -1218,6 +1230,10 @@ mod tests {
         assert_eq!(parse_theme(Some("light"))?, Some(ThemeAppearance::Light));
         assert_eq!(parse_theme(Some("dark"))?, Some(ThemeAppearance::Dark));
         assert!(parse_theme(Some("sepia")).is_err());
+        assert_eq!(parse_text_size(None)?, None);
+        assert_eq!(parse_text_size(Some("200"))?, Some(200));
+        assert!(parse_text_size(Some("120")).is_err());
+        assert!(parse_text_size(Some("big")).is_err());
         Ok(())
     }
 

@@ -3,8 +3,9 @@
 //! [`UiPreferences`] is the one place the desktop shell keeps choices that
 //! should survive a restart: theme mode, list density, reading-pane
 //! position, pane widths, sidebar state, the last open mailbox, the keymap,
-//! the undo-send delay and motion. `zmail-store` persists it as JSON in the
-//! local store's `app_settings` table, next to the rest of the app's state.
+//! the undo-send delay, motion and the text size. `zmail-store` persists it
+//! as JSON in the local store's `app_settings` table, next to the rest of
+//! the app's state.
 //!
 //! Loading is deliberately forgiving so a preferences record can never stop
 //! the app from starting:
@@ -170,6 +171,12 @@ pub const DEFAULT_UNDO_SEND_DELAY_SECS: u32 = 10;
 /// Longest undo-send delay the app honours, in seconds.
 pub const MAX_UNDO_SEND_DELAY_SECS: u32 = 30;
 
+/// The text sizes Settings → Appearance offers, in percent of the default.
+pub const TEXT_SIZES: [u16; 5] = [100, 125, 150, 175, 200];
+
+/// The default text size, in percent.
+pub const DEFAULT_TEXT_SIZE: u16 = 100;
+
 /// The most entries [`UiPreferences::recent_commands`] keeps.
 pub const MAX_RECENT_COMMANDS: usize = 8;
 
@@ -221,6 +228,10 @@ pub struct UiPreferences {
     /// Whether the UI follows the system's reduce-motion setting.
     #[serde(deserialize_with = "lenient")]
     pub motion: MotionMode,
+    /// Text size in percent of the default, one of [`TEXT_SIZES`]. Read
+    /// it through [`UiPreferences::text_size`], which keeps it to them.
+    #[serde(rename = "text_size", deserialize_with = "lenient_text_size")]
+    pub text_size_percent: u16,
 }
 
 impl Default for UiPreferences {
@@ -239,6 +250,7 @@ impl Default for UiPreferences {
             recent_commands: Vec::new(),
             sender_warnings: SenderWarnings::default(),
             motion: MotionMode::default(),
+            text_size_percent: DEFAULT_TEXT_SIZE,
         }
     }
 }
@@ -264,6 +276,15 @@ impl UiPreferences {
         self.recent_commands.retain(|recent| recent != key);
         self.recent_commands.insert(0, key.to_owned());
         self.recent_commands.truncate(MAX_RECENT_COMMANDS);
+    }
+
+    /// The text size in percent: the stored value, or the nearest of
+    /// [`TEXT_SIZES`] when it is not one of them.
+    pub fn text_size(&self) -> u16 {
+        TEXT_SIZES
+            .into_iter()
+            .min_by_key(|size| size.abs_diff(self.text_size_percent))
+            .unwrap_or(DEFAULT_TEXT_SIZE)
     }
 
     /// The undo-send delay, clamped to [`MAX_UNDO_SEND_DELAY_SECS`].
@@ -292,6 +313,15 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(u32::deserialize(value).unwrap_or(DEFAULT_UNDO_SEND_DELAY_SECS))
+}
+
+/// [`lenient`] for the text size, whose default is not zero.
+fn lenient_text_size<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(u16::deserialize(value).unwrap_or(DEFAULT_TEXT_SIZE))
 }
 
 /// [`lenient`] for switches that default to on.
@@ -338,6 +368,7 @@ mod tests {
             recent_commands: vec!["mailbox:42".to_owned(), "action:zmail::Archive".to_owned()],
             sender_warnings: SenderWarnings::Fewer,
             motion: MotionMode::Reduce,
+            text_size_percent: 150,
         }
     }
 
@@ -397,6 +428,7 @@ mod tests {
         assert!(json.contains(r#""keymap":"gmail""#), "{json}");
         assert!(json.contains(r#""sender_warnings":"fewer""#), "{json}");
         assert!(json.contains(r#""motion":"reduce""#), "{json}");
+        assert!(json.contains(r#""text_size":150"#), "{json}");
     }
 
     #[test]
@@ -418,6 +450,18 @@ mod tests {
         let prefs = UiPreferences::from_json(r#"{"motion":"wobbly","density":"compact"}"#);
         assert_eq!(prefs.motion, MotionMode::System);
         assert_eq!(prefs.density, Density::Compact);
+    }
+
+    #[test]
+    fn text_size_defaults_to_100_and_keeps_to_the_offered_sizes() {
+        assert_eq!(UiPreferences::default().text_size(), 100);
+        let at = |json: &str| UiPreferences::from_json(json).text_size();
+        assert_eq!(at(r#"{"text_size":175}"#), 175);
+        assert_eq!(at(r#"{"text_size":180}"#), 175, "the nearest offered size");
+        assert_eq!(at(r#"{"text_size":900}"#), 200);
+        assert_eq!(at(r#"{"text_size":0}"#), 100);
+        assert_eq!(at(r#"{"text_size":"huge"}"#), 100);
+        assert_eq!(at(r#"{"text_size":-1}"#), 100);
     }
 
     #[test]

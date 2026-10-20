@@ -1,10 +1,11 @@
 //! Reads and writes the persisted [`UiPreferences`] for the workspace.
 //!
 //! The theme mode, the imported theme, the sidebar's collapsed state, the
-//! pane widths, the list density, the reading pane and motion are wired up
-//! so far; the rest are stored by `zmail-store` and get wired as the views
-//! that use them land. The Settings window writes the preferences to the store and
-//! then calls [`WorkspaceView::apply_preferences`].
+//! pane widths, the list density, the reading pane, motion and the text
+//! size are wired up so far; the rest are stored by `zmail-store` and get
+//! wired as the views that use them land. The Settings window writes the
+//! preferences to the store and then calls
+//! [`WorkspaceView::apply_preferences`].
 
 use gpui::{App, AppContext as _, Context, Window, WindowAppearance};
 use zmail_core::{
@@ -14,6 +15,7 @@ use zmail_core::{
 
 use crate::actions::ToggleDensity;
 use crate::motion;
+use crate::styles::TextScale;
 
 use super::WorkspaceView;
 
@@ -62,6 +64,7 @@ impl WorkspaceView {
         self.apply_layout_preferences();
         self.apply_motion(cx);
         self.read_system_motion(cx);
+        self.apply_text_size(cx);
         if self.reading_pane != reading_pane {
             self.reading_pane_changed(window, cx);
         }
@@ -78,6 +81,7 @@ impl WorkspaceView {
                 self.reading_pane = supported_reading_pane(preferences.reading_pane);
                 self.sender_warnings = preferences.sender_warnings;
                 self.motion = preferences.motion;
+                self.text_size = preferences.text_size();
                 self.sidebar_tree = preferences.sidebar_tree;
                 if let Some(width) = preferences.pane_widths.sidebar {
                     self.sidebar_width = width;
@@ -96,6 +100,15 @@ impl WorkspaceView {
     /// choice and the last system setting read.
     pub(crate) fn apply_motion(&self, cx: &mut App) {
         motion::apply(self.motion, cx);
+    }
+
+    /// Sizes every window's text for the saved text size.
+    pub(crate) fn apply_text_size(&self, cx: &mut App) {
+        let scale = TextScale::from_percent(self.text_size);
+        if cx.try_global::<TextScale>() != Some(&scale) {
+            cx.set_global(scale);
+            cx.refresh_windows();
+        }
     }
 
     /// Reads the system's reduce-motion setting in the background, when

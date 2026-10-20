@@ -3,12 +3,16 @@
 //!
 //! Comfortable matches the Phase 0 layout constants exactly, so views can
 //! move to [`DensityTokens`] without changing a pixel.
+//!
+//! The constants are for the default text size. [`DensityTokens::scaled`]
+//! grows everything that holds text (lines, rows, the avatar's initials)
+//! with the text size, keeping paddings and gaps as they are.
 
 use zmail_core::preferences::Density;
 
 use super::{
     AVATAR_SIZE, BADGE_SIZE, LIST_ITEM_HEIGHT, MAILBOX_ITEM_HEIGHT, ROW_BORDER_WIDTH, ROW_LINE_GAP,
-    ROW_PADDING_Y, ROW_SENDER_LINE_HEIGHT, SPACE_1, SPACE_2, SPACE_3, SPACE_4,
+    ROW_PADDING_Y, ROW_SENDER_LINE_HEIGHT, SPACE_1, SPACE_2, SPACE_3, SPACE_4, TYPE_BODY,
 };
 
 /// Row geometry for one density, in logical pixels.
@@ -38,6 +42,8 @@ pub struct DensityTokens {
     pub sidebar_row_padding_x: f32,
     /// Gap between the icons, text and badges inside any row.
     pub row_gap: f32,
+    /// The text size these tokens are for, as a factor of the default.
+    pub text_scale: f32,
 }
 
 impl DensityTokens {
@@ -57,6 +63,7 @@ impl DensityTokens {
         sidebar_row_height: MAILBOX_ITEM_HEIGHT,
         sidebar_row_padding_x: SPACE_3,
         row_gap: SPACE_3,
+        text_scale: 1.0,
     };
 
     /// One-line rows without avatars.
@@ -75,6 +82,7 @@ impl DensityTokens {
         sidebar_row_height: 32.0,
         sidebar_row_padding_x: SPACE_2,
         row_gap: SPACE_2,
+        text_scale: 1.0,
     };
 
     /// The tokens for `density`.
@@ -83,6 +91,31 @@ impl DensityTokens {
             Density::Comfortable => Self::COMFORTABLE,
             Density::Compact => Self::COMPACT,
         }
+    }
+
+    /// These tokens at a text size `scale` times the default: the text
+    /// lines and the avatar grow with the text, and the rows grow by as
+    /// much as their lines do.
+    pub fn scaled(self, scale: f32) -> Self {
+        let lines = f32::from(self.message_row_lines);
+        let fixed = self.message_row_padding_y * 2.0
+            + self.message_row_line_gap * (lines - 1.0)
+            + ROW_BORDER_WIDTH;
+        let sidebar_text = TYPE_BODY.line_height_px(16.0);
+        Self {
+            message_row_height: fixed + (self.message_row_height - fixed) * scale,
+            message_row_line_height: self.message_row_line_height * scale,
+            avatar_size: self.avatar_size * scale,
+            sidebar_row_height: self.sidebar_row_height + sidebar_text * (scale - 1.0),
+            text_scale: self.text_scale * scale,
+            ..self
+        }
+    }
+
+    /// `pixels` at the default text size, at these tokens' text size: for
+    /// the heights of a row's lines.
+    pub fn text(&self, pixels: f32) -> f32 {
+        pixels * self.text_scale
     }
 }
 
@@ -96,7 +129,7 @@ const COMPACT_ROW_PADDING_Y: f32 = SPACE_1 + 2.0;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::styles::{ICON_SIZE_SM, ROW_PREVIEW_LINE_HEIGHT, ROW_TITLE_LINE_HEIGHT, TYPE_BODY};
+    use crate::styles::{ICON_SIZE_SM, ROW_PREVIEW_LINE_HEIGHT, ROW_TITLE_LINE_HEIGHT};
 
     #[test]
     fn comfortable_is_the_phase0_layout() {
@@ -131,5 +164,31 @@ mod tests {
 
         // Sidebar rows hold a line of body text with padding to spare.
         assert!(compact.sidebar_row_height >= TYPE_BODY.line_height_px(16.0) + SPACE_2);
+    }
+
+    #[test]
+    fn scaled_rows_grow_with_their_text() {
+        for tokens in [DensityTokens::COMFORTABLE, DensityTokens::COMPACT] {
+            assert_eq!(tokens.scaled(1.0), tokens);
+            let double = tokens.scaled(2.0);
+            assert_eq!(double.text(20.0), 40.0);
+            assert_eq!(
+                double.message_row_line_height,
+                tokens.message_row_line_height * 2.0
+            );
+            // The padding stays, and the text lines double.
+            let text = |tokens: DensityTokens| {
+                tokens.message_row_height
+                    - tokens.message_row_padding_y * 2.0
+                    - tokens.message_row_line_gap * f32::from(tokens.message_row_lines - 1)
+                    - ROW_BORDER_WIDTH
+            };
+            assert_eq!(text(double), text(tokens) * 2.0);
+            assert_eq!(double.message_row_padding_y, tokens.message_row_padding_y);
+            assert!(
+                double.sidebar_row_height >= TYPE_BODY.line_height_px(32.0) + SPACE_2,
+                "a 200% sidebar row holds its text"
+            );
+        }
     }
 }

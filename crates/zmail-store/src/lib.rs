@@ -9528,6 +9528,7 @@ mod tests {
             recent_commands: vec!["virtual:flagged".to_owned()],
             sender_warnings: SenderWarnings::Fewer,
             motion: MotionMode::Full,
+            text_size_percent: 125,
         };
         store
             .save_ui_preferences(&preferences)

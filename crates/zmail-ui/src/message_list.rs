@@ -44,7 +44,7 @@ use crate::components::{Button, ButtonSize, Menu};
 use crate::drag::DraggedThreads;
 use crate::mail_actions::MailActions;
 use crate::search::{SearchFilter, SearchHighlighter, SearchScopeState};
-use crate::styles::{DensityTokens, UiColors};
+use crate::styles::{DensityTokens, TextScale, UiColors};
 use crate::widgets::{empty_state, toolbar_button};
 
 use self::row::{MessageRow, RowAccount, outbox_status, row_content, row_shell};
@@ -428,9 +428,9 @@ impl MessageListView {
         page.rows[from..to].to_vec()
     }
 
-    /// Row geometry for the chosen density.
-    fn density_tokens(&self) -> DensityTokens {
-        DensityTokens::for_density(self.state.density)
+    /// Row geometry for the chosen density and text size.
+    fn density_tokens(&self, cx: &App) -> DensityTokens {
+        DensityTokens::for_density(self.state.density).scaled(TextScale::get(cx).0)
     }
 
     // -----------------------------------------------------------------------
@@ -664,7 +664,7 @@ impl MessageListView {
             return self.render_filtered_empty(&colors, cx);
         }
         if thread_count == 0 && self.state.first_sync {
-            return self.render_skeleton();
+            return self.render_skeleton(cx);
         }
         if thread_count == 0 {
             return self.render_empty_mailbox(&colors);
@@ -706,7 +706,7 @@ impl MessageListView {
         let count = self.thread_count();
         let threads = self.thread_rows(range, cx);
         let now = chrono::Local::now();
-        let density = self.density_tokens();
+        let density = self.density_tokens(cx);
         let own_addresses = self
             .state
             .own_addresses
@@ -820,7 +820,7 @@ impl MessageListView {
             cx.emit(MessageListEvent::LoadMoreResults);
         }
         let now = chrono::Local::now();
-        let density = self.density_tokens();
+        let density = self.density_tokens(cx);
         let highlighter = SearchHighlighter::new(&self.state.search_query);
         // Results from several accounts name their account, as rows of
         // the Unified Inbox do.
@@ -904,7 +904,7 @@ impl MessageListView {
             return self.render_no_drafts(colors);
         }
         let now = chrono::Local::now();
-        let density = self.density_tokens();
+        let density = self.density_tokens(cx);
         let count = self.state.drafts.len();
         div()
             .id("drafts-list")
@@ -947,7 +947,7 @@ impl MessageListView {
             return self.render_empty_outbox(colors);
         }
         let now = chrono::Local::now();
-        let density = self.density_tokens();
+        let density = self.density_tokens(cx);
         let count = self.state.outbox_jobs.len();
         div()
             .id("outbox-list")

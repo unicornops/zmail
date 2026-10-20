@@ -37,7 +37,7 @@ use gpui::{
     AnyView, App, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, Global, IntoElement, Orientation, Render, Role, ScrollHandle, SharedString,
     Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, point,
-    prelude::*, px, rgb, size,
+    prelude::*, px, relative, rgb, size,
 };
 use zmail_core::{AccountColor, AppBootstrap, UpstreamPins};
 use zmail_security::SecretStore;
@@ -59,7 +59,7 @@ use crate::components::{
 };
 use crate::styles::{
     ICON_SIZE_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6, TYPE_BODY, TYPE_BODY_STRONG,
-    TYPE_CAPTION, TYPE_TITLE, TypeStyleExt, UiColors,
+    TYPE_CAPTION, TYPE_TITLE, TypeStyleExt, UiColors, rems_from_px,
 };
 use crate::widgets::{EllipsisExt, HoverExt, account_dot, icon, interactive_background};
 
@@ -81,6 +81,9 @@ const NAV_WIDTH: f32 = 200.0;
 const NAV_ROW_HEIGHT: f32 = 32.0;
 /// Widest a section's content gets, so rows stay readable in a wide window.
 const CONTENT_MAX_WIDTH: f32 = 680.0;
+/// Narrowest a setting's label and description get before its control
+/// wraps below them.
+const SETTING_TEXT_MIN_WIDTH: f32 = 240.0;
 /// How often an open section re-reads the store (sync and outbox state
 /// change in the background).
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -526,7 +529,10 @@ impl SettingsWindow {
             .flex_col()
             .flex_none()
             .gap(px(SPACE_1))
-            .w(px(NAV_WIDTH))
+            // Grows with the text size, but leaves the content most of
+            // the window.
+            .w(rems_from_px(NAV_WIDTH))
+            .max_w(relative(0.34))
             .h_full()
             .p(px(SPACE_2))
             .bg(rgb(colors.surface))
@@ -556,7 +562,7 @@ impl SettingsWindow {
                     .flex()
                     .items_center()
                     .gap(px(SPACE_2))
-                    .h(px(NAV_ROW_HEIGHT))
+                    .min_h(rems_from_px(NAV_ROW_HEIGHT))
                     .px(px(SPACE_2))
                     .rounded(px(ComponentTheme::get(cx).platform.control_radius))
                     .bg(rgb(fill))
@@ -640,7 +646,7 @@ impl Render for SettingsWindow {
                                             .child(
                                                 div()
                                                     .w_full()
-                                                    .max_w(px(CONTENT_MAX_WIDTH))
+                                                    .max_w(rems_from_px(CONTENT_MAX_WIDTH))
                                                     .px(px(SPACE_6))
                                                     .py(px(SPACE_4))
                                                     .child(self.section_view()),
@@ -709,7 +715,9 @@ pub(crate) fn group_heading(title: &str, colors: &UiColors) -> gpui::Stateful<gp
 }
 
 /// One setting: its label and a sentence about it on the leading side, the
-/// control on the trailing side, and a divider below.
+/// control on the trailing side, and a divider below. When the two do not
+/// fit side by side (large text in a narrow window), the control wraps
+/// below the text.
 pub(crate) fn setting_row(
     label: impl IntoElement,
     description: Option<SharedString>,
@@ -718,13 +726,14 @@ pub(crate) fn setting_row(
 ) -> gpui::Div {
     div()
         .flex()
+        .flex_wrap()
         .items_center()
         .gap(px(SPACE_4))
         .py(px(SPACE_3))
         .border_b_1()
         .border_color(rgb(colors.border))
-        .child(setting_text(label, description, colors))
-        .child(div().flex_none().child(control))
+        .child(setting_text(label, description, colors).min_w(rems_from_px(SETTING_TEXT_MIN_WIDTH)))
+        .child(div().flex_none().max_w_full().child(control))
 }
 
 /// A setting's label and description.

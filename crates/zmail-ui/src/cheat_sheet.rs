@@ -34,6 +34,7 @@ use crate::keymap::active_keymap;
 use crate::menus::{MenuModel, binding_label};
 use crate::styles::{
     Platform, SPACE_1, SPACE_2, SPACE_3, SPACE_8, TYPE_BODY, TYPE_CAPTION, TypeStyleExt,
+    rems_from_px,
 };
 use crate::widgets::EllipsisExt;
 
@@ -266,7 +267,8 @@ impl WorkspaceView {
                     .flex()
                     .flex_col()
                     .gap(px(SPACE_1))
-                    .w(px(GROUP_WIDTH))
+                    .w(rems_from_px(GROUP_WIDTH))
+                    .max_w_full()
                     .child(
                         div()
                             .type_style(TYPE_CAPTION)
