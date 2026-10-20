@@ -39,6 +39,7 @@ mod reader;
 mod reader_attachments;
 mod reader_safety;
 mod search;
+mod settings;
 
 /// What the store holds when the window opens.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -321,6 +322,7 @@ fn open_workspace_with(
     );
     let notifier = Arc::new(zmail_notify::NewMailNotifier::os_backed());
     let bootstrap = AppBootstrap {
+        app_version: "0.0.0-test".to_owned(),
         runtime: RuntimeSummary {
             worker_threads: 1,
             bridge_verified: true,
@@ -335,7 +337,11 @@ fn open_workspace_with(
     prepare(&store);
     // The keymap the saved preferences pick, as `run()` binds it.
     let saved_keymap = store.ui_preferences().expect("the preferences load").keymap;
-    cx.update(|cx| keymap::bind_keymap(saved_keymap, cx));
+    cx.update(|cx| {
+        keymap::bind_keymap(saved_keymap, cx);
+        // The app-wide commands (Settings…), as `run()` registers them.
+        crate::menus::init(cx);
+    });
     let initial_view = initial_view(&harness);
     let (view, cx) = cx.add_window_view(move |window, cx| {
         WorkspaceView::new(

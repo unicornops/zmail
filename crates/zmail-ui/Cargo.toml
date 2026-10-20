@@ -21,12 +21,12 @@ zmail-notify = { path = "../zmail-notify" }
 zmail-security = { path = "../zmail-security" }
 zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }
+zmail-theme = { path = "../zmail-theme" }
 
 [dev-dependencies]
 # `#[gpui::test]`, `TestAppContext` and `VisualTestContext` for view tests.
 gpui = { workspace = true, features = ["test-support"] }
 tokio.workspace = true
-zmail-theme = { path = "../zmail-theme" }
 
 [lints]
 workspace = true

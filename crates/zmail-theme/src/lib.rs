@@ -66,6 +66,96 @@ impl ThemeFamily {
     }
 }
 
+/// Largest theme file [`import_theme_family`] accepts. Zed theme families
+/// are tens of kilobytes; anything near this is not a theme.
+pub const MAX_THEME_FILE_BYTES: usize = 4 * 1024 * 1024;
+
+/// A Zed theme family the user imported: its name and the variant used for
+/// each appearance. A family without a light (or dark) variant leaves the
+/// bundled one in place for that appearance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedTheme {
+    /// The family's name.
+    pub name: String,
+    /// The family's first dark variant.
+    pub dark: Option<ThemeSummary>,
+    /// The family's first light variant.
+    pub light: Option<ThemeSummary>,
+}
+
+/// Why a file could not be imported as a theme. The message is a plain
+/// sentence to show the user as it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeImportError(pub String);
+
+impl std::fmt::Display for ThemeImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ThemeImportError {}
+
+/// Reads a Zed theme family file for import, checking that it is one Zmail
+/// can use: valid JSON in Zed's theme format, with at least one variant
+/// that sets the background and text colours.
+pub fn import_theme_family(input: &str) -> Result<ImportedTheme, ThemeImportError> {
+    let error = |message: String| Err(ThemeImportError(message));
+    if input.len() > MAX_THEME_FILE_BYTES {
+        return error(format!(
+            "The file is {} MB, which is too large to be a theme.",
+            input.len() / (1024 * 1024)
+        ));
+    }
+    let value: Value = match serde_json::from_str(input) {
+        Ok(value) => value,
+        Err(parse) => {
+            return error(format!(
+                "The file is not valid JSON (line {}, column {}).",
+                parse.line(),
+                parse.column()
+            ));
+        }
+    };
+    if value.get("themes").is_none() {
+        return error(
+            "The file is not a Zed theme: it has no \"themes\" list. Pick a theme family file, such as one from Zed's themes folder."
+                .to_owned(),
+        );
+    }
+    let family: ThemeFamily = match serde_json::from_value(value) {
+        Ok(family) => family,
+        Err(parse) => return error(format!("The file is not a Zed theme: {parse}.")),
+    };
+    if family.themes.is_empty() {
+        return error("The theme file has no themes in it.".to_owned());
+    }
+    let usable = |theme: &&Theme| {
+        let semantic = SemanticTheme::from_theme(theme);
+        semantic.background.is_some() && semantic.foreground.is_some()
+    };
+    let pick = |appearance: Appearance| {
+        family
+            .themes
+            .iter()
+            .filter(|theme| theme.appearance == appearance)
+            .find(usable)
+            .map(|theme| family.summary(theme))
+    };
+    let (dark, light) = (pick(Appearance::Dark), pick(Appearance::Light));
+    if dark.is_none() && light.is_none() {
+        return error(format!(
+            "\"{}\" does not set the background and text colours Zmail needs.",
+            family.name
+        ));
+    }
+    Ok(ImportedTheme {
+        name: family.name.clone(),
+        dark,
+        light,
+    })
+}
+
 /// A single named theme variant within a Zed theme family.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Theme {
@@ -211,7 +301,63 @@ impl SemanticTheme {
 
 #[cfg(test)]
 mod tests {
-    use super::{Appearance, SemanticTheme, ThemeFamily};
+    use super::{Appearance, SemanticTheme, ThemeFamily, import_theme_family};
+    use zmail_core::ThemeAppearance;
+
+    #[test]
+    fn imports_a_family_with_one_variant_per_appearance() {
+        let imported = import_theme_family(
+            r##"{
+              "name": "Paper",
+              "author": "test",
+              "themes": [
+                {"name": "Paper Light", "appearance": "light",
+                 "style": {"background": "#ffffff", "text": "#111111"}},
+                {"name": "Paper Light Two", "appearance": "light",
+                 "style": {"background": "#fafafa", "text": "#000000"}}
+              ]
+            }"##,
+        )
+        .expect("the family imports");
+        assert_eq!(imported.name, "Paper");
+        assert_eq!(imported.dark, None, "the bundled dark theme stays");
+        let light = imported.light.expect("a light variant");
+        assert_eq!(light.theme_name, "Paper Light", "the first one wins");
+        assert_eq!(light.appearance, ThemeAppearance::Light);
+
+        assert!(import_theme_family(super::bundled::DARK).is_ok());
+    }
+
+    #[test]
+    fn import_errors_say_what_is_wrong() {
+        let message = |input: &str| {
+            import_theme_family(input)
+                .expect_err("the import fails")
+                .to_string()
+        };
+        assert_eq!(
+            message("{ not json"),
+            "The file is not valid JSON (line 1, column 3)."
+        );
+        assert!(message(r#"{"name": "x"}"#).contains("no \"themes\" list"));
+        assert!(
+            message(r#"{"name": "x", "author": "y", "themes": [{"name": 3}]}"#)
+                .starts_with("The file is not a Zed theme: ")
+        );
+        assert_eq!(
+            message(r#"{"name": "x", "author": "y", "themes": []}"#),
+            "The theme file has no themes in it."
+        );
+        assert_eq!(
+            message(
+                r##"{"name": "Bare", "author": "y", "themes": [
+                    {"name": "Bare Dark", "appearance": "dark", "style": {"border": "#333333"}}
+                ]}"##
+            ),
+            "\"Bare\" does not set the background and text colours Zmail needs."
+        );
+        assert!(message(&" ".repeat(super::MAX_THEME_FILE_BYTES + 1)).contains("too large"));
+    }
 
     use super::bundled::{DARK as SAMPLE_THEME, LIGHT as SAMPLE_LIGHT_THEME};
 

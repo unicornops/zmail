@@ -159,6 +159,12 @@ impl Select {
         }
     }
 
+    /// Choose the option at `index` as a click on it would.
+    #[cfg(test)]
+    pub(crate) fn pick(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.choose(index, cx);
+    }
+
     fn choose(&mut self, index: usize, cx: &mut Context<Self>) {
         self.selected = Some(index);
         cx.emit(SelectEvent::Changed(index));

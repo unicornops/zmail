@@ -32,7 +32,7 @@
 //! | `styles` | design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
 //! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar, pane widths, density) |
 //! | `widgets` | `toolbar_button`, `input_card`, `empty_state`, `icon`, … |
-//! | `diagnostics` | internal counters kept for the future Settings → About page |
+//! | `settings` | `SettingsWindow`: Appearance, Sending, About & Diagnostics |
 
 use std::sync::Arc;
 
@@ -55,6 +55,7 @@ mod components;
 use crate::components::TextInput;
 use crate::components::title_bar::TRAFFIC_LIGHT_POSITION;
 pub use components::gallery::run_gallery;
+pub use settings::SettingsSection;
 
 mod account_setup;
 pub use account_setup::OnboardingStep;
@@ -64,7 +65,6 @@ mod attachments;
 mod cheat_sheet;
 mod command_palette;
 mod compose;
-mod diagnostics;
 mod drag;
 mod fonts;
 mod fuzzy;
@@ -78,6 +78,7 @@ mod pane;
 mod preferences;
 mod reader;
 mod search;
+mod settings;
 mod sidebar;
 mod toolbar;
 mod tooltip;
@@ -151,6 +152,8 @@ pub enum InitialView {
     CommandPalette(&'static str),
     /// The last mailbox with the keyboard shortcut cheat sheet open.
     KeyboardShortcuts,
+    /// The inbox, with the Settings window open on this section.
+    Settings(SettingsSection),
 }
 
 /// Runs the native Phase 4 shell.
@@ -378,12 +381,6 @@ struct WorkspaceView {
     mailboxes: Vec<MailboxSummary>,
     drafts: Vec<DraftSummary>,
     outbox_jobs: Vec<OutboxJobSummary>,
-    /// Number of mailbox operations still queued for server write-back on
-    /// the selected account.
-    pending_op_count: usize,
-    /// Number of write-back operations that exhausted their retry budget
-    /// on the selected account.
-    dead_op_count: usize,
     search_results: Vec<SearchHit>,
     /// The query that produced `search_results`, shown in the list header
     /// (the search field itself may have been edited since).
@@ -439,12 +436,20 @@ struct WorkspaceView {
     /// Set while the user's saved theme mode forces light or dark; while
     /// unset the theme follows the system light/dark appearance.
     theme_overridden: bool,
+    /// The bundled theme variants the app started with (`bootstrap.theme`
+    /// is the active one).
+    bundled_themes: [zmail_core::ThemeSummary; 2],
+    /// The Zed theme family imported in Settings → Appearance, whose
+    /// variants replace the bundled ones.
+    imported_theme: Option<zmail_theme::ImportedTheme>,
     /// 12- or 24-hour clock for list and reader dates, from the locale.
     hour_cycle: zmail_core::time::HourCycle,
     /// Whether the user hid the sidebar (persisted in the UI preferences).
     sidebar_collapsed: bool,
     /// Message-list row density (persisted).
     density: zmail_core::preferences::Density,
+    /// Whether the reader sits beside the list or replaces it (persisted).
+    reading_pane: zmail_core::preferences::ReadingPanePosition,
     /// The user's sidebar width (persisted); the layout clamps it to
     /// what the window fits.
     sidebar_width: f32,
