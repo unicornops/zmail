@@ -488,6 +488,7 @@ impl WorkspaceView {
             selected_thread_id: self.selected_thread_id,
             search_results: self.search_results.clone(),
             search_query: self.search_results_query.clone(),
+            search_has_more: self.search_context.has_more,
             searching_server: self.search_context.servers_pending > 0,
             search_scope: self.search_scope_state(),
             drafts: self.drafts.clone(),
@@ -620,7 +621,7 @@ impl WorkspaceView {
             .unwrap_or_default();
         // Re-run the shown search so read state, flags and moves made since
         // it ran show up in the results.
-        self.refresh_search_results();
+        self.refresh_search_results(cx);
         self.pending_op_count = self
             .selected_account_id
             .and_then(|account_id| self.store.pending_op_count(account_id).ok())
@@ -2643,6 +2644,10 @@ impl WorkspaceView {
                 if self.pane_layout().mode == LayoutMode::Single {
                     self.focus_pane(Pane::Detail, window, cx);
                 }
+            }
+            MessageListEvent::LoadMoreResults => self.load_more_search_results(cx),
+            MessageListEvent::FilterSearch(filter) => {
+                self.apply_search_filter(*filter, window, cx);
             }
             MessageListEvent::Error(error) => self.show_error(error, cx),
         }

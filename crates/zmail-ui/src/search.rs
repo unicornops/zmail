@@ -27,18 +27,26 @@
 //! last sync still syncs the account at most once per
 //! `zmail_sync::SEARCH_SYNC_COOLDOWN`.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::Result;
 use gpui::{AppContext as _, Context, Task, Window};
 use zmail_core::{MailboxSelection, SearchHit, SearchScope, search::SearchQuery};
+use zmail_store::LocalStore;
 
 use super::{DetailMode, ListMode, WorkspaceView};
 use crate::actions::{SearchAllAccounts, SearchInAccount, SearchInFolder};
 use crate::pane::Pane;
 
-/// Most results a search lists.
-const SEARCH_LIMIT: usize = 100;
+mod filters;
+mod highlight;
+
+pub(crate) use filters::{DateRange, SearchFilter, SearchFilters};
+pub(crate) use highlight::{RowMatches, SearchHighlighter};
+
+/// Results a search reads at a time. Scrolling near the end of the list
+/// reads the next page.
+const SEARCH_PAGE: usize = 100;
 
 /// How long typing must pause before the local search runs.
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -75,6 +83,11 @@ pub(crate) struct SearchContext {
     pub(crate) servers_pending: usize,
     /// Whether the servers were asked for this generation already.
     pub(crate) servers_asked: bool,
+    /// How many results the search reads: one page, plus one more for
+    /// each time the list scrolled near the end.
+    pub(crate) limit: usize,
+    /// Whether the last read filled `limit`, so there may be more.
+    pub(crate) has_more: bool,
 }
 
 /// What the list shows about the search scope (see the list header).
@@ -121,6 +134,8 @@ impl SearchContext {
         self.generation = self.generation.wrapping_add(1);
         self.servers_pending = 0;
         self.servers_asked = false;
+        self.limit = SEARCH_PAGE;
+        self.has_more = false;
         self.generation
     }
 }
@@ -261,6 +276,27 @@ impl WorkspaceView {
         }
     }
 
+    /// A filter chip edits the query in the search field and runs it. A
+    /// chip that leaves nothing to search yet (From, which waits for the
+    /// sender) hands the field to the user instead.
+    pub(crate) fn apply_search_filter(
+        &mut self,
+        filter: SearchFilter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.search_query.read(cx).text().to_owned();
+        let edited = filters::apply_filter(&current, filter);
+        self.search_query
+            .update(cx, |input, cx| input.set_text(edited.clone(), cx));
+        if SearchQuery::parse(&edited) == SearchQuery::parse(&current) {
+            self.search_query
+                .update(cx, |input, cx| input.focus(window, cx));
+            return;
+        }
+        self.search_now(Read::Background, cx);
+    }
+
     /// Ends the search and goes back to the mailbox it started in.
     pub(crate) fn end_search(&mut self, cx: &mut Context<Self>) {
         if matches!(self.list_mode, ListMode::Search) {
@@ -323,42 +359,58 @@ impl WorkspaceView {
 
     /// Re-reads the shown search's local results, so read state, flags
     /// and moves made since it ran show up.
-    pub(crate) fn refresh_search_results(&mut self) {
-        if !matches!(self.list_mode, ListMode::Search) || self.search_results_query.is_empty() {
+    pub(crate) fn refresh_search_results(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.list_mode, ListMode::Search) && !self.search_pending_query.is_empty() {
+            self.read_search_results(Read::Background, cx);
+        }
+    }
+
+    /// Reads the next page of the shown search's results.
+    pub(crate) fn load_more_search_results(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.list_mode, ListMode::Search) || !self.search_context.has_more {
             return;
         }
-        if let Some(scope) = self.search_context.scope()
-            && let Ok(results) =
-                self.store
-                    .search_threads_in(&scope, &self.search_results_query, SEARCH_LIMIT)
-        {
-            self.search_results = results;
-        }
+        self.search_context.has_more = false;
+        self.search_context.limit += SEARCH_PAGE;
+        self.read_search_results(Read::Background, cx);
     }
 
     /// Searches the store in the current scope for the pending query, then
     /// asks the servers in scope when the local index cannot fully answer.
     fn search_in_scope(&mut self, servers: ServerSearch, read: Read, cx: &mut Context<Self>) {
+        self.read_search_results(read, cx);
+        if servers == ServerSearch::Now {
+            self.search_servers_in_scope(cx);
+        }
+    }
+
+    /// Reads the pending query's results in the current scope, up to the
+    /// search's limit. A later read replaces (and so cancels) one still
+    /// running; the generation check covers reads that already finished.
+    fn read_search_results(&mut self, read: Read, cx: &mut Context<Self>) {
         let Some(scope) = self.search_context.scope() else {
             return;
         };
         let generation = self.search_context.generation;
         let query = self.search_pending_query.clone();
+        let limit = self.search_context.limit.max(SEARCH_PAGE);
         match read {
             Read::Now => {
-                let results = self.store.search_threads_in(&scope, &query, SEARCH_LIMIT);
+                let results = self
+                    .store
+                    .search_threads_in(&scope, &query, limit)
+                    .map(|hits| with_body_excerpts(&self.store, hits, &query));
                 self.search_read = Task::ready(());
                 self.show_search_results(generation, query, results, cx);
             }
             Read::Background => {
                 let store = self.store.clone();
-                // Replacing the task cancels a read still running for an
-                // earlier search; the generation check below covers the
-                // rest.
                 self.search_read = cx.spawn(async move |this, cx| {
                     let (query, results) = cx
                         .background_spawn(async move {
-                            let results = store.search_threads_in(&scope, &query, SEARCH_LIMIT);
+                            let results = store
+                                .search_threads_in(&scope, &query, limit)
+                                .map(|hits| with_body_excerpts(&store, hits, &query));
                             (query, results)
                         })
                         .await;
@@ -367,9 +419,6 @@ impl WorkspaceView {
                     });
                 });
             }
-        }
-        if servers == ServerSearch::Now {
-            self.search_servers_in_scope(cx);
         }
     }
 
@@ -387,6 +436,8 @@ impl WorkspaceView {
         }
         match results {
             Ok(results) => {
+                self.search_context.has_more =
+                    results.len() >= self.search_context.limit.max(SEARCH_PAGE);
                 self.search_results = results;
                 self.search_results_query = query;
                 if !matches!(self.list_mode, ListMode::Search) {
@@ -454,7 +505,7 @@ impl WorkspaceView {
                     }
                     view.search_context.servers_pending =
                         view.search_context.servers_pending.saturating_sub(1);
-                    view.refresh_search_results();
+                    // Re-reads the results too.
                     view.refresh_from_store(cx);
                     cx.notify();
                 });
@@ -492,6 +543,43 @@ impl WorkspaceView {
             self.set_search_level(SearchLevel::AllAccounts, cx);
         }
     }
+}
+
+/// `hits` with each snippet that does not show why the hit matched
+/// replaced by an excerpt of the thread's body around the match, when the
+/// body is stored. Free text matches in bodies the stored snippet (the
+/// start of the latest message) often leaves out.
+fn with_body_excerpts(store: &LocalStore, mut hits: Vec<SearchHit>, query: &str) -> Vec<SearchHit> {
+    let highlighter = SearchHighlighter::new(query);
+    if !highlighter.marks_text() {
+        return hits;
+    }
+    let unexplained = hits
+        .iter()
+        .filter(|hit| highlighter.text(&hit.preview).is_empty())
+        .map(|hit| hit.thread_id)
+        .collect::<Vec<_>>();
+    if unexplained.is_empty() {
+        return hits;
+    }
+    // A failed read leaves the stored snippets.
+    let Ok(bodies) = store.thread_body_texts(&unexplained) else {
+        return hits;
+    };
+    let mut excerpts = HashMap::new();
+    for (thread_id, body) in &bodies {
+        if !excerpts.contains_key(thread_id)
+            && let Some(excerpt) = highlighter.body_excerpt(body)
+        {
+            excerpts.insert(*thread_id, excerpt);
+        }
+    }
+    for hit in &mut hits {
+        if let Some(excerpt) = excerpts.remove(&hit.thread_id) {
+            hit.preview = excerpt;
+        }
+    }
+    hits
 }
 
 #[cfg(test)]

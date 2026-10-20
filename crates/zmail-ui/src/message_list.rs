@@ -42,7 +42,7 @@ use crate::actions::{
 use crate::components::{Button, ButtonSize, Menu};
 use crate::drag::DraggedThreads;
 use crate::mail_actions::MailActions;
-use crate::search::SearchScopeState;
+use crate::search::{SearchFilter, SearchHighlighter, SearchScopeState};
 use crate::styles::{DensityTokens, UiColors};
 use crate::widgets::{empty_state, toolbar_button};
 
@@ -93,6 +93,9 @@ pub(crate) struct MessageListState {
     pub(crate) search_results: Vec<SearchHit>,
     /// The query that produced `search_results`.
     pub(crate) search_query: String,
+    /// Whether the store has more results than `search_results` holds:
+    /// scrolling near the end asks for the next page.
+    pub(crate) search_has_more: bool,
     /// Whether the server search fallback for the query is still running.
     pub(crate) searching_server: bool,
     /// Where the search looks, for the header's scope control.
@@ -137,6 +140,7 @@ impl Default for MessageListState {
             selected_thread_id: None,
             search_results: Vec::new(),
             search_query: String::new(),
+            search_has_more: false,
             searching_server: false,
             search_scope: SearchScopeState::default(),
             drafts: Vec::new(),
@@ -174,6 +178,11 @@ pub(crate) enum MessageListEvent {
     /// A thread, search result or draft row was clicked (after its open
     /// event). The single-pane layout shows the detail pane on it.
     RowClicked,
+    /// A search filter chip was chosen: the shell edits the query.
+    FilterSearch(SearchFilter),
+    /// The search results are scrolled near their end and the store has
+    /// more: the shell reads the next page.
+    LoadMoreResults,
     /// Reading the rows failed.
     Error(String),
 }
@@ -219,6 +228,13 @@ pub(crate) struct MessageListView {
     /// Set when a press on the filter button closed the open menu, so the
     /// click that follows does not reopen it.
     swallow_filter_click: bool,
+    /// How many search results the list had when it last asked for more,
+    /// so it asks once per page.
+    asked_for_more_at: Option<usize>,
+    /// The open search date menu, like `filter_menu`.
+    date_menu: Option<(Entity<Menu>, Subscription)>,
+    /// Like `swallow_filter_click`, for the date chip.
+    swallow_date_click: bool,
     /// The thread row under the pointer: it shows quick actions in place
     /// of its date.
     hovered_thread: Option<i64>,
@@ -264,6 +280,9 @@ impl MessageListView {
             filtered_total: None,
             filter_menu: None,
             swallow_filter_click: false,
+            asked_for_more_at: None,
+            date_menu: None,
+            swallow_date_click: false,
             hovered_thread: None,
             page: None,
             selected_index_hint: None,
@@ -299,6 +318,18 @@ impl MessageListView {
         // rows away): Shift extends from the selected row again.
         if self.state.selection.is_multiple() && !state.selection.is_multiple() {
             self.selection_anchor = None;
+        }
+        // Another search's results start at the top; the next page of the
+        // same search keeps the scroll position.
+        let new_search = state.mode == ListMode::Search
+            && (self.state.mode != ListMode::Search
+                || self.state.search_query != state.search_query);
+        if new_search {
+            self.asked_for_more_at = None;
+            self.thread_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        }
+        if state.mode != ListMode::Search {
+            self.date_menu = None;
         }
         self.state = state;
         if mailbox_changed {
@@ -499,6 +530,8 @@ impl MessageListView {
                     return;
                 };
                 let (thread_id, mailbox_id) = (hit.thread_id, hit.mailbox_id);
+                self.thread_scroll
+                    .scroll_to_item(index, ScrollStrategy::Nearest);
                 self.state.selected_thread_id = Some(thread_id);
                 cx.emit(MessageListEvent::OpenThread {
                     thread_id,
@@ -586,7 +619,7 @@ impl Render for MessageListView {
             .children(self.render_row_overlays())
             .child(match self.state.mode {
                 ListMode::Mail => self.render_threads(&colors, cx),
-                ListMode::Search => self.render_search_results(&colors, focused, cx),
+                ListMode::Search => self.render_search_results(&colors, cx),
                 ListMode::Drafts => self.render_drafts(&colors, focused, cx),
                 ListMode::Outbox => self.render_outbox(&colors, focused, cx),
             })
@@ -722,17 +755,50 @@ impl MessageListView {
             .collect()
     }
 
-    fn render_search_results(
-        &self,
-        colors: &UiColors,
-        focused: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_search_results(&self, colors: &UiColors, cx: &mut Context<Self>) -> AnyElement {
         if self.state.search_results.is_empty() {
             return self.render_no_results(colors);
         }
+        let colors = *colors;
+        // Rows are paged like a mailbox's: the list draws only what is in
+        // view, and asks for the next page as the end comes near.
+        div()
+            .id("search-results-list")
+            .flex_1()
+            .overflow_hidden()
+            .child(
+                uniform_list(
+                    "search-results",
+                    self.state.search_results.len(),
+                    cx.processor(move |this, range: Range<usize>, window, cx| {
+                        let focused = this.focus_handle.contains_focused(window, cx);
+                        this.render_search_rows(range, &colors, focused, cx)
+                    }),
+                )
+                .track_scroll(&self.thread_scroll)
+                .h_full(),
+            )
+            .into_any_element()
+    }
+
+    fn render_search_rows(
+        &mut self,
+        range: Range<usize>,
+        colors: &UiColors,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::Stateful<gpui::Div>> {
+        let loaded = self.state.search_results.len();
+        if self.state.search_has_more
+            && range.end + ROW_PAGE_PADDING >= loaded
+            && self.asked_for_more_at != Some(loaded)
+        {
+            self.asked_for_more_at = Some(loaded);
+            cx.emit(MessageListEvent::LoadMoreResults);
+        }
         let now = chrono::Local::now();
         let density = self.density_tokens();
+        let highlighter = SearchHighlighter::new(&self.state.search_query);
         // Results from several accounts name their account, as rows of
         // the Unified Inbox do.
         let first_account = self.state.search_results.first().map(|hit| hit.account_id);
@@ -741,68 +807,68 @@ impl MessageListView {
             .search_results
             .iter()
             .any(|hit| Some(hit.account_id) != first_account);
-        div()
-            .id("search-results-list")
-            .flex_1()
-            .overflow_y_scroll()
-            .children(
-                self.state
-                    .search_results
-                    .iter()
-                    .enumerate()
-                    .map(|(index, hit)| {
-                        let thread_id = hit.thread_id;
-                        let row_id = search_row_id(thread_id);
-                        let is_selected = self.is_thread_selected(thread_id);
-                        let mut row =
-                            MessageRow::search_hit(row_id.clone(), hit, &now, self.hour_cycle);
-                        if spans_accounts {
-                            row.account = self
-                                .state
-                                .accounts
-                                .iter()
-                                .find(|account| account.id == hit.account_id)
-                                .map(|account| RowAccount {
-                                    id: account.id,
-                                    name: account.name.clone(),
-                                    color: account.color,
-                                });
-                        }
-                        let quick_actions = (self.hovered_thread == Some(thread_id))
-                            .then(|| self.quick_actions(thread_id, &row, cx));
-                        // A hit says where it is, so it can be dragged to
-                        // one of its account's folders.
-                        let dragged =
-                            self.dragged_threads(thread_id, hit.account_id, hit.mailbox_id);
+        let start = range.start;
+        let end = range.end.min(loaded);
+        self.state.search_results[start.min(end)..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, hit)| {
+                let index = start + offset;
+                let thread_id = hit.thread_id;
+                let row_id = search_row_id(thread_id);
+                let is_selected = self.is_thread_selected(thread_id);
+                let mut row = MessageRow::search_hit(
+                    row_id.clone(),
+                    hit,
+                    &highlighter,
+                    &now,
+                    self.hour_cycle,
+                );
+                if spans_accounts {
+                    row.account = self
+                        .state
+                        .accounts
+                        .iter()
+                        .find(|account| account.id == hit.account_id)
+                        .map(|account| RowAccount {
+                            id: account.id,
+                            name: account.name.clone(),
+                            color: account.color,
+                        });
+                }
+                let quick_actions = (self.hovered_thread == Some(thread_id))
+                    .then(|| self.quick_actions(thread_id, &row, cx));
+                // A hit says where it is, so it can be dragged to one of
+                // its account's folders.
+                let dragged = self.dragged_threads(thread_id, hit.account_id, hit.mailbox_id);
 
-                        row_shell(row_id, is_selected, focused, density, colors)
-                            .debug_selector(move || format!("search-row-{thread_id}"))
-                            .role(Role::ListItem)
-                            .aria_label(row.accessible_label())
-                            .on_hover(cx.listener(move |this, hovered, _, cx| {
-                                this.set_hovered_thread(thread_id, *hovered, cx);
-                            }))
-                            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                this.click_thread_row(index, event.modifiers(), cx);
-                            }))
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                    this.open_context_menu(index, event.position, window, cx);
-                                }),
-                            )
-                            .on_drag(dragged, |dragged: &DraggedThreads, _, _, cx| {
-                                cx.new(|_| dragged.clone())
-                            })
-                            .child(row_content(
-                                row,
-                                quick_actions,
-                                density,
-                                &row_colors(is_selected, focused, colors),
-                            ))
-                    }),
-            )
-            .into_any_element()
+                row_shell(row_id, is_selected, focused, density, colors)
+                    .debug_selector(move || format!("search-row-{thread_id}"))
+                    .role(Role::ListItem)
+                    .aria_label(row.accessible_label())
+                    .on_hover(cx.listener(move |this, hovered, _, cx| {
+                        this.set_hovered_thread(thread_id, *hovered, cx);
+                    }))
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        this.click_thread_row(index, event.modifiers(), cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.open_context_menu(index, event.position, window, cx);
+                        }),
+                    )
+                    .on_drag(dragged, |dragged: &DraggedThreads, _, _, cx| {
+                        cx.new(|_| dragged.clone())
+                    })
+                    .child(row_content(
+                        row,
+                        quick_actions,
+                        density,
+                        &row_colors(is_selected, focused, colors),
+                    ))
+            })
+            .collect()
     }
 
     fn render_drafts(
