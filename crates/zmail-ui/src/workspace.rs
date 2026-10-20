@@ -33,7 +33,7 @@ use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
 use super::{DetailMode, InitialView, ListMode, WorkspaceView};
-use crate::a11y::AccessibleExt;
+use crate::a11y::{AccessibleExt, Politeness};
 use crate::account_setup::{
     AccountSetupEvent, AccountSetupServices, AccountSetupView, open_add_account,
     open_add_account_with_notice,
@@ -64,6 +64,7 @@ use crate::styles::{
     DETAIL_MIN_WIDTH, ICON_SIZE_SM, MESSAGE_LIST_MIN_WIDTH, MESSAGE_LIST_WIDTH, MenuPlacement,
     PlatformStyle, READER_COMPACT_ACTIONS_BELOW, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, UiColors,
 };
+use crate::toolbar::{sync_announcement, sync_indicator};
 use crate::widgets::{EllipsisExt, HoverExt, icon, status_banner};
 
 /// The inline reply open below a conversation.
@@ -201,6 +202,7 @@ impl WorkspaceView {
             shortcuts_modal: components::ModalState::new(cx),
             shortcut_groups: Vec::new(),
             search_results: Vec::new(),
+            announcer: Default::default(),
             search_results_query: String::new(),
             search_pending_query: String::new(),
             search_context: Default::default(),
@@ -606,6 +608,12 @@ impl WorkspaceView {
         self.thread_view_cache = None;
         match self.store.list_accounts() {
             Ok(accounts) => {
+                let now = chrono::Utc::now();
+                let before = sync_indicator(&self.accounts, now);
+                let after = sync_indicator(&accounts, now);
+                if let Some(text) = sync_announcement(before.as_ref(), after.as_ref()) {
+                    self.announcer.announce(text, Politeness::Polite);
+                }
                 self.accounts = accounts;
             }
             Err(error) => {
@@ -3109,6 +3117,7 @@ impl Render for WorkspaceView {
             )
             .children(self.render_open_warning(cx))
             .children(self.render_command_palette(cx))
+            .children(self.announcer.render("workspace-announcement"))
             .children(self.render_keyboard_shortcuts(cx))
             .child(self.toasts.clone());
         // The Linux client-side decoration frame (nothing elsewhere); it

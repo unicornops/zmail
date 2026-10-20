@@ -35,6 +35,7 @@ use zmail_core::{MailboxSelection, SearchHit, SearchScope, search::SearchQuery};
 use zmail_store::LocalStore;
 
 use super::{DetailMode, ListMode, WorkspaceView};
+use crate::a11y::Politeness;
 use crate::actions::{SearchAllAccounts, SearchInAccount, SearchInFolder};
 use crate::pane::Pane;
 
@@ -438,6 +439,14 @@ impl WorkspaceView {
             Ok(results) => {
                 self.search_context.has_more =
                     results.len() >= self.search_context.limit.max(SEARCH_PAGE);
+                // A new query's count is read out; more pages of the same
+                // one are not.
+                if query != self.search_results_query {
+                    self.announcer.announce(
+                        result_count_announcement(results.len(), self.search_context.has_more),
+                        Politeness::Polite,
+                    );
+                }
                 self.search_results = results;
                 self.search_results_query = query;
                 if !matches!(self.list_mode, ListMode::Search) {
@@ -582,11 +591,30 @@ fn with_body_excerpts(store: &LocalStore, mut hits: Vec<SearchHit>, query: &str)
     hits
 }
 
+/// What a screen reader hears when a search's results arrive. With more
+/// to load, `count` is only the first page.
+pub(crate) fn result_count_announcement(count: usize, has_more: bool) -> String {
+    match (count, has_more) {
+        (0, _) => "No results".to_owned(),
+        (count, true) => format!("At least {count} results"),
+        (1, false) => "1 result".to_owned(),
+        (count, false) => format!("{count} results"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use zmail_core::{MailboxRole, VirtualMailbox};
 
     use super::*;
+
+    #[test]
+    fn result_counts_read_in_words() {
+        assert_eq!(result_count_announcement(0, false), "No results");
+        assert_eq!(result_count_announcement(1, false), "1 result");
+        assert_eq!(result_count_announcement(7, false), "7 results");
+        assert_eq!(result_count_announcement(50, true), "At least 50 results");
+    }
 
     #[test]
     fn levels_map_to_store_scopes() {

@@ -13,7 +13,7 @@ use zmail_autodiscover::{
 use zmail_core::{AccountColor, ProtocolKind, SyncPhase};
 
 use super::{AccountField, AccountSetupView, KEY_CONTEXT, Stage};
-use crate::a11y::{AccessibleExt, readable};
+use crate::a11y::{A11yFlags, AccessibleExt, Politeness, readable};
 use crate::components::{Banner, BannerTone, Button, ButtonSize, ComponentTheme};
 use crate::styles::{
     EMPTY_STATE_ICON_FRAME_SIZE, ICON_SIZE_LG, ICON_SIZE_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4,
@@ -165,16 +165,22 @@ fn error_line(
     view: &AccountSetupView,
     field: AccountField,
     colors: &UiColors,
-) -> Option<gpui::Div> {
+) -> Option<gpui::Stateful<gpui::Div>> {
     view.form.errors.get(&field).map(|error| {
+        let text = SharedString::from(format!("{}: {error}", field.label()));
         div()
+            .id(SharedString::from(format!("account-setup-error-{field:?}")))
             .debug_selector(move || format!("account-setup-error-{field:?}"))
+            // Read out as soon as it appears, naming the field.
+            .accessible(Role::Alert, text.clone())
+            .aria_value(text)
+            .a11y_flags(A11yFlags {
+                live: Some(Politeness::Assertive),
+                ..A11yFlags::default()
+            })
             .type_style(TYPE_CAPTION)
             .text_color(rgb(colors.danger))
-            .child(readable(
-                SharedString::from(format!("account-setup-error-{field:?}")),
-                error.clone(),
-            ))
+            .child(error.clone())
     })
 }
 

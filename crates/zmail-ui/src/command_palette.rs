@@ -30,7 +30,9 @@ use gpui::{
 use zmail_core::{AccountSummary, MailboxRole, MailboxSummary, VirtualMailbox};
 
 use crate::WorkspaceView;
-use crate::a11y::AccessibleExt;
+use crate::a11y::{
+    AccessibleExt, Politeness, announcement_key, highlight_announcement, live_region,
+};
 use crate::actions::ToggleCommandPalette;
 use crate::components::actions::{SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use crate::components::kbd::spoken_keystrokes;
@@ -86,6 +88,14 @@ pub(crate) struct PaletteEntry {
     /// The shortcut in GPUI syntax, for [`Kbd`].
     pub(crate) shortcut: Option<SharedString>,
     pub(crate) target: PaletteTarget,
+}
+
+/// What a screen reader reads for an entry: its label, then its detail.
+fn entry_name(entry: &PaletteEntry) -> SharedString {
+    match &entry.detail {
+        Some(detail) => format!("{}, {detail}", entry.label).into(),
+        None => entry.label.clone(),
+    }
 }
 
 /// What the palette reports.
@@ -460,10 +470,7 @@ impl CommandPalette {
                         Some((offset..offset + ch.len_utf8(), bold))
                     })
                     .collect::<Vec<_>>();
-                let accessible_name: SharedString = match &entry.detail {
-                    Some(detail) => format!("{}, {detail}", entry.label).into(),
-                    None => entry.label.clone(),
-                };
+                let accessible_name = entry_name(entry);
                 Some(
                     div()
                         .id(("command-palette-entry", position))
@@ -520,10 +527,25 @@ impl Render for CommandPalette {
         let colors = ComponentTheme::get(cx).colors;
         let count = self.matches.len();
         let visible = count.min(VISIBLE_ROWS);
+        let highlight = highlight_announcement(
+            &self
+                .matches
+                .get(self.highlighted)
+                .map(|found| entry_name(&self.entries[found.entry]))
+                .unwrap_or_default(),
+            self.highlighted,
+            count,
+        );
 
         div()
             .id("command-palette")
             .key_context(KEY_CONTEXT)
+            .relative()
+            .child(live_region(
+                ("command-palette-highlight", announcement_key(&highlight)),
+                highlight,
+                Politeness::Polite,
+            ))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::select_first))

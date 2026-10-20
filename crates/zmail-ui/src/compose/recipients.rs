@@ -27,7 +27,9 @@ use gpui::{
 use zmail_core::{AddressSuggestion, participants::Participant, participants::parse_address_list};
 use zmail_store::LocalStore;
 
-use crate::a11y::AccessibleExt;
+use crate::a11y::{
+    AccessibleExt, Politeness, announcement_key, highlight_announcement, live_region,
+};
 use crate::components::actions::{Cancel, SelectNext, SelectPrevious};
 use crate::components::menu::MENU_ITEM_HEIGHT;
 use crate::components::popover::{Popover, popover_below};
@@ -565,5 +567,24 @@ impl Render for RecipientField {
                     .child(self.input.clone()),
             )
             .children(suggestions.map(popover_below))
+            .children(showing.then(|| {
+                let highlight = highlight_announcement(
+                    &self
+                        .suggestions
+                        .get(self.highlighted)
+                        .map(|suggestion| suggestion.to_header_value())
+                        .unwrap_or_default(),
+                    self.highlighted,
+                    self.suggestions.len(),
+                );
+                live_region(
+                    (
+                        "recipient-suggestion-highlight",
+                        announcement_key(&highlight),
+                    ),
+                    highlight,
+                    Politeness::Polite,
+                )
+            }))
     }
 }

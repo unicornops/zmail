@@ -19,7 +19,9 @@ use gpui::{
 };
 use zmail_core::MailboxSummary;
 
-use crate::a11y::AccessibleExt;
+use crate::a11y::{
+    AccessibleExt, Politeness, announcement_key, highlight_announcement, live_region,
+};
 use crate::components::actions::{Cancel, MENU_CONTEXT, SelectNext, SelectPrevious};
 use crate::components::menu::{MENU_ITEM_HEIGHT, MENU_MIN_WIDTH};
 use crate::components::popover::Popover;
@@ -207,11 +209,26 @@ impl Render for MovePicker {
             })
             .collect();
         let empty = rows.is_empty();
+        let highlight = highlight_announcement(
+            &self
+                .matches
+                .get(self.highlighted)
+                .map(|&index| self.mailboxes[index].name.clone())
+                .unwrap_or_default(),
+            self.highlighted,
+            self.matches.len(),
+        );
 
         div()
             .id("move-picker")
             .track_focus(&self.focus_handle)
-            .role(Role::Menu)
+            .accessible(Role::Menu, "Move to folder")
+            .relative()
+            .child(live_region(
+                ("move-picker-highlight", announcement_key(&highlight)),
+                highlight,
+                Politeness::Polite,
+            ))
             .key_context(MENU_CONTEXT)
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
