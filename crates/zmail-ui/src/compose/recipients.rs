@@ -34,7 +34,7 @@ use crate::components::actions::{Cancel, SelectNext, SelectPrevious};
 use crate::components::menu::MENU_ITEM_HEIGHT;
 use crate::components::popover::{Popover, popover_below};
 use crate::components::text_input::{Backspace, Paste};
-use crate::components::{ComponentTheme, TextInput, TextInputEvent};
+use crate::components::{ComponentTheme, HitTargetExt, MIN_TARGET_SIZE, TextInput, TextInputEvent};
 use crate::styles::{
     ICON_SIZE_SM, RADIUS_FULL, RADIUS_MD, RADIUS_SM, SPACE_0_5, SPACE_1, SPACE_2, TYPE_BODY,
     TYPE_CAPTION, TextScale, TypeStyleExt, rems_from_px,
@@ -433,7 +433,7 @@ impl Render for RecipientField {
                         .id(SharedString::from(format!(
                             "recipient-{field_id}-{index}-remove"
                         )))
-                        .debug_selector({
+                        .hit_target({
                             let field_id = field_id.clone();
                             move || format!("recipient-{field_id}-{index}-remove")
                         })
@@ -441,7 +441,10 @@ impl Render for RecipientField {
                         .flex_none()
                         .items_center()
                         .justify_center()
-                        .size(px(ICON_SIZE_SM + SPACE_1))
+                        // A 24px target (WCAG 2.5.8); the chip's vertical
+                        // padding is trimmed so the chip stays compact.
+                        .size(px(MIN_TARGET_SIZE))
+                        .my(px(-SPACE_0_5))
                         .rounded(px(RADIUS_FULL))
                         .cursor_pointer()
                         .hover(|this| this.bg(rgb(colors.hover_background)))
@@ -475,7 +478,7 @@ impl Render for RecipientField {
                         let field_id = field_id.clone();
                         div()
                             .id(("recipient-suggestion", index))
-                            .debug_selector(move || format!("suggestion-{field_id}-{index}"))
+                            .hit_target(move || format!("suggestion-{field_id}-{index}"))
                             .flex()
                             .items_center()
                             .gap(px(SPACE_2))

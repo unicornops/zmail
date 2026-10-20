@@ -47,7 +47,8 @@ use crate::actions::{
 };
 use crate::app_menu::AppMenuButton;
 use crate::components::{
-    self, IconButton, SplitHandle, TextInput, TextInputEvent, TitleBar, Toast, ToastHost, ToastKind,
+    self, HitTargetExt, IconButton, SplitHandle, TextInput, TextInputEvent, TitleBar, Toast,
+    ToastHost, ToastKind,
 };
 use crate::compose::{ComposeEvent, ComposeView, ComposeWindow, Presentation};
 use crate::layout::{LayoutMode, PaneLayout, SinglePane};
@@ -3111,6 +3112,7 @@ impl Render for WorkspaceView {
                             .child(
                                 div()
                                     .id("dismiss-error")
+                                    .hit_target(|| "dismiss-error".into())
                                     .accessible(Role::Button, "Dismiss error")
                                     .tab_index(0)
                                     .flex()

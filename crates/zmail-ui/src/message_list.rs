@@ -40,7 +40,7 @@ use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::actions::{
     AddAccount, OpenSelected, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
-use crate::components::{Button, ButtonSize, Menu};
+use crate::components::{Button, ButtonSize, HitTargetExt, Menu};
 use crate::drag::DraggedThreads;
 use crate::mail_actions::MailActions;
 use crate::search::{SearchFilter, SearchHighlighter, SearchScopeState};
@@ -746,7 +746,7 @@ impl MessageListView {
 
                 let cursor = focused && self.state.selected_thread_id == Some(thread_id);
                 row_shell(row_id, is_selected, focused, density, colors)
-                    .debug_selector(move || format!("thread-row-{index}"))
+                    .hit_target(move || format!("thread-row-{index}"))
                     .map(|this| row.accessible(this, is_selected, cursor, index, count))
                     .on_hover(cx.listener(move |this, hovered, _, cx| {
                         this.set_hovered_thread(thread_id, *hovered, cx);

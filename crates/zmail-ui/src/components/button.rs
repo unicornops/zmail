@@ -16,6 +16,7 @@ use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::styles::{ICON_SIZE_MD, ICON_SIZE_SM, TYPE_BODY, TYPE_CAPTION, TextScale, TypeStyleExt};
 use crate::widgets::icon;
 
+use super::hit_target::HitTargetExt;
 use super::kbd::spoken_keystrokes;
 use super::theme::{ComponentTheme, FocusRingExt};
 use super::tooltip::TooltipExt;
@@ -461,9 +462,11 @@ fn button_base(
         role,
     } = base;
     let (hover, active) = (colors.hover, colors.active);
+    let target = id.clone();
 
     div()
         .id(id)
+        .hit_target(move || format!("button-{target}"))
         .flex()
         .flex_none()
         .items_center()

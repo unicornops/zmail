@@ -28,6 +28,7 @@ use gpui::{
 
 use crate::a11y::AccessibleExt;
 
+use super::hit_target::HitTargetExt;
 use super::theme::{ComponentTheme, FocusRingExt};
 
 /// Width of the handle's hit area.
@@ -174,8 +175,10 @@ impl RenderOnce for SplitHandle {
         let on_decrement = emit;
         let accent = colors.focus_ring;
 
+        let target = id.clone();
         div()
             .id(id.clone())
+            .hit_target(move || format!("split-handle-{target}"))
             .group("split-handle")
             .flex_none()
             .flex()

@@ -14,7 +14,7 @@ use zmail_core::{AccountColor, ProtocolKind, SyncPhase};
 
 use super::{AccountField, AccountSetupView, KEY_CONTEXT, Stage};
 use crate::a11y::{A11yFlags, AccessibleExt, Politeness, readable};
-use crate::components::{Banner, BannerTone, Button, ButtonSize, ComponentTheme};
+use crate::components::{Banner, BannerTone, Button, ButtonSize, ComponentTheme, HitTargetExt};
 use crate::styles::{
     EMPTY_STATE_ICON_FRAME_SIZE, ICON_SIZE_LG, ICON_SIZE_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4,
     SPACE_6, SPACE_8, TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TYPE_HEADLINE, TypeStyleExt,
@@ -797,7 +797,7 @@ impl AccountSetupView {
                     "account-setup-colour-{}",
                     color.as_str()
                 )))
-                .debug_selector(move || format!("account-setup-colour-{}", color.as_str()))
+                .hit_target(move || format!("account-setup-colour-{}", color.as_str()))
                 .accessible(Role::RadioButton, color.label())
                 .aria_toggled(if selected {
                     gpui::Toggled::True

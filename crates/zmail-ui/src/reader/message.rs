@@ -24,7 +24,7 @@ use super::header::{render_details, render_header};
 use super::quoted::split_folded_tail;
 use super::{attachments, banners};
 use crate::a11y::AccessibleExt;
-use crate::components::{Avatar, ButtonSize, IconButton};
+use crate::components::{Avatar, ButtonSize, HitTargetExt, IconButton};
 use crate::styles::{AVATAR_SIZE, UiColors, rems_from_px};
 use crate::widgets::EllipsisExt;
 
@@ -156,7 +156,7 @@ fn collapsed_summary(
     }
     div()
         .id(("reader-message-summary", message.id as u64))
-        .debug_selector(move || format!("reader-message-summary-{index}"))
+        .hit_target(move || format!("reader-message-summary-{index}"))
         .flex()
         .items_center()
         .gap_3()
