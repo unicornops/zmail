@@ -131,6 +131,8 @@ MATRIX=(
   "reader-attachments-dark reader-attachments dark 1440 920"
   "reader-attachments-light reader-attachments light 1440 920"
   "reader-attachments-dark-720 reader-attachments dark 720 720"
+  "settings-accounts-dark settings-accounts dark 820 900"
+  "settings-accounts-light settings-accounts light 820 900"
   "settings-appearance-dark settings-appearance dark 820 600"
   "settings-appearance-light settings-appearance light 820 600"
   "settings-sending-dark settings-sending dark 820 600"

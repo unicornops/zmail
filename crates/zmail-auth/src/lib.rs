@@ -55,7 +55,18 @@ pub enum OAuth2Preset {
     Microsoft365,
 }
 
+/// The local port the browser flow's redirect comes back to by default.
+pub const DEFAULT_REDIRECT_PORT: u16 = 8357;
+
 impl OAuth2Preset {
+    /// The preset whose token endpoint is `token_endpoint`, so a stored
+    /// account's client can be rebuilt to sign in again.
+    pub fn for_token_endpoint(token_endpoint: &str) -> Option<Self> {
+        [Self::Gmail, Self::Microsoft365]
+            .into_iter()
+            .find(|preset| preset.client(String::new(), None, 0).token_endpoint == token_endpoint)
+    }
+
     /// The preset's display name.
     pub fn name(self) -> &'static str {
         match self {
@@ -456,9 +467,21 @@ mod tests {
         time::Duration,
     };
 
-    use super::{OAuth2Client, Pkce};
+    use super::{OAuth2Client, OAuth2Preset, Pkce};
     use anyhow::{Context, Result, bail};
     use sha2::Digest;
+
+    #[test]
+    fn presets_are_found_by_their_token_endpoint() {
+        for preset in [OAuth2Preset::Gmail, OAuth2Preset::Microsoft365] {
+            let endpoint = preset.client("id".to_owned(), None, 1).token_endpoint;
+            assert_eq!(OAuth2Preset::for_token_endpoint(&endpoint), Some(preset));
+        }
+        assert_eq!(
+            OAuth2Preset::for_token_endpoint("https://auth.example.test/token"),
+            None
+        );
+    }
 
     fn client(port: u16) -> OAuth2Client {
         OAuth2Client {

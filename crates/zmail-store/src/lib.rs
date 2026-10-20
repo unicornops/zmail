@@ -32,6 +32,19 @@ use zmail_security::sanitize_html_for_display;
 mod address_history;
 mod search;
 
+/// What removing an account deletes besides its mail: unsent messages and
+/// drafts (see [`LocalStore::account_removal_impact`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AccountRemovalImpact {
+    /// Outbox messages that have not gone yet: waiting, retrying or
+    /// failed.
+    pub unsent_messages: usize,
+    /// Outbox messages being sent right now.
+    pub sending_messages: usize,
+    /// Drafts that are not in the outbox.
+    pub drafts: usize,
+}
+
 /// The storage stance recorded during Phase 2.
 pub const STORAGE_MODEL: &str =
     "SQLite metadata plus content-addressed blobs, optimized for large offline-first mailboxes.";
@@ -926,6 +939,113 @@ impl LocalStore {
             params![account_id, expires_at],
         )
         .with_context(|| format!("failed to record the token expiry for account {account_id}"))?;
+        Ok(())
+    }
+
+    /// What [`LocalStore::delete_account`] would delete besides the
+    /// account's synced mail, which the server keeps.
+    pub fn account_removal_impact(&self, account_id: i64) -> Result<AccountRemovalImpact> {
+        let conn = self.connection()?;
+        let count = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> Result<usize> {
+            conn.query_row(sql, params, |row| row.get::<_, usize>(0))
+                .context("failed to count what removing the account deletes")
+        };
+        Ok(AccountRemovalImpact {
+            unsent_messages: count(
+                "SELECT COUNT(*) FROM outbox_jobs WHERE account_id = ?1 AND state IN (?2, ?3, ?4)",
+                &[
+                    &account_id,
+                    &OutboxJobState::Queued.as_str(),
+                    &OutboxJobState::Retrying.as_str(),
+                    &OutboxJobState::Failed.as_str(),
+                ],
+            )?,
+            sending_messages: count(
+                "SELECT COUNT(*) FROM outbox_jobs WHERE account_id = ?1 AND state = ?2",
+                &[&account_id, &OutboxJobState::Sending.as_str()],
+            )?,
+            drafts: count(
+                "SELECT COUNT(*) FROM drafts WHERE account_id = ?1 \
+                 AND id NOT IN (SELECT draft_id FROM outbox_jobs)",
+                &[&account_id],
+            )?,
+        })
+    }
+
+    /// Deletes an account and everything stored locally for it: its synced
+    /// mail, downloaded bodies and attachments, drafts, outbox, queued
+    /// changes, address history and search index entries, and its place
+    /// in the UI preferences. Nothing is deleted on the server, and the
+    /// caller removes the account's keychain secrets.
+    pub fn delete_account(&self, account_id: i64) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin the account removal")?;
+        let paths = |sql: &str| -> Result<Vec<String>> {
+            let mut statement = transaction.prepare(sql)?;
+            let rows = statement.query_map(params![account_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to list the account's stored files")
+        };
+        let attachments = paths(
+            r#"
+            SELECT DISTINCT a.storage_path
+            FROM message_attachments a
+            JOIN messages m ON m.id = a.message_id
+            JOIN threads t ON t.id = m.thread_id
+            JOIN mailboxes b ON b.id = t.mailbox_id
+            WHERE b.account_id = ?1
+            "#,
+        )?;
+        let draft_files = paths(
+            r#"
+            SELECT d.storage_path
+            FROM draft_attachments d
+            JOIN drafts ON drafts.id = d.draft_id
+            WHERE drafts.account_id = ?1
+            "#,
+        )?;
+        let deleted = transaction
+            .execute("DELETE FROM accounts WHERE id = ?1", params![account_id])
+            .with_context(|| format!("failed to delete account {account_id}"))?;
+        if deleted == 0 {
+            return Ok(());
+        }
+        flush_search_index(&transaction)?;
+        let mut preferences = load_ui_preferences(&transaction)?;
+        forget_account(&mut preferences, account_id);
+        store_ui_preferences(&transaction, &preferences)?;
+        // Attachment blobs another account still uses (the same file
+        // content) stay.
+        let mut still_used = Vec::new();
+        for path in &attachments {
+            let used: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE storage_path = ?1)",
+                params![path],
+                |row| row.get(0),
+            )?;
+            still_used.push(used);
+        }
+        transaction
+            .commit()
+            .context("failed to commit the account removal")?;
+
+        // The rows are gone; a file that cannot be removed now is only
+        // disk space, so it does not fail the removal.
+        let storage = self.attachment_storage_dir();
+        for (path, used) in attachments.iter().zip(still_used) {
+            let relative = Path::new(path);
+            let contained = relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)));
+            if !used && contained {
+                let _ = fs::remove_file(storage.join(relative));
+            }
+        }
+        for path in draft_files {
+            let _ = fs::remove_file(path);
+        }
         Ok(())
     }
 
@@ -6142,6 +6262,22 @@ fn utc_now_timestamp() -> String {
     utc_timestamp_from_epoch(seconds)
 }
 
+/// Drops a removed account from the UI preferences: its collapsed folders,
+/// and the last open mailbox if it was the account's.
+fn forget_account(preferences: &mut UiPreferences, account_id: i64) {
+    let tree = &mut preferences.sidebar_tree;
+    tree.collapsed_accounts.retain(|id| *id != account_id);
+    tree.collapsed_folders
+        .retain(|folder| folder.account_id != account_id);
+    if let Some(MailboxSelection::Mailbox {
+        account_id: last, ..
+    }) = preferences.last_mailbox
+        && last == account_id
+    {
+        preferences.last_mailbox = None;
+    }
+}
+
 fn load_ui_preferences(conn: &Connection) -> Result<UiPreferences> {
     let stored = conn
         .query_row(
@@ -6174,8 +6310,8 @@ mod tests {
     use zmail_core::{
         AccountColor, AccountSyncSnapshot, AuthKind, CachePolicySummary, DraftState, HydratedBody,
         MailboxRole, MailboxSelection, MailboxSnapshot, MessageAttachment, MessageRenderMode,
-        MessageSnapshot, NewAccount, NewDraft, NewIdentity, PendingOpKind, ProtocolKind, SyncPhase,
-        ThreadCounts, ThreadFilter, ThreadSnapshot, VirtualMailbox,
+        MessageSnapshot, NewAccount, NewDraft, NewIdentity, PendingOpKind, ProtocolKind,
+        SearchScope, SyncPhase, ThreadCounts, ThreadFilter, ThreadSnapshot, VirtualMailbox,
     };
 
     #[test]
@@ -6897,6 +7033,139 @@ mod tests {
             )
             .expect("snapshot should apply");
         (store, work, home)
+    }
+
+    #[test]
+    fn deleting_an_account_removes_its_local_data_and_keeps_the_other() {
+        let (store, work, home) = two_account_store();
+        let identity = store.list_identities(work).expect("identities")[0].id;
+        let draft = |subject: &str| {
+            store
+                .create_draft(&NewDraft {
+                    account_id: work,
+                    identity_id: identity,
+                    to: vec!["kai@example.test".to_owned()],
+                    cc: Vec::new(),
+                    bcc: Vec::new(),
+                    subject: subject.to_owned(),
+                    body: "Hello".to_owned(),
+                })
+                .expect("the draft is stored")
+        };
+        draft("Still a draft");
+        let queued = draft("Waiting to send");
+        store.queue_draft(queued).expect("queued");
+        let inbox = store
+            .mailbox_id_by_role(work, "inbox")
+            .expect("lookup")
+            .expect("an inbox");
+        let thread = store
+            .first_thread_id(inbox)
+            .expect("lookup")
+            .expect("a thread");
+        store
+            .set_thread_read(thread, true)
+            .expect("a change is queued");
+        store
+            .update_ui_preferences(|preferences| {
+                preferences.last_mailbox = Some(MailboxSelection::Mailbox {
+                    account_id: work,
+                    mailbox_id: inbox,
+                });
+                preferences.sidebar_tree.collapsed_accounts = vec![work, home];
+            })
+            .expect("the preferences save");
+
+        assert_eq!(
+            store.account_removal_impact(work).expect("counts"),
+            super::AccountRemovalImpact {
+                unsent_messages: 1,
+                sending_messages: 0,
+                drafts: 1,
+            }
+        );
+        assert!(
+            !store
+                .search_threads(work, "work-new", 10)
+                .expect("search")
+                .is_empty()
+        );
+
+        store.delete_account(work).expect("the account is removed");
+
+        let accounts = store.list_accounts().expect("accounts");
+        assert_eq!(accounts.iter().map(|a| a.id).collect::<Vec<_>>(), [home]);
+        assert!(store.list_mailboxes(work).expect("mailboxes").is_empty());
+        assert!(store.list_drafts(Some(work)).expect("drafts").is_empty());
+        assert!(
+            store
+                .list_outbox_jobs(Some(work))
+                .expect("outbox")
+                .is_empty()
+        );
+        assert_eq!(store.pending_op_count(work).expect("ops"), 0);
+        let unified = MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Inbox));
+        let left: Vec<String> = store
+            .list_selection_threads(&unified, 0..10)
+            .expect("threads")
+            .into_iter()
+            .map(|thread| thread.subject)
+            .collect();
+        assert_eq!(left, ["home-mid", "home-old"]);
+        assert!(
+            store
+                .search_threads_in(&SearchScope::AllAccounts, "work", 10)
+                .expect("search")
+                .is_empty(),
+            "the search index forgets the account's mail"
+        );
+        let preferences = store.ui_preferences().expect("preferences");
+        assert_eq!(preferences.last_mailbox, None);
+        assert_eq!(preferences.sidebar_tree.collapsed_accounts, [home]);
+
+        // Removing it again is harmless.
+        store.delete_account(work).expect("nothing to remove");
+    }
+
+    #[test]
+    fn deleting_an_account_removes_its_attachment_files() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let blob_dir = store.attachment_storage_dir();
+        std::fs::create_dir_all(&blob_dir).expect("the attachments directory should be created");
+        let mut accounts = Vec::new();
+        for (name, file) in [("first", "own.bin"), ("second", "shared.bin")] {
+            let account_id = store
+                .create_demo_account(ProtocolKind::Imap)
+                .expect("account should be created");
+            let mut snapshot = merge_test_snapshot(
+                name,
+                "body",
+                &format!("thread-{name}"),
+                &format!("message-{name}"),
+                None,
+            );
+            snapshot.mailboxes[0].threads[0].messages[0].attachments = [file, "shared.bin"]
+                .into_iter()
+                .map(|path| MessageAttachment {
+                    filename: path.to_owned(),
+                    content_type: "application/octet-stream".to_owned(),
+                    size_bytes: 1,
+                    storage_path: path.to_owned(),
+                })
+                .collect();
+            store
+                .replace_account_snapshot(account_id, &snapshot)
+                .expect("snapshot should apply");
+            std::fs::write(blob_dir.join(file), b"x").expect("the blob should write");
+            accounts.push(account_id);
+        }
+
+        store.delete_account(accounts[0]).expect("removed");
+        assert!(!blob_dir.join("own.bin").exists(), "its own file goes");
+        assert!(
+            blob_dir.join("shared.bin").exists(),
+            "a file the other account also uses stays"
+        );
     }
 
     #[test]
