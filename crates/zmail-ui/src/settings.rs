@@ -7,6 +7,7 @@
 //!
 //! | Module | Section |
 //! |--------|---------|
+//! | `accounts` | each account's status, colour, cache budget, Re-authenticate and Remove; Add Account |
 //! | `appearance` | theme mode, imported Zed theme, row density, reading pane |
 //! | `sending` | the undo-send delay |
 //! | `about` | version, upstream pins, queues, undelivered changes, Copy diagnostics |
@@ -21,6 +22,7 @@
 //! [`UiPreferences`]: zmail_core::preferences::UiPreferences
 
 mod about;
+mod accounts;
 mod appearance;
 mod sending;
 
@@ -34,9 +36,12 @@ use gpui::{
     rgb, size,
 };
 use zmail_core::{AccountColor, AppBootstrap, UpstreamPins};
+use zmail_security::SecretStore;
 use zmail_store::LocalStore;
+use zmail_sync::SyncService;
 
 use self::about::AboutSettings;
+use self::accounts::AccountsSettings;
 use self::appearance::AppearanceSettings;
 use self::sending::SendingSettings;
 use crate::WorkspaceView;
@@ -76,8 +81,11 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// A section of the Settings window, in list order.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SettingsSection {
-    /// Theme, imported theme, density and reading pane.
+    /// Each account: status, colour, cache budget, Re-authenticate and
+    /// Remove.
     #[default]
+    Accounts,
+    /// Theme, imported theme, density and reading pane.
     Appearance,
     /// The undo-send delay.
     Sending,
@@ -87,7 +95,8 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Every section, in list order.
-    pub(crate) const ALL: [SettingsSection; 3] = [
+    pub(crate) const ALL: [SettingsSection; 4] = [
+        SettingsSection::Accounts,
         SettingsSection::Appearance,
         SettingsSection::Sending,
         SettingsSection::About,
@@ -96,6 +105,7 @@ impl SettingsSection {
     /// The name in the section list and the section's heading.
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::Accounts => "Accounts",
             Self::Appearance => "Appearance",
             Self::Sending => "Sending",
             Self::About => "About & Diagnostics",
@@ -104,6 +114,7 @@ impl SettingsSection {
 
     fn icon(self) -> &'static str {
         match self {
+            Self::Accounts => "user",
             Self::Appearance => "sun",
             Self::Sending => "send",
             Self::About => "info",
@@ -112,6 +123,7 @@ impl SettingsSection {
 
     fn id(self) -> &'static str {
         match self {
+            Self::Accounts => "accounts",
             Self::Appearance => "appearance",
             Self::Sending => "sending",
             Self::About => "about",
@@ -123,11 +135,13 @@ impl SettingsSection {
 // The host: what Settings needs from the app
 // ---------------------------------------------------------------------------
 
-/// What the Settings window works with: the store, the app's build
-/// details and the main window to apply changes to. The main
+/// What the Settings window works with: the store, the keychain, the sync
+/// service, the app's build details and the main window to apply changes to. The main
 /// window installs it when it opens.
 pub(crate) struct SettingsHost {
     pub(crate) store: Arc<LocalStore>,
+    pub(crate) secrets: Arc<dyn SecretStore>,
+    pub(crate) sync_service: SyncService,
     pub(crate) app_version: String,
     pub(crate) upstream: UpstreamPins,
     pub(crate) worker_threads: usize,
@@ -142,11 +156,15 @@ impl SettingsHost {
     pub(crate) fn install(
         bootstrap: &AppBootstrap,
         store: Arc<LocalStore>,
+        secrets: Arc<dyn SecretStore>,
+        sync_service: SyncService,
         workspace: WindowHandle<WorkspaceView>,
         cx: &mut App,
     ) {
         cx.set_global(Self {
             store,
+            secrets,
+            sync_service,
             app_version: bootstrap.app_version.clone(),
             upstream: bootstrap.upstream.clone(),
             worker_threads: bootstrap.runtime.worker_threads,
@@ -187,6 +205,31 @@ pub(crate) fn open(section: Option<SettingsSection>, cx: &mut App) {
             });
         }
     }
+}
+
+/// Opens Settings → Accounts on `account_id`: the sidebar's Fix… on an
+/// account that cannot sync.
+pub(crate) fn open_account(account_id: i64, cx: &mut App) {
+    open(Some(SettingsSection::Accounts), cx);
+    if let Some(handle) = window(cx) {
+        let _ = handle.update(cx, |root, _, cx| {
+            root.accounts
+                .update(cx, |accounts, cx| accounts.focus_account(account_id, cx));
+        });
+    }
+}
+
+/// Runs `update` on the main window's shell, for example to re-read the
+/// store after Settings changed an account.
+pub(crate) fn update_workspace(
+    cx: &mut App,
+    update: impl FnOnce(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>),
+) {
+    let Some(host) = cx.try_global::<SettingsHost>() else {
+        return;
+    };
+    let workspace = host.workspace;
+    let _ = workspace.update(cx, update);
 }
 
 /// The open Settings window, if any.
@@ -237,6 +280,7 @@ pub(crate) enum SettingsEvent {
 pub(crate) struct SettingsWindow {
     section: SettingsSection,
     nav_focus: FocusHandle,
+    accounts: Entity<AccountsSettings>,
     appearance: Entity<AppearanceSettings>,
     sending: Entity<SendingSettings>,
     about: Entity<AboutSettings>,
@@ -278,11 +322,13 @@ impl SettingsWindow {
     }
 
     fn new(section: SettingsSection, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let accounts = cx.new(|cx| AccountsSettings::new(window, cx));
         let appearance = cx.new(|cx| AppearanceSettings::new(window, cx));
         let sending = cx.new(SendingSettings::new);
         let about = cx.new(AboutSettings::new);
         let toasts = cx.new(|_| ToastHost::new());
         let subscriptions = vec![
+            cx.subscribe(&accounts, Self::on_section_event),
             cx.subscribe(&appearance, Self::on_section_event),
             cx.subscribe(&sending, Self::on_section_event),
             cx.subscribe(&about, Self::on_section_event),
@@ -307,6 +353,7 @@ impl SettingsWindow {
         Self {
             section,
             nav_focus,
+            accounts,
             appearance,
             sending,
             about,
@@ -328,6 +375,10 @@ impl SettingsWindow {
             self.section = section;
             self.scroll.set_offset(point(px(0.0), px(0.0)));
             self.refresh(cx);
+            if section == SettingsSection::Accounts {
+                self.accounts
+                    .update(cx, |accounts, cx| accounts.measure_usage(cx));
+            }
         }
         cx.notify();
     }
@@ -340,9 +391,19 @@ impl SettingsWindow {
 
     /// Re-read the open section's store state.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.section == SettingsSection::About {
-            self.about.update(cx, |about, cx| about.refresh(cx));
+        match self.section {
+            SettingsSection::Accounts => self
+                .accounts
+                .update(cx, |accounts, cx| accounts.refresh(cx)),
+            SettingsSection::About => self.about.update(cx, |about, cx| about.refresh(cx)),
+            SettingsSection::Appearance | SettingsSection::Sending => {}
         }
+    }
+
+    /// The Accounts section.
+    #[cfg(test)]
+    pub(crate) fn accounts(&self) -> &Entity<AccountsSettings> {
+        &self.accounts
     }
 
     /// The Appearance section.
@@ -472,6 +533,7 @@ impl SettingsWindow {
 
     fn section_view(&self) -> AnyView {
         match self.section {
+            SettingsSection::Accounts => self.accounts.clone().into(),
             SettingsSection::Appearance => self.appearance.clone().into(),
             SettingsSection::Sending => self.sending.clone().into(),
             SettingsSection::About => self.about.clone().into(),
@@ -632,6 +694,7 @@ pub(crate) fn setting_text(
         })
 }
 
+impl EventEmitter<SettingsEvent> for AccountsSettings {}
 impl EventEmitter<SettingsEvent> for AppearanceSettings {}
 impl EventEmitter<SettingsEvent> for SendingSettings {}
 impl EventEmitter<SettingsEvent> for AboutSettings {}

@@ -2232,15 +2232,23 @@ fn a_failing_account_offers_fix(cx: &mut TestAppContext) {
     assert!(!drawn(format!("account-fix-{work}"), cx), "Work is fine");
 
     click_on(format!("account-fix-{home}"), cx);
-    let handle = cx
-        .update(|_, cx| crate::account_setup::open_window(cx))
-        .expect("Fix… opens the Add Account window");
-    let notice = handle
-        .read_with(cx, |root, cx| root.setup().read(cx).notice.clone())
-        .expect("the window is open");
+    // Settings → Accounts opens on Home.
+    let (root, window_cx) = settings::settings_window(cx);
     assert_eq!(
-        notice.as_deref(),
-        Some("Home can't sync: authentication failed")
+        root.read_with(&window_cx, |root, _| root.section()),
+        crate::settings::SettingsSection::Accounts
+    );
+    assert_eq!(
+        root.read_with(&window_cx, |root, cx| root
+            .accounts()
+            .read(cx)
+            .focused_account()),
+        Some(home)
+    );
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.detail_mode),
+        DetailMode::Reader,
+        "the main window stays on the mail"
     );
     assert!(
         drawn(

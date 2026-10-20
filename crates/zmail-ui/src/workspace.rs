@@ -126,7 +126,7 @@ impl WorkspaceView {
         if !cx.has_global::<AccountSetupServices>() {
             cx.set_global(AccountSetupServices {
                 store: store.clone(),
-                secrets,
+                secrets: secrets.clone(),
                 sync_service: sync_service.clone(),
                 network: zmail_autodiscover::Network::system(),
             });
@@ -243,7 +243,14 @@ impl WorkspaceView {
         // The Settings window works with this window's store and applies
         // its changes here.
         if let Some(handle) = window.window_handle().downcast::<WorkspaceView>() {
-            crate::settings::SettingsHost::install(&view.bootstrap, view.store.clone(), handle, cx);
+            crate::settings::SettingsHost::install(
+                &view.bootstrap,
+                view.store.clone(),
+                secrets,
+                view.sync_service.clone(),
+                handle,
+                cx,
+            );
         }
 
         // A job still queued or sending now was queued before this window
@@ -307,6 +314,7 @@ impl WorkspaceView {
                 | InitialView::CommandPalette(_)
                 | InitialView::KeyboardShortcuts
                 | InitialView::Settings(_)
+                | InitialView::SettingsAccount(_)
         ) {
             view.restore_last_mailbox(cx);
         }
@@ -384,6 +392,9 @@ impl WorkspaceView {
             // Once the main window is up.
             InitialView::Settings(section) => cx.defer_in(window, move |_, _, cx| {
                 crate::settings::open(Some(section), cx);
+            }),
+            InitialView::SettingsAccount(account_id) => cx.defer_in(window, move |_, _, cx| {
+                crate::settings::open_account(account_id, cx);
             }),
             InitialView::Search(query) => {
                 view.search_query
@@ -1985,24 +1996,10 @@ impl WorkspaceView {
     // Account setup
     // -----------------------------------------------------------------------
 
-    /// The "Fix…" action on an account whose sync fails: open the Add
-    /// Account window with the error. Settings → Accounts takes this over
-    /// once it can re-authenticate an account (#120).
+    /// The "Fix…" action on an account whose sync fails: Settings →
+    /// Accounts, on that account.
     fn fix_account(&mut self, account_id: i64, cx: &mut Context<Self>) {
-        let Some(account) = self
-            .accounts
-            .iter()
-            .find(|account| account.id == account_id)
-        else {
-            return;
-        };
-        let error = account
-            .sync_status
-            .last_error_message
-            .clone()
-            .unwrap_or_else(|| "the last sync failed".to_owned());
-        let notice = format!("{} can't sync: {error}", account.display_name);
-        open_add_account_with_notice(Some(notice.into()), cx);
+        crate::settings::open_account(account_id, cx);
     }
 
     /// Shows the first-run onboarding in place of the panes.

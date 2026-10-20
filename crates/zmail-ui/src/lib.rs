@@ -32,7 +32,7 @@
 //! | `styles` | design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
 //! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar, pane widths, density) |
 //! | `widgets` | `toolbar_button`, `input_card`, `empty_state`, `icon`, … |
-//! | `settings` | `SettingsWindow`: Appearance, Sending, About & Diagnostics |
+//! | `settings` | `SettingsWindow`: Accounts, Appearance, Sending, About & Diagnostics |
 
 use std::sync::Arc;
 
@@ -154,6 +154,9 @@ pub enum InitialView {
     KeyboardShortcuts,
     /// The inbox, with the Settings window open on this section.
     Settings(SettingsSection),
+    /// The inbox, with Settings → Accounts open on this account, as the
+    /// sidebar's Fix… opens it.
+    SettingsAccount(i64),
 }
 
 /// Runs the native Phase 4 shell.

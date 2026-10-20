@@ -4,7 +4,7 @@
 
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
 use zmail_core::{
-    ThemeAppearance,
+    AccountColor, ThemeAppearance,
     preferences::{Density, ReadingPanePosition, ThemeMode},
 };
 use zmail_store::LocalStore;
@@ -17,7 +17,9 @@ use crate::layout::SinglePane;
 use crate::settings::{self, SettingsSection, SettingsWindow};
 
 /// The open Settings window's root, and a test context for that window.
-fn settings_window(cx: &mut VisualTestContext) -> (Entity<SettingsWindow>, VisualTestContext) {
+pub(super) fn settings_window(
+    cx: &mut VisualTestContext,
+) -> (Entity<SettingsWindow>, VisualTestContext) {
     let handle = cx
         .update(|_, cx| settings::window(cx))
         .expect("the Settings window is open");
@@ -74,14 +76,14 @@ fn secondary_comma_opens_one_settings_window(cx: &mut TestAppContext) {
     assert_eq!(cx.update(|_, cx| cx.windows().len()), windows + 1);
     assert_eq!(
         root.read_with(&window_cx, |root, _| root.section()),
-        SettingsSection::Appearance
+        SettingsSection::Accounts
     );
 
     // Down in the section list moves to the next section.
     keys("down", &mut window_cx);
     assert_eq!(
         root.read_with(&window_cx, |root, _| root.section()),
-        SettingsSection::Sending
+        SettingsSection::Appearance
     );
     click("settings-nav-about", &mut window_cx);
     assert_eq!(
@@ -219,7 +221,7 @@ fn importing_a_zed_theme_uses_it_and_bad_files_say_why(cx: &mut TestAppContext) 
                 .expect("saved");
         },
     );
-    cx.update(|_, cx| settings::open(None, cx));
+    cx.update(|_, cx| settings::open(Some(SettingsSection::Appearance), cx));
     cx.run_until_parked();
     let (root, mut window_cx) = settings_window(cx);
     let appearance = root.read_with(&window_cx, |root, _| root.appearance().clone());
@@ -416,4 +418,152 @@ fn diagnostics_never_include_mail_or_secrets(cx: &mut TestAppContext) {
     }
     let toasts = root.read_with(&window_cx, |root, cx| root.toast_messages(cx));
     assert_eq!(toasts, ["Diagnostics copied to the clipboard."]);
+}
+
+#[gpui::test]
+fn account_colour_and_cache_budget_save_and_show(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Settings(SettingsSection::Accounts),
+        |_| {},
+    );
+    let account_id = harness.store.list_accounts().expect("accounts")[0].id;
+    let (root, mut window_cx) = settings_window(cx);
+    let accounts = root.read_with(&window_cx, |root, _| root.accounts().clone());
+    let (color, budget) = accounts
+        .read_with(&window_cx, |accounts, _| accounts.selects(account_id))
+        .expect("the account has a card");
+    assert_eq!(
+        color.read_with(&window_cx, |select, _| select
+            .selected_label()
+            .map(|label| label.to_string())),
+        Some("Automatic (Blue)".to_owned())
+    );
+
+    // Pink (Automatic, then the palette in order).
+    pick(&color, 1 + AccountColor::Pink.index(), &mut window_cx);
+    assert_eq!(
+        harness.store.list_accounts().expect("accounts")[0].color(),
+        AccountColor::Pink
+    );
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.accounts[0].color()),
+        AccountColor::Pink,
+        "the main window shows it at once"
+    );
+    pick(&color, 0, &mut window_cx);
+    assert_eq!(
+        harness.store.list_accounts().expect("accounts")[0].color_override,
+        None
+    );
+
+    // 1 GB.
+    pick(&budget, 3, &mut window_cx);
+    assert_eq!(
+        harness
+            .store
+            .account_disk_budget_bytes(account_id)
+            .expect("loads"),
+        Some(1024 * 1024 * 1024)
+    );
+    pick(&budget, 0, &mut window_cx);
+    assert_eq!(
+        harness
+            .store
+            .account_disk_budget_bytes(account_id)
+            .expect("loads"),
+        None
+    );
+}
+
+#[gpui::test]
+fn reauthenticate_saves_a_new_password_in_the_keychain(cx: &mut TestAppContext) {
+    let (_view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Settings(SettingsSection::Accounts),
+        |_| {},
+    );
+    let account_id = harness.store.list_accounts().expect("accounts")[0].id;
+    let (root, mut window_cx) = settings_window(cx);
+    let accounts = root.read_with(&window_cx, |root, _| root.accounts().clone());
+    click_selector(&format!("reauth-{account_id}"), &mut window_cx);
+    assert!(accounts.read_with(&window_cx, |accounts, _| accounts.reauth_open()));
+    let password = accounts.read_with(&window_cx, |accounts, _| accounts.password_input().clone());
+    password.update(&mut window_cx, |input, cx| {
+        input.set_text("new-app-password", cx)
+    });
+    click("reauth-save", &mut window_cx);
+    assert!(!accounts.read_with(&window_cx, |accounts, _| accounts.reauth_open()));
+    let saved = cx.update(|_, cx| {
+        settings::SettingsHost::get(cx)
+            .secrets
+            .get_account_secret(account_id)
+            .ok()
+    });
+    assert_eq!(saved.as_deref(), Some("new-app-password"));
+    assert!(
+        password.read_with(&window_cx, |input, _| input.text().is_empty()),
+        "the password does not stay in the field"
+    );
+}
+
+#[gpui::test]
+fn remove_confirms_then_deletes_local_data_and_secrets(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Accounts,
+        |_| InitialView::Settings(SettingsSection::Accounts),
+        |_| {},
+    );
+    let work = harness.store.list_accounts().expect("accounts")[0].id;
+    super::queue_test_message(&harness.store, "Not sent yet");
+    cx.update(|_, cx| {
+        settings::SettingsHost::get(cx)
+            .secrets
+            .set_account_secret(work, "work-password")
+            .expect("stored");
+    });
+    let (root, mut window_cx) = settings_window(cx);
+    window_cx.simulate_resize(size(px(820.0), px(1400.0)));
+    window_cx.run_until_parked();
+    let accounts = root.read_with(&window_cx, |root, _| root.accounts().clone());
+
+    // Cancel keeps everything.
+    click_selector(&format!("remove-{work}"), &mut window_cx);
+    assert!(accounts.read_with(&window_cx, |accounts, _| accounts.removal_open()));
+    click("remove-cancel", &mut window_cx);
+    assert!(!accounts.read_with(&window_cx, |accounts, _| accounts.removal_open()));
+    assert_eq!(harness.store.list_accounts().expect("accounts").len(), 2);
+
+    click_selector(&format!("remove-{work}"), &mut window_cx);
+    click("remove-confirm", &mut window_cx);
+    let left = harness.store.list_accounts().expect("accounts");
+    assert_eq!(left.len(), 1);
+    assert_ne!(left[0].id, work);
+    assert!(
+        harness
+            .store
+            .list_outbox_jobs(Some(work))
+            .expect("outbox")
+            .is_empty()
+    );
+    let secret = cx.update(|_, cx| {
+        settings::SettingsHost::get(cx)
+            .secrets
+            .get_account_secret(work)
+            .ok()
+    });
+    assert_eq!(secret, None, "the keychain entry is gone");
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.accounts.len()),
+        1,
+        "the main window no longer shows it"
+    );
+    let toasts = root.read_with(&window_cx, |root, cx| root.toast_messages(cx));
+    assert_eq!(
+        toasts,
+        ["Removed Work from this computer. Its mail on the server is untouched."]
+    );
 }

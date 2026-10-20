@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result, bail};
 use zmail_core::{
-    AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxRole, MailboxSelection,
+    AccountColor, AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxRole, MailboxSelection,
     MailboxSnapshot, MessageAttachment, MessageSnapshot, NewAccount, NewDraft, NewIdentity,
     OutgoingConfig, ProtocolKind, SyncPhase, ThemeAppearance, ThreadSnapshot, VirtualMailbox,
     participants::thread_participants,
@@ -99,6 +99,10 @@ pub(crate) enum FixtureView {
     /// The inbox with the Gmail keymap on and the keyboard shortcut cheat
     /// sheet open.
     CheatSheet,
+    /// The Settings window on Accounts, opened by Fix… on the account
+    /// that fails to sync, with three accounts: one with its own colour
+    /// and one with a cache budget.
+    SettingsAccounts,
     /// The Settings window on Appearance.
     SettingsAppearance,
     /// The Settings window on Sending.
@@ -150,11 +154,12 @@ impl FixtureView {
             "reader-attachments" => Self::ReaderAttachments,
             "command-palette" => Self::CommandPalette,
             "cheat-sheet" => Self::CheatSheet,
+            "settings-accounts" => Self::SettingsAccounts,
             "settings-appearance" => Self::SettingsAppearance,
             "settings-sending" => Self::SettingsSending,
             "settings-about" => Self::SettingsAbout,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-appearance, settings-sending or settings-about"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-appearance, settings-sending or settings-about"
             ),
         })
     }
@@ -285,6 +290,17 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
                     .context("failed to record the fixture sync phase")?;
             }
             InitialView::Onboarding(step)
+        }
+        FixtureView::SettingsAccounts => {
+            seed_more_accounts(store, account_id, now)?;
+            let accounts = store.list_accounts()?;
+            store.set_account_color(accounts[1].id, Some(AccountColor::Violet))?;
+            store.set_account_disk_budget(account_id, Some(1024))?;
+            let failing = accounts
+                .iter()
+                .find(|account| account.sync_status.phase == SyncPhase::Failed)
+                .context("one fixture account fails to sync")?;
+            InitialView::SettingsAccount(failing.id)
         }
         FixtureView::SettingsAppearance => InitialView::Settings(SettingsSection::Appearance),
         FixtureView::SettingsSending => InitialView::Settings(SettingsSection::Sending),
@@ -1163,6 +1179,7 @@ mod tests {
             "reader-attachments",
             "command-palette",
             "cheat-sheet",
+            "settings-accounts",
             "settings-appearance",
             "settings-sending",
             "settings-about",
