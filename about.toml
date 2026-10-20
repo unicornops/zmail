@@ -35,6 +35,20 @@ ignore-dev-dependencies = false
 #   used under GPL-3.0-only) and crates/gpui/examples/window_shadow.rs
 #   (Apache License 2.0, crates/zmail-ui/LICENSE-APACHE) in Zed v1.24.2,
 #   Copyright Zed Industries, Inc.
+#
+# Proton Mail support (issue #237, docs/adr/0004-proton-native.md). Every
+# file listed in docs/upstream/proton-ports.toml starts with a header naming
+# its upstream path, the pinned commit (docs/upstream/proton.md) and the
+# licence below.
+# - Files ported from go-proton-api (https://github.com/ProtonMail/go-proton-api),
+#   Copyright (c) 2020 James Houlahan and Copyright (c) 2022 Proton AG, and
+#   from go-srp (https://github.com/ProtonMail/go-srp), Copyright (c) 2019
+#   Proton Technologies AG, both licensed under the MIT License
+#   (crates/zmail-proton-api/LICENSE-MIT, which ships with that crate).
+# - Files ported from Proton Mail Bridge
+#   (https://github.com/ProtonMail/proton-bridge), Copyright (c) Proton AG,
+#   licensed under GPL-3.0-or-later (used under GPL-3.0-only), with a dated
+#   modification notice in each file.
 
 # Bundled assets that are not crates, also recorded here:
 #

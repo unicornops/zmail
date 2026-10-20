@@ -21,6 +21,7 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 - `docs/phase5-hardening.md`: current hardening and packaging status
 - `docs/upstream/zed.md`: pinned upstream GPUI and Zed context
 - `docs/adr/0001-jmap-client-strategy.md`: JMAP implementation decision
+- `docs/adr/0004-proton-native.md` and `docs/upstream/proton.md`: native Proton Mail decision, upstream pins and ported files
 
 ## Workspace Overview
 
