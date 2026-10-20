@@ -567,3 +567,19 @@ fn remove_confirms_then_deletes_local_data_and_secrets(cx: &mut TestAppContext) 
         ["Removed Work from this computer. Its mail on the server is untouched."]
     );
 }
+
+#[gpui::test]
+fn privacy_states_what_is_protected(cx: &mut TestAppContext) {
+    let (_view, cx, _harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Settings(SettingsSection::Privacy),
+        |_| {},
+    );
+    let (root, mut window_cx) = settings_window(cx);
+    assert_eq!(
+        root.read_with(&window_cx, |root, _| root.section()),
+        SettingsSection::Privacy
+    );
+    assert!(window_cx.debug_bounds("settings-nav-privacy").is_some());
+}

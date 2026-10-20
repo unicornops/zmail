@@ -135,6 +135,8 @@ MATRIX=(
   "settings-accounts-light settings-accounts light 820 900"
   "settings-appearance-dark settings-appearance dark 820 600"
   "settings-appearance-light settings-appearance light 820 600"
+  "settings-privacy-dark settings-privacy dark 820 600"
+  "settings-privacy-light settings-privacy light 820 600"
   "settings-sending-dark settings-sending dark 820 600"
   "settings-sending-light settings-sending light 820 600"
   "settings-about-dark settings-about dark 820 900"

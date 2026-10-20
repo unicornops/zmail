@@ -9,6 +9,7 @@
 //! |--------|---------|
 //! | `accounts` | each account's status, colour, cache budget, Re-authenticate and Remove; Add Account |
 //! | `appearance` | theme mode, imported Zed theme, row density, reading pane |
+//! | `privacy` | remote content (always blocked), the sender-warning level |
 //! | `sending` | the undo-send delay |
 //! | `about` | version, upstream pins, queues, undelivered changes, Copy diagnostics |
 //!
@@ -24,6 +25,7 @@
 mod about;
 mod accounts;
 mod appearance;
+mod privacy;
 mod sending;
 
 use std::{sync::Arc, time::Duration};
@@ -43,6 +45,7 @@ use zmail_sync::SyncService;
 use self::about::AboutSettings;
 use self::accounts::AccountsSettings;
 use self::appearance::AppearanceSettings;
+use self::privacy::PrivacySettings;
 use self::sending::SendingSettings;
 use crate::WorkspaceView;
 use crate::actions::{SelectNext, SelectPrevious};
@@ -87,6 +90,8 @@ pub enum SettingsSection {
     Accounts,
     /// Theme, imported theme, density and reading pane.
     Appearance,
+    /// Remote content and sender warnings.
+    Privacy,
     /// The undo-send delay.
     Sending,
     /// Version, queues, undelivered changes and diagnostics.
@@ -95,9 +100,10 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Every section, in list order.
-    pub(crate) const ALL: [SettingsSection; 4] = [
+    pub(crate) const ALL: [SettingsSection; 5] = [
         SettingsSection::Accounts,
         SettingsSection::Appearance,
+        SettingsSection::Privacy,
         SettingsSection::Sending,
         SettingsSection::About,
     ];
@@ -107,6 +113,7 @@ impl SettingsSection {
         match self {
             Self::Accounts => "Accounts",
             Self::Appearance => "Appearance",
+            Self::Privacy => "Privacy",
             Self::Sending => "Sending",
             Self::About => "About & Diagnostics",
         }
@@ -116,6 +123,7 @@ impl SettingsSection {
         match self {
             Self::Accounts => "user",
             Self::Appearance => "sun",
+            Self::Privacy => "shield",
             Self::Sending => "send",
             Self::About => "info",
         }
@@ -125,6 +133,7 @@ impl SettingsSection {
         match self {
             Self::Accounts => "accounts",
             Self::Appearance => "appearance",
+            Self::Privacy => "privacy",
             Self::Sending => "sending",
             Self::About => "about",
         }
@@ -282,6 +291,7 @@ pub(crate) struct SettingsWindow {
     nav_focus: FocusHandle,
     accounts: Entity<AccountsSettings>,
     appearance: Entity<AppearanceSettings>,
+    privacy: Entity<PrivacySettings>,
     sending: Entity<SendingSettings>,
     about: Entity<AboutSettings>,
     toasts: Entity<ToastHost>,
@@ -324,6 +334,7 @@ impl SettingsWindow {
     fn new(section: SettingsSection, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let accounts = cx.new(|cx| AccountsSettings::new(window, cx));
         let appearance = cx.new(|cx| AppearanceSettings::new(window, cx));
+        let privacy = cx.new(PrivacySettings::new);
         let sending = cx.new(SendingSettings::new);
         let about = cx.new(AboutSettings::new);
         let toasts = cx.new(|_| ToastHost::new());
@@ -331,6 +342,7 @@ impl SettingsWindow {
             cx.subscribe(&accounts, Self::on_section_event),
             cx.subscribe(&appearance, Self::on_section_event),
             cx.subscribe(&sending, Self::on_section_event),
+            cx.subscribe(&privacy, Self::on_section_event),
             cx.subscribe(&about, Self::on_section_event),
         ];
         let nav_focus = cx.focus_handle();
@@ -355,6 +367,7 @@ impl SettingsWindow {
             nav_focus,
             accounts,
             appearance,
+            privacy,
             sending,
             about,
             toasts,
@@ -387,6 +400,7 @@ impl SettingsWindow {
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.appearance.update(cx, |section, cx| section.reload(cx));
         self.sending.update(cx, |section, cx| section.reload(cx));
+        self.privacy.update(cx, |section, cx| section.reload(cx));
     }
 
     /// Re-read the open section's store state.
@@ -396,7 +410,7 @@ impl SettingsWindow {
                 .accounts
                 .update(cx, |accounts, cx| accounts.refresh(cx)),
             SettingsSection::About => self.about.update(cx, |about, cx| about.refresh(cx)),
-            SettingsSection::Appearance | SettingsSection::Sending => {}
+            SettingsSection::Appearance | SettingsSection::Privacy | SettingsSection::Sending => {}
         }
     }
 
@@ -410,6 +424,12 @@ impl SettingsWindow {
     #[cfg(test)]
     pub(crate) fn appearance(&self) -> &Entity<AppearanceSettings> {
         &self.appearance
+    }
+
+    /// The Privacy section.
+    #[cfg(test)]
+    pub(crate) fn privacy(&self) -> &Entity<PrivacySettings> {
+        &self.privacy
     }
 
     /// The Sending section.
@@ -535,6 +555,7 @@ impl SettingsWindow {
         match self.section {
             SettingsSection::Accounts => self.accounts.clone().into(),
             SettingsSection::Appearance => self.appearance.clone().into(),
+            SettingsSection::Privacy => self.privacy.clone().into(),
             SettingsSection::Sending => self.sending.clone().into(),
             SettingsSection::About => self.about.clone().into(),
         }
@@ -696,5 +717,6 @@ pub(crate) fn setting_text(
 
 impl EventEmitter<SettingsEvent> for AccountsSettings {}
 impl EventEmitter<SettingsEvent> for AppearanceSettings {}
+impl EventEmitter<SettingsEvent> for PrivacySettings {}
 impl EventEmitter<SettingsEvent> for SendingSettings {}
 impl EventEmitter<SettingsEvent> for AboutSettings {}

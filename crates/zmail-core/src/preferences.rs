@@ -68,6 +68,20 @@ pub enum KeymapName {
     Gmail,
 }
 
+/// Which sender-safety warnings the reader shows (Settings → Privacy).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SenderWarnings {
+    /// Every warning: lookalike senders, Reply-To on an unrelated domain,
+    /// and Reply-To on another part of the sender's own domain.
+    #[default]
+    Standard,
+    /// Leave out the informational warning for a Reply-To on a parent or
+    /// subdomain of the sender's domain. Warnings about lookalike senders
+    /// and unrelated Reply-To domains always show.
+    Fewer,
+}
+
 /// User-chosen pane widths in logical pixels. `None` means "use the layout
 /// default", so changing a default later still reaches users who never
 /// dragged that pane.
@@ -186,6 +200,9 @@ pub struct UiPreferences {
     /// Update it through [`UiPreferences::note_recent_command`].
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Vec::is_empty")]
     pub recent_commands: Vec<String>,
+    /// Which sender-safety warnings the reader shows.
+    #[serde(deserialize_with = "lenient")]
+    pub sender_warnings: SenderWarnings,
 }
 
 impl Default for UiPreferences {
@@ -202,6 +219,7 @@ impl Default for UiPreferences {
             undo_send_delay_secs: DEFAULT_UNDO_SEND_DELAY_SECS,
             indexing: IndexingPreferences::default(),
             recent_commands: Vec::new(),
+            sender_warnings: SenderWarnings::default(),
         }
     }
 }
@@ -299,6 +317,7 @@ mod tests {
                 on_metered: true,
             },
             recent_commands: vec!["mailbox:42".to_owned(), "action:zmail::Archive".to_owned()],
+            sender_warnings: SenderWarnings::Fewer,
         }
     }
 
@@ -356,6 +375,18 @@ mod tests {
         assert!(json.contains(r#""theme_mode":"dark""#), "{json}");
         assert!(json.contains(r#""reading_pane":"bottom""#), "{json}");
         assert!(json.contains(r#""keymap":"gmail""#), "{json}");
+        assert!(json.contains(r#""sender_warnings":"fewer""#), "{json}");
+    }
+
+    #[test]
+    fn sender_warnings_default_to_standard_and_fall_back_to_it() {
+        assert_eq!(
+            UiPreferences::default().sender_warnings,
+            SenderWarnings::Standard
+        );
+        let prefs = UiPreferences::from_json(r#"{"sender_warnings":"none","density":"compact"}"#);
+        assert_eq!(prefs.sender_warnings, SenderWarnings::Standard);
+        assert_eq!(prefs.density, Density::Compact);
     }
 
     #[test]

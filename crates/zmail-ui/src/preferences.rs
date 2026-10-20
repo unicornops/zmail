@@ -73,6 +73,7 @@ impl WorkspaceView {
                 self.sidebar_collapsed = preferences.sidebar_collapsed;
                 self.density = preferences.density;
                 self.reading_pane = supported_reading_pane(preferences.reading_pane);
+                self.sender_warnings = preferences.sender_warnings;
                 self.sidebar_tree = preferences.sidebar_tree;
                 if let Some(width) = preferences.pane_widths.sidebar {
                     self.sidebar_width = width;

@@ -32,7 +32,7 @@
 //! | `styles` | design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
 //! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar, pane widths, density) |
 //! | `widgets` | `toolbar_button`, `input_card`, `empty_state`, `icon`, … |
-//! | `settings` | `SettingsWindow`: Accounts, Appearance, Sending, About & Diagnostics |
+//! | `settings` | `SettingsWindow`: Accounts, Appearance, Privacy, Sending, About & Diagnostics |
 
 use std::sync::Arc;
 
@@ -453,6 +453,8 @@ struct WorkspaceView {
     density: zmail_core::preferences::Density,
     /// Whether the reader sits beside the list or replaces it (persisted).
     reading_pane: zmail_core::preferences::ReadingPanePosition,
+    /// Which sender-safety warnings the reader shows (persisted).
+    sender_warnings: zmail_core::preferences::SenderWarnings,
     /// The user's sidebar width (persisted); the layout clamps it to
     /// what the window fits.
     sidebar_width: f32,

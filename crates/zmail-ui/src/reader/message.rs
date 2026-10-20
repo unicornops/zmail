@@ -12,6 +12,7 @@ use gpui::{AnyElement, Context, FontWeight, IntoElement, div, prelude::*, px, rg
 use zmail_core::{
     ThreadMessage,
     participants::sender_identity,
+    preferences::SenderWarnings,
     time::{HourCycle, format_list_date},
 };
 
@@ -40,6 +41,8 @@ pub(super) struct MessageContext<'a> {
     /// Whether the reader has keyboard focus, so the current message
     /// shows the focus ring.
     pub(super) focused: bool,
+    /// Which sender-safety warnings show.
+    pub(super) sender_warnings: SenderWarnings,
 }
 
 /// How one message shows.
@@ -169,7 +172,7 @@ fn expanded_content(
     cx: &mut Context<ReaderView>,
 ) -> AnyElement {
     let colors = &context.colors;
-    let banners = message_banners(message, colors);
+    let banners = banners::message_banners(message, context.sender_warnings);
     let attachments = message_attachments(message, colors);
     let index = display.index;
     let fold_label = if display.unfolded {
@@ -224,12 +227,6 @@ fn expanded_content(
             this.child(div().flex().flex_wrap().gap_2().children(attachments))
         })
         .into_any_element()
-}
-
-/// The banner slot of an expanded message, between its header and body:
-/// the sender-safety banner.
-fn message_banners(message: &ThreadMessage, _colors: &UiColors) -> Vec<AnyElement> {
-    banners::message_banners(message)
 }
 
 /// The attachments slot of an expanded message, below its body: a card
