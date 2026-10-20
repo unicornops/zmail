@@ -2,9 +2,9 @@
 //!
 //! [`UiPreferences`] is the one place the desktop shell keeps choices that
 //! should survive a restart: theme mode, list density, reading-pane
-//! position, pane widths, sidebar state, the last open mailbox, the keymap
-//! and the undo-send delay. `zmail-store` persists it as JSON in the local
-//! store's `app_settings` table, next to the rest of the app's state.
+//! position, pane widths, sidebar state, the last open mailbox, the keymap,
+//! the undo-send delay and motion. `zmail-store` persists it as JSON in the
+//! local store's `app_settings` table, next to the rest of the app's state.
 //!
 //! Loading is deliberately forgiving so a preferences record can never stop
 //! the app from starting:
@@ -31,6 +31,21 @@ pub enum ThemeMode {
     Light,
     /// Always use the dark theme.
     Dark,
+}
+
+/// Whether the UI animates: follow the system's reduce-motion setting, or
+/// force reduced or full motion.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MotionMode {
+    /// Follow the operating system's reduce-motion setting (full motion
+    /// where the platform cannot tell).
+    #[default]
+    System,
+    /// Never animate: loading placeholders and spinners stay still.
+    Reduce,
+    /// Always animate, whatever the system says.
+    Full,
 }
 
 /// How much vertical space list rows take.
@@ -203,6 +218,9 @@ pub struct UiPreferences {
     /// Which sender-safety warnings the reader shows.
     #[serde(deserialize_with = "lenient")]
     pub sender_warnings: SenderWarnings,
+    /// Whether the UI follows the system's reduce-motion setting.
+    #[serde(deserialize_with = "lenient")]
+    pub motion: MotionMode,
 }
 
 impl Default for UiPreferences {
@@ -220,6 +238,7 @@ impl Default for UiPreferences {
             indexing: IndexingPreferences::default(),
             recent_commands: Vec::new(),
             sender_warnings: SenderWarnings::default(),
+            motion: MotionMode::default(),
         }
     }
 }
@@ -318,6 +337,7 @@ mod tests {
             },
             recent_commands: vec!["mailbox:42".to_owned(), "action:zmail::Archive".to_owned()],
             sender_warnings: SenderWarnings::Fewer,
+            motion: MotionMode::Reduce,
         }
     }
 
@@ -376,6 +396,7 @@ mod tests {
         assert!(json.contains(r#""reading_pane":"bottom""#), "{json}");
         assert!(json.contains(r#""keymap":"gmail""#), "{json}");
         assert!(json.contains(r#""sender_warnings":"fewer""#), "{json}");
+        assert!(json.contains(r#""motion":"reduce""#), "{json}");
     }
 
     #[test]
@@ -386,6 +407,16 @@ mod tests {
         );
         let prefs = UiPreferences::from_json(r#"{"sender_warnings":"none","density":"compact"}"#);
         assert_eq!(prefs.sender_warnings, SenderWarnings::Standard);
+        assert_eq!(prefs.density, Density::Compact);
+    }
+
+    #[test]
+    fn motion_defaults_to_system_and_falls_back_to_it() {
+        assert_eq!(UiPreferences::default().motion, MotionMode::System);
+        let full = UiPreferences::from_json(r#"{"motion":"full"}"#);
+        assert_eq!(full.motion, MotionMode::Full);
+        let prefs = UiPreferences::from_json(r#"{"motion":"wobbly","density":"compact"}"#);
+        assert_eq!(prefs.motion, MotionMode::System);
         assert_eq!(prefs.density, Density::Compact);
     }
 

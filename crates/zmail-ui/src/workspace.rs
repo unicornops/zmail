@@ -230,6 +230,8 @@ impl WorkspaceView {
             density: Default::default(),
             reading_pane: Default::default(),
             sender_warnings: Default::default(),
+            motion: Default::default(),
+            system_motion_read: gpui::Task::ready(()),
             sidebar_width: SIDEBAR_WIDTH,
             list_width: MESSAGE_LIST_WIDTH,
             pane_widths_generation: 0,
@@ -279,8 +281,13 @@ impl WorkspaceView {
         view.notifier.set_quiet(window.is_window_active());
         cx.observe_window_activation(
             window,
-            |this: &mut WorkspaceView, window: &mut Window, _cx: &mut Context<Self>| {
+            |this: &mut WorkspaceView, window: &mut Window, cx: &mut Context<Self>| {
                 this.notifier.set_quiet(window.is_window_active());
+                // Coming back from the system settings is when the
+                // reduce-motion setting is most likely to have changed.
+                if window.is_window_active() {
+                    this.read_system_motion(cx);
+                }
             },
         )
         .detach();
@@ -289,6 +296,8 @@ impl WorkspaceView {
         // system changes unless the user has picked a theme.
         view.apply_theme_preference(window.appearance());
         view.apply_layout_preferences();
+        view.apply_motion(cx);
+        view.read_system_motion(cx);
         cx.set_global(UiColors::from_theme(&view.bootstrap.theme));
         cx.observe_window_appearance(
             window,

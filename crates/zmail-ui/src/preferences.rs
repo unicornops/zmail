@@ -1,18 +1,19 @@
 //! Reads and writes the persisted [`UiPreferences`] for the workspace.
 //!
 //! The theme mode, the imported theme, the sidebar's collapsed state, the
-//! pane widths, the list density and the reading pane are wired up so far;
-//! the rest are stored by `zmail-store` and get wired as the views that use
-//! them land. The Settings window writes the preferences to the store and
+//! pane widths, the list density, the reading pane and motion are wired up
+//! so far; the rest are stored by `zmail-store` and get wired as the views
+//! that use them land. The Settings window writes the preferences to the store and
 //! then calls [`WorkspaceView::apply_preferences`].
 
-use gpui::{Context, Window, WindowAppearance};
+use gpui::{App, AppContext as _, Context, Window, WindowAppearance};
 use zmail_core::{
     ThemeAppearance,
-    preferences::{Density, PaneWidths, ReadingPanePosition, ThemeMode, UiPreferences},
+    preferences::{Density, MotionMode, PaneWidths, ReadingPanePosition, ThemeMode, UiPreferences},
 };
 
 use crate::actions::ToggleDensity;
+use crate::motion;
 
 use super::WorkspaceView;
 
@@ -59,6 +60,8 @@ impl WorkspaceView {
         let reading_pane = self.reading_pane;
         self.apply_theme_preference(window.appearance());
         self.apply_layout_preferences();
+        self.apply_motion(cx);
+        self.read_system_motion(cx);
         if self.reading_pane != reading_pane {
             self.reading_pane_changed(window, cx);
         }
@@ -74,6 +77,7 @@ impl WorkspaceView {
                 self.density = preferences.density;
                 self.reading_pane = supported_reading_pane(preferences.reading_pane);
                 self.sender_warnings = preferences.sender_warnings;
+                self.motion = preferences.motion;
                 self.sidebar_tree = preferences.sidebar_tree;
                 if let Some(width) = preferences.pane_widths.sidebar {
                     self.sidebar_width = width;
@@ -86,6 +90,30 @@ impl WorkspaceView {
                 self.store_error = Some(format!("Could not load the UI preferences: {error:#}"));
             }
         }
+    }
+
+    /// Turns animations on or off in every window for the saved motion
+    /// choice and the last system setting read.
+    pub(crate) fn apply_motion(&self, cx: &mut App) {
+        motion::apply(self.motion, cx);
+    }
+
+    /// Reads the system's reduce-motion setting in the background, when
+    /// the saved choice follows it, and applies it once read.
+    pub(crate) fn read_system_motion(&mut self, cx: &mut Context<Self>) {
+        // Tests set `SystemMotion` themselves, whatever the machine
+        // running them is set to.
+        if self.motion != MotionMode::System || cfg!(test) {
+            return;
+        }
+        let read = cx.background_spawn(async { motion::read_system_setting() });
+        self.system_motion_read = cx.spawn(async move |this, cx| {
+            let system = read.await;
+            let _ = this.update(cx, |this, cx| {
+                cx.set_global(motion::SystemMotion(system));
+                this.apply_motion(cx);
+            });
+        });
     }
 
     /// Saves the mailbox the list shows, to reopen on the next launch.

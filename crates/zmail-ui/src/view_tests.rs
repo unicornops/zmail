@@ -33,6 +33,7 @@ mod cheat_sheet;
 mod compose;
 mod gmail_keymap;
 mod list;
+mod motion;
 mod onboarding;
 mod palette;
 mod reader;

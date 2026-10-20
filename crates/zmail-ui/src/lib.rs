@@ -28,6 +28,7 @@
 //! | `fonts` | registers the bundled Inter font on Linux |
 //! | `pane` | pane focus order and the focused-pane indicator |
 //! | `layout` | the responsive pane layout: breakpoints and pane widths |
+//! | `motion` | reduced motion: the system setting and the Settings override |
 //! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, `TextInput`, … and the gallery |
 //! | `styles` | design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
 //! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar, pane widths, density) |
@@ -73,6 +74,7 @@ mod layout;
 mod mail_actions;
 mod menus;
 mod message_list;
+mod motion;
 mod move_picker;
 mod pane;
 mod preferences;
@@ -455,6 +457,12 @@ struct WorkspaceView {
     reading_pane: zmail_core::preferences::ReadingPanePosition,
     /// Which sender-safety warnings the reader shows (persisted).
     sender_warnings: zmail_core::preferences::SenderWarnings,
+    /// Whether animations follow the system or are forced on or off
+    /// (persisted).
+    motion: zmail_core::preferences::MotionMode,
+    /// The running read of the system's reduce-motion setting; a newer
+    /// read replaces it.
+    system_motion_read: gpui::Task<()>,
     /// The user's sidebar width (persisted); the layout clamps it to
     /// what the window fits.
     sidebar_width: f32,
