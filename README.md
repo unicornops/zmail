@@ -24,6 +24,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - Tagged releases also attach a Linux screenshot captured from the live mail harness by the Release Please workflow chain
 - pull requests that change the UI get a `ui-screenshots` CI artefact: every main UI state in light and dark plus narrow and wide windows, captured from seeded fixture data (see `AGENTS.md`)
 - release archives ship platform binaries plus a Linux `.deb`, a macOS DMG (Developer ID signed and notarized when the org-wide Apple credentials are present), and a Windows MSI installer; Windows code signing remains opt-in pending work
+- screen-reader roles, names and announcements through AccessKit (VoiceOver, UI Automation, AT-SPI), Windows contrast themes and macOS Increase Contrast; not yet checked with a real screen reader (see [`docs/phase5-hardening.md`](./docs/phase5-hardening.md#accessibility))
 - Phase 5 hardening and release policy documentation
 
 ## Workspace
