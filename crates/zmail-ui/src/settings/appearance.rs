@@ -1,5 +1,5 @@
 //! Settings → Appearance: the theme mode, an imported Zed theme, the list
-//! density and the reading pane.
+//! density, the reading pane and motion.
 //!
 //! Importing reads a Zed theme family file the user picks
 //! (`prompt_for_paths`) and checks it with
@@ -14,7 +14,7 @@ use gpui::{
     Context, Entity, IntoElement, PathPromptOptions, Render, SharedString, Subscription, Window,
     div, prelude::*, px,
 };
-use zmail_core::preferences::{Density, ReadingPanePosition, ThemeMode, UiPreferences};
+use zmail_core::preferences::{Density, MotionMode, ReadingPanePosition, ThemeMode, UiPreferences};
 use zmail_theme::{MAX_THEME_FILE_BYTES, import_theme_family};
 
 use super::{
@@ -45,11 +45,18 @@ const READING_PANES: [(ReadingPanePosition, &str); 2] = [
     (ReadingPanePosition::Off, "Off"),
 ];
 
+const MOTIONS: [(MotionMode, &str); 3] = [
+    (MotionMode::System, "Match System"),
+    (MotionMode::Reduce, "Reduce"),
+    (MotionMode::Full, "Full"),
+];
+
 /// The Appearance section.
 pub(crate) struct AppearanceSettings {
     theme_mode: Entity<Select>,
     density: Entity<Select>,
     reading_pane: Entity<Select>,
+    motion: Entity<Select>,
     /// The imported theme family's name, or `None` for the bundled themes.
     imported_theme: Option<String>,
     /// Why the last import failed, shown until the next import or reset.
@@ -73,6 +80,7 @@ impl AppearanceSettings {
             "Reading pane",
             cx,
         );
+        let motion = select(MOTIONS.map(|(_, label)| label).to_vec(), "Motion", cx);
         let subscriptions = vec![
             cx.subscribe(&theme_mode, |_, _, event: &SelectEvent, cx| {
                 let SelectEvent::Changed(index) = *event;
@@ -95,11 +103,19 @@ impl AppearanceSettings {
                     preferences.reading_pane = position;
                 });
             }),
+            cx.subscribe(&motion, |_, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(index) = *event;
+                let motion = MOTIONS[index].0;
+                save(cx, "the motion setting", move |preferences| {
+                    preferences.motion = motion;
+                });
+            }),
         ];
         let mut this = Self {
             theme_mode,
             density,
             reading_pane,
+            motion,
             imported_theme: None,
             import_error: None,
             _subscriptions: subscriptions,
@@ -137,6 +153,14 @@ impl AppearanceSettings {
                 cx,
             )
         });
+        self.motion.update(cx, |select, cx| {
+            select.set_selected(
+                MOTIONS
+                    .iter()
+                    .position(|(motion, _)| *motion == preferences.motion),
+                cx,
+            )
+        });
         self.imported_theme = store
             .custom_theme()
             .ok()
@@ -166,6 +190,12 @@ impl AppearanceSettings {
             self.density.clone(),
             self.reading_pane.clone(),
         ]
+    }
+
+    /// The motion picker, for tests to drive.
+    #[cfg(test)]
+    pub(crate) fn motion_select(&self) -> Entity<Select> {
+        self.motion.clone()
     }
 
     /// Ask for a theme file and import it.
@@ -308,6 +338,15 @@ impl Render for AppearanceSettings {
                         .into(),
                 ),
                 self.reading_pane.clone(),
+                &colors,
+            ))
+            .child(setting_row(
+                "Motion",
+                Some(
+                    "Reduce keeps loading placeholders and spinners still. Match System follows your system's reduce motion setting."
+                        .into(),
+                ),
+                self.motion.clone(),
                 &colors,
             ))
             .child(group_heading("Theme file", &colors))

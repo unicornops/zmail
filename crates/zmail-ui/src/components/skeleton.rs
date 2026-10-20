@@ -1,5 +1,6 @@
 //! `SkeletonRow`: a grey placeholder shaped like a message-list row, shown
-//! while the first page of a mailbox loads.
+//! while the first page of a mailbox loads. It pulses unless motion is
+//! reduced (see `crate::motion`), when it stays still at full opacity.
 
 use std::time::Duration;
 
@@ -36,7 +37,7 @@ impl SkeletonRow {
         self
     }
 
-    /// Turn the pulse off (reduced motion, screenshots).
+    /// Turn the pulse off (screenshots). Reduced motion turns it off too.
     pub(crate) fn animated(mut self, animated: bool) -> Self {
         self.animated = animated;
         self
@@ -88,7 +89,9 @@ impl RenderOnce for SkeletonRow {
                     .children(lines.into_iter().map(bar)),
             );
 
-        if self.animated {
+        // Reduced motion would hold the pulse at its first, dimmed frame;
+        // a still row reads better at full opacity.
+        if self.animated && !cx.reduce_motion() {
             row.with_animation(
                 self.id,
                 Animation::new(Duration::from_millis(1200))
