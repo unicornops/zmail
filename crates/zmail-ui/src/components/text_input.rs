@@ -378,16 +378,6 @@ impl TextInput {
         self
     }
 
-    /// Replaces the placeholder text.
-    pub(crate) fn set_placeholder(
-        &mut self,
-        placeholder: impl Into<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
-        self.placeholder = placeholder.into();
-        cx.notify();
-    }
-
     /// The current text.
     pub(crate) fn text(&self) -> &str {
         &self.content

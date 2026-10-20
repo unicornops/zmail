@@ -17,13 +17,17 @@ use zmail_core::{
     participants::thread_participants, preferences::Density, time::utc_timestamp,
 };
 use zmail_store::LocalStore;
-use zmail_ui::InitialView;
+use zmail_ui::{InitialView, OnboardingStep};
 
 /// The UI state a fixture launch opens in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FixtureView {
-    /// No accounts: the first-run account setup.
+    /// No accounts: the first-run onboarding's welcome step.
     Empty,
+    /// A step of the first-run onboarding. The steps before the account
+    /// is stored seed nothing; the colour and first-sync steps seed the
+    /// usual account (mid-sync for the latter).
+    Onboarding(OnboardingStep),
     /// The seeded inbox with its newest thread open.
     Inbox,
     /// The seeded inbox with compact (one-line) rows.
@@ -58,7 +62,7 @@ pub(crate) enum FixtureView {
     ComposeInvalid,
     /// A reply just sent, with the Undo Send toast showing.
     UndoSend,
-    /// The account setup pane with an account already configured.
+    /// The Add Account window, opened over the seeded inbox.
     AccountSetup,
     /// The seeded inbox with keyboard focus in the sidebar, so a window
     /// too narrow for the sidebar pane shows it as an overlay.
@@ -105,6 +109,15 @@ impl FixtureView {
             "compose-invalid" => Self::ComposeInvalid,
             "undo-send" => Self::UndoSend,
             "account-setup" => Self::AccountSetup,
+            "onboarding-provider" => Self::Onboarding(OnboardingStep::Provider),
+            "onboarding-credentials" => Self::Onboarding(OnboardingStep::Credentials),
+            "onboarding-discovering" => Self::Onboarding(OnboardingStep::Discovering),
+            "onboarding-consent" => Self::Onboarding(OnboardingStep::Consent),
+            "onboarding-result" => Self::Onboarding(OnboardingStep::Result),
+            "onboarding-manual" => Self::Onboarding(OnboardingStep::Manual),
+            "onboarding-manual-cleartext" => Self::Onboarding(OnboardingStep::ManualCleartext),
+            "onboarding-colour" => Self::Onboarding(OnboardingStep::Colour),
+            "onboarding-syncing" => Self::Onboarding(OnboardingStep::Syncing),
             "sidebar" => Self::Sidebar,
             "accounts" => Self::Accounts,
             "multi-select" => Self::MultiSelect,
@@ -114,7 +127,7 @@ impl FixtureView {
             "reader-safety-danger" => Self::ReaderSafetyDanger,
             "reader-attachments" => Self::ReaderAttachments,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, sidebar, accounts, multi-select, search, reader-safety-info, reader-safety-caution, reader-safety-danger or reader-attachments"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, reader-safety-info, reader-safety-caution, reader-safety-danger or reader-attachments"
             ),
         })
     }
@@ -159,8 +172,15 @@ pub(crate) fn anchor_time() -> u64 {
 ///
 /// Message dates are offsets back from `now` (see [`anchor_time`]).
 pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<InitialView> {
-    if view == FixtureView::Empty {
-        return Ok(InitialView::Inbox);
+    match view {
+        FixtureView::Empty => return Ok(InitialView::Inbox),
+        // Nothing is stored until the end of the server settings.
+        FixtureView::Onboarding(step)
+            if !matches!(step, OnboardingStep::Colour | OnboardingStep::Syncing) =>
+        {
+            return Ok(InitialView::Onboarding(step));
+        }
+        _ => {}
     }
 
     let account_id = store
@@ -215,7 +235,16 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
             seed_more_accounts(store, account_id, now)?;
             InitialView::Search("release")
         }
-        FixtureView::AccountSetup => InitialView::AccountSetup,
+        FixtureView::AccountSetup => InitialView::AddAccount,
+        FixtureView::Onboarding(step) => {
+            if step == OnboardingStep::Syncing {
+                // The folders are in; the first sync is still filling one.
+                store
+                    .begin_sync_attempt(account_id, SyncPhase::Syncing, "Fetching Archive")
+                    .context("failed to record the fixture sync phase")?;
+            }
+            InitialView::Onboarding(step)
+        }
         FixtureView::Sidebar => InitialView::Sidebar,
         FixtureView::MultiSelect => InitialView::MultiSelect,
         FixtureView::Reader => {
@@ -1327,8 +1356,28 @@ mod tests {
     #[test]
     fn account_setup_keeps_the_account() -> Result<()> {
         let (store, initial_view) = seeded(FixtureView::AccountSetup)?;
-        assert_eq!(initial_view, InitialView::AccountSetup);
+        assert_eq!(initial_view, InitialView::AddAccount);
         assert_eq!(store.list_accounts()?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn onboarding_seeds_an_account_only_once_it_would_exist() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::parse("onboarding-manual-cleartext")?)?;
+        assert_eq!(
+            initial_view,
+            InitialView::Onboarding(OnboardingStep::ManualCleartext)
+        );
+        assert!(store.list_accounts()?.is_empty());
+
+        let (store, initial_view) = seeded(FixtureView::parse("onboarding-syncing")?)?;
+        assert_eq!(
+            initial_view,
+            InitialView::Onboarding(OnboardingStep::Syncing)
+        );
+        let account = store.list_accounts()?.remove(0);
+        assert_eq!(account.sync_status.phase, SyncPhase::Syncing);
+        assert!(!store.list_mailboxes(account.id)?.is_empty());
         Ok(())
     }
 }

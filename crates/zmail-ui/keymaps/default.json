@@ -144,7 +144,8 @@
   {
     "context": "AccountSetup",
     "bindings": {
-      "secondary-enter": "zmail::SaveAccount"
+      "secondary-enter": "zmail::ContinueSetup",
+      "escape": "zmail::Cancel"
     }
   }
 ]

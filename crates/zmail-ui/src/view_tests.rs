@@ -21,7 +21,6 @@ use zmail_security::{InMemorySecretStore, SecretStore};
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
-use crate::account_setup::AccountField;
 use crate::components::{self, TextInput};
 use crate::compose::ComposeView;
 use crate::keymap;
@@ -32,6 +31,7 @@ use crate::{DetailMode, InitialView, ListMode, WorkspaceView};
 
 mod compose;
 mod list;
+mod onboarding;
 mod reader;
 mod reader_attachments;
 mod reader_safety;
@@ -537,53 +537,6 @@ fn search_field_understands_query_operators(cx: &mut TestAppContext) {
     assert!(run("quarterly -from:kai", cx).is_empty());
 }
 
-#[gpui::test]
-fn account_setup_focuses_fields_and_clears_errors_on_edit(cx: &mut TestAppContext) {
-    let (view, cx, _harness) = open_workspace(cx, Setup::NoAccount);
-    assert!(cx.read_entity(&view, |view, _| matches!(
-        view.detail_mode,
-        DetailMode::AccountSetup
-    )));
-    let input = |field: AccountField, cx: &mut VisualTestContext| {
-        cx.read_entity(&view, |view, cx| {
-            view.account_setup.read(cx).form.input(field).clone()
-        })
-    };
-    let has_error = |cx: &mut VisualTestContext| {
-        cx.read_entity(&view, |view, cx| {
-            view.account_setup
-                .read(cx)
-                .form
-                .errors
-                .contains_key(&AccountField::Endpoint)
-        })
-    };
-
-    // With no account, the form opens with the first field focused.
-    cx.simulate_input("Work");
-    let display_name = input(AccountField::DisplayName, cx);
-    assert_eq!(text(&display_name, cx), "Work");
-
-    // Secondary+Enter submits; it reports the missing fields and focuses
-    // the first one.
-    keys("secondary-enter", cx);
-    assert!(has_error(cx));
-
-    // Typing goes to the focused endpoint field and clears its error.
-    cx.simulate_input("imaps://mail.example.test");
-    let endpoint = input(AccountField::Endpoint, cx);
-    assert_eq!(text(&endpoint, cx), "imaps://mail.example.test");
-    assert!(!has_error(cx));
-    assert_eq!(text(&display_name, cx), "Work");
-
-    // Escape does not close the form while there is no account to show.
-    keys("escape", cx);
-    assert!(cx.read_entity(&view, |view, _| matches!(
-        view.detail_mode,
-        DetailMode::AccountSetup
-    )));
-}
-
 // ---------------------------------------------------------------------------
 // Pane focus and the keymap
 // ---------------------------------------------------------------------------
@@ -759,19 +712,6 @@ fn escape_closes_overlays(cx: &mut TestAppContext) {
         None
     );
 
-    // The account form, when there is an account to go back to.
-    keys("secondary-shift-a", cx);
-    assert!(cx.read_entity(&view, |view, _| matches!(
-        view.detail_mode,
-        DetailMode::AccountSetup
-    )));
-    keys("escape", cx);
-    assert!(cx.read_entity(&view, |view, _| matches!(
-        view.detail_mode,
-        DetailMode::Reader
-    )));
-    assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
-
     // The search field: Escape clears it and leaves search.
     keys("secondary-f", cx);
     cx.simulate_input("Quarterly");
@@ -857,10 +797,9 @@ fn every_toolbar_action_is_dispatchable_by_keybinding(cx: &mut TestAppContext) {
     assert!(search_is_focused(&view, cx));
     keys("escape", cx);
 
-    // Add Account.
+    // Add Account opens its window (see view_tests/onboarding.rs).
     keys("secondary-shift-a", cx);
-    assert_eq!(modes(cx).1, DetailMode::AccountSetup);
-    keys("escape", cx);
+    assert!(cx.update(|_, cx| crate::account_setup::open_window(cx).is_some()));
 
     // Compose opens a window with focus in To.
     keys("secondary-n", cx);
@@ -1455,25 +1394,6 @@ fn the_window_can_open_on_a_thread_without_marking_it_read(cx: &mut TestAppConte
         thread.unread_count, 1,
         "opening on a thread leaves it unread"
     );
-}
-
-#[gpui::test]
-fn the_window_can_open_on_account_setup(cx: &mut TestAppContext) {
-    let (view, cx, _harness) = open_workspace_on(cx, Setup::Mail, |_| InitialView::AccountSetup);
-    assert_eq!(
-        cx.read_entity(&view, |view, _| view.detail_mode),
-        DetailMode::AccountSetup
-    );
-    // The first field has focus, ready to type.
-    cx.simulate_input("Work");
-    let display_name = cx.read_entity(&view, |view, cx| {
-        view.account_setup
-            .read(cx)
-            .form
-            .input(AccountField::DisplayName)
-            .clone()
-    });
-    assert_eq!(text(&display_name, cx), "Work");
 }
 
 // ---------------------------------------------------------------------------
@@ -2303,13 +2223,12 @@ fn a_failing_account_offers_fix(cx: &mut TestAppContext) {
     assert!(!drawn(format!("account-fix-{work}"), cx), "Work is fine");
 
     click_on(format!("account-fix-{home}"), cx);
-    assert_eq!(
-        cx.read_entity(&view, |view, _| view.detail_mode),
-        DetailMode::AccountSetup
-    );
-    let notice = cx.read_entity(&view, |view, cx| {
-        view.account_setup.read(cx).form.notice.clone()
-    });
+    let handle = cx
+        .update(|_, cx| crate::account_setup::open_window(cx))
+        .expect("Fix… opens the Add Account window");
+    let notice = handle
+        .read_with(cx, |root, cx| root.setup().read(cx).notice.clone())
+        .expect("the window is open");
     assert_eq!(
         notice.as_deref(),
         Some("Home can't sync: authentication failed")
