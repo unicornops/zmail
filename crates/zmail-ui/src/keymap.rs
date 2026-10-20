@@ -139,8 +139,6 @@ struct ActiveKeymap(KeymapName);
 impl Global for ActiveKeymap {}
 
 /// The keymap [`bind_keymap`] last bound (the standard one before that).
-// Read by Settings → Keyboard, which is being built alongside this.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn active_keymap(cx: &App) -> KeymapName {
     cx.try_global::<ActiveKeymap>()
         .map_or_else(KeymapName::default, |active| active.0)
@@ -169,8 +167,6 @@ pub(crate) fn bind_keymap(keymap: KeymapName, cx: &mut App) {
 /// keys and refreshes the macOS menu bar's key equivalents. The keys
 /// change even if saving fails; the error says the choice will not survive
 /// a restart.
-// Called by Settings → Keyboard, which is being built alongside this.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn use_keymap(store: &LocalStore, keymap: KeymapName, cx: &mut App) -> Result<()> {
     if active_keymap(cx) != keymap {
         bind_keymap(keymap, cx);

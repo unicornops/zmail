@@ -5,11 +5,11 @@
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
 use zmail_core::{
     AccountColor, ThemeAppearance,
-    preferences::{Density, ReadingPanePosition, ThemeMode},
+    preferences::{Density, KeymapName, ReadingPanePosition, ThemeMode},
 };
 use zmail_store::LocalStore;
 
-use super::{Harness, Setup, click, keys, open_workspace, open_workspace_with};
+use super::{Harness, Setup, click, focus, keys, open_workspace, open_workspace_with};
 use crate::InitialView;
 use crate::actions::ToggleDensity;
 use crate::components::{ComponentTheme, Select};
@@ -582,4 +582,73 @@ fn privacy_states_what_is_protected(cx: &mut TestAppContext) {
         SettingsSection::Privacy
     );
     assert!(window_cx.debug_bounds("settings-nav-privacy").is_some());
+}
+
+#[gpui::test]
+fn keyboard_switches_the_keymap_and_searches_the_shortcuts(cx: &mut TestAppContext) {
+    let (_view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Settings(SettingsSection::Keyboard),
+        |_| {},
+    );
+    let (root, mut window_cx) = settings_window(cx);
+    let keyboard = root.read_with(&window_cx, |root, _| root.keyboard().clone());
+    let labels = |window_cx: &mut VisualTestContext| {
+        keyboard.read_with(window_cx, |keyboard, cx| {
+            keyboard
+                .visible(cx)
+                .into_iter()
+                .flat_map(|(_, rows)| rows.into_iter().map(|row| row.label.clone()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let gmail_keys = |window_cx: &mut VisualTestContext| {
+        keyboard.read_with(window_cx, |keyboard, cx| {
+            keyboard
+                .visible(cx)
+                .into_iter()
+                .flat_map(|(_, rows)| rows)
+                .any(|row| row.label == "Archive" && row.keys.iter().any(|key| key == "e"))
+        })
+    };
+    assert!(labels(&mut window_cx).contains(&"Archive".to_owned()));
+    assert!(!gmail_keys(&mut window_cx), "no single-key shortcuts yet");
+
+    // Gmail: bound at once, saved, and the list shows the new keys.
+    let select = keyboard.read_with(&window_cx, |keyboard, _| keyboard.keymap_select().clone());
+    pick(&select, 1, &mut window_cx);
+    assert_eq!(
+        harness.store.ui_preferences().expect("loads").keymap,
+        KeymapName::Gmail
+    );
+    assert_eq!(
+        cx.update(|_, cx| crate::keymap::active_keymap(cx)),
+        KeymapName::Gmail
+    );
+    assert!(gmail_keys(&mut window_cx));
+
+    // Search narrows the list by label, place or key.
+    let search = keyboard.read_with(&window_cx, |keyboard, _| keyboard.search().clone());
+    focus(&search, &mut window_cx);
+    window_cx.simulate_input("archive");
+    window_cx.run_until_parked();
+    let found = labels(&mut window_cx);
+    assert!(!found.is_empty());
+    assert!(
+        found
+            .iter()
+            .all(|label| label.to_lowercase().contains("archive")),
+        "{found:?}"
+    );
+    search.update(&mut window_cx, |input, cx| input.set_text("", cx));
+    window_cx.simulate_input("no such command");
+    window_cx.run_until_parked();
+    assert!(labels(&mut window_cx).is_empty());
+
+    pick(&select, 0, &mut window_cx);
+    assert_eq!(
+        cx.update(|_, cx| crate::keymap::active_keymap(cx)),
+        KeymapName::Default
+    );
 }

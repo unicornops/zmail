@@ -32,7 +32,7 @@
 //! | `styles` | design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
 //! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar, pane widths, density) |
 //! | `widgets` | `toolbar_button`, `input_card`, `empty_state`, `icon`, … |
-//! | `settings` | `SettingsWindow`: Accounts, Appearance, Privacy, Sending, About & Diagnostics |
+//! | `settings` | `SettingsWindow`: Accounts, Appearance, Keyboard, Privacy, Sending, About & Diagnostics |
 
 use std::sync::Arc;
 
