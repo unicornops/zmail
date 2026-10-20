@@ -22,7 +22,7 @@ use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
 use crate::account_setup::AccountField;
-use crate::components::{self, TextInput, text_input};
+use crate::components::{self, TextInput};
 use crate::compose::ComposeView;
 use crate::keymap;
 use crate::layout::{LayoutMode, SinglePane};
@@ -233,11 +233,6 @@ fn open_workspace_with(
     initial_view: impl FnOnce(&Harness) -> InitialView,
     prepare: impl FnOnce(&LocalStore),
 ) -> (Entity<WorkspaceView>, &mut VisualTestContext, Harness) {
-    cx.update(|cx| {
-        components::init(cx);
-        text_input::init(cx);
-        keymap::bind_default_keymap(cx);
-    });
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -334,6 +329,9 @@ fn open_workspace_with(
         },
     };
     prepare(&store);
+    // The keymap the saved preferences pick, as `run()` binds it.
+    let saved_keymap = store.ui_preferences().expect("the preferences load").keymap;
+    cx.update(|cx| keymap::bind_keymap(saved_keymap, cx));
     let initial_view = initial_view(&harness);
     let (view, cx) = cx.add_window_view(move |window, cx| {
         WorkspaceView::new(

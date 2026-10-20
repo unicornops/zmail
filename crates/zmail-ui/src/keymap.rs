@@ -23,14 +23,23 @@
 //! it from panes that never bound it. `menus::tests` checks this.
 //!
 //! The default keymap ships inside the binary, plus a small macOS keymap for
-//! the system conventions that only exist there (Hide, Minimize). A user
-//! keymap and a Gmail-style keymap are Phase 7 of the UI plan.
+//! the system conventions that only exist there (Hide, Minimize).
+//!
+//! The user picks a [`KeymapName`] (saved in the UI preferences): the
+//! standard keymap, or the Gmail keymap, which layers single-key shortcuts
+//! on top of it. [`bind_keymap`] binds everything the app binds for one of
+//! them, and [`use_keymap`] switches at runtime without a restart. A user
+//! keymap file is still to come.
 
 use std::rc::Rc;
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use gpui::{App, KeyBinding, KeyBindingContextPredicate};
+use gpui::{App, Global, KeyBinding, KeyBindingContextPredicate};
 use serde_json::Value;
+use zmail_core::preferences::KeymapName;
+use zmail_store::LocalStore;
+
+use crate::components;
 
 /// The keymap bundled with the app.
 pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../keymaps/default.json");
@@ -103,15 +112,63 @@ pub(crate) fn parse_keymap(source: &str, cx: &App) -> Result<Vec<KeyBinding>> {
     Ok(bindings)
 }
 
-/// Binds the bundled keymaps. A parse failure is a bug in a bundled file
-/// (the tests load them), so it is logged rather than stopping the app.
-pub(crate) fn bind_default_keymap(cx: &mut App) {
-    for source in platform_keymaps() {
+/// The bundled keymaps `keymap` loads on this platform, in order: later
+/// files win over earlier ones where both bind a key in the same context.
+pub(crate) fn keymaps_for(keymap: KeymapName) -> Vec<&'static str> {
+    match keymap {
+        // The Gmail layer (`keymaps/gmail.json`) lands with its own PR;
+        // until then the choice binds the standard keys.
+        KeymapName::Default | KeymapName::Gmail => platform_keymaps().to_vec(),
+    }
+}
+
+/// The keymap the app has bound, so views can say which one is active.
+struct ActiveKeymap(KeymapName);
+
+impl Global for ActiveKeymap {}
+
+/// The keymap [`bind_keymap`] last bound (the standard one before that).
+// Read by Settings → Keyboard, which is being built alongside this.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn active_keymap(cx: &App) -> KeymapName {
+    cx.try_global::<ActiveKeymap>()
+        .map_or_else(KeymapName::default, |active| active.0)
+}
+
+/// Replaces every key binding with the ones for `keymap`: the components',
+/// the text input's and the bundled keymap files. Call it at startup before
+/// [`crate::menus::init`], and through [`use_keymap`] afterwards.
+///
+/// A parse failure is a bug in a bundled file (the tests load them), so it
+/// is logged rather than stopping the app.
+pub(crate) fn bind_keymap(keymap: KeymapName, cx: &mut App) {
+    cx.clear_key_bindings();
+    cx.bind_keys(components::actions::key_bindings());
+    cx.bind_keys(components::text_input::key_bindings());
+    for source in keymaps_for(keymap) {
         match parse_keymap(source, cx) {
             Ok(bindings) => cx.bind_keys(bindings),
             Err(error) => eprintln!("zmail: a bundled keymap did not load: {error:#}"),
         }
     }
+    cx.set_global(ActiveKeymap(keymap));
+}
+
+/// Switches to `keymap` while the app runs: saves the choice, rebinds the
+/// keys and refreshes the macOS menu bar's key equivalents. The keys
+/// change even if saving fails; the error says the choice will not survive
+/// a restart.
+// Called by Settings → Keyboard, which is being built alongside this.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn use_keymap(store: &LocalStore, keymap: KeymapName, cx: &mut App) -> Result<()> {
+    if active_keymap(cx) != keymap {
+        bind_keymap(keymap, cx);
+        crate::menus::refresh_menu_bar(cx);
+    }
+    store
+        .update_ui_preferences(|preferences| preferences.keymap = keymap)
+        .context("could not save the keyboard shortcut choice")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -119,9 +176,65 @@ mod tests {
     use std::collections::BTreeSet;
 
     use gpui::TestAppContext;
+    use zmail_core::preferences::KeymapName;
+    use zmail_store::LocalStore;
 
-    use super::{DEFAULT_KEYMAP, MACOS_KEYMAP, parse_keymap};
-    use crate::actions::ACTIONS_WITHOUT_KEYS;
+    use super::{
+        DEFAULT_KEYMAP, MACOS_KEYMAP, active_keymap, bind_keymap, parse_keymap, use_keymap,
+    };
+    use crate::actions::{ACTIONS_WITHOUT_KEYS, NewMessage};
+    use crate::components::text_input;
+
+    #[gpui::test]
+    fn binding_a_keymap_replaces_every_binding(cx: &mut TestAppContext) {
+        let count =
+            |cx: &mut TestAppContext| cx.update(|cx| cx.key_bindings().borrow().bindings().len());
+        cx.update(|cx| bind_keymap(KeymapName::Default, cx));
+        let standard = count(cx);
+        assert!(standard > 0);
+        cx.update(|cx| {
+            assert_eq!(active_keymap(cx), KeymapName::Default);
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            assert!(
+                keymap.bindings_for_action(&NewMessage).next().is_some(),
+                "the keymap files are bound"
+            );
+            assert!(
+                keymap
+                    .bindings_for_action(&text_input::Paste)
+                    .next()
+                    .is_some(),
+                "the text input's own keys are bound"
+            );
+        });
+        // Binding again replaces rather than adds.
+        cx.update(|cx| bind_keymap(KeymapName::Default, cx));
+        assert_eq!(count(cx), standard);
+        cx.update(|cx| bind_keymap(KeymapName::Gmail, cx));
+        cx.update(|cx| assert_eq!(active_keymap(cx), KeymapName::Gmail));
+        cx.update(|cx| bind_keymap(KeymapName::Default, cx));
+        assert_eq!(count(cx), standard, "switching back drops the Gmail layer");
+    }
+
+    #[gpui::test]
+    fn switching_keymaps_saves_the_choice(cx: &mut TestAppContext) {
+        let store = LocalStore::open_ephemeral().expect("the store opens");
+        cx.update(|cx| {
+            assert_eq!(active_keymap(cx), KeymapName::Default, "before any binding");
+            bind_keymap(KeymapName::Default, cx);
+            use_keymap(&store, KeymapName::Gmail, cx).expect("the choice saves");
+            assert_eq!(active_keymap(cx), KeymapName::Gmail);
+        });
+        let saved = store.ui_preferences().expect("the preferences load");
+        assert_eq!(saved.keymap, KeymapName::Gmail);
+        cx.update(|cx| {
+            use_keymap(&store, KeymapName::Default, cx).expect("the choice saves");
+            assert_eq!(active_keymap(cx), KeymapName::Default);
+        });
+        let saved = store.ui_preferences().expect("the preferences load");
+        assert_eq!(saved.keymap, KeymapName::Default);
+    }
 
     #[gpui::test]
     fn the_bundled_keymaps_load(cx: &mut TestAppContext) {
