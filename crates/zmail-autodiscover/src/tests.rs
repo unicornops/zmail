@@ -464,3 +464,134 @@ fn a_starttls_only_imap_server_is_explained() {
     };
     assert!(note.contains("STARTTLS"), "{note}");
 }
+
+/// A resolver whose every lookup fails, as with no network or a broken
+/// resolver configuration.
+struct BrokenDns;
+
+impl DnsLookup for BrokenDns {
+    fn srv(&self, _: &str) -> Result<Vec<SrvRecord>, String> {
+        Err("timed out".to_owned())
+    }
+
+    fn mx(&self, _: &str) -> Result<Vec<MxRecord>, String> {
+        Err("timed out".to_owned())
+    }
+}
+
+#[test]
+fn dns_failures_are_reported_but_never_stop_discovery() {
+    let web = Arc::new(FakeWeb::default().serve(
+        AUTOCONFIG_URL,
+        200,
+        AUTOCONFIG_URL,
+        include_bytes!("../fixtures/example-autoconfig.xml"),
+    ));
+    let network = Network {
+        fetch: web.clone(),
+        dns: Some(Arc::new(BrokenDns)),
+        probe: Arc::new(FakePorts::default()),
+    };
+    let discovery = discover(email(), false, &network, |_| {});
+    assert_eq!(
+        steps_run(&discovery),
+        [Step::DnsSrv, Step::DomainAutoconfig]
+    );
+    let StepOutcome::NothingFound { note: Some(note) } = &discovery.reports()[0].outcome else {
+        panic!(
+            "a failed SRV lookup is nothing found: {:?}",
+            discovery.reports()
+        );
+    };
+    assert!(
+        note.contains("DNS lookup failed") && note.contains("_imaps._tcp.example.com"),
+        "{note}"
+    );
+    assert!(
+        discovery.result().is_some(),
+        "the autoconfig file still counts"
+    );
+
+    // The MX step after a declined ISPDB lookup, failing the same way.
+    let network = Network {
+        fetch: Arc::new(FakeWeb::default()),
+        ..network
+    };
+    let discovery = discover(email(), false, &network, |_| {});
+    let mx = discovery
+        .reports()
+        .iter()
+        .find(|report| report.step == Step::MxGuess)
+        .expect("the MX step ran");
+    assert!(
+        matches!(&mx.outcome, StepOutcome::NothingFound { note: Some(note) } if note.contains("timed out")),
+        "{mx:?}"
+    );
+    assert_eq!(
+        discovery.reports().last().map(|report| report.step),
+        Some(Step::HostnameGuess),
+        "discovery carries on to the last step"
+    );
+}
+
+#[test]
+fn srv_finds_jmap_first() {
+    let dns = FakeDns {
+        srv: HashMap::from([
+            (
+                "_jmap._tcp.example.com".to_owned(),
+                srv("api.example.com.", 443),
+            ),
+            (
+                "_imaps._tcp.example.com".to_owned(),
+                srv("imap.example.com.", 993),
+            ),
+        ]),
+        mx: Vec::new(),
+    };
+    let findings = run_step(
+        Step::DnsSrv,
+        &email(),
+        &network(
+            &Arc::new(FakeWeb::default()),
+            Some(dns),
+            FakePorts::default(),
+        ),
+    )
+    .expect("the step never fails");
+    let jmap = findings.jmap.expect("JMAP found");
+    assert_eq!(
+        jmap.value.session_url,
+        "https://api.example.com/.well-known/jmap"
+    );
+    assert!(findings.imap.is_none(), "JMAP wins outright");
+}
+
+/// Real lookups through the system resolver. Needs network access, so it
+/// only runs on request:
+/// `cargo test -p zmail-autodiscover -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs network access"]
+fn system_dns_answers_real_queries() {
+    let dns = crate::SystemDns::new();
+    for name in [
+        "_imaps._tcp.fastmail.com",
+        "_submission._tcp.fastmail.com",
+        "_jmap._tcp.fastmail.com",
+    ] {
+        let records = dns.srv(name).expect("the SRV lookup works");
+        println!("{name}: {records:?}");
+        assert!(!records.is_empty(), "{name} has records");
+    }
+    for domain in ["gmail.com", "fastmail.com", "posteo.de"] {
+        let records = dns.mx(domain).expect("the MX lookup works");
+        println!("MX {domain}: {records:?}");
+        assert!(!records.is_empty(), "{domain} has MX records");
+    }
+    // A name with no SRV records is an empty answer, not an error.
+    let none = dns
+        .srv("_imaps._tcp.example.com")
+        .expect("NXDOMAIN is not an error");
+    println!("_imaps._tcp.example.com: {none:?}");
+    assert!(none.is_empty());
+}

@@ -8,11 +8,11 @@
 //!
 //! | Step | Asks | Notes |
 //! |---|---|---|
-//! | [`Step::DnsSrv`] | the system resolver | RFC 6186 / 8314 / 8620 SRV records; only with a [`DnsLookup`] |
+//! | [`Step::DnsSrv`] | the system resolver | RFC 6186 / 8314 / 8620 SRV records |
 //! | [`Step::DomainAutoconfig`] | the mail domain itself | `autoconfig.<domain>` and `<domain>/.well-known/autoconfig` |
 //! | [`Step::WellKnownJmap`] | the mail domain itself | RFC 8620 `/.well-known/jmap` |
 //! | [`Step::Ispdb`] | Mozilla (`autoconfig.thunderbird.net`) | only after [`Discovery::set_ispdb_consent`] |
-//! | [`Step::MxGuess`] | the system resolver | known hosted providers by MX; only with a [`DnsLookup`] |
+//! | [`Step::MxGuess`] | the system resolver | known hosted providers by MX |
 //! | [`Step::HostnameGuess`] | the mail domain itself | TCP probes of `imap.`/`smtp.`/`mail.<domain>` |
 //!
 //! Privacy and safety rules every step follows:
@@ -24,7 +24,10 @@
 //!   otherwise), a node limit, and strict host and port checks; see
 //!   [`autoconfig`].
 //! - Only the ISPDB step sends the domain to a third party, and only with
-//!   consent. There is no DNS-over-HTTPS fallback, which would do the same.
+//!   consent. DNS goes to the system's own resolvers ([`SystemDns`]); there
+//!   is no DNS-over-HTTPS fallback, which would leak the domain too.
+//! - A step that fails (a timeout, a DNS error, a TLS error) never stops
+//!   discovery; the next step runs.
 //! - Plain-text servers are never offered. IMAP over STARTTLS is skipped
 //!   too, because zmail's IMAP client only speaks implicit TLS.
 //!
@@ -42,7 +45,7 @@ pub mod guess;
 pub mod providers;
 
 pub use address::{AddressError, EmailAddress};
-pub use dns::{DnsLookup, MxRecord, SrvRecord};
+pub use dns::{DnsLookup, MxRecord, SrvRecord, SystemDns};
 pub use fetch::{Fetch, FetchResponse, HttpsFetcher};
 pub use guess::{PortProbe, TcpProbe};
 pub use providers::Provider;
@@ -322,13 +325,13 @@ pub struct Network {
 }
 
 impl Network {
-    /// The real network: HTTPS through [`HttpsFetcher`], TCP probes through
-    /// [`TcpProbe`]. There is no SRV/MX resolver yet, so the DNS steps are
-    /// skipped.
+    /// The real network: HTTPS through [`HttpsFetcher`], SRV and MX
+    /// lookups through [`SystemDns`], TCP probes through [`TcpProbe`].
+    /// Nothing is set up until a step first needs it.
     pub fn system() -> Self {
         Self {
             fetch: Arc::new(HttpsFetcher::new()),
-            dns: None,
+            dns: Some(Arc::new(SystemDns::new())),
             probe: Arc::new(TcpProbe::default()),
         }
     }

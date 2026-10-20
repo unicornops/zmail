@@ -63,7 +63,7 @@ Recommended Rust workspace layout:
 - `crates/zmail-auth`
   - OAuth2 flows, token refresh, account onboarding helpers.
 - `crates/zmail-autodiscover`
-  - Account autodiscovery from an email address: the domain's autoconfig and `.well-known/jmap`, ISPDB with consent, hostname guesses, and DNS SRV/MX once a resolver is chosen.
+  - Account autodiscovery from an email address: the domain's autoconfig and `.well-known/jmap`, DNS SRV and MX through the system resolver (hickory-resolver), ISPDB with consent, and hostname guesses.
 - `crates/zmail-security`
   - Secret storage abstraction, TLS policy, HTML sanitization, attachment safety policy.
 - `crates/zmail-index`
