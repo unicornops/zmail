@@ -10,6 +10,7 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant is pulled transitively by the pinned GPUI Linux accessibility stack (accesskit_unix, atspi) and folds into zbus 6, which that stack does not use yet" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names is pulled transitively by the pinned GPUI Linux accessibility stack (accesskit_unix, atspi) and folds into zbus 6, which that stack does not use yet" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is pulled transitively by the pinned GPUI Linux accessibility stack (accesskit_unix, atspi) and folds into zbus 6, which that stack does not use yet" },
+    { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 (via jmap-client -> tokio-tungstenite 0.28) is a shim whose only code is `pub use parent::TLS_SERVER_ROOTS;`, re-exporting webpki-roots 1.x, which Cargo.lock pins to the fixed 1.0.10; there is no newer 0.26.x" },
 ]
 
 [licenses]
