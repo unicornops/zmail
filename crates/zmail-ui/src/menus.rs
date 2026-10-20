@@ -18,8 +18,8 @@
 //! [`ACTIONS_NOT_IN_MENUS`] with the reason, so a new command cannot be
 //! left out by accident.
 //!
-//! A Help menu (Keyboard Shortcuts, About, Diagnostics) waits for the views
-//! those entries open; it has nothing to list yet.
+//! The Help menu lists Keyboard Shortcuts; About and Diagnostics join it
+//! with the views those entries open.
 
 use gpui::{
     Action, App, KeyBinding, KeyContext, Keymap, Menu as NativeMenu, MenuItem as NativeMenuItem,
@@ -31,8 +31,8 @@ use crate::actions::{
     AddAccount, AddAttachment, Archive, Delete, FocusSearch, Forward, GoBack, Hide, HideOthers,
     Minimize, NewMessage, Quit, Reply, ReplyAll, RetryOutbox, SaveAttachments, SaveDraft,
     SearchAllAccounts, SearchInAccount, SearchInFolder, Send, ShowAll, ShowBcc, ShowCc, ShowDrafts,
-    ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleCommandPalette, ToggleDensity, ToggleFlag,
-    ToggleRead, ToggleSidebar, ToggleTheme, Undo, Zoom,
+    ShowKeyboardShortcuts, ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleCommandPalette,
+    ToggleDensity, ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme, Undo, Zoom,
 };
 use crate::components::text_input;
 use crate::styles::{MenuPlacement, Platform, PlatformStyle};
@@ -289,6 +289,11 @@ impl MenuModel {
             });
         }
 
+        sections.push(MenuSection {
+            name: "Help",
+            items: vec![command("Keyboard Shortcuts", ShowKeyboardShortcuts)],
+        });
+
         Self { sections }
     }
 
@@ -482,13 +487,13 @@ mod tests {
         assert_eq!(
             names(Platform::MacOs),
             [
-                "Zmail", "File", "Edit", "View", "Mailbox", "Message", "Window"
+                "Zmail", "File", "Edit", "View", "Mailbox", "Message", "Window", "Help"
             ]
         );
         for platform in [Platform::Windows, Platform::Linux] {
             assert_eq!(
                 names(platform),
-                ["File", "Edit", "View", "Mailbox", "Message"]
+                ["File", "Edit", "View", "Mailbox", "Message", "Help"]
             );
         }
     }

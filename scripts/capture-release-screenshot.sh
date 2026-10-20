@@ -42,7 +42,8 @@ HARNESS_STARTED=0
 # breakpoint: 720 (one pane at a time), 900 (sidebar as an overlay) and
 # 1920 (wide); `sidebar` is the overlay open at 900. `accounts` is three
 # accounts with nested folders on the Unified Inbox, and `command-palette`
-# is the palette open over it. The compose views are
+# is the palette open over it; `cheat-sheet` is the keyboard shortcuts with
+# the Gmail keymap on. The compose views are
 # captured from their compose window (see window_title_for), at its default
 # 760x680.
 MATRIX=(
@@ -115,6 +116,8 @@ MATRIX=(
   "search-filters-light search-filters light 1440 920"
   "command-palette-dark command-palette dark 1440 920"
   "command-palette-light command-palette light 1440 920"
+  "cheat-sheet-dark cheat-sheet dark 1440 920"
+  "cheat-sheet-light cheat-sheet light 1440 920"
   "inbox-dark-1920 inbox dark 1920 1080"
   "inbox-light-1920 inbox light 1920 1080"
   "reader-dark-1920 reader dark 1920 1080"

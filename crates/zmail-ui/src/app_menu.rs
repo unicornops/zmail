@@ -294,9 +294,13 @@ mod tests {
         let button = button(&root, cx);
         button.update_in(cx, |button, window, cx| button.open(window, cx));
         let names: Vec<_> = rows(&button, cx).into_iter().map(|row| row.0).collect();
-        assert_eq!(names, ["File", "Edit", "View", "Mailbox", "Message"]);
+        assert_eq!(
+            names,
+            ["File", "Edit", "View", "Mailbox", "Message", "Help"]
+        );
 
-        cx.simulate_keystrokes("end enter");
+        // Message, the menu before Help.
+        cx.simulate_keystrokes("end up enter");
         let rows = rows(&button, cx);
         let row = |label: &str| {
             rows.iter()
@@ -319,8 +323,8 @@ mod tests {
         let (root, cx) = open_root(cx);
         let button = button(&root, cx);
         button.update_in(cx, |button, window, cx| button.open(window, cx));
-        // Message, then Reply (the first command).
-        cx.simulate_keystrokes("end enter down enter");
+        // Message (before Help), then Reply (the first command).
+        cx.simulate_keystrokes("end up enter down enter");
         root.read_with(cx, |root, _| assert_eq!(*root.replies.borrow(), 1));
         button.read_with(cx, |button, _| assert!(button.open_menu().is_none()));
         let focused = cx.update(|window, cx| window.focused(cx));

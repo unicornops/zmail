@@ -22,7 +22,8 @@
     "context": "Workspace && !TextInput && !Modal && !Menu && !Select && !Compose && !AccountSetup",
     "bindings": {
       "c": "zmail::NewMessage",
-      "g i": "zmail::GoToInbox"
+      "g i": "zmail::GoToInbox",
+      "?": "zmail::ShowKeyboardShortcuts"
     }
   }
 ]
