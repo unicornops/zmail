@@ -240,7 +240,29 @@ wait_for_window() {
 
   echo "timed out waiting for the ${title} window" >&2
   cat "${APP_LOG}" >&2
+  dump_app_state >&2
   return 1
+}
+
+# After a window wait times out (#186): the windows that are mapped,
+# under any title, and every thread's stack, to tell a slow cold start
+# from a hang. Needs gdb; ptrace needs root on most runners.
+dump_app_state() {
+  echo "--- mapped windows"
+  xdotool search --name . 2>/dev/null | while read -r id; do
+    echo "${id} $(xdotool getwindowname "${id}" 2>/dev/null || true)"
+  done
+  echo "--- zmail-app threads (pid ${APP_PID})"
+  if command -v gdb >/dev/null 2>&1; then
+    local gdb=(gdb)
+    sudo -n true 2>/dev/null && gdb=(sudo -n gdb)
+    timeout 60 "${gdb[@]}" -p "${APP_PID}" -batch -ex 'thread apply all bt' 2>&1 \
+      | grep -v '^\[New LWP\|^\[Thread debugging' || true
+  else
+    for task in /proc/"${APP_PID}"/task/*; do
+      echo "${task##*/} $(cat "${task}/comm" 2>/dev/null) $(cat "${task}/wchan" 2>/dev/null)"
+    done
+  fi
 }
 
 start_session() {

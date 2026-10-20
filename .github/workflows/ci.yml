@@ -261,9 +261,10 @@ jobs:
             # GPUI renders through wgpu, which loads the Vulkan loader
             # (libvulkan1) and, failing that, EGL/GL at runtime;
             # mesa-vulkan-drivers supplies the lavapipe software Vulkan
-            # driver the headless capture uses.
+            # driver the headless capture uses. gdb dumps the app's threads
+            # when a window never appears (#186).
             - name: Install Linux build and capture dependencies
-              run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev libvulkan1 libgl1 libegl1 libgl1-mesa-dri mesa-vulkan-drivers xvfb openbox xdotool imagemagick
+              run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev libvulkan1 libgl1 libegl1 libgl1-mesa-dri mesa-vulkan-drivers xvfb openbox xdotool imagemagick gdb
 
             - name: Read the pinned Rust toolchain
               id: toolchain
