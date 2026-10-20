@@ -484,3 +484,15 @@ fn keys_only_reach_the_focused_input_and_tab_moves_focus(cx: &mut TestAppContext
     assert_eq!(text(&first, cx), "one!");
     assert_eq!(text(&second, cx), "two");
 }
+
+#[gpui::test]
+fn clear_is_an_undoable_change(cx: &mut TestAppContext) {
+    let (input, cx) = focused_input(cx, |input| input.clearable("Clear"));
+    cx.simulate_input("query");
+    let events = record_events(&input, cx);
+    cx.update(|_, cx| input.update(cx, |input, cx| input.clear(cx)));
+    assert_eq!(text(&input, cx), "");
+    assert_eq!(*events.borrow(), vec![TextInputEvent::Changed]);
+    cx.simulate_keystrokes(&secondary("z"));
+    assert_eq!(text(&input, cx), "query");
+}

@@ -57,8 +57,6 @@ actions!(
         RetryOutbox,
         /// Move focus to the search field.
         FocusSearch,
-        /// Search local mail for the text in the search field.
-        RunSearch,
         /// Search only the folder the search started in.
         SearchInFolder,
         /// Widen the search to the folder's whole account.
@@ -243,7 +241,6 @@ pub(crate) const ACTIONS_WITHOUT_KEYS: &[(&str, &str)] = &[
         "zmail::ToggleDensity",
         "a View menu setting, rarely switched; no key to collide with",
     ),
-    ("zmail::RunSearch", "Enter in the search field submits it"),
     (
         "zmail::ShowAll",
         "the macOS menu bar has no standard key for it",

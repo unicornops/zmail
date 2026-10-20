@@ -36,8 +36,8 @@ use crate::account_setup::{AccountSetupEvent, AccountSetupView};
 use crate::actions::{
     AddAccount, Archive, Cancel, Delete, DismissSenderWarning, FocusNextPane, FocusPreviousPane,
     FocusSearch, Forward, GoBack, MoveToMailbox, NewMessage, Reply, ReplyAll, ReplyToMessage,
-    RetryOutbox, RunSearch, SaveAttachments, ShowDrafts, ShowMail, ShowOutbox, SyncAccount,
-    SyncAll, ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme, Undo,
+    RetryOutbox, SaveAttachments, ShowDrafts, ShowMail, ShowOutbox, SyncAccount, SyncAll,
+    ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme, Undo,
 };
 use crate::app_menu::AppMenuButton;
 use crate::components::{
@@ -123,6 +123,7 @@ impl WorkspaceView {
             TextInput::new(cx)
                 .compact()
                 .leading_icon("search")
+                .clearable("Clear search")
                 .label("Search mail")
                 .placeholder("Search mail")
         });
@@ -132,11 +133,13 @@ impl WorkspaceView {
         let toasts = cx.new(|_| ToastHost::new());
 
         let subscriptions = vec![
-            cx.subscribe(&search_query, |this, _, event: &TextInputEvent, cx| {
-                if *event == TextInputEvent::Submitted {
-                    this.run_search(cx);
-                }
-            }),
+            cx.subscribe(
+                &search_query,
+                |this, _, event: &TextInputEvent, cx| match event {
+                    TextInputEvent::Changed => this.search_edited(cx),
+                    TextInputEvent::Submitted => this.submit_search(cx),
+                },
+            ),
             cx.subscribe_in(&mail_actions, window, Self::on_mail_event),
             cx.subscribe_in(&sidebar, window, Self::on_sidebar_event),
             cx.subscribe_in(&message_list, window, Self::on_message_list_event),
@@ -184,7 +187,10 @@ impl WorkspaceView {
             dead_op_count: 0,
             search_results: Vec::new(),
             search_results_query: String::new(),
+            search_pending_query: String::new(),
             search_context: Default::default(),
+            search_typing: gpui::Task::ready(()),
+            search_read: gpui::Task::ready(()),
             selected_account_id: None,
             selected_mailbox_id: None,
             virtual_mailbox: None,
@@ -345,7 +351,7 @@ impl WorkspaceView {
             InitialView::Search(query) => {
                 view.search_query
                     .update(cx, |input, cx| input.set_text(query, cx));
-                view.run_search(cx);
+                view.search_on_open(cx);
                 view.focus_pane(Pane::MessageList, window, cx);
             }
         }
@@ -1053,7 +1059,7 @@ impl WorkspaceView {
         self.selected_account_id = Some(account_id);
         self.virtual_mailbox = None;
         self.list_selection = ListSelection::default();
-        self.list_mode = ListMode::Mail;
+        self.list_mail(cx);
         if matches!(self.detail_mode, DetailMode::AccountSetup) {
             self.detail_mode = DetailMode::Reader;
         }
@@ -1079,7 +1085,7 @@ impl WorkspaceView {
                 None
             }
         };
-        self.list_mode = ListMode::Mail;
+        self.list_mail(cx);
         self.detail_mode = DetailMode::Reader;
         if account_changed || was_virtual {
             self.refresh_from_store(cx);
@@ -1097,7 +1103,7 @@ impl WorkspaceView {
     ) {
         self.virtual_mailbox = Some(virtual_mailbox);
         self.selected_thread_id = None;
-        self.list_mode = ListMode::Mail;
+        self.list_mail(cx);
         self.detail_mode = DetailMode::Reader;
         self.refresh_from_store(cx);
         self.persist_last_mailbox();
@@ -1197,11 +1203,23 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Shows the mailbox in the list, ending a search, without touching
+    /// the detail pane or the selection.
+    fn list_mail(&mut self, cx: &mut Context<Self>) {
+        if self.list_mode == ListMode::Search {
+            self.reset_search(cx);
+        }
+        self.list_mode = ListMode::Mail;
+    }
+
     /// Switch the list panel mode.  Switching to [`ListMode::Mail`] also
     /// resets the detail pane to the reader.
     pub(crate) fn set_list_mode(&mut self, list_mode: ListMode, cx: &mut Context<Self>) {
         if list_mode != self.list_mode {
             self.list_selection = ListSelection::default();
+            if self.list_mode == ListMode::Search {
+                self.reset_search(cx);
+            }
         }
         self.list_mode = list_mode;
         if matches!(list_mode, ListMode::Mail) {
@@ -2325,13 +2343,28 @@ impl WorkspaceView {
         self.retry_selected_outbox(window, cx);
     }
 
+    /// Focuses the search field with its text selected, so typing
+    /// replaces it.
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_query
-            .update(cx, |input, cx| input.focus(window, cx));
+        self.search_query.update(cx, |input, cx| {
+            input.select_range(0..input.text().len(), cx);
+            input.focus(window, cx);
+        });
     }
 
-    fn run_search_action(&mut self, _: &RunSearch, _: &mut Window, cx: &mut Context<Self>) {
-        self.run_search(cx);
+    /// Down in the search field moves into the results. Other single-line
+    /// fields pass Down on, so it only reaches here from them unhandled.
+    fn search_field_down(
+        &mut self,
+        _: &components::text_input::Down,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_query.focus_handle(cx).is_focused(window) {
+            self.search_into_results(window, cx);
+        } else {
+            cx.propagate();
+        }
     }
 
     fn sync_account_action(
@@ -2354,6 +2387,8 @@ impl WorkspaceView {
             .focus_handle(cx)
             .contains_focused(window, cx)
         {
+            // Escape in the search field clears it and leaves search.
+            self.end_search(cx);
             self.focus_pane(Pane::MessageList, window, cx);
         } else if self.sidebar_overlay_open {
             self.close_sidebar_overlay(window, cx);
@@ -2378,7 +2413,7 @@ impl WorkspaceView {
             cx.notify();
         } else if self.go_back_to_list(window, cx) {
         } else if matches!(self.list_mode, ListMode::Search) {
-            self.set_list_mode(ListMode::Mail, cx);
+            self.end_search(cx);
         }
     }
 
@@ -2649,7 +2684,7 @@ impl WorkspaceView {
             } => {
                 self.selected_account_id = Some(*account_id);
                 self.detail_mode = DetailMode::Reader;
-                self.list_mode = ListMode::Mail;
+                self.list_mail(cx);
                 self.show_status(message.clone(), cx);
                 self.refresh_from_store(cx);
                 self.schedule_refresh(window, cx);
@@ -2830,7 +2865,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::show_outbox))
             .on_action(cx.listener(Self::retry_outbox))
             .on_action(cx.listener(Self::focus_search))
-            .on_action(cx.listener(Self::run_search_action))
+            .on_action(cx.listener(Self::search_field_down))
             .on_action(cx.listener(Self::search_in_folder))
             .on_action(cx.listener(Self::search_in_account))
             .on_action(cx.listener(Self::search_all_accounts))

@@ -32,6 +32,12 @@
     }
   },
   {
+    "context": "(Sidebar || MessageList || Reader) && !TextInput",
+    "bindings": {
+      "/": "zmail::FocusSearch"
+    }
+  },
+  {
     "context": "Sidebar",
     "bindings": {
       "down": "zmail::SelectNext",

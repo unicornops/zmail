@@ -1,27 +1,52 @@
 //! Running searches in a scope: the folder the list shows (the default),
 //! its account, or every account (UI plan Phase 3 item 5, Phase 7).
 //!
-//! Each search typed into the search field starts in the folder and can
-//! widen from the list header's scope control, its empty state or the
-//! Edit menu. The folder and account are taken when the search starts, so
-//! opening a result from another account does not change what is
-//! searched. An `in:` clause in the query names the folder itself and
-//! takes precedence over the folder scope; the scope control shows it.
+//! Search is live: each edit of the search field waits [`SEARCH_DEBOUNCE`]
+//! for the next one, then reads the local index on a background thread,
+//! so typing never waits for the store. Every search bumps
+//! [`SearchContext::generation`], and results only show while their
+//! generation is current, so a slow read for an earlier keystroke never
+//! replaces newer results. Clearing the field, Escape, or showing a
+//! mailbox ends the search and empties the field.
+//!
+//! A search session starts in the folder the list shows and can widen
+//! from the list header's scope control, its empty state or the Edit
+//! menu. The folder and account are taken when the session starts, so
+//! refining the query keeps the scope, and opening a result from another
+//! account does not change what is searched. An `in:` clause in the query
+//! names the folder itself and takes precedence over the folder scope;
+//! the scope control shows it.
 //!
 //! The local store answers first. When a query needs message bodies that
 //! are not indexed yet, the server fallback runs for each account in scope
 //! (only the folder's mailboxes in folder scope), and the results are
 //! re-read from the store as each finishes. One account's failure leaves
-//! the others' results in place.
+//! the others' results in place. The fallback never runs per keystroke:
+//! only once typing has settled for [`SERVER_SEARCH_SETTLE`], or at once
+//! on Enter, Down or a scope change. A server hit for mail newer than the
+//! last sync still syncs the account at most once per
+//! `zmail_sync::SEARCH_SYNC_COOLDOWN`.
 
-use gpui::{Context, Window};
-use zmail_core::{MailboxSelection, SearchScope, search::SearchQuery};
+use std::time::Duration;
+
+use anyhow::Result;
+use gpui::{AppContext as _, Context, Task, Window};
+use zmail_core::{MailboxSelection, SearchHit, SearchScope, search::SearchQuery};
 
 use super::{DetailMode, ListMode, WorkspaceView};
 use crate::actions::{SearchAllAccounts, SearchInAccount, SearchInFolder};
+use crate::pane::Pane;
 
 /// Most results a search lists.
 const SEARCH_LIMIT: usize = 100;
+
+/// How long typing must pause before the local search runs.
+pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// How long typing must pause before the servers are asked, counted from
+/// the last edit. Long enough that a word typed at a normal pace asks
+/// once, at its end.
+pub(crate) const SERVER_SEARCH_SETTLE: Duration = Duration::from_millis(1000);
 
 /// How far a search reaches.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -43,11 +68,13 @@ pub(crate) struct SearchContext {
     pub(crate) folder: Option<(MailboxSelection, String)>,
     /// The account the search started in, and its name.
     pub(crate) account: Option<(i64, String)>,
-    /// Bumped by every search, so a late server result for an earlier one
-    /// is ignored.
+    /// Bumped by every search, scope change and clear, so a late local or
+    /// server result for an earlier one is ignored.
     pub(crate) generation: u64,
     /// Server searches still running for this one.
     pub(crate) servers_pending: usize,
+    /// Whether the servers were asked for this generation already.
+    pub(crate) servers_asked: bool,
 }
 
 /// What the list shows about the search scope (see the list header).
@@ -87,45 +114,181 @@ impl SearchContext {
             _ => None,
         }
     }
+
+    /// Starts a new generation: anything still running for the last one
+    /// is ignored when it finishes.
+    fn next_generation(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.servers_pending = 0;
+        self.servers_asked = false;
+        self.generation
+    }
+}
+
+/// When a search asks the servers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerSearch {
+    /// Straight away (Enter, Down, a scope change).
+    Now,
+    /// Not yet: typing may go on ([`SERVER_SEARCH_SETTLE`]).
+    Later,
+}
+
+/// Where a search reads the local index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Read {
+    /// On a background thread; the results show when it finishes.
+    Background,
+    /// Here and now, for a search the next step depends on (Down into
+    /// the results, the window opening on a search).
+    Now,
 }
 
 impl WorkspaceView {
-    /// Runs the query in the search field, starting in the folder the
-    /// list shows.
-    pub(crate) fn run_search(&mut self, cx: &mut Context<Self>) {
+    /// The search field changed: search again once typing pauses, or end
+    /// the search when the field is empty.
+    pub(crate) fn search_edited(&mut self, cx: &mut Context<Self>) {
+        if self.search_query.read(cx).text().trim().is_empty() {
+            self.end_search(cx);
+            return;
+        }
+        // Replacing the task cancels the one for the previous edit.
+        self.search_typing = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SEARCH_DEBOUNCE).await;
+            let Ok(Some(generation)) = this.update(cx, |view, cx| {
+                view.start_search(ServerSearch::Later, Read::Background, cx)
+            }) else {
+                return;
+            };
+            cx.background_executor()
+                .timer(SERVER_SEARCH_SETTLE.saturating_sub(SEARCH_DEBOUNCE))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.search_context.generation == generation {
+                    view.search_servers_in_scope(cx);
+                }
+            });
+        });
+    }
+
+    /// Enter in the search field: search now, servers included, without
+    /// waiting for the debounce.
+    pub(crate) fn submit_search(&mut self, cx: &mut Context<Self>) {
+        self.search_now(Read::Background, cx);
+    }
+
+    /// Runs the search the window opens on, with its results in place
+    /// before the first frame.
+    pub(crate) fn search_on_open(&mut self, cx: &mut Context<Self>) {
+        self.search_now(Read::Now, cx);
+    }
+
+    /// Searches for the field's text straight away, servers included. A
+    /// search already showing for the same text only asks the servers if
+    /// it has not yet.
+    fn search_now(&mut self, read: Read, cx: &mut Context<Self>) {
+        self.search_typing = Task::ready(());
+        let query = self.search_query.read(cx).text().trim().to_owned();
+        if query.is_empty() {
+            self.end_search(cx);
+            return;
+        }
+        // The list shows this query's results, and no read for another
+        // query is still running.
+        let showing = matches!(self.list_mode, ListMode::Search)
+            && self.search_results_query == query
+            && self.search_pending_query == query;
+        if showing {
+            self.search_servers_in_scope(cx);
+        } else {
+            self.start_search(ServerSearch::Now, read, cx);
+        }
+    }
+
+    /// Runs the query in the search field. A new search starts in the
+    /// folder the list shows; refining the query of the search the list
+    /// shows keeps its scope. Returns the search's generation.
+    fn start_search(
+        &mut self,
+        servers: ServerSearch,
+        read: Read,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
         let Some(account_id) = self.selected_account_id else {
             self.show_error("Select or add an account before searching.", cx);
-            return;
+            return None;
         };
         let query = self.search_query.read(cx).text().trim().to_owned();
         if query.is_empty() {
-            self.search_results.clear();
-            self.list_mode = ListMode::Mail;
-            cx.notify();
-            return;
+            self.end_search(cx);
+            return None;
         }
-        let account_name = self
-            .accounts
-            .iter()
-            .find(|account| account.id == account_id)
-            .map(|account| account.display_name.clone())
-            .unwrap_or_default();
-        let folder = match (self.mailbox_selection(), self.list_mailbox()) {
-            (Some(selection), Some(mailbox)) => Some((selection, mailbox.name)),
-            _ => None,
-        };
-        self.search_context = SearchContext {
-            level: SearchLevel::Folder,
-            folder,
-            account: Some((account_id, account_name)),
-            generation: self.search_context.generation.wrapping_add(1),
-            servers_pending: 0,
-        };
-        self.search_results_query = query;
-        self.search_in_scope(cx);
+        if !matches!(self.list_mode, ListMode::Search) {
+            let account_name = self
+                .accounts
+                .iter()
+                .find(|account| account.id == account_id)
+                .map(|account| account.display_name.clone())
+                .unwrap_or_default();
+            let folder = match (self.mailbox_selection(), self.list_mailbox()) {
+                (Some(selection), Some(mailbox)) => Some((selection, mailbox.name)),
+                _ => None,
+            };
+            self.search_context = SearchContext {
+                level: SearchLevel::Folder,
+                folder,
+                account: Some((account_id, account_name)),
+                generation: self.search_context.generation,
+                ..SearchContext::default()
+            };
+        }
+        let generation = self.search_context.next_generation();
+        self.search_pending_query = query;
+        self.search_in_scope(servers, read, cx);
+        Some(generation)
     }
 
-    /// Re-runs the shown search at `level`.
+    /// Runs the field's query straight away and moves focus into the
+    /// results, selecting the first: Down in the search field.
+    pub(crate) fn search_into_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_now(Read::Now, cx);
+        self.focus_pane(Pane::MessageList, window, cx);
+        if matches!(self.list_mode, ListMode::Search)
+            && let Some(hit) = self.search_results.first()
+        {
+            let (thread_id, mailbox_id) = (hit.thread_id, hit.mailbox_id);
+            self.select_thread(thread_id, mailbox_id, cx);
+        }
+    }
+
+    /// Ends the search and goes back to the mailbox it started in.
+    pub(crate) fn end_search(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.list_mode, ListMode::Search) {
+            // Leaving search mode resets the search.
+            self.set_list_mode(ListMode::Mail, cx);
+        } else {
+            self.reset_search(cx);
+        }
+    }
+
+    /// Drops the search's results and anything still running for it, and
+    /// empties the search field. Runs whenever the list leaves search
+    /// mode, so the field always shows what the list does.
+    pub(crate) fn reset_search(&mut self, cx: &mut Context<Self>) {
+        self.search_typing = Task::ready(());
+        self.search_read = Task::ready(());
+        self.search_context.next_generation();
+        self.search_results.clear();
+        self.search_results_query.clear();
+        self.search_pending_query.clear();
+        if !self.search_query.read(cx).text().is_empty() {
+            self.search_query
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
+        cx.notify();
+    }
+
+    /// Re-runs the shown search at `level`, servers included.
     pub(crate) fn set_search_level(&mut self, level: SearchLevel, cx: &mut Context<Self>) {
         if !matches!(self.list_mode, ListMode::Search)
             || self.search_results_query.is_empty()
@@ -133,10 +296,11 @@ impl WorkspaceView {
         {
             return;
         }
+        self.search_typing = Task::ready(());
         self.search_context.level = level;
-        self.search_context.generation = self.search_context.generation.wrapping_add(1);
-        self.search_context.servers_pending = 0;
-        self.search_in_scope(cx);
+        self.search_context.next_generation();
+        self.search_pending_query = self.search_results_query.clone();
+        self.search_in_scope(ServerSearch::Now, Read::Background, cx);
     }
 
     /// What the list header and empty state show about the scope.
@@ -172,23 +336,80 @@ impl WorkspaceView {
         }
     }
 
-    /// Searches the store in the current scope, then asks the servers in
-    /// scope when the local index cannot fully answer.
-    fn search_in_scope(&mut self, cx: &mut Context<Self>) {
+    /// Searches the store in the current scope for the pending query, then
+    /// asks the servers in scope when the local index cannot fully answer.
+    fn search_in_scope(&mut self, servers: ServerSearch, read: Read, cx: &mut Context<Self>) {
         let Some(scope) = self.search_context.scope() else {
             return;
         };
-        let query = self.search_results_query.clone();
-        match self.store.search_threads_in(&scope, &query, SEARCH_LIMIT) {
+        let generation = self.search_context.generation;
+        let query = self.search_pending_query.clone();
+        match read {
+            Read::Now => {
+                let results = self.store.search_threads_in(&scope, &query, SEARCH_LIMIT);
+                self.search_read = Task::ready(());
+                self.show_search_results(generation, query, results, cx);
+            }
+            Read::Background => {
+                let store = self.store.clone();
+                // Replacing the task cancels a read still running for an
+                // earlier search; the generation check below covers the
+                // rest.
+                self.search_read = cx.spawn(async move |this, cx| {
+                    let (query, results) = cx
+                        .background_spawn(async move {
+                            let results = store.search_threads_in(&scope, &query, SEARCH_LIMIT);
+                            (query, results)
+                        })
+                        .await;
+                    let _ = this.update(cx, |view, cx| {
+                        view.show_search_results(generation, query, results, cx);
+                    });
+                });
+            }
+        }
+        if servers == ServerSearch::Now {
+            self.search_servers_in_scope(cx);
+        }
+    }
+
+    /// Shows a local read's results, unless a newer search has started
+    /// since it began.
+    pub(crate) fn show_search_results(
+        &mut self,
+        generation: u64,
+        query: String,
+        results: Result<Vec<SearchHit>>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.search_context.generation {
+            return;
+        }
+        match results {
             Ok(results) => {
                 self.search_results = results;
-                self.list_mode = ListMode::Search;
-                self.detail_mode = DetailMode::Reader;
-                self.search_servers(&scope, query, cx);
+                self.search_results_query = query;
+                if !matches!(self.list_mode, ListMode::Search) {
+                    self.set_list_mode(ListMode::Search, cx);
+                    self.detail_mode = DetailMode::Reader;
+                }
             }
             Err(error) => self.store_error = Some(error.to_string()),
         }
         cx.notify();
+    }
+
+    /// Asks the servers in scope about the search, once per generation.
+    fn search_servers_in_scope(&mut self, cx: &mut Context<Self>) {
+        if self.search_context.servers_asked || self.search_pending_query.is_empty() {
+            return;
+        }
+        let Some(scope) = self.search_context.scope() else {
+            return;
+        };
+        self.search_context.servers_asked = true;
+        let query = self.search_pending_query.clone();
+        self.search_servers(&scope, query, cx);
     }
 
     /// Runs the server fallback for every account in `scope` that has
@@ -240,6 +461,7 @@ impl WorkspaceView {
             })
             .detach();
         }
+        cx.notify();
     }
 
     pub(crate) fn search_in_folder(

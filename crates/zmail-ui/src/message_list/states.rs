@@ -100,7 +100,7 @@ impl MessageListView {
         if self.state.search_query.is_empty() {
             return empty_state(
                 "Search your mail",
-                "Type in the search field and press Enter.",
+                "Results appear as you type in the search field.",
                 "search",
                 Some(self.action_button("list-search-clear", "Back to Mail", ShowMail)),
                 colors,

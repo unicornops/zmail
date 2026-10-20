@@ -103,7 +103,6 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
         "keyboard focus navigation (Tab, F6)",
     ),
     ("zmail::Cancel", "Escape closes whatever is on top"),
-    ("zmail::RunSearch", "Enter in the search field submits it"),
     ("zmail::SaveAccount", "the account form's own Save button"),
     (
         "zmail::MoveToMailbox",

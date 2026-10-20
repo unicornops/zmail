@@ -234,6 +234,12 @@ const QUERIES: &[&str] = &[
     "subject:report -kittiwake",
 ];
 
+/// What the live-search timing types, one character at a time.
+const LIVE_TYPING: &[&str] = &["budget review", "from:alice", "kittiwake"];
+
+/// The page a live search reads (the UI's first page of results).
+const LIVE_PAGE: usize = 100;
+
 #[test]
 fn operators_match_a_brute_force_oracle() -> Result<()> {
     let spec = SyntheticMailboxSpec {
@@ -304,6 +310,31 @@ fn large_mailbox_search_timings() -> Result<()> {
         warm.sort();
         slowest = slowest.max(warm[2]);
         println!("| `{query}` | {hits} | {cold:.1?} | {:.1?} |", warm[2]);
+    }
+
+    // Live search runs on every pause in typing, so every prefix of a
+    // query is searched in turn: short prefixes match the most threads.
+    println!("\n| live typing (first {LIVE_PAGE}) | hits | warm (median of 5) |");
+    println!("|---|---|---|");
+    for typed in LIVE_TYPING {
+        for end in typed
+            .char_indices()
+            .map(|(index, _)| index)
+            .skip(1)
+            .chain([typed.len()])
+        {
+            let query = &typed[..end];
+            let timed = || -> Result<(usize, Duration)> {
+                let started = Instant::now();
+                let hits = store.search_threads_at(account_id, query, LIVE_PAGE, &now())?;
+                Ok((hits.len(), started.elapsed()))
+            };
+            let mut runs = (0..5).map(|_| timed()).collect::<Result<Vec<_>>>()?;
+            runs.sort_by_key(|(_, elapsed)| *elapsed);
+            let (hits, warm) = runs[2];
+            slowest = slowest.max(warm);
+            println!("| `{query}` | {hits} | {warm:.1?} |");
+        }
     }
 
     // Indexing hot paths: queue lookups and per-message hydration, which
