@@ -33,7 +33,7 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 - `crates/zmail-smtp`: SMTP submission
 - `crates/zmail-security`: keychain and rendering safety helpers
 - `crates/zmail-theme`: Zed theme compatibility layer
-- `crates/zmail-test-support`: synthetic data and live mail harness support
+- `crates/zmail-test-support`: synthetic data, the live mail harness and the Proton API harness
 
 ## Repo Expectations For Agents
 
@@ -74,6 +74,25 @@ cargo test -p zmail-test-support --test live_mail_harness -- --ignored --nocaptu
 cargo test -p zmail-test-support --test live_jmap_harness -- --ignored --nocapture
 scripts/mail-harness.sh down
 ```
+
+Proton API harness (go-proton-api's fake server, `docker/proton-harness`):
+
+```bash
+scripts/proton-harness.sh up      # build, start, wait, seed; state in target/proton-harness
+cargo test -p zmail-test-support --test live_proton_harness -- --ignored --nocapture
+scripts/proton-harness.sh down
+```
+
+The live tests start the harness themselves through
+`zmail_test_support::ProtonHarness`, which runs the script; `up` is only needed
+to poke the API by hand (`scripts/proton-harness.sh env` prints
+`PROTON_HARNESS_URL`, `PROTON_HARNESS_CA_PEM` and the seeded account). It
+serves the API on `https://127.0.0.1:18443` with a certificate from a throwaway
+CA made on every `up`; clients trust that CA only through `zmail-proton-api`'s
+test-only `test-harness` feature, never in release builds. The image is built
+locally from the pinned go-proton-api commit (CI builds it in the quality job);
+where Docker is unavailable, `PROTON_HARNESS_MODE=native` builds and runs the
+same pin with a local Go 1.26 toolchain. See `docker/proton-harness/README.md`.
 
 Harness image pulls: the script pre-pulls the three Docker Hub images with
 retries, and logs in with `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` when those

@@ -57,7 +57,7 @@ jobs:
                     esac
 
                     case "$file" in
-                      docker/mail-harness/*)
+                      docker/mail-harness/*|docker/proton-harness/*)
                         if [[ "$file" != *.md ]]; then
                           workspace_checks=true
                         fi
@@ -78,7 +78,7 @@ jobs:
                           workspace_checks=true
                         fi
                         ;;
-                      about.toml|deny.toml|scripts/mail-harness.sh)
+                      about.toml|deny.toml|scripts/mail-harness.sh|scripts/proton-harness.sh)
                         workspace_checks=true
                         ;;
                     esac
@@ -166,6 +166,21 @@ jobs:
                 DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
                 DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
               run: cargo test -p zmail-test-support --test live_jmap_harness -- --ignored --nocapture
+
+            # The Proton API test double (docker/proton-harness): built here
+            # from the pinned go-proton-api commit, so a build failure shows
+            # as its own step instead of a test failure. The script retries
+            # the build; the test step reuses the image.
+            - name: Build Proton Harness
+              timeout-minutes: 15
+              env:
+                DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+              run: scripts/proton-harness.sh build
+
+            - name: Live Proton Harness Test
+              timeout-minutes: 10
+              run: cargo test -p zmail-test-support --test live_proton_harness -- --ignored --nocapture
 
     build:
         name: Build (${{ matrix.os }})

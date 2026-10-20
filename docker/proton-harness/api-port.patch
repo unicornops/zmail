@@ -1,0 +1,103 @@
+zmail proton-harness: serve go-proton-api's fake API on a fixed port with a
+caller-supplied certificate. Applied by docker/proton-harness/Dockerfile (and
+by scripts/proton-harness.sh in native mode) on top of the pinned
+go-proton-api commit; see docker/proton-harness/README.md for why.
+
+diff --git a/server/cmd/server/main.go b/server/cmd/server/main.go
+index 19833d4..b89271d 100644
+--- a/server/cmd/server/main.go
++++ b/server/cmd/server/main.go
+@@ -2,6 +2,7 @@ package main
+ 
+ import (
+ 	"context"
++	"crypto/tls"
+ 	"fmt"
+ 	"log"
+ 	"net"
+@@ -27,6 +28,18 @@ func main() {
+ 		&cli.BoolFlag{
+ 			Name: "tls",
+ 		},
++		&cli.IntFlag{
++			Name:  "api-port",
++			Usage: "port to serve the API on, on all interfaces (0 picks a random loopback port)",
++		},
++		&cli.StringFlag{
++			Name:  "tls-cert",
++			Usage: "PEM certificate to serve the API with, instead of the built-in test certificate",
++		},
++		&cli.StringFlag{
++			Name:  "tls-key",
++			Usage: "PEM private key for --tls-cert",
++		},
+ 	}
+ 
+ 	app.Action = run
+@@ -37,12 +50,65 @@ func main() {
+ }
+ 
+ func run(c *cli.Context) error {
+-	s := server.New(server.WithTLS(c.Bool("tls")))
++	opts, err := apiOptions(c)
++	if err != nil {
++		return err
++	}
++
++	s := server.New(opts...)
+ 	defer s.Close()
+ 
++	log.Printf("gRPC on :%d", c.Int("port"))
++
+ 	return newService(s).run(c.Int("port"))
+ }
+ 
++// apiOptions serves the API on a fixed port, and with a caller-supplied
++// certificate, when asked to. The built-in httptest certificate is a CA
++// certificate, which strict TLS clients refuse as a server certificate.
++func apiOptions(c *cli.Context) ([]server.Option, error) {
++	certFile, keyFile := c.String("tls-cert"), c.String("tls-key")
++	if (certFile == "") != (keyFile == "") {
++		return nil, fmt.Errorf("--tls-cert and --tls-key must be given together")
++	}
++
++	if c.Int("api-port") == 0 {
++		if certFile != "" {
++			return nil, fmt.Errorf("--tls-cert needs --api-port")
++		}
++
++		log.Printf("API on a random loopback port (gRPC GetInfo reports it)")
++
++		return []server.Option{server.WithTLS(c.Bool("tls"))}, nil
++	}
++
++	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", c.Int("api-port")))
++	if err != nil {
++		return nil, err
++	}
++
++	if certFile == "" {
++		log.Printf("API on :%d (tls=%t, built-in test certificate)", c.Int("api-port"), c.Bool("tls"))
++
++		return []server.Option{server.WithListener(listener), server.WithTLS(c.Bool("tls"))}, nil
++	}
++
++	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
++	if err != nil {
++		return nil, fmt.Errorf("failed to load the API certificate: %w", err)
++	}
++
++	listener = tls.NewListener(listener, &tls.Config{
++		Certificates: []tls.Certificate{cert},
++		MinVersion:   tls.VersionTLS12,
++	})
++
++	log.Printf("API on :%d (TLS with %s)", c.Int("api-port"), certFile)
++
++	// The listener terminates TLS, so the test server itself runs plain.
++	return []server.Option{server.WithListener(listener), server.WithTLS(false)}, nil
++}
++
+ type service struct {
+ 	proto.UnimplementedServerServer
+ 

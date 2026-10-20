@@ -1,4 +1,7 @@
-//! Test support utilities, synthetic datasets, and the Phase 2b mail harness.
+//! Test support utilities, synthetic datasets, the Phase 2b mail harness and
+//! the Proton API test double.
+
+mod proton_harness;
 
 use std::{
     fs,
@@ -15,6 +18,12 @@ use reqwest::blocking::Client;
 use serde_json::json;
 use zmail_core::{
     AccountSyncSnapshot, MailboxSnapshot, MessageAttachment, MessageSnapshot, ThreadSnapshot,
+};
+
+pub use proton_harness::{
+    PROTON_HARNESS_ALIAS_ADDRESS, PROTON_HARNESS_PASSWORD, PROTON_HARNESS_PRIMARY_ADDRESS,
+    PROTON_HARNESS_URL, PROTON_HARNESS_USERNAME, ProtonHarness, ProtonHarnessAddress,
+    ProtonHarnessLabel, ProtonHarnessLabelKind, ProtonHarnessState,
 };
 
 /// Parameters for a generated mailbox dataset.
