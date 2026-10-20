@@ -11,9 +11,12 @@
 //! selectable mailbox and JMAP queries every email; only bodies are lazy,
 //! and eviction only drops bodies), so a hit the store does not know is
 //! mail that arrived after the last sync. One account sync, through the
-//! normal sync path, brings it in. A search triggers at most one, and
-//! searches start at most one per account every [`SEARCH_SYNC_COOLDOWN`],
-//! so repeated searches never chain full-account syncs.
+//! normal sync path, brings it in: the search asks for it with
+//! [`SyncService::request_sync`], so it queues behind a sync already
+//! running (which then runs once more, picking up mail that arrived after
+//! it started) instead of starting its own. Searches ask at most once per
+//! account every [`SEARCH_SYNC_COOLDOWN`], so repeated searches never chain
+//! full-account syncs.
 //!
 //! A search scoped to a folder ([`SyncService::search_server_in_and_wait`])
 //! asks IMAP about that folder's mailboxes only; an `in:` clause in the
@@ -166,21 +169,8 @@ impl SyncService {
         if unknown.is_empty() {
             return Ok(report);
         }
-        // Mail newer than the last sync: let a running sync finish, or run
-        // one, then resolve again. At most one sync per search, and none
-        // when a search already synced this account within the cooldown,
-        // so repeated searches never chain full-account syncs.
-        if self.is_syncing(account_id) {
-            while self.is_syncing(account_id) {
-                sleep(SYNC_WAIT_INTERVAL).await;
-            }
-        } else if self.claim_search_sync(account_id) && self.mark_account_active(account_id) {
-            self.clone().run_sync_job(account_id).await?;
-        } else {
-            while self.is_syncing(account_id) {
-                sleep(SYNC_WAIT_INTERVAL).await;
-            }
-        }
+        // Mail newer than the last sync: sync, then resolve again.
+        self.sync_for_unknown_hits(account_id).await;
         let still_unknown = store.record_server_search_hits(account_id, query, &hits)?;
         report.fetched_by_sync = unknown.len() - still_unknown.len().min(unknown.len());
         report.unresolved = still_unknown.len();
@@ -189,6 +179,22 @@ impl SyncService {
 }
 
 impl SyncService {
+    /// Brings in mail a server search found but the store does not have
+    /// yet. Asks for a sync with [`SyncService::request_sync`], at most
+    /// once per account every [`SEARCH_SYNC_COOLDOWN`]: with a sync already
+    /// running, the request queues behind it and that sync runs once more,
+    /// so mail that arrived after it started is fetched too. Then waits
+    /// until the account has no sync running or queued. A failed sync is
+    /// the sync's own to report; the search resolves what it can.
+    async fn sync_for_unknown_hits(&self, account_id: i64) {
+        if self.claim_search_sync(account_id) {
+            self.request_sync(account_id);
+        }
+        while self.is_syncing(account_id) {
+            sleep(SYNC_WAIT_INTERVAL).await;
+        }
+    }
+
     /// Records a search-triggered sync for the account, returning `false`
     /// when one already ran within [`SEARCH_SYNC_COOLDOWN`].
     fn claim_search_sync(&self, account_id: i64) -> bool {
@@ -293,5 +299,39 @@ mod tests {
         assert!(!scope("report in:inbox", "Archive", Some("archive")));
         assert!(!scope("report -in:spam", "Bulk", Some("junk")));
         assert!(scope("report -in:spam", "INBOX", None));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unknown_hits_queue_a_rerun_behind_a_running_sync() {
+        use std::sync::{Arc, atomic::Ordering};
+
+        use zmail_core::AuthKind;
+        use zmail_store::LocalStore;
+
+        use crate::tests::{CountingSecretStore, insert_account};
+
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let account_id = insert_account(&store, AuthKind::Password);
+        let secrets = Arc::new(CountingSecretStore::default());
+        let service = SyncService::new(
+            tokio::runtime::Handle::current().clone(),
+            store,
+            secrets.clone(),
+        );
+        let lookups = || secrets.lookups.load(Ordering::SeqCst);
+
+        // A sync is running: two failing attempts two seconds apart, one
+        // credential lookup each. The search's sync queues behind it, so
+        // it runs once more, and the search waits for both.
+        service.request_sync(account_id);
+        service.sync_for_unknown_hits(account_id).await;
+        assert!(!service.is_syncing(account_id));
+        assert_eq!(lookups(), 4, "the running sync ran once more");
+
+        // Within the cooldown, another search asks for nothing.
+        service.sync_for_unknown_hits(account_id).await;
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(lookups(), 4);
+        assert!(!service.is_syncing(account_id));
     }
 }

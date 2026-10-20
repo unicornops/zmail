@@ -1410,8 +1410,8 @@ mod tests {
     /// Fails every credential lookup instantly and counts the lookups, one
     /// per sync attempt.
     #[derive(Debug, Default)]
-    struct CountingSecretStore {
-        lookups: std::sync::atomic::AtomicUsize,
+    pub(super) struct CountingSecretStore {
+        pub(super) lookups: std::sync::atomic::AtomicUsize,
     }
 
     impl SecretStore for CountingSecretStore {
