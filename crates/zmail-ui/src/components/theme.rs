@@ -11,6 +11,7 @@ use gpui::{App, BoxShadow, Global, InteractiveElement, Styled, point, px, rgb};
 use zmail_core::{ThemeAppearance, ThemeSummary};
 
 use crate::styles::contrast::{MIN_TEXT_CONTRAST, contrast_ratio, readable_on};
+use crate::styles::high_contrast::{self, Contrast, ContrastSetting};
 use crate::styles::{
     FOCUS_RING_OFFSET, FOCUS_RING_WIDTH, Platform, PlatformStyle, UiColors, blend_over,
 };
@@ -92,9 +93,17 @@ impl ComponentTheme {
         }
     }
 
-    /// Install the theme resolved from `summary`.
+    /// Install the theme resolved from `summary`, adjusted for the
+    /// platform's contrast setting.
     pub(crate) fn sync(summary: &ThemeSummary, cx: &mut App) {
-        Self::set(Self::from_summary(summary), cx);
+        let contrast = ContrastSetting::get(cx);
+        let colors = high_contrast::apply(UiColors::from_theme(summary), contrast);
+        let is_light = match contrast {
+            // A contrast theme's own colours decide.
+            Contrast::System(_) => high_contrast::is_light(&colors),
+            _ => matches!(summary.appearance, ThemeAppearance::Light),
+        };
+        Self::set(Self::new(colors, is_light), cx);
     }
 
     /// Text colour for content drawn on `fill`: the theme's foreground or

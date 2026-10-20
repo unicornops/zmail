@@ -23,6 +23,7 @@
 
 pub mod contrast;
 mod density;
+pub(crate) mod high_contrast;
 mod platform;
 mod typography;
 
@@ -364,6 +365,15 @@ pub struct UiColors {
     pub selection_background: u32,
     /// Text and icons on `selection_background`.
     pub selection_foreground: u32,
+}
+
+/// The palette the UI draws with: `theme`'s colours, adjusted for the
+/// platform's contrast setting (see [`high_contrast`]).
+pub(crate) fn themed_colors(theme: &ThemeSummary, cx: &gpui::App) -> UiColors {
+    high_contrast::apply(
+        UiColors::from_theme(theme),
+        high_contrast::ContrastSetting::get(cx),
+    )
 }
 
 impl UiColors {

@@ -57,6 +57,7 @@ MATRIX=(
   "inbox-hover-light inbox light 1440 920 470 240"
   "inbox-empty-dark inbox-empty dark 1440 920"
   "inbox-empty-light inbox-empty light 1440 920"
+  "inbox-high-contrast inbox-high-contrast dark 1440 920"
   "syncing-dark syncing dark 1440 920"
   "syncing-light syncing light 1440 920"
   "outbox-dark outbox dark 1440 920"

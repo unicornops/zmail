@@ -36,6 +36,9 @@ pub(crate) enum FixtureView {
     InboxCompact,
     /// An empty inbox: "You're all caught up".
     InboxEmpty,
+    /// The seeded inbox drawn as a Windows contrast theme (High Contrast
+    /// Black) would draw it, on any platform.
+    InboxHighContrast,
     /// An account in its first sync: skeleton rows.
     Syncing,
     /// The outbox with a message sending, one waiting for a retry and one
@@ -120,12 +123,18 @@ pub(crate) enum FixtureView {
 const SEARCH_FILTERS_QUERY: &str = "search is:unread after:30d";
 
 impl FixtureView {
+    /// Whether the view simulates a Windows contrast theme.
+    pub(crate) fn high_contrast(self) -> bool {
+        self == Self::InboxHighContrast
+    }
+
     pub(crate) fn parse(value: &str) -> Result<Self> {
         Ok(match value {
             "empty" => Self::Empty,
             "inbox" => Self::Inbox,
             "inbox-compact" => Self::InboxCompact,
             "inbox-empty" => Self::InboxEmpty,
+            "inbox-high-contrast" => Self::InboxHighContrast,
             "syncing" => Self::Syncing,
             "outbox" => Self::Outbox,
             "reader" => Self::Reader,
@@ -165,7 +174,7 @@ impl FixtureView {
             "settings-sending" => Self::SettingsSending,
             "settings-about" => Self::SettingsAbout,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-appearance, settings-keyboard, settings-privacy, settings-sending or settings-about"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-appearance, settings-keyboard, settings-privacy, settings-sending or settings-about"
             ),
         })
     }
@@ -253,6 +262,7 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
     Ok(match view {
         FixtureView::Empty
         | FixtureView::Inbox
+        | FixtureView::InboxHighContrast
         | FixtureView::InboxEmpty
         | FixtureView::Syncing => InitialView::Inbox,
         FixtureView::Outbox => {
@@ -1169,6 +1179,7 @@ mod tests {
             "inbox",
             "inbox-compact",
             "inbox-empty",
+            "inbox-high-contrast",
             "syncing",
             "outbox",
             "reader",

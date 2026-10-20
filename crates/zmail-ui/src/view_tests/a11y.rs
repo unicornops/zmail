@@ -12,7 +12,10 @@ use gpui::{AppContext as _, Entity, Role, TestAppContext, VisualTestContext};
 use super::settings::settings_window;
 use super::{Harness, Setup, focus, keys, open_workspace, open_workspace_on, search_input, toasts};
 use crate::a11y::audit;
+use crate::components::ComponentTheme;
 use crate::settings::SettingsSection;
+use crate::styles::UiColors;
+use crate::styles::high_contrast::{Contrast, ContrastSetting, SystemColors};
 use crate::{InitialView, WorkspaceView};
 
 /// Fails on any empty label, naming its role.
@@ -235,4 +238,26 @@ fn toasts_and_errors_are_live_regions(cx: &mut TestAppContext) {
     assert!(has(&entries, Role::Status, &toast), "{entries:?}");
     assert!(has(&entries, Role::Alert, "The store is locked"));
     drop(harness);
+}
+
+#[gpui::test]
+fn a_windows_contrast_theme_replaces_the_palette(cx: &mut TestAppContext) {
+    let system = SystemColors::HIGH_CONTRAST_BLACK;
+    cx.update(|cx| ContrastSetting::simulate(Contrast::System(system), cx));
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+    let (colors, theme) = cx.update(|_, cx| (*cx.global::<UiColors>(), ComponentTheme::get(cx)));
+    assert_eq!(colors.background, system.window);
+    assert_eq!(colors.foreground, system.window_text);
+    assert_eq!(colors.selection_background, system.highlight);
+    assert_eq!(
+        theme.colors, colors,
+        "components draw with the same palette"
+    );
+    assert!(!theme.is_light);
+
+    // Switching the theme keeps the system colours.
+    keys("secondary-shift-t", cx);
+    let after = cx.update(|_, cx| *cx.global::<UiColors>());
+    assert_eq!(after, colors);
+    drop(view);
 }
