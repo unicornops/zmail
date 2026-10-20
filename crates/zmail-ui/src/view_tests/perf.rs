@@ -9,7 +9,12 @@
 //! ```
 //!
 //! `ZMAIL_PERF_THREADS` overrides the Inbox's size (default 100,000).
-//! `docs/performance.md` has the budgets and the recorded baseline.
+//! `ZMAIL_PERF_REPORT=<dir>` also writes the tables to
+//! `<dir>/performance.md` and the numbers to `<dir>/performance.json`.
+//! `ZMAIL_PERF_GATE=<factor>` fails the run when a median is over its
+//! budget times `factor` (CI uses 5: a gross-regression gate, not the
+//! budget). `docs/performance.md` has the budgets and the recorded
+//! baseline.
 //!
 //! # What is measured
 //!
@@ -73,6 +78,9 @@ struct Samples {
     name: String,
     budget: Duration,
     times: Vec<Duration>,
+    /// Whether `ZMAIL_PERF_GATE` checks it: false for a known miss that
+    /// a fix is still pending for.
+    gated: bool,
 }
 
 impl Samples {
@@ -81,7 +89,14 @@ impl Samples {
             name: name.into(),
             budget,
             times: Vec::new(),
+            gated: true,
         }
+    }
+
+    /// Leaves a known miss out of the gate (it is still reported).
+    fn ungated(mut self) -> Self {
+        self.gated = false;
+        self
     }
 
     /// Times `step` and records it.
@@ -128,19 +143,38 @@ impl Samples {
             self.over_budget(),
         )
     }
+
+    fn json(&self, group: &str) -> serde_json::Value {
+        let ms = |duration: Duration| duration.as_secs_f64() * 1_000.;
+        serde_json::json!({
+            "group": group,
+            "name": self.name,
+            "n": self.times.len(),
+            "median_ms": ms(self.percentile(50)),
+            "p95_ms": ms(self.percentile(95)),
+            "max_ms": ms(self.max()),
+            "budget_ms": ms(self.budget),
+            "over_budget": self.over_budget(),
+            "gated": self.gated,
+        })
+    }
 }
 
 fn ms(duration: Duration) -> String {
     format!("{:.2} ms", duration.as_secs_f64() * 1_000.)
 }
 
-fn print_table(title: &str, samples: &[Samples]) {
-    println!("\n{title}\n");
-    println!("| measurement | n | median | p95 | max | budget | over budget |");
-    println!("|---|---|---|---|---|---|---|");
+/// Prints a group's table and returns it as Markdown.
+fn print_table(title: &str, samples: &[Samples]) -> String {
+    let mut table = format!(
+        "\n### {title}\n\n| measurement | n | median | p95 | max | budget | over budget |\n|---|---|---|---|---|---|---|\n"
+    );
     for sample in samples {
-        println!("{}", sample.row());
+        table.push_str(&sample.row());
+        table.push('\n');
     }
+    print!("{table}");
+    table
 }
 
 /// A test context whose text system is the platform's own, so text is
@@ -442,12 +476,17 @@ fn measure_reader_open(
     view.update(cx, |view, cx| view.select_mailbox(seeded.inbox, cx));
     cx.run_until_parked();
     let mut results = Vec::new();
-    for (label, thread_id) in [
-        ("100 unread messages", seeded.long),
-        ("1 MB HTML body", seeded.html),
-        ("60 attachments", seeded.attachments),
+    // The 1 MB body is a known miss: the reader lays the whole body out
+    // in its first frame until long bodies are laid out in pieces.
+    for (label, thread_id, gated) in [
+        ("100 unread messages", seeded.long, true),
+        ("1 MB HTML body", seeded.html, false),
+        ("60 attachments", seeded.attachments, true),
     ] {
         let mut samples = Samples::new(format!("open reader ({label})"), ACTION_BUDGET);
+        if !gated {
+            samples = samples.ungated();
+        }
         for _ in 0..RUNS {
             // Another conversation first, so each open loads and lays out
             // this one from scratch.
@@ -544,15 +583,72 @@ fn performance_budgets() {
     view.update(cx, |view, cx| view.select_mailbox(seeded.inbox, cx));
     cx.run_until_parked();
 
-    let scroll = measure_list_scroll(&view, total, cx);
-    print_table(
-        &format!("List scroll, {total} threads (CPU time per frame)"),
-        &scroll,
-    );
-    let actions = measure_actions(&view, &seeded, cx);
-    print_table("Action to visible change (CPU time)", &actions);
-    let reader = measure_reader_open(&view, &seeded, cx);
-    print_table("Reader open (CPU time)", &reader);
-
+    let groups = [
+        (
+            "List scroll (CPU time per frame)",
+            measure_list_scroll(&view, total, cx),
+        ),
+        (
+            "Action to visible change (CPU time)",
+            measure_actions(&view, &seeded, cx),
+        ),
+        (
+            "Reader open (CPU time)",
+            measure_reader_open(&view, &seeded, cx),
+        ),
+    ];
     drop(harness);
+
+    let mut markdown = format!(
+        "## Performance budgets, {total} threads\n\nSeeding took {seed_time:.1?}. \
+         CPU time on the main thread per step; see docs/performance.md.\n"
+    );
+    for (title, samples) in &groups {
+        markdown.push_str(&print_table(title, samples));
+    }
+    if let Some(dir) = std::env::var_os("ZMAIL_PERF_REPORT") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("the report directory is created");
+        let results = groups
+            .iter()
+            .flat_map(|(title, samples)| samples.iter().map(move |sample| sample.json(title)))
+            .collect::<Vec<_>>();
+        let report = serde_json::json!({
+            "threads": total,
+            "seed_ms": seed_time.as_secs_f64() * 1_000.,
+            "results": results,
+        });
+        std::fs::write(dir.join("performance.md"), &markdown).expect("the tables are written");
+        std::fs::write(
+            dir.join("performance.json"),
+            serde_json::to_string_pretty(&report).expect("the report serialises"),
+        )
+        .expect("the report is written");
+    }
+
+    // A gross-regression gate (CI): only a median several times over its
+    // budget fails, so runner noise does not.
+    if let Some(factor) = std::env::var("ZMAIL_PERF_GATE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+    {
+        let over = groups
+            .iter()
+            .flat_map(|(_, samples)| samples)
+            .filter(|samples| samples.gated && samples.percentile(50) > samples.budget * factor)
+            .map(|samples| {
+                format!(
+                    "{}: median {} over {factor} × {}",
+                    samples.name,
+                    ms(samples.percentile(50)),
+                    ms(samples.budget)
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            over.is_empty(),
+            "medians over {factor} times their budget:\n{}",
+            over.join("\n")
+        );
+    }
 }
