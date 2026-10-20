@@ -108,6 +108,11 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
         "the add-account flow's own Continue button",
     ),
     (
+        "zmail::GoToInbox",
+        "only the Gmail keymap binds it (g i), and a plain-key sequence is no menu key \
+         equivalent; the sidebar and the palette's Go to Inbox entries cover it",
+    ),
+    (
         "zmail::MoveToMailbox",
         "needs a mailbox; the reader's More menu opens the Move to… picker",
     ),
@@ -407,7 +412,7 @@ mod tests {
     use gpui::TestAppContext;
 
     use super::*;
-    use crate::keymap::{DEFAULT_KEYMAP, MACOS_KEYMAP, parse_keymap};
+    use crate::keymap::{DEFAULT_KEYMAP, GMAIL_KEYMAP, MACOS_KEYMAP, parse_keymap};
 
     const PLATFORMS: [Platform; 3] = [Platform::MacOs, Platform::Windows, Platform::Linux];
 
@@ -535,6 +540,33 @@ mod tests {
                 command.label,
                 binding_label(binding)
             );
+        }
+    }
+
+    #[gpui::test]
+    fn the_gmail_keymap_keeps_menu_shortcuts_chorded(cx: &mut TestAppContext) {
+        // The Gmail layer loads after the standard keymap, so every menu
+        // still shows (and on macOS uses as its key equivalent) the
+        // standard chord, never a plain letter AppKit would fire from any
+        // pane.
+        let standard = keymap(cx);
+        let gmail = cx.update(|cx| {
+            let mut bindings = standard.bindings().cloned().collect::<Vec<_>>();
+            bindings.extend(parse_keymap(GMAIL_KEYMAP, cx).expect("the Gmail keymap parses"));
+            Keymap::new(bindings)
+        });
+        for platform in PLATFORMS {
+            for command in MenuModel::new(platform).commands() {
+                let label = |keymap: &Keymap| {
+                    menu_binding(keymap, command.action.as_ref()).map(binding_label)
+                };
+                assert_eq!(
+                    label(&gmail),
+                    label(&standard),
+                    "{platform:?} {}",
+                    command.label
+                );
+            }
         }
     }
 

@@ -557,16 +557,24 @@ impl MessageListView {
     }
 
     fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
-        let next = self.current_index(cx).map(|index| index + 1).unwrap_or(0);
-        self.select_index(next, cx);
+        self.select_adjacent(true, cx);
     }
 
     fn select_previous(&mut self, _: &SelectPrevious, _: &mut Window, cx: &mut Context<Self>) {
-        let previous = self
-            .current_index(cx)
-            .map(|index| index.saturating_sub(1))
-            .unwrap_or(0);
-        self.select_index(previous, cx);
+        self.select_adjacent(false, cx);
+    }
+
+    /// Selects and opens the next (or previous) row, as Down and Up do.
+    /// The workspace calls it for the Gmail keymap's j and k in the
+    /// reader, which move through the list behind the conversation.
+    pub(crate) fn select_adjacent(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let current = self.current_index(cx);
+        let index = match (current, forward) {
+            (Some(index), true) => index + 1,
+            (Some(index), false) => index.saturating_sub(1),
+            (None, _) => 0,
+        };
+        self.select_index(index, cx);
     }
 
     fn select_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) {

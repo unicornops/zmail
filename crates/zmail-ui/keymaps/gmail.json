@@ -1,0 +1,28 @@
+[
+  {
+    "context": "(MessageList || Reader) && !TextInput && !Modal && !Menu && !Select && !Compose",
+    "bindings": {
+      "j": "zmail::SelectNext",
+      "k": "zmail::SelectPrevious",
+      "e": "zmail::Archive",
+      "#": "zmail::Delete",
+      "r": "zmail::Reply",
+      "a": "zmail::ReplyAll",
+      "f": "zmail::Forward",
+      "s": "zmail::ToggleFlag"
+    }
+  },
+  {
+    "context": "(Sidebar || MessageList || Reader) && !TextInput && !Modal && !Menu && !Select && !Compose",
+    "bindings": {
+      "z": "zmail::Undo"
+    }
+  },
+  {
+    "context": "Workspace && !TextInput && !Modal && !Menu && !Select && !Compose && !AccountSetup",
+    "bindings": {
+      "c": "zmail::NewMessage",
+      "g i": "zmail::GoToInbox"
+    }
+  }
+]
