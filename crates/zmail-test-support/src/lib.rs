@@ -269,6 +269,134 @@ impl SyntheticRandom {
     }
 }
 
+/// Subject of [`reader_stress_threads`]' conversation of 100 unread
+/// messages.
+pub const STRESS_LONG_SUBJECT: &str = "Stress: long conversation";
+/// Subject of [`reader_stress_threads`]' message with a 1 MB HTML body.
+pub const STRESS_HTML_SUBJECT: &str = "Stress: large HTML body";
+/// Subject of [`reader_stress_threads`]' message with 60 attachments.
+pub const STRESS_ATTACHMENTS_SUBJECT: &str = "Stress: many attachments";
+
+/// Conversations that are heavy to open in the reader, for the reader
+/// benchmarks (#122): 100 unread messages of about 2 KB each, one message
+/// whose only body is 1 MB of sanitised HTML, and one message with 60
+/// attachments. All three are dated 2026-10-02, after every message of
+/// [`SyntheticMailboxSpec::snapshot`], so they list first.
+pub fn reader_stress_threads() -> Vec<ThreadSnapshot> {
+    let long = (0..100)
+        .map(|index| {
+            stress_message(
+                &format!("long-{index}"),
+                STRESS_LONG_SUBJECT,
+                index,
+                Some(stress_text_body(index, 2_000)),
+            )
+        })
+        .collect();
+    let mut html = stress_message("html", STRESS_HTML_SUBJECT, 200, None);
+    html.sanitized_html = Some(stress_html(1_000_000));
+    html.body_preview = "Quarterly report".to_owned();
+    let mut attachments = stress_message(
+        "attachments",
+        STRESS_ATTACHMENTS_SUBJECT,
+        300,
+        Some(stress_text_body(0, 800)),
+    );
+    attachments.attachments = (0..60)
+        .map(|index| MessageAttachment {
+            filename: format!("scan-{index:02}.pdf"),
+            content_type: "application/pdf".to_owned(),
+            size_bytes: 250_000 + index * 1_000,
+            storage_path: format!("stress/{index}.pdf"),
+        })
+        .collect();
+    vec![
+        stress_thread(STRESS_LONG_SUBJECT, long),
+        stress_thread(STRESS_HTML_SUBJECT, vec![html]),
+        stress_thread(STRESS_ATTACHMENTS_SUBJECT, vec![attachments]),
+    ]
+}
+
+fn stress_message(id: &str, subject: &str, minute: usize, body: Option<String>) -> MessageSnapshot {
+    MessageSnapshot {
+        remote_id: format!("stress-{id}"),
+        identity_email: "synthetic@zmail.test".to_owned(),
+        sender: format!("Sender {0} <sender{0}@example.com>", minute % 7),
+        reply_to: None,
+        recipients: "synthetic@zmail.test".to_owned(),
+        subject: subject.to_owned(),
+        body_preview: body
+            .as_deref()
+            .unwrap_or_default()
+            .chars()
+            .take(120)
+            .collect(),
+        body_text: body,
+        sanitized_html: None,
+        has_remote_content: false,
+        is_read: false,
+        is_flagged: false,
+        received_at: format!("2026-10-02T{:02}:{:02}:00+00:00", minute / 60, minute % 60),
+        attachments: Vec::new(),
+    }
+}
+
+fn stress_thread(subject: &str, messages: Vec<MessageSnapshot>) -> ThreadSnapshot {
+    ThreadSnapshot {
+        remote_thread_id: format!("stress-{subject}"),
+        subject: subject.to_owned(),
+        participants: zmail_core::participants::thread_participants(&messages),
+        preview: messages
+            .last()
+            .map(|message| message.body_preview.clone())
+            .unwrap_or_default(),
+        is_flagged: false,
+        has_attachments: messages
+            .iter()
+            .any(|message| !message.attachments.is_empty()),
+        unread_count: messages.len(),
+        latest_message_at: messages
+            .last()
+            .map(|message| message.received_at.clone())
+            .unwrap_or_default(),
+        messages,
+    }
+}
+
+/// A plain-text reply of about `bytes`: paragraphs with a link, and a
+/// quoted tail that folds.
+fn stress_text_body(index: usize, bytes: usize) -> String {
+    let paragraph = "Thanks for the numbers. The budget review moved to Thursday, \
+        and the launch checklist is at https://example.com/launch for anyone \
+        who has not seen it yet. Please add your notes before the meeting.";
+    let mut body = format!("Hello {index},\n\n");
+    while body.len() < bytes {
+        body.push_str(paragraph);
+        body.push_str("\n\n");
+    }
+    body.push_str("On Monday, someone wrote:\n> the earlier message\n> quoted here\n");
+    body
+}
+
+/// About `bytes` of sanitised HTML, as a report or newsletter has:
+/// headings, paragraphs with links, and table rows.
+fn stress_html(bytes: usize) -> String {
+    let mut html = String::from("<html><body><h1>Quarterly report</h1>");
+    let mut row = 0;
+    while html.len() < bytes {
+        html.push_str(&format!(
+            "<h2>Section {row}</h2><p>The <b>budget</b> for item {row} is on \
+             <a href=\"https://example.com/items/{row}\">its page</a>, with the \
+             launch notes and the vendor's renewal terms.</p><table><tr><td>Item \
+             {row}</td><td>{}</td><td>approved</td></tr></table>",
+            row * 17
+        ));
+        row += 1;
+    }
+    html.push_str("</body></html>");
+    html
+}
+
 /// The default Phase 0 benchmark dataset shape.
 pub const DEFAULT_SPEC: SyntheticMailboxSpec = SyntheticMailboxSpec {
     mailbox_count: 128,

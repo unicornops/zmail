@@ -296,6 +296,12 @@ impl MessageListView {
         }
     }
 
+    /// The thread rows' scroll handle (the performance runs scroll it).
+    #[cfg(test)]
+    pub(crate) fn thread_scroll(&self) -> &UniformListScrollHandle {
+        &self.thread_scroll
+    }
+
     /// What the list shows now.
     #[cfg(test)]
     pub(crate) fn state(&self) -> &MessageListState {

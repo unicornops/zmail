@@ -37,6 +37,7 @@ mod list;
 mod motion;
 mod onboarding;
 mod palette;
+mod perf;
 mod reader;
 mod reader_attachments;
 mod reader_safety;

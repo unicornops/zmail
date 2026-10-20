@@ -35,6 +35,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 # `#[gpui::test]`, `TestAppContext` and `VisualTestContext` for view tests.
 gpui = { workspace = true, features = ["test-support"] }
 tokio.workspace = true
+# Synthetic mailboxes for the performance runs (`view_tests/perf.rs`).
+zmail-test-support = { path = "../zmail-test-support" }
 
 [lints]
 workspace = true
