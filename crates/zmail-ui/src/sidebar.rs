@@ -778,20 +778,24 @@ impl SidebarView {
             SidebarItem::Drafts => ("sidebar-drafts".into(), "file-text", "Drafts".into(), 0),
             _ => ("sidebar-outbox".into(), "clock", "Outbox".into(), 0),
         };
-        let account_id = match item {
+        let account_color = match item {
             SidebarItem::Inbox(mailbox_id) if state.accounts.len() > 1 => state
                 .mailboxes
                 .iter()
                 .find(|mailbox| mailbox.id == *mailbox_id)
-                .map(|mailbox| mailbox.account_id),
+                .and_then(|mailbox| {
+                    state
+                        .accounts
+                        .iter()
+                        .find(|account| account.id == mailbox.account_id)
+                })
+                .map(AccountSummary::color),
             _ => None,
         };
         let outbox = state.outbox;
         self.row_frame(id, item, depth, is_selected, colors, cx)
             .child(icon(icon_name, ICON_SIZE_SM, colors.muted))
-            .when_some(account_id, |this, account_id| {
-                this.child(account_dot(account_id))
-            })
+            .when_some(account_color, |this, color| this.child(account_dot(color)))
             .child(Self::label(label))
             .when(unread > 0, |this| this.child(Badge::count(unread)))
             .when(
@@ -870,7 +874,7 @@ impl SidebarView {
             colors,
             cx,
         ))
-        .child(account_dot(account_id))
+        .child(account_dot(account.color()))
         .child(Self::label(account.display_name.clone()).font_weight(FontWeight::SEMIBOLD))
         .child(
             div()

@@ -15,16 +15,17 @@ use std::{
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use zmail_core::{
-    AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, CachePolicySummary,
-    DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary, DraftUpdate,
-    HydratedBody, IdentitySummary, IndexCandidate, IndexProgress, MailboxRole, MailboxSelection,
-    MailboxSnapshot, MailboxSummary, MessageAttachment, MessageFlagState, MessagePreview,
-    MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, OAuth2TargetConfig, OutboxJobState,
-    OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp,
-    PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, SearchScope,
-    ServerHitRef, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary,
-    SyncTarget, ThreadCounts, ThreadFilter, ThreadMarks, ThreadMessage, ThreadSnapshot,
-    ThreadState, ThreadSummary, ThreadView, VirtualMailbox, preferences::UiPreferences,
+    AccountColor, AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind,
+    CachePolicySummary, DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary,
+    DraftUpdate, HydratedBody, IdentitySummary, IndexCandidate, IndexProgress, MailboxRole,
+    MailboxSelection, MailboxSnapshot, MailboxSummary, MessageAttachment, MessageFlagState,
+    MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, OAuth2TargetConfig,
+    OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage,
+    PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit,
+    SearchScope, ServerHitRef, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase,
+    SyncStatusSummary, SyncTarget, ThreadCounts, ThreadFilter, ThreadMarks, ThreadMessage,
+    ThreadSnapshot, ThreadState, ThreadSummary, ThreadView, VirtualMailbox,
+    preferences::UiPreferences,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -61,6 +62,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0019_address_history",
         address_history::ADDRESS_HISTORY_SCHEMA,
     ),
+    ("0020_account_color", ACCOUNT_COLOR_SCHEMA),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -308,6 +310,12 @@ ALTER TABLE accounts ADD COLUMN oauth2_access_expires_at INTEGER;
 
 const ACCOUNT_DISK_BUDGET_SCHEMA: &str = r#"
 ALTER TABLE accounts ADD COLUMN cache_policy_disk_budget_mb INTEGER;
+"#;
+
+/// The account colour the user picked (an [`AccountColor`] name); NULL
+/// keeps the colour derived from the account id.
+const ACCOUNT_COLOR_SCHEMA: &str = r#"
+ALTER TABLE accounts ADD COLUMN color TEXT;
 "#;
 
 const MESSAGE_REPLY_TO_SCHEMA: &str = r#"
@@ -716,7 +724,8 @@ impl LocalStore {
                 sync_state.last_success_at,
                 sync_state.last_error_at,
                 sync_state.last_error_message,
-                sync_state.failure_count
+                sync_state.failure_count,
+                accounts.color
             FROM accounts
             LEFT JOIN identities ON identities.account_id = accounts.id
             LEFT JOIN sync_state ON sync_state.account_id = accounts.id
@@ -735,7 +744,8 @@ impl LocalStore {
                 sync_state.last_success_at,
                 sync_state.last_error_at,
                 sync_state.last_error_message,
-                sync_state.failure_count
+                sync_state.failure_count,
+                accounts.color
             ORDER BY accounts.id ASC
             "#,
         )?;
@@ -769,6 +779,10 @@ impl LocalStore {
                     last_error_message: row.get(14)?,
                     failure_count: row.get::<_, Option<usize>>(15)?.unwrap_or_default(),
                 },
+                color_override: row
+                    .get::<_, Option<String>>(16)?
+                    .as_deref()
+                    .and_then(AccountColor::parse),
             })
         })?;
 
@@ -908,6 +922,18 @@ impl LocalStore {
             params![account_id, expires_at],
         )
         .with_context(|| format!("failed to record the token expiry for account {account_id}"))?;
+        Ok(())
+    }
+
+    /// Sets the account's colour; `None` goes back to the colour derived
+    /// from its id.
+    pub fn set_account_color(&self, account_id: i64, color: Option<AccountColor>) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE accounts SET color = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![account_id, color.map(AccountColor::as_str)],
+        )
+        .with_context(|| format!("failed to set the colour of account {account_id}"))?;
         Ok(())
     }
 
@@ -6082,10 +6108,10 @@ mod tests {
 
     use super::LocalStore;
     use zmail_core::{
-        AccountSyncSnapshot, AuthKind, CachePolicySummary, DraftState, HydratedBody, MailboxRole,
-        MailboxSelection, MailboxSnapshot, MessageAttachment, MessageRenderMode, MessageSnapshot,
-        NewAccount, NewDraft, NewIdentity, PendingOpKind, ProtocolKind, SyncPhase, ThreadCounts,
-        ThreadFilter, ThreadSnapshot, VirtualMailbox,
+        AccountColor, AccountSyncSnapshot, AuthKind, CachePolicySummary, DraftState, HydratedBody,
+        MailboxRole, MailboxSelection, MailboxSnapshot, MessageAttachment, MessageRenderMode,
+        MessageSnapshot, NewAccount, NewDraft, NewIdentity, PendingOpKind, ProtocolKind, SyncPhase,
+        ThreadCounts, ThreadFilter, ThreadSnapshot, VirtualMailbox,
     };
 
     #[test]
@@ -6254,6 +6280,32 @@ mod tests {
             !directory.exists(),
             "the directory is removed with the last handle"
         );
+    }
+
+    #[test]
+    fn account_colours_are_stored_and_cleared() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let color = |store: &LocalStore| {
+            store.list_accounts().expect("accounts should list")[0].color_override
+        };
+        assert_eq!(color(&store), None, "a new account uses the derived colour");
+
+        store
+            .set_account_color(account_id, Some(AccountColor::Pink))
+            .expect("the colour should save");
+        assert_eq!(color(&store), Some(AccountColor::Pink));
+        assert_eq!(
+            store.list_accounts().expect("accounts should list")[0].color(),
+            AccountColor::Pink
+        );
+
+        store
+            .set_account_color(account_id, None)
+            .expect("the colour should clear");
+        assert_eq!(color(&store), None);
     }
 
     #[test]

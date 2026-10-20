@@ -403,6 +403,101 @@ pub struct AccountSummary {
     pub cache_policy: CachePolicySummary,
     /// Current sync status for the account.
     pub sync_status: SyncStatusSummary,
+    /// The colour the user picked, or `None` for the one derived from the
+    /// id. Read it through [`AccountSummary::color`].
+    pub color_override: Option<AccountColor>,
+}
+
+impl AccountSummary {
+    /// The account's colour: the user's choice, or the derived one.
+    pub fn color(&self) -> AccountColor {
+        self.color_override
+            .unwrap_or_else(|| AccountColor::derived(self.id))
+    }
+}
+
+/// An account's colour, from a fixed palette that reads on light and dark
+/// themes. It only marks which account something belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AccountColor {
+    /// Blue.
+    Blue,
+    /// Green.
+    Green,
+    /// Amber.
+    Amber,
+    /// Pink.
+    Pink,
+    /// Violet.
+    Violet,
+    /// Cyan.
+    Cyan,
+    /// Orange.
+    Orange,
+    /// Lime.
+    Lime,
+}
+
+impl AccountColor {
+    /// The palette, in the order accounts are given colours.
+    pub const ALL: [AccountColor; 8] = [
+        AccountColor::Blue,
+        AccountColor::Green,
+        AccountColor::Amber,
+        AccountColor::Pink,
+        AccountColor::Violet,
+        AccountColor::Cyan,
+        AccountColor::Orange,
+        AccountColor::Lime,
+    ];
+
+    /// The colour an account gets when the user has not picked one:
+    /// derived from its id, so the first accounts all differ and an
+    /// account keeps its colour across launches. Ids start at 1, and the
+    /// first account gets the first colour.
+    pub fn derived(account_id: i64) -> Self {
+        let len = Self::ALL.len() as i64;
+        Self::ALL[(account_id - 1).rem_euclid(len) as usize]
+    }
+
+    /// The colour's position in [`AccountColor::ALL`].
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The stable name stored in the database.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blue => "blue",
+            Self::Green => "green",
+            Self::Amber => "amber",
+            Self::Pink => "pink",
+            Self::Violet => "violet",
+            Self::Cyan => "cyan",
+            Self::Orange => "orange",
+            Self::Lime => "lime",
+        }
+    }
+
+    /// Parses a stored name; unknown names (from a newer version) give
+    /// `None`, so the derived colour applies.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|color| color.as_str() == value)
+    }
+
+    /// The name shown in the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Blue => "Blue",
+            Self::Green => "Green",
+            Self::Amber => "Amber",
+            Self::Pink => "Pink",
+            Self::Violet => "Violet",
+            Self::Cyan => "Cyan",
+            Self::Orange => "Orange",
+            Self::Lime => "Lime",
+        }
+    }
 }
 
 /// Account metadata shown in the shell header.
@@ -1611,7 +1706,20 @@ pub struct AppBootstrap {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthKind, MailboxRole, ProtocolKind, mailbox_leaf_name};
+    use super::{AccountColor, AuthKind, MailboxRole, ProtocolKind, mailbox_leaf_name};
+
+    #[test]
+    fn account_colours_round_trip_and_derive_in_palette_order() {
+        for (index, color) in AccountColor::ALL.into_iter().enumerate() {
+            assert_eq!(color.index(), index);
+            assert_eq!(AccountColor::parse(color.as_str()), Some(color));
+        }
+        assert_eq!(AccountColor::parse("teal"), None);
+        assert_eq!(AccountColor::derived(1), AccountColor::Blue);
+        assert_eq!(AccountColor::derived(2), AccountColor::Green);
+        assert_eq!(AccountColor::derived(9), AccountColor::Blue);
+        assert_eq!(AccountColor::derived(0), AccountColor::Lime);
+    }
 
     #[test]
     fn mailbox_roles_parse_their_storage_names_ignoring_case() {

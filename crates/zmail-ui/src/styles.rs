@@ -151,7 +151,7 @@ pub const MAILBOX_ITEM_HEIGHT: f32 = 40.0;
 pub const SIDEBAR_TREE_INDENT: f32 = SPACE_4;
 /// Diameter of an account's colour dot.
 pub const ACCOUNT_DOT_SIZE: f32 = 8.0;
-/// Account colours, given out in account order (see
+/// Account colours, in `zmail_core::AccountColor` order (see
 /// `widgets::account_color`). Mid-tone hues that read on light and dark
 /// surfaces; they only mark which account something belongs to.
 pub const ACCOUNT_COLORS: [u32; 8] = [
