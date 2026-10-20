@@ -716,6 +716,7 @@ mod tests {
             identity_count: 1,
             cache_policy: CachePolicySummary::performance_first(),
             sync_status: SyncStatusSummary::idle(""),
+            color_override: None,
         }
     }
 
