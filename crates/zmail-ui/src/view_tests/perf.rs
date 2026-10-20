@@ -472,6 +472,44 @@ fn measure_reader_open(
     results
 }
 
+/// Scrolling far down a large mailbox reads each page of rows once, not
+/// on every frame: the row the list measures (row 0) has its own cache.
+#[gpui::test]
+fn scrolling_deep_in_a_mailbox_reads_each_page_once(cx: &mut TestAppContext) {
+    let snapshot = perf_snapshot(2_000);
+    let (view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Account,
+        |_| crate::InitialView::Inbox,
+        |store| {
+            let account_id = store.list_accounts().expect("the accounts load")[0].id;
+            store
+                .replace_account_snapshot(account_id, &snapshot)
+                .expect("the mail is stored");
+        },
+    );
+    let seeded = seeded_ids(&harness.store);
+    cx.simulate_resize(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)));
+    view.update(cx, |view, cx| view.select_mailbox(seeded.inbox, cx));
+    cx.run_until_parked();
+    jump_list_to(&view, 1_000, cx);
+    cx.simulate_mouse_move(over_list(), None, Modifiers::none());
+    let queries = |cx: &mut VisualTestContext| {
+        cx.read_entity(&view, |view, cx| {
+            view.message_list.read(cx).counters.queries
+        })
+    };
+
+    // Ten frames of a slow scroll stay inside one page.
+    scroll_wheel(-8., cx);
+    let before = queries(cx);
+    for _ in 0..10 {
+        scroll_wheel(-8., cx);
+    }
+    assert!(list_top(&view, cx) > 1_000., "the list scrolled");
+    assert_eq!(queries(cx), before, "no frame read the store again");
+}
+
 #[test]
 #[ignore = "seeds a 100k-thread store; run with --release (see the module docs)"]
 fn performance_budgets() {
