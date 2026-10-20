@@ -1,9 +1,16 @@
 name: CI
 
+# Branch pushes are covered by their pull request's run, so a push runs CI
+# only on main. A newer push to a pull request cancels its older run.
 on:
     push:
+        branches: [main]
     pull_request:
     workflow_dispatch:
+
+concurrency:
+    group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
     contents: read
