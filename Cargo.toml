@@ -36,6 +36,10 @@ futures-util = "0.3"
 # together, so keep them on the same tag.
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
+# SRV and MX lookups for account autodiscovery, through the system's own
+# resolver configuration (resolv.conf, the macOS dynamic store, the Windows
+# adapters) on the Tokio runtime. No DNS-over-HTTPS/TLS/QUIC transports.
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["system-config", "tokio"] }
 jmap-client = { version = "0.4.0", default-features = false, features = ["async", "rustls"] }
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 # DKIM signing is the sending server's job; leaving out mail-send's default `dkim`

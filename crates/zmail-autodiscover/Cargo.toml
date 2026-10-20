@@ -7,8 +7,10 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+hickory-resolver.workspace = true
 reqwest.workspace = true
 roxmltree.workspace = true
+tokio.workspace = true
 url.workspace = true
 
 [lints]
