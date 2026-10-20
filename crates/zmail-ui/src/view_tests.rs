@@ -2243,6 +2243,8 @@ fn a_failing_account_offers_fix(cx: &mut TestAppContext) {
 }
 
 /// Queues a one-line draft from the first account and returns the job.
+/// The job is due an hour from now, so the harness's sync service never
+/// claims it: the test decides when it is sent.
 fn queue_test_message(store: &LocalStore, subject: &str) -> i64 {
     let account_id = store.list_accounts().expect("accounts")[0].id;
     let identity = store.list_identities(account_id).expect("identities")[0].id;
@@ -2257,16 +2259,14 @@ fn queue_test_message(store: &LocalStore, subject: &str) -> i64 {
             body: "Hello".to_owned(),
         })
         .expect("the draft is stored");
-    store.queue_draft(draft_id).expect("queued")
+    store
+        .queue_draft_after(draft_id, std::time::Duration::from_secs(60 * 60))
+        .expect("queued")
 }
 
-/// Delivers outbox job `job_id` the way the sync service does.
+/// Records outbox job `job_id` as delivered, as the sync service does after
+/// a successful send.
 fn deliver(store: &LocalStore, job_id: i64) {
-    let claimed = store
-        .claim_due_outbox_job(None)
-        .expect("the claim runs")
-        .expect("a job is due");
-    assert_eq!(claimed.job_id, job_id);
     store
         .record_outbox_sent(job_id)
         .expect("the send is recorded");
