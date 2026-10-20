@@ -48,6 +48,10 @@ GPUI (pinned to a Zed stable release, see `docs/upstream/zed.md`) ships AccessKi
   - The setting is read at startup and again when the window is activated or the appearance changes.
 - **macOS Increase Contrast** (System Settings → Accessibility → Display) keeps the theme but raises secondary text to 7:1 and borders to 4.5:1. It is read at the same times.
 - **Linux** has no high-contrast handling yet.
+- **Reduced motion.** Settings → Appearance → Motion offers Match System, Reduce and Full.
+  - Match System reads macOS Reduce Motion and GNOME's `enable-animations` at startup and whenever the window is activated. Windows' setting is not read yet, so on Windows motion stays on unless Reduce is chosen.
+  - With motion reduced, the loading placeholders stop pulsing, spinners stand still and animated images show their first frame.
+  - Nothing in the UI slides; menus, overlays, dialogs and toasts appear and go at once.
 - **Messages.** Undo toasts stay eight seconds and other toasts and status messages four; screen readers announce them as they appear. Errors stay until dismissed with the banner's close button, which is also a Tab stop.
 
 ### Content
