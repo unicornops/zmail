@@ -9,7 +9,7 @@
 //! |--------|---------|
 //! | `accounts` | each account's status, colour, cache budget, Re-authenticate and Remove; Add Account |
 //! | `appearance` | theme mode, imported Zed theme, row density, reading pane |
-//! | `privacy` | remote content and sender warnings, as they stand |
+//! | `privacy` | remote content (always blocked), the sender-warning level |
 //! | `sending` | the undo-send delay |
 //! | `about` | version, upstream pins, queues, undelivered changes, Copy diagnostics |
 //!
@@ -334,7 +334,7 @@ impl SettingsWindow {
     fn new(section: SettingsSection, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let accounts = cx.new(|cx| AccountsSettings::new(window, cx));
         let appearance = cx.new(|cx| AppearanceSettings::new(window, cx));
-        let privacy = cx.new(|_| PrivacySettings);
+        let privacy = cx.new(PrivacySettings::new);
         let sending = cx.new(SendingSettings::new);
         let about = cx.new(AboutSettings::new);
         let toasts = cx.new(|_| ToastHost::new());
@@ -342,6 +342,7 @@ impl SettingsWindow {
             cx.subscribe(&accounts, Self::on_section_event),
             cx.subscribe(&appearance, Self::on_section_event),
             cx.subscribe(&sending, Self::on_section_event),
+            cx.subscribe(&privacy, Self::on_section_event),
             cx.subscribe(&about, Self::on_section_event),
         ];
         let nav_focus = cx.focus_handle();
@@ -399,6 +400,7 @@ impl SettingsWindow {
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.appearance.update(cx, |section, cx| section.reload(cx));
         self.sending.update(cx, |section, cx| section.reload(cx));
+        self.privacy.update(cx, |section, cx| section.reload(cx));
     }
 
     /// Re-read the open section's store state.
@@ -422,6 +424,12 @@ impl SettingsWindow {
     #[cfg(test)]
     pub(crate) fn appearance(&self) -> &Entity<AppearanceSettings> {
         &self.appearance
+    }
+
+    /// The Privacy section.
+    #[cfg(test)]
+    pub(crate) fn privacy(&self) -> &Entity<PrivacySettings> {
+        &self.privacy
     }
 
     /// The Sending section.
@@ -709,5 +717,6 @@ pub(crate) fn setting_text(
 
 impl EventEmitter<SettingsEvent> for AccountsSettings {}
 impl EventEmitter<SettingsEvent> for AppearanceSettings {}
+impl EventEmitter<SettingsEvent> for PrivacySettings {}
 impl EventEmitter<SettingsEvent> for SendingSettings {}
 impl EventEmitter<SettingsEvent> for AboutSettings {}

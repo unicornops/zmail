@@ -2,10 +2,14 @@
 //! the tiered sender-safety banners with "Looks safe" and "Show details".
 
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
-use zmail_core::{AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
+use zmail_core::{
+    AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, ThreadSnapshot,
+    preferences::SenderWarnings,
+};
 use zmail_store::LocalStore;
 
 use super::{Harness, Setup, click_on, drawn, open_workspace_with};
+use crate::settings::SettingsSection;
 use crate::{InitialView, WorkspaceView};
 
 /// A one-message thread from `sender` with an optional Reply-To.
@@ -157,5 +161,78 @@ fn a_reply_to_on_another_domain_shows_a_caution_banner(cx: &mut TestAppContext) 
     );
     let (thread_id, message_id) = only_thread(&harness);
     assert_eq!(reader_thread(&view, cx), Some(thread_id));
+    assert!(drawn(format!("sender-safety-{message_id}"), cx));
+}
+
+/// Like [`open_thread`], with the sender-warning level saved first.
+fn open_thread_at(
+    cx: &mut TestAppContext,
+    thread: ThreadSnapshot,
+    level: SenderWarnings,
+) -> (Entity<WorkspaceView>, &mut VisualTestContext, Harness) {
+    open_workspace_with(
+        cx,
+        Setup::Account,
+        |harness| InitialView::Thread(only_thread(harness).0),
+        move |store| {
+            seed(store, thread);
+            store
+                .update_ui_preferences(|preferences| preferences.sender_warnings = level)
+                .expect("the preferences save");
+        },
+    )
+}
+
+#[gpui::test]
+fn fewer_warnings_hides_an_info_banner_live(cx: &mut TestAppContext) {
+    // Replies go to a subdomain of the sender's own domain: Info.
+    let (_view, cx, harness) = open_thread_at(
+        cx,
+        thread(
+            "info",
+            "Kai Santos <kai@example.test>",
+            Some("replies@news.example.test"),
+            false,
+        ),
+        SenderWarnings::Standard,
+    );
+    let (_, message_id) = only_thread(&harness);
+    assert!(drawn(format!("sender-safety-{message_id}"), cx));
+
+    // Settings → Privacy → Fewer Warnings: the banner goes at once.
+    cx.update(|_, cx| crate::settings::open(Some(SettingsSection::Privacy), cx));
+    cx.run_until_parked();
+    let (root, mut window_cx) = super::settings::settings_window(cx);
+    let select = root.read_with(&window_cx, |root, cx| {
+        root.privacy().read(cx).sender_warnings().clone()
+    });
+    select.update(&mut window_cx, |select, cx| select.pick(1, cx));
+    window_cx.run_until_parked();
+    cx.run_until_parked();
+    assert_eq!(
+        harness
+            .store
+            .ui_preferences()
+            .expect("the preferences load")
+            .sender_warnings,
+        SenderWarnings::Fewer
+    );
+    assert!(!drawn(format!("sender-safety-{message_id}"), cx));
+}
+
+#[gpui::test]
+fn fewer_warnings_still_shows_a_caution_banner(cx: &mut TestAppContext) {
+    // Replies go to an unrelated domain: Caution, which always shows.
+    let (_view, cx, harness) = open_thread_at(
+        cx,
+        thread(
+            "caution",
+            "Kai Santos <kai@example.test>",
+            Some("billing@unrelated.example"),
+            false,
+        ),
+        SenderWarnings::Fewer,
+    );
+    let (_, message_id) = only_thread(&harness);
     assert!(drawn(format!("sender-safety-{message_id}"), cx));
 }

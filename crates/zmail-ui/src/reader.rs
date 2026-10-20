@@ -49,7 +49,7 @@ use gpui::{
     App, Context, Entity, FocusHandle, Focusable, IntoElement, ListAlignment, ListOffset,
     ListState, MouseButton, Render, Subscription, Window, div, list, prelude::*, px, rgb,
 };
-use zmail_core::{MailboxSummary, ThreadView, time::HourCycle};
+use zmail_core::{MailboxSummary, ThreadView, preferences::SenderWarnings, time::HourCycle};
 
 use self::actions::{action_bar_buttons, more_menu_items};
 use self::body::{BodyContext, BodyModel, BodySelection};
@@ -102,6 +102,8 @@ pub(crate) struct ReaderState {
     /// message. Without one, the footer offers Reply, Reply All and
     /// Forward.
     pub(crate) reply: Option<Entity<ComposeView>>,
+    /// Which sender-safety warnings show (Settings → Privacy).
+    pub(crate) sender_warnings: SenderWarnings,
 }
 
 pub(crate) struct ReaderView {
@@ -408,6 +410,7 @@ impl ReaderView {
                     own_addresses: &self.state.own_addresses,
                     colors,
                     focused: self.focus_handle.contains_focused(window, cx),
+                    sender_warnings: self.state.sender_warnings,
                 };
                 let display = MessageDisplay {
                     index,

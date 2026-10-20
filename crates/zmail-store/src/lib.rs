@@ -9505,7 +9505,8 @@ mod tests {
     #[test]
     fn ui_preferences_round_trip_through_the_store() {
         use zmail_core::preferences::{
-            Density, KeymapName, PaneWidths, ReadingPanePosition, ThemeMode, UiPreferences,
+            Density, KeymapName, PaneWidths, ReadingPanePosition, SenderWarnings, ThemeMode,
+            UiPreferences,
         };
         use zmail_core::{MailboxSelection, VirtualMailbox};
 
@@ -9525,6 +9526,7 @@ mod tests {
             undo_send_delay_secs: 5,
             indexing: Default::default(),
             recent_commands: vec!["virtual:flagged".to_owned()],
+            sender_warnings: SenderWarnings::Fewer,
         };
         store
             .save_ui_preferences(&preferences)

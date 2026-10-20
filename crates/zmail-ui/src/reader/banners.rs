@@ -12,11 +12,14 @@
 //!
 //! "Looks safe" hides the banner for that message only (stored with the
 //! message); "Show details" shows the evidence the banner is based on.
+//! With Settings → Privacy → Sender warnings on "Fewer warnings", Info
+//! banners do not show; Caution and Danger always do.
 
 use gpui::{AnyElement, IntoElement, SharedString, div, prelude::*};
 use zmail_core::{
     ThreadMessage, ThreadView,
     participants::{parse_address_list, sender_identity},
+    preferences::SenderWarnings,
 };
 use zmail_security::sender_safety::{SafetyTier, SenderSafetyReport, analyze_sender_identity};
 
@@ -38,10 +41,10 @@ pub(crate) fn conversation_banners(thread: &ThreadView) -> Vec<AnyElement> {
     ]
 }
 
-/// The sender-safety banner for `message`, unless its sender looks safe or
-/// the user dismissed it.
-pub(crate) fn message_banners(message: &ThreadMessage) -> Vec<AnyElement> {
-    sender_safety_banner(message)
+/// The sender-safety banner for `message`, unless its sender looks safe,
+/// the user dismissed it, or `level` leaves its tier out.
+pub(crate) fn message_banners(message: &ThreadMessage, level: SenderWarnings) -> Vec<AnyElement> {
+    sender_safety_banner(message, level)
         .map(IntoElement::into_any_element)
         .into_iter()
         .collect()
@@ -57,13 +60,28 @@ pub(crate) struct SenderWarning {
     pub(crate) details: Vec<(&'static str, String)>,
 }
 
-/// The warning for `message`, or `None` when there is nothing to show.
-pub(crate) fn sender_warning(message: &ThreadMessage) -> Option<SenderWarning> {
+/// The warning for `message`, or `None` when there is nothing to show at
+/// `level`.
+pub(crate) fn sender_warning(
+    message: &ThreadMessage,
+    level: SenderWarnings,
+) -> Option<SenderWarning> {
     if message.sender_warning_dismissed {
         return None;
     }
     let report = analyze_sender_identity(&message.sender, message.reply_to.as_deref());
     describe(&report, &message.sender, message.reply_to.as_deref())
+        .filter(|warning| shows(warning.tier, level))
+}
+
+/// Whether a warning of `tier` shows at `level`. Only Info can be left
+/// out: lookalike senders (Danger) and an unrelated Reply-To (Caution)
+/// always show.
+pub(crate) fn shows(tier: SafetyTier, level: SenderWarnings) -> bool {
+    match level {
+        SenderWarnings::Standard => true,
+        SenderWarnings::Fewer => tier >= SafetyTier::Caution,
+    }
 }
 
 fn describe(
@@ -129,8 +147,8 @@ fn describe(
     })
 }
 
-fn sender_safety_banner(message: &ThreadMessage) -> Option<Banner> {
-    let warning = sender_warning(message)?;
+fn sender_safety_banner(message: &ThreadMessage, level: SenderWarnings) -> Option<Banner> {
+    let warning = sender_warning(message, level)?;
     let message_id = message.id;
     let tone = match warning.tier {
         SafetyTier::Info => BannerTone::Info,
@@ -163,6 +181,16 @@ fn sender_safety_banner(message: &ThreadMessage) -> Option<Banner> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fewer_warnings_leaves_out_info_only() {
+        for tier in [SafetyTier::Info, SafetyTier::Caution, SafetyTier::Danger] {
+            assert!(shows(tier, SenderWarnings::Standard));
+        }
+        assert!(!shows(SafetyTier::Info, SenderWarnings::Fewer));
+        assert!(shows(SafetyTier::Caution, SenderWarnings::Fewer));
+        assert!(shows(SafetyTier::Danger, SenderWarnings::Fewer));
+    }
 
     fn warning(from: &str, reply_to: Option<&str>) -> Option<SenderWarning> {
         let report = analyze_sender_identity(from, reply_to);

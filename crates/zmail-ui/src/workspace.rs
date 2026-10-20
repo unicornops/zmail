@@ -229,6 +229,7 @@ impl WorkspaceView {
             sidebar_collapsed: false,
             density: Default::default(),
             reading_pane: Default::default(),
+            sender_warnings: Default::default(),
             sidebar_width: SIDEBAR_WIDTH,
             list_width: MESSAGE_LIST_WIDTH,
             pane_widths_generation: 0,
@@ -575,6 +576,7 @@ impl WorkspaceView {
                 .as_ref()
                 .filter(|reply| Some(reply.thread_id) == self.selected_thread_id)
                 .map(|reply| reply.compose.clone()),
+            sender_warnings: self.sender_warnings,
         };
         self.reader
             .update(cx, |reader, cx| reader.set_state(reader_state, cx));

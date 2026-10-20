@@ -453,6 +453,8 @@ struct WorkspaceView {
     density: zmail_core::preferences::Density,
     /// Whether the reader sits beside the list or replaces it (persisted).
     reading_pane: zmail_core::preferences::ReadingPanePosition,
+    /// Which sender-safety warnings the reader shows (persisted).
+    sender_warnings: zmail_core::preferences::SenderWarnings,
     /// The user's sidebar width (persisted); the layout clamps it to
     /// what the window fits.
     sidebar_width: f32,
