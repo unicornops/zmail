@@ -9,6 +9,7 @@
 //! |--------|---------|
 //! | `accounts` | each account's status, colour, cache budget, Re-authenticate and Remove; Add Account |
 //! | `appearance` | theme mode, imported Zed theme, row density, reading pane |
+//! | `keyboard` | Standard or Gmail shortcuts, and the shortcut list with search |
 //! | `privacy` | remote content (always blocked), the sender-warning level |
 //! | `sending` | the undo-send delay |
 //! | `about` | version, upstream pins, queues, undelivered changes, Copy diagnostics |
@@ -25,6 +26,7 @@
 mod about;
 mod accounts;
 mod appearance;
+mod keyboard;
 mod privacy;
 mod sending;
 
@@ -45,6 +47,7 @@ use zmail_sync::SyncService;
 use self::about::AboutSettings;
 use self::accounts::AccountsSettings;
 use self::appearance::AppearanceSettings;
+use self::keyboard::KeyboardSettings;
 use self::privacy::PrivacySettings;
 use self::sending::SendingSettings;
 use crate::WorkspaceView;
@@ -90,6 +93,8 @@ pub enum SettingsSection {
     Accounts,
     /// Theme, imported theme, density and reading pane.
     Appearance,
+    /// The keymap and the shortcut list.
+    Keyboard,
     /// Remote content and sender warnings.
     Privacy,
     /// The undo-send delay.
@@ -100,9 +105,10 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Every section, in list order.
-    pub(crate) const ALL: [SettingsSection; 5] = [
+    pub(crate) const ALL: [SettingsSection; 6] = [
         SettingsSection::Accounts,
         SettingsSection::Appearance,
+        SettingsSection::Keyboard,
         SettingsSection::Privacy,
         SettingsSection::Sending,
         SettingsSection::About,
@@ -113,6 +119,7 @@ impl SettingsSection {
         match self {
             Self::Accounts => "Accounts",
             Self::Appearance => "Appearance",
+            Self::Keyboard => "Keyboard",
             Self::Privacy => "Privacy",
             Self::Sending => "Sending",
             Self::About => "About & Diagnostics",
@@ -123,6 +130,7 @@ impl SettingsSection {
         match self {
             Self::Accounts => "user",
             Self::Appearance => "sun",
+            Self::Keyboard => "keyboard",
             Self::Privacy => "shield",
             Self::Sending => "send",
             Self::About => "info",
@@ -133,6 +141,7 @@ impl SettingsSection {
         match self {
             Self::Accounts => "accounts",
             Self::Appearance => "appearance",
+            Self::Keyboard => "keyboard",
             Self::Privacy => "privacy",
             Self::Sending => "sending",
             Self::About => "about",
@@ -291,6 +300,7 @@ pub(crate) struct SettingsWindow {
     nav_focus: FocusHandle,
     accounts: Entity<AccountsSettings>,
     appearance: Entity<AppearanceSettings>,
+    keyboard: Entity<KeyboardSettings>,
     privacy: Entity<PrivacySettings>,
     sending: Entity<SendingSettings>,
     about: Entity<AboutSettings>,
@@ -334,6 +344,7 @@ impl SettingsWindow {
     fn new(section: SettingsSection, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let accounts = cx.new(|cx| AccountsSettings::new(window, cx));
         let appearance = cx.new(|cx| AppearanceSettings::new(window, cx));
+        let keyboard = cx.new(KeyboardSettings::new);
         let privacy = cx.new(PrivacySettings::new);
         let sending = cx.new(SendingSettings::new);
         let about = cx.new(AboutSettings::new);
@@ -342,6 +353,7 @@ impl SettingsWindow {
             cx.subscribe(&accounts, Self::on_section_event),
             cx.subscribe(&appearance, Self::on_section_event),
             cx.subscribe(&sending, Self::on_section_event),
+            cx.subscribe(&keyboard, Self::on_section_event),
             cx.subscribe(&privacy, Self::on_section_event),
             cx.subscribe(&about, Self::on_section_event),
         ];
@@ -367,6 +379,7 @@ impl SettingsWindow {
             nav_focus,
             accounts,
             appearance,
+            keyboard,
             privacy,
             sending,
             about,
@@ -401,6 +414,7 @@ impl SettingsWindow {
         self.appearance.update(cx, |section, cx| section.reload(cx));
         self.sending.update(cx, |section, cx| section.reload(cx));
         self.privacy.update(cx, |section, cx| section.reload(cx));
+        self.keyboard.update(cx, |section, cx| section.reload(cx));
     }
 
     /// Re-read the open section's store state.
@@ -410,7 +424,10 @@ impl SettingsWindow {
                 .accounts
                 .update(cx, |accounts, cx| accounts.refresh(cx)),
             SettingsSection::About => self.about.update(cx, |about, cx| about.refresh(cx)),
-            SettingsSection::Appearance | SettingsSection::Privacy | SettingsSection::Sending => {}
+            SettingsSection::Appearance
+            | SettingsSection::Keyboard
+            | SettingsSection::Privacy
+            | SettingsSection::Sending => {}
         }
     }
 
@@ -424,6 +441,12 @@ impl SettingsWindow {
     #[cfg(test)]
     pub(crate) fn appearance(&self) -> &Entity<AppearanceSettings> {
         &self.appearance
+    }
+
+    /// The Keyboard section.
+    #[cfg(test)]
+    pub(crate) fn keyboard(&self) -> &Entity<KeyboardSettings> {
+        &self.keyboard
     }
 
     /// The Privacy section.
@@ -555,6 +578,7 @@ impl SettingsWindow {
         match self.section {
             SettingsSection::Accounts => self.accounts.clone().into(),
             SettingsSection::Appearance => self.appearance.clone().into(),
+            SettingsSection::Keyboard => self.keyboard.clone().into(),
             SettingsSection::Privacy => self.privacy.clone().into(),
             SettingsSection::Sending => self.sending.clone().into(),
             SettingsSection::About => self.about.clone().into(),
@@ -717,6 +741,7 @@ pub(crate) fn setting_text(
 
 impl EventEmitter<SettingsEvent> for AccountsSettings {}
 impl EventEmitter<SettingsEvent> for AppearanceSettings {}
+impl EventEmitter<SettingsEvent> for KeyboardSettings {}
 impl EventEmitter<SettingsEvent> for PrivacySettings {}
 impl EventEmitter<SettingsEvent> for SendingSettings {}
 impl EventEmitter<SettingsEvent> for AboutSettings {}

@@ -105,6 +105,8 @@ pub(crate) enum FixtureView {
     SettingsAccounts,
     /// The Settings window on Appearance.
     SettingsAppearance,
+    /// The Settings window on Keyboard, with the Gmail keymap on.
+    SettingsKeyboard,
     /// The Settings window on Privacy.
     SettingsPrivacy,
     /// The Settings window on Sending.
@@ -158,11 +160,12 @@ impl FixtureView {
             "cheat-sheet" => Self::CheatSheet,
             "settings-accounts" => Self::SettingsAccounts,
             "settings-appearance" => Self::SettingsAppearance,
+            "settings-keyboard" => Self::SettingsKeyboard,
             "settings-privacy" => Self::SettingsPrivacy,
             "settings-sending" => Self::SettingsSending,
             "settings-about" => Self::SettingsAbout,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-appearance, settings-privacy, settings-sending or settings-about"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-appearance, settings-keyboard, settings-privacy, settings-sending or settings-about"
             ),
         })
     }
@@ -306,6 +309,12 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
             InitialView::SettingsAccount(failing.id)
         }
         FixtureView::SettingsAppearance => InitialView::Settings(SettingsSection::Appearance),
+        FixtureView::SettingsKeyboard => {
+            store
+                .update_ui_preferences(|preferences| preferences.keymap = KeymapName::Gmail)
+                .context("failed to save the fixture keymap")?;
+            InitialView::Settings(SettingsSection::Keyboard)
+        }
         FixtureView::SettingsPrivacy => InitialView::Settings(SettingsSection::Privacy),
         FixtureView::SettingsSending => InitialView::Settings(SettingsSection::Sending),
         FixtureView::SettingsAbout => {
@@ -1185,6 +1194,7 @@ mod tests {
             "cheat-sheet",
             "settings-accounts",
             "settings-appearance",
+            "settings-keyboard",
             "settings-privacy",
             "settings-sending",
             "settings-about",
