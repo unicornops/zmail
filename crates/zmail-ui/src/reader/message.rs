@@ -8,12 +8,14 @@
 //! switches between the two.
 
 use chrono::{DateTime, Local};
-use gpui::{AnyElement, Context, FontWeight, IntoElement, div, prelude::*, px, rgb};
+use gpui::{
+    AccessibleAction, AnyElement, Context, FontWeight, IntoElement, Role, div, prelude::*, px, rgb,
+};
 use zmail_core::{
     ThreadMessage,
     participants::sender_identity,
     preferences::SenderWarnings,
-    time::{HourCycle, format_list_date},
+    time::{HourCycle, format_full_date, format_list_date},
 };
 
 use super::ReaderView;
@@ -21,6 +23,7 @@ use super::body::{BodyContext, render_paragraphs};
 use super::header::{render_details, render_header};
 use super::quoted::split_folded_tail;
 use super::{attachments, banners};
+use crate::a11y::AccessibleExt;
 use crate::components::{Avatar, ButtonSize, IconButton};
 use crate::styles::{AVATAR_SIZE, UiColors};
 use crate::widgets::EllipsisExt;
@@ -43,6 +46,8 @@ pub(super) struct MessageContext<'a> {
     pub(super) focused: bool,
     /// Which sender-safety warnings show.
     pub(super) sender_warnings: SenderWarnings,
+    /// Messages in the conversation.
+    pub(super) message_count: usize,
 }
 
 /// How one message shows.
@@ -70,9 +75,28 @@ pub(super) fn render_message(
 ) -> AnyElement {
     let colors = &context.colors;
     let index = display.index;
+    let reader_entity = cx.entity().downgrade();
     let card = div()
         .id(("reader-message", message.id as u64))
         .debug_selector(move || format!("reader-message-{index}"))
+        .accessible(Role::Article, message_label(message, context))
+        .aria_expanded(display.expanded)
+        .aria_position_in_set(index + 1)
+        .aria_size_of_set(context.message_count)
+        // n and p move between messages while focus stays on the reader.
+        .when(display.current && context.focused, |this| {
+            this.aria_active_descendant()
+        })
+        .on_a11y_action(
+            if display.expanded {
+                AccessibleAction::Collapse
+            } else {
+                AccessibleAction::Expand
+            },
+            move |_, _, cx| {
+                let _ = reader_entity.update(cx, |reader, cx| reader.toggle_message(index, cx));
+            },
+        )
         .rounded_lg()
         .border_1()
         .border_color(rgb(if display.current && context.focused {
@@ -90,6 +114,29 @@ pub(super) fn render_message(
     };
     // Padding, not margin: the list measures an item without its margins.
     div().px_4().pb_2().child(card).into_any_element()
+}
+
+/// What a screen reader reads for a message card: whether it is unread,
+/// who sent it and when. The body follows as the card's text.
+pub(super) fn message_label(message: &ThreadMessage, context: &MessageContext<'_>) -> String {
+    let (sender_name, _) = sender_identity(&message.sender);
+    let date = format_full_date(
+        &message.received_at,
+        &context.now.timezone(),
+        context.hour_cycle,
+    );
+    let state = if message.is_read {
+        ""
+    } else {
+        "Unread message"
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if !state.is_empty() {
+        parts.push(state.to_owned());
+    }
+    parts.push(format!("from {sender_name}"));
+    parts.push(date);
+    parts.join(", ")
 }
 
 /// A collapsed message: avatar, sender, snippet and date on one line.

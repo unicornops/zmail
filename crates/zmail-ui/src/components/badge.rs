@@ -1,4 +1,7 @@
 //! `Badge`: a small count or label pill, or a dot.
+//!
+//! A badge has no accessibility node of its own: the row or heading it
+//! sits in says the count in words ("Inbox, 3 unread").
 
 use gpui::{
     App, FontWeight, IntoElement, RenderOnce, SharedString, Window, div, prelude::*, px, rgb,

@@ -18,12 +18,13 @@
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    App, Context, Entity, FocusHandle, IntoElement, MouseButton, RenderOnce, Window, div,
+    App, Context, Entity, FocusHandle, IntoElement, MouseButton, RenderOnce, Role, Window, div,
     prelude::*, px,
 };
 use zmail_core::{AccountSummary, SyncPhase, text::count_noun, time::parse_timestamp};
 
 use super::WorkspaceView;
+use crate::a11y::AccessibleExt;
 use crate::actions::{NewMessage, SyncAll, ToggleSidebar};
 use crate::components::{Button, IconButton, TextInput};
 use crate::pane::dispatch_from;
@@ -70,6 +71,7 @@ impl RenderOnce for Toolbar {
 
         div()
             .id("toolbar")
+            .accessible(Role::Toolbar, "Mail toolbar")
             .flex()
             .flex_1()
             .min_w_0()

@@ -20,7 +20,7 @@
 //! account ([`AccountsSettings::focus_account`]).
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, IntoElement, Render,
+    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, IntoElement, Render, Role,
     SharedString, Subscription, Window, div, prelude::*, px, rgb,
 };
 use zmail_core::{AccountColor, AccountSummary, AuthKind, SyncPhase, text::count_noun};
@@ -31,6 +31,7 @@ use super::{
     SettingsEvent, SettingsHost, dotted_label, section_heading, setting_row, setting_text,
     update_workspace,
 };
+use crate::a11y::AccessibleExt;
 use crate::components::{
     Banner, BannerTone, Button, ButtonSize, ComponentTheme, Modal, ModalState, Select, SelectEvent,
     TextInput, TextInputEvent,
@@ -578,6 +579,14 @@ impl AccountsSettings {
         div()
             .id(SharedString::from(card_id.clone()))
             .debug_selector(move || card_id.clone())
+            // Names the card's controls (Re-authenticate, Remove, Colour…)
+            // for a screen reader.
+            .accessible(Role::Group, account.display_name.clone())
+            .aria_description(format!(
+                "{}, {}. {status_text}",
+                account.username,
+                account.protocol.label()
+            ))
             .flex()
             .flex_col()
             .mt(px(SPACE_4))

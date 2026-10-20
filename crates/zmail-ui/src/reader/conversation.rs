@@ -12,10 +12,11 @@
 
 use std::collections::HashSet;
 
-use gpui::{AnyElement, FontWeight, IntoElement, div, prelude::*, rgb};
+use gpui::{AnyElement, FontWeight, IntoElement, Role, div, prelude::*, rgb};
 use zmail_core::{ThreadView, text::count_noun};
 
 use super::banners;
+use crate::a11y::{AccessibleExt, readable};
 use crate::styles::UiColors;
 use crate::widgets::empty_state;
 
@@ -201,16 +202,34 @@ pub(super) fn render_conversation_header(thread: &ThreadView, colors: &UiColors)
         // edge.
         .child(
             div()
+                .id("reader-subject")
+                .accessible(
+                    Role::Heading,
+                    if thread.subject.trim().is_empty() {
+                        "(no subject)".to_owned()
+                    } else {
+                        thread.subject.clone()
+                    },
+                )
+                .aria_level(1)
                 .w_full()
                 .text_xl()
                 .font_weight(FontWeight::BOLD)
                 .child(thread.subject.clone()),
         )
-        .child(div().text_sm().text_color(rgb(colors.muted)).child(format!(
-            "{} \u{2022} {}",
-            thread.mailbox_name,
-            count_noun(thread.message_count, "message", "messages")
-        )))
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(colors.muted))
+                .child(readable(
+                    "reader-subject-detail",
+                    format!(
+                        "{} \u{2022} {}",
+                        thread.mailbox_name,
+                        count_noun(thread.message_count, "message", "messages")
+                    ),
+                )),
+        )
         .when(!banners.is_empty(), |this| {
             this.child(div().flex().flex_wrap().gap_2().children(banners))
         })

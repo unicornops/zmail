@@ -19,6 +19,7 @@ use gpui::{
 };
 use zmail_core::MailboxSummary;
 
+use crate::a11y::AccessibleExt;
 use crate::components::actions::{Cancel, MENU_CONTEXT, SelectNext, SelectPrevious};
 use crate::components::menu::{MENU_ITEM_HEIGHT, MENU_MIN_WIDTH};
 use crate::components::popover::Popover;
@@ -189,8 +190,7 @@ impl Render for MovePicker {
                     .px(px(SPACE_2))
                     .rounded(px(RADIUS_SM))
                     .type_style(TYPE_BODY)
-                    .role(Role::MenuItem)
-                    .aria_label(name.clone())
+                    .accessible(Role::MenuItem, name.clone())
                     .aria_selected(highlighted)
                     .cursor_pointer()
                     .when_some(background, |this, background| this.bg(rgb(background)))

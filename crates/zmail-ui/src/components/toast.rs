@@ -25,6 +25,7 @@ use gpui::{
     prelude::*, px, rgb,
 };
 
+use crate::a11y::AccessibleExt;
 use crate::styles::{ICON_SIZE_SM, RADIUS_LG, SPACE_2, SPACE_3, SPACE_4, TYPE_BODY, TypeStyleExt};
 use crate::widgets::icon;
 
@@ -253,8 +254,7 @@ impl Render for ToastHost {
                 };
                 div()
                     .id(("toast", id.0))
-                    .role(Role::Status)
-                    .aria_label(active.toast.message.clone())
+                    .accessible(Role::Status, active.toast.message.clone())
                     .flex()
                     .items_center()
                     .gap(px(SPACE_3))

@@ -3,6 +3,9 @@
 //! The colour is a stable hash of the address (or the name when there is
 //! no address), so a sender keeps the same colour across runs, machines
 //! and Rust versions. Images (BIMI, Gravatar, contacts) come later.
+//!
+//! Avatars are decorative: the row or message around one names the
+//! sender, so the avatar has no accessibility node.
 
 use gpui::{
     App, FontWeight, IntoElement, RenderOnce, SharedString, Window, div, prelude::*, px, rgb,

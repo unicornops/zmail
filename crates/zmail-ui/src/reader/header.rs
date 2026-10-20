@@ -11,7 +11,9 @@
 //!
 //! A click anywhere else on the header collapses the message.
 
-use gpui::{AnyElement, Context, FontWeight, IntoElement, div, prelude::*, px, rgb};
+use gpui::{
+    AnyElement, Context, FontWeight, IntoElement, Role, SharedString, div, prelude::*, px, rgb,
+};
 use zmail_core::{
     ThreadMessage,
     participants::{Participant, parse_address_list, sender_identity},
@@ -21,6 +23,7 @@ use zmail_core::{
 use super::ReaderView;
 use super::message::{MessageContext, MessageDisplay};
 use super::popover::PopoverAnchor;
+use crate::a11y::{AccessibleExt, readable};
 use crate::actions::ReplyToMessage;
 use crate::components::{Avatar, ButtonSize, IconButton};
 use crate::styles::{ICON_SIZE_SM, UiColors};
@@ -55,9 +58,16 @@ pub(super) fn render_header(
     if let Some(email) = &sender_email {
         avatar = avatar.address(email.clone());
     }
+    let sender_label = match &sender_email {
+        Some(email) if *email != sender_name => format!("{sender_name}, {email}"),
+        _ => sender_name.clone(),
+    };
     let sender = div()
         .id(("reader-sender", message.id as u64))
         .debug_selector(move || format!("reader-sender-{index}"))
+        .accessible(Role::Button, sender_label)
+        .aria_description("Sender details")
+        .aria_expanded(reader.popover_anchor_is(PopoverAnchor::Sender(index)))
         .max_w_full()
         .ellipsis()
         .font_weight(FontWeight::SEMIBOLD)
@@ -102,6 +112,9 @@ pub(super) fn render_header(
                             div()
                                 .id(("reader-recipients", message.id as u64))
                                 .debug_selector(move || format!("reader-recipients-{index}"))
+                                .accessible(Role::Button, summary.clone())
+                                .aria_description("From, To and Date details")
+                                .aria_expanded(display.details)
                                 .flex()
                                 .items_center()
                                 .gap_1()
@@ -238,9 +251,15 @@ fn detail_line(label: &str, value: &str, colors: &UiColors) -> gpui::Div {
                 .flex_none()
                 .w(px(40.))
                 .text_color(rgb(colors.muted))
-                .child(label.to_owned()),
+                .child(readable(
+                    SharedString::from(format!("detail-label-{label}")),
+                    label.to_owned(),
+                )),
         )
-        .child(div().flex_1().min_w_0().child(value.to_owned()))
+        .child(div().flex_1().min_w_0().child(readable(
+            SharedString::from(format!("detail-value-{label}")),
+            value.to_owned(),
+        )))
 }
 
 /// "Name <address>", or whichever of the two the participant has.

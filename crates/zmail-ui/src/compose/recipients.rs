@@ -27,6 +27,7 @@ use gpui::{
 use zmail_core::{AddressSuggestion, participants::Participant, participants::parse_address_list};
 use zmail_store::LocalStore;
 
+use crate::a11y::AccessibleExt;
 use crate::components::actions::{Cancel, SelectNext, SelectPrevious};
 use crate::components::menu::MENU_ITEM_HEIGHT;
 use crate::components::popover::{Popover, popover_below};
@@ -408,12 +409,14 @@ impl Render for RecipientField {
                 .border_color(rgb(border))
                 .text_color(rgb(foreground))
                 .type_style(TYPE_BODY)
-                .role(Role::ListItem)
-                .aria_label(if valid {
-                    full.clone()
-                } else {
-                    SharedString::from(format!("{full} (not a valid address)"))
-                })
+                .accessible(
+                    Role::ListItem,
+                    if valid {
+                        full.clone()
+                    } else {
+                        SharedString::from(format!("{full} (not a valid address)"))
+                    },
+                )
                 .tooltip(crate::components::tooltip::Tooltip::text(if valid {
                     full.clone()
                 } else {
@@ -440,8 +443,10 @@ impl Render for RecipientField {
                         .rounded(px(RADIUS_FULL))
                         .cursor_pointer()
                         .hover(|this| this.bg(rgb(colors.hover_background)))
-                        .role(Role::Button)
-                        .aria_label(SharedString::from(format!("Remove {}", chip.label())))
+                        .accessible(
+                            Role::Button,
+                            SharedString::from(format!("Remove {}", chip.label())),
+                        )
                         // Keep focus in the field.
                         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                         .on_click(cx.listener(move |this, _, _, cx| this.remove_chip(index, cx)))
@@ -475,8 +480,10 @@ impl Render for RecipientField {
                             .min_h(px(MENU_ITEM_HEIGHT))
                             .px(px(SPACE_2))
                             .rounded(px(RADIUS_SM))
-                            .role(Role::ListBoxOption)
-                            .aria_label(SharedString::from(suggestion.to_header_value()))
+                            .accessible(
+                                Role::ListBoxOption,
+                                SharedString::from(suggestion.to_header_value()),
+                            )
                             .aria_selected(highlighted)
                             .cursor_pointer()
                             .when_some(background, |this, background| this.bg(rgb(background)))
@@ -544,8 +551,7 @@ impl Render for RecipientField {
             .gap(px(SPACE_1))
             .p(px(SPACE_0_5))
             .rounded(px(RADIUS_MD))
-            .role(Role::List)
-            .aria_label(self.label.clone())
+            .accessible(Role::List, self.label.clone())
             .cursor_text()
             // A click on the empty part of the field types into it.
             .on_click(move |_, window, cx| {

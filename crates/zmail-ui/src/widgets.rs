@@ -5,11 +5,13 @@
 //! importing directly from `lib.rs`.
 
 use gpui::{
-    AnyElement, App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, Svg, Window, div, prelude::*, px, rgb, svg,
+    AnyElement, App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, Role,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Svg, Window, div, prelude::*, px,
+    rgb, svg,
 };
 use zmail_core::{AccountColor, SyncPhase};
 
+use crate::a11y::{AccessibleExt, readable};
 use crate::components::TextInput;
 use crate::styles::{
     ACCOUNT_COLORS, ACCOUNT_DOT_SIZE, ACTION_DIVIDER_HEIGHT, ACTION_DIVIDER_WIDTH,
@@ -124,6 +126,8 @@ pub(crate) fn toolbar_button(
         .border_color(rgb(border))
         .text_color(rgb(foreground))
         .cursor_pointer()
+        .tab_index(0)
+        .accessible(Role::Button, label.clone())
         // Toolbar buttons sit in the title bar: a press must reach the
         // button, not start a window drag (see `components::title_bar`).
         .occlude()
@@ -175,6 +179,8 @@ pub(crate) fn empty_state(
                 )
                 .child(
                     div()
+                        .id("empty-state-title")
+                        .accessible(Role::Heading, title.to_owned())
                         .w_full()
                         .text_xl()
                         .font_weight(FontWeight::SEMIBOLD)
@@ -185,7 +191,7 @@ pub(crate) fn empty_state(
                         .w_full()
                         .text_sm()
                         .text_color(rgb(colors.muted))
-                        .child(detail.to_owned()),
+                        .child(readable("empty-state-detail", detail.to_owned())),
                 )
                 .when_some(action, |this, action| this.child(action)),
         )
@@ -322,14 +328,19 @@ pub(crate) fn action_divider(colors: &UiColors) -> gpui::Div {
 // ---------------------------------------------------------------------------
 
 /// Render a compact status or error banner with a leading colour strip.
+/// `role` is [`Role::Status`] for news and [`Role::Alert`] for errors.
 pub(crate) fn status_banner(
+    id: &'static str,
+    role: Role,
     message: &str,
     icon_name: &'static str,
     accent_color: u32,
     background_color: u32,
     colors: &UiColors,
-) -> gpui::Div {
+) -> Stateful<gpui::Div> {
     div()
+        .id(id)
+        .accessible(role, message.to_owned())
         .w_full()
         .flex()
         .bg(rgb(background_color))

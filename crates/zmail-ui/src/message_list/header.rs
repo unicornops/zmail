@@ -13,6 +13,7 @@ use gpui::{
 use zmail_core::{ThreadFilter, text::count_noun};
 
 use super::{ListMode, MessageListView};
+use crate::a11y::{AccessibleExt, readable};
 use crate::actions::{RetryOutbox, SearchAllAccounts, SearchInAccount, SearchInFolder};
 use crate::components::{Badge, Button, ButtonSize, Menu, MenuEntry, popover_below_end};
 use crate::pane::{dispatch_from, pane_focus_indicator};
@@ -153,6 +154,16 @@ impl MessageListView {
                         .gap_2()
                         .child(
                             div()
+                                .id("list-title")
+                                .accessible(
+                                    Role::Heading,
+                                    if unread > 0 {
+                                        format!("{title}, {unread} unread")
+                                    } else {
+                                        title.clone()
+                                    },
+                                )
+                                .aria_level(1)
                                 .min_w_0()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .ellipsis()
@@ -172,7 +183,7 @@ impl MessageListView {
                         .text_sm()
                         .text_color(rgb(colors.muted))
                         .ellipsis()
-                        .child(subtitle),
+                        .child(readable("list-subtitle", subtitle)),
                 )
                 .when(self.state.mode == ListMode::Search, |this| {
                     this.child(self.render_scope_control())
@@ -203,7 +214,12 @@ impl MessageListView {
             div()
                 .flex_none()
                 .debug_selector(move || selector.into())
-                .child(button.size(ButtonSize::Small).ghost())
+                .child(
+                    button
+                        .size(ButtonSize::Small)
+                        .ghost()
+                        .role(Role::RadioButton),
+                )
         };
         let folder = match (&scope.in_clause, &scope.folder) {
             (Some(value), _) => Some(chip(
@@ -249,8 +265,7 @@ impl MessageListView {
             .items_center()
             .gap_1()
             .mt_1()
-            .role(Role::RadioGroup)
-            .aria_label("Search scope")
+            .accessible(Role::RadioGroup, "Search scope")
             .children(folder)
             .children(account)
             .children(all)
@@ -314,8 +329,7 @@ impl MessageListView {
             .items_center()
             .gap_1()
             .mt_1()
-            .role(Role::Group)
-            .aria_label("Search filters")
+            .accessible(Role::Group, "Search filters")
             .child(from)
             .child(attachment)
             .child(unread)
@@ -469,7 +483,7 @@ impl MessageListView {
         )
     }
 
-    fn header_text(&self) -> (String, String) {
+    pub(super) fn header_text(&self) -> (String, String) {
         let mailbox = self.state.mailbox.as_ref();
         let title = match self.state.mode {
             ListMode::Mail => mailbox

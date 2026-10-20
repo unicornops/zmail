@@ -36,6 +36,7 @@ use zmail_store::LocalStore;
 pub(crate) use self::selection::ListSelection;
 use self::selection::{OpenMovePicker, row_colors};
 use crate::ListMode;
+use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::actions::{
     AddAccount, OpenSelected, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
@@ -608,6 +609,7 @@ impl Render for MessageListView {
             .id("message-list")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .accessible(Role::Pane, "Message list")
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::select_first))
@@ -668,7 +670,14 @@ impl MessageListView {
             return self.render_empty_mailbox(&colors);
         }
 
+        let (title, _) = self.header_text();
         div()
+            .id("thread-list")
+            .accessible(Role::ListBox, title)
+            .a11y_flags(A11yFlags {
+                multiselectable: true,
+                ..A11yFlags::default()
+            })
             .flex_1()
             .overflow_hidden()
             .child(
@@ -694,6 +703,7 @@ impl MessageListView {
         cx: &mut Context<Self>,
     ) -> Vec<gpui::Stateful<gpui::Div>> {
         let start = range.start;
+        let count = self.thread_count();
         let threads = self.thread_rows(range, cx);
         let now = chrono::Local::now();
         let density = self.density_tokens();
@@ -734,10 +744,10 @@ impl MessageListView {
                 let quick_actions = (self.hovered_thread == Some(thread_id))
                     .then(|| self.quick_actions(thread_id, &row, cx));
 
+                let cursor = focused && self.state.selected_thread_id == Some(thread_id);
                 row_shell(row_id, is_selected, focused, density, colors)
                     .debug_selector(move || format!("thread-row-{index}"))
-                    .role(Role::ListItem)
-                    .aria_label(row.accessible_label())
+                    .map(|this| row.accessible(this, is_selected, cursor, index, count))
                     .on_hover(cx.listener(move |this, hovered, _, cx| {
                         this.set_hovered_thread(thread_id, *hovered, cx);
                     }))
@@ -772,6 +782,11 @@ impl MessageListView {
         // view, and asks for the next page as the end comes near.
         div()
             .id("search-results-list")
+            .accessible(Role::ListBox, "Search results")
+            .a11y_flags(A11yFlags {
+                multiselectable: true,
+                ..A11yFlags::default()
+            })
             .flex_1()
             .overflow_hidden()
             .child(
@@ -850,10 +865,10 @@ impl MessageListView {
                 // its account's folders.
                 let dragged = self.dragged_threads(thread_id, hit.account_id, hit.mailbox_id);
 
+                let cursor = focused && self.state.selected_thread_id == Some(thread_id);
                 row_shell(row_id, is_selected, focused, density, colors)
                     .debug_selector(move || format!("search-row-{thread_id}"))
-                    .role(Role::ListItem)
-                    .aria_label(row.accessible_label())
+                    .map(|this| row.accessible(this, is_selected, cursor, index, loaded))
                     .on_hover(cx.listener(move |this, hovered, _, cx| {
                         this.set_hovered_thread(thread_id, *hovered, cx);
                     }))
@@ -890,19 +905,22 @@ impl MessageListView {
         }
         let now = chrono::Local::now();
         let density = self.density_tokens();
+        let count = self.state.drafts.len();
         div()
             .id("drafts-list")
+            .accessible(Role::ListBox, "Drafts")
             .flex_1()
             .overflow_y_scroll()
-            .children(self.state.drafts.iter().map(|draft| {
+            .children(self.state.drafts.iter().enumerate().map(|(index, draft)| {
                 let draft_id = draft.id;
                 let row_id = draft_row_id(draft_id);
                 let is_selected = Some(draft_id) == self.state.selected_draft_id;
                 let row = MessageRow::draft(row_id.clone(), draft, &now, self.hour_cycle);
 
                 row_shell(row_id, is_selected, focused, density, colors)
-                    .role(Role::ListItem)
-                    .aria_label(row.accessible_label())
+                    .map(|this| {
+                        row.accessible(this, is_selected, focused && is_selected, index, count)
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.selected_draft_id = Some(draft_id);
                         cx.emit(MessageListEvent::OpenDraft(draft_id));
@@ -930,41 +948,62 @@ impl MessageListView {
         }
         let now = chrono::Local::now();
         let density = self.density_tokens();
+        let count = self.state.outbox_jobs.len();
         div()
             .id("outbox-list")
+            .accessible(Role::ListBox, "Outbox")
             .flex_1()
             .overflow_y_scroll()
-            .children(self.state.outbox_jobs.iter().map(|job| {
-                let job_id = job.id;
-                let row_id = outbox_row_id(job_id);
-                let is_selected = Some(job_id) == self.state.selected_outbox_job_id;
-                let draft = self
-                    .state
-                    .drafts
+            .children(
+                self.state
+                    .outbox_jobs
                     .iter()
-                    .find(|draft| draft.id == job.draft_id);
-                let row = MessageRow::outbox_job(row_id.clone(), job, draft, &now, self.hour_cycle);
-                // A message waiting for a retry, or one that gave up,
-                // offers Retry now where the date goes.
-                let retry = outbox_status(job, &now)
-                    .can_retry
-                    .then(|| self.retry_now_button(job_id, &row_id, cx));
+                    .enumerate()
+                    .map(|(index, job)| {
+                        let job_id = job.id;
+                        let row_id = outbox_row_id(job_id);
+                        let is_selected = Some(job_id) == self.state.selected_outbox_job_id;
+                        let draft = self
+                            .state
+                            .drafts
+                            .iter()
+                            .find(|draft| draft.id == job.draft_id);
+                        let row = MessageRow::outbox_job(
+                            row_id.clone(),
+                            job,
+                            draft,
+                            &now,
+                            self.hour_cycle,
+                        );
+                        // A message waiting for a retry, or one that gave up,
+                        // offers Retry now where the date goes.
+                        let retry = outbox_status(job, &now)
+                            .can_retry
+                            .then(|| self.retry_now_button(job_id, &row_id, cx));
 
-                row_shell(row_id, is_selected, focused, density, colors)
-                    .role(Role::ListItem)
-                    .aria_label(row.accessible_label())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state.selected_outbox_job_id = Some(job_id);
-                        cx.emit(MessageListEvent::SelectOutboxJob(job_id));
-                        cx.notify();
-                    }))
-                    .child(row_content(
-                        row,
-                        retry,
-                        density,
-                        &row_colors(is_selected, focused, colors),
-                    ))
-            }))
+                        row_shell(row_id, is_selected, focused, density, colors)
+                            .map(|this| {
+                                row.accessible(
+                                    this,
+                                    is_selected,
+                                    focused && is_selected,
+                                    index,
+                                    count,
+                                )
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state.selected_outbox_job_id = Some(job_id);
+                                cx.emit(MessageListEvent::SelectOutboxJob(job_id));
+                                cx.notify();
+                            }))
+                            .child(row_content(
+                                row,
+                                retry,
+                                density,
+                                &row_colors(is_selected, focused, colors),
+                            ))
+                    }),
+            )
             .into_any_element()
     }
 

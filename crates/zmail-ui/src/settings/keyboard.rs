@@ -8,14 +8,15 @@
 //! whose label, group or keys contain every word typed.
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, IntoElement, Render, SharedString,
+    AnyElement, App, AppContext as _, Context, Entity, IntoElement, Render, Role, SharedString,
     Subscription, Window, div, prelude::*, px, rgb,
 };
 use zmail_core::preferences::KeymapName;
 
 use super::{SettingsEvent, SettingsHost, group_heading, section_heading, setting_row};
+use crate::a11y::AccessibleExt;
 use crate::cheat_sheet::{ShortcutGroup, ShortcutRow, action_label, shortcut_groups};
-use crate::components::kbd::keystrokes_label;
+use crate::components::kbd::{keystrokes_label, spoken_keystrokes};
 use crate::components::{ComponentTheme, Kbd, Select, SelectEvent, TextInput, TextInputEvent};
 use crate::keymap::{active_keymap, use_keymap};
 use crate::menus::MenuModel;
@@ -145,7 +146,8 @@ fn bound_shortcuts(cx: &App) -> Vec<ShortcutGroup> {
 
 impl Render for KeyboardSettings {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = ComponentTheme::get(cx).colors;
+        let theme = ComponentTheme::get(cx);
+        let (colors, platform) = (theme.colors, theme.platform.platform);
         let rows: Vec<AnyElement> =
             self.visible(cx)
                 .into_iter()
@@ -153,10 +155,17 @@ impl Render for KeyboardSettings {
                 .flat_map(|(group_index, (name, rows))| {
                     std::iter::once(group_heading(name, &colors).into_any_element()).chain(
                         rows.into_iter().enumerate().map(move |(row_index, row)| {
+                            let keys = row
+                                .keys
+                                .iter()
+                                .map(|keys| spoken_keystrokes(keys, platform))
+                                .collect::<Vec<_>>()
+                                .join(" or ");
                             div()
                                 .id(SharedString::from(format!(
                                     "settings-shortcut-{group_index}-{row_index}"
                                 )))
+                                .accessible(Role::ListItem, format!("{}: {keys}", row.label))
                                 .flex()
                                 .items_center()
                                 .gap(px(SPACE_3))

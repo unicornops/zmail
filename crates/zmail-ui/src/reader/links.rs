@@ -21,6 +21,7 @@ use url::Url;
 use zmail_security::html_links;
 
 use super::ReaderView;
+use crate::a11y::readable;
 use crate::components::{Button, Modal};
 use crate::styles::{ICON_SIZE_SM, UiColors};
 use crate::widgets::icon;
@@ -360,7 +361,8 @@ impl ReaderView {
                         .border_1()
                         .border_color(rgb(colors.border))
                         .text_sm()
-                        .child(prompt.target.clone()),
+                        // The whole address, read out before the choice.
+                        .child(readable("reader-link-target", prompt.target.clone())),
                 )
                 .footer(
                     Button::new("reader-link-copy", "Copy Link")

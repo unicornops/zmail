@@ -31,6 +31,7 @@ use gpui::{
     prelude::*, px, rgb,
 };
 
+use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::styles::{
     RADIUS_XL, SPACE_2, SPACE_3, SPACE_4, SPACE_6, TYPE_BODY, TYPE_TITLE, TypeStyleExt,
 };
@@ -297,8 +298,14 @@ impl RenderOnce for Modal {
             // skips it and goes to its first control. (A tracked handle
             // carries its own tab settings; the element's are ignored.)
             .track_focus(&self.focus_handle.clone().tab_index(0).tab_stop(false))
-            .role(Role::Dialog)
-            .aria_label(self.title.clone())
+            .accessible(Role::Dialog, self.title.clone())
+            .when_some(self.description.clone(), |this, description| {
+                this.aria_description(description)
+            })
+            .a11y_flags(A11yFlags {
+                modal: true,
+                ..A11yFlags::default()
+            })
             .on_action(move |_: &Cancel, window, cx| {
                 if let Some(dismiss) = &dismiss {
                     dismiss(&DismissEvent, window, cx);

@@ -30,8 +30,10 @@ use gpui::{
 use zmail_core::{AccountSummary, MailboxRole, MailboxSummary, VirtualMailbox};
 
 use crate::WorkspaceView;
+use crate::a11y::AccessibleExt;
 use crate::actions::ToggleCommandPalette;
 use crate::components::actions::{SelectFirst, SelectLast, SelectNext, SelectPrevious};
+use crate::components::kbd::spoken_keystrokes;
 use crate::components::{ComponentTheme, Kbd, Modal, TextInput, TextInputEvent};
 use crate::fuzzy::fuzzy_match;
 use crate::menus::{MenuModel, MenuModelItem, binding_label, menu_binding};
@@ -429,7 +431,8 @@ impl CommandPalette {
         range: Range<usize>,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
-        let colors = ComponentTheme::get(cx).colors;
+        let theme = ComponentTheme::get(cx);
+        let (colors, platform) = (theme.colors, theme.platform.platform);
         let count = self.matches.len();
         range
             .filter_map(|position| {
@@ -472,13 +475,12 @@ impl CommandPalette {
                         .h(px(ROW_HEIGHT))
                         .px(px(SPACE_2))
                         .rounded(px(RADIUS_SM))
-                        .role(Role::ListBoxOption)
-                        .aria_label(accessible_name)
+                        .accessible(Role::ListBoxOption, accessible_name)
                         .aria_selected(highlighted)
                         .aria_position_in_set(position + 1)
                         .aria_size_of_set(count)
-                        .when_some(entry.shortcut.clone(), |this, shortcut| {
-                            this.aria_keyshortcuts(shortcut)
+                        .when_some(entry.shortcut.as_ref(), |this, shortcut| {
+                            this.aria_keyshortcuts(spoken_keystrokes(shortcut, platform))
                         })
                         .cursor_pointer()
                         .when_some(background, |this, background| this.bg(rgb(background)))
@@ -539,8 +541,7 @@ impl Render for CommandPalette {
             .child(
                 div()
                     .id("command-palette-results")
-                    .role(Role::ListBox)
-                    .aria_label("Commands, folders and accounts")
+                    .accessible(Role::ListBox, "Commands, folders and accounts")
                     .p(px(SPACE_1))
                     .when(count > 0, |this| {
                         this.child(

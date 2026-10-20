@@ -35,9 +35,9 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Result;
 use gpui::{
     AnyView, App, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Global, IntoElement, Render, Role, ScrollHandle, SharedString, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, point, prelude::*, px,
-    rgb, size,
+    FontWeight, Global, IntoElement, Orientation, Render, Role, ScrollHandle, SharedString,
+    Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, point,
+    prelude::*, px, rgb, size,
 };
 use zmail_core::{AccountColor, AppBootstrap, UpstreamPins};
 use zmail_security::SecretStore;
@@ -51,6 +51,7 @@ use self::keyboard::KeyboardSettings;
 use self::privacy::PrivacySettings;
 use self::sending::SendingSettings;
 use crate::WorkspaceView;
+use crate::a11y::{AccessibleExt, readable};
 use crate::actions::{SelectNext, SelectPrevious};
 use crate::components::title_bar::TRAFFIC_LIGHT_POSITION;
 use crate::components::{
@@ -517,8 +518,8 @@ impl SettingsWindow {
             .id("settings-nav")
             .key_context(NAV_KEY_CONTEXT)
             .track_focus(&self.nav_focus.clone().tab_index(0).tab_stop(true))
-            .role(Role::List)
-            .aria_label(SharedString::from("Settings sections"))
+            .accessible(Role::TabList, SharedString::from("Settings sections"))
+            .aria_orientation(Orientation::Vertical)
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
             .flex()
@@ -547,9 +548,11 @@ impl SettingsWindow {
                 div()
                     .id(SharedString::from(id.clone()))
                     .debug_selector(move || id.clone())
-                    .role(Role::ListItem)
-                    .aria_label(SharedString::from(section.label()))
+                    .accessible(Role::Tab, SharedString::from(section.label()))
                     .aria_selected(selected)
+                    // Up and Down move between sections while focus stays
+                    // on the list.
+                    .when(selected && focused, |this| this.aria_active_descendant())
                     .flex()
                     .items_center()
                     .gap(px(SPACE_2))
@@ -627,6 +630,10 @@ impl Render for SettingsWindow {
                                     .child(
                                         div()
                                             .id("settings-content")
+                                            .accessible(
+                                                Role::TabPanel,
+                                                SharedString::from(self.section.label()),
+                                            )
                                             .size_full()
                                             .overflow_y_scroll()
                                             .track_scroll(&self.scroll)
@@ -682,13 +689,17 @@ pub(crate) fn section_heading(title: &str) -> gpui::Stateful<gpui::Div> {
         .id("settings-section-heading")
         .pb(px(SPACE_2))
         .type_style(TYPE_TITLE)
-        .role(Role::Heading)
+        .accessible(Role::Heading, title.to_owned())
+        .aria_level(1)
         .child(title.to_owned())
 }
 
 /// A group heading inside a section, such as "Undelivered changes".
-pub(crate) fn group_heading(title: &str, colors: &UiColors) -> gpui::Div {
+pub(crate) fn group_heading(title: &str, colors: &UiColors) -> gpui::Stateful<gpui::Div> {
     div()
+        .id(SharedString::from(format!("settings-group-{title}")))
+        .accessible(Role::Heading, title.to_owned())
+        .aria_level(2)
         .pt(px(SPACE_6))
         .pb(px(SPACE_1))
         .text_xs()
@@ -734,7 +745,10 @@ pub(crate) fn setting_text(
                 div()
                     .type_style(TYPE_CAPTION)
                     .text_color(rgb(colors.muted))
-                    .child(description),
+                    .child(readable(
+                        SharedString::from(format!("setting-description-{description}")),
+                        description,
+                    )),
             )
         })
 }

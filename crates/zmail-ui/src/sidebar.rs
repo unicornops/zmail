@@ -20,15 +20,17 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
-    Render, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Window, div,
-    prelude::*, px, rgb,
+    AccessibleAction, AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, FontWeight,
+    IntoElement, Render, Role, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement,
+    Window, div, prelude::*, px, rgb,
 };
 use zmail_core::{
     AccountSummary, MailboxRole, MailboxSummary, SyncPhase, VirtualMailbox, mailbox_leaf_name,
     preferences::{Density, FolderRef, SidebarTree},
+    text::count_noun,
 };
 
+use crate::a11y::AccessibleExt;
 use crate::actions::{
     AddAccount, OpenSelected, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
@@ -502,6 +504,11 @@ impl Render for SidebarView {
         let rows = self.rows();
         let items = self.items();
         let selected = self.selected_item(&items);
+        // The row the arrow keys move from, which a screen reader reads
+        // while focus stays on the tree.
+        let current = focused
+            .then(|| self.cursor.clone().or_else(|| selected.clone()))
+            .flatten();
         let children = rows
             .iter()
             .map(|row| match row {
@@ -519,7 +526,13 @@ impl Render for SidebarView {
                         }
                         _ => selected.as_ref() == Some(item),
                     };
-                    self.render_item(item, *depth, *expanded, is_selected, &colors, cx)
+                    let row = RowState {
+                        depth: *depth,
+                        expanded: *expanded,
+                        selected: is_selected,
+                        current: current.as_ref() == Some(item),
+                    };
+                    self.render_item(item, row, &colors, cx)
                 }
             })
             .collect::<Vec<_>>();
@@ -528,6 +541,7 @@ impl Render for SidebarView {
             .id("sidebar")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .accessible(Role::Tree, "Mailboxes")
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::select_first))
@@ -603,9 +617,7 @@ impl SidebarView {
     fn render_item(
         &self,
         item: &SidebarItem,
-        depth: usize,
-        expanded: Option<bool>,
-        is_selected: bool,
+        row: RowState,
         colors: &UiColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -616,37 +628,64 @@ impl SidebarView {
                 .iter()
                 .find(|account| account.id == *account_id)
                 .map(|account| {
-                    self.render_account(account, expanded.unwrap_or(true), is_selected, colors, cx)
+                    self.render_account(account, row, colors, cx)
                         .into_any_element()
                 })
                 .unwrap_or_else(|| div().into_any_element()),
             SidebarItem::Folder(_) | SidebarItem::Group(_) => self
-                .render_folder_row(item, depth, expanded, is_selected, colors, cx)
+                .render_folder_row(item, row, colors, cx)
                 .into_any_element(),
             _ => self
-                .render_view_row(item, depth, is_selected, colors, cx)
+                .render_view_row(item, row, colors, cx)
                 .into_any_element(),
         }
     }
 
     /// The common frame of a row: height, indent, background, hover and
-    /// click. Picking a row that opens a view also tells the shell it was
-    /// clicked, so the sidebar overlay closes.
+    /// click, and the tree item a screen reader reads as `label`. Picking
+    /// a row that opens a view also tells the shell it was clicked, so the
+    /// sidebar overlay closes.
     fn row_frame(
         &self,
         id: SharedString,
         item: &SidebarItem,
-        depth: usize,
-        is_selected: bool,
+        row: RowState,
+        label: String,
         colors: &UiColors,
         cx: &mut Context<Self>,
     ) -> Stateful<gpui::Div> {
         let tokens = self.tokens();
         let selector = id.to_string();
         let clicked = item.clone();
+        let RowState {
+            depth,
+            expanded,
+            selected: is_selected,
+            current,
+        } = row;
+        let node = self.tree_node(item).filter(|_| expanded.is_some());
         div()
             .id(id)
             .debug_selector(move || selector.clone())
+            .accessible(Role::TreeItem, label)
+            .aria_level(depth + 1)
+            .aria_selected(is_selected)
+            .when_some(expanded, |this, expanded| this.aria_expanded(expanded))
+            .when(current, |this| this.aria_active_descendant())
+            // Screen readers open and close a branch without the chevron.
+            .when_some(node, |this, node| {
+                let action = if expanded == Some(true) {
+                    AccessibleAction::Collapse
+                } else {
+                    AccessibleAction::Expand
+                };
+                let entity = cx.entity().downgrade();
+                this.on_a11y_action(action, move |_, _, cx| {
+                    let _ = entity.update(cx, |_, cx| {
+                        cx.emit(SidebarEvent::ToggleCollapsed(node.clone()));
+                    });
+                })
+            })
             .flex()
             .items_center()
             .gap_2()
@@ -727,8 +766,7 @@ impl SidebarView {
     fn render_view_row(
         &self,
         item: &SidebarItem,
-        depth: usize,
-        is_selected: bool,
+        row: RowState,
         colors: &UiColors,
         cx: &mut Context<Self>,
     ) -> Stateful<gpui::Div> {
@@ -793,7 +831,12 @@ impl SidebarView {
             _ => None,
         };
         let outbox = state.outbox;
-        self.row_frame(id, item, depth, is_selected, colors, cx)
+        let count = match item {
+            SidebarItem::Drafts => state.draft_count,
+            _ => unread,
+        };
+        let accessible_label = view_row_label(item, &label, count, outbox);
+        self.row_frame(id, item, row, accessible_label, colors, cx)
             .child(icon(icon_name, ICON_SIZE_SM, colors.muted))
             .when_some(account_color, |this, color| this.child(account_dot(color)))
             .child(Self::label(label))
@@ -845,11 +888,11 @@ impl SidebarView {
     fn render_account(
         &self,
         account: &AccountSummary,
-        expanded: bool,
-        is_selected: bool,
+        row: RowState,
         colors: &UiColors,
         cx: &mut Context<Self>,
     ) -> Stateful<gpui::Div> {
+        let expanded = row.expanded.unwrap_or(true);
         let account_id = account.id;
         let item = SidebarItem::Account(account_id);
         let status = &account.sync_status;
@@ -862,8 +905,12 @@ impl SidebarView {
         self.row_frame(
             account_row_id(account_id),
             &item,
-            0,
-            is_selected,
+            RowState {
+                depth: 0,
+                expanded: Some(expanded),
+                ..row
+            },
+            format!("{} account, {status_tooltip}", account.display_name),
             colors,
             cx,
         )
@@ -918,9 +965,7 @@ impl SidebarView {
     fn render_folder_row(
         &self,
         item: &SidebarItem,
-        depth: usize,
-        expanded: Option<bool>,
-        is_selected: bool,
+        row: RowState,
         colors: &UiColors,
         cx: &mut Context<Self>,
     ) -> Stateful<gpui::Div> {
@@ -963,7 +1008,8 @@ impl SidebarView {
             _ => return div().id("sidebar-unknown-folder"),
         };
         let chevron_id = SharedString::from(format!("{id}-chevron"));
-        self.row_frame(id, item, depth, is_selected, colors, cx)
+        let expanded = row.expanded;
+        self.row_frame(id, item, row, label.clone(), colors, cx)
             .when_some(drop_target, |row, (mailbox_id, account_id)| {
                 Self::drop_target(row, mailbox_id, account_id, colors, cx)
             })
@@ -1002,6 +1048,44 @@ impl SidebarView {
             });
         }))
     }
+}
+
+/// Where a row sits in the tree and how it shows.
+#[derive(Debug, Clone, Copy)]
+struct RowState {
+    depth: usize,
+    /// Whether a branch is open; `None` for a leaf.
+    expanded: Option<bool>,
+    /// Drawn as the current view (or, for a branch, the keyboard cursor).
+    selected: bool,
+    /// The row the arrow keys move from, while the tree has focus.
+    current: bool,
+}
+
+/// What a screen reader reads for an inbox, favourite, Drafts or Outbox
+/// row: the name, then the number beside it in words.
+fn view_row_label(item: &SidebarItem, name: &str, count: usize, outbox: OutboxStatus) -> String {
+    let name = match item {
+        // Under the Unified Inbox each inbox shows its account's name.
+        SidebarItem::Inbox(_) if name != MailboxRole::Inbox.label() => format!("{name} Inbox"),
+        _ => name.to_owned(),
+    };
+    let mut parts = vec![name];
+    match item {
+        SidebarItem::Drafts if count > 0 => parts.push(count_noun(count, "draft", "drafts")),
+        SidebarItem::Drafts => {}
+        SidebarItem::Outbox => {
+            if outbox.waiting > 0 {
+                parts.push(format!("{} waiting", outbox.waiting));
+            }
+            if outbox.failed > 0 {
+                parts.push(format!("{} failed", outbox.failed));
+            }
+        }
+        _ if count > 0 => parts.push(format!("{count} unread")),
+        _ => {}
+    }
+    parts.join(", ")
 }
 
 /// A folder's name in the tree: its last path segment, except that the
@@ -1159,6 +1243,40 @@ fn folder_tree<'a>(mailboxes: impl Iterator<Item = &'a MailboxSummary>) -> Vec<F
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_read_their_counts_in_words() {
+        let none = OutboxStatus::default();
+        let unified = SidebarItem::Virtual(VirtualMailbox::Unified(MailboxRole::Inbox));
+        assert_eq!(
+            view_row_label(&unified, "Unified Inbox", 0, none),
+            "Unified Inbox"
+        );
+        assert_eq!(
+            view_row_label(&unified, "Unified Inbox", 4, none),
+            "Unified Inbox, 4 unread"
+        );
+        assert_eq!(
+            view_row_label(&SidebarItem::Inbox(3), "Home", 2, none),
+            "Home Inbox, 2 unread"
+        );
+        assert_eq!(
+            view_row_label(&SidebarItem::Inbox(3), "Inbox", 0, none),
+            "Inbox"
+        );
+        assert_eq!(
+            view_row_label(&SidebarItem::Drafts, "Drafts", 1, none),
+            "Drafts, 1 draft"
+        );
+        let outbox = OutboxStatus {
+            waiting: 3,
+            failed: 1,
+        };
+        assert_eq!(
+            view_row_label(&SidebarItem::Outbox, "Outbox", 0, outbox),
+            "Outbox, 3 waiting, 1 failed"
+        );
+    }
 
     #[test]
     fn mailbox_icons_follow_the_role_and_exist() {

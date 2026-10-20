@@ -47,7 +47,7 @@ use std::{collections::HashMap, rc::Rc};
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, IntoElement, ListAlignment, ListOffset,
-    ListState, MouseButton, Render, Subscription, Window, div, list, prelude::*, px, rgb,
+    ListState, MouseButton, Render, Role, Subscription, Window, div, list, prelude::*, px, rgb,
 };
 use zmail_core::{MailboxSummary, ThreadView, preferences::SenderWarnings, time::HourCycle};
 
@@ -62,6 +62,7 @@ use self::message::{MessageContext, MessageDisplay, render_message};
 use self::popover::OpenPopover;
 pub(crate) use self::popover::PopoverAnchor;
 use self::source::SourceView;
+use crate::a11y::AccessibleExt;
 use crate::actions::{
     Forward, NextMessage, PageDown, PageUp, PreviousMessage, Reply, ReplyAll, ScrollDown, ScrollUp,
     ToggleMessage,
@@ -411,6 +412,7 @@ impl ReaderView {
                     colors,
                     focused: self.focus_handle.contains_focused(window, cx),
                     sender_warnings: self.state.sender_warnings,
+                    message_count: thread.messages.len(),
                 };
                 let display = MessageDisplay {
                     index,
@@ -513,6 +515,7 @@ impl Render for ReaderView {
             .id("reader")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .accessible(Role::Pane, "Reader")
             .on_action(cx.listener(Self::scroll_up))
             .on_action(cx.listener(Self::scroll_down))
             .on_action(cx.listener(Self::page_up))
@@ -548,6 +551,8 @@ impl Render for ReaderView {
                     focused,
                     &colors,
                 )
+                .id("reader-actions")
+                .accessible(Role::Toolbar, "Conversation actions")
                 .when(thread.is_none(), |this| {
                     this.child(div().px_1().text_color(rgb(colors.muted)).child("Reader"))
                 })

@@ -21,9 +21,10 @@ use std::rc::Rc;
 
 use gpui::{
     App, Context, DismissEvent, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
-    Render, Role, SharedString, Window, div, prelude::*, px, rgb,
+    Render, Role, SharedString, Toggled, Window, div, prelude::*, px, rgb,
 };
 
+use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::styles::{
     ICON_SIZE_SM, RADIUS_SM, SPACE_1, SPACE_2, TYPE_BODY, TYPE_CAPTION, TypeStyleExt,
 };
@@ -32,7 +33,7 @@ use crate::widgets::{EllipsisExt, icon};
 use super::actions::{
     Cancel, Confirm, MENU_CONTEXT, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
-use super::kbd::Kbd;
+use super::kbd::{Kbd, spoken_keystrokes};
 use super::popover::Popover;
 use super::theme::ComponentTheme;
 
@@ -301,9 +302,24 @@ impl Menu {
             .px(px(SPACE_2))
             .rounded(px(RADIUS_SM))
             .type_style(TYPE_BODY)
-            .role(Role::MenuItem)
-            .aria_label(entry.label.clone())
+            .map(|this| match entry.checked {
+                Some(checked) => this
+                    .accessible(Role::MenuItemCheckBox, entry.label.clone())
+                    .aria_toggled(if checked {
+                        Toggled::True
+                    } else {
+                        Toggled::False
+                    }),
+                None => this.accessible(Role::MenuItem, entry.label.clone()),
+            })
             .aria_selected(highlighted)
+            // Focus stays on the menu; the highlighted entry is what a
+            // screen reader reads as the arrow keys move.
+            .when(highlighted, |this| this.aria_active_descendant())
+            .when_some(entry.shortcut.as_ref(), |this, shortcut| {
+                this.aria_keyshortcuts(spoken_keystrokes(shortcut, theme.platform.platform))
+            })
+            .a11y_flags(A11yFlags::disabled(disabled))
             .when_some(background, |this, background| this.bg(rgb(background)))
             .text_color(rgb(foreground))
             .when(disabled, |this| this.opacity(0.45))
