@@ -249,6 +249,8 @@ impl AccountFormValues {
                 self.imap_security == Security::None || self.smtp_security == Security::None
             }
             ProtocolKind::Jmap => self.jmap_url.trim().starts_with("http://"),
+            // Proton's API is HTTPS only, and its accounts never use this form.
+            ProtocolKind::Proton => false,
         }
     }
 }
@@ -502,6 +504,8 @@ pub(crate) fn validate_account_form(
     }
 
     match form.protocol {
+        // Proton accounts are added by signing in to Proton, not here.
+        ProtocolKind::Proton => {}
         ProtocolKind::Jmap => {
             if require(
                 &mut errors,
@@ -644,6 +648,7 @@ pub(crate) fn build_account_from_form(
     };
 
     let (endpoint, username, outgoing) = match form.protocol {
+        ProtocolKind::Proton => bail!("Proton Mail accounts are added by signing in to Proton"),
         ProtocolKind::Jmap => (
             form.jmap_url.trim().to_owned(),
             address.clone(),

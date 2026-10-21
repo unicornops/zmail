@@ -9,6 +9,7 @@ members = [
     "crates/zmail-index",
     "crates/zmail-jmap",
     "crates/zmail-notify",
+    "crates/zmail-proton",
     "crates/zmail-proton-api",
     "crates/zmail-security",
     "crates/zmail-smtp",

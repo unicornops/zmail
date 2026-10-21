@@ -79,6 +79,7 @@ impl SubmissionConfig {
                     username: username.clone(),
                     secret: secret.clone(),
                 },
+                AuthKind::ProtonSession => bail!("Proton accounts do not send over SMTP"),
             })),
             (None, None) => Ok(None),
             _ => bail!("SMTP credentials must include both username and secret"),

@@ -2,6 +2,7 @@
 
 mod backoff;
 mod imap_watch;
+mod proton;
 mod wake;
 
 use std::{
@@ -17,6 +18,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use backoff::Backoff;
+use proton::Credentials;
 use tokio::{
     runtime::{Builder, Handle},
     sync::oneshot,
@@ -174,6 +176,9 @@ struct SyncServiceInner {
     /// Raised after a sleep or network change so watchers reconnect now.
     wake: WakeSignal,
     wake_watchdog_started: AtomicBool,
+    /// Proton sessions, one per account, once `configure_proton` ran.
+    #[cfg(feature = "proton")]
+    proton: Mutex<Option<Arc<zmail_proton::ProtonSessions>>>,
 }
 
 impl std::fmt::Debug for SyncService {
@@ -213,6 +218,8 @@ impl SyncService {
                 search_syncs: Mutex::new(std::collections::HashMap::new()),
                 wake: WakeSignal::new(),
                 wake_watchdog_started: AtomicBool::new(false),
+                #[cfg(feature = "proton")]
+                proton: Mutex::new(None),
             }),
         };
         service.start_outbox_supervisor();
@@ -302,6 +309,9 @@ impl SyncService {
     /// user interaction. Access tokens stored in the legacy single-secret
     /// slot by the token-paste flow are honored as a fallback.
     pub async fn connect_secret(&self, target: &SyncTarget) -> Result<String> {
+        if target.auth == AuthKind::ProtonSession {
+            bail!("Proton accounts connect with a session, not a stored secret");
+        }
         if target.auth != AuthKind::OAuth2 {
             return self
                 .inner
@@ -574,12 +584,17 @@ impl SyncService {
             // Only spawn watchers for accounts with resolvable credentials;
             // a later `sync_watchers` call retries accounts whose secrets
             // appear afterwards.
-            let has_secret = self.inner.secrets.get_account_secret(target.id).is_ok()
-                || self
-                    .inner
-                    .secrets
-                    .get_account_secret_from_slot(target.id, SecretSlot::AccessToken)
-                    .is_ok();
+            let has_secret = match target.protocol {
+                ProtocolKind::Proton => self.has_proton_session(target.id),
+                ProtocolKind::Imap | ProtocolKind::Jmap => {
+                    self.inner.secrets.get_account_secret(target.id).is_ok()
+                        || self
+                            .inner
+                            .secrets
+                            .get_account_secret_from_slot(target.id, SecretSlot::AccessToken)
+                            .is_ok()
+                }
+            };
             if !has_secret {
                 self.unwatch_account(target.id);
                 continue;
@@ -628,7 +643,14 @@ impl SyncService {
             // registry slot is free if the id is ever reused.
             if !self.account_exists(target.id) {
                 self.unwatch_account(target.id);
+                self.forget_proton_session(target.id).await;
                 return;
+            }
+
+            if target.protocol == ProtocolKind::Proton {
+                self.watch_proton(&target, poll_interval, &mut backoff, &mut wake)
+                    .await;
+                continue;
             }
 
             let Ok(secret) = self.connect_secret(&target).await else {
@@ -660,6 +682,7 @@ impl SyncService {
                     self.watch_jmap_push(&target, &secret, poll_interval, &mut backoff, &mut wake)
                         .await;
                 }
+                ProtocolKind::Proton => unreachable!("Proton accounts are watched above"),
             }
         }
     }
@@ -880,9 +903,9 @@ impl SyncService {
         let Some(target) = self.inner.store.sync_target(account_id)? else {
             bail!("account {account_id} no longer exists");
         };
-        let secret = self.connect_secret(&target).await.with_context(|| {
-            format!("missing or inaccessible credentials for account {account_id}")
-        })?;
+        // `connect` names the problem itself: missing credentials, or a
+        // Proton session that has ended and needs signing in again.
+        let credentials = self.connect(&target).await?;
         let existing_mailboxes = self
             .inner
             .store
@@ -910,12 +933,19 @@ impl SyncService {
                     pending_ops.len()
                 ),
             )?;
-            let report = match target.protocol {
-                ProtocolKind::Imap => {
-                    zmail_imap::apply_pending_ops(&target, &secret, &pending_ops).await?
-                }
-                ProtocolKind::Jmap => {
-                    zmail_jmap::apply_pending_ops(&target, &secret, &pending_ops).await?
+            let report = match &credentials {
+                Credentials::Secret(secret) => match target.protocol {
+                    ProtocolKind::Imap => {
+                        zmail_imap::apply_pending_ops(&target, secret, &pending_ops).await?
+                    }
+                    ProtocolKind::Jmap => {
+                        zmail_jmap::apply_pending_ops(&target, secret, &pending_ops).await?
+                    }
+                    ProtocolKind::Proton => bail!("Proton accounts need a Proton session"),
+                },
+                #[cfg(feature = "proton")]
+                Credentials::Proton(session) => {
+                    zmail_proton::apply_pending_ops(&target, session, &pending_ops).await?
                 }
             };
             for op_id in &report.applied {
@@ -959,12 +989,19 @@ impl SyncService {
             ),
         )?;
 
-        let snapshot = match target.protocol {
-            ProtocolKind::Imap => {
-                zmail_imap::discover_and_sync(&target, &secret, &existing_mailboxes).await?
-            }
-            ProtocolKind::Jmap => {
-                zmail_jmap::discover_and_sync(&target, &secret, &existing_mailboxes).await?
+        let snapshot = match &credentials {
+            Credentials::Secret(secret) => match target.protocol {
+                ProtocolKind::Imap => {
+                    zmail_imap::discover_and_sync(&target, secret, &existing_mailboxes).await?
+                }
+                ProtocolKind::Jmap => {
+                    zmail_jmap::discover_and_sync(&target, secret, &existing_mailboxes).await?
+                }
+                ProtocolKind::Proton => bail!("Proton accounts need a Proton session"),
+            },
+            #[cfg(feature = "proton")]
+            Credentials::Proton(session) => {
+                zmail_proton::discover_and_sync(&target, session, &existing_mailboxes).await?
             }
         };
 
@@ -1071,6 +1108,9 @@ impl SyncService {
                     job.target.account_id, job.job_id
                 )
             })?;
+        if job.target.outgoing.kind == SubmissionKind::Proton {
+            bail!("sending through Proton is not supported yet");
+        }
         let secret = self.connect_secret(&target).await.with_context(|| {
             format!(
                 "missing or inaccessible credentials for account {}",
@@ -1119,6 +1159,7 @@ impl SyncService {
                 )
                 .await
             }
+            SubmissionKind::Proton => unreachable!("Proton submission is refused above"),
         }
     }
 }

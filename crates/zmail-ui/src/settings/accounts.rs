@@ -360,6 +360,9 @@ impl AccountsSettings {
                 cx.notify();
             }
             AuthKind::OAuth2 => self.sign_in_again(account_id, cx),
+            // Signing in to Proton again arrives with Proton onboarding
+            // (#237); until then no Proton account can exist here.
+            AuthKind::ProtonSession => {}
         }
     }
 

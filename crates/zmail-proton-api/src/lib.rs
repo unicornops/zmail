@@ -29,6 +29,7 @@ mod boolean;
 mod client;
 mod config;
 mod cookies;
+mod event;
 mod hv;
 mod keyring;
 mod manager;

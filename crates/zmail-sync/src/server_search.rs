@@ -126,6 +126,11 @@ impl SyncService {
         let Some(target) = store.sync_target(account_id)? else {
             bail!("account {account_id} no longer exists");
         };
+        // Proton encrypts message bodies, so its server cannot search them;
+        // Proton accounts are searched locally only, like Bridge does.
+        if target.protocol == ProtocolKind::Proton {
+            return Ok(report);
+        }
         let secret = self.connect_secret(&target).await?;
         let hits = match target.protocol {
             ProtocolKind::Imap => {
@@ -161,6 +166,7 @@ impl SyncService {
                 )
                 .await?
             }
+            ProtocolKind::Proton => unreachable!("Proton accounts are searched locally"),
         };
         report.searched = true;
         report.hits = hits.len();

@@ -210,6 +210,12 @@ jobs:
               timeout-minutes: 10
               run: cargo test -p zmail-test-support --test live_proton_api -- --ignored --nocapture
 
+            # Proton accounts in the sync runtime (zmail-sync's `proton`
+            # feature): session resume, refresh-token rotation, sync.
+            - name: Live Proton Sync Test
+              timeout-minutes: 10
+              run: cargo test -p zmail-test-support --test live_proton_sync -- --ignored --nocapture
+
     build:
         name: Build (${{ matrix.os }})
         needs:

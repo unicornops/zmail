@@ -103,6 +103,9 @@ pub enum ProtocolKind {
     Imap,
     /// Standards-based JMAP sync.
     Jmap,
+    /// Proton Mail's API (ADR 0004). Not offered in the UI until the local
+    /// store is encrypted at rest (#139).
+    Proton,
 }
 
 impl ProtocolKind {
@@ -111,6 +114,7 @@ impl ProtocolKind {
         match self {
             Self::Imap => "imap",
             Self::Jmap => "jmap",
+            Self::Proton => "proton",
         }
     }
 
@@ -119,6 +123,7 @@ impl ProtocolKind {
         match self {
             Self::Imap => "IMAP",
             Self::Jmap => "JMAP",
+            Self::Proton => "Proton Mail",
         }
     }
 
@@ -127,6 +132,7 @@ impl ProtocolKind {
         match value {
             "imap" => Some(Self::Imap),
             "jmap" => Some(Self::Jmap),
+            "proton" => Some(Self::Proton),
             _ => None,
         }
     }
@@ -222,6 +228,8 @@ pub enum SubmissionKind {
     Smtp,
     /// Send using JMAP `EmailSubmission`.
     Jmap,
+    /// Send through Proton's API (not implemented yet; #237).
+    Proton,
 }
 
 impl SubmissionKind {
@@ -230,6 +238,7 @@ impl SubmissionKind {
         match self {
             Self::Smtp => "smtp",
             Self::Jmap => "jmap",
+            Self::Proton => "proton",
         }
     }
 
@@ -238,6 +247,7 @@ impl SubmissionKind {
         match self {
             Self::Smtp => "SMTP",
             Self::Jmap => "JMAP",
+            Self::Proton => "Proton Mail",
         }
     }
 
@@ -246,6 +256,7 @@ impl SubmissionKind {
         match value {
             "smtp" => Some(Self::Smtp),
             "jmap" => Some(Self::Jmap),
+            "proton" => Some(Self::Proton),
             _ => None,
         }
     }
@@ -331,6 +342,15 @@ impl OutgoingConfig {
             username: None,
             security: Some(SubmissionSecurity::StartTls),
             hello_name: "localhost".to_owned(),
+        }
+    }
+
+    /// Returns the Proton API submission config (sending is a later
+    /// phase of #237).
+    pub fn proton_default() -> Self {
+        Self {
+            kind: SubmissionKind::Proton,
+            ..Self::jmap_default()
         }
     }
 
@@ -563,6 +583,9 @@ pub enum AuthKind {
     Password,
     /// OAuth2 bearer token authentication (IMAP `XOAUTH2`).
     OAuth2,
+    /// A Proton session: the session UID, refresh token and salted key
+    /// password in the Proton secret slots. No password is stored.
+    ProtonSession,
 }
 
 impl AuthKind {
@@ -571,6 +594,7 @@ impl AuthKind {
         match self {
             Self::Password => "password",
             Self::OAuth2 => "oauth2",
+            Self::ProtonSession => "proton-session",
         }
     }
 
@@ -579,6 +603,7 @@ impl AuthKind {
         match value {
             "password" => Some(Self::Password),
             "oauth2" => Some(Self::OAuth2),
+            "proton-session" => Some(Self::ProtonSession),
             _ => None,
         }
     }

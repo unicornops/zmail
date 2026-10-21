@@ -343,6 +343,7 @@ impl AccountSetupView {
             Stage::Manual => Some(match self.form.protocol {
                 ProtocolKind::Imap => AccountField::ImapHost,
                 ProtocolKind::Jmap => AccountField::JmapUrl,
+                ProtocolKind::Proton => AccountField::Email,
             }),
             _ => None,
         };
@@ -603,7 +604,8 @@ impl AccountSetupView {
     /// Puts the manual form's Selects in step with the form's values.
     fn sync_selects(&mut self, cx: &mut Context<Self>) {
         let protocol = match self.form.protocol {
-            ProtocolKind::Imap => 0,
+            // The manual form never holds a Proton account.
+            ProtocolKind::Imap | ProtocolKind::Proton => 0,
             ProtocolKind::Jmap => 1,
         };
         let imap = IMAP_SECURITY

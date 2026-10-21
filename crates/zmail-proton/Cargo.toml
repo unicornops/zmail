@@ -1,0 +1,18 @@
+[package]
+name = "zmail-proton"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Proton Mail sync adapter for Zmail, following Proton Mail Bridge's services"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+zmail-core = { path = "../zmail-core" }
+zmail-proton-api = { path = "../zmail-proton-api" }
+zmail-security = { path = "../zmail-security" }
+
+[lints]
+workspace = true

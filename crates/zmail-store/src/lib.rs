@@ -676,22 +676,27 @@ impl LocalStore {
         let display_name = match protocol {
             ProtocolKind::Imap => format!("Operations IMAP {ordinal}"),
             ProtocolKind::Jmap => format!("Workspace JMAP {ordinal}"),
+            ProtocolKind::Proton => format!("Private Proton {ordinal}"),
         };
         let username = match protocol {
             ProtocolKind::Imap => format!("ops{ordinal}@zmail.dev"),
             ProtocolKind::Jmap => format!("workspace{ordinal}@zmail.dev"),
+            ProtocolKind::Proton => format!("private{ordinal}@proton.zmail.dev"),
         };
         let endpoint = match protocol {
             ProtocolKind::Imap => format!("imap{ordinal}.mail.zmail.dev:993"),
             ProtocolKind::Jmap => format!("https://jmap{ordinal}.mail.zmail.dev/jmap"),
+            ProtocolKind::Proton => "https://mail-api.proton.me".to_owned(),
         };
         let primary_name = match protocol {
             ProtocolKind::Imap => "Operations Desk",
             ProtocolKind::Jmap => "Workspace Team",
+            ProtocolKind::Proton => "Private Desk",
         };
         let secondary_name = match protocol {
             ProtocolKind::Imap => "Incident Response",
             ProtocolKind::Jmap => "Automations",
+            ProtocolKind::Proton => "Private Alias",
         };
 
         let account = NewAccount {
@@ -706,6 +711,7 @@ impl LocalStore {
                     OutgoingConfig::smtp_default(format!("smtp{ordinal}.mail.zmail.dev"))
                 }
                 ProtocolKind::Jmap => OutgoingConfig::jmap_default(),
+                ProtocolKind::Proton => OutgoingConfig::proton_default(),
             }),
             identities: vec![
                 zmail_core::NewIdentity {
@@ -719,6 +725,7 @@ impl LocalStore {
                     email_address: match protocol {
                         ProtocolKind::Imap => format!("alerts{ordinal}@zmail.dev"),
                         ProtocolKind::Jmap => format!("flows{ordinal}@zmail.dev"),
+                        ProtocolKind::Proton => format!("alias{ordinal}@proton.zmail.dev"),
                     },
                     signature: format!("Thanks,\n{secondary_name}"),
                     is_primary: false,
@@ -4746,6 +4753,7 @@ fn outgoing_from_row(
         .unwrap_or(match protocol {
             ProtocolKind::Imap => SubmissionKind::Smtp,
             ProtocolKind::Jmap => SubmissionKind::Jmap,
+            ProtocolKind::Proton => SubmissionKind::Proton,
         });
     let derived = default_outgoing(protocol, endpoint, username);
     let OutgoingConfig {
@@ -4777,6 +4785,7 @@ fn outgoing_from_row(
 fn default_outgoing(protocol: ProtocolKind, endpoint: &str, username: &str) -> OutgoingConfig {
     match protocol {
         ProtocolKind::Jmap => OutgoingConfig::jmap_default(),
+        ProtocolKind::Proton => OutgoingConfig::proton_default(),
         ProtocolKind::Imap => {
             let host = extract_host(endpoint).unwrap_or_else(|| "localhost".to_owned());
             let mut outgoing = OutgoingConfig::smtp_default(host);
@@ -6391,6 +6400,39 @@ mod tests {
             .expect("the sync target should load")
             .expect("the sync target should exist");
         assert_eq!(target.auth, AuthKind::Password);
+    }
+
+    #[test]
+    fn proton_accounts_round_trip_through_sync_targets() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .insert_account(&NewAccount {
+                display_name: "Proton".to_owned(),
+                protocol: ProtocolKind::Proton,
+                auth: AuthKind::ProtonSession,
+                endpoint: "https://mail-api.proton.me".to_owned(),
+                username: "user".to_owned(),
+                cache_policy: CachePolicySummary::performance_first(),
+                outgoing: None,
+                identities: vec![NewIdentity {
+                    display_name: "User".to_owned(),
+                    email_address: "user@proton.me".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }],
+            })
+            .expect("the account should be inserted");
+
+        let target = store
+            .sync_target(account_id)
+            .expect("the sync target should load")
+            .expect("the sync target should exist");
+        assert_eq!(target.protocol, ProtocolKind::Proton);
+        assert_eq!(target.auth, AuthKind::ProtonSession);
+        assert_eq!(
+            super::default_outgoing(ProtocolKind::Proton, &target.endpoint, &target.username).kind,
+            zmail_core::SubmissionKind::Proton
+        );
     }
 
     #[test]
@@ -9049,6 +9091,7 @@ mod tests {
                 ProtocolKind::Imap => assert_eq!(ops, Vec::new()),
                 // JMAP ids name the message wherever it is.
                 ProtocolKind::Jmap => assert_eq!(ops.len(), 2, "{ops:?}"),
+                ProtocolKind::Proton => unreachable!("only IMAP and JMAP run this scenario"),
             }
         }
     }

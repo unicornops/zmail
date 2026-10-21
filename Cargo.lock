@@ -9234,6 +9234,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zmail-proton"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "zmail-core",
+ "zmail-proton-api",
+ "zmail-security",
+]
+
+[[package]]
 name = "zmail-proton-api"
 version = "0.0.1"
 dependencies = [
@@ -9300,6 +9311,7 @@ dependencies = [
  "zmail-imap",
  "zmail-jmap",
  "zmail-notify",
+ "zmail-proton",
  "zmail-security",
  "zmail-smtp",
  "zmail-store",
@@ -9317,6 +9329,7 @@ dependencies = [
  "zmail-core",
  "zmail-imap",
  "zmail-jmap",
+ "zmail-proton",
  "zmail-proton-api",
  "zmail-security",
  "zmail-smtp",

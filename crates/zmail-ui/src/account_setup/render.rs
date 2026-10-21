@@ -700,6 +700,8 @@ impl AccountSetupView {
             .map(|discovery| discovery.email().domain().to_owned());
         let cleartext = self.form.values(cx).uses_cleartext();
         let servers = match self.form.protocol {
+            // Proton accounts have no server settings to edit.
+            ProtocolKind::Proton => Vec::new(),
             ProtocolKind::Jmap => vec![
                 section_card("JMAP", colors).child(field(self, AccountField::JmapUrl, colors)),
             ],
