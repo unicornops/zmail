@@ -317,3 +317,70 @@ local = "crates/zmail-proton/src/ops.rs"
 repo = "proton-bridge"
 upstream = "internal/services/imapservice/helpers.go"
 local = "crates/zmail-proton/src/ops.rs"
+
+# Sending: drafts, attachment upload, send packages and Bridge's SMTP service.
+
+[[port]]
+repo = "go-proton-api"
+upstream = "message_send.go"
+local = "crates/zmail-proton-api/src/draft.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "message_draft_types.go"
+local = "crates/zmail-proton-api/src/draft.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "message_send_types.go"
+local = "crates/zmail-proton-api/src/package.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "keys.go"
+local = "crates/zmail-proton-api/src/keys.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "keys_types.go"
+local = "crates/zmail-proton-api/src/keys.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "contact_types.go"
+local = "crates/zmail-proton-api/src/keys.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "mail_settings.go"
+local = "crates/zmail-proton-api/src/mail_settings.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "mail_settings_types.go"
+local = "crates/zmail-proton-api/src/mail_settings.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/smtp/smtp.go"
+local = "crates/zmail-proton/src/send.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/smtp/smtp_packages.go"
+local = "crates/zmail-proton/src/send.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/smtp/errors.go"
+local = "crates/zmail-proton/src/send.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/usertypes/types.go"
+local = "crates/zmail-proton/src/send.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/smtp/smtp_prefs.go"
+local = "crates/zmail-proton/src/send_prefs.rs"

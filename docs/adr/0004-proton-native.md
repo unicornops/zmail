@@ -210,6 +210,13 @@ hydration phase must follow these design rules:
    doesn't decrypt is shown as undecryptable and stays that way until the
    user acts.
 
+Sending keeps to the same line. Bridge decrypts the key packets the
+server returns for each uploaded attachment to get its session key back,
+and only then sends; with an RSA key that would be a decryption of
+server-supplied data whose outcome the server sees. Zmail keeps the
+session keys it made when it encrypted the attachments and never decrypts
+anything during a send.
+
 With those rules in place, `RUSTSEC-2023-0071` is ignored in `deny.toml`
 and in the `cargo audit` step of CI, with a reason pointing here. Users
 with RSA keys can also migrate to Curve25519 keys in Proton's settings.

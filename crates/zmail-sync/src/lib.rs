@@ -1159,7 +1159,7 @@ impl SyncService {
                 )
             })?;
         if job.target.outgoing.kind == SubmissionKind::Proton {
-            bail!("sending through Proton is not supported yet");
+            return self.deliver_proton(&target, &job.message).await;
         }
         let secret = self.connect_secret(&target).await.with_context(|| {
             format!(
@@ -1209,7 +1209,7 @@ impl SyncService {
                 )
                 .await
             }
-            SubmissionKind::Proton => unreachable!("Proton submission is refused above"),
+            SubmissionKind::Proton => unreachable!("Proton submission is delivered above"),
         }
     }
 }

@@ -191,6 +191,9 @@ pub enum Error {
     /// The client was configured with invalid values.
     #[error("invalid Proton client configuration: {0}")]
     Config(String),
+    /// A send package could not be built from the recipients' preferences.
+    #[error("cannot build the Proton send package: {0}")]
+    Package(String),
 }
 
 impl Error {

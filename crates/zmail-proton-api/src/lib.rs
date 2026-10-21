@@ -22,6 +22,9 @@
 //!   code; [`HumanVerification`] covers code 9001.
 //! - [`Salts::salt_for_key`], [`Keys::unlock`] and [`unlock`] turn the key
 //!   password into unlocked user and address keys on rPGP (ADR 0004).
+//! - [`Client::create_draft`], [`Client::upload_attachment`] and
+//!   [`Client::send_draft`] send mail, with [`SendDraftReq`] packages built
+//!   from each recipient's [`SendPreferences`].
 
 mod address;
 mod attachment;
@@ -30,14 +33,19 @@ mod boolean;
 mod client;
 mod config;
 mod cookies;
+mod crypto;
+mod draft;
 mod event;
 mod header_types;
 mod hv;
 mod keyring;
+mod keys;
 mod label;
+mod mail_settings;
 mod manager;
 mod manager_auth;
 mod message;
+mod package;
 mod paging;
 mod pinning;
 mod response;
@@ -52,18 +60,26 @@ mod srp_vectors;
 mod tests;
 
 pub use address::{Address, AddressStatus, AddressType};
-pub use attachment::Attachment;
+pub use attachment::{ATTACHMENT_DISPOSITION, Attachment, CreateAttachmentReq, INLINE_DISPOSITION};
 pub use client::Client;
 pub use config::{API_HOST_URL, AppVersion, ClientConfig};
 pub use cookies::{CookieJar, StoredCookie};
+pub use crypto::{RecipientKey, SessionKey, Split};
+pub use draft::{CreateDraftAction, CreateDraftReq, DraftTemplate, UpdateDraftReq};
 pub use event::{AddressEvent, Event, EventAction, LabelEvent, MAX_COLLECTED_EVENTS, MessageEvent};
 pub use header_types::Headers;
 pub use hv::HumanVerification;
 pub use keyring::{Key, KeyFlags, KeyRing, Keys, UnlockedKey};
+pub use keys::{ContactSettings, PublicKey, RecipientType};
 pub use label::*;
+pub use mail_settings::MailSettings;
 pub use manager::{Manager, Status};
 pub use manager_auth::{Auth, AuthInfo, PasswordMode, TwoFaInfo, TwoFaStatus};
 pub use message::{EmailAddress, Message, MessageFilter, MessageFlags, MessageMetadata};
+pub use package::{
+    EncryptionScheme, MULTIPART_MIXED, MessagePackage, MessageRecipient, PackageKey, SendDraftReq,
+    SendPreferences, SignatureType, TEXT_HTML, TEXT_PLAIN,
+};
 pub use paging::{MAX_PAGE_SIZE, fetch_paged};
 pub use pinning::{PinMismatch, PinParseError, PinSet};
 pub use response::{ApiError, Code, Error};

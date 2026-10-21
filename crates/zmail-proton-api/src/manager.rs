@@ -237,7 +237,7 @@ impl Manager {
         }
         if let Some(body) = &request.body {
             builder = builder
-                .header(CONTENT_TYPE, "application/json")
+                .header(CONTENT_TYPE, request.content_type.as_str())
                 .body(body.clone());
         }
 
@@ -331,6 +331,8 @@ pub(crate) struct Request {
     pub(crate) query: Vec<(String, String)>,
     pub(crate) headers: Vec<(&'static str, String)>,
     pub(crate) body: Option<Vec<u8>>,
+    /// The body's media type.
+    pub(crate) content_type: String,
 }
 
 impl Request {
@@ -341,6 +343,7 @@ impl Request {
             query: Vec::new(),
             headers: Vec::new(),
             body: None,
+            content_type: String::new(),
         }
     }
 
@@ -350,6 +353,10 @@ impl Request {
 
     pub(crate) fn post(path: impl Into<String>) -> Self {
         Self::new(Method::POST, path)
+    }
+
+    pub(crate) fn put(path: impl Into<String>) -> Self {
+        Self::new(Method::PUT, path)
     }
 
     pub(crate) fn delete(path: impl Into<String>) -> Self {
@@ -371,7 +378,15 @@ impl Request {
     /// Sets a JSON body.
     pub(crate) fn json(mut self, body: &impl Serialize) -> Result<Self, Error> {
         self.body = Some(serde_json::to_vec(body)?);
+        self.content_type = "application/json".to_owned();
         Ok(self)
+    }
+
+    /// Sets a body of another media type (a multipart form).
+    pub(crate) fn body(mut self, content_type: impl Into<String>, body: Vec<u8>) -> Self {
+        self.body = Some(body);
+        self.content_type = content_type.into();
+        self
     }
 }
 
