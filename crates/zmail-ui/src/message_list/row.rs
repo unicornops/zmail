@@ -28,6 +28,7 @@ use zmail_core::{
     AccountColor, DraftState, DraftSummary, OutboxJobState, OutboxJobSummary, SearchHit,
     ThreadSummary,
     participants::{parse_address_list, participant_names, sender_identity},
+    reauth::ReauthReason,
     text::count_noun,
     time::{HourCycle, format_full_date, format_list_date, parse_timestamp},
 };
@@ -389,6 +390,9 @@ pub(super) struct OutboxStatus {
     pub(super) failed: bool,
     /// Offer "Retry now": the message is waiting for a retry, or gave up.
     pub(super) can_retry: bool,
+    /// The server refused the account's sign-in: offer Re-authenticate
+    /// instead of Retry now, which cannot help until then.
+    pub(super) needs_reauth: bool,
 }
 
 /// "Sending…", "Failed — retrying in 5 min", "Couldn't send" and so on,
@@ -401,8 +405,18 @@ pub(super) fn outbox_status(
         text: text.to_owned(),
         failed,
         can_retry,
+        needs_reauth: false,
     };
+    let refused = job
+        .last_error_message
+        .as_deref()
+        .and_then(ReauthReason::of_message)
+        .is_some();
     match job.state {
+        OutboxJobState::Failed if refused => OutboxStatus {
+            needs_reauth: true,
+            ..status("Sign in again to send", true, false)
+        },
         OutboxJobState::Queued => status("Waiting to send", false, false),
         OutboxJobState::Sending => status("Sending\u{2026}", false, false),
         OutboxJobState::Sent => status("Sent", false, false),
@@ -423,6 +437,7 @@ pub(super) fn outbox_status(
                 text,
                 failed: true,
                 can_retry: true,
+                needs_reauth: false,
             }
         }
     }
@@ -848,6 +863,7 @@ fn trailing(row: &MessageRow, quick_actions: Option<AnyElement>, colors: &UiColo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zmail_core::reauth::ReauthRequired;
 
     fn thread(message_count: usize, participants: &str) -> ThreadSummary {
         ThreadSummary {
@@ -1104,6 +1120,26 @@ mod tests {
         assert!(failed.failed && failed.can_retry);
         let sending = outbox_status(&job(OutboxJobState::Sending, None), &now);
         assert!(!sending.failed && !sending.can_retry);
+        assert!(!failed.needs_reauth && !sending.needs_reauth);
+    }
+
+    #[test]
+    fn a_refused_sign_in_asks_to_sign_in_again_instead_of_retrying() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-18T10:00:00Z")
+            .expect("a timestamp")
+            .with_timezone(&chrono::Local);
+        let mut refused = job(OutboxJobState::Failed, None);
+        refused.last_error_message = Some(
+            ReauthRequired::new(
+                ReauthReason::SendRefused,
+                "535 5.7.3 Authentication unsuccessful",
+            )
+            .to_string(),
+        );
+        let status = outbox_status(&refused, &now);
+        assert_eq!(status.text, "Sign in again to send");
+        assert!(status.failed && status.needs_reauth);
+        assert!(!status.can_retry, "retrying the same sign-in cannot help");
     }
 
     #[test]

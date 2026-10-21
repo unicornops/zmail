@@ -6,7 +6,10 @@ use anyhow::{Context, Result, bail};
 use mail_send::{
     Credentials, SmtpClientBuilder, mail_builder::MessageBuilder, smtp::message::Message,
 };
-use zmail_core::{AuthKind, OutgoingMessage};
+use zmail_core::{
+    AuthKind, OutgoingMessage,
+    reauth::{ReauthReason, ReauthRequired},
+};
 
 pub use zmail_core::SubmissionSecurity;
 
@@ -138,7 +141,12 @@ pub async fn submit_outgoing_message(
         SubmissionSecurity::Plain => builder
             .connect_plain()
             .await
-            .context("failed to connect to the SMTP server over plain text")?
+            .map_err(|error| {
+                connect_error(
+                    error,
+                    "failed to connect to the SMTP server over plain text",
+                )
+            })?
             .send(smtp_message)
             .await
             .context("failed to submit the SMTP message")?,
@@ -146,20 +154,44 @@ pub async fn submit_outgoing_message(
             .implicit_tls(false)
             .connect()
             .await
-            .context("failed to connect to the SMTP server using STARTTLS")?
+            .map_err(|error| {
+                connect_error(error, "failed to connect to the SMTP server using STARTTLS")
+            })?
             .send(smtp_message)
             .await
             .context("failed to submit the SMTP message")?,
         SubmissionSecurity::ImplicitTls => builder
             .connect()
             .await
-            .context("failed to connect to the SMTP server using implicit TLS")?
+            .map_err(|error| {
+                connect_error(
+                    error,
+                    "failed to connect to the SMTP server using implicit TLS",
+                )
+            })?
             .send(smtp_message)
             .await
             .context("failed to submit the SMTP message")?,
     }
 
     Ok(())
+}
+
+/// Wraps a connection failure. A refused sign-in (`AUTH` answered with
+/// 535 or another failure) is a [`ReauthRequired`] error, since retrying
+/// the same credentials cannot work; the user has to sign in again.
+fn connect_error(error: mail_send::Error, context: &'static str) -> anyhow::Error {
+    match error {
+        mail_send::Error::AuthenticationFailed(reply) => anyhow::Error::new(ReauthRequired::new(
+            ReauthReason::SendRefused,
+            format!(
+                "{} {}.{}.{} {}",
+                reply.code, reply.esc[0], reply.esc[1], reply.esc[2], reply.message
+            ),
+        ))
+        .context(context),
+        error => anyhow::Error::new(error).context(context),
+    }
 }
 
 /// Renders a composed outgoing message into RFC-822 bytes.

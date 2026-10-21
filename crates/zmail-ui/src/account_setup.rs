@@ -420,7 +420,7 @@ impl AccountSetupView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.form.provider = provider;
+        self.form.set_provider(provider, cx);
         // Microsoft 365 refuses passwords: start on OAuth2, whose client
         // fields are under Advanced.
         let oauth = provider.is_some_and(Provider::needs_oauth2);

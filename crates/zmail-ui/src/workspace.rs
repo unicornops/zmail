@@ -2751,6 +2751,9 @@ impl WorkspaceView {
                 self.selected_outbox_job_id = Some(*job_id);
                 self.retry_selected_outbox(window, cx);
             }
+            MessageListEvent::ReauthenticateAccount(account_id) => {
+                crate::settings::reauthenticate_account(*account_id, cx);
+            }
             MessageListEvent::Activate => self.focus_pane(Pane::Detail, window, cx),
             // In a stacked layout a click opens the row's detail;
             // elsewhere the detail is already beside the list.

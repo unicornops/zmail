@@ -26,7 +26,7 @@ impl AccountSetupView {
             return;
         };
         let fill = |view: &mut Self, provider: Option<Provider>, cx: &mut Context<Self>| {
-            view.form.provider = provider;
+            view.form.set_provider(provider, cx);
             view.form.set_text(AccountField::Name, NAME, cx);
             view.form.set_text(AccountField::Email, EMAIL, cx);
             view.form

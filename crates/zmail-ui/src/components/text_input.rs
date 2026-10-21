@@ -323,6 +323,16 @@ impl TextInput {
         self
     }
 
+    /// Replaces the text shown while the input is empty.
+    pub(crate) fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
     /// The accessible name announced by screen readers (usually the visible
     /// field label).
     pub(crate) fn label(mut self, label: impl Into<SharedString>) -> Self {

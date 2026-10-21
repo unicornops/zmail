@@ -17,12 +17,13 @@ runs below should be filed as a follow-up issue.
 
 Prerequisites: a Google account, and a Google Cloud OAuth client
 configured as a **desktop** application with the
-`https://mail.google.com/` scope. The client's secret is embedded in the
-desktop app (Google treats desktop clients as confidential; PKCE is used
-on top).
+`https://mail.google.com/` scope. Google requires the client's secret at
+the token exchange even for desktop clients (PKCE is used on top), so
+zmail asks for it. The secret is sent only to the token endpoint, never
+in the browser's authorization URL.
 
 1. Launch Zmail, open **Add Account**, pick the **Gmail** preset, enter
-   the client id (and secret), and complete the browser consent on the
+   the client id and secret, and complete the browser consent on the
    loopback redirect. The preset fills `imaps://imap.gmail.com:993` and
    `smtp.gmail.com:465` (implicit TLS).
 2. Sync the account; confirm messages land in the local mirror and the
@@ -35,6 +36,24 @@ on top).
 5. Revoke the grant at `myaccount.google.com > Security > Third-party
    access`, trigger a sync, and confirm the failure surfaces as a sync
    failure status in the UI rather than a hang.
+
+## Microsoft 365 (IMAP + SMTP over XOAUTH2)
+
+Prerequisites: a Microsoft 365 or Outlook.com account, and an Entra app
+registration as a public client (no secret) with a loopback redirect. The
+preset asks for `https://outlook.office.com/IMAP.AccessAsUser.All`,
+`https://outlook.office.com/SMTP.Send` and `offline_access`; the tenant
+must allow SMTP AUTH for the mailbox.
+
+1. Add the account with the **Microsoft 365** preset and the client id
+   under Advanced, and complete the consent, which lists reading and
+   sending mail.
+2. Sync, then send a message; confirm `smtp.office365.com:587` accepts
+   `AUTH XOAUTH2` with the same token.
+3. An account signed in before zmail asked for `SMTP.Send` keeps its
+   old grant: a send is refused, the Outbox row says "Sign in again to
+   send" with **Re-authenticate**, and signing in again (which shows the
+   consent for sending) sends the waiting message.
 
 ## JMAP provider (Fastmail or similar) with OAuth2
 

@@ -207,6 +207,53 @@ fn microsoft_365_starts_on_oauth_under_advanced(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn google_oauth_needs_the_client_secret_and_microsoft_does_not(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::NoAccount);
+    let setup = onboarding(&view, cx);
+    let secret_label = |setup: &Entity<AccountSetupView>, cx: &mut VisualTestContext| {
+        cx.read_entity(setup, |setup, _| {
+            setup.form.label(AccountField::OauthClientSecret)
+        })
+    };
+    keys("secondary-enter", cx);
+
+    // Google: OAuth under Advanced asks for the ID and the secret.
+    click("account-setup-provider-google", cx);
+    cx.update(|_, cx| {
+        setup.update(cx, |setup, cx| {
+            setup.toggle_advanced(cx);
+            setup.set_use_oauth(true, cx);
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(secret_label(&setup, cx), "OAuth client secret");
+    fill(&setup, AccountField::Email, "me@example.test", cx);
+    fill(
+        &setup,
+        AccountField::OauthClientId,
+        "1234-abc.apps.googleusercontent.com",
+        cx,
+    );
+    click("account-setup-continue", cx);
+    assert_eq!(errors(&setup, cx), [AccountField::OauthClientSecret]);
+
+    // Microsoft 365's public clients have no secret.
+    click("account-setup-back", cx);
+    click("account-setup-provider-microsoft365", cx);
+    assert_eq!(secret_label(&setup, cx), "OAuth client secret (optional)");
+    fill(&setup, AccountField::OauthClientSecret, "", cx);
+    let values = cx.read_entity(&setup, |setup, cx| setup.form.values(cx));
+    assert!(
+        crate::account_setup::validate_account_form(
+            &values,
+            crate::account_setup::Check::Credentials
+        )
+        .is_empty(),
+        "an empty secret is fine for Microsoft 365"
+    );
+}
+
+#[gpui::test]
 fn discovery_asks_before_ispdb_and_falls_back_to_the_manual_form(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::NoAccount);
     let web = Arc::new(FakeWeb::default());

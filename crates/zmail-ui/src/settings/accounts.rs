@@ -17,13 +17,17 @@
 //!   that moment blocks removal until it has gone.
 //!
 //! The sidebar's Fix… on a failing account opens this section on that
-//! account ([`AccountsSettings::focus_account`]).
+//! account ([`AccountsSettings::focus_account`]), as does Re-authenticate
+//! on an Outbox message the server refused for the account's sign-in.
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, IntoElement, Render, Role,
     SharedString, Subscription, Window, div, prelude::*, px, rgb,
 };
-use zmail_core::{AccountColor, AccountSummary, AuthKind, SyncPhase, text::count_noun};
+use zmail_core::{
+    AccountColor, AccountSummary, AuthKind, OutboxJobState, SyncPhase, reauth::ReauthReason,
+    text::count_noun,
+};
 use zmail_security::SecretSlot;
 use zmail_store::AccountRemovalImpact;
 
@@ -41,6 +45,20 @@ use crate::styles::{
     TypeStyleExt, UiColors,
 };
 use crate::widgets::{EllipsisExt, format_size, icon, sync_badge};
+
+/// What the fix banner says about a message the server refused for the
+/// account's sign-in, ending with the stored error.
+fn refused_send_message(auth: AuthKind, error: &str) -> String {
+    let advice = match auth {
+        AuthKind::OAuth2 => {
+            "Signing in again asks your provider for permission to send mail as well as read it. Microsoft 365 accounts added before zmail asked for that need it once."
+        }
+        _ => {
+            "The outgoing server no longer accepts the saved password. Enter the current one, or a new app password."
+        }
+    };
+    format!("{advice} Messages waiting in the Outbox send once you have signed in. {error}")
+}
 
 /// The cache budgets offered, in MiB; `None` is no limit.
 const CACHE_BUDGETS: [Option<u64>; 7] = [
@@ -68,6 +86,9 @@ struct AccountCard {
     /// The budgets `budget` lists: [`CACHE_BUDGETS`], plus the saved one
     /// when it is not among them.
     budget_options: Vec<Option<u64>>,
+    /// The error of an Outbox message the server refused for the
+    /// account's sign-in, if any: the account can sync but not send.
+    refused_send: Option<String>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -193,6 +214,13 @@ impl AccountsSettings {
                 .position(|option| *option == budget_mb);
             card.budget
                 .update(cx, |select, cx| select.set_selected(selected, cx));
+            card.refused_send = store
+                .list_outbox_jobs(Some(account.id))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|job| job.state == OutboxJobState::Failed)
+                .filter_map(|job| job.last_error_message)
+                .find(|message| ReauthReason::of_message(message).is_some());
             card.account = account;
             card.auth = auth;
             cards.push(card);
@@ -229,6 +257,7 @@ impl AccountsSettings {
             color,
             budget,
             budget_options: options,
+            refused_send: None,
             _subscriptions: [color_subscription, budget_subscription],
         }
     }
@@ -380,6 +409,7 @@ impl AccountsSettings {
             Ok(()) => {
                 let _ = host.sync_service.sync_account(account_id);
                 let _ = host.sync_service.sync_watchers();
+                let _ = host.sync_service.retry_refused_sends(account_id);
                 cx.emit(SettingsEvent::Status(format!(
                     "Password saved. {name} is syncing."
                 )));
@@ -445,6 +475,8 @@ impl AccountsSettings {
                     Ok(()) => {
                         let _ = sync_service.sync_account(account_id);
                         let _ = sync_service.sync_watchers();
+                        // Messages refused for the old sign-in go now.
+                        let _ = sync_service.retry_refused_sends(account_id);
                     }
                     Err(error) => {
                         let _ = store.record_sync_failure(
@@ -707,28 +739,38 @@ impl AccountsSettings {
             .into_any_element()
     }
 
-    /// The banner Fix… opens the section with, while that account fails.
+    /// The banner Fix… (or an Outbox message's Re-authenticate) opens the
+    /// section with, while that account fails to sync or to send.
     fn render_fix_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let card = self
             .cards
             .iter()
             .find(|card| Some(card.account.id) == self.focused_account)?;
         let status = &card.account.sync_status;
-        if !matches!(status.phase, SyncPhase::Failed | SyncPhase::Backoff) {
-            return None;
-        }
+        let name = &card.account.display_name;
+        let (title, message) = if matches!(status.phase, SyncPhase::Failed | SyncPhase::Backoff) {
+            (
+                format!("{name} can't sync"),
+                status
+                    .last_error_message
+                    .clone()
+                    .unwrap_or_else(|| "The last sync failed.".to_owned()),
+            )
+        } else {
+            let refused = card.refused_send.as_ref()?;
+            (
+                format!("{name} can't send"),
+                refused_send_message(card.auth, refused),
+            )
+        };
         let account_id = card.account.id;
-        let message = status
-            .last_error_message
-            .clone()
-            .unwrap_or_else(|| "The last sync failed.".to_owned());
         Some(
             div()
                 .pt(px(SPACE_2))
                 .child(
                     Banner::new("account-fix", message)
                         .tone(BannerTone::Caution)
-                        .title(format!("{} can't sync", card.account.display_name))
+                        .title(title)
                         .action(
                             Button::new("account-fix-reauth", "Re-authenticate")
                                 .size(ButtonSize::Small)

@@ -241,6 +241,19 @@ pub(crate) fn open_account(account_id: i64, cx: &mut App) {
     }
 }
 
+/// Opens Settings → Accounts on `account_id` and starts signing it in
+/// again: an Outbox message refused for the account's sign-in.
+pub(crate) fn reauthenticate_account(account_id: i64, cx: &mut App) {
+    open_account(account_id, cx);
+    if let Some(handle) = window(cx) {
+        let _ = handle.update(cx, |root, window, cx| {
+            root.accounts.update(cx, |accounts, cx| {
+                accounts.reauthenticate(account_id, window, cx)
+            });
+        });
+    }
+}
+
 /// Runs `update` on the main window's shell, for example to re-read the
 /// store after Settings changed an account.
 pub(crate) fn update_workspace(

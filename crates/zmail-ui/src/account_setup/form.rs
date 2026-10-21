@@ -101,7 +101,7 @@ impl AccountField {
             AccountField::Email => "jane@example.com",
             AccountField::Password => "Password or app password",
             AccountField::OauthClientId => "From your provider's developer console",
-            AccountField::OauthClientSecret => "Optional for public clients",
+            AccountField::OauthClientSecret => oauth_secret_placeholder(None),
             AccountField::OauthAuthorizationEndpoint => "https://provider.example.com/authorize",
             AccountField::OauthTokenEndpoint => "https://provider.example.com/token",
             AccountField::OauthScopes => "Space-separated, for example: email",
@@ -115,6 +115,31 @@ impl AccountField {
             | AccountField::SmtpSecurity
             | AccountField::AllowCleartext => "",
         }
+    }
+}
+
+/// Whether the provider's OAuth clients need their secret at the token
+/// exchange. Google's desktop clients do, though the secret is not
+/// confidential there; Microsoft's public clients have none.
+pub(crate) fn oauth_secret_required(provider: Option<Provider>) -> bool {
+    provider == Some(Provider::Google)
+}
+
+/// The client secret field's visible label for the provider.
+pub(crate) fn oauth_secret_label(provider: Option<Provider>) -> &'static str {
+    if oauth_secret_required(provider) {
+        "OAuth client secret"
+    } else {
+        "OAuth client secret (optional)"
+    }
+}
+
+/// The client secret field's placeholder for the provider.
+pub(crate) fn oauth_secret_placeholder(provider: Option<Provider>) -> &'static str {
+    if oauth_secret_required(provider) {
+        "Required: shown beside the client ID in Google Cloud"
+    } else {
+        "Leave empty for a public client"
     }
 }
 
@@ -350,6 +375,25 @@ impl AccountForm {
         }
     }
 
+    /// Sets the provider, and with it what the client secret field asks
+    /// for.
+    pub(crate) fn set_provider(&mut self, provider: Option<Provider>, cx: &mut App) {
+        self.provider = provider;
+        self.input(AccountField::OauthClientSecret)
+            .update(cx, |input, cx| {
+                input.set_placeholder(oauth_secret_placeholder(provider), cx)
+            });
+    }
+
+    /// A field's visible label, which for the client secret depends on the
+    /// provider.
+    pub(crate) fn label(&self, field: AccountField) -> &'static str {
+        match field {
+            AccountField::OauthClientSecret => oauth_secret_label(self.provider),
+            field => field.label(),
+        }
+    }
+
     /// Fills the server fields from discovered (or preset) settings.
     pub(crate) fn apply_settings(&mut self, settings: &MailSettings, cx: &mut App) {
         match settings {
@@ -477,6 +521,14 @@ pub(crate) fn validate_account_form(
             &form.oauth_client_id,
             "Enter the OAuth client ID (under Advanced).",
         );
+        if oauth_secret_required(form.provider) {
+            require(
+                &mut errors,
+                AccountField::OauthClientSecret,
+                &form.oauth_client_secret,
+                "Google needs the client secret as well as the ID. Copy it from the client in Google Cloud.",
+            );
+        }
         if oauth_preset(form).is_none() {
             require(
                 &mut errors,
@@ -748,7 +800,7 @@ mod tests {
 
     use super::{
         AccountField, AccountFormValues, AccountSetupSecret, Check, build_account_from_form,
-        validate_account_form,
+        oauth_secret_label, oauth_secret_placeholder, oauth_secret_required, validate_account_form,
     };
 
     fn fields(errors: &[(AccountField, String)]) -> Vec<AccountField> {
@@ -880,6 +932,7 @@ mod tests {
             use_oauth: true,
             password: String::new(),
             oauth_client_id: "client-1".to_owned(),
+            oauth_client_secret: "secret-1".to_owned(),
             ..imap_form()
         };
         let (account, secret) = build_account_from_form(&form).expect("valid form");
@@ -888,10 +941,12 @@ mod tests {
             panic!("expected an OAuth2 client");
         };
         assert_eq!(client.token_endpoint, "https://oauth2.googleapis.com/token");
+        assert_eq!(client.client_secret.as_deref(), Some("secret-1"));
 
         // Without a preset the endpoints are required.
         let form = AccountFormValues {
             provider: None,
+            oauth_client_secret: String::new(),
             protocol: ProtocolKind::Jmap,
             jmap_url: "https://api.example.com/jmap/session".to_owned(),
             ..form
@@ -916,5 +971,68 @@ mod tests {
         };
         assert_eq!(client.scopes, ["email", "profile"]);
         assert!(client.client_secret.is_none());
+    }
+
+    #[test]
+    fn the_client_secret_is_required_for_google_only() {
+        let oauth = |provider| AccountFormValues {
+            provider,
+            use_oauth: true,
+            password: String::new(),
+            oauth_client_id: "client-1".to_owned(),
+            oauth_authorization_endpoint: "https://provider.test/authorize".to_owned(),
+            oauth_token_endpoint: "https://provider.test/token".to_owned(),
+            ..imap_form()
+        };
+
+        // Google's desktop clients need the secret at the token exchange.
+        let google = oauth(Some(Provider::Google));
+        assert_eq!(
+            fields(&validate_account_form(&google, Check::Credentials)),
+            [AccountField::OauthClientSecret]
+        );
+        assert!(build_account_from_form(&google).is_err());
+        let blank = AccountFormValues {
+            oauth_client_secret: "   ".to_owned(),
+            ..google.clone()
+        };
+        assert_eq!(
+            fields(&validate_account_form(&blank, Check::Credentials)),
+            [AccountField::OauthClientSecret],
+            "whitespace is not a secret"
+        );
+        assert!(oauth_secret_required(Some(Provider::Google)));
+        assert_eq!(
+            oauth_secret_label(Some(Provider::Google)),
+            "OAuth client secret"
+        );
+        assert!(oauth_secret_placeholder(Some(Provider::Google)).starts_with("Required"));
+
+        // Microsoft's public clients, and other providers, have none.
+        for provider in [Some(Provider::Microsoft365), None] {
+            let form = oauth(provider);
+            assert!(
+                validate_account_form(&form, Check::Credentials).is_empty(),
+                "{provider:?} needs no secret"
+            );
+            let (_, secret) = build_account_from_form(&form).expect("valid form");
+            let AccountSetupSecret::OAuth2(client) = secret else {
+                panic!("expected an OAuth2 client");
+            };
+            assert!(client.client_secret.is_none());
+            assert!(!oauth_secret_required(provider));
+            assert_eq!(
+                oauth_secret_label(provider),
+                "OAuth client secret (optional)"
+            );
+            assert!(!oauth_secret_placeholder(provider).contains("Required"));
+        }
+
+        // A password sign-in never asks for it.
+        let password = AccountFormValues {
+            provider: Some(Provider::Google),
+            ..imap_form()
+        };
+        assert!(validate_account_form(&password, Check::All).is_empty());
     }
 }
