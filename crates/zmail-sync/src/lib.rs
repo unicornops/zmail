@@ -396,7 +396,8 @@ impl SyncService {
             .context("failed to spawn the OAuth2 refresh thread")?;
         let tokens = rx
             .await
-            .context("the OAuth2 refresh thread exited before returning")??;
+            .context("the OAuth2 refresh thread exited before returning")?
+            .map_err(refused_grant)?;
 
         self.inner.secrets.set_account_secret_in_slot(
             target.id,
@@ -910,7 +911,9 @@ impl SyncService {
         for attempt in 1..=MAX_ATTEMPTS {
             match self.run_single_sync(account_id).await {
                 Ok(()) => return Ok(()),
-                Err(error) if attempt < MAX_ATTEMPTS => {
+                // Signing in again is the only fix, so a second attempt
+                // would fail the same way.
+                Err(error) if attempt < MAX_ATTEMPTS && reauth_required(&error).is_none() => {
                     let delay = Duration::from_secs((attempt * 2) as u64);
                     self.inner.store.record_sync_backoff(
                         account_id,
@@ -923,7 +926,7 @@ impl SyncService {
                     self.inner.store.record_sync_failure(
                         account_id,
                         "Sync failed after retry",
-                        error.to_string(),
+                        failure_message(&error),
                     )?;
                     return Err(error);
                 }
@@ -1264,6 +1267,30 @@ fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as i64)
         .unwrap_or_default()
+}
+
+/// A refresh the provider refused with `invalid_grant` becomes a
+/// [`ReauthRequired`] error: the saved sign-in expired or was revoked, so
+/// retrying it cannot work and the user has to sign in again. Other
+/// failures (an offline token endpoint, say) are left to retry.
+fn refused_grant(error: anyhow::Error) -> anyhow::Error {
+    match zmail_auth::TokenError::find(&error).filter(|token| token.is_invalid_grant()) {
+        Some(token) => anyhow::Error::new(ReauthRequired::new(
+            ReauthReason::GrantExpired,
+            token.summary(),
+        )),
+        None => error,
+    }
+}
+
+/// The message a failure is stored with: a [`ReauthRequired`] failure's
+/// own message, which the shell recognises, otherwise the outermost
+/// context.
+fn failure_message(error: &anyhow::Error) -> String {
+    match reauth_required(error) {
+        Some(reauth) => reauth.to_string(),
+        None => error.to_string(),
+    }
 }
 
 /// The [`ReauthRequired`] failure somewhere in `error`'s chain, if any:
@@ -1884,6 +1911,44 @@ mod oauth2_refresh_tests {
     use zmail_store::LocalStore;
 
     use super::tests::insert_account;
+
+    #[test]
+    fn an_invalid_grant_asks_to_sign_in_again() {
+        use zmail_core::reauth::ReauthReason;
+
+        let refused = anyhow::Error::new(zmail_auth::TokenError {
+            status: 400,
+            error: Some("invalid_grant".to_owned()),
+            description: Some("Token has been expired or revoked.".to_owned()),
+        })
+        .context("the token request failed");
+        let error = super::refused_grant(refused)
+            .context("failed to refresh the OAuth2 access token for account 1");
+        let message = super::failure_message(&error);
+        assert_eq!(
+            ReauthReason::of_message(&message),
+            Some(ReauthReason::GrantExpired),
+            "{message}"
+        );
+        assert!(message.contains("invalid_grant: Token has been expired or revoked."));
+
+        // Anything else keeps its own message and is retried as before.
+        for other in [
+            anyhow::Error::new(zmail_auth::TokenError {
+                status: 401,
+                error: Some("invalid_client".to_owned()),
+                description: None,
+            }),
+            anyhow::anyhow!("dns error: no record found"),
+        ] {
+            let error = super::refused_grant(other);
+            assert!(super::reauth_required(&error).is_none(), "{error:#}");
+            assert_eq!(
+                ReauthReason::of_message(&super::failure_message(&error)),
+                None
+            );
+        }
+    }
 
     #[test]
     fn persist_oauth2_grant_stores_the_full_grant() {

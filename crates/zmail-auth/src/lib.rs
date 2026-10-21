@@ -26,6 +26,58 @@ pub struct TokenSet {
     pub expires_in: Option<u64>,
 }
 
+/// A token endpoint's refusal (RFC 6749 §5.2): the HTTP status and, when
+/// the body carries them, the error code and its description.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenError {
+    /// The HTTP status.
+    pub status: u16,
+    /// The OAuth2 error code, such as `invalid_grant`.
+    pub error: Option<String>,
+    /// The provider's description of the error.
+    pub description: Option<String>,
+}
+
+impl TokenError {
+    /// The refresh token (or authorization code) is no longer accepted:
+    /// it expired or was revoked, and only signing in again helps. Google
+    /// answers this for every refresh once a Testing app's 7-day sign-in
+    /// has lapsed.
+    pub fn is_invalid_grant(&self) -> bool {
+        self.error.as_deref() == Some("invalid_grant")
+    }
+
+    /// The `error_code: description` pair, for messages.
+    pub fn summary(&self) -> String {
+        match (&self.error, &self.description) {
+            (Some(error), Some(description)) => format!("{error}: {description}"),
+            (Some(error), None) => error.clone(),
+            (None, _) => format!("HTTP {}", self.status),
+        }
+    }
+
+    /// The token error somewhere in `error`'s chain, if any.
+    pub fn find(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|cause| cause.downcast_ref())
+    }
+}
+
+impl std::fmt::Display for TokenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the token endpoint rejected the request with HTTP {}",
+            self.status
+        )?;
+        if self.error.is_some() {
+            write!(f, " ({})", self.summary())?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for TokenError {}
+
 /// An OAuth2 provider client configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuth2Client {
@@ -387,11 +439,22 @@ fn token_request(endpoint: &str, form: Vec<(&str, String)>) -> Result<TokenSet> 
         .form(&form)
         .send()
         .context("the token request failed")?;
-    if !response.status().is_success() {
-        bail!(
-            "the token endpoint rejected the request with HTTP {}",
-            response.status()
-        );
+    let status = response.status();
+    if !status.is_success() {
+        // RFC 6749 §5.2: the body names the error, such as `invalid_grant`
+        // for a refresh token that expired or was revoked.
+        let body: serde_json::Value = response.json().unwrap_or_default();
+        let field = |name: &str| {
+            body.get(name)
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        };
+        return Err(TokenError {
+            status: status.as_u16(),
+            error: field("error"),
+            description: field("error_description"),
+        }
+        .into());
     }
     let json: serde_json::Value = response.json().context("the token response was not JSON")?;
     let access_token = json
@@ -810,6 +873,80 @@ mod tests {
             .join()
             .expect("the mock server should finish")
             .expect("the mock server should validate the request");
+    }
+
+    /// One-shot mock token endpoint answering `status` with `body`.
+    fn mock_token_error(
+        port: u16,
+        status: &'static str,
+        body: &'static str,
+    ) -> thread::JoinHandle<()> {
+        let listener = TcpListener::bind(("127.0.0.1", port)).expect("the mock binds");
+        thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0u8; 8192];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        })
+    }
+
+    #[test]
+    fn an_expired_or_revoked_refresh_token_is_an_invalid_grant() {
+        let port = free_port();
+        let server = mock_token_error(
+            port,
+            "400 Bad Request",
+            r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#,
+        );
+        let error = retry_until_bound(|| {
+            super::refresh_access_token(
+                &format!("http://127.0.0.1:{port}/token"),
+                "test-client",
+                Some("secret"),
+                "refresh-1",
+            )
+        })
+        .expect_err("the refresh is refused");
+        server.join().expect("the mock finishes");
+        let token_error = super::TokenError::find(&error).expect("a token error");
+        assert!(token_error.is_invalid_grant());
+        assert_eq!(token_error.status, 400);
+        assert_eq!(
+            token_error.summary(),
+            "invalid_grant: Token has been expired or revoked."
+        );
+        assert!(format!("{error:#}").contains("invalid_grant"));
+    }
+
+    #[test]
+    fn other_token_failures_are_not_invalid_grants() {
+        for (status, body) in [
+            ("400 Bad Request", r#"{"error":"invalid_client"}"#),
+            ("500 Internal Server Error", "<html>oops</html>"),
+        ] {
+            let port = free_port();
+            let server = mock_token_error(port, status, body);
+            let error = retry_until_bound(|| {
+                super::refresh_access_token(
+                    &format!("http://127.0.0.1:{port}/token"),
+                    "test-client",
+                    None,
+                    "refresh-1",
+                )
+            })
+            .expect_err("the refresh is refused");
+            server.join().expect("the mock finishes");
+            let token_error = super::TokenError::find(&error).expect("a token error");
+            assert!(!token_error.is_invalid_grant(), "{status}: {body}");
+        }
     }
 
     #[test]

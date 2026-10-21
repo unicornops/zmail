@@ -6,7 +6,9 @@
 //! 2. **Provider:** Google, Microsoft 365, Fastmail, iCloud or Other.
 //! 3. **Sign in:** name, address and password. OAuth2 and its client
 //!    fields sit under Advanced until zmail has client IDs of its own
-//!    (#89); Microsoft 365, which refuses passwords, opens it.
+//!    (#89); Microsoft 365, which refuses passwords, opens it. Gmail keeps
+//!    app passwords as the default and offers a guide to creating a
+//!    Google OAuth client of your own instead (`google_guide.rs`).
 //! 4. **Finding settings:** a provider preset needs none. For Other,
 //!    `zmail_autodiscover` runs one step at a time off the main thread with
 //!    progress, and stops to ask before the ISPDB lookup, which sends the
@@ -43,6 +45,7 @@ use crate::components::{Select, SelectEvent, TextInputEvent};
 
 mod fixture;
 mod form;
+mod google_guide;
 mod render;
 mod window;
 
@@ -104,6 +107,9 @@ pub(crate) enum Stage {
     Provider,
     /// Name, address and password (or OAuth2 under Advanced).
     Credentials,
+    /// Gmail with a Google OAuth client of the user's own: the steps to
+    /// create one, and its fields.
+    GoogleGuide,
     /// Autodiscovery with progress.
     Discovering,
     /// May zmail ask Mozilla's ISPDB?
@@ -129,6 +135,11 @@ pub enum OnboardingStep {
     Provider,
     /// Google's sign-in step, with its app password note.
     Credentials,
+    /// The guide to a Google OAuth client of your own, part filled in.
+    GoogleGuide,
+    /// The guide with a client pasted the wrong way round, and the
+    /// errors it gets.
+    GoogleGuideInvalid,
     /// Autodiscovery part way through.
     Discovering,
     /// The ISPDB consent question.
@@ -340,6 +351,11 @@ impl AccountSetupView {
             } else {
                 AccountField::Password
             }),
+            Stage::GoogleGuide => Some(if self.form.text(AccountField::Email, cx).is_empty() {
+                AccountField::Email
+            } else {
+                AccountField::OauthClientId
+            }),
             Stage::Manual => Some(match self.form.protocol {
                 ProtocolKind::Imap => AccountField::ImapHost,
                 ProtocolKind::Jmap => AccountField::JmapUrl,
@@ -361,6 +377,11 @@ impl AccountSetupView {
     pub(crate) fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.account_id.is_some() {
             return;
+        }
+        // Leaving the guide goes back to the app password.
+        if self.stage == Stage::GoogleGuide {
+            self.form.use_oauth = false;
+            self.form.errors.clear();
         }
         // Discovery and consent are not places to go back to: Back from
         // the result or the manual form returns to the sign-in step.
@@ -406,7 +427,7 @@ impl AccountSetupView {
             Stage::Welcome => self.go(Stage::Provider, window, cx),
             // Picking a provider is the action here.
             Stage::Provider | Stage::Discovering | Stage::Consent => {}
-            Stage::Credentials => self.submit_credentials(window, cx),
+            Stage::Credentials | Stage::GoogleGuide => self.submit_credentials(window, cx),
             Stage::Result | Stage::Manual => self.save(window, cx),
             Stage::Colour => self.confirm_colour(window, cx),
             Stage::Syncing => self.finish(cx),
@@ -428,6 +449,14 @@ impl AccountSetupView {
         self.advanced_open = oauth;
         self.form.errors.clear();
         self.go(Stage::Credentials, window, cx);
+    }
+
+    /// Gmail's "Set up your own client": the guide, signing in with
+    /// OAuth2 instead of an app password.
+    pub(crate) fn open_google_guide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.form.use_oauth = true;
+        self.form.errors.clear();
+        self.go(Stage::GoogleGuide, window, cx);
     }
 
     /// Shows or hides the Advanced fields.
@@ -647,8 +676,12 @@ impl AccountSetupView {
                         | AccountField::OauthScopes
                 )
             }) {
-                self.advanced_open |= values.use_oauth;
-                Stage::Credentials
+                if self.stage == Stage::GoogleGuide {
+                    Stage::GoogleGuide
+                } else {
+                    self.advanced_open |= values.use_oauth;
+                    Stage::Credentials
+                }
             } else {
                 Stage::Manual
             };

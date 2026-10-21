@@ -40,24 +40,28 @@ use crate::components::{
     Banner, BannerTone, Button, ButtonSize, ComponentTheme, Modal, ModalState, Select, SelectEvent,
     TextInput, TextInputEvent,
 };
+use crate::google_oauth;
 use crate::styles::{
     ICON_SIZE_SM, RADIUS_LG, SPACE_1, SPACE_2, SPACE_3, SPACE_4, TYPE_BODY_STRONG, TYPE_CAPTION,
     TypeStyleExt, UiColors,
 };
 use crate::widgets::{EllipsisExt, format_size, icon, sync_badge};
 
-/// What the fix banner says about a message the server refused for the
-/// account's sign-in, ending with the stored error.
-fn refused_send_message(auth: AuthKind, error: &str) -> String {
-    let advice = match auth {
-        AuthKind::OAuth2 => {
-            "Signing in again asks your provider for permission to send mail as well as read it. Microsoft 365 accounts added before zmail asked for that need it once."
+/// What the fix banner advises for a failure only signing in again fixes.
+/// `google` is a Gmail account signed in with the user's own client.
+fn reauth_advice(reason: ReauthReason, auth: AuthKind, google: bool) -> &'static str {
+    match (reason, auth) {
+        (ReauthReason::GrantExpired, _) if google => google_oauth::EXPIRED_ADVICE,
+        (ReauthReason::GrantExpired, _) => {
+            "Your provider no longer accepts zmail's saved sign-in: it expired, or access was revoked. Sign in again to carry on."
         }
-        _ => {
-            "The outgoing server no longer accepts the saved password. Enter the current one, or a new app password."
+        (ReauthReason::SendRefused, AuthKind::OAuth2) => {
+            "Signing in again asks your provider for permission to send mail as well as read it. Microsoft 365 accounts added before zmail asked for that need it once. Messages waiting in the Outbox send once you have signed in."
         }
-    };
-    format!("{advice} Messages waiting in the Outbox send once you have signed in. {error}")
+        (ReauthReason::SendRefused, _) => {
+            "The outgoing server no longer accepts the saved password. Enter the current one, or a new app password. Messages waiting in the Outbox send once you have signed in."
+        }
+    }
 }
 
 /// The cache budgets offered, in MiB; `None` is no limit.
@@ -89,6 +93,9 @@ struct AccountCard {
     /// The error of an Outbox message the server refused for the
     /// account's sign-in, if any: the account can sync but not send.
     refused_send: Option<String>,
+    /// A Gmail account signed in with the user's own OAuth client, whose
+    /// sign-ins expire after 7 days while its app is in Testing.
+    google_oauth: bool,
     _subscriptions: [Subscription; 2],
 }
 
@@ -184,12 +191,14 @@ impl AccountsSettings {
                 .ok()
                 .flatten()
                 .map(|bytes| bytes / (1024 * 1024));
-            let auth = store
-                .sync_target(account.id)
-                .ok()
-                .flatten()
+            let target = store.sync_target(account.id).ok().flatten();
+            let auth = target
+                .as_ref()
                 .map(|target| target.auth)
                 .unwrap_or_default();
+            let google_oauth = target.and_then(|target| target.oauth2).and_then(|config| {
+                zmail_auth::OAuth2Preset::for_token_endpoint(&config.token_endpoint)
+            }) == Some(zmail_auth::OAuth2Preset::Gmail);
             let existing = self
                 .cards
                 .iter()
@@ -223,6 +232,7 @@ impl AccountsSettings {
                 .find(|message| ReauthReason::of_message(message).is_some());
             card.account = account;
             card.auth = auth;
+            card.google_oauth = google_oauth;
             cards.push(card);
         }
         self.cards = cards;
@@ -258,6 +268,7 @@ impl AccountsSettings {
             budget,
             budget_options: options,
             refused_send: None,
+            google_oauth: false,
             _subscriptions: [color_subscription, budget_subscription],
         }
     }
@@ -748,7 +759,7 @@ impl AccountsSettings {
             .find(|card| Some(card.account.id) == self.focused_account)?;
         let status = &card.account.sync_status;
         let name = &card.account.display_name;
-        let (title, message) = if matches!(status.phase, SyncPhase::Failed | SyncPhase::Backoff) {
+        let (title, error) = if matches!(status.phase, SyncPhase::Failed | SyncPhase::Backoff) {
             (
                 format!("{name} can't sync"),
                 status
@@ -757,30 +768,47 @@ impl AccountsSettings {
                     .unwrap_or_else(|| "The last sync failed.".to_owned()),
             )
         } else {
-            let refused = card.refused_send.as_ref()?;
-            (
-                format!("{name} can't send"),
-                refused_send_message(card.auth, refused),
+            (format!("{name} can't send"), card.refused_send.clone()?)
+        };
+        // A failure only signing in again fixes says why and how, with the
+        // stored error under Show details; any other shows the error.
+        let reason = ReauthReason::of_message(&error);
+        let title = match reason {
+            Some(ReauthReason::GrantExpired) => format!("{name}'s sign-in has expired"),
+            _ => title,
+        };
+        let banner = match reason {
+            Some(reason) => Banner::new(
+                "account-fix",
+                reauth_advice(reason, card.auth, card.google_oauth),
             )
+            .detail("Error", error),
+            None => Banner::new("account-fix", error),
         };
         let account_id = card.account.id;
-        Some(
-            div()
-                .pt(px(SPACE_2))
-                .child(
-                    Banner::new("account-fix", message)
-                        .tone(BannerTone::Caution)
-                        .title(title)
-                        .action(
-                            Button::new("account-fix-reauth", "Re-authenticate")
-                                .size(ButtonSize::Small)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.reauthenticate(account_id, window, cx)
-                                })),
-                        ),
-                )
-                .into_any_element(),
-        )
+        let banner = banner.tone(BannerTone::Caution).title(title).action(
+            div().debug_selector(|| "account-fix-reauth".into()).child(
+                Button::new("account-fix-reauth", "Re-authenticate")
+                    .size(ButtonSize::Small)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.reauthenticate(account_id, window, cx)
+                    })),
+            ),
+        );
+        // An expired Google sign-in links to the guide's fix.
+        let banner = if reason == Some(ReauthReason::GrantExpired) && card.google_oauth {
+            banner.action(
+                div().debug_selector(|| "account-fix-guide".into()).child(
+                    Button::new("account-fix-guide", "How to stop this")
+                        .size(ButtonSize::Small)
+                        .icon("external-link")
+                        .on_click(|_, _, cx: &mut App| cx.open_url(google_oauth::GUIDE_URL)),
+                ),
+            )
+        } else {
+            banner
+        };
+        Some(div().pt(px(SPACE_2)).child(banner).into_any_element())
     }
 
     fn render_reauth_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

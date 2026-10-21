@@ -20,6 +20,7 @@ use zmail_core::{
 };
 
 use crate::components::TextInput;
+use crate::google_oauth;
 
 // ---------------------------------------------------------------------------
 // AccountField
@@ -521,13 +522,17 @@ pub(crate) fn validate_account_form(
             &form.oauth_client_id,
             "Enter the OAuth client ID (under Advanced).",
         );
-        if oauth_secret_required(form.provider) {
-            require(
-                &mut errors,
-                AccountField::OauthClientSecret,
-                &form.oauth_client_secret,
-                "Google needs the client secret as well as the ID. Copy it from the client in Google Cloud.",
-            );
+        if form.provider == Some(Provider::Google) {
+            // A pasted client is checked for its shape (a Google client
+            // ID, a secret that is not the ID) before the browser opens.
+            if !form.oauth_client_id.trim().is_empty()
+                && let Some(error) = google_oauth::check_client_id(&form.oauth_client_id)
+            {
+                errors.push((AccountField::OauthClientId, error.to_owned()));
+            }
+            if let Some(error) = google_oauth::check_client_secret(&form.oauth_client_secret) {
+                errors.push((AccountField::OauthClientSecret, error.to_owned()));
+            }
         }
         if oauth_preset(form).is_none() {
             require(
@@ -931,7 +936,7 @@ mod tests {
             provider: Some(Provider::Google),
             use_oauth: true,
             password: String::new(),
-            oauth_client_id: "client-1".to_owned(),
+            oauth_client_id: "client-1.apps.googleusercontent.com".to_owned(),
             oauth_client_secret: "secret-1".to_owned(),
             ..imap_form()
         };
@@ -979,7 +984,7 @@ mod tests {
             provider,
             use_oauth: true,
             password: String::new(),
-            oauth_client_id: "client-1".to_owned(),
+            oauth_client_id: "client-1.apps.googleusercontent.com".to_owned(),
             oauth_authorization_endpoint: "https://provider.test/authorize".to_owned(),
             oauth_token_endpoint: "https://provider.test/token".to_owned(),
             ..imap_form()
@@ -1034,5 +1039,41 @@ mod tests {
             ..imap_form()
         };
         assert!(validate_account_form(&password, Check::All).is_empty());
+    }
+
+    #[test]
+    fn a_pasted_google_client_is_checked_for_its_shape() {
+        let google = |client_id: &str, client_secret: &str| AccountFormValues {
+            provider: Some(Provider::Google),
+            use_oauth: true,
+            password: String::new(),
+            oauth_client_id: client_id.to_owned(),
+            oauth_client_secret: client_secret.to_owned(),
+            ..imap_form()
+        };
+        let check =
+            |form: &AccountFormValues| fields(&validate_account_form(form, Check::Credentials));
+
+        assert!(check(&google("42-abc.apps.googleusercontent.com", "GOCSPX-x")).is_empty());
+        // Not a Google client ID.
+        assert_eq!(
+            check(&google("42-abc", "GOCSPX-x")),
+            [AccountField::OauthClientId]
+        );
+        // The two pasted the wrong way round.
+        assert_eq!(
+            check(&google("GOCSPX-x", "42-abc.apps.googleusercontent.com")),
+            [AccountField::OauthClientId, AccountField::OauthClientSecret]
+        );
+        // An empty ID is reported as missing, once.
+        let errors = validate_account_form(&google("", "GOCSPX-x"), Check::Credentials);
+        assert_eq!(fields(&errors), [AccountField::OauthClientId]);
+        assert!(errors[0].1.starts_with("Enter the OAuth client ID"));
+        // Microsoft's client IDs are GUIDs, and are not checked this way.
+        let microsoft = AccountFormValues {
+            provider: Some(Provider::Microsoft365),
+            ..google("00000000-0000-0000-0000-000000000000", "")
+        };
+        assert!(check(&microsoft).is_empty());
     }
 }
