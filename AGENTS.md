@@ -82,6 +82,7 @@ Proton API harness (go-proton-api's fake server, `docker/proton-harness`):
 ```bash
 scripts/proton-harness.sh up      # build, start, wait, seed; state in target/proton-harness
 cargo test -p zmail-test-support --test live_proton_harness -- --ignored --nocapture
+cargo test -p zmail-test-support --test live_proton_api -- --ignored --nocapture
 scripts/proton-harness.sh down
 ```
 

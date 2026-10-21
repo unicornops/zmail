@@ -191,6 +191,12 @@ jobs:
               timeout-minutes: 10
               run: cargo test -p zmail-test-support --test live_proton_harness -- --ignored --nocapture
 
+            # zmail-proton-api end to end against the harness: SRP login,
+            # refresh, logout and unlocking the seeded account's keys.
+            - name: Live Proton API Test
+              timeout-minutes: 10
+              run: cargo test -p zmail-test-support --test live_proton_api -- --ignored --nocapture
+
     build:
         name: Build (${{ matrix.os }})
         needs:

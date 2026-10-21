@@ -20,5 +20,10 @@ zmail-smtp = { path = "../zmail-smtp" }
 zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }
 
+[dev-dependencies]
+# Live tests against the Proton harness. `test-harness` lets the client trust
+# the harness CA on a loopback URL; it is never enabled outside this crate.
+zmail-proton-api = { path = "../zmail-proton-api", features = ["test-harness"] }
+
 [lints]
 workspace = true
