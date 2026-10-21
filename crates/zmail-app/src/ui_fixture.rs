@@ -19,7 +19,7 @@ use zmail_core::{
     time::utc_timestamp,
 };
 use zmail_store::LocalStore;
-use zmail_ui::{InitialView, OnboardingStep, SettingsSection};
+use zmail_ui::{InitialView, OnboardingStep, SettingsSection, UnlockFixture};
 
 /// The UI state a fixture launch opens in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +121,10 @@ pub(crate) enum FixtureView {
     /// The Settings window on About & Diagnostics, with three accounts,
     /// outbox jobs and two changes the server refused.
     SettingsAbout,
+    /// The window shown before the store opens (ADR 0005): encrypting an
+    /// older store, a locked keychain, or a store whose key is gone. No
+    /// store is opened.
+    Unlock(UnlockFixture),
 }
 
 /// The `search-filters` view's query: words to highlight and two chips.
@@ -182,8 +186,11 @@ impl FixtureView {
             "settings-privacy" => Self::SettingsPrivacy,
             "settings-sending" => Self::SettingsSending,
             "settings-about" => Self::SettingsAbout,
+            "unlock-encrypting" => Self::Unlock(UnlockFixture::Encrypting),
+            "unlock-keychain" => Self::Unlock(UnlockFixture::Keychain),
+            "unlock-unreadable" => Self::Unlock(UnlockFixture::Unreadable),
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-appearance, settings-keyboard, settings-privacy, settings-sending or settings-about"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
             ),
         })
     }
@@ -241,7 +248,7 @@ pub(crate) fn anchor_time() -> u64 {
 /// Message dates are offsets back from `now` (see [`anchor_time`]).
 pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<InitialView> {
     match view {
-        FixtureView::Empty => return Ok(InitialView::Inbox),
+        FixtureView::Empty | FixtureView::Unlock(_) => return Ok(InitialView::Inbox),
         // Nothing is stored until the end of the server settings.
         FixtureView::Onboarding(step)
             if !matches!(step, OnboardingStep::Colour | OnboardingStep::Syncing) =>
@@ -282,6 +289,7 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
 
     Ok(match view {
         FixtureView::Empty
+        | FixtureView::Unlock(_)
         | FixtureView::Inbox
         | FixtureView::InboxHighContrast
         | FixtureView::InboxEmpty
