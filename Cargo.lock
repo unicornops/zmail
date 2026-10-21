@@ -9298,7 +9298,13 @@ name = "zmail-security"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "hkdf",
  "keyring",
+ "rand 0.8.8",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]
