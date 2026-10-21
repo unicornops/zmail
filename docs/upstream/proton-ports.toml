@@ -273,3 +273,35 @@ local = "crates/zmail-proton/src/message.rs"
 repo = "proton-bridge"
 upstream = "pkg/message/build_custom.go"
 local = "crates/zmail-proton/src/message.rs"
+
+# Events: the event loop, incremental sync and message actions.
+
+[[port]]
+repo = "go-proton-api"
+upstream = "event_types.go"
+local = "crates/zmail-proton-api/src/event.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "undo.go"
+local = "crates/zmail-proton-api/src/message.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "undo_types.go"
+local = "crates/zmail-proton-api/src/message.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/imapservice/service_message_events.go"
+local = "crates/zmail-proton/src/events.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/userevents/subscription.go"
+local = "crates/zmail-proton/src/events.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/user/user.go"
+local = "crates/zmail-proton/src/events.rs"

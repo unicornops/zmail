@@ -5,11 +5,14 @@
 // (https://github.com/ProtonMail/go-proton-api).
 // Copyright (c) 2020 James Houlahan, Copyright (c) 2022 Proton AG.
 // Licensed under the MIT License; see crates/zmail-proton-api/LICENSE-MIT.
-// Also `GetMessage` and `Message` from `message.go` and `message_types.go`.
+// Also `GetMessage`, `Message`, the read/unread, label/unlabel and delete
+// actions (`MessageActionReq`, `LabelMessagesReq`, `LabelMessagesRes`) from
+// `message.go` and `message_types.go`, and `UndoActions` from `undo.go` and
+// `undo_types.go`.
 // Modified by UnicornOps on 2026-10-21: rewritten in Rust. Adds the
 // `ConversationID` field Proton returns (go-proton-api does not read it),
-// which Zmail uses to group threads. Message actions and sending follow in
-// later slices (#237).
+// which Zmail uses to group threads. Chunks run one after another rather
+// than in parallel. Sending follows later (#237).
 
 //! Message metadata: what a message list needs, without the encrypted body.
 
@@ -193,7 +196,144 @@ fn serialize_api_bool<S: serde::Serializer>(
     serializer.serialize_i64(i64::from(*value))
 }
 
+/// One message's result in a label action (`LabelMessageRes`).
+#[derive(Debug, Deserialize)]
+struct LabelMessageRes {
+    #[serde(rename = "Response")]
+    response: LabelResponse,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelResponse {
+    #[serde(rename = "Code")]
+    code: i64,
+    #[serde(rename = "Error", default)]
+    error: String,
+}
+
+/// A label action's result (`LabelMessagesRes`).
+#[derive(Debug, Deserialize)]
+struct LabelMessagesRes {
+    #[serde(rename = "Responses", default, deserialize_with = "null_as_empty")]
+    responses: Vec<LabelMessageRes>,
+    #[serde(rename = "UndoToken", default)]
+    undo_token: Option<UndoToken>,
+}
+
+/// A token that undoes one label action (`UndoToken`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UndoToken {
+    #[serde(rename = "Token")]
+    token: String,
+    #[serde(rename = "ValidUntil")]
+    valid_until: i64,
+}
+
+#[derive(Serialize)]
+struct MessageActionReq<'a> {
+    #[serde(rename = "IDs")]
+    ids: &'a [String],
+}
+
+#[derive(Serialize)]
+struct LabelMessagesReq<'a> {
+    #[serde(rename = "LabelID")]
+    label_id: &'a str,
+    #[serde(rename = "IDs")]
+    ids: &'a [String],
+}
+
 impl Client {
+    /// Marks messages read (`MarkMessagesRead`).
+    pub async fn mark_messages_read(&self, message_ids: &[String]) -> Result<(), Error> {
+        self.message_action("/mail/v4/messages/read", message_ids)
+            .await
+    }
+
+    /// Marks messages unread (`MarkMessagesUnread`).
+    pub async fn mark_messages_unread(&self, message_ids: &[String]) -> Result<(), Error> {
+        self.message_action("/mail/v4/messages/unread", message_ids)
+            .await
+    }
+
+    /// Deletes messages permanently (`DeleteMessage`).
+    pub async fn delete_messages(&self, message_ids: &[String]) -> Result<(), Error> {
+        self.message_action("/mail/v4/messages/delete", message_ids)
+            .await
+    }
+
+    async fn message_action(&self, path: &str, message_ids: &[String]) -> Result<(), Error> {
+        for page in message_ids.chunks(crate::paging::MAX_PAGE_SIZE) {
+            let request =
+                Request::new(reqwest::Method::PUT, path).json(&MessageActionReq { ids: page })?;
+            self.send(&request).await?;
+        }
+        Ok(())
+    }
+
+    /// Adds a label, or moves to a folder or system label
+    /// (`LabelMessages`). If a chunk fails, the chunks before it are undone.
+    pub async fn label_messages(
+        &self,
+        message_ids: &[String],
+        label_id: &str,
+    ) -> Result<(), Error> {
+        self.label_action("/mail/v4/messages/label", message_ids, label_id)
+            .await
+    }
+
+    /// Removes a label (`UnlabelMessages`).
+    pub async fn unlabel_messages(
+        &self,
+        message_ids: &[String],
+        label_id: &str,
+    ) -> Result<(), Error> {
+        self.label_action("/mail/v4/messages/unlabel", message_ids, label_id)
+            .await
+    }
+
+    async fn label_action(
+        &self,
+        path: &str,
+        message_ids: &[String],
+        label_id: &str,
+    ) -> Result<(), Error> {
+        let mut tokens = Vec::new();
+        for chunk in message_ids.chunks(crate::paging::MAX_PAGE_SIZE) {
+            let request = Request::new(reqwest::Method::PUT, path).json(&LabelMessagesReq {
+                label_id,
+                ids: chunk,
+            })?;
+            let res: LabelMessagesRes = self.json(&request).await?;
+            if let Some(failed) = res.responses.iter().find(|item| item.response.code != 1000) {
+                let reason = failed.response.error.clone();
+                self.undo_actions(&tokens).await?;
+                return Err(Error::Api(crate::response::ApiError {
+                    status: 200,
+                    code: crate::response::Code(failed.response.code),
+                    message: format!("failed to change labels: {reason}"),
+                    details: None,
+                }));
+            }
+            tokens.extend(res.undo_token);
+        }
+        Ok(())
+    }
+
+    /// Undoes earlier label actions (`UndoActions`); expired tokens are an
+    /// error, as upstream.
+    async fn undo_actions(&self, tokens: &[UndoToken]) -> Result<(), Error> {
+        let now = chrono::Utc::now().timestamp();
+        for token in tokens {
+            if token.valid_until < now {
+                return Err(Error::Config("undo token expired".to_owned()));
+            }
+            self.send(&Request::post("/mail/v4/undoactions").json(token)?)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Returns a full message (`GetMessage`).
     pub async fn get_message(&self, message_id: &str) -> Result<Message, Error> {
         #[derive(Deserialize)]

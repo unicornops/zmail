@@ -22,7 +22,9 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use zmail_core::{MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
-use zmail_proton_api::{Client, EmailAddress, Label, LabelType, MessageFilter, MessageMetadata};
+use zmail_proton_api::{
+    Client, EmailAddress, Label, LabelType, MessageFilter, MessageMetadata, STARRED_LABEL,
+};
 
 use crate::mailbox::{DELIMITER, ProtonMailbox, mailboxes_for};
 
@@ -59,6 +61,42 @@ pub(crate) async fn fetch_all_metadata(client: &Client) -> Result<Vec<MessageMet
     }
 }
 
+/// A message and where it goes: its labels and conversation.
+#[derive(Debug, Clone)]
+pub(crate) struct PlacedMessage {
+    pub(crate) snapshot: MessageSnapshot,
+    pub(crate) label_ids: Vec<String>,
+    pub(crate) thread_id: String,
+    pub(crate) has_attachments: bool,
+}
+
+impl PlacedMessage {
+    /// Places a message from its metadata.
+    pub(crate) fn from_metadata(meta: &MessageMetadata, identity_email: &str) -> Self {
+        Self {
+            snapshot: message_snapshot(meta, identity_email),
+            label_ids: meta.label_ids.clone(),
+            thread_id: if meta.conversation_id.is_empty() {
+                meta.id.clone()
+            } else {
+                meta.conversation_id.clone()
+            },
+            has_attachments: meta.num_attachments > 0,
+        }
+    }
+
+    /// Keeps the body fields a previous hydration stored, so a flag or
+    /// label change does not drop an opened message's body.
+    pub(crate) fn keep_body_of(mut self, previous: &MessageSnapshot) -> Self {
+        self.snapshot.body_preview = previous.body_preview.clone();
+        self.snapshot.body_text = previous.body_text.clone();
+        self.snapshot.sanitized_html = previous.sanitized_html.clone();
+        self.snapshot.has_remote_content = previous.has_remote_content;
+        self.snapshot.attachments = previous.attachments.clone();
+        self
+    }
+}
+
 /// Builds the mailbox snapshots from the labels and message metadata.
 ///
 /// A message appears in every mailbox of its labels (Proton labels, like
@@ -71,26 +109,33 @@ pub(crate) fn build_mailboxes(
     identity_for_address: &HashMap<String, String>,
     fallback_identity: &str,
 ) -> Vec<MailboxSnapshot> {
+    place_messages(
+        labels,
+        metadata.iter().map(|meta| {
+            let identity = identity_for_address
+                .get(&meta.address_id)
+                .map(String::as_str)
+                .unwrap_or(fallback_identity);
+            PlacedMessage::from_metadata(meta, identity)
+        }),
+    )
+}
+
+/// Builds the mailbox snapshots from placed messages.
+pub(crate) fn place_messages(
+    labels: &[Label],
+    messages: impl IntoIterator<Item = PlacedMessage>,
+) -> Vec<MailboxSnapshot> {
     let (mailboxes, index) = mailboxes_for(labels);
     let mut threads: Vec<BTreeMap<String, ThreadAccumulator>> =
         vec![BTreeMap::new(); mailboxes.len()];
-    for meta in metadata {
-        let identity = identity_for_address
-            .get(&meta.address_id)
-            .map(String::as_str)
-            .unwrap_or(fallback_identity);
-        let message = message_snapshot(meta, identity);
-        let thread_id = if meta.conversation_id.is_empty() {
-            meta.id.clone()
-        } else {
-            meta.conversation_id.clone()
-        };
-        for label_id in &meta.label_ids {
+    for placed in messages {
+        for label_id in &placed.label_ids {
             if let Some(&position) = index.get(label_id) {
                 threads[position]
-                    .entry(thread_id.clone())
-                    .or_insert_with(|| ThreadAccumulator::new(&thread_id))
-                    .push(message.clone(), meta.num_attachments > 0);
+                    .entry(placed.thread_id.clone())
+                    .or_insert_with(|| ThreadAccumulator::new(&placed.thread_id))
+                    .push(placed.snapshot.clone(), placed.has_attachments);
             }
         }
     }
@@ -99,6 +144,44 @@ pub(crate) fn build_mailboxes(
         .zip(threads)
         .map(|(mailbox, threads)| mailbox_snapshot(mailbox, threads))
         .collect()
+}
+
+/// Recovers the placed messages from the stored mirror: each message's
+/// labels are the mailboxes it is in, plus Starred when it is flagged.
+pub(crate) fn placed_from_mirror(
+    labels: &[Label],
+    mirror: &[MailboxSnapshot],
+) -> HashMap<String, PlacedMessage> {
+    let (mailboxes, _) = mailboxes_for(labels);
+    let label_for_name: HashMap<&str, &str> = mailboxes
+        .iter()
+        .map(|mailbox| (mailbox.name.as_str(), mailbox.label_id.as_str()))
+        .collect();
+    let mut placed: HashMap<String, PlacedMessage> = HashMap::new();
+    for mailbox in mirror {
+        let Some(label_id) = label_for_name.get(mailbox.name.as_str()) else {
+            continue;
+        };
+        for thread in &mailbox.threads {
+            for message in &thread.messages {
+                let entry =
+                    placed
+                        .entry(message.remote_id.clone())
+                        .or_insert_with(|| PlacedMessage {
+                            snapshot: message.clone(),
+                            label_ids: if message.is_flagged {
+                                vec![STARRED_LABEL.to_owned()]
+                            } else {
+                                Vec::new()
+                            },
+                            thread_id: thread.remote_thread_id.clone(),
+                            has_attachments: thread.has_attachments,
+                        });
+                entry.label_ids.push((*label_id).to_owned());
+            }
+        }
+    }
+    placed
 }
 
 fn mailbox_snapshot(

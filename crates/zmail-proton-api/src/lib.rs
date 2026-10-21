@@ -56,6 +56,7 @@ pub use attachment::Attachment;
 pub use client::Client;
 pub use config::{API_HOST_URL, AppVersion, ClientConfig};
 pub use cookies::{CookieJar, StoredCookie};
+pub use event::{AddressEvent, Event, EventAction, LabelEvent, MAX_COLLECTED_EVENTS, MessageEvent};
 pub use header_types::Headers;
 pub use hv::HumanVerification;
 pub use keyring::{Key, KeyFlags, KeyRing, Keys, UnlockedKey};
