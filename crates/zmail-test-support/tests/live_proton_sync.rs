@@ -439,3 +439,109 @@ fn applies_server_changes_from_the_event_stream() -> Result<()> {
     ensure!(thread("Re: Welcome to the harness")?.is_flagged);
     Ok(())
 }
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn writes_local_mailbox_changes_back_with_bridges_rules() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+    let state = harness.state().clone();
+    let message_id = |subject: &str| -> Result<String> {
+        state
+            .messages
+            .iter()
+            .find(|message| message.subject == subject)
+            .map(|message| message.id.clone())
+            .with_context(|| format!("no fixture {subject}"))
+    };
+    let label_id = |name: &str| -> Result<String> {
+        state
+            .labels
+            .iter()
+            .find(|label| label.name == name)
+            .map(|label| label.id.clone())
+            .with_context(|| format!("no label {name}"))
+    };
+
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, secrets.as_ref(), account_id)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.configure_proton(harness_config(&harness)?)?;
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
+
+    let mailbox_id = |name: &str| -> Result<i64> {
+        store
+            .list_mailboxes(account_id)?
+            .into_iter()
+            .find(|mailbox| mailbox.name == name)
+            .map(|mailbox| mailbox.id)
+            .with_context(|| format!("no {name} mailbox"))
+    };
+    let thread_id = |mailbox: &str, subject: &str| -> Result<i64> {
+        store
+            .list_threads(mailbox_id(mailbox)?, 0..100)?
+            .into_iter()
+            .find(|thread| thread.subject == subject)
+            .map(|thread| thread.id)
+            .with_context(|| format!("no {subject} in {mailbox}"))
+    };
+
+    // Local changes queue write-back operations.
+    store.set_thread_read(thread_id("INBOX", "Welcome to the harness")?, true)?;
+    store.set_thread_flagged(thread_id("INBOX", "To the alias")?, true)?;
+    store.move_thread(
+        thread_id("Folders/Work", "Quarterly report")?,
+        mailbox_id("Folders/Receipts")?,
+    )?;
+    // Deleting moves to Trash; deleting from Trash destroys.
+    store.delete_thread(thread_id("Archive", "Old receipt")?)?;
+    store.delete_thread(thread_id("Trash", "Old receipt")?)?;
+    ensure!(!store.list_pending_ops(account_id)?.is_empty());
+
+    sync_service.sync_account_and_wait(account_id)?;
+    ensure!(
+        store.list_pending_ops(account_id)?.is_empty(),
+        "operations left: {:?}",
+        store.list_pending_ops(account_id)?
+    );
+
+    // The server now has every change.
+    let manager = Manager::new(harness_config(&harness)?)?;
+    let server = runtime.handle().block_on(async {
+        let (client, _) = manager
+            .login(harness.username(), harness.password())
+            .await?;
+        let ids = state.messages.iter().map(|m| m.id.clone()).collect();
+        let filter = zmail_proton_api::MessageFilter {
+            id: ids,
+            ..zmail_proton_api::MessageFilter::default()
+        };
+        anyhow::Ok(client.get_message_metadata_page(0, 50, &filter).await?)
+    })?;
+    let meta = |subject: &str| -> Result<&zmail_proton_api::MessageMetadata> {
+        let id = message_id(subject)?;
+        server
+            .iter()
+            .find(|meta| meta.id == id)
+            .with_context(|| format!("{subject} is gone from the server"))
+    };
+    ensure!(meta("Welcome to the harness")?.seen());
+    ensure!(meta("To the alias")?.starred());
+    let report = meta("Quarterly report")?;
+    ensure!(
+        report.label_ids.contains(&label_id("Receipts")?)
+            && !report.label_ids.contains(&label_id("Work")?),
+        "labels: {:?}",
+        report.label_ids
+    );
+    ensure!(
+        meta("Old receipt").is_err(),
+        "a message destroyed from Trash should be deleted"
+    );
+    Ok(())
+}
