@@ -291,20 +291,23 @@ control() {
   fi
 }
 
-# seed_messages - imports the message fixtures through the API as the
-# seeded user and prints what zmail-seed reports (a JSON list).
+# seed_messages - imports the message fixtures and creates the contacts
+# through the API as the seeded user, and prints what zmail-seed reports
+# (a JSON list of the messages).
 seed_messages() {
   local limit=()
   command -v timeout >/dev/null 2>&1 && limit=(timeout 120)
   if [[ "${MODE}" == docker ]]; then
     ${limit[@]+"${limit[@]}"} docker exec "${CONTAINER}" /usr/local/bin/zmail-seed \
       --api "https://127.0.0.1:8443" --ca /tls/ca.pem \
-      --username "${USERNAME}" --password "${PASSWORD}" --manifest /seed/manifest.json
+      --username "${USERNAME}" --password "${PASSWORD}" --manifest /seed/manifest.json \
+      --contacts /seed/contacts.json
   else
     native_build
     ${limit[@]+"${limit[@]}"} "${NATIVE_BIN}/zmail-seed" \
       --api "${BASE_URL}" --ca "${CA_PEM}" \
-      --username "${USERNAME}" --password "${PASSWORD}" --manifest "${MESSAGES_DIR}/manifest.json"
+      --username "${USERNAME}" --password "${PASSWORD}" --manifest "${MESSAGES_DIR}/manifest.json" \
+      --contacts "${MESSAGES_DIR}/contacts.json"
   fi
 }
 

@@ -1,6 +1,7 @@
 // Ported from proton-bridge `internal/services/smtp/smtp.go`
 // (`smtpSendMail`, `sendWithKey`, `createDraft`, `createAttachments`,
-// `getRecipients`, `constructEmail`), `smtp_packages.go` (`createSendReq`,
+// `getRecipients`, `getContactSettings`, `constructEmail`),
+// `smtp_packages.go` (`createSendReq`,
 // `recipients`), `errors.go` (the API error codes) and
 // `internal/usertypes/types.go` (`SanitizeEmail`) at v3.27.1
 // (43b9237786204a0215abfd4dcc51ee7bb92f52d4,
@@ -21,8 +22,9 @@
 // from the upload response, so a send decrypts nothing the server supplies
 // (ADR 0004). If sending fails before the draft is sent, the
 // draft is deleted, so outbox retries do not leave drafts behind; Bridge
-// leaves it. Contact settings (vCard) and the MIME packages (PGP/MIME,
-// clear MIME) follow with external sending (#237).
+// leaves it. The MIME body for PGP/MIME and clear MIME recipients is
+// written from the composed message (`outgoing.rs`) rather than taken from
+// an SMTP client.
 
 //! Sending a message through Proton: Bridge's SMTP service.
 
@@ -31,13 +33,17 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, anyhow, bail};
 use zmail_core::OutgoingMessage;
 use zmail_proton_api::{
-    ATTACHMENT_DISPOSITION, Address, AddressStatus, Client, ContactSettings, CreateAttachmentReq,
-    CreateDraftAction, CreateDraftReq, DraftTemplate, EmailAddress, EncryptionScheme, Error,
-    MULTIPART_MIXED, MailSettings, Message, RecipientType, SendDraftReq, SendPreferences,
-    SessionKey, TEXT_HTML, TEXT_PLAIN, UnlockedKey,
+    ATTACHMENT_DISPOSITION, Address, AddressStatus, CardType, Client, ContactSettings,
+    CreateAttachmentReq, CreateDraftAction, CreateDraftReq, DraftTemplate, EmailAddress,
+    EncryptionScheme, Error, KeyRing, MULTIPART_MIXED, MailSettings, Message, RecipientType,
+    SendDraftReq, SendPreferences, SessionKey, TEXT_HTML, TEXT_PLAIN, UnlockedKey,
 };
 
-use crate::{ProtonSession, send_prefs::build_send_prefs};
+use crate::{
+    ProtonSession,
+    outgoing::{MimeSource, OutgoingFile, build_mime_body},
+    send_prefs::build_send_prefs,
+};
 
 /// `errCodeAddressDoesNotExist`.
 const ADDRESS_DOES_NOT_EXIST: i64 = 33102;
@@ -47,13 +53,6 @@ const VALIDATION_FAILED: i64 = 2001;
 const MESSAGE_TOO_LARGE: i64 = 2024;
 /// `errCodeInvalidListOfRecipients`.
 const INVALID_LIST_OF_RECIPIENTS: i64 = 2002;
-
-/// One attachment to send.
-struct OutgoingFile {
-    name: String,
-    mime_type: String,
-    data: Vec<u8>,
-}
 
 /// Sends a composed message from one of the account's addresses
 /// (`smtpSendMail`).
@@ -125,11 +124,14 @@ pub(crate) async fn send_message(session: &ProtonSession, message: &OutgoingMess
 
     send_with_key(
         client,
-        &settings,
-        addr_key,
-        &emails,
-        from,
-        &to,
+        &SendContext {
+            settings: &settings,
+            user_kr: &keys.user,
+            addr_key,
+            emails: &emails,
+            from,
+            to: &to,
+        },
         message,
         &attachments,
     )
@@ -155,18 +157,37 @@ fn sanitize_email(email: &str) -> String {
     format!("{local}@{}", parts[1])
 }
 
+/// What `sendWithKey` works with besides the message.
+struct SendContext<'a> {
+    /// The user's mail settings.
+    settings: &'a MailSettings,
+    /// The user keys, which verify contact cards.
+    user_kr: &'a KeyRing,
+    /// The sending address's first key.
+    addr_key: &'a UnlockedKey,
+    /// The account's addresses.
+    emails: &'a [String],
+    /// The sending address.
+    from: &'a str,
+    /// Every recipient (the SMTP envelope).
+    to: &'a [String],
+}
+
 /// Sends the message with the given address key (`sendWithKey`).
-#[allow(clippy::too_many_arguments)]
 async fn send_with_key(
     client: &Client,
-    settings: &MailSettings,
-    addr_key: &UnlockedKey,
-    emails: &[String],
-    from: &str,
-    to: &[String],
+    context: &SendContext<'_>,
     message: &OutgoingMessage,
     attachments: &[OutgoingFile],
 ) -> Result<()> {
+    let SendContext {
+        settings,
+        user_kr,
+        addr_key,
+        emails,
+        from,
+        to,
+    } = *context;
     // A plain-text message: the body is the plain body and the rich body.
     let mime_type = TEXT_PLAIN;
     let body = message.text_body.as_str();
@@ -187,6 +208,16 @@ async fn send_with_key(
         bcc_list: message.bcc.iter().map(address).collect(),
         ..DraftTemplate::default()
     };
+    let mime_body = build_mime_body(
+        &MimeSource {
+            from: &template.sender,
+            to: &template.to_list,
+            cc: &template.cc_list,
+            subject: &template.subject,
+            text: body,
+        },
+        attachments,
+    );
 
     let draft = create_draft(client, addr_key, emails, from, to, template)
         .await
@@ -197,10 +228,10 @@ async fn send_with_key(
         let att_keys = create_attachments(client, addr_key, &draft.metadata.id, attachments)
             .await
             .context("failed to create attachments")?;
-        let recipients = get_recipients(client, settings, &draft)
+        let recipients = get_recipients(client, user_kr, settings, &draft)
             .await
             .context("failed to get recipients")?;
-        create_send_req(addr_key, body, body, &recipients, &att_keys)
+        create_send_req(addr_key, &mime_body, body, body, &recipients, &att_keys)
             .context("failed to create packages")
     }
     .await;
@@ -352,6 +383,7 @@ fn without_name_params(media_type: &str) -> String {
 /// (`getRecipients`).
 async fn get_recipients(
     client: &Client,
+    user_kr: &KeyRing,
     settings: &MailSettings,
     draft: &Message,
 ) -> Result<Recipients> {
@@ -377,7 +409,9 @@ async fn get_recipients(
                     .with_context(|| format!("failed to get public key for {recipient}"));
             }
         };
-        let contact_settings = ContactSettings::default();
+        let contact_settings = get_contact_settings(client, user_kr, &recipient)
+            .await
+            .with_context(|| format!("failed to get contact settings for {recipient}"))?;
         let prefs = build_send_prefs(
             &contact_settings,
             settings,
@@ -388,6 +422,27 @@ async fn get_recipients(
         recipients.insert(recipient, prefs);
     }
     Ok(recipients)
+}
+
+/// What the user's contact card says about a recipient
+/// (`getContactSettings`).
+async fn get_contact_settings(
+    client: &Client,
+    user_kr: &KeyRing,
+    recipient: &str,
+) -> Result<ContactSettings> {
+    let contacts = client
+        .get_all_contact_emails(recipient)
+        .await
+        .context("failed to get contact data")?;
+    let Some(contact) = contacts.iter().find(|contact| contact.email == recipient) else {
+        return Ok(ContactSettings::default());
+    };
+    let contact = client
+        .get_contact(&contact.contact_id)
+        .await
+        .context("failed to get contact")?;
+    Ok(contact.get_settings(user_kr, recipient, CardType::SIGNED)?)
 }
 
 /// Each recipient's send preferences, by address (`recipients`).
@@ -414,6 +469,7 @@ fn with_content(recipients: &Recipients, mime_types: &[&str]) -> Recipients {
 /// Builds the send packages (`createSendReq`).
 fn create_send_req(
     key: &UnlockedKey,
+    mime_body: &str,
     rich_body: &str,
     plain_body: &str,
     recipients: &Recipients,
@@ -426,11 +482,7 @@ fn create_send_req(
         &[EncryptionScheme::PGP_MIME, EncryptionScheme::CLEAR_MIME],
     );
     if !mime.is_empty() {
-        let addresses: Vec<&str> = mime.keys().map(String::as_str).collect();
-        bail!(
-            "sending signed or PGP/MIME mail through Proton is not supported yet (recipients: {})",
-            addresses.join(", ")
-        );
+        req.add_mime_package(key, mime_body, &mime)?;
     }
 
     let text = with_scheme(
@@ -482,6 +534,7 @@ fn construct_email(header_email: &str, address_email: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use zmail_proton_api::{RecipientKey, SignatureType};
 
     use crate::send_prefs::tests::KEY_A;
@@ -543,8 +596,8 @@ mod tests {
     }
 
     #[test]
-    fn builds_one_package_per_format_and_refuses_mime_schemes_for_now() {
-        // A key of our own: the test address key, unlocked.
+    fn builds_one_package_per_format() {
+        // A key of our own: the test user key, unlocked.
         let keyring = zmail_proton_api::Keys(vec![test_key()])
             .unlock(b"password", None)
             .expect("unlock");
@@ -555,26 +608,56 @@ mod tests {
             signature_type: SignatureType::DETACHED,
             ..prefs(EncryptionScheme::INTERNAL, TEXT_HTML)
         };
+        // PGP/MIME to a key we hold, so the package can be opened here.
+        let pgp_mime = SendPreferences {
+            encrypt: true,
+            pub_key: Some(key.recipient_key()),
+            signature_type: SignatureType::DETACHED,
+            ..prefs(EncryptionScheme::PGP_MIME, MULTIPART_MIXED)
+        };
+        let clear_mime = SendPreferences {
+            signature_type: SignatureType::DETACHED,
+            ..prefs(EncryptionScheme::CLEAR_MIME, MULTIPART_MIXED)
+        };
         let recipients = Recipients::from([
             ("a".to_owned(), prefs(EncryptionScheme::CLEAR, TEXT_PLAIN)),
             ("b".to_owned(), internal),
+            ("c".to_owned(), pgp_mime),
+            ("d".to_owned(), clear_mime),
         ]);
-        let req = create_send_req(key, "<p>hi</p>", "hi", &recipients, &BTreeMap::new())
-            .expect("packages");
+        let req = create_send_req(
+            key,
+            "MIME-Version: 1.0\r\n\r\nhi",
+            "<p>hi</p>",
+            "hi",
+            &recipients,
+            &BTreeMap::new(),
+        )
+        .expect("packages");
         let types: Vec<&str> = req
             .packages
             .iter()
             .map(|package| package.mime_type.as_str())
             .collect();
-        assert_eq!(types, [TEXT_HTML, TEXT_PLAIN]);
+        assert_eq!(types, [MULTIPART_MIXED, TEXT_HTML, TEXT_PLAIN]);
 
-        let signed_external = Recipients::from([(
-            "c".to_owned(),
-            prefs(EncryptionScheme::CLEAR_MIME, MULTIPART_MIXED),
-        )]);
-        let error =
-            create_send_req(key, "", "", &signed_external, &BTreeMap::new()).expect_err("not yet");
-        assert!(error.to_string().contains("not supported yet"));
+        // One MIME package serves both MIME schemes: a key packet for the
+        // PGP/MIME recipient, the session key for the clear one.
+        let mime = &req.packages[0];
+        assert_eq!(mime.kind, EncryptionScheme(16 | 32));
+        assert!(mime.body_key.is_some());
+        assert!(mime.addresses["d"].body_key_packet.is_empty());
+        let mut message = BASE64
+            .decode(&mime.addresses["c"].body_key_packet)
+            .expect("b64");
+        message.extend(BASE64.decode(&mime.body).expect("b64"));
+        assert_eq!(
+            keyring
+                .decrypt_binary(&message)
+                .expect("decrypts")
+                .as_slice(),
+            b"MIME-Version: 1.0\r\n\r\nhi"
+        );
     }
 
     fn test_key() -> zmail_proton_api::Key {

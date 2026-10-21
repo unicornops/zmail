@@ -384,3 +384,18 @@ local = "crates/zmail-proton/src/send.rs"
 repo = "proton-bridge"
 upstream = "internal/services/smtp/smtp_prefs.go"
 local = "crates/zmail-proton/src/send_prefs.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "contact.go"
+local = "crates/zmail-proton-api/src/contact.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "contact_card.go"
+local = "crates/zmail-proton-api/src/contact.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "contact_types.go"
+local = "crates/zmail-proton-api/src/contact.rs"

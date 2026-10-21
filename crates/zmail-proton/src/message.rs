@@ -343,7 +343,7 @@ fn sanitize_message_date(seconds: i64) -> DateTime<Utc> {
     }
 }
 
-fn rfc1123z(date: DateTime<Utc>) -> String {
+pub(crate) fn rfc1123z(date: DateTime<Utc>) -> String {
     date.format("%a, %d %b %Y %H:%M:%S %z").to_string()
 }
 
@@ -444,7 +444,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Header fields in order, values already encoded.
 #[derive(Debug, Default, Clone)]
-struct PartHeader {
+pub(crate) struct PartHeader {
     fields: Vec<(String, String)>,
 }
 
@@ -483,7 +483,7 @@ impl PartHeader {
     }
 
     /// Replaces every `name` field with one, where the first one was.
-    fn set(&mut self, name: &str, value: &str) {
+    pub(crate) fn set(&mut self, name: &str, value: &str) {
         match self
             .fields
             .iter()
@@ -514,11 +514,11 @@ impl PartHeader {
             .retain(|(field, _)| !field.eq_ignore_ascii_case(name));
     }
 
-    fn set_content_type(&mut self, media: &str, params: &[(&str, &str)]) {
+    pub(crate) fn set_content_type(&mut self, media: &str, params: &[(&str, &str)]) {
         self.set("Content-Type", &media_with_params(media, params));
     }
 
-    fn write(&self, out: &mut Vec<u8>) {
+    pub(crate) fn write(&self, out: &mut Vec<u8>) {
         for (name, value) in &self.fields {
             // Header values must not carry bare line breaks.
             let value: String = value
@@ -531,7 +531,7 @@ impl PartHeader {
     }
 }
 
-fn media_with_params(media: &str, params: &[(&str, &str)]) -> String {
+pub(crate) fn media_with_params(media: &str, params: &[(&str, &str)]) -> String {
     let mut value = media.to_owned();
     for (key, param) in params {
         let quoted = param.replace('\\', "\\\\").replace('"', "\\\"");
@@ -540,7 +540,7 @@ fn media_with_params(media: &str, params: &[(&str, &str)]) -> String {
     value
 }
 
-fn write_multipart(out: &mut Vec<u8>, boundary: &str, parts: &[(PartHeader, Vec<u8>)]) {
+pub(crate) fn write_multipart(out: &mut Vec<u8>, boundary: &str, parts: &[(PartHeader, Vec<u8>)]) {
     for (header, body) in parts {
         out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         header.write(out);
@@ -551,7 +551,7 @@ fn write_multipart(out: &mut Vec<u8>, boundary: &str, parts: &[(PartHeader, Vec<
 }
 
 /// `newBoundary`: 64 random hex characters.
-fn new_boundary() -> String {
+pub(crate) fn new_boundary() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -582,7 +582,7 @@ fn split_header_body(entity: &[u8]) -> (Vec<(String, String)>, &[u8]) {
 }
 
 /// Quoted-printable with CRLF line ends and 76-character lines.
-fn quoted_printable(data: &[u8]) -> Vec<u8> {
+pub(crate) fn quoted_printable(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + data.len() / 8);
     let lines: Vec<&[u8]> = data.split(|byte| *byte == b'\n').collect();
     for (index, line) in lines.iter().enumerate() {
@@ -612,7 +612,7 @@ fn quoted_printable(data: &[u8]) -> Vec<u8> {
 }
 
 /// Base64 in 76-character lines.
-fn base64_lines(data: &[u8]) -> Vec<u8> {
+pub(crate) fn base64_lines(data: &[u8]) -> Vec<u8> {
     let encoded = BASE64.encode(data);
     let mut out = Vec::with_capacity(encoded.len() + encoded.len() / 38);
     for chunk in encoded.as_bytes().chunks(76) {
@@ -673,7 +673,7 @@ fn single_line(text: &str) -> String {
 }
 
 /// RFC 2047 Q-encoding when needed (Go's `mime.QEncoding.Encode`).
-fn q_encode(text: &str) -> String {
+pub(crate) fn q_encode(text: &str) -> String {
     let plain = text.chars().all(|ch| (' '..='~').contains(&ch)) && !text.contains("=?");
     if plain {
         return text.to_owned();
@@ -711,7 +711,7 @@ fn address_empty(address: &EmailAddress) -> bool {
 }
 
 /// Go's `mail.Address.String`.
-fn format_address(address: &EmailAddress) -> String {
+pub(crate) fn format_address(address: &EmailAddress) -> String {
     if address.name.is_empty() {
         return format!("<{}>", address.address);
     }
@@ -726,7 +726,7 @@ fn format_address(address: &EmailAddress) -> String {
     format!("{name} <{}>", address.address)
 }
 
-fn address_list(addresses: &[EmailAddress]) -> String {
+pub(crate) fn address_list(addresses: &[EmailAddress]) -> String {
     addresses
         .iter()
         .map(format_address)

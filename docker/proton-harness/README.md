@@ -106,6 +106,14 @@ labels exist and records each message's ID and subject under `messages` in
 (`address` is one of the account's addresses; `labels` are label or folder
 names, at most one of them a folder or system label).
 
+`messages/contacts.json` lists contacts for sending tests. `zmail-seed`
+gives each one a card signed by the user keys, as Proton's clients sign
+them, with the address's `X-PM-*` send settings (`sign`, `encrypt`,
+`scheme`, `mime_type`) and, with `"key": true`, a freshly generated public
+key. The fake server checks card signatures against the address keys when
+a contact is created, so each contact is created with a clear card and
+then updated to its signed card.
+
 ## Licence
 
 go-proton-api is MIT licensed (Copyright (c) 2020 James Houlahan, Copyright

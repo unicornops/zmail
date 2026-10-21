@@ -32,6 +32,7 @@ mod auth;
 mod boolean;
 mod client;
 mod config;
+mod contact;
 mod cookies;
 mod crypto;
 mod draft;
@@ -53,6 +54,7 @@ mod salt;
 mod srp_modulus;
 mod unlock;
 mod user;
+mod vcard;
 
 #[cfg(test)]
 mod srp_vectors;
@@ -63,6 +65,7 @@ pub use address::{Address, AddressStatus, AddressType};
 pub use attachment::{ATTACHMENT_DISPOSITION, Attachment, CreateAttachmentReq, INLINE_DISPOSITION};
 pub use client::Client;
 pub use config::{API_HOST_URL, AppVersion, ClientConfig};
+pub use contact::{Card, CardType, Contact, ContactEmail, ContactSettings};
 pub use cookies::{CookieJar, StoredCookie};
 pub use crypto::{RecipientKey, SessionKey, Split};
 pub use draft::{CreateDraftAction, CreateDraftReq, DraftTemplate, UpdateDraftReq};
@@ -70,7 +73,7 @@ pub use event::{AddressEvent, Event, EventAction, LabelEvent, MAX_COLLECTED_EVEN
 pub use header_types::Headers;
 pub use hv::HumanVerification;
 pub use keyring::{Key, KeyFlags, KeyRing, Keys, UnlockedKey};
-pub use keys::{ContactSettings, PublicKey, RecipientType};
+pub use keys::{PublicKey, RecipientType};
 pub use label::*;
 pub use mail_settings::MailSettings;
 pub use manager::{Manager, Status};
