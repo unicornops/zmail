@@ -1,7 +1,7 @@
 # Proton API test double: go-proton-api's fake server (server/cmd/server)
 # and its gRPC control client (server/cmd/client), built at the pinned
-# commit with api-port.patch applied. Test-only; nothing from this image
-# ships in zmail. See README.md and scripts/proton-harness.sh.
+# commit with api-port.patch and srp-salt.patch applied. Test-only; nothing
+# from this image ships in zmail. See README.md and scripts/proton-harness.sh.
 
 # golang:1.26.7-bookworm (multi-arch index digest). go-proton-api's go.mod
 # asks for toolchain go1.26.7; GOTOOLCHAIN=local keeps the build on this
@@ -24,8 +24,9 @@ RUN git init --quiet . \
 # Module downloads are checked against upstream's go.sum.
 RUN go mod download
 
-COPY api-port.patch /src/api-port.patch
-RUN git apply /src/api-port.patch
+COPY api-port.patch srp-salt.patch /src/
+RUN git apply /src/api-port.patch \
+    && git apply /src/srp-salt.patch
 
 RUN go build -trimpath -o /out/proton-server ./server/cmd/server \
     && go build -trimpath -o /out/proton-client ./server/cmd/client

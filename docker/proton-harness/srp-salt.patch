@@ -1,0 +1,43 @@
+zmail proton-harness: give the fake server Proton-shaped 10-byte SRP salts.
+Upstream reuses the account's 16-byte key salt as the SRP salt; real Proton
+SRP salts are 10 bytes. Applied after api-port.patch by
+docker/proton-harness/Dockerfile (and by scripts/proton-harness.sh in native
+mode); see docker/proton-harness/README.md.
+
+diff --git a/server/backend/api_auth.go b/server/backend/api_auth.go
+index 9f4b49b..ee46c79 100644
+--- a/server/backend/api_auth.go
++++ b/server/backend/api_auth.go
+@@ -32,7 +32,7 @@ func (b *Backend) NewAuthInfo(username string) (proton.AuthInfo, error) {
+ 				Version:         4,
+ 				Modulus:         modulus,
+ 				ServerEphemeral: base64.StdEncoding.EncodeToString(challenge),
+-				Salt:            base64.StdEncoding.EncodeToString(acc.salt),
++				Salt:            base64.StdEncoding.EncodeToString(acc.salt[:srpSaltLen]),
+ 				SRPSession:      session,
+ 			}, nil
+ 		})
+@@ -118,3 +118,8 @@ func (b *Backend) DeleteSession(userID, authUID string) error {
+ 		})
+ 	})
+ }
++
++// srpSaltLen is the length of Proton's SRP salts: the salt plus "proton"
++// makes the 16-byte bcrypt salt. The account's 16-byte salt stays the key
++// salt; its first 10 bytes are the SRP salt (zmail proton-harness patch).
++const srpSaltLen = 10
+diff --git a/server/backend/backend.go b/server/backend/backend.go
+index dd3570f..52b8198 100644
+--- a/server/backend/backend.go
++++ b/server/backend/backend.go
+@@ -132,7 +132,9 @@ func (b *Backend) CreateUser(username string, password []byte) (string, error) {
+ 			return "", err
+ 		}
+ 
+-		srpAuth, err := srp.NewAuthForVerifier(password, modulus, salt)
++		// A capped slice: go-srp appends "proton" to the salt it is given,
++		// which would otherwise overwrite the key salt's last six bytes.
++		srpAuth, err := srp.NewAuthForVerifier(password, modulus, salt[:srpSaltLen:srpSaltLen])
+ 		if err != nil {
+ 			return "", err
+ 		}

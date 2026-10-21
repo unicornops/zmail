@@ -26,7 +26,7 @@ set -euo pipefail
 #   env          the same as PROTON_HARNESS_* shell exports
 #
 # PROTON_HARNESS_MODE=native builds and runs the server with a local Go
-# toolchain instead of Docker (same pin, same patch), for machines without
+# toolchain instead of Docker (same pin, same patches), for machines without
 # a working Docker.
 #
 # Environment:
@@ -55,7 +55,7 @@ GRPC_PORT=18080
 BASE_URL="https://127.0.0.1:${API_PORT}"
 CONTAINER="zmail-proton-harness"
 # Tagged by the build inputs, so a changed Dockerfile or patch rebuilds.
-IMAGE="zmail-proton-harness:$(cat "${HARNESS_DIR}/Dockerfile" "${HARNESS_DIR}/api-port.patch" | sha256sum | cut -c1-16)"
+IMAGE="zmail-proton-harness:$(cat "${HARNESS_DIR}/Dockerfile" "${HARNESS_DIR}/api-port.patch" "${HARNESS_DIR}/srp-salt.patch" | sha256sum | cut -c1-16)"
 # Proton rejects API calls without an app version; the fake server only
 # checks that one is present.
 APP_VERSION="zmail@0.0.0-harness"
@@ -198,7 +198,7 @@ native_build() {
   require go git
   NATIVE_BIN="${NATIVE_SRC}/bin"
   local stamp="${NATIVE_BIN}/patch.sha256" want
-  want="$(sha256sum "${HARNESS_DIR}/api-port.patch" | cut -d' ' -f1)"
+  want="$(cat "${HARNESS_DIR}/api-port.patch" "${HARNESS_DIR}/srp-salt.patch" | sha256sum | cut -d' ' -f1)"
   if [[ -x "${NATIVE_BIN}/proton-server" && -x "${NATIVE_BIN}/proton-client" \
     && "$(cat "${stamp}" 2>/dev/null)" == "${want}" ]]; then
     return
@@ -217,6 +217,7 @@ native_build() {
   [[ "$(git -C "${repo}" rev-parse HEAD)" == "${GO_PROTON_API_COMMIT}" ]] \
     || die "go-proton-api checkout is not at ${GO_PROTON_API_COMMIT}"
   git -C "${repo}" apply "${HARNESS_DIR}/api-port.patch" || die "api-port.patch does not apply"
+  git -C "${repo}" apply "${HARNESS_DIR}/srp-salt.patch" || die "srp-salt.patch does not apply"
   (cd "${repo}" && CGO_ENABLED=0 GOFLAGS=-mod=readonly retry 3 5 go mod download) \
     || die "could not download go-proton-api's modules"
   if ! (
