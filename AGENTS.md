@@ -32,6 +32,7 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 - `crates/zmail-imap`: IMAP adapter
 - `crates/zmail-jmap`: JMAP adapter and submission support
 - `crates/zmail-proton-api`: Proton Mail API client (go-proton-api port; not reachable from the UI until #139)
+- `crates/zmail-proton`: Proton Mail sync adapter (Bridge services port), built only with `zmail-sync`'s `proton` feature, which `zmail-app` does not enable until #139
 - `crates/zmail-smtp`: SMTP submission
 - `crates/zmail-security`: keychain and rendering safety helpers
 - `crates/zmail-theme`: Zed theme compatibility layer

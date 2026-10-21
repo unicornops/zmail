@@ -1011,6 +1011,7 @@ async fn connect_session(
                 .map_err(|(error, _)| anyhow!(error))
                 .context("IMAP XOAUTH2 authentication failed")
         }
+        AuthKind::ProtonSession => bail!("Proton accounts do not sign in over IMAP"),
     }
 }
 

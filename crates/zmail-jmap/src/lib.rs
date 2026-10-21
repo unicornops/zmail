@@ -393,10 +393,11 @@ fn jmap_credentials(
     auth: AuthKind,
     username: &str,
     secret: &str,
-) -> jmap_client::client::Credentials {
+) -> Result<jmap_client::client::Credentials> {
     match auth {
-        AuthKind::Password => jmap_client::client::Credentials::basic(username, secret),
-        AuthKind::OAuth2 => jmap_client::client::Credentials::bearer(secret.to_owned()),
+        AuthKind::Password => Ok(jmap_client::client::Credentials::basic(username, secret)),
+        AuthKind::OAuth2 => Ok(jmap_client::client::Credentials::bearer(secret.to_owned())),
+        AuthKind::ProtonSession => bail!("Proton accounts do not sign in over JMAP"),
     }
 }
 
@@ -406,7 +407,7 @@ pub(crate) async fn connect_client(
     secret: &str,
     auth: AuthKind,
 ) -> Result<Client> {
-    let mut client_builder = Client::new().credentials(jmap_credentials(auth, username, secret));
+    let mut client_builder = Client::new().credentials(jmap_credentials(auth, username, secret)?);
     if let Some(host) = Url::parse(endpoint)
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
@@ -1155,14 +1156,20 @@ mod tests {
     #[test]
     fn jmap_credentials_follow_the_auth_kind() {
         assert_eq!(
-            jmap_credentials(AuthKind::Password, "user@example.test", "app-password"),
+            jmap_credentials(AuthKind::Password, "user@example.test", "app-password")
+                .expect("password credentials"),
             jmap_client::client::Credentials::basic("user@example.test", "app-password"),
             "password accounts authenticate with HTTP Basic"
         );
         assert_eq!(
-            jmap_credentials(AuthKind::OAuth2, "user@example.test", "access-token"),
+            jmap_credentials(AuthKind::OAuth2, "user@example.test", "access-token")
+                .expect("bearer credentials"),
             jmap_client::client::Credentials::bearer("access-token"),
             "OAuth2 accounts authenticate with a bearer token"
+        );
+        assert!(
+            jmap_credentials(AuthKind::ProtonSession, "user@example.test", "").is_err(),
+            "Proton sessions never reach JMAP"
         );
     }
 

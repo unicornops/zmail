@@ -15,9 +15,16 @@ zmail-core = { path = "../zmail-core" }
 zmail-imap = { path = "../zmail-imap" }
 zmail-jmap = { path = "../zmail-jmap" }
 zmail-notify = { path = "../zmail-notify" }
+zmail-proton = { path = "../zmail-proton", optional = true }
 zmail-security = { path = "../zmail-security" }
 zmail-smtp = { path = "../zmail-smtp" }
 zmail-store = { path = "../zmail-store" }
+
+[features]
+# Proton Mail accounts (docs/adr/0004-proton-native.md). Off by default, and
+# zmail-app does not enable it until the local store is encrypted at rest
+# (#139).
+proton = ["dep:zmail-proton"]
 
 [lints]
 workspace = true

@@ -1319,11 +1319,17 @@ impl AccountSecret {
 }
 
 fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, AccountSecret)> {
+    if protocol == ProtocolKind::Proton {
+        // Proton accounts need Proton sign-in and an encrypted local store
+        // first (docs/adr/0004-proton-native.md, #139).
+        bail!("Proton Mail accounts can't be added yet");
+    }
     println!("Setting up a new {protocol} account.");
     let display_name = prompt("Display name")?;
     let endpoint = match protocol {
         ProtocolKind::Imap => prompt_with_default("IMAP endpoint", "imaps://mail.example.com:993")?,
         ProtocolKind::Jmap => prompt_with_default("JMAP base URL", "https://mail.example.com")?,
+        ProtocolKind::Proton => unreachable!("Proton accounts are refused above"),
     };
     validate_endpoint(protocol, &endpoint)?;
     let username = prompt("Username or account email")?;
@@ -1342,6 +1348,7 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, AccountSecret)>
                 AuthKind::Password
             }
         }
+        ProtocolKind::Proton => unreachable!("Proton accounts are refused above"),
     };
     let secret = match auth {
         AuthKind::Password => AccountSecret::Password(
@@ -1368,6 +1375,7 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, AccountSecret)>
                 )
             }
         }
+        AuthKind::ProtonSession => unreachable!("Proton accounts are refused above"),
     };
     let identity_name = prompt_with_default("Primary identity name", &display_name)?;
     let identity_email = prompt_with_default("Primary identity email", &username)?;
@@ -1377,6 +1385,7 @@ fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, AccountSecret)>
     let outgoing = match protocol {
         ProtocolKind::Imap => prompt_smtp_outgoing(&endpoint, &username)?,
         ProtocolKind::Jmap => OutgoingConfig::jmap_default(),
+        ProtocolKind::Proton => unreachable!("Proton accounts are refused above"),
     };
 
     let mut identities = vec![NewIdentity {
@@ -1517,6 +1526,11 @@ fn validate_endpoint(protocol: ProtocolKind, endpoint: &str) -> Result<()> {
         ProtocolKind::Jmap => {
             if !matches!(parsed.scheme(), "http" | "https") {
                 bail!("JMAP endpoints must use http:// or https://");
+            }
+        }
+        ProtocolKind::Proton => {
+            if parsed.scheme() != "https" {
+                bail!("the Proton API is only reached over https://");
             }
         }
     }

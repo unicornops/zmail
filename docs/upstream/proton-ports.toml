@@ -192,3 +192,10 @@ local = "crates/zmail-proton-api/src/address.rs"
 repo = "proton-bridge"
 upstream = "internal/bridge/user.go"
 local = "crates/zmail-proton-api/src/unlock.rs"
+
+# Sync adapter support (crates/zmail-proton-api).
+
+[[port]]
+repo = "go-proton-api"
+upstream = "event.go"
+local = "crates/zmail-proton-api/src/event.rs"
