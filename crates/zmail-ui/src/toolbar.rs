@@ -263,6 +263,23 @@ pub(crate) fn sync_indicator(
     Some(indicator)
 }
 
+/// What a screen reader is told when the indicator goes from `before` to
+/// `after`: a sync starting to fail, a different failure, and syncing
+/// working again. Routine background syncs (up to date, syncing, up to
+/// date) say nothing, and neither does the first reading at startup.
+pub(crate) fn sync_announcement(
+    before: Option<&SyncIndicator>,
+    after: Option<&SyncIndicator>,
+) -> Option<String> {
+    let (before, after) = (before?, after?);
+    let announce = match (before.state, after.state) {
+        (SyncState::Problem, SyncState::Problem) => before.label != after.label,
+        (_, SyncState::Problem) | (SyncState::Problem, _) => true,
+        _ => false,
+    };
+    announce.then(|| after.label.clone())
+}
+
 /// "Updated just now", "Updated 5 min ago", "Updated 3 hours ago",
 /// "Updated yesterday" or "Updated 4 days ago".
 fn updated_ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
@@ -327,6 +344,37 @@ mod tests {
     fn label(accounts: &[AccountSummary]) -> (SyncState, String) {
         let indicator = sync_indicator(accounts, now()).expect("an indicator");
         (indicator.state, indicator.label)
+    }
+
+    #[test]
+    fn only_problems_and_recovery_are_announced() {
+        let indicator = |state, label: &str| SyncIndicator {
+            state,
+            label: label.to_owned(),
+        };
+        let fine = indicator(SyncState::UpToDate, "Updated just now");
+        let syncing = indicator(SyncState::Syncing, "Syncing Work…");
+        let failing = indicator(SyncState::Problem, "Couldn't sync Work: timed out");
+        let worse = indicator(SyncState::Problem, "2 accounts couldn't sync");
+
+        // Startup, and routine syncs, say nothing.
+        assert_eq!(sync_announcement(None, Some(&failing)), None);
+        assert_eq!(sync_announcement(Some(&fine), Some(&syncing)), None);
+        assert_eq!(sync_announcement(Some(&syncing), Some(&fine)), None);
+        // Failing, failing differently and recovering are read out.
+        assert_eq!(
+            sync_announcement(Some(&syncing), Some(&failing)).as_deref(),
+            Some("Couldn't sync Work: timed out")
+        );
+        assert_eq!(sync_announcement(Some(&failing), Some(&failing)), None);
+        assert_eq!(
+            sync_announcement(Some(&failing), Some(&worse)).as_deref(),
+            Some("2 accounts couldn't sync")
+        );
+        assert_eq!(
+            sync_announcement(Some(&failing), Some(&fine)).as_deref(),
+            Some("Updated just now")
+        );
     }
 
     #[test]

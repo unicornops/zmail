@@ -25,7 +25,7 @@ use gpui::{
     prelude::*, px, rgb,
 };
 
-use crate::a11y::AccessibleExt;
+use crate::a11y::{A11yFlags, AccessibleExt, Politeness};
 use crate::styles::{ICON_SIZE_SM, RADIUS_LG, SPACE_2, SPACE_3, SPACE_4, TYPE_BODY, TypeStyleExt};
 use crate::widgets::icon;
 
@@ -238,6 +238,14 @@ impl ToastHost {
     }
 }
 
+/// How a toast is announced: an error interrupts, anything else waits.
+pub(crate) fn toast_politeness(kind: ToastKind) -> Politeness {
+    match kind {
+        ToastKind::Error => Politeness::Assertive,
+        ToastKind::Info | ToastKind::Success => Politeness::Polite,
+    }
+}
+
 impl Render for ToastHost {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ComponentTheme::get(cx);
@@ -252,9 +260,23 @@ impl Render for ToastHost {
                     ToastKind::Success => ("check-circle", colors.success),
                     ToastKind::Error => ("alert-circle", colors.danger),
                 };
+                // Each toast is a new node, so a screen reader reads it as
+                // it appears: errors at once, the rest when it is free.
+                let politeness = toast_politeness(active.toast.kind);
                 div()
                     .id(("toast", id.0))
-                    .accessible(Role::Status, active.toast.message.clone())
+                    .accessible(
+                        match politeness {
+                            Politeness::Polite => Role::Status,
+                            Politeness::Assertive => Role::Alert,
+                        },
+                        active.toast.message.clone(),
+                    )
+                    .aria_value(active.toast.message.clone())
+                    .a11y_flags(A11yFlags {
+                        live: Some(politeness),
+                        ..A11yFlags::default()
+                    })
                     .flex()
                     .items_center()
                     .gap(px(SPACE_3))
@@ -311,6 +333,13 @@ mod tests {
     use gpui::{Entity, Subscription, TestAppContext, VisualTestContext};
 
     use super::*;
+
+    #[test]
+    fn errors_interrupt_and_other_toasts_wait() {
+        assert_eq!(toast_politeness(ToastKind::Error), Politeness::Assertive);
+        assert_eq!(toast_politeness(ToastKind::Info), Politeness::Polite);
+        assert_eq!(toast_politeness(ToastKind::Success), Politeness::Polite);
+    }
 
     struct Root {
         host: Entity<ToastHost>,

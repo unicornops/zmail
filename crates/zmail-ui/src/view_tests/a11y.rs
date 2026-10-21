@@ -7,13 +7,13 @@
 //! [`AccessibleExt::accessible`](crate::a11y::AccessibleExt::accessible)
 //! set while the views render (see [`crate::a11y::audit`]).
 
-use gpui::{Role, TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, Entity, Role, TestAppContext, VisualTestContext};
 
 use super::settings::settings_window;
-use super::{Harness, Setup, keys, open_workspace, open_workspace_on};
-use crate::InitialView;
+use super::{Harness, Setup, focus, keys, open_workspace, open_workspace_on, search_input, toasts};
 use crate::a11y::audit;
 use crate::settings::SettingsSection;
+use crate::{InitialView, WorkspaceView};
 
 /// Fails on any empty label, naming its role.
 fn assert_all_named(entries: &[(Role, String)]) {
@@ -114,6 +114,16 @@ fn the_main_window_names_every_control(cx: &mut TestAppContext) {
             .any(|label| label.starts_with("Command Palette: ")),
     );
     assert!(has(&entries, Role::Form, "New Message"));
+
+    // The palette's highlighted entry is announced, since focus stays in
+    // its search field.
+    assert!(
+        audit::labels(&entries, Role::Status)
+            .iter()
+            .any(|label| label.contains(", 1 of ")),
+        "{:?}",
+        audit::labels(&entries, Role::Status)
+    );
     assert!(has(&entries, Role::MultilineTextInput, "Message"));
 }
 
@@ -151,4 +161,78 @@ fn onboarding_names_its_controls(cx: &mut TestAppContext) {
     assert_all_named(&entries);
     assert!(!audit::labels(&entries, Role::Heading).is_empty());
     assert!(has(&entries, Role::Button, "Add your first account"));
+}
+
+fn announcement(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Option<String> {
+    cx.read_entity(view, |view, _| {
+        view.announcer
+            .current()
+            .map(|announcement| announcement.text.to_string())
+    })
+}
+
+fn refresh(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) {
+    cx.update(|_, cx| view.update(cx, |view, cx| view.refresh_from_store(cx)));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_new_search_announces_its_result_count(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+    let search = search_input(&view, cx);
+    focus(&search, cx);
+    cx.simulate_input("quarterly");
+    keys("enter", cx);
+    assert_eq!(announcement(&view, cx).as_deref(), Some("3 results"));
+
+    // Search Mail again, typing a query nothing matches.
+    keys("secondary-a", cx);
+    cx.simulate_input("zebra");
+    keys("enter", cx);
+    assert_eq!(announcement(&view, cx).as_deref(), Some("No results"));
+}
+
+#[gpui::test]
+fn sync_failures_and_recovery_are_announced(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let account_id = harness.store.list_accounts().expect("accounts load")[0].id;
+    refresh(&view, cx);
+    assert_eq!(announcement(&view, cx), None, "nothing at startup");
+
+    harness
+        .store
+        .record_sync_failure(account_id, "IMAP sync failed", "connection timed out")
+        .expect("the failure is recorded");
+    refresh(&view, cx);
+    assert_eq!(
+        announcement(&view, cx).as_deref(),
+        Some("Couldn't sync Work: connection timed out")
+    );
+
+    harness
+        .store
+        .record_sync_success(account_id, "IMAP sync complete", "checkpoint")
+        .expect("the success is recorded");
+    refresh(&view, cx);
+    assert_eq!(announcement(&view, cx).as_deref(), Some("Updated just now"));
+}
+
+#[gpui::test]
+fn toasts_and_errors_are_live_regions(cx: &mut TestAppContext) {
+    audit::start();
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    // Archiving shows an undo toast.
+    keys("secondary-e", cx);
+    let toast = toasts(&view, cx).pop().expect("a toast");
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.store_error = Some("The store is locked".to_owned());
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    let entries = audit::finish();
+    assert!(has(&entries, Role::Status, &toast), "{entries:?}");
+    assert!(has(&entries, Role::Alert, "The store is locked"));
+    drop(harness);
 }

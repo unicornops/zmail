@@ -11,7 +11,7 @@ use gpui::{
 };
 use zmail_core::{AccountColor, SyncPhase};
 
-use crate::a11y::{AccessibleExt, readable};
+use crate::a11y::{A11yFlags, AccessibleExt, Politeness, readable};
 use crate::components::TextInput;
 use crate::styles::{
     ACCOUNT_COLORS, ACCOUNT_DOT_SIZE, ACTION_DIVIDER_HEIGHT, ACTION_DIVIDER_WIDTH,
@@ -338,9 +338,20 @@ pub(crate) fn status_banner(
     background_color: u32,
     colors: &UiColors,
 ) -> Stateful<gpui::Div> {
+    // A live region: shown, or changed, it is read out (errors at once).
+    let politeness = if role == Role::Alert {
+        Politeness::Assertive
+    } else {
+        Politeness::Polite
+    };
     div()
         .id(id)
         .accessible(role, message.to_owned())
+        .aria_value(message.to_owned())
+        .a11y_flags(A11yFlags {
+            live: Some(politeness),
+            ..A11yFlags::default()
+        })
         .w_full()
         .flex()
         .bg(rgb(background_color))

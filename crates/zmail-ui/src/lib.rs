@@ -29,7 +29,7 @@
 //! | `pane` | pane focus order and the focused-pane indicator |
 //! | `layout` | the responsive pane layout: breakpoints and pane widths |
 //! | `motion` | reduced motion: the system setting and the Settings override |
-//! | `a11y` | screen-reader roles and names (`AccessibleExt`), the AccessKit flags GPUI has no builder for, readable text |
+//! | `a11y` | screen-reader roles and names (`AccessibleExt`), the AccessKit flags GPUI has no builder for, readable text, live regions (`Announcer`) |
 //! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, `TextInput`, … and the gallery |
 //! | `styles` | design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
 //! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar, pane widths, density) |
@@ -430,6 +430,9 @@ struct WorkspaceView {
     detail_mode: DetailMode,
     /// The last error. It stays until the user dismisses it.
     store_error: Option<String>,
+    /// What a screen reader is told about changes nothing has focus on:
+    /// sync status and search result counts.
+    announcer: a11y::Announcer,
     /// A transient status message; [`WorkspaceView::show_status`] clears it
     /// after a few seconds.
     status_message: Option<String>,
