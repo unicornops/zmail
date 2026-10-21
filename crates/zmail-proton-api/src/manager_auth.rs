@@ -3,23 +3,32 @@
 // (https://github.com/ProtonMail/go-proton-api).
 // Copyright (c) 2020 James Houlahan, Copyright (c) 2022 Proton AG.
 // Licensed under the MIT License; see crates/zmail-proton-api/LICENSE-MIT.
-// Modified by UnicornOps on 2026-10-20: rewritten in Rust. This file holds
-// the session types and the token refresh; the SRP login lands with the
-// auth work (issue #237). The refresh `State` is base64 rather than raw
-// random bytes, and tokens are redacted from `Debug` output.
+// Modified by UnicornOps on 2026-10-20: rewritten in Rust. SRP runs on
+// `proton-srp` with the modulus signature checked by `srp_modulus.rs`
+// (go-srp's `NewAuth` and `GenerateProofs`). The server proof is always
+// checked (no `WithSkipVerifyProofs`). The refresh `State` is base64 rather
+// than raw random bytes, and tokens are redacted from `Debug` output.
+// FIDO2 is not supported (ADR 0004) but the empty `FIDO2` object is sent
+// as upstream does. `AuthModulus` is not ported.
 
-//! Sessions: the `Auth` response, new clients and token refresh.
+//! Sessions: SRP login, the `Auth` response, new clients and token refresh.
 
 use std::fmt;
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
+};
+use proton_srp::{SRPAuth, SRPProof, SrpHashVersion};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     client::Client,
+    hv::HumanVerification,
     manager::{Manager, Request},
     response::Error,
+    srp_modulus::ModulusVerifier,
 };
 
 /// Two-factor methods enabled on the account (go-proton-api's
@@ -110,6 +119,77 @@ impl fmt::Debug for Auth {
     }
 }
 
+/// The SRP challenge from `/auth/v4/info` (go-proton-api's `AuthInfo`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthInfo {
+    /// SRP password hash version (4 for current accounts).
+    #[serde(rename = "Version")]
+    pub version: u8,
+    /// The SRP modulus, clear-signed by Proton's modulus key.
+    #[serde(rename = "Modulus")]
+    pub modulus: String,
+    /// The server's ephemeral value, base64.
+    #[serde(rename = "ServerEphemeral")]
+    pub server_ephemeral: String,
+    /// The account's SRP salt, base64.
+    #[serde(rename = "Salt")]
+    pub salt: String,
+    /// The SRP session to answer.
+    #[serde(rename = "SRPSession")]
+    pub srp_session: String,
+    /// Two-factor information.
+    #[serde(rename = "2FA", default)]
+    pub two_fa: TwoFaInfo,
+}
+
+/// go-proton-api's `FIDO2Req`, always empty: Zmail sends it like Bridge
+/// does but does not support FIDO2.
+#[derive(Debug, Default, Serialize)]
+struct Fido2Req {
+    #[serde(rename = "AuthenticationOptions")]
+    authentication_options: Option<()>,
+    #[serde(rename = "ClientData")]
+    client_data: &'static str,
+    #[serde(rename = "AuthenticatorData")]
+    authenticator_data: &'static str,
+    #[serde(rename = "Signature")]
+    signature: &'static str,
+    #[serde(rename = "CredentialID")]
+    credential_id: Option<()>,
+}
+
+/// go-proton-api's `Auth2FAReq`.
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct Auth2FaReq<'a> {
+    #[serde(rename = "TwoFactorCode", skip_serializing_if = "str::is_empty")]
+    pub(crate) two_factor_code: &'a str,
+    #[serde(rename = "FIDO2")]
+    fido2: Fido2Req,
+}
+
+impl<'a> Auth2FaReq<'a> {
+    pub(crate) fn totp(code: &'a str) -> Self {
+        Self {
+            two_factor_code: code,
+            fido2: Fido2Req::default(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct AuthReq<'a> {
+    #[serde(flatten)]
+    two_fa: Auth2FaReq<'a>,
+    #[serde(rename = "Username")]
+    username: &'a str,
+    #[serde(rename = "ClientEphemeral")]
+    client_ephemeral: String,
+    #[serde(rename = "ClientProof")]
+    client_proof: String,
+    #[serde(rename = "SRPSession")]
+    srp_session: &'a str,
+}
+
 #[derive(Serialize)]
 struct AuthRefreshReq<'a> {
     #[serde(rename = "UID")]
@@ -129,6 +209,59 @@ struct AuthRefreshReq<'a> {
 }
 
 impl Manager {
+    /// Signs in with SRP (`NewClientWithLogin`).
+    ///
+    /// Runs `/auth/v4/info`, checks the modulus signature, sends the SRP
+    /// proofs to `/auth/v4` and checks the server's proof before trusting
+    /// the session. If [`Auth::two_fa`] asks for TOTP, call
+    /// [`Client::auth_2fa`] next. The password is only borrowed; keep it in
+    /// a zeroizing buffer on the caller's side.
+    pub async fn login(&self, username: &str, password: &str) -> Result<(Client, Auth), Error> {
+        self.login_with_hv(username, password, None).await
+    }
+
+    /// Signs in after human verification (`NewClientWithLoginWithHVToken`):
+    /// pass the [`HumanVerification`] from the 9001 error once the user has
+    /// completed it.
+    pub async fn login_with_hv(
+        &self,
+        username: &str,
+        password: &str,
+        hv: Option<&HumanVerification>,
+    ) -> Result<(Client, Auth), Error> {
+        let info = self.auth_info(username).await?;
+        let proofs = srp_proofs(&info, username, password)?;
+        let request = Request::post("/auth/v4")
+            .human_verification(hv)
+            .json(&AuthReq {
+                two_fa: Auth2FaReq::default(),
+                username,
+                client_ephemeral: BASE64.encode(proofs.client_ephemeral),
+                client_proof: BASE64.encode(proofs.client_proof),
+                srp_session: &info.srp_session,
+            })?;
+        let auth: Auth = self.send(&request, None).await?.json()?;
+        check_server_proof(&proofs, &auth.server_proof)?;
+        let client = Client::new(
+            self.clone(),
+            &auth.uid,
+            &auth.access_token,
+            &auth.refresh_token,
+        );
+        Ok((client, auth))
+    }
+
+    /// `POST /auth/v4/info` (`AuthInfo`).
+    pub async fn auth_info(&self, username: &str) -> Result<AuthInfo, Error> {
+        #[derive(Serialize)]
+        struct AuthInfoReq<'a> {
+            #[serde(rename = "Username")]
+            username: &'a str,
+        }
+        let request = Request::post("/auth/v4/info").json(&AuthInfoReq { username })?;
+        self.send(&request, None).await?.json()
+    }
+
     /// Creates a client for an existing session (`NewClient`).
     pub fn new_client(&self, uid: &str, access_token: &str, refresh_token: &str) -> Client {
         Client::new(self.clone(), uid, access_token, refresh_token)
@@ -165,6 +298,35 @@ impl Manager {
             access_token,
         })?;
         self.send(&request, None).await?.json()
+    }
+}
+
+/// Builds the SRP proofs for a login challenge (go-srp `NewAuth` and
+/// `GenerateProofs`), checking the modulus signature first.
+fn srp_proofs(info: &AuthInfo, username: &str, password: &str) -> Result<SRPProof, Error> {
+    let version = SrpHashVersion::try_from(info.version).map_err(Error::Srp)?;
+    let auth = SRPAuth::new(
+        &ModulusVerifier,
+        Some(username),
+        password,
+        version,
+        &info.salt,
+        &info.modulus,
+        &info.server_ephemeral,
+    )
+    .map_err(Error::Srp)?;
+    auth.generate_proofs().map_err(Error::Srp)
+}
+
+/// Compares the server's proof in constant time (`ErrInvalidProof`).
+fn check_server_proof(proofs: &SRPProof, server_proof: &str) -> Result<(), Error> {
+    let server_proof = BASE64
+        .decode(server_proof)
+        .map_err(|_| Error::InvalidServerProof)?;
+    if proofs.compare_server_proof(&server_proof) {
+        Ok(())
+    } else {
+        Err(Error::InvalidServerProof)
     }
 }
 

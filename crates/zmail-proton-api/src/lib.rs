@@ -18,24 +18,30 @@
 //! - [`Client`] is one session: it sends `x-pm-uid` and the bearer token,
 //!   and on 401 refreshes the session once and retries once.
 
+mod auth;
 mod client;
 mod config;
 mod cookies;
+mod hv;
 mod manager;
 mod manager_auth;
 mod paging;
 mod pinning;
 mod response;
+mod srp_modulus;
 mod user;
 
+#[cfg(test)]
+mod srp_vectors;
 #[cfg(test)]
 mod tests;
 
 pub use client::Client;
 pub use config::{API_HOST_URL, AppVersion, ClientConfig};
 pub use cookies::{CookieJar, StoredCookie};
+pub use hv::HumanVerification;
 pub use manager::{Manager, Status};
-pub use manager_auth::{Auth, PasswordMode, TwoFaInfo, TwoFaStatus};
+pub use manager_auth::{Auth, AuthInfo, PasswordMode, TwoFaInfo, TwoFaStatus};
 pub use paging::{MAX_PAGE_SIZE, fetch_paged};
 pub use pinning::{PinMismatch, PinParseError, PinSet};
 pub use response::{ApiError, Code, Error};

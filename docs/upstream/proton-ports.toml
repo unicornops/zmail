@@ -10,13 +10,9 @@
 # after the pin. See docs/upstream/proton.md.
 #
 # Planned ports (added as [[port]] entries when the files land, issue #237):
-#   go-proton-api: manager_auth.go, manager_auth_types.go, auth.go, hv.go
-#                  -> crates/zmail-proton-api (auth)
-#   go-srp:        srp.go (modulus signature check), srp_test.go (vectors)
 #   go-proton-api: salt.go, salt_types.go, keyring.go, keys_types.go,
 #                  unlock.go, address.go, address_types.go
 #                  -> crates/zmail-proton-api (keys)
-#   proton-bridge: internal/hv/hv_default.go (verification URL)
 
 # Client core and TLS pinning (crates/zmail-proton-api).
 
@@ -114,3 +110,40 @@ local = "crates/zmail-proton-api/src/config.rs"
 repo = "proton-bridge"
 upstream = "internal/constants/host_default.go"
 local = "crates/zmail-proton-api/src/config.rs"
+
+# Auth: SRP login, 2FA, logout, human verification.
+
+[[port]]
+repo = "go-proton-api"
+upstream = "auth.go"
+local = "crates/zmail-proton-api/src/auth.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "hv.go"
+local = "crates/zmail-proton-api/src/hv.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/hv/hv.go"
+local = "crates/zmail-proton-api/src/hv.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/hv/hv_default.go"
+local = "crates/zmail-proton-api/src/hv.rs"
+
+[[port]]
+repo = "go-srp"
+upstream = "srp.go"
+local = "crates/zmail-proton-api/src/srp_modulus.rs"
+
+[[port]]
+repo = "go-srp"
+upstream = "srp_test.go"
+local = "crates/zmail-proton-api/src/srp_modulus.rs"
+
+[[port]]
+repo = "go-srp"
+upstream = "srp_test.go"
+local = "crates/zmail-proton-api/src/srp_vectors.rs"

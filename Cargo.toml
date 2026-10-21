@@ -49,6 +49,12 @@ keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sy
 mail-send = { version = "0.6.2", default-features = false, features = ["builder", "cram-md5", "digest-md5", "aws_lc_rs", "tls12"] }
 mail-parser = "0.11.2"
 notify-rust = "4"
+# OpenPGP (rPGP) for Proton key handling and the SRP modulus signature, shared
+# with ADR 0002. Default features off: no bzip2 (docs/adr/0004-proton-native.md).
+pgp = { version = "0.21.0", default-features = false }
+# Proton's SRP (ADR 0004); the modulus signature is checked with `pgp` in
+# zmail-proton-api, so the rPGP-based `pgpinternal` default stays off.
+proton-srp = { version = "0.8.4", default-features = false }
 rand = "0.8"
 # Autoconfig XML. Already in the tree through GPUI (usvg); it never fetches
 # external entities, and zmail-autodiscover also turns DTDs off.
@@ -69,6 +75,7 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-threa
 tokio-rustls = "0.26.4"
 unicode-segmentation = "1.13"
 url = "2.5"
+zeroize = "1.8"
 
 [workspace.lints.rust]
 missing_docs = "warn"
