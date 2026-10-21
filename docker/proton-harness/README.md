@@ -82,7 +82,9 @@ as Proton's is:
   truncates the over-long encoded salt, so upstream's own Go client never
   noticed.
 
-The patch uses the first 10 bytes of the account salt for SRP. Key salts
+The patch uses the first 10 bytes of the account salt for SRP, through a
+capped slice: go-srp appends `"proton"` to the salt it is given, and an
+uncapped slice would overwrite the key salt's last six bytes. Key salts
 (`/core/v4/keys/salts`) and the key passphrases stay on the full 16 bytes,
 which is also what Proton uses.
 

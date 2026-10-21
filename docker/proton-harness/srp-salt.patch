@@ -27,15 +27,17 @@ index 9f4b49b..ee46c79 100644
 +// salt; its first 10 bytes are the SRP salt (zmail proton-harness patch).
 +const srpSaltLen = 10
 diff --git a/server/backend/backend.go b/server/backend/backend.go
-index dd3570f..1df6e87 100644
+index dd3570f..52b8198 100644
 --- a/server/backend/backend.go
 +++ b/server/backend/backend.go
-@@ -132,7 +132,7 @@ func (b *Backend) CreateUser(username string, password []byte) (string, error) {
+@@ -132,7 +132,9 @@ func (b *Backend) CreateUser(username string, password []byte) (string, error) {
  			return "", err
  		}
  
 -		srpAuth, err := srp.NewAuthForVerifier(password, modulus, salt)
-+		srpAuth, err := srp.NewAuthForVerifier(password, modulus, salt[:srpSaltLen])
++		// A capped slice: go-srp appends "proton" to the salt it is given,
++		// which would otherwise overwrite the key salt's last six bytes.
++		srpAuth, err := srp.NewAuthForVerifier(password, modulus, salt[:srpSaltLen:srpSaltLen])
  		if err != nil {
  			return "", err
  		}
