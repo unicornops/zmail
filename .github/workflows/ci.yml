@@ -22,6 +22,7 @@ jobs:
             app_code: ${{ steps.detect.outputs.app_code }}
             workspace_checks: ${{ steps.detect.outputs.workspace_checks }}
             ui: ${{ steps.detect.outputs.ui }}
+            performance: ${{ steps.detect.outputs.performance }}
 
         steps:
             - name: Checkout
@@ -38,14 +39,25 @@ jobs:
                     echo "app_code=true" >> "$GITHUB_OUTPUT"
                     echo "workspace_checks=true" >> "$GITHUB_OUTPUT"
                     echo "ui=true" >> "$GITHUB_OUTPUT"
+                    echo "performance=true" >> "$GITHUB_OUTPUT"
                     exit 0
                   fi
 
                   app_code=false
                   workspace_checks=false
                   ui=false
+                  performance=false
                   while IFS= read -r file; do
                     [[ -z "$file" ]] && continue
+
+                    # Code the performance budgets measure (performance).
+                    case "$file" in
+                      crates/zmail-ui/*|crates/zmail-store/*|crates/zmail-core/*|crates/zmail-test-support/*|Cargo.toml|Cargo.lock|rust-toolchain.toml)
+                        if [[ "$file" != *.md ]]; then
+                          performance=true
+                        fi
+                        ;;
+                    esac
 
                     # UI changes get the screenshot matrix (ui_screenshots).
                     case "$file" in
@@ -90,6 +102,7 @@ jobs:
                   echo "app_code=$app_code" >> "$GITHUB_OUTPUT"
                   echo "workspace_checks=$workspace_checks" >> "$GITHUB_OUTPUT"
                   echo "ui=$ui" >> "$GITHUB_OUTPUT"
+                  echo "performance=$performance" >> "$GITHUB_OUTPUT"
 
     quality:
         needs: changes
@@ -308,3 +321,60 @@ jobs:
                   name: ui-screenshot-logs
                   path: ${{ runner.temp }}/ui-screenshot-logs
                   if-no-files-found: ignore
+
+    performance:
+        name: Performance budgets
+        needs: changes
+        if: github.event_name != 'pull_request' || needs.changes.outputs.performance == 'true'
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Install Linux build dependencies
+              run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
+
+            - name: Read the pinned Rust toolchain
+              id: toolchain
+              shell: bash
+              run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+              with:
+                  toolchain: ${{ steps.toolchain.outputs.channel }}
+
+            - name: Cache Cargo git dependencies
+              uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: ~/.cargo/git/db
+                  key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-git-${{ runner.os }}-
+
+            # docs/performance.md: the budget runs over a seeded 100k-thread
+            # mailbox. Shared runners are noisy, so the job reports the
+            # numbers and fails only on a median over five times its
+            # budget (ZMAIL_PERF_GATE), a gross regression.
+            - name: Run the performance budgets
+              env:
+                  ZMAIL_PERF_REPORT: artifacts/performance
+                  ZMAIL_PERF_GATE: "5"
+              run: cargo test --release --locked -p zmail-ui --lib performance_budgets -- --ignored --nocapture
+
+            - name: Summarise the results
+              if: always()
+              shell: bash
+              run: |
+                  if [[ -f artifacts/performance/performance.md ]]; then
+                    cat artifacts/performance/performance.md >> "$GITHUB_STEP_SUMMARY"
+                  fi
+
+            - name: Upload the results
+              if: always()
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: performance
+                  path: artifacts/performance
+                  if-no-files-found: ignore
+                  retention-days: 90

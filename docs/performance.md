@@ -69,6 +69,23 @@ time" below means this CPU time, not a measured frame rate.
 - **Reader open:** each stress conversation opened 10 times, from another
   conversation each time so it loads and lays out from scratch.
 
+### In CI
+
+The `Performance budgets` job in `.github/workflows/ci.yml` runs
+`performance_budgets` on Linux for pull requests that touch `zmail-ui`,
+`zmail-store`, `zmail-core`, `zmail-test-support` or the lock file, and
+for every push to `main`. It writes the tables to the job summary and
+uploads them, with `performance.json`, as the `performance` artefact
+(kept 90 days, so `main`'s runs form the trend).
+
+The job reports; it is not the budget. Shared runners vary from run to
+run, so a median only fails the job when it is more than five times its
+budget (`ZMAIL_PERF_GATE=5`): it catches regressions of the
+order-of-magnitude kind the baseline below found. Known misses with a fix still
+pending (opening the 1 MB HTML body) are reported but left out of the
+gate. Which budgets should become hard gates, and at what tolerance, is
+still open.
+
 ### Store: `cargo bench -p zmail-store`
 
 The divan benchmarks in `crates/zmail-store/benches/store.rs` (see
