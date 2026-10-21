@@ -11,6 +11,7 @@ mod events;
 mod hydrate;
 mod mailbox;
 mod message;
+mod ops;
 mod session;
 mod sync;
 
@@ -112,26 +113,15 @@ async fn full_sync(session: &ProtonSession) -> Result<AccountSyncSnapshot> {
     })
 }
 
-/// Writes queued mailbox operations back to Proton. Not supported yet
-/// (#237): every operation is reported as failed and stays queued.
+/// Writes queued mailbox operations back to Proton, with Bridge's rules
+/// for read state, stars, moves and deletion (see `ops.rs`).
 pub async fn apply_pending_ops(
     target: &SyncTarget,
-    _session: &ProtonSession,
+    session: &ProtonSession,
     ops: &[PendingOp],
 ) -> Result<OpApplyReport> {
     if target.protocol != ProtocolKind::Proton {
         bail!("Proton adapter received a non-Proton sync target");
     }
-    Ok(OpApplyReport {
-        applied: Vec::new(),
-        failed: ops
-            .iter()
-            .map(|op| {
-                (
-                    op.id,
-                    "Proton mailbox changes are not written back yet".to_owned(),
-                )
-            })
-            .collect(),
-    })
+    ops::apply(session.client(), ops).await
 }

@@ -305,3 +305,15 @@ local = "crates/zmail-proton/src/events.rs"
 repo = "proton-bridge"
 upstream = "internal/user/user.go"
 local = "crates/zmail-proton/src/events.rs"
+
+# Pending operations: read state, stars, moves and deletion.
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/imapservice/connector.go"
+local = "crates/zmail-proton/src/ops.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/imapservice/helpers.go"
+local = "crates/zmail-proton/src/ops.rs"
