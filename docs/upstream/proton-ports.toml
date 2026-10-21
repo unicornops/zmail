@@ -1,0 +1,24 @@
+# Zmail files ported from Proton's upstream repositories.
+#
+# Each [[port]] maps one Zmail file to the upstream file it follows:
+#   repo     = a repository name from the pin table in docs/upstream/proton.md
+#   upstream = a path in that repository at the pinned commit; a trailing "/"
+#              means every file under that directory
+#   local    = the Zmail file, relative to the repository root
+#
+# The weekly upstream check reports every entry whose upstream path changed
+# after the pin. See docs/upstream/proton.md.
+#
+# Planned ports (added as [[port]] entries when the files land, issue #237):
+#   go-proton-api: manager.go, manager_builder.go, client.go, response.go,
+#                  paging.go, option.go -> crates/zmail-proton-api (client core)
+#   proton-bridge: internal/dialer/dialer_pinning.go,
+#                  internal/dialer/dialer_pinning_checker*.go
+#                  -> crates/zmail-proton-api (TLS pinning)
+#   go-proton-api: manager_auth.go, manager_auth_types.go, auth.go, hv.go
+#                  -> crates/zmail-proton-api (auth)
+#   go-srp:        srp.go (modulus signature check), srp_test.go (vectors)
+#   go-proton-api: salt.go, salt_types.go, keyring.go, keys_types.go,
+#                  unlock.go, user_types.go, address_types.go
+#                  -> crates/zmail-proton-api (keys)
+#   proton-bridge: internal/hv/hv_default.go (verification URL)
