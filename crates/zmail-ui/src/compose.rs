@@ -38,7 +38,9 @@ use crate::a11y::AccessibleExt;
 use crate::actions::{
     AddAttachment, RemoveAttachment, SaveDraft, SelectIdentity, Send, ShowBcc, ShowCc,
 };
-use crate::components::{Button, ButtonSize, Select, SelectEvent, TextInput, TextInputEvent};
+use crate::components::{
+    Button, ButtonSize, HitTargetExt, Select, SelectEvent, TextInput, TextInputEvent,
+};
 use crate::mail_actions::MailActions;
 use crate::pane::{dispatch_from, pane_focus_indicator};
 use crate::styles::{
@@ -1083,9 +1085,7 @@ fn render_attachment_card(
                 .child(
                     div()
                         .id(("compose-attachment-remove", attachment.id as u64))
-                        .debug_selector(move || {
-                            format!("compose-attachment-remove-{attachment_id}")
-                        })
+                        .hit_target(move || format!("compose-attachment-remove-{attachment_id}"))
                         .accessible(
                             Role::Button,
                             SharedString::from(format!("Remove {}", attachment.filename)),

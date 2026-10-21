@@ -35,11 +35,14 @@ use crate::actions::{
     AddAccount, OpenSelected, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
 use crate::components::{
-    Badge, BadgeTone, Button, ButtonSize, ButtonVariant, IconButton, Scrollbar,
+    Badge, BadgeTone, Button, ButtonSize, ButtonVariant, HitTargetExt, IconButton, MIN_TARGET_SIZE,
+    Scrollbar,
 };
 use crate::drag::DraggedThreads;
 use crate::pane::{dispatch_from, pane_focus_indicator};
-use crate::styles::{DensityTokens, ICON_SIZE_SM, SIDEBAR_TREE_INDENT, TextScale, UiColors};
+use crate::styles::{
+    DensityTokens, ICON_SIZE_SM, RADIUS_SM, SIDEBAR_TREE_INDENT, TextScale, UiColors,
+};
 use crate::tooltip::text_tooltip;
 use crate::widgets::{HoverExt, account_dot, icon, interactive_background, sync_badge};
 
@@ -666,7 +669,7 @@ impl SidebarView {
         let node = self.tree_node(item).filter(|_| expanded.is_some());
         div()
             .id(id)
-            .debug_selector(move || selector.clone())
+            .hit_target(move || selector.clone())
             .accessible(Role::TreeItem, label)
             .aria_level(depth + 1)
             .aria_selected(is_selected)
@@ -737,13 +740,20 @@ impl SidebarView {
     ) -> AnyElement {
         match (node, expanded) {
             (Some(node), Some(expanded)) => div()
-                .debug_selector({
+                .hit_target({
                     let selector = id.to_string();
                     move || selector.clone()
                 })
                 .id(id)
+                .flex()
                 .flex_none()
+                .items_center()
+                .justify_center()
+                // A 24px target around the 16px glyph (WCAG 2.5.8).
+                .size(px(MIN_TARGET_SIZE))
+                .rounded(px(RADIUS_SM))
                 .cursor_pointer()
+                .hover(|style| style.bg(rgb(colors.hover_background)))
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.stop_propagation();
                     cx.emit(SidebarEvent::ToggleCollapsed(node.clone()));
@@ -758,7 +768,10 @@ impl SidebarView {
                     colors.muted,
                 ))
                 .into_any_element(),
-            _ => div().flex_none().size(px(ICON_SIZE_SM)).into_any_element(),
+            _ => div()
+                .flex_none()
+                .size(px(MIN_TARGET_SIZE))
+                .into_any_element(),
         }
     }
 

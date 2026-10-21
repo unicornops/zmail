@@ -33,6 +33,7 @@ mod a11y;
 mod cheat_sheet;
 mod compose;
 mod gmail_keymap;
+mod hit_targets;
 mod list;
 mod motion;
 mod onboarding;

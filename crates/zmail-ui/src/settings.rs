@@ -55,7 +55,7 @@ use crate::a11y::{AccessibleExt, readable};
 use crate::actions::{SelectNext, SelectPrevious};
 use crate::components::title_bar::TRAFFIC_LIGHT_POSITION;
 use crate::components::{
-    ComponentTheme, Scrollbar, TitleBar, Toast, ToastHost, ToastKind, window_frame,
+    ComponentTheme, HitTargetExt, Scrollbar, TitleBar, Toast, ToastHost, ToastKind, window_frame,
 };
 use crate::styles::{
     ICON_SIZE_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6, TYPE_BODY, TYPE_BODY_STRONG,
@@ -553,7 +553,7 @@ impl SettingsWindow {
                 let id = format!("settings-nav-{}", section.id());
                 div()
                     .id(SharedString::from(id.clone()))
-                    .debug_selector(move || id.clone())
+                    .hit_target(move || id.clone())
                     .accessible(Role::Tab, SharedString::from(section.label()))
                     .aria_selected(selected)
                     // Up and Down move between sections while focus stays

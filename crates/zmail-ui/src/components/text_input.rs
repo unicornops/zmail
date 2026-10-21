@@ -41,6 +41,7 @@ use gpui::{
 };
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
+use super::hit_target::HitTargetExt;
 use super::{ButtonSize, IconButton};
 use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::styles::{ICON_SIZE_SM, TOOLBAR_BUTTON_HEIGHT, TYPE_BODY, TextScale, UiColors};
@@ -1640,6 +1641,7 @@ impl Render for TextInput {
                 "text-input".into(),
                 cx.entity_id().as_u64(),
             ))
+            .hit_target(|| format!("text-input-{}", cx.entity_id()))
             // A field without a visible label is named by its placeholder.
             .accessible(
                 role,

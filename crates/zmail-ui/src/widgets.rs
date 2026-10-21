@@ -12,7 +12,7 @@ use gpui::{
 use zmail_core::{AccountColor, SyncPhase};
 
 use crate::a11y::{A11yFlags, AccessibleExt, Politeness, readable};
-use crate::components::TextInput;
+use crate::components::{HitTargetExt, TextInput};
 use crate::styles::{
     ACCOUNT_COLORS, ACCOUNT_DOT_SIZE, ACTION_DIVIDER_HEIGHT, ACTION_DIVIDER_WIDTH,
     EMPTY_STATE_ICON_FRAME_SIZE, ICON_SIZE_LG, ICON_SIZE_SM, STATUS_BANNER_STRIP_WIDTH,
@@ -110,8 +110,10 @@ pub(crate) fn toolbar_button(
 ) -> Stateful<gpui::Div> {
     let label = label.into();
     let button_id = toolbar_button_id(&label);
+    let target = button_id.clone();
     div()
         .id(button_id)
+        .hit_target(move || format!("toolbar-button-{target}"))
         .flex()
         .flex_none()
         .whitespace_nowrap()

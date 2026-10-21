@@ -25,7 +25,7 @@ use crate::a11y::{
 use crate::components::actions::{Cancel, MENU_CONTEXT, SelectNext, SelectPrevious};
 use crate::components::menu::{MENU_ITEM_HEIGHT, MENU_MIN_WIDTH};
 use crate::components::popover::Popover;
-use crate::components::{ComponentTheme, TextInput, TextInputEvent};
+use crate::components::{ComponentTheme, HitTargetExt, TextInput, TextInputEvent};
 use crate::styles::{
     ICON_SIZE_SM, RADIUS_SM, SPACE_1, SPACE_2, TYPE_BODY, TextScale, TypeStyleExt,
 };
@@ -185,7 +185,7 @@ impl Render for MovePicker {
                 let name = SharedString::from(mailbox.name.clone());
                 div()
                     .id(("move-picker-folder", position))
-                    .debug_selector(move || format!("move-picker-{position}"))
+                    .hit_target(move || format!("move-picker-{position}"))
                     .flex()
                     .flex_none()
                     .items_center()

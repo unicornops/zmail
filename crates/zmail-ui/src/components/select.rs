@@ -16,6 +16,7 @@ use crate::styles::{ICON_SIZE_SM, SPACE_2, TYPE_BODY, TextScale, TypeStyleExt, r
 use crate::widgets::{EllipsisExt, icon};
 
 use super::actions::{SELECT_CONTEXT, SelectNext, SelectPrevious};
+use super::hit_target::HitTargetExt;
 use super::menu::{Menu, MenuEntry};
 use super::popover::popover_below;
 use super::theme::{ComponentTheme, FocusRingExt};
@@ -200,6 +201,7 @@ impl Render for Select {
             .child(
                 div()
                     .id("select-trigger")
+                    .hit_target(|| format!("select-{}", cx.entity_id()))
                     .key_context(SELECT_CONTEXT)
                     .track_focus(&self.focus_handle.clone().tab_index(0).tab_stop(!disabled))
                     .flex()

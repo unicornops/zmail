@@ -36,7 +36,7 @@ use crate::a11y::{
 use crate::actions::ToggleCommandPalette;
 use crate::components::actions::{SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use crate::components::kbd::spoken_keystrokes;
-use crate::components::{ComponentTheme, Kbd, Modal, TextInput, TextInputEvent};
+use crate::components::{ComponentTheme, HitTargetExt, Kbd, Modal, TextInput, TextInputEvent};
 use crate::fuzzy::fuzzy_match;
 use crate::menus::{MenuModel, MenuModelItem, binding_label, menu_binding};
 use crate::pane::Pane;
@@ -474,7 +474,7 @@ impl CommandPalette {
                 Some(
                     div()
                         .id(("command-palette-entry", position))
-                        .debug_selector(move || format!("command-palette-{position}"))
+                        .hit_target(move || format!("command-palette-{position}"))
                         .flex()
                         .w_full()
                         .items_center()

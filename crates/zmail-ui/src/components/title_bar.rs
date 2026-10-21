@@ -44,6 +44,7 @@ use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::styles::{ICON_SIZE_SM, Platform, TYPE_BODY, TextScale};
 use crate::widgets::icon;
 
+use super::hit_target::HitTargetExt;
 use super::theme::ComponentTheme;
 
 /// Space the macOS traffic lights take at the bar's leading edge: their
@@ -353,7 +354,7 @@ fn linux_window_controls(
             };
             div()
                 .id(control_id)
-                .debug_selector(move || control_id.to_owned())
+                .hit_target(move || control_id.to_owned())
                 .flex()
                 .flex_none()
                 .items_center()
@@ -449,7 +450,7 @@ fn windows_caption_buttons(
                     };
                     div()
                         .id(id)
-                        .debug_selector(move || format!("caption-{id}"))
+                        .hit_target(move || format!("caption-{id}"))
                         .flex()
                         .items_center()
                         .justify_center()

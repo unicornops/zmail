@@ -33,6 +33,7 @@ use crate::widgets::{EllipsisExt, icon};
 use super::actions::{
     Cancel, Confirm, MENU_CONTEXT, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
+use super::hit_target::HitTargetExt;
 use super::kbd::{Kbd, spoken_keystrokes};
 use super::popover::Popover;
 use super::theme::ComponentTheme;
@@ -295,6 +296,7 @@ impl Menu {
         let disabled = entry.disabled;
         div()
             .id(("menu-item", index))
+            .hit_target(move || format!("menu-item-{index}"))
             .flex()
             .items_center()
             .gap(px(SPACE_2))

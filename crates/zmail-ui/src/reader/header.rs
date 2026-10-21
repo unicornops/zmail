@@ -12,7 +12,7 @@
 //! A click anywhere else on the header collapses the message.
 
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, Role, SharedString, div, prelude::*, rgb,
+    AnyElement, Context, FontWeight, IntoElement, Role, SharedString, div, prelude::*, px, rgb,
 };
 use zmail_core::{
     ThreadMessage,
@@ -25,7 +25,7 @@ use super::message::{MessageContext, MessageDisplay};
 use super::popover::PopoverAnchor;
 use crate::a11y::{AccessibleExt, readable};
 use crate::actions::ReplyToMessage;
-use crate::components::{Avatar, ButtonSize, IconButton};
+use crate::components::{Avatar, ButtonSize, HitTargetExt, IconButton, MIN_TARGET_SIZE};
 use crate::styles::{ICON_SIZE_SM, UiColors, rems_from_px};
 use crate::tooltip::text_tooltip;
 use crate::widgets::{EllipsisExt, icon};
@@ -64,7 +64,7 @@ pub(super) fn render_header(
     };
     let sender = div()
         .id(("reader-sender", message.id as u64))
-        .debug_selector(move || format!("reader-sender-{index}"))
+        .hit_target(move || format!("reader-sender-{index}"))
         .accessible(Role::Button, sender_label)
         .aria_description("Sender details")
         .aria_expanded(reader.popover_anchor_is(PopoverAnchor::Sender(index)))
@@ -84,7 +84,7 @@ pub(super) fn render_header(
 
     div()
         .id(("reader-message-header", message.id as u64))
-        .debug_selector(move || format!("reader-message-header-{index}"))
+        .hit_target(move || format!("reader-message-header-{index}"))
         .flex()
         .items_start()
         .gap_3()
@@ -111,12 +111,13 @@ pub(super) fn render_header(
                         div().flex().min_w_0().child(
                             div()
                                 .id(("reader-recipients", message.id as u64))
-                                .debug_selector(move || format!("reader-recipients-{index}"))
+                                .hit_target(move || format!("reader-recipients-{index}"))
                                 .accessible(Role::Button, summary.clone())
                                 .aria_description("From, To and Date details")
                                 .aria_expanded(display.details)
                                 .flex()
                                 .items_center()
+                                .min_h(px(MIN_TARGET_SIZE))
                                 .gap_1()
                                 .min_w_0()
                                 .text_sm()
