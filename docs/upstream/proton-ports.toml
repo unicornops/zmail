@@ -9,10 +9,8 @@
 # The weekly upstream check reports every entry whose upstream path changed
 # after the pin. See docs/upstream/proton.md.
 #
-# Planned ports (added as [[port]] entries when the files land, issue #237):
-#   go-proton-api: salt.go, salt_types.go, keyring.go, keys_types.go,
-#                  unlock.go, address.go, address_types.go
-#                  -> crates/zmail-proton-api (keys)
+# Not tracked here: test vectors and key fixtures copied from
+# proton-crypto-rs (pinned by Cargo.lock through proton-srp).
 
 # Client core and TLS pinning (crates/zmail-proton-api).
 
@@ -147,3 +145,50 @@ local = "crates/zmail-proton-api/src/srp_modulus.rs"
 repo = "go-srp"
 upstream = "srp_test.go"
 local = "crates/zmail-proton-api/src/srp_vectors.rs"
+
+# Keys: salts, user and address key unlocking, two-password mode.
+
+[[port]]
+repo = "go-proton-api"
+upstream = "salt.go"
+local = "crates/zmail-proton-api/src/salt.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "salt_types.go"
+local = "crates/zmail-proton-api/src/salt.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "keyring.go"
+local = "crates/zmail-proton-api/src/keyring.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "keys_types.go"
+local = "crates/zmail-proton-api/src/keyring.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "unlock.go"
+local = "crates/zmail-proton-api/src/unlock.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "boolean.go"
+local = "crates/zmail-proton-api/src/boolean.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "address.go"
+local = "crates/zmail-proton-api/src/address.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "address_types.go"
+local = "crates/zmail-proton-api/src/address.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/bridge/user.go"
+local = "crates/zmail-proton-api/src/unlock.rs"

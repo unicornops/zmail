@@ -176,6 +176,18 @@ pub enum Error {
     /// (go-proton-api's `ErrInvalidProof`).
     #[error("unexpected server proof")]
     InvalidServerProof,
+    /// The account has no salt for the key (`SaltForKey`).
+    #[error("no key salt found for key {0}")]
+    NoSaltForKey(String),
+    /// The key password did not unlock the user keys.
+    #[error("the Proton mailbox password is wrong")]
+    KeyPasswordWrong,
+    /// The account uses two-password mode and needs its mailbox password.
+    #[error("this Proton account needs its mailbox password")]
+    MailboxPasswordRequired,
+    /// A key could not be read, unlocked, checked or used.
+    #[error("Proton key error: {0}")]
+    Key(String),
     /// The client was configured with invalid values.
     #[error("invalid Proton client configuration: {0}")]
     Config(String),

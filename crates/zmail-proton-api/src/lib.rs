@@ -17,18 +17,28 @@
 //!   `Retry-After`; failed connects back off).
 //! - [`Client`] is one session: it sends `x-pm-uid` and the bearer token,
 //!   and on 401 refreshes the session once and retries once.
+//! - [`Manager::login`] signs in with SRP (`proton-srp`, with the modulus
+//!   signature checked by rPGP), then [`Client::auth_2fa`] takes a TOTP
+//!   code; [`HumanVerification`] covers code 9001.
+//! - [`Salts::salt_for_key`], [`Keys::unlock`] and [`unlock`] turn the key
+//!   password into unlocked user and address keys on rPGP (ADR 0004).
 
+mod address;
 mod auth;
+mod boolean;
 mod client;
 mod config;
 mod cookies;
 mod hv;
+mod keyring;
 mod manager;
 mod manager_auth;
 mod paging;
 mod pinning;
 mod response;
+mod salt;
 mod srp_modulus;
+mod unlock;
 mod user;
 
 #[cfg(test)]
@@ -36,13 +46,17 @@ mod srp_vectors;
 #[cfg(test)]
 mod tests;
 
+pub use address::{Address, AddressStatus, AddressType};
 pub use client::Client;
 pub use config::{API_HOST_URL, AppVersion, ClientConfig};
 pub use cookies::{CookieJar, StoredCookie};
 pub use hv::HumanVerification;
+pub use keyring::{Key, KeyFlags, KeyRing, Keys, UnlockedKey};
 pub use manager::{Manager, Status};
 pub use manager_auth::{Auth, AuthInfo, PasswordMode, TwoFaInfo, TwoFaStatus};
 pub use paging::{MAX_PAGE_SIZE, fetch_paged};
 pub use pinning::{PinMismatch, PinParseError, PinSet};
 pub use response::{ApiError, Code, Error};
+pub use salt::{Salt, SaltedKeyPass, Salts};
+pub use unlock::{UnlockedAccount, key_password, unlock};
 pub use user::{ProductUsedSpace, User};
