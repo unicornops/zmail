@@ -20,16 +20,24 @@
 //! motion, or follows the system:
 //!
 //! - macOS: Accessibility → Display → Reduce motion
-//!   (`defaults read com.apple.universalaccess reduceMotion`);
+//!   (`NSWorkspace.accessibilityDisplayShouldReduceMotion`);
+//! - Windows: `HKCU\Control Panel\Desktop\WindowMetrics\MinAnimate`, as a
+//!   proxy for Settings → Accessibility → Visual effects → Animation
+//!   effects. The value itself is the "Animate windows when minimizing and
+//!   maximizing" effect (`SPI_GETANIMATION`); turning Animation effects off
+//!   clears it along with Windows' other animations. It is not the
+//!   client-area animation setting (`SPI_GETCLIENTAREAANIMATION`), which
+//!   has no registry value and needs unsafe code to read, so a user who
+//!   turns off only that one in Performance Options is not detected, and
+//!   one who turns off only the minimise animation reduces motion here;
 //! - Linux and the BSDs: GNOME's
-//!   `org.gnome.desktop.interface enable-animations` (through `gsettings`);
-//! - Windows: not read yet. `SPI_GETCLIENTAREAANIMATION` needs a binding
-//!   and unsafe code the workspace does not allow, so it counts as unknown.
+//!   `org.gnome.desktop.interface enable-animations`, read by a
+//!   short-lived `gsettings` subprocess (like `zmail_sync`'s power monitor,
+//!   with no platform binding).
 //!
-//! The system setting is read by a short-lived subprocess on a background
-//! thread, like `zmail_sync`'s power monitor, so no platform binding is
-//! needed. A setting that cannot be read (no such tool, a timeout, output
-//! that does not parse) is unknown, and unknown means motion is allowed.
+//! The setting is read on a background thread. A setting that cannot be
+//! read (a missing key or tool, a timeout, a value that does not parse) is
+//! unknown, and unknown means motion is allowed.
 //!
 //! [`App::reduce_motion`]: gpui::App::reduce_motion
 
@@ -70,12 +78,10 @@ pub(crate) fn apply(mode: MotionMode, cx: &mut App) {
 /// [`SYSTEM_READ_TIMEOUT`], so call it off the main thread.
 pub(crate) fn read_system_setting() -> Option<bool> {
     if cfg!(target_os = "macos") {
-        command_output(
-            "defaults",
-            &["read", "com.apple.universalaccess", "reduceMotion"],
-        )
-        .and_then(|output| parse_macos_reduce_motion(&output))
-    } else if cfg!(all(unix, not(target_os = "macos"))) {
+        macos_reduce_motion()
+    } else if cfg!(target_os = "windows") {
+        windows_min_animate().and_then(|value| parse_windows_min_animate(&value))
+    } else if cfg!(unix) {
         command_output(
             "gsettings",
             &["get", "org.gnome.desktop.interface", "enable-animations"],
@@ -86,11 +92,40 @@ pub(crate) fn read_system_setting() -> Option<bool> {
     }
 }
 
-/// `defaults read com.apple.universalaccess reduceMotion`: `1` reduces.
-fn parse_macos_reduce_motion(output: &str) -> Option<bool> {
-    match output.trim() {
-        "1" => Some(true),
-        "0" => Some(false),
+/// Accessibility → Display → Reduce motion.
+#[cfg(target_os = "macos")]
+fn macos_reduce_motion() -> Option<bool> {
+    use objc2_app_kit::NSWorkspace;
+
+    Some(NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_reduce_motion() -> Option<bool> {
+    None
+}
+
+/// The `MinAnimate` string under `Control Panel\Desktop\WindowMetrics`.
+#[cfg(target_os = "windows")]
+fn windows_min_animate() -> Option<String> {
+    use windows_registry::CURRENT_USER;
+
+    CURRENT_USER
+        .open(r"Control Panel\Desktop\WindowMetrics")
+        .and_then(|key| key.get_string("MinAnimate"))
+        .ok()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_min_animate() -> Option<String> {
+    None
+}
+
+/// `MinAnimate`: `"0"` (animations off) reduces.
+fn parse_windows_min_animate(value: &str) -> Option<bool> {
+    match value.trim() {
+        "0" => Some(true),
+        "1" => Some(false),
         _ => None,
     }
 }
@@ -157,13 +192,10 @@ mod tests {
 
     #[test]
     fn platform_answers_parse_and_anything_else_is_unknown() {
-        assert_eq!(parse_macos_reduce_motion("1\n"), Some(true));
-        assert_eq!(parse_macos_reduce_motion("0\n"), Some(false));
-        assert_eq!(parse_macos_reduce_motion(""), None);
-        assert_eq!(
-            parse_macos_reduce_motion("The domain/default pair does not exist"),
-            None
-        );
+        assert_eq!(parse_windows_min_animate("0"), Some(true));
+        assert_eq!(parse_windows_min_animate("1"), Some(false));
+        assert_eq!(parse_windows_min_animate(""), None);
+        assert_eq!(parse_windows_min_animate("yes"), None);
         assert_eq!(parse_gnome_enable_animations("false\n"), Some(true));
         assert_eq!(parse_gnome_enable_animations("true\n"), Some(false));
         assert_eq!(

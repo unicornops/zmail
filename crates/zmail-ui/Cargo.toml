@@ -23,8 +23,9 @@ zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }
 zmail-theme = { path = "../zmail-theme" }
 
-# High contrast (`styles/high_contrast.rs`): the platforms' settings,
-# read through safe APIs. Both are already in the tree through GPUI.
+# High contrast (`styles/high_contrast.rs`) and reduced motion
+# (`motion.rs`): the platforms' settings, read through safe APIs. Both are
+# already in the tree through GPUI.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-registry = "0.6.1"
 
