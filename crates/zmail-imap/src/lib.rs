@@ -387,20 +387,36 @@ fn hydrated_body_from_fetch(
     attachments_dir: &Path,
 ) -> Option<(u32, HydratedBody)> {
     let uid = fetch.uid?;
-    let message = MessageParser::default().parse(fetch.body()?)?;
+    let body = hydrated_body_from_rfc822(
+        fetch.body()?,
+        mailbox_name,
+        &uid.to_string(),
+        attachments_dir,
+    )?;
+    Some((uid, body))
+}
+
+/// Parses a full RFC 822 message into the stored body fields, through the
+/// same sanitizer and attachment path IMAP hydration uses, persisting its
+/// attachment blobs. Adapters that rebuild RFC 822 themselves (Proton) use
+/// it so every protocol renders and stores mail the same way. Returns
+/// `None` when the bytes do not parse as a message.
+pub fn hydrated_body_from_rfc822(
+    raw: &[u8],
+    mailbox_name: &str,
+    remote_id: &str,
+    attachments_dir: &Path,
+) -> Option<HydratedBody> {
+    let message = MessageParser::default().parse(raw)?;
     let (body_text, sanitized_html, has_remote_content, preview_source) = hydrate_bodies(&message);
-    let attachments =
-        persist_attachments(&message, mailbox_name, &uid.to_string(), attachments_dir);
-    Some((
-        uid,
-        HydratedBody {
-            body_text,
-            sanitized_html,
-            has_remote_content,
-            body_preview: excerpt(&preview_source, 180),
-            attachments,
-        },
-    ))
+    let attachments = persist_attachments(&message, mailbox_name, remote_id, attachments_dir);
+    Some(HydratedBody {
+        body_text,
+        sanitized_html,
+        has_remote_content,
+        body_preview: excerpt(&preview_source, 180),
+        attachments,
+    })
 }
 
 /// Bodies fetched for background indexing from one mailbox.

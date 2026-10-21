@@ -306,6 +306,13 @@ impl KeyRing {
         decrypt_message(message, &secret_keys)
     }
 
+    /// Decrypts a binary OpenPGP message (such as an attachment's key
+    /// packets followed by its data packets) with any of the keys.
+    pub fn decrypt_binary(&self, message: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let secret_keys: Vec<&SignedSecretKey> = self.keys.iter().map(|key| &key.key).collect();
+        decrypt_bytes(message, &secret_keys)
+    }
+
     /// Verifies an armored detached signature over `data` with any of the
     /// keys (primary or subkey).
     pub fn verify_detached_armored(&self, data: &[u8], armored: &str) -> Result<(), Error> {

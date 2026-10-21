@@ -24,12 +24,14 @@
 //!   password into unlocked user and address keys on rPGP (ADR 0004).
 
 mod address;
+mod attachment;
 mod auth;
 mod boolean;
 mod client;
 mod config;
 mod cookies;
 mod event;
+mod header_types;
 mod hv;
 mod keyring;
 mod label;
@@ -50,15 +52,17 @@ mod srp_vectors;
 mod tests;
 
 pub use address::{Address, AddressStatus, AddressType};
+pub use attachment::Attachment;
 pub use client::Client;
 pub use config::{API_HOST_URL, AppVersion, ClientConfig};
 pub use cookies::{CookieJar, StoredCookie};
+pub use header_types::Headers;
 pub use hv::HumanVerification;
 pub use keyring::{Key, KeyFlags, KeyRing, Keys, UnlockedKey};
 pub use label::*;
 pub use manager::{Manager, Status};
 pub use manager_auth::{Auth, AuthInfo, PasswordMode, TwoFaInfo, TwoFaStatus};
-pub use message::{EmailAddress, MessageFilter, MessageFlags, MessageMetadata};
+pub use message::{EmailAddress, Message, MessageFilter, MessageFlags, MessageMetadata};
 pub use paging::{MAX_PAGE_SIZE, fetch_paged};
 pub use pinning::{PinMismatch, PinParseError, PinSet};
 pub use response::{ApiError, Code, Error};

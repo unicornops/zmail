@@ -5,17 +5,19 @@
 // (https://github.com/ProtonMail/go-proton-api).
 // Copyright (c) 2020 James Houlahan, Copyright (c) 2022 Proton AG.
 // Licensed under the MIT License; see crates/zmail-proton-api/LICENSE-MIT.
+// Also `GetMessage` and `Message` from `message.go` and `message_types.go`.
 // Modified by UnicornOps on 2026-10-21: rewritten in Rust. Adds the
 // `ConversationID` field Proton returns (go-proton-api does not read it),
-// which Zmail uses to group threads. Full messages, attachments and
-// message actions follow in later slices (#237).
+// which Zmail uses to group threads. Message actions and sending follow in
+// later slices (#237).
 
 //! Message metadata: what a message list needs, without the encrypted body.
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    boolean::api_bool, client::Client, label::STARRED_LABEL, manager::Request, response::Error,
+    attachment::Attachment, boolean::api_bool, client::Client, header_types::Headers,
+    label::STARRED_LABEL, manager::Request, response::Error,
 };
 
 /// An email address as the API sends it (Go's `mail.Address`).
@@ -130,6 +132,31 @@ impl MessageMetadata {
     }
 }
 
+/// A full message: metadata, headers and the encrypted body (go-proton-api's
+/// `Message`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Message {
+    /// The metadata.
+    #[serde(flatten)]
+    pub metadata: MessageMetadata,
+    /// The original header block, as text.
+    #[serde(rename = "Header", default)]
+    pub header: String,
+    /// The headers, parsed and in order.
+    #[serde(rename = "ParsedHeaders", default)]
+    pub parsed_headers: Headers,
+    /// The body: an armored OpenPGP message encrypted to the address key.
+    #[serde(rename = "Body", default)]
+    pub body: String,
+    /// The body's MIME type: `text/plain`, `text/html`, or
+    /// `multipart/mixed` for PGP/MIME messages from outside Proton.
+    #[serde(rename = "MIMEType", default)]
+    pub mime_type: String,
+    /// Attachments.
+    #[serde(rename = "Attachments", default, deserialize_with = "null_as_empty")]
+    pub attachments: Vec<Attachment>,
+}
+
 /// Which messages to list (go-proton-api's `MessageFilter`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MessageFilter {
@@ -167,6 +194,19 @@ fn serialize_api_bool<S: serde::Serializer>(
 }
 
 impl Client {
+    /// Returns a full message (`GetMessage`).
+    pub async fn get_message(&self, message_id: &str) -> Result<Message, Error> {
+        #[derive(Deserialize)]
+        struct Res {
+            #[serde(rename = "Message")]
+            message: Message,
+        }
+        let res: Res = self
+            .json(&Request::get(format!("/mail/v4/messages/{message_id}")))
+            .await?;
+        Ok(res.message)
+    }
+
     /// Returns one page of message metadata (`GetMessageMetadataPage`),
     /// asking again while the server reports the result as stale.
     pub async fn get_message_metadata_page(

@@ -263,3 +263,101 @@ fn mirrors_labels_as_mailboxes_and_messages_by_metadata() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn hydrates_decrypted_bodies_and_attachments_on_open() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, secrets.as_ref(), account_id)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.configure_proton(harness_config(&harness)?)?;
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
+
+    let mailbox_id = |name: &str| -> Result<i64> {
+        store
+            .list_mailboxes(account_id)?
+            .into_iter()
+            .find(|mailbox| mailbox.name == name)
+            .map(|mailbox| mailbox.id)
+            .with_context(|| format!("no {name} mailbox"))
+    };
+    let thread_id = |mailbox: &str, subject: &str| -> Result<i64> {
+        store
+            .list_threads(mailbox_id(mailbox)?, 0..100)?
+            .into_iter()
+            .find(|thread| thread.subject == subject)
+            .map(|thread| thread.id)
+            .with_context(|| format!("no {subject} in {mailbox}"))
+    };
+    let hydrate = |thread: i64| {
+        runtime
+            .handle()
+            .block_on(sync_service.hydrate_thread_body_and_wait(account_id, thread))
+    };
+
+    // Metadata sync stores no body; opening the thread decrypts it.
+    let welcome = thread_id("INBOX", "Welcome to the harness")?;
+    ensure!(
+        store.thread_view(welcome)?.context("thread")?.messages[0]
+            .body_text
+            .is_none()
+    );
+    ensure!(hydrate(welcome)? == 1, "the welcome body should hydrate");
+    let view = store.thread_view(welcome)?.context("thread")?;
+    let body = view.messages[0].body_text.clone().unwrap_or_default();
+    ensure!(
+        body.contains("Hello from the Proton harness."),
+        "body: {body:?}"
+    );
+    // Hydrated once, the body is not fetched again.
+    ensure!(hydrate(welcome)? == 0, "a hydrated body was fetched again");
+
+    // An attachment is decrypted with its key packets and stored.
+    let report = thread_id("Folders/Work", "Quarterly report")?;
+    ensure!(hydrate(report)? == 1);
+    let view = store.thread_view(report)?.context("thread")?;
+    let message = &view.messages[0];
+    ensure!(
+        message
+            .body_text
+            .as_deref()
+            .is_some_and(|text| text.contains("The report is attached.")),
+        "body: {:?}",
+        message.body_text
+    );
+    ensure!(message.attachments.len() == 1, "{:?}", message.attachments);
+    ensure!(message.attachments[0].filename == "report.csv");
+    let destination =
+        std::env::temp_dir().join(format!("zmail-proton-attachment-{}", std::process::id()));
+    let saved = store.save_attachment(message.attachments[0].id, &destination)?;
+    let bytes = std::fs::read(&saved)?;
+    let _ = std::fs::remove_dir_all(&destination);
+    ensure!(
+        bytes == b"quarter,total\n1,10\n",
+        "attachment bytes: {bytes:?}"
+    );
+
+    // HTML goes through the sanitizer, with remote content blocked.
+    let dinner = thread_id("Labels/Family", "Dinner on Sunday")?;
+    ensure!(hydrate(dinner)? == 1);
+    let view = store.thread_view(dinner)?.context("thread")?;
+    let message = &view.messages[0];
+    ensure!(
+        message.has_remote_content,
+        "the tracking pixel is remote content"
+    );
+    let html = message.sanitized_html.clone().unwrap_or_default();
+    ensure!(
+        html.contains("six") && !html.contains("https://tracker"),
+        "html: {html:?}"
+    );
+    Ok(())
+}

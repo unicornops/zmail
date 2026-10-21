@@ -9264,10 +9264,15 @@ name = "zmail-proton"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
+ "mail-parser",
+ "rand 0.8.8",
  "serde_json",
  "tokio",
+ "zeroize",
  "zmail-core",
+ "zmail-imap",
  "zmail-proton-api",
  "zmail-security",
 ]
