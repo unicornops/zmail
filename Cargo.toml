@@ -43,6 +43,9 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2"
 # resolver configuration (resolv.conf, the macOS dynamic store, the Windows
 # adapters) on the Tokio runtime. No DNS-over-HTTPS/TLS/QUIC transports.
 hickory-resolver = { version = "0.26.3", default-features = false, features = ["system-config", "tokio"] }
+# HKDF-SHA256 for the store key's subkeys (ADR 0005); already in the tree
+# through pgp.
+hkdf = "0.12.4"
 jmap-client = { version = "0.4.0", default-features = false, features = ["async", "rustls"] }
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 # DKIM signing is the sending server's job; leaving out mail-send's default `dkim`

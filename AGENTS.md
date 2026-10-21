@@ -22,6 +22,7 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 - `docs/upstream/zed.md`: pinned upstream GPUI and Zed context
 - `docs/adr/0001-jmap-client-strategy.md`: JMAP implementation decision
 - `docs/adr/0004-proton-native.md` and `docs/upstream/proton.md`: native Proton Mail decision, upstream pins and ported files
+- `docs/adr/0005-store-encryption.md`: encryption of the local store at rest (SQLCipher, encrypted attachment files, the store key in the OS keychain)
 
 ## Workspace Overview
 

@@ -2,6 +2,7 @@
 
 pub mod attachment_safety;
 pub mod sender_safety;
+pub mod vault;
 
 use std::{
     collections::HashMap,
@@ -173,6 +174,8 @@ impl SecretStore for KeyringSecretStore {
 #[derive(Debug, Default)]
 pub struct InMemorySecretStore {
     secrets: Mutex<HashMap<(i64, SecretSlot), String>>,
+    /// Store keys ([`vault::StoreKeychain`]), as the keychain holds them.
+    store_keys: Mutex<HashMap<vault::KeyId, zeroize::Zeroizing<String>>>,
 }
 
 impl InMemorySecretStore {
@@ -183,6 +186,14 @@ impl InMemorySecretStore {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(i64, SecretSlot), String>> {
         self.secrets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn lock_store_keys(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<vault::KeyId, zeroize::Zeroizing<String>>> {
+        self.store_keys
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
