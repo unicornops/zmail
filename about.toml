@@ -63,3 +63,14 @@ ignore-dev-dependencies = false
 #   Lucide derives from Feather are also under MIT (assets/icons/LICENSE.txt,
 #   copied from the Lucide repository). Embedded in all builds; the .deb also
 #   installs the licence.
+
+# Third-party code used only by tests, never shipped in a build:
+#
+# - docker/proton-harness (built in CI by scripts/proton-harness.sh)
+#   go-proton-api (https://github.com/ProtonMail/go-proton-api) at
+#   8a62023d3e38cb29749bcfc01bf44eafda6cec82, Copyright (c) 2020 James
+#   Houlahan and Copyright (c) 2022 Proton AG,
+#   licensed under the MIT License. Its fake API server is fetched and
+#   built at test time as the Proton API test double;
+#   docker/proton-harness/api-port.patch modifies its
+#   server/cmd/server/main.go and is under the same MIT licence.
