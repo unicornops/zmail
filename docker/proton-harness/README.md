@@ -2,7 +2,7 @@
 
 A test double for the Proton Mail API, used by the live Proton tests. It is
 go-proton-api's fake server (`server/cmd/server`) at the commit pinned in the
-`Dockerfile` (`GO_PROTON_API_COMMIT`), with one small patch. It is built and
+`Dockerfile` (`GO_PROTON_API_COMMIT`), with two small patches. It is built and
 run only for tests; nothing from it ships in zmail.
 
 Once started it serves:
@@ -50,7 +50,7 @@ library reads no environment variable. The feature refuses to compile in a
 release-profile build, so production builds keep the fixed API host and its
 pins.
 
-## The patch
+## The patches
 
 `api-port.patch` changes only `server/cmd/server/main.go`, in two ways:
 
@@ -67,12 +67,31 @@ pins.
   script makes for `127.0.0.1` and `localhost`. The fake server itself then
   runs in plain mode behind that listener.
 
-With neither flag the server behaves as upstream does. When the pin moves,
-check that the patch still applies (`git apply --check`). The image build
-and native mode both fail loudly if it doesn't.
+With neither flag the server behaves as upstream does.
+
+`srp-salt.patch` changes `server/backend/backend.go` and
+`server/backend/api_auth.go` so the fake server's **SRP salt is 10 bytes**,
+as Proton's is:
+
+- Upstream reuses the account's 16-byte key salt as the SRP salt, both for
+  the verifier (`srp.NewAuthForVerifier`) and in `/auth/v4/info`.
+- Real Proton SRP salts are 10 bytes: the salt plus `"proton"` makes exactly
+  the 16-byte bcrypt salt. go-srp's and proton-srp's test vectors all use 10
+  bytes, and `proton-srp` (which zmail uses) refuses any other length.
+- go-srp only tolerates the 16-byte salt because Go's bcrypt silently
+  truncates the over-long encoded salt, so upstream's own Go client never
+  noticed.
+
+The patch uses the first 10 bytes of the account salt for SRP. Key salts
+(`/core/v4/keys/salts`) and the key passphrases stay on the full 16 bytes,
+which is also what Proton uses.
+
+When the pin moves, check that both patches still apply in order
+(`git apply --check`). The image build and native mode both fail loudly if
+one doesn't.
 
 ## Licence
 
 go-proton-api is MIT licensed (Copyright (c) 2020 James Houlahan, Copyright
-(c) 2022 Proton AG). The patch is under the same licence, and the use is
+(c) 2022 Proton AG). The patches are under the same licence, and the use is
 recorded in `about.toml` even though it is test-only.

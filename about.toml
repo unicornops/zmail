@@ -78,4 +78,6 @@ ignore-dev-dependencies = false
 #   licensed under the MIT License. Its fake API server is fetched and
 #   built at test time as the Proton API test double;
 #   docker/proton-harness/api-port.patch modifies its
-#   server/cmd/server/main.go and is under the same MIT licence.
+#   server/cmd/server/main.go and docker/proton-harness/srp-salt.patch its
+#   server/backend/backend.go and api_auth.go; both are under the same MIT
+#   licence.
