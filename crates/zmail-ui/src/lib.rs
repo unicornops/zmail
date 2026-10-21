@@ -37,6 +37,7 @@
 //! | `settings` | `SettingsWindow`: Accounts, Appearance, Keyboard, Privacy, Sending, About & Diagnostics |
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::{
     App, AppContext as _, AssetSource, Bounds, Entity, FocusHandle, Subscription, TitlebarOptions,
@@ -52,6 +53,7 @@ use zmail_sync::SyncService;
 
 mod a11y;
 mod styles;
+use crate::styles::high_contrast::{Contrast, ContrastSetting, SystemColors};
 use crate::styles::{WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_WIDTH};
 
 mod components;
@@ -102,6 +104,16 @@ use crate::sidebar::SidebarView;
 // ---------------------------------------------------------------------------
 // Top-level entry point
 // ---------------------------------------------------------------------------
+
+/// Set by [`simulate_high_contrast`].
+static SIMULATE_HIGH_CONTRAST: AtomicBool = AtomicBool::new(false);
+
+/// Draw the next [`run`] as if a Windows contrast theme (High Contrast
+/// Black) were on, whatever the platform says. For
+/// `zmail-app launch-ui-fixture`'s high-contrast screenshots.
+pub fn simulate_high_contrast() {
+    SIMULATE_HIGH_CONTRAST.store(true, Ordering::Relaxed);
+}
 
 /// Application id used for the Linux window class / Wayland app id. It
 /// matches the macOS bundle identifier and the packaged desktop entry name.
@@ -185,6 +197,13 @@ pub fn run(
             // After the keymap: the macOS menu bar reads key equivalents
             // from it.
             menus::init(cx);
+            // Before the first frame: the palette follows the platform's
+            // contrast setting (or the screenshot fixture's simulation).
+            if SIMULATE_HIGH_CONTRAST.load(Ordering::Relaxed) {
+                ContrastSetting::simulate(Contrast::System(SystemColors::HIGH_CONTRAST_BLACK), cx);
+            } else {
+                ContrastSetting::refresh(cx);
+            }
             let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
             let bootstrap = bootstrap.clone();
             let store = store.clone();

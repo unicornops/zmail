@@ -60,9 +60,11 @@ use crate::reader::{ReaderState, ReaderView};
 use crate::sidebar::{
     OutboxStatus, SidebarEvent, SidebarHighlight, SidebarState, SidebarView, TreeNode,
 };
+use crate::styles::high_contrast::ContrastSetting;
 use crate::styles::{
     DETAIL_MIN_WIDTH, ICON_SIZE_SM, MESSAGE_LIST_MIN_WIDTH, MESSAGE_LIST_WIDTH, MenuPlacement,
     PlatformStyle, READER_COMPACT_ACTIONS_BELOW, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, UiColors,
+    themed_colors,
 };
 use crate::toolbar::{sync_announcement, sync_indicator};
 use crate::widgets::{EllipsisExt, HoverExt, icon, status_banner};
@@ -287,9 +289,13 @@ impl WorkspaceView {
             |this: &mut WorkspaceView, window: &mut Window, cx: &mut Context<Self>| {
                 this.notifier.set_quiet(window.is_window_active());
                 // Coming back from the system settings is when the
-                // reduce-motion setting is most likely to have changed.
+                // reduce-motion and contrast settings are most likely to
+                // have changed; neither OS tells GPUI.
                 if window.is_window_active() {
                     this.read_system_motion(cx);
+                    if ContrastSetting::refresh(cx) {
+                        this.apply_theme(cx);
+                    }
                 }
             },
         )
@@ -301,11 +307,16 @@ impl WorkspaceView {
         view.apply_layout_preferences();
         view.apply_motion(cx);
         view.read_system_motion(cx);
-        cx.set_global(UiColors::from_theme(&view.bootstrap.theme));
+        cx.set_global(themed_colors(&view.bootstrap.theme, cx));
         cx.observe_window_appearance(
             window,
             |this: &mut WorkspaceView, window: &mut Window, cx: &mut Context<Self>| {
-                if !this.theme_overridden && this.follow_system_appearance(window.appearance()) {
+                // Turning a Windows contrast theme on or off also changes
+                // the system appearance.
+                let contrast_changed = ContrastSetting::refresh(cx);
+                let followed =
+                    !this.theme_overridden && this.follow_system_appearance(window.appearance());
+                if contrast_changed || followed {
                     this.apply_theme(cx);
                 }
             },
@@ -1137,7 +1148,7 @@ impl WorkspaceView {
     /// and the compose and Settings windows draw with the same colours.
     pub(crate) fn apply_theme(&mut self, cx: &mut Context<Self>) {
         components::ComponentTheme::sync(&self.bootstrap.theme, cx);
-        cx.set_global(UiColors::from_theme(&self.bootstrap.theme));
+        cx.set_global(themed_colors(&self.bootstrap.theme, cx));
         cx.refresh_windows();
         cx.notify();
     }
@@ -2991,7 +3002,7 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = UiColors::from_theme(&self.bootstrap.theme);
+        let colors = themed_colors(&self.bootstrap.theme, cx);
         // Components read the theme from a global; keep it in step.
         components::ComponentTheme::sync(&self.bootstrap.theme, cx);
         // The panes and text inputs read the palette from this global.

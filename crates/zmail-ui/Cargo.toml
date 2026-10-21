@@ -23,6 +23,14 @@ zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }
 zmail-theme = { path = "../zmail-theme" }
 
+# High contrast (`styles/high_contrast.rs`): the platforms' settings,
+# read through safe APIs. Both are already in the tree through GPUI.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-registry = "0.6.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAccessibility", "NSWorkspace"] }
+
 [dev-dependencies]
 # `#[gpui::test]`, `TestAppContext` and `VisualTestContext` for view tests.
 gpui = { workspace = true, features = ["test-support"] }

@@ -621,6 +621,9 @@ fn launch_ui_fixture(view: ui_fixture::FixtureView, theme: Option<ThemeAppearanc
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(LocalStore::open_ephemeral().context("failed to open the fixture store")?);
     let initial_view = ui_fixture::seed(&store, view, ui_fixture::anchor_time())?;
+    if view.high_contrast() {
+        zmail_ui::simulate_high_contrast();
+    }
     let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
     let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
 
