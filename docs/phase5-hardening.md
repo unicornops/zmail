@@ -107,6 +107,7 @@ Run this on each platform before claiming screen-reader support works, and note 
   - [`docs/performance.md`](./performance.md) records the budgets, how they are measured and the latest numbers.
   - CI runs the budgets on Linux with a gross-regression gate.
   - Dragging the scrollbar across a 100k mailbox still misses the frame budget (#242). Wheel and keyboard scrolling stay within it.
+  - In search, a short word typed after a full one (`budget r`) can take just over the 100 ms budget in a 100k folder (#250). Other keystrokes take 25–45 ms.
 
 ## Mailbox Deletion Policy
 
