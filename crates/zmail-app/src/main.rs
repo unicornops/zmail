@@ -570,22 +570,28 @@ fn launch_gui() -> Result<()> {
 fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
     install_panic_log();
     let runtime = BackgroundRuntime::start(4)?;
-    let store = Arc::new(open_store().context("failed to open the Phase 4 local store")?);
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
-    let _ = sync_service.bootstrap_existing_accounts();
-    let _ = sync_service.start_mail_watcher();
-    sync_service.start_background_indexing();
-
+    let handle = runtime.handle().clone();
     let bootstrap = build_bootstrap(runtime.summary())?;
     let initial_view = initial_draft_id.map_or(InitialView::Inbox, InitialView::Draft);
-    zmail_ui::run(
+    // The window unlocks the encrypted store first (ADR 0005), showing the
+    // migration's progress or what went wrong; sync starts once it is open.
+    zmail_ui::run_unlocking(
         ZmailAssets,
         bootstrap,
-        store,
-        sync_service,
-        secrets,
-        initial_view,
+        store_path()?,
+        Arc::new(KeyringSecretStore),
+        move |store| {
+            let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+            let sync_service = SyncService::new(handle.clone(), store, secrets.clone());
+            let _ = sync_service.bootstrap_existing_accounts();
+            let _ = sync_service.start_mail_watcher();
+            sync_service.start_background_indexing();
+            Ok(zmail_ui::Started {
+                sync_service,
+                secrets,
+                initial_view,
+            })
+        },
     );
     drop(runtime);
     Ok(())
@@ -636,6 +642,11 @@ fn launch_ui_fixture(
 ) -> Result<()> {
     install_panic_log();
     let runtime = BackgroundRuntime::start(4)?;
+    if let ui_fixture::FixtureView::Unlock(state) = view {
+        let bootstrap = fixture_bootstrap(runtime.summary(), theme)?;
+        zmail_ui::run_unlock_fixture(ZmailAssets, bootstrap, state);
+        return Ok(());
+    }
     let store = Arc::new(LocalStore::open_ephemeral().context("failed to open the fixture store")?);
     let initial_view = ui_fixture::seed(&store, view, ui_fixture::anchor_time())?;
     if view.high_contrast() {
@@ -647,15 +658,7 @@ fn launch_ui_fixture(
     let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
     let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
 
-    let mut bootstrap = build_bootstrap(runtime.summary())?;
-    if let Some(appearance) = theme {
-        if bootstrap.theme.appearance != appearance {
-            std::mem::swap(&mut bootstrap.theme, &mut bootstrap.alternate_theme);
-        }
-        // With both slots on the same variant, following the system
-        // appearance has nothing to switch to.
-        bootstrap.alternate_theme = bootstrap.theme.clone();
-    }
+    let bootstrap = fixture_bootstrap(runtime.summary(), theme)?;
     zmail_ui::run(
         ZmailAssets,
         bootstrap,
@@ -666,6 +669,24 @@ fn launch_ui_fixture(
     );
     drop(runtime);
     Ok(())
+}
+
+/// The app bootstrap for a fixture launch, pinned to `theme`'s light or
+/// dark variant when one is given.
+fn fixture_bootstrap(
+    runtime: zmail_core::RuntimeSummary,
+    theme: Option<ThemeAppearance>,
+) -> Result<zmail_core::AppBootstrap> {
+    let mut bootstrap = build_bootstrap(runtime)?;
+    if let Some(appearance) = theme {
+        if bootstrap.theme.appearance != appearance {
+            std::mem::swap(&mut bootstrap.theme, &mut bootstrap.alternate_theme);
+        }
+        // With both slots on the same variant, following the system
+        // appearance has nothing to switch to.
+        bootstrap.alternate_theme = bootstrap.theme.clone();
+    }
+    Ok(bootstrap)
 }
 
 fn add_account(protocol: ProtocolKind) -> Result<()> {

@@ -36,7 +36,9 @@
 //! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar, pane widths, density) |
 //! | `widgets` | `toolbar_button`, `input_card`, `empty_state`, `icon`, … |
 //! | `settings` | `SettingsWindow`: Accounts, Appearance, Keyboard, Privacy, Sending, About & Diagnostics |
+//! | `store_unlock` | unlocking the encrypted store before the workspace: the "Encrypting your mail" progress window and the keychain and lost-key screens |
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -88,6 +90,7 @@ mod reader;
 mod search;
 mod settings;
 mod sidebar;
+mod store_unlock;
 mod toolbar;
 mod tooltip;
 #[cfg(test)]
@@ -177,7 +180,7 @@ pub enum InitialView {
     SettingsAccount(i64),
 }
 
-/// Runs the native Phase 4 shell.
+/// Runs the native Phase 4 shell on an open store.
 pub fn run(
     asset_source: impl AssetSource,
     bootstrap: AppBootstrap,
@@ -186,90 +189,228 @@ pub fn run(
     secrets: Arc<dyn SecretStore>,
     initial_view: InitialView,
 ) {
-    let notifier = Arc::new(zmail_notify::NewMailNotifier::os_backed());
-    sync_service.set_notifier(notifier.clone());
     // `gpui_platform::application()` picks the OS backend (macOS, Windows,
     // or Linux Wayland/X11) and leaves AccessKit enabled; never switch to
     // `Application::new_inaccessible`, which turns screen readers off.
     gpui_platform::application()
         .with_assets(asset_source)
         .run(move |cx: &mut App| {
-            fonts::register_ui_font(cx);
-            keymap::bind_keymap(saved_keymap(&store), cx);
-            // After the keymap: the macOS menu bar reads key equivalents
-            // from it.
-            menus::init(cx);
-            // Before the first frame: the palette follows the platform's
-            // contrast setting (or the screenshot fixture's simulation).
-            if SIMULATE_HIGH_CONTRAST.load(Ordering::Relaxed) {
-                ContrastSetting::simulate(Contrast::System(SystemColors::HIGH_CONTRAST_BLACK), cx);
-            } else {
-                ContrastSetting::refresh(cx);
-            }
-            let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
-            let bootstrap = bootstrap.clone();
-            let store = store.clone();
-            let sync_service = sync_service.clone();
-            let secrets = secrets.clone();
-            // The add-account flow reads these from any window.
-            cx.set_global(account_setup::AccountSetupServices {
-                store: store.clone(),
-                secrets: secrets.clone(),
-                sync_service: sync_service.clone(),
-                network: zmail_autodiscover::Network::system(),
-            });
-
-            if let Err(error) = cx.open_window(
-                WindowOptions {
-                    // Zmail draws its own title bar (`components::title_bar`)
-                    // with the toolbar inside it: transparent over the
-                    // traffic lights on macOS, custom caption buttons on
-                    // Windows, and a client-side header bar on Linux when
-                    // the compositor supports it.
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(APP_NAME.into()),
-                        appears_transparent: true,
-                        traffic_light_position: Some(point(
-                            px(TRAFFIC_LIGHT_POSITION.0),
-                            px(TRAFFIC_LIGHT_POSITION.1),
-                        )),
-                    }),
-                    // The title bar moves the window itself
-                    // (`start_window_move`), so AppKit must not also drag
-                    // it or delay its clicks (macOS only).
-                    app_owns_titlebar_drag: true,
-                    window_decorations: Some(window_decorations()),
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
-                    // Matches the macOS bundle id and the packaged
-                    // `ie.unicornops.zmail.desktop`, so Linux docks
-                    // (StartupWMClass / Wayland app id) find the window.
-                    app_id: Some(APP_ID.to_owned()),
-                    ..Default::default()
+            init_app(saved_keymap(&store), &bootstrap, cx);
+            if let Err(error) = open_main_window(
+                MainWindow {
+                    bootstrap: bootstrap.clone(),
+                    store: store.clone(),
+                    sync_service: sync_service.clone(),
+                    secrets: secrets.clone(),
+                    initial_view,
                 },
-                move |window, cx| {
-                    let bootstrap = bootstrap.clone();
-                    let store = store.clone();
-                    let sync_service = sync_service.clone();
-                    let secrets = secrets.clone();
-                    let notifier = notifier.clone();
-                    cx.new(|cx| {
-                        WorkspaceView::new(
-                            bootstrap,
-                            store,
-                            sync_service,
-                            secrets,
-                            notifier,
-                            initial_view,
-                            window,
-                            cx,
-                        )
-                    })
-                },
+                cx,
             ) {
                 panic!("failed to open the Phase 4 window: {error:#}");
             }
         });
+}
+
+/// What the workspace needs besides the store, from [`run_unlocking`]'s
+/// `start` once the store is open.
+pub struct Started {
+    /// The sync service over the unlocked store.
+    pub sync_service: SyncService,
+    /// Account secrets.
+    pub secrets: Arc<dyn SecretStore>,
+    /// The view the window opens on.
+    pub initial_view: InitialView,
+}
+
+/// Runs the shell on the encrypted store at `store_path` (ADR 0005): unlocks
+/// it with its key from `keychain` (encrypting an older plaintext store
+/// first, with a progress window), then calls `start` and opens the
+/// workspace. A store that can't be unlocked gets a window that says why;
+/// it is never opened unencrypted.
+pub fn run_unlocking(
+    asset_source: impl AssetSource,
+    bootstrap: AppBootstrap,
+    store_path: std::path::PathBuf,
+    keychain: Arc<dyn zmail_store::StoreKeychain>,
+    start: impl Fn(Arc<LocalStore>) -> anyhow::Result<Started> + 'static,
+) {
+    gpui_platform::application()
+        .with_assets(asset_source)
+        .run(move |cx: &mut App| {
+            init_app(
+                zmail_core::preferences::KeymapName::default(),
+                &bootstrap,
+                cx,
+            );
+            let bootstrap = bootstrap.clone();
+            let start = Rc::new(start);
+            let unlocker = store_unlock::Unlocker::new(
+                store_path.clone(),
+                keychain.clone(),
+                move |store, notice, cx| {
+                    let started = start(store.clone())?;
+                    // The keymap the store's preferences pick, now they can
+                    // be read; the menu bar shows its shortcuts.
+                    keymap::bind_keymap(saved_keymap(&store), cx);
+                    menus::refresh_menu_bar(cx);
+                    let handle = open_main_window(
+                        MainWindow {
+                            bootstrap: bootstrap.clone(),
+                            store,
+                            sync_service: started.sync_service,
+                            secrets: started.secrets,
+                            initial_view: started.initial_view,
+                        },
+                        cx,
+                    )?;
+                    if let Some(notice) = notice {
+                        let _ = handle.update(cx, |view, _, cx| view.show_status(notice, cx));
+                    }
+                    Ok(())
+                },
+            );
+            store_unlock::start(unlocker, cx);
+        });
+}
+
+/// Opens only the unlock window, on `phase`, for the screenshot fixture.
+pub fn run_unlock_fixture(
+    asset_source: impl AssetSource,
+    bootstrap: AppBootstrap,
+    phase: UnlockFixture,
+) {
+    gpui_platform::application()
+        .with_assets(asset_source)
+        .run(move |cx: &mut App| {
+            init_app(
+                zmail_core::preferences::KeymapName::default(),
+                &bootstrap,
+                cx,
+            );
+            store_unlock::show_fixture(phase.phase(), cx);
+        });
+}
+
+/// The unlock window states the screenshot fixture can show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnlockFixture {
+    /// Encrypting an older store, part way through.
+    Encrypting,
+    /// The keychain is locked.
+    Keychain,
+    /// The store's key is gone.
+    Unreadable,
+}
+
+impl UnlockFixture {
+    fn phase(self) -> store_unlock::UnlockPhase {
+        match self {
+            Self::Encrypting => {
+                store_unlock::UnlockPhase::Working(Some(zmail_store::MigrationProgress::Database {
+                    written: 420,
+                    total: 1000,
+                }))
+            }
+            Self::Keychain => store_unlock::UnlockPhase::KeychainUnavailable(
+                "failed to load the mail store key: the keychain is locked".to_owned(),
+            ),
+            Self::Unreadable => store_unlock::UnlockPhase::Unreadable,
+        }
+    }
+}
+
+/// App-wide setup before any window: fonts, the keymap, the menus and the
+/// contrast setting, and the component theme for windows that open before
+/// the workspace (which keeps it in sync after).
+fn init_app(keymap: zmail_core::preferences::KeymapName, bootstrap: &AppBootstrap, cx: &mut App) {
+    fonts::register_ui_font(cx);
+    keymap::bind_keymap(keymap, cx);
+    // After the keymap: the macOS menu bar reads key equivalents from it.
+    menus::init(cx);
+    // Before the first frame: the palette follows the platform's contrast
+    // setting (or the screenshot fixture's simulation).
+    if SIMULATE_HIGH_CONTRAST.load(Ordering::Relaxed) {
+        ContrastSetting::simulate(Contrast::System(SystemColors::HIGH_CONTRAST_BLACK), cx);
+    } else {
+        ContrastSetting::refresh(cx);
+    }
+    components::ComponentTheme::sync(&bootstrap.theme, cx);
+}
+
+/// The main window's view and its services.
+struct MainWindow {
+    bootstrap: AppBootstrap,
+    store: Arc<LocalStore>,
+    sync_service: SyncService,
+    secrets: Arc<dyn SecretStore>,
+    initial_view: InitialView,
+}
+
+/// Opens the main window on the workspace.
+fn open_main_window(
+    main: MainWindow,
+    cx: &mut App,
+) -> anyhow::Result<gpui::WindowHandle<WorkspaceView>> {
+    let MainWindow {
+        bootstrap,
+        store,
+        sync_service,
+        secrets,
+        initial_view,
+    } = main;
+    let notifier = Arc::new(zmail_notify::NewMailNotifier::os_backed());
+    sync_service.set_notifier(notifier.clone());
+    let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
+    // The add-account flow reads these from any window.
+    cx.set_global(account_setup::AccountSetupServices {
+        store: store.clone(),
+        secrets: secrets.clone(),
+        sync_service: sync_service.clone(),
+        network: zmail_autodiscover::Network::system(),
+    });
+
+    cx.open_window(
+        WindowOptions {
+            // Zmail draws its own title bar (`components::title_bar`) with
+            // the toolbar inside it: transparent over the traffic lights on
+            // macOS, custom caption buttons on Windows, and a client-side
+            // header bar on Linux when the compositor supports it.
+            titlebar: Some(TitlebarOptions {
+                title: Some(APP_NAME.into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(
+                    px(TRAFFIC_LIGHT_POSITION.0),
+                    px(TRAFFIC_LIGHT_POSITION.1),
+                )),
+            }),
+            // The title bar moves the window itself (`start_window_move`),
+            // so AppKit must not also drag it or delay its clicks (macOS
+            // only).
+            app_owns_titlebar_drag: true,
+            window_decorations: Some(window_decorations()),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
+            // Matches the macOS bundle id and the packaged
+            // `ie.unicornops.zmail.desktop`, so Linux docks (StartupWMClass
+            // / Wayland app id) find the window.
+            app_id: Some(APP_ID.to_owned()),
+            ..Default::default()
+        },
+        move |window, cx| {
+            cx.new(|cx| {
+                WorkspaceView::new(
+                    bootstrap,
+                    store,
+                    sync_service,
+                    secrets,
+                    notifier,
+                    initial_view,
+                    window,
+                    cx,
+                )
+            })
+        },
+    )
 }
 
 /// The keymap saved in the UI preferences. An unreadable record means the

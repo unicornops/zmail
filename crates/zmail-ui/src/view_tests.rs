@@ -45,6 +45,7 @@ mod reader_long;
 mod reader_safety;
 mod search;
 mod settings;
+mod store_unlock;
 mod text_scale;
 
 /// What the store holds when the window opens.
