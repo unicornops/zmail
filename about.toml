@@ -69,6 +69,22 @@ ignore-dev-dependencies = false
 #   copied from the Lucide repository). Embedded in all builds; the .deb also
 #   installs the licence.
 
+# C libraries compiled into the binary by crates whose own metadata does
+# not name their licence (docs/adr/0005-store-encryption.md):
+#
+# - SQLCipher (https://www.zetetic.net/sqlcipher/), the encrypted SQLite
+#   that libsqlite3-sys bundles for the local store, Copyright (c) 2008-2020
+#   Zetetic LLC, licensed under the BSD 3-Clause License
+#   (crates/zmail-store/LICENSE-SQLCIPHER). All builds. SQLite itself is in
+#   the public domain.
+# - OpenSSL 3 (https://www.openssl.org), built from source by openssl-src
+#   and linked statically as SQLCipher's crypto library on Linux and
+#   Windows, licensed under the Apache License 2.0
+#   (crates/zmail-store/LICENSE-OPENSSL). macOS builds use the system's
+#   CommonCrypto instead.
+# Release archives ship both licences under licenses/ (OpenSSL's only on
+# Linux and Windows), and the .deb installs them with the others.
+
 # Third-party code used only by tests, never shipped in a build:
 #
 # - docker/proton-harness (built in CI by scripts/proton-harness.sh)

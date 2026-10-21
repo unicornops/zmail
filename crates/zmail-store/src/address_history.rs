@@ -774,7 +774,8 @@ mod tests {
         .expect("marker set");
         drop(conn);
 
-        let reopened = LocalStore::open(store.path()).expect("store reopens");
+        let reopened =
+            LocalStore::open(store.path(), store.store_key().clone()).expect("store reopens");
         assert_eq!(
             emails(&reopened, "", "2026-03-06T00:00:00Z"),
             ["alice@example.com", "carol@example.com", "bob@example.org"]

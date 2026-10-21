@@ -378,12 +378,37 @@ What it shows:
   every page it reads is decrypted again, even when the OS has the file
   cached. Reusing connections (a small per-thread cache, keeping
   SQLite's page cache warm) would remove most of the read overhead, and
-  some of today's cost too. The database PR adds it, so the scrollbar
-  jump keeps its distance from the gate and mail actions stay well
-  inside their budget.
+  some of today's cost too. The database PR adds it; the next table
+  shows the result.
 - CI's runner measured close to these `main` numbers in the run that
   added the gate (#241): scrolling about 25% slower, the actions about
   15% faster, the scrollbar jump 11.3 ms.
+
+**With the connection cache (the database PR).** Each thread keeps its
+finished connections per store (at most two), and each connection's page
+cache is 16 MiB instead of SQLite's default 2 MiB. The same
+`performance_budgets` run, `main` against the encrypted store, two runs
+each (medians in ms):
+
+| Measurement | Budget | main | encrypted, with the cache |
+| --- | --- | --- | --- |
+| Scroll frame, flick (top / middle / end) | 8.33 | 4.4 / 4.4 / 4.3 | 4.4 / 4.4 / 4.4 |
+| Scroll frame, scrollbar jump | 8.33 | 12.2–12.5 | 10.7–11.0 |
+| Open thread (Select Next) | 100 | 6.0–6.1 | 4.5–5.0 |
+| Mark read / unread | 100 | 33.1–33.6 | 17.4–18.7 |
+| Flag / unflag | 100 | 31.7–31.9 | 17.2–17.5 |
+| Archive | 100 | 38.3–38.4 | 18.6–18.9 |
+| Open folder (20k / 100k) | 100 | 13.6–13.8 / 20.6–21.3 | 7.5 / 14.6 |
+| Search keystroke, results | 100 | 30.3 | 24.9–25.0 |
+| Open reader (100 unread / 1 MB HTML / 60 attachments) | 100 | 7.2 / 36.4–36.6 / 11.0–11.4 | 4.9–5.0 / 33.3 / 9.5 |
+| Seeding the store (s) | | 13.6–13.9 | 13.8–13.9 |
+
+The encrypted store with the cache is faster than today's plaintext one
+on every measurement, because the plaintext store also paid for a new
+connection and a cold page cache on every call. In the store benchmarks
+a page at row 99,850 takes 2.5 ms (6.8 ms on `main`) and the refresh
+counts 0.16 ms (8.3 ms), though a benchmark repeating one query keeps
+its pages warmer than real use does.
 
 ### 6. What this does not protect
 

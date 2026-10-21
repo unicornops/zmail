@@ -176,13 +176,27 @@ jobs:
           key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-git-${{ runner.os }}-
 
+      # SQLCipher's vendored OpenSSL (ADR 0005) needs NASM for its AES-NI
+      # code: OPENSSL_RUST_USE_NASM=1 fails the build without it instead of
+      # falling back to slow C. Configure must run under Strawberry Perl, not
+      # Git's MSYS Perl.
+      - name: Install NASM for OpenSSL
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files\NASM"
+          Add-Content -Path $env:GITHUB_ENV -Value "OPENSSL_RUST_USE_NASM=1"
+          Add-Content -Path $env:GITHUB_ENV -Value "OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe"
+
       - name: Build release binary
         run: cargo build -p zmail-app --release --locked
 
       # The archives carry zmail's licence and the notices that must travel
       # with every copy of what the binary embeds: the Inter font's SIL OFL
-      # 1.1 (Linux builds), Lucide's ISC/MIT and the Apache-2.0 licence of
-      # the code ported from GPUI.
+      # 1.1 (Linux builds), Lucide's ISC/MIT, the Apache-2.0 licence of
+      # the code ported from GPUI, SQLCipher's BSD-3-Clause and, where it
+      # is linked (Linux and Windows), OpenSSL's Apache-2.0.
       - name: Create Unix archive
         if: runner.os != 'Windows'
         run: |
@@ -191,6 +205,10 @@ jobs:
           cp assets/fonts/inter/LICENSE.txt archive/licenses/Inter-OFL.txt
           cp assets/icons/LICENSE.txt archive/licenses/Lucide-LICENSE.txt
           cp crates/zmail-ui/LICENSE-APACHE archive/licenses/GPUI-Apache-2.0.txt
+          cp crates/zmail-store/LICENSE-SQLCIPHER archive/licenses/SQLCipher-LICENSE.txt
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            cp crates/zmail-store/LICENSE-OPENSSL archive/licenses/OpenSSL-LICENSE.txt
+          fi
           tar -czf "${{ matrix.artifact_path }}" -C archive .
 
       - name: Create Windows archive
@@ -202,6 +220,8 @@ jobs:
           Copy-Item assets/fonts/inter/LICENSE.txt archive/licenses/Inter-OFL.txt
           Copy-Item assets/icons/LICENSE.txt archive/licenses/Lucide-LICENSE.txt
           Copy-Item crates/zmail-ui/LICENSE-APACHE archive/licenses/GPUI-Apache-2.0.txt
+          Copy-Item crates/zmail-store/LICENSE-SQLCIPHER archive/licenses/SQLCipher-LICENSE.txt
+          Copy-Item crates/zmail-store/LICENSE-OPENSSL archive/licenses/OpenSSL-LICENSE.txt
           Compress-Archive -Path archive/* -DestinationPath "${{ matrix.artifact_path }}"
 
       # Opt-in Authenticode signing: the steps no-op until the repository

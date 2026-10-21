@@ -13,7 +13,7 @@ use zmail_core::{
     OutgoingConfig, ProtocolKind, SubmissionSecurity, ThemeAppearance, ThemeSummary, UpstreamPins,
 };
 use zmail_security::{InMemorySecretStore, KeyringSecretStore, SecretSlot, SecretStore};
-use zmail_store::LocalStore;
+use zmail_store::{LocalStore, MigrationProgress, StoreOpenError};
 use zmail_sync::{BackgroundRuntime, SyncService};
 use zmail_theme::ThemeFamily;
 use zmail_ui::InitialView;
@@ -74,6 +74,7 @@ fn main() -> Result<()> {
         Command::RemoveAttachment(attachment_id) => remove_attachment(attachment_id),
         Command::ProcessOutbox(account_id) => process_outbox(account_id),
         Command::Backup { directory } => create_backup(directory.as_deref()),
+        Command::ResetStore => reset_unreadable_store(),
         Command::ExportAccount { account_id, path } => export_account(account_id, &path),
         Command::DeadOps { account_id } => list_dead_ops(account_id),
         Command::RetryOp(op_id) => retry_dead_op(op_id),
@@ -107,6 +108,7 @@ enum Command {
     Backup {
         directory: Option<String>,
     },
+    ResetStore,
     DeadOps {
         account_id: Option<i64>,
     },
@@ -378,6 +380,7 @@ impl Command {
             "backup" => Ok(Self::Backup {
                 directory: args.next(),
             }),
+            "reset-store" => Ok(Self::ResetStore),
             "dead-ops" => Ok(Self::DeadOps {
                 account_id: parse_optional_id(args.next(), "account id")?,
             }),
@@ -1777,6 +1780,7 @@ fn print_help() {
     println!("  zmail-app retry-outbox JOB");
     println!("  zmail-app process-outbox [ACCOUNT]");
     println!("  zmail-app backup [DIRECTORY]");
+    println!("  zmail-app reset-store     Move a store whose key is lost aside and start over");
     println!("  zmail-app export-account ACCOUNT PATH");
     println!("  zmail-app attachments THREAD");
     println!("  zmail-app save-attachment ATTACHMENT [--dest DIRECTORY]");
@@ -1786,8 +1790,62 @@ fn print_help() {
     println!("  zmail-app empty-trash ACCOUNT");
 }
 
+/// Opens the encrypted store with its key from the OS keychain (ADR 0005),
+/// encrypting a plaintext store first and printing its progress.
 fn open_store() -> Result<LocalStore> {
-    LocalStore::open(store_path()?).context("failed to open the local store")
+    let path = store_path()?;
+    let progress = |step: MigrationProgress| match step {
+        MigrationProgress::Database { written, total } => {
+            let percent = (written * 100).checked_div(total).unwrap_or(100);
+            eprint!("\rEncrypting the mail store: {percent}%");
+        }
+        MigrationProgress::Verifying => eprint!("\rEncrypting the mail store: checking the copy"),
+        MigrationProgress::Finished => eprintln!("\rEncrypting the mail store: done.            "),
+    };
+    match LocalStore::unlock(&path, &KeyringSecretStore, &progress) {
+        Ok((store, report)) => {
+            if let Some(report) = report {
+                eprintln!(
+                    "The mail store is now encrypted. Blocks of the old plaintext files can \
+                     stay on the disk until it reuses them; full-disk encryption covers that."
+                );
+                for backup in report.plaintext_backups {
+                    eprintln!(
+                        "note: the backup {} was made before encryption and is still plaintext.",
+                        backup.display()
+                    );
+                }
+            }
+            Ok(store)
+        }
+        Err(error @ StoreOpenError::Unreadable { .. }) => Err(anyhow::Error::from(error).context(
+            "the mail on your servers is safe, but drafts, unsent outbox mail and queued \
+             changes that exist only in this store are lost. `zmail-app reset-store` moves \
+             the unreadable store aside and starts a new one",
+        )),
+        Err(StoreOpenError::Keychain(error)) => Err(error.context(
+            "Zmail needs the system keychain to unlock its mail store; unlock it and try again",
+        )),
+        Err(StoreOpenError::Other(error)) => Err(error.context("failed to open the local store")),
+    }
+}
+
+/// `reset-store`: moves a store whose key is gone aside, so the next start
+/// creates a new one. Refuses while the store can still be unlocked.
+fn reset_unreadable_store() -> Result<()> {
+    let path = store_path()?;
+    match LocalStore::unlock(&path, &KeyringSecretStore, &|_| {}) {
+        Ok(_) => bail!("the mail store unlocks with its key; there is nothing to reset"),
+        Err(StoreOpenError::Unreadable { .. }) => {}
+        Err(error) => return Err(anyhow::Error::from(error).context("not resetting the store")),
+    }
+    let aside = zmail_store::move_unreadable_store_aside(&path)?;
+    println!(
+        "Moved the unreadable store to {}. The next start creates a new store; add your \
+         accounts again. Delete that directory once you are sure its key won't turn up.",
+        aside.display()
+    );
+    Ok(())
 }
 
 /// Name of the SQLite database file inside the store directory.

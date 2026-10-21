@@ -262,3 +262,29 @@ From the run above (`main` at dfd386a):
   before the page limit applies. Tracked in #250.
 
 Everything else in the tables is within its budget.
+
+## The encrypted store (2026-10-21)
+
+The store is a SQLCipher database from #139 (ADR 0005): every page is
+decrypted and its MAC checked when read, and encrypted when written.
+On its own that cost 10–35% on mark read, flag and archive, and 1.5–2×
+on the scrollbar jump. The same change made each thread keep its store
+connections, with a 16 MiB page cache each, so a call no longer opens a
+connection and reads every page cold. The net result, from
+`performance_budgets` on the development container (two runs each,
+medians):
+
+| Measurement | Budget | Before (plaintext) | Encrypted |
+|---|---|---|---|
+| Scroll frame, flick (top / middle / end) | 8.33 ms | 4.4 / 4.4 / 4.3 ms | 4.4 / 4.4 / 4.4 ms |
+| Scroll frame, scrollbar jump | 8.33 ms | 12.2–12.5 ms | 10.7–11.0 ms |
+| Open thread (Select Next) | 100 ms | 6.0–6.1 ms | 4.5–5.0 ms |
+| Mark read / unread | 100 ms | 33.1–33.6 ms | 17.4–18.7 ms |
+| Flag / unflag | 100 ms | 31.7–31.9 ms | 17.2–17.5 ms |
+| Archive | 100 ms | 38.3–38.4 ms | 18.6–18.9 ms |
+| Open folder (20k / 100k) | 100 ms | 13.6–13.8 / 20.6–21.3 ms | 7.5 / 14.6 ms |
+| Search keystroke, results | 100 ms | 30.3 ms | 24.9–25.0 ms |
+| Open reader (100 unread / 1 MB HTML / 60 attachments) | 100 ms | 7.2 / 36.4–36.6 / 11.0–11.4 ms | 4.9–5.0 / 33.3 / 9.5 ms |
+
+ADR 0005 §5 has the measurements without the connection cache and the
+store benchmarks.
