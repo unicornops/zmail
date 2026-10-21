@@ -12,6 +12,7 @@ mod hydrate;
 mod mailbox;
 mod message;
 mod ops;
+mod outgoing;
 mod send;
 mod send_prefs;
 mod session;
@@ -130,10 +131,13 @@ pub async fn apply_pending_ops(
 
 /// Sends a composed message from one of the account's addresses, the way
 /// Bridge's SMTP service does (see `send.rs`): a draft encrypted to the
-/// sender, the attachments uploaded to it, and one package per body format
-/// with each recipient's key packets (Proton recipients) or session keys
-/// (clear recipients). Proton files the sent message in Sent; the next
-/// sync brings it in.
+/// sender, the attachments uploaded to it, and one package per body format.
+/// Each recipient's scheme comes from Bridge's send preferences: the
+/// recipient's keys (Proton's own, or found through WKD), the user's
+/// signed contact card and the mail settings. Proton recipients and
+/// PGP/Inline and PGP/MIME contacts get key packets, clear recipients the
+/// session keys. Proton files the sent message in Sent; the next sync
+/// brings it in.
 pub async fn submit_outgoing_message(
     session: &ProtonSession,
     message: &OutgoingMessage,

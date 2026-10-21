@@ -91,6 +91,11 @@ impl RecipientKey {
         hex(self.0.fingerprint().as_bytes())
     }
 
+    /// The key, binary (`Serialize`), as contact cards hold it.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.0.to_bytes().map_err(key_error)
+    }
+
     /// Encrypts a session key to this key (`EncryptSessionKey`), returning
     /// the key packet. Like go-crypto, the first subkey that can encrypt
     /// is used, else the primary key.

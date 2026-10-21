@@ -182,7 +182,7 @@ pub struct MessageFilter {
 }
 
 /// Go encodes an empty slice as `null`.
-fn null_as_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+pub(crate) fn null_as_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,

@@ -1,0 +1,22 @@
+[
+  {
+    "email": "pgp-mime@example.com",
+    "name": "PGP MIME Contact",
+    "encrypt": "true",
+    "sign": "true",
+    "scheme": "pgp-mime",
+    "key": true
+  },
+  {
+    "email": "pgp-inline@example.com",
+    "name": "PGP Inline Contact",
+    "encrypt": "true",
+    "scheme": "pgp-inline",
+    "key": true
+  },
+  {
+    "email": "signed@example.com",
+    "name": "Signed Contact",
+    "sign": "true"
+  }
+]

@@ -12,7 +12,7 @@ use zmail_core::{
     AuthKind, CachePolicySummary, NewAccount, NewDraft, NewIdentity, OutboxJobState, ProtocolKind,
 };
 use zmail_proton::{ClientConfig, store_new_session};
-use zmail_proton_api::{AppVersion, Manager};
+use zmail_proton_api::{AppVersion, CardType, EncryptionScheme, Manager};
 use zmail_security::{InMemorySecretStore, SecretSlot, SecretStore};
 use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
@@ -658,5 +658,105 @@ fn sends_through_the_outbox_with_internal_and_clear_packages() -> Result<()> {
         bytes == b"line one\nline two\n",
         "attachment bytes: {bytes:?}"
     );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn sends_to_outside_recipients_by_their_contact_settings() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+
+    // The seeded contacts' signed cards read back with the user keys.
+    let manager = Manager::new(harness_config(&harness)?)?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let (client, _) = manager
+                .login(harness.username(), harness.password())
+                .await?;
+            let user = client.get_user().await?;
+            let addresses = client.get_addresses().await?;
+            let key_pass = client.salted_key_pass(&user, harness.password()).await?;
+            let keys = zmail_proton_api::unlock(&user, &addresses, &key_pass)?;
+            let settings = |email: &'static str| {
+                let client = &client;
+                let keys = &keys;
+                async move {
+                    let emails = client.get_all_contact_emails(email).await?;
+                    let contact = emails
+                        .iter()
+                        .find(|contact| contact.email == email)
+                        .with_context(|| format!("no contact {email}"))?;
+                    let contact = client.get_contact(&contact.contact_id).await?;
+                    anyhow::Ok(contact.get_settings(&keys.user, email, CardType::SIGNED)?)
+                }
+            };
+            let pgp_mime = settings("pgp-mime@example.com").await?;
+            ensure!(
+                pgp_mime.encrypt == Some(true)
+                    && pgp_mime.scheme == Some(EncryptionScheme::PGP_MIME)
+                    && pgp_mime.keys.len() == 1,
+                "{pgp_mime:?}"
+            );
+            let signed = settings("signed@example.com").await?;
+            ensure!(
+                signed.sign == Some(true) && signed.encrypt.is_none(),
+                "{signed:?}"
+            );
+            anyhow::Ok(())
+        })
+        .with_context(|| format!("contacts; server log:\n{}", harness.logs()))?;
+
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, secrets.as_ref(), account_id)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.configure_proton(harness_config(&harness)?)?;
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
+    let identity = store
+        .list_identities(account_id)?
+        .into_iter()
+        .find(|identity| identity.email_address == PROTON_HARNESS_PRIMARY_ADDRESS)
+        .context("no identity for the primary address")?;
+
+    // One message to a Proton address (internal), a PGP/MIME contact and
+    // a signed one (one MIME package), and a PGP/Inline contact (a text
+    // package encrypted to the contact's key).
+    let draft_id = store.create_draft(&NewDraft {
+        account_id,
+        identity_id: identity.id,
+        to: vec![
+            PROTON_HARNESS_ALIAS_ADDRESS.to_owned(),
+            "pgp-mime@example.com".to_owned(),
+        ],
+        cc: vec!["signed@example.com".to_owned()],
+        bcc: vec!["pgp-inline@example.com".to_owned()],
+        subject: "To the outside".to_owned(),
+        body: "Encrypted where the contact asks for it.".to_owned(),
+    })?;
+    store.queue_draft(draft_id)?;
+    sync_service.process_outbox_and_wait(Some(account_id))?;
+    let job = store
+        .list_outbox_jobs(Some(account_id))?
+        .into_iter()
+        .find(|job| job.draft_id == draft_id)
+        .context("no outbox job")?;
+    ensure!(
+        job.state == OutboxJobState::Sent,
+        "job {job:?}; server log:\n{}",
+        harness.logs()
+    );
+
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
+    ensure!(subjects(&store, account_id, "Sent")?.contains(&"To the outside".to_owned()));
+    ensure!(subjects(&store, account_id, "INBOX")?.contains(&"To the outside".to_owned()));
     Ok(())
 }

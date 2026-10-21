@@ -1,22 +1,16 @@
 // Ported from go-proton-api `keys.go` (`GetPublicKeys`), `keys_types.go`
-// (`PublicKey`, `PublicKeys`) and `contact_types.go` (`RecipientType`,
-// `ContactSettings`) at 8a62023d3e38cb29749bcfc01bf44eafda6cec82
+// (`PublicKey`, `PublicKeys`) and `contact_types.go` (`RecipientType`) at
+// 8a62023d3e38cb29749bcfc01bf44eafda6cec82
 // (https://github.com/ProtonMail/go-proton-api).
 // Copyright (c) 2020 James Houlahan, Copyright (c) 2022 Proton AG.
 // Licensed under the MIT License; see crates/zmail-proton-api/LICENSE-MIT.
-// Modified by UnicornOps on 2026-10-21: rewritten in Rust. Contact keys
-// are parsed public keys rather than gopenpgp keys; reading contacts
-// (`GetAllContactEmails`, `GetContact`, `GetSettings`) follows later
-// (#237).
+// Modified by UnicornOps on 2026-10-21: rewritten in Rust.
 
-//! Recipients' public keys, and what a contact says about sending to them.
+//! Recipients' public keys.
 
 use serde::Deserialize;
 
-use crate::{
-    client::Client, crypto::RecipientKey, keyring::KeyFlags, manager::Request,
-    package::EncryptionScheme, response::Error,
-};
+use crate::{client::Client, keyring::KeyFlags, manager::Request, response::Error};
 
 /// A recipient's public key as the API serves it (`PublicKey`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -47,25 +41,6 @@ impl From<i64> for RecipientType {
             Self::External
         }
     }
-}
-
-/// What the user's contact card says about sending to an address
-/// (`ContactSettings`). Every field is optional; the default is "no
-/// contact".
-#[derive(Debug, Clone, Default)]
-pub struct ContactSettings {
-    /// Preferred body format.
-    pub mime_type: Option<String>,
-    /// Preferred PGP scheme (PGP/MIME or PGP/Inline).
-    pub scheme: Option<EncryptionScheme>,
-    /// Whether to sign.
-    pub sign: Option<bool>,
-    /// Whether to encrypt.
-    pub encrypt: Option<bool>,
-    /// Whether to encrypt to keys found through WKD.
-    pub encrypt_untrusted: Option<bool>,
-    /// Pinned public keys.
-    pub keys: Vec<RecipientKey>,
 }
 
 impl Client {
