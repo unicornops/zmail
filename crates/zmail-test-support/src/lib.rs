@@ -23,7 +23,7 @@ use zmail_core::{
 pub use proton_harness::{
     PROTON_HARNESS_ALIAS_ADDRESS, PROTON_HARNESS_PASSWORD, PROTON_HARNESS_PRIMARY_ADDRESS,
     PROTON_HARNESS_URL, PROTON_HARNESS_USERNAME, ProtonHarness, ProtonHarnessAddress,
-    ProtonHarnessLabel, ProtonHarnessLabelKind, ProtonHarnessState,
+    ProtonHarnessLabel, ProtonHarnessLabelKind, ProtonHarnessMessage, ProtonHarnessState,
 };
 
 /// Parameters for a generated mailbox dataset.

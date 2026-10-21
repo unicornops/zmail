@@ -9264,6 +9264,8 @@ name = "zmail-proton"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "chrono",
+ "serde_json",
  "tokio",
  "zmail-core",
  "zmail-proton-api",

@@ -1,0 +1,9 @@
+From: Dan Example <dan@example.com>
+To: zmail@proton.local
+Subject: Dinner on Sunday
+Date: Tue, 20 Oct 2026 12:00:00 +0000
+Message-ID: <dinner@example.com>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<p>Dinner at <b>six</b>?</p><img src="https://tracker.example.com/pixel.gif">

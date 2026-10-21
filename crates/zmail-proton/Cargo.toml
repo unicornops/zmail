@@ -9,10 +9,14 @@ description = "Proton Mail sync adapter for Zmail, following Proton Mail Bridge'
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 tokio.workspace = true
 zmail-core = { path = "../zmail-core" }
 zmail-proton-api = { path = "../zmail-proton-api" }
 zmail-security = { path = "../zmail-security" }
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

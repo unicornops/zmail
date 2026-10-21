@@ -140,3 +140,126 @@ fn a_revoked_session_asks_to_sign_in_again() -> Result<()> {
     );
     Ok(())
 }
+
+/// Subjects of the threads in one mailbox.
+fn subjects(store: &LocalStore, account_id: i64, mailbox: &str) -> Result<Vec<String>> {
+    let id = store
+        .list_mailboxes(account_id)?
+        .into_iter()
+        .find(|summary| summary.name == mailbox)
+        .map(|summary| summary.id)
+        .with_context(|| format!("no {mailbox} mailbox"))?;
+    let mut subjects: Vec<String> = store
+        .list_threads(id, 0..100)?
+        .into_iter()
+        .map(|thread| thread.subject)
+        .collect();
+    subjects.sort();
+    Ok(subjects)
+}
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn mirrors_labels_as_mailboxes_and_messages_by_metadata() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+    let state = harness.state().clone();
+    ensure!(
+        state.messages.len() == 6,
+        "unexpected fixtures: {:?}",
+        state.messages
+    );
+
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, secrets.as_ref(), account_id)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.configure_proton(harness_config(&harness)?)?;
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
+
+    // Mailboxes as Bridge names them, with roles for the system labels.
+    let mailboxes = store.list_mailboxes(account_id)?;
+    let role_of = |name: &str| {
+        mailboxes
+            .iter()
+            .find(|mailbox| mailbox.name == name)
+            .map(|mailbox| mailbox.role.map(|role| role.as_str()))
+    };
+    for (name, role) in [
+        ("INBOX", Some("inbox")),
+        ("Drafts", Some("drafts")),
+        ("Sent", Some("sent")),
+        ("Archive", Some("archive")),
+        ("Spam", Some("junk")),
+        ("Trash", Some("trash")),
+        ("All Mail", None),
+        ("Folders/Work", None),
+        ("Folders/Receipts", None),
+        ("Labels/Family", None),
+        ("Labels/Follow up", None),
+    ] {
+        ensure!(role_of(name) == Some(role), "{name}: {:?}", role_of(name));
+    }
+    ensure!(
+        role_of("Starred").is_none(),
+        "Starred is the flagged state, not a mailbox"
+    );
+    let work = mailboxes
+        .iter()
+        .find(|mailbox| mailbox.name == "Folders/Work")
+        .context("no Folders/Work")?;
+    ensure!(work.parent.as_deref() == Some("Folders"));
+    ensure!(work.delimiter.as_deref() == Some("/"));
+
+    // Each message sits in every mailbox of its labels; All Mail has all.
+    ensure!(
+        subjects(&store, account_id, "INBOX")?
+            == [
+                "Dinner on Sunday",
+                "Re: Welcome to the harness",
+                "To the alias",
+                "Welcome to the harness"
+            ],
+        "INBOX: {:?}",
+        subjects(&store, account_id, "INBOX")?
+    );
+    ensure!(subjects(&store, account_id, "Folders/Work")? == ["Quarterly report"]);
+    ensure!(subjects(&store, account_id, "Labels/Family")? == ["Dinner on Sunday"]);
+    ensure!(subjects(&store, account_id, "Archive")? == ["Old receipt"]);
+    ensure!(subjects(&store, account_id, "Folders/Receipts")?.is_empty());
+    ensure!(subjects(&store, account_id, "All Mail")?.len() == 6);
+
+    // Read, unread and starred come from the metadata.
+    let inbox_id = mailboxes
+        .iter()
+        .find(|mailbox| mailbox.name == "INBOX")
+        .map(|mailbox| mailbox.id)
+        .context("no INBOX")?;
+    let threads = store.list_threads(inbox_id, 0..100)?;
+    let thread = |subject: &str| {
+        threads
+            .iter()
+            .find(|thread| thread.subject == subject)
+            .with_context(|| format!("no thread {subject}"))
+    };
+    let welcome = thread("Welcome to the harness")?;
+    ensure!(
+        welcome.unread_count == 1 && welcome.is_flagged,
+        "{welcome:?}"
+    );
+    let reply = thread("Re: Welcome to the harness")?;
+    ensure!(reply.unread_count == 0 && !reply.is_flagged, "{reply:?}");
+    ensure!(thread("Dinner on Sunday")?.unread_count == 1);
+    ensure!(
+        thread("Welcome to the harness")?
+            .latest_sender
+            .contains("alice@example.com"),
+        "sender: {}",
+        welcome.latest_sender
+    );
+    Ok(())
+}
