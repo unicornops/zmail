@@ -5,6 +5,7 @@
 
 ### Features
 
+* **ui:** 24px minimum pointer targets, checked by walking each view ([#231](https://github.com/unicornops/zmail/issues/231)) ([aa8ace5](https://github.com/unicornops/zmail/commit/aa8ace51b3000264f755b3b9987284f56e7f9384))
 * **ui:** read reduced motion on Windows and through AppKit on macOS ([#248](https://github.com/unicornops/zmail/issues/248)) ([d7671f0](https://github.com/unicornops/zmail/commit/d7671f0075c1de74bd636a15925e56f5401550b6))
 * **ui:** text size setting that scales every window's rem size ([#228](https://github.com/unicornops/zmail/issues/228)) ([ee06d4b](https://github.com/unicornops/zmail/commit/ee06d4b961019692143a178bb24d53f6979b1c72))
 * **proton:** SRP login, TOTP 2FA, logout and human verification ([#245](https://github.com/unicornops/zmail/issues/245)) ([7cf5d45](https://github.com/unicornops/zmail/commit/7cf5d45b7eb36ba6688ac12a9ace24005ae7ce35))
