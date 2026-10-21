@@ -4,31 +4,98 @@ This document records the Phase 5 hardening work that is present in-repo today a
 
 ## Accessibility
 
-Zmail is not yet usable without a pointer or with a screen reader. This section records what is true today, so nobody relies on support that does not exist. The work to close the gaps is in the UI plan (`UI_PLAN.md`): Phase 1 (actions, key bindings, per-pane focus, a real text input) and Phase 8 (screen readers, text scaling, reduced motion, high contrast).
+This section records what ships today, so nobody relies on support that does not exist. None of the screen-reader support below has been checked with a real screen reader yet; [Manual screen-reader check](#manual-screen-reader-check) is the script for doing that.
 
 ### Keyboard
 
-- There are no key bindings. The shell defines no GPUI actions or `KeyBinding`s, has no per-pane focus, and has no Tab order.
-- The whole workspace has a single focus handle. Every key press goes to whichever text field was clicked last: the search field, a compose field, or an account-setup field. This holds even after clicking a thread or a mailbox.
-- Enter submits single-line fields: it runs the search, adds the typed attachment path, and saves the account from the last account-setup fields. Nothing else responds to the keyboard.
-- Choosing an account, mailbox, thread, draft or outbox job, and every toolbar, reader and compose button, needs a pointer. So the primary flows (read, reply, send, set up an account) are **not** keyboard reachable.
-- Text fields are drawn labels with an inserted cursor, not an editor. There is no selection, copy, cut, undo, key repeat or IME. Paste uses GPUI's platform modifier, which is Cmd on macOS but not Ctrl on Linux or Windows. The cursor is a byte index, so editing next to a non-ASCII character can panic.
+- Every command is a GPUI action with a key binding (`crates/zmail-ui/keymaps/default.json`, plus `macos.json` on macOS), a menu entry and a command palette entry (Ctrl+K, Cmd+K on macOS). Settings → Keyboard offers an optional Gmail keymap. Ctrl+/ (Cmd+/) and the Gmail keymap's `?` open a cheat sheet of the bound keys.
+- Each pane (sidebar, message list, reader, compose) has its own focus. Tab and F6 move between panes, and Shift+Tab and Shift+F6 move back. Arrow keys, Home and End move the selection in the focused pane, and Enter opens it.
+- Text fields are real editors, with selection, copy, cut, paste, undo and redo, word movement and IME input.
+- Buttons, selects, menus and dialogs are Tab stops with a visible 2px focus ring. Enter and Space activate buttons. Escape closes the topmost overlay.
+- **Pointer only:** the full date of a list row is a tooltip, so it needs hovering; screen readers get it as the row's description. The row's hover quick actions (Archive, Delete, Flag, Read) have keyboard shortcuts and context-menu equivalents instead.
 
 ### Screen readers
 
-- The pinned GPUI (a Zed stable release, see `docs/upstream/zed.md`) ships AccessKit, and Zmail starts it with accessibility enabled. Zmail's views do not set roles or labels yet, so screen readers still announce almost nothing in the window. That work is UI plan Phase 8.
+GPUI (pinned to a Zed stable release, see `docs/upstream/zed.md`) ships AccessKit, and Zmail starts it with `gpui_platform::application()`, which leaves it enabled. AccessKit drives VoiceOver on macOS, UI Automation (NVDA, Narrator, JAWS) on Windows and AT-SPI (Orca) on Linux.
+
+- **Names and roles.** Every control reports a role and a name (`crates/zmail-ui/src/a11y.rs`). Icon-only buttons are named by their tooltip, and shortcuts are spelled out ("Shift+Command+K", "Ctrl+Shift+K"). Avatars, badges and key caps are decorative; the row or button around them says what they mean.
+- **Structure.**
+  - The sidebar is a tree: levels, expanded state, and Expand/Collapse actions. Rows read "Unified Inbox, 5 unread" or "Work account, Updated just now".
+  - The message list is a multi-select list box. Rows read "Unread, from Alice, Lunch on Friday, 10:42, has attachments", with the preview line and the full date as the description.
+  - The reader is a pane with a "Conversation actions" toolbar, the subject as a heading, and each message as an article ("Unread message, from Alice, …") that can be expanded and collapsed.
+  - Compose is a form named after its subject.
+  - Settings is a tab list of sections, with headings. Each account's controls are grouped under the account's name.
+  - Dialogs are modal and named by their title.
+- **Keyboard navigation is announced.** In the sidebar, the message list, the reader, menus and the Settings sections, focus stays on the pane while the arrow keys (and j/k, n/p) move. The current row is reported as the focused item.
+- **Announcements (live regions).**
+  - Toasts and status messages are announced politely, and errors (error toasts, the error banner, a failed send, account-setup field errors) assertively.
+  - The result count of each new search is announced.
+  - Sync is announced only when an account starts failing or recovers; routine background syncs stay quiet.
+  - In the command palette, Move to… and recipient suggestions, the highlighted option is announced ("Archive, 1 of 12"). Focus stays in the text field there, and GPUI only reports a focused list item under the focused element.
+- **Readable text.** Headings, empty states, the open-link prompt's full address, a message's From, To and Date details and View Source are text a screen reader can reach. Message bodies are read paragraph by paragraph.
+- **Not yet:**
+  - Links inside a message body are not separate links a screen reader can follow; use Open First Link or the link prompt.
+  - Text fields report their text but not the caret or selection.
+  - List rows say "has attachments", not how many, because the store keeps only a flag per conversation.
+  - The tree and list cannot be tested automatically, because GPUI's test platform never builds the accessibility tree. View tests check instead that every control the main window, Settings and onboarding draw has a non-empty name (`crates/zmail-ui/src/view_tests/a11y.rs`).
 
 ### Visual
 
-- The theme follows the system light/dark appearance until it is switched with Ctrl+Shift+T (Cmd+Shift+T on macOS) or View → Switch Light/Dark Theme; the choice is saved in the UI preferences.
-- Dates in lists are relative ("10:42", "Yesterday"), with the full timestamp in a tooltip. The tooltip needs a pointer to hover; there is no keyboard equivalent yet.
-- Text size follows GPUI's fixed 16px root size. There is no text scaling, high-contrast mode or reduced-motion handling.
-- Status messages dismiss themselves after four seconds, so they can be missed. Errors stay until dismissed with the banner's close button, which needs a pointer.
+- **Theme.** The theme follows the system light/dark appearance until it is switched with Ctrl+Shift+T (Cmd+Shift+T on macOS) or View → Switch Light/Dark Theme; the choice is saved in the UI preferences. Body text, controls and focus rings are checked against WCAG contrast minimums (4.5:1 text, 3:1 boundaries) for the bundled palettes.
+- **Windows contrast themes** (High Contrast, or Windows 11's Aquatic, Desert, Dusk and Night sky):
+  - When one is on, every colour comes from the user's system colours, read from `HKCU\Control Panel\Colors`.
+  - Status colours fall back to the text colour, as in Windows' own controls; banners still differ by their icons.
+  - The setting is read at startup and again when the window is activated or the appearance changes.
+- **macOS Increase Contrast** (System Settings → Accessibility → Display) keeps the theme but raises secondary text to 7:1 and borders to 4.5:1. It is read at the same times.
+- **Linux** has no high-contrast handling yet.
+- **Reduced motion.** Settings → Appearance → Motion offers Match System, Reduce and Full.
+  - Match System follows:
+    - macOS: Reduce motion (`NSWorkspace.accessibilityDisplayShouldReduceMotion`);
+    - GNOME: `org.gnome.desktop.interface enable-animations`, read by a short-lived `gsettings`;
+    - Windows: `HKCU\Control Panel\Desktop\WindowMetrics\MinAnimate`, as a proxy for Settings → Accessibility → Visual effects → Animation effects. Turning that switch off clears it. The value itself is the minimise and maximise animation, so turning off only the client-area animations in Performance Options is not detected, and turning off only the minimise animation reduces motion here.
+  - The setting is read at startup and whenever the window is activated. A setting that cannot be read allows motion.
+  - With motion reduced, the loading placeholders stop pulsing, spinners stand still and animated images show their first frame.
+  - Nothing in the UI slides: menus, overlays, dialogs and toasts appear and go at once. `crates/zmail-ui/src/motion.rs` lists every animation.
+- **Text size.** Settings → Appearance → Text size scales text in every window from 100% to 200%, in 25% steps. It sets GPUI's rem size.
+  - Rows, buttons, selects, menus and the widths of dialogs, popovers and cards grow with the text. Spacing, borders and icons stay the same size. Settings rows wrap their control below the text when both do not fit.
+  - The main views are captured at 150% and 200% in the screenshot matrix, and view tests check that list rows grow to hold the larger text.
+  - GPUI exposes no OS text-scale setting, so the system's text size (macOS, Windows "Text size", GNOME's text scaling factor) is not followed yet; use the setting.
+
+### Pointer targets
+
+- Everything that takes a click is at least 24×24 px at the default text size (WCAG 2.2, 2.5.8 Target Size (Minimum)), and larger text only makes targets bigger. `crates/zmail-ui/src/view_tests/hit_targets.rs` checks every target the main window, onboarding, each Settings section, the compose window and the command palette draw.
+- Two exceptions are documented in `crates/zmail-ui/src/components/hit_target.rs` rather than counted as passes. Each has keyboard and wheel alternatives:
+  - The split handles between panes are 6 px wide. Arrow keys, Home and End resize them, and a double click restores the default width.
+  - The overlay scrollbar's strip is 12–15 px wide, though its thumb is at least 24 px long. The wheel, the trackpad and Page Up/Down scroll.
 
 ### Content
 
 - The reader renders message bodies as text, and HTML is converted to text before display.
 - Remote content stays blocked by default, and attachments are only saved on explicit user action.
+
+### Manual screen-reader check
+
+Run this on each platform before claiming screen-reader support works, and note anything that is silent or wrong. Start with an account that has mail in more than one folder.
+
+1. **Start the screen reader.**
+   - macOS: VoiceOver, Cmd+F5.
+   - Windows: NVDA (Ctrl+Alt+N) or Narrator (Win+Ctrl+Enter).
+   - Linux: Orca, Super+Alt+S, on a GNOME session.
+
+   Then open Zmail. The window should be announced as "Zmail".
+2. **Sidebar.** Press F6 until the sidebar has focus. Up and Down should read each row with its unread count and level ("Unified Inbox, 5 unread"). On an account row, Enter (or the screen reader's expand command) should open and close it and announce "expanded" or "collapsed".
+3. **Message list.** Press Tab to the list. Up and Down should read "Unread, from …, subject, time, …" and "selected". Shift+Down should extend the selection and still read each row.
+4. **Reader.** Press Enter, then Tab to the reader. The subject should read as a heading, and n and p should move between messages ("Unread message, from …, date"). The screen reader's reading command should read the body.
+5. **Actions.** Press Ctrl+E (Cmd+E) to archive. The "Conversation archived" toast should be announced without moving focus. Press Ctrl+Z (Cmd+Z) to undo.
+6. **Search.** Press Ctrl+F (Cmd+F) and type a word that matches, then press Enter. The result count should be announced ("3 results").
+7. **Palette.** Press Ctrl+K (Cmd+K) and type "arch". Each Down press should announce the highlighted command ("Archive, 2 of 5"). Escape closes it.
+8. **Compose.** Press Ctrl+N (Cmd+N). The To, Subject and Message fields should each read their name. Add a recipient, then Tab to the chip's Remove button, which should read "Remove <name>".
+9. **Errors.** In Add Account (Ctrl+Shift+A, Cmd+Shift+A), press Continue with the fields empty. The field error should be announced at once.
+10. **Settings.** Press Ctrl+, (Cmd+,). Up and Down in the section list should read each tab, and Tab should move into the section, whose controls each read a name.
+11. **High contrast (Windows).** Turn on a contrast theme (Settings → Accessibility → Contrast themes) and switch back to Zmail. The window should redraw in the theme's colours, and the selected row should stay readable.
+12. **Increase Contrast (macOS).** Turn Increase contrast on and switch back to Zmail. Secondary text and borders should darken (in a light theme) or lighten (in a dark theme).
+13. **Reduced motion.** Turn the system's reduce-motion setting on and switch back to Zmail. Press F5 to sync: the toolbar's sync indicator should stand still instead of spinning.
+14. **Text size.** In Settings → Appearance, set Text size to 200%. Every window should grow its text, and nothing in the main views should be cut off at 1280×800.
 
 ## Performance
 
@@ -36,6 +103,10 @@ Zmail is not yet usable without a pointer or with a screen reader. This section 
 - The shell only schedules one delayed refresh at a time while background work is active.
 - Local browsing, mailbox switching, and search continue to read from the local mirror rather than from network paths.
 - Phase 5 adds tests that assert sync and outbox scheduling return immediately instead of waiting on slow background work.
+- UI plan Phase 8 sets numeric budgets over a 100,000-conversation mailbox: 8.3 ms per list scroll frame, and 100 ms from an action (archive, flag, mark read, opening a folder or conversation, a search keystroke, opening a heavy reader) to the visible change.
+  - [`docs/performance.md`](./performance.md) records the budgets, how they are measured and the latest numbers.
+  - CI runs the budgets on Linux with a gross-regression gate.
+  - Dragging the scrollbar across a 100k mailbox still misses the frame budget (#242). Wheel and keyboard scrolling stay within it.
 
 ## Mailbox Deletion Policy
 
