@@ -9329,6 +9329,7 @@ dependencies = [
  "zmail-core",
  "zmail-imap",
  "zmail-jmap",
+ "zmail-proton",
  "zmail-proton-api",
  "zmail-security",
  "zmail-smtp",
