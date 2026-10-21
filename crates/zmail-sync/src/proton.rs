@@ -9,11 +9,9 @@
 
 use std::time::Duration;
 
-#[cfg(feature = "proton")]
-use anyhow::Context;
-use anyhow::Result;
 #[cfg(not(feature = "proton"))]
 use anyhow::bail;
+use anyhow::{Context, Result};
 use zmail_core::{ProtocolKind, SyncTarget};
 
 use crate::{SyncService, backoff::Backoff, wake::unless_woken};
@@ -33,7 +31,13 @@ impl SyncService {
         match target.protocol {
             ProtocolKind::Proton => self.connect_proton(target).await,
             ProtocolKind::Imap | ProtocolKind::Jmap => {
-                Ok(Credentials::Secret(self.connect_secret(target).await?))
+                let secret = self.connect_secret(target).await.with_context(|| {
+                    format!(
+                        "missing or inaccessible credentials for account {}",
+                        target.id
+                    )
+                })?;
+                Ok(Credentials::Secret(secret))
             }
         }
     }

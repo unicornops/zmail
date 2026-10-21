@@ -903,9 +903,9 @@ impl SyncService {
         let Some(target) = self.inner.store.sync_target(account_id)? else {
             bail!("account {account_id} no longer exists");
         };
-        let credentials = self.connect(&target).await.with_context(|| {
-            format!("missing or inaccessible credentials for account {account_id}")
-        })?;
+        // `connect` names the problem itself: missing credentials, or a
+        // Proton session that has ended and needs signing in again.
+        let credentials = self.connect(&target).await?;
         let existing_mailboxes = self
             .inner
             .store
