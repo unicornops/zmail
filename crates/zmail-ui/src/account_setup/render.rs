@@ -364,17 +364,20 @@ impl AccountSetupView {
                 .gap(px(SPACE_1))
                 .debug_selector(|| "account-setup-provider-proton".into())
                 .child(
-                    Button::new("account-setup-provider-proton", "Proton Mail")
-                        .size(ButtonSize::Large)
-                        .full_width()
-                        .icon("shield")
-                        .selected(self.history.contains(&Stage::ProtonSignIn))
-                        .tooltip(
-                            "Paid Proton plans; zmail signs in the way Proton Mail Bridge does",
-                        )
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    Button::new(
+                        "account-setup-provider-proton",
+                        "Proton Mail (Experimental)",
+                    )
+                    .size(ButtonSize::Large)
+                    .full_width()
+                    .icon("shield")
+                    .selected(self.history.contains(&Stage::ProtonSignIn))
+                    .tooltip("Paid Proton plans; zmail signs in the way Proton Mail Bridge does")
+                    .on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| {
                             this.choose_proton(window, cx);
-                        })),
+                        },
+                    )),
                 )
                 .child(
                     caption(

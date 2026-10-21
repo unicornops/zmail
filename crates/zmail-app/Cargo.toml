@@ -45,8 +45,10 @@ zmail-ui = { path = "../zmail-ui" }
 
 [features]
 # Proton Mail accounts (docs/adr/0004-proton-native.md): the provider in the
-# add-account flow and Proton sync. Off by default, so no release build has
-# it, until the local store is encrypted at rest (#139) and Rob turns it on.
+# add-account flow and Proton sync. On by default since the local store is
+# encrypted at rest (#139); labelled experimental in onboarding while it is
+# tested against real accounts. `--no-default-features` builds without it.
+default = ["proton"]
 proton = ["zmail-ui/proton", "zmail-sync/proton"]
 
 [build-dependencies]

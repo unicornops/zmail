@@ -13,6 +13,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - real IMAP and JMAP account sync behind a dedicated Tokio background runtime
 - OAuth2 account setup in the settings dialog with provider presets (Gmail, Microsoft 365), background access-token refresh, and XOAUTH2 for IMAP sync, SMTP submission, and JMAP bearer authentication
 - Gmail signs in with an app password by default; zmail has no Google OAuth client of its own yet, so [`docs/gmail-oauth.md`](./docs/gmail-oauth.md) (and the guide in the Add Account flow) walks through creating your own
+- **experimental** native Proton Mail accounts (paid plans) that follow Proton Mail Bridge's behaviour without needing Bridge: sign-in with 2FA and human verification, sync, live updates, actions and end-to-end encrypted sending ([ADR 0004](./docs/adr/0004-proton-native.md)). zmail is an independent client on Proton's private API, so Proton may change or block it; build with `--no-default-features` to leave it out
 - received attachment download and save-as for IMAP and JMAP accounts
 - full-text search with query operators; IMAP message bodies are fetched and indexed in the background, newest first, within the account's disk budget, pausing on battery power (Linux) unless allowed
 - compose, autosave, attachment handling, outbox retry, SMTP submission, and JMAP submission support
