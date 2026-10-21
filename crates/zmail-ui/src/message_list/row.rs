@@ -21,8 +21,8 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, FontWeight, HighlightStyle, IntoElement, SharedString, Stateful, StyledText, div,
-    prelude::*, px, relative, rgb,
+    AnyElement, FontWeight, HighlightStyle, IntoElement, Role, SharedString, Stateful, StyledText,
+    div, prelude::*, px, relative, rgb,
 };
 use zmail_core::{
     AccountColor, DraftState, DraftSummary, OutboxJobState, OutboxJobSummary, SearchHit,
@@ -33,6 +33,7 @@ use zmail_core::{
 };
 
 use super::selection::{row_background, row_colors};
+use crate::a11y::AccessibleExt;
 use crate::components::tooltip::TooltipExt;
 use crate::components::{Avatar, Badge, BadgeTone};
 use crate::search::{RowMatches, SearchHighlighter};
@@ -57,6 +58,9 @@ pub(super) struct MessageRow {
     pub(super) id: SharedString,
     /// The sender, or the participants of a longer thread.
     pub(super) sender: String,
+    /// Mail someone sent, as opposed to a draft or outgoing message whose
+    /// sender line names the recipients.
+    pub(super) incoming: bool,
     /// Name and address the avatar's initials and colour come from.
     pub(super) avatar_name: String,
     pub(super) avatar_address: Option<String>,
@@ -123,6 +127,7 @@ impl MessageRow {
         Self {
             id,
             sender,
+            incoming: true,
             avatar_name: name,
             avatar_address: address,
             subject: display_subject(&thread.subject).to_owned(),
@@ -155,6 +160,7 @@ impl MessageRow {
         Self {
             id,
             sender: name.clone(),
+            incoming: true,
             avatar_name: name,
             avatar_address: address,
             matches: RowMatches {
@@ -205,6 +211,7 @@ impl MessageRow {
         Self {
             id,
             sender,
+            incoming: false,
             avatar_name,
             avatar_address,
             subject: display_subject(&draft.subject).to_owned(),
@@ -252,6 +259,7 @@ impl MessageRow {
         Self {
             id,
             sender,
+            incoming: false,
             avatar_name,
             avatar_address,
             subject: display_subject(draft.map(|draft| draft.subject.as_str()).unwrap_or(""))
@@ -278,7 +286,10 @@ impl MessageRow {
         }
     }
 
-    /// What a screen reader announces for the row.
+    /// What a screen reader announces for the row, in the order the eye
+    /// reads it (UI plan §4, Phase 8): "Unread, from Alice, Lunch on
+    /// Friday, 10:42, has attachments". A draft or outgoing message reads
+    /// its recipients and its status instead of a sender.
     pub(super) fn accessible_label(&self) -> String {
         let mut parts = Vec::new();
         if self.unread {
@@ -287,19 +298,56 @@ impl MessageRow {
         if self.is_flagged {
             parts.push("Flagged".to_owned());
         }
-        parts.push(self.sender.clone());
-        parts.push(self.subject.clone());
-        if let Some(account) = &self.account {
-            parts.push(account.name.clone());
+        if self.incoming {
+            parts.push(format!("from {}", self.sender));
+        } else {
+            parts.push(self.sender.clone());
         }
+        parts.push(self.subject.clone());
+        if !self.incoming {
+            parts.push(self.snippet.clone());
+        }
+        parts.push(self.date.clone());
         if self.message_count > 1 {
             parts.push(format!("{} messages", self.message_count));
         }
         if self.has_attachments {
-            parts.push("Has attachments".to_owned());
+            parts.push("has attachments".to_owned());
         }
-        parts.push(self.date_tooltip.clone());
+        if let Some(label) = &self.label {
+            // "Archive • on server" reads better without the bullet.
+            parts.push(format!("in {}", label.replace(" \u{2022} ", ", ")));
+        }
+        if let Some(account) = &self.account {
+            parts.push(account.name.clone());
+        }
         parts.join(", ")
+    }
+
+    /// Expose `shell`, the row's clickable box, as option `index` of
+    /// `count` in a list box. `cursor` marks the row the arrow keys move
+    /// from while the list has focus, which a screen reader reads as
+    /// focused. The preview line and full date are its description.
+    pub(super) fn accessible(
+        &self,
+        shell: Stateful<gpui::Div>,
+        selected: bool,
+        cursor: bool,
+        index: usize,
+        count: usize,
+    ) -> Stateful<gpui::Div> {
+        let description = if self.incoming && !self.snippet.trim().is_empty() {
+            format!("{}. {}", self.snippet, self.date_tooltip)
+        } else {
+            self.date_tooltip.clone()
+        };
+        shell
+            .accessible(Role::ListBoxOption, self.accessible_label())
+            .aria_description(description)
+            .aria_selected(selected)
+            .aria_position_in_set(index + 1)
+            .aria_size_of_set(count)
+            .when(cursor, |this| this.aria_active_descendant())
     }
 
     /// A test selector for one part of the row: `{id}-{part}`.
@@ -863,11 +911,69 @@ mod tests {
     fn the_accessible_label_reads_the_row() {
         let row = row(&thread(3, "Priya Raman <priya.raman@example.org>"));
         let label = row.accessible_label();
-        assert!(
-            label.starts_with(
-                "Unread, Flagged, Priya Raman, Q4 roadmap review, 3 messages, Has attachments, "
-            ),
-            "{label}"
+        assert_eq!(
+            label,
+            format!(
+                "Unread, Flagged, from Priya Raman, Q4 roadmap review, {}, 3 messages, has attachments",
+                row.date
+            )
+        );
+    }
+
+    /// The announcement from UI plan §4, Phase 8, built from a stored
+    /// thread summary as the list builds it.
+    #[test]
+    fn a_thread_summary_reads_as_the_plan_describes() {
+        let received = "2026-03-20T10:42:00Z";
+        let now = parse_timestamp(received)
+            .expect("valid timestamp")
+            .with_timezone(&chrono::Local);
+        let summary = ThreadSummary {
+            id: 9,
+            mailbox_id: 1,
+            account_id: 1,
+            subject: "Lunch on Friday".to_owned(),
+            latest_sender: "Alice <alice@example.org>".to_owned(),
+            participants: "Alice <alice@example.org>".to_owned(),
+            preview: "Are you free?".to_owned(),
+            message_count: 1,
+            unread_count: 1,
+            is_flagged: false,
+            has_attachments: true,
+            latest_message_at: received.to_owned(),
+        };
+        let row = MessageRow::thread(
+            "thread-row-9".into(),
+            &summary,
+            &["me@example.org"],
+            &now,
+            HourCycle::H24,
+        );
+        // Mail from today shows its time: 10:42 in UTC, whatever the
+        // local zone makes of it here.
+        assert!(row.date.contains(':'), "{}", row.date);
+        assert_eq!(
+            row.accessible_label(),
+            format!(
+                "Unread, from Alice, Lunch on Friday, {}, has attachments",
+                row.date
+            )
+        );
+
+        let mut read = summary.clone();
+        read.unread_count = 0;
+        read.has_attachments = false;
+        read.message_count = 4;
+        let row = MessageRow::thread(
+            "thread-row-9".into(),
+            &read,
+            &["me@example.org"],
+            &now,
+            HourCycle::H24,
+        );
+        assert_eq!(
+            row.accessible_label(),
+            format!("from Alice, Lunch on Friday, {}, 4 messages", row.date)
         );
     }
 
@@ -900,6 +1006,11 @@ mod tests {
         assert_eq!(row.subject, "(no subject)");
         assert_eq!(row.label.as_deref(), Some("Archive \u{2022} on server"));
         assert!(!row.unread);
+        assert!(
+            row.accessible_label().ends_with(", in Archive, on server"),
+            "{}",
+            row.accessible_label()
+        );
     }
 
     #[test]

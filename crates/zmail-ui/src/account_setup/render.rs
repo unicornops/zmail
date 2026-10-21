@@ -13,6 +13,7 @@ use zmail_autodiscover::{
 use zmail_core::{AccountColor, ProtocolKind, SyncPhase};
 
 use super::{AccountField, AccountSetupView, KEY_CONTEXT, Stage};
+use crate::a11y::{AccessibleExt, readable};
 use crate::components::{Banner, BannerTone, Button, ButtonSize, ComponentTheme};
 use crate::styles::{
     EMPTY_STATE_ICON_FRAME_SIZE, ICON_SIZE_LG, ICON_SIZE_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4,
@@ -135,17 +136,21 @@ fn heading(
         .flex()
         .flex_col()
         .gap(px(SPACE_2))
-        .child(
+        .child({
+            let title = title.into();
             div()
+                .id("account-setup-heading")
+                .accessible(Role::Heading, title.clone())
+                .aria_level(1)
                 .type_style(TYPE_HEADLINE)
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(title.into()),
-        )
+                .child(title)
+        })
         .child(
             div()
                 .type_style(TYPE_BODY)
                 .text_color(rgb(colors.muted))
-                .child(detail.into()),
+                .child(readable("account-setup-detail", detail)),
         )
 }
 
@@ -166,7 +171,10 @@ fn error_line(
             .debug_selector(move || format!("account-setup-error-{field:?}"))
             .type_style(TYPE_CAPTION)
             .text_color(rgb(colors.danger))
-            .child(error.clone())
+            .child(readable(
+                SharedString::from(format!("account-setup-error-{field:?}")),
+                error.clone(),
+            ))
     })
 }
 
@@ -200,10 +208,14 @@ fn pair(wide: impl IntoElement, narrow: impl IntoElement, narrow_width: f32) -> 
 
 /// A muted caption.
 fn caption(text: impl Into<SharedString>, colors: &UiColors) -> gpui::Div {
+    let text = text.into();
     div()
         .type_style(TYPE_CAPTION)
         .text_color(rgb(colors.muted))
-        .child(text.into())
+        .child(readable(
+            SharedString::from(format!("account-setup-caption-{text}")),
+            text,
+        ))
 }
 
 /// A spinning loader icon.
@@ -775,8 +787,7 @@ impl AccountSetupView {
                     color.as_str()
                 )))
                 .debug_selector(move || format!("account-setup-colour-{}", color.as_str()))
-                .role(Role::RadioButton)
-                .aria_label(color.label())
+                .accessible(Role::RadioButton, color.label())
                 .aria_toggled(if selected {
                     gpui::Toggled::True
                 } else {
@@ -823,8 +834,7 @@ impl AccountSetupView {
             .child(
                 div()
                     .id("account-setup-colours")
-                    .role(Role::RadioGroup)
-                    .aria_label("Account colour")
+                    .accessible(Role::RadioGroup, "Account colour")
                     .flex()
                     .flex_wrap()
                     .gap(px(SPACE_3))

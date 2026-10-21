@@ -11,6 +11,7 @@ use gpui::{
     rgb,
 };
 
+use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::styles::{ICON_SIZE_SM, SPACE_2, TYPE_BODY, TypeStyleExt};
 use crate::widgets::{EllipsisExt, icon};
 
@@ -211,10 +212,10 @@ impl Render for Select {
                     .type_style(TYPE_BODY)
                     .text_color(rgb(text_color))
                     .focus_ring(&theme)
-                    .role(Role::ComboBox)
-                    .aria_label(self.label.clone())
+                    .accessible(Role::ComboBox, self.label.clone())
                     .aria_value(text.clone())
                     .aria_expanded(open)
+                    .a11y_flags(A11yFlags::disabled(disabled))
                     .map(|this| {
                         if disabled {
                             this.opacity(0.45)

@@ -12,6 +12,7 @@ use gpui::{
 use zmail_core::participants::sender_identity;
 
 use super::ReaderView;
+use crate::a11y::readable;
 use crate::components::{Button, Modal};
 use crate::styles::UiColors;
 
@@ -106,7 +107,7 @@ impl ReaderView {
                         .border_1()
                         .border_color(rgb(colors.border))
                         .text_sm()
-                        .child(source.text.clone()),
+                        .child(readable("reader-source-body", source.text.clone())),
                 )
                 .footer(
                     Button::new("reader-source-copy", "Copy")

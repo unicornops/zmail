@@ -29,6 +29,7 @@
 //! | `pane` | pane focus order and the focused-pane indicator |
 //! | `layout` | the responsive pane layout: breakpoints and pane widths |
 //! | `motion` | reduced motion: the system setting and the Settings override |
+//! | `a11y` | screen-reader roles and names (`AccessibleExt`), the AccessKit flags GPUI has no builder for, readable text |
 //! | `components` | the component set: `Button`, `Menu`, `Select`, `Modal`, `ToastHost`, `SplitHandle`, `TextInput`, … and the gallery |
 //! | `styles` | design tokens (type scale, spacing, density, `PlatformStyle`), `UiColors`, contrast helpers |
 //! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar, pane widths, density) |
@@ -49,6 +50,7 @@ use zmail_security::SecretStore;
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
+mod a11y;
 mod styles;
 use crate::styles::{WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_WIDTH};
 

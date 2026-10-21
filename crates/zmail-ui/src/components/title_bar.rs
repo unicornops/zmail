@@ -40,6 +40,7 @@ use gpui::{
     WindowButtonLayout, WindowControlArea, WindowControls, div, prelude::*, px, rgb,
 };
 
+use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::styles::{ICON_SIZE_SM, Platform};
 use crate::widgets::icon;
 
@@ -360,8 +361,8 @@ fn linux_window_controls(
                 .rounded_full()
                 .bg(rgb(fill))
                 .occlude()
-                .aria_label(label)
-                .role(gpui::Role::Button)
+                .accessible(gpui::Role::Button, label)
+                .a11y_flags(A11yFlags::disabled(!enabled))
                 .when(!enabled, |this| this.opacity(0.45))
                 .when(enabled, |this| {
                     this.cursor_pointer()
@@ -400,6 +401,7 @@ fn windows_caption_buttons(
     let buttons = [
         (
             "minimize",
+            "Minimize",
             "\u{e921}",
             WindowControlArea::Min,
             chrome.minimizable,
@@ -407,6 +409,7 @@ fn windows_caption_buttons(
         if chrome.maximized {
             (
                 "restore",
+                "Restore",
                 "\u{e923}",
                 WindowControlArea::Max,
                 chrome.resizable,
@@ -414,12 +417,13 @@ fn windows_caption_buttons(
         } else {
             (
                 "maximize",
+                "Maximize",
                 "\u{e922}",
                 WindowControlArea::Max,
                 chrome.resizable,
             )
         },
-        ("close", "\u{e8bb}", WindowControlArea::Close, true),
+        ("close", "Close", "\u{e8bb}", WindowControlArea::Close, true),
     ];
     // Windows' own close-button red, with white glyphs.
     let close_red: Rgba = rgb(0xC42B1C);
@@ -429,44 +433,62 @@ fn windows_caption_buttons(
         .flex_none()
         .self_stretch()
         .font_family(font)
-        .children(buttons.into_iter().map(move |(id, glyph, area, enabled)| {
-            let close = area == WindowControlArea::Close;
-            let (hover_bg, active_bg) = if close {
-                (close_red, close_red.opacity(0.9))
-            } else {
-                (
-                    rgb(theme.hover_tint(colors.background)),
-                    rgb(theme.active_tint(colors.background)),
-                )
-            };
-            div()
-                .id(id)
-                .debug_selector(move || format!("caption-{id}"))
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(WINDOWS_CAPTION_BUTTON_WIDTH))
-                .h_full()
-                .text_size(px(10.0))
-                .text_color(rgb(colors.foreground))
-                .occlude()
-                // The close button sits in the window's top-right corner.
-                .when(close, |this| this.rounded_tr(window_radius))
-                .when(!enabled, |this| this.opacity(0.45))
-                .when(enabled, |this| {
-                    this.hover(move |style| {
-                        let style = style.bg(hover_bg);
-                        if close {
-                            style.text_color(gpui::white())
-                        } else {
-                            style
-                        }
-                    })
-                    .active(move |style| style.bg(active_bg))
-                })
-                .window_control_area(area)
-                .child(glyph)
-        }))
+        .children(
+            buttons
+                .into_iter()
+                .map(move |(id, label, glyph, area, enabled)| {
+                    let close = area == WindowControlArea::Close;
+                    let (hover_bg, active_bg) = if close {
+                        (close_red, close_red.opacity(0.9))
+                    } else {
+                        (
+                            rgb(theme.hover_tint(colors.background)),
+                            rgb(theme.active_tint(colors.background)),
+                        )
+                    };
+                    div()
+                        .id(id)
+                        .debug_selector(move || format!("caption-{id}"))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(WINDOWS_CAPTION_BUTTON_WIDTH))
+                        .h_full()
+                        .text_size(px(10.0))
+                        .text_color(rgb(colors.foreground))
+                        .occlude()
+                        // The close button sits in the window's top-right corner.
+                        .when(close, |this| this.rounded_tr(window_radius))
+                        .when(!enabled, |this| this.opacity(0.45))
+                        .when(enabled, |this| {
+                            this.hover(move |style| {
+                                let style = style.bg(hover_bg);
+                                if close {
+                                    style.text_color(gpui::white())
+                                } else {
+                                    style
+                                }
+                            })
+                            .active(move |style| style.bg(active_bg))
+                        })
+                        .window_control_area(area)
+                        // Windows handles the pointer through the control area;
+                        // assistive technology presses the button through here.
+                        .accessible(gpui::Role::Button, label)
+                        .a11y_flags(A11yFlags::disabled(!enabled))
+                        .when(enabled, |this| {
+                            this.on_a11y_action(
+                                gpui::AccessibleAction::Click,
+                                move |_, window, _| match area {
+                                    WindowControlArea::Min => window.minimize_window(),
+                                    WindowControlArea::Max => window.zoom_window(),
+                                    _ => window.remove_window(),
+                                },
+                            )
+                        })
+                        .child(glyph)
+                }),
+        )
 }
 
 #[cfg(test)]

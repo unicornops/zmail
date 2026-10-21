@@ -20,12 +20,13 @@ use std::ops::RangeInclusive;
 
 use gpui::{
     AnyElement, Context, DismissEvent, Entity, FontWeight, IntoElement, Modifiers, Pixels, Point,
-    ScrollStrategy, Subscription, Window, div, prelude::*, rgb,
+    Role, ScrollStrategy, Subscription, Window, div, prelude::*, rgb,
 };
 use zmail_core::{MailboxSelection, MailboxSummary};
 
 use super::{MessageListEvent, MessageListView};
 use crate::ListMode;
+use crate::a11y::AccessibleExt;
 use crate::actions::{
     Archive, Cancel, Delete, ExtendSelectionDown, ExtendSelectionUp, MoveToMailbox, SelectAll,
     ToggleFlag, ToggleRead,
@@ -437,6 +438,13 @@ impl MessageListView {
             div()
                 .id("bulk-bar")
                 .debug_selector(|| "bulk-bar".into())
+                .accessible(
+                    Role::Toolbar,
+                    format!(
+                        "Actions for {} selected conversations",
+                        selection.thread_ids.len()
+                    ),
+                )
                 .flex()
                 .flex_none()
                 .items_center()

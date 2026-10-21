@@ -12,9 +12,11 @@ use gpui::{
     RenderOnce, Role, SharedString, Transformation, Window, div, percentage, prelude::*, px, rgb,
 };
 
+use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::styles::{ICON_SIZE_MD, ICON_SIZE_SM, TYPE_BODY, TYPE_CAPTION, TypeStyleExt};
 use crate::widgets::icon;
 
+use super::kbd::spoken_keystrokes;
 use super::theme::{ComponentTheme, FocusRingExt};
 use super::tooltip::TooltipExt;
 
@@ -130,6 +132,7 @@ pub(crate) struct Button {
     shortcut: Option<SharedString>,
     focus_handle: Option<FocusHandle>,
     tab_index: isize,
+    role: Role,
     on_click: Option<ClickHandler>,
 }
 
@@ -149,8 +152,16 @@ impl Button {
             shortcut: None,
             focus_handle: None,
             tab_index: 0,
+            role: Role::Button,
             on_click: None,
         }
+    }
+
+    /// Expose the button to screen readers as `role` instead of a button,
+    /// such as [`Role::RadioButton`] for one choice of a group.
+    pub(crate) fn role(mut self, role: Role) -> Self {
+        self.role = role;
+        self
     }
 
     /// Show the Lucide icon `name` before the label.
@@ -256,6 +267,7 @@ impl RenderOnce for Button {
                 tooltip,
                 shortcut: self.shortcut,
                 label: label.clone(),
+                role: self.role,
             },
         )
         .h(px(self.size.height(&theme)))
@@ -389,6 +401,7 @@ impl RenderOnce for IconButton {
                 tooltip: Some(self.label.clone()),
                 shortcut: self.shortcut,
                 label: self.label,
+                role: Role::Button,
             },
         )
         .size(px(size))
@@ -419,6 +432,7 @@ struct ButtonBase {
     tooltip: Option<SharedString>,
     shortcut: Option<SharedString>,
     label: SharedString,
+    role: Role,
 }
 
 fn button_base(
@@ -436,6 +450,7 @@ fn button_base(
         tooltip,
         shortcut,
         label,
+        role,
     } = base;
     let (hover, active) = (colors.hover, colors.active);
 
@@ -453,12 +468,22 @@ fn button_base(
             this.border_1().border_color(rgb(border))
         })
         .focus_ring(theme)
-        .role(Role::Button)
-        .aria_label(label)
-        .when(selected, |this| this.aria_toggled(gpui::Toggled::True))
-        .when_some(shortcut.clone(), |this, shortcut| {
-            this.aria_keyshortcuts(shortcut)
+        // A tooltip that says more than the label is its description.
+        .when_some(
+            tooltip.clone().filter(|tooltip| *tooltip != label),
+            |this, tooltip| this.aria_description(tooltip),
+        )
+        .accessible(role, label)
+        .map(|this| match (selected, role) {
+            (true, _) => this.aria_toggled(gpui::Toggled::True),
+            // A radio button says it is off, too.
+            (false, Role::RadioButton) => this.aria_toggled(gpui::Toggled::False),
+            (false, _) => this,
         })
+        .when_some(shortcut.as_ref(), |this, shortcut| {
+            this.aria_keyshortcuts(spoken_keystrokes(shortcut, theme.platform.platform))
+        })
+        .a11y_flags(A11yFlags::disabled(disabled))
         // A tracked handle carries its own tab settings (GPUI ignores the
         // element's `tab_index` for it), so set them on the handle.
         .when_some(focus_handle, |this, handle| {

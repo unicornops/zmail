@@ -34,6 +34,7 @@ use zmail_core::{DraftAttachment, DraftDetail, DraftState, DraftUpdate, Identity
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
+use crate::a11y::AccessibleExt;
 use crate::actions::{
     AddAttachment, RemoveAttachment, SaveDraft, SelectIdentity, Send, ShowBcc, ShowCc,
 };
@@ -709,6 +710,7 @@ impl Render for ComposeView {
             .id("compose")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .accessible(Role::Form, self.title(cx))
             .on_action(cx.listener(Self::send))
             .on_action(cx.listener(Self::save_draft))
             .on_action(cx.listener(Self::add_attachment))
@@ -862,6 +864,8 @@ impl ComposeView {
             })
             .when_some(compose.last_error_message.as_ref(), |this, error| {
                 this.child(status_banner(
+                    "compose-send-error",
+                    Role::Alert,
                     &format!("Last send error: {error}"),
                     "alert-circle",
                     colors.danger,
@@ -1081,11 +1085,10 @@ fn render_attachment_card(
                         .debug_selector(move || {
                             format!("compose-attachment-remove-{attachment_id}")
                         })
-                        .role(Role::Button)
-                        .aria_label(SharedString::from(format!(
-                            "Remove {}",
-                            attachment.filename
-                        )))
+                        .accessible(
+                            Role::Button,
+                            SharedString::from(format!("Remove {}", attachment.filename)),
+                        )
                         .flex()
                         .flex_none()
                         .items_center()

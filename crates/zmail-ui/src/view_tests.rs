@@ -29,6 +29,7 @@ use crate::pane::Pane;
 use crate::styles::{DETAIL_MIN_WIDTH, MESSAGE_LIST_WIDTH, SIDEBAR_WIDTH};
 use crate::{DetailMode, InitialView, ListMode, WorkspaceView};
 
+mod a11y;
 mod cheat_sheet;
 mod compose;
 mod gmail_keymap;

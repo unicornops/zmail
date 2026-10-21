@@ -24,7 +24,7 @@ pub(crate) struct SendingSettings {
 
 impl SendingSettings {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
-        let undo_send = cx.new(|cx| Select::new(Vec::<String>::new(), None, cx));
+        let undo_send = cx.new(|cx| Select::new(Vec::<String>::new(), None, cx).label("Undo Send"));
         let mut this = Self {
             undo_send,
             delays: Vec::new(),

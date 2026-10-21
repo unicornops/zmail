@@ -42,6 +42,7 @@ use gpui::{
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 use super::{ButtonSize, IconButton};
+use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::styles::{ICON_SIZE_SM, TOOLBAR_BUTTON_HEIGHT, UiColors};
 use crate::widgets::icon;
 
@@ -1639,14 +1640,20 @@ impl Render for TextInput {
                 "text-input".into(),
                 cx.entity_id().as_u64(),
             ))
-            .role(role)
-            .when_some(self.label.clone(), |this, label| this.aria_label(label))
+            // A field without a visible label is named by its placeholder.
+            .accessible(
+                role,
+                self.label
+                    .clone()
+                    .unwrap_or_else(|| self.placeholder.clone()),
+            )
             .when(!self.placeholder.is_empty(), |this| {
                 this.aria_placeholder(self.placeholder.clone())
             })
             .when(!self.masked, |this| {
                 this.aria_value(SharedString::from(self.content.clone()))
             })
+            .a11y_flags(A11yFlags::disabled(self.disabled))
             .key_context(KEY_CONTEXT)
             .when(!self.disabled, |this| {
                 this.track_focus(&self.focus_handle)

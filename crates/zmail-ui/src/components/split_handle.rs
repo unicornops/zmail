@@ -21,9 +21,12 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, CursorStyle, DragMoveEvent, ElementId, IntoElement, KeyDownEvent, Orientation,
-    Render, RenderOnce, Role, Window, div, prelude::*, px, rgb,
+    AccessibleAction, App, Context, CursorStyle, DragMoveEvent, ElementId, IntoElement,
+    KeyDownEvent, Orientation, Render, RenderOnce, Role, SharedString, Window, div, prelude::*, px,
+    rgb,
 };
+
+use crate::a11y::AccessibleExt;
 
 use super::theme::{ComponentTheme, FocusRingExt};
 
@@ -86,6 +89,7 @@ pub(crate) struct SplitHandle {
     max: f32,
     default_width: Option<f32>,
     side: PaneSide,
+    label: SharedString,
     on_resize: Option<ResizeHandler>,
 }
 
@@ -99,8 +103,16 @@ impl SplitHandle {
             max: f32::MAX,
             default_width: None,
             side: PaneSide::Leading,
+            label: "Resize pane".into(),
             on_resize: None,
         }
+    }
+
+    /// The accessible name, such as "Resize sidebar" (default "Resize
+    /// pane").
+    pub(crate) fn label(mut self, label: impl Into<SharedString>) -> Self {
+        self.label = label.into();
+        self
     }
 
     /// The narrowest and widest the pane may get.
@@ -143,6 +155,7 @@ impl RenderOnce for SplitHandle {
             max,
             default_width,
             side,
+            label,
             on_resize,
         } = self;
         let emit = move |new: f32, window: &mut Window, cx: &mut App| {
@@ -156,7 +169,9 @@ impl RenderOnce for SplitHandle {
         let drag_id = id.clone();
         let on_move = emit.clone();
         let on_key = emit.clone();
-        let on_double = emit;
+        let on_double = emit.clone();
+        let on_increment = emit.clone();
+        let on_decrement = emit;
         let accent = colors.focus_ring;
 
         div()
@@ -173,12 +188,19 @@ impl RenderOnce for SplitHandle {
             .cursor(CursorStyle::ResizeColumn)
             .tab_index(0)
             .focus_ring(&theme)
-            .role(Role::Splitter)
-            .aria_label("Resize pane")
+            .accessible(Role::Splitter, label)
             .aria_orientation(Orientation::Vertical)
             .aria_numeric_value(f64::from(width))
             .aria_min_numeric_value(f64::from(min))
             .aria_max_numeric_value(f64::from(max.max(min)))
+            .aria_numeric_value_step(f64::from(KEY_STEP))
+            // Assistive technology widens and narrows the pane itself.
+            .on_a11y_action(AccessibleAction::Increment, move |_, window, cx| {
+                on_increment(clamp_width(width + KEY_STEP, min, max), window, cx);
+            })
+            .on_a11y_action(AccessibleAction::Decrement, move |_, window, cx| {
+                on_decrement(clamp_width(width - KEY_STEP, min, max), window, cx);
+            })
             .on_drag(SplitDrag { id: id.clone() }, |_, _, _, cx| {
                 cx.new(|_| SplitDragPreview)
             })

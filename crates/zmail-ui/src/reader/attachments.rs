@@ -6,10 +6,11 @@
 //! workspace saves the file and warns before opening a program or script
 //! (see `crate::attachments`).
 
-use gpui::{AnyElement, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb};
+use gpui::{AnyElement, FontWeight, IntoElement, Role, SharedString, div, prelude::*, px, rgb};
 use zmail_core::{ReceivedAttachment, ThreadMessage};
 use zmail_security::attachment_safety::is_executable_or_script;
 
+use crate::a11y::AccessibleExt;
 use crate::actions::{OpenAttachment, SaveAttachmentAs};
 use crate::components::{ButtonSize, IconButton};
 use crate::styles::{
@@ -53,6 +54,15 @@ fn attachment_card(attachment: &ReceivedAttachment, colors: &UiColors) -> impl I
     div()
         .id(("attachment-card", attachment_id as u64))
         .debug_selector(|| format!("attachment-{attachment_id}"))
+        // Names the card's Open and Save As… buttons for a screen reader.
+        .accessible(
+            Role::Group,
+            format!(
+                "Attachment {name}, {}, {}",
+                kind.label,
+                format_size(attachment.size_bytes)
+            ),
+        )
         .flex()
         .items_center()
         .gap(px(SPACE_3))

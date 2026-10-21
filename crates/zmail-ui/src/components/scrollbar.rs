@@ -21,8 +21,8 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 use gpui::{
     App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior,
     InspectorElementId, IntoElement, LayoutId, Length, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Position, ScrollHandle, Size, Style, Task, UniformListScrollHandle,
-    Window, fill, point, px, rgb, size,
+    MouseUpEvent, Orientation, Pixels, Position, Role, ScrollHandle, Size, Style, Task,
+    UniformListScrollHandle, Window, accesskit, fill, point, px, rgb, size,
 };
 
 use crate::styles::{Platform, ScrollbarBehavior, contrast::mix};
@@ -92,6 +92,15 @@ struct ScrollbarState {
     hide_task: Option<Task<()>>,
 }
 
+/// How far through `max_scroll` a view scrolled `scrolled` pixels is, as
+/// a whole percentage; 0 when nothing scrolls.
+pub(crate) fn scrolled_percent(scrolled: f32, max_scroll: f32) -> f64 {
+    if max_scroll <= 0.0 {
+        return 0.0;
+    }
+    f64::from((scrolled / max_scroll).clamp(0.0, 1.0) * 100.0).round()
+}
+
 /// A vertical overlay scrollbar. Place it as the last child of a
 /// `.relative()` wrapper around the scrolling element.
 pub(crate) struct Scrollbar {
@@ -147,6 +156,22 @@ impl Element for Scrollbar {
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
         None
+    }
+
+    fn a11y_role(&self) -> Option<Role> {
+        Some(Role::ScrollBar)
+    }
+
+    /// How far down the view is scrolled, as a percentage. Screen readers
+    /// scroll the view itself; this only says where it is.
+    fn write_a11y_info(&self, node: &mut accesskit::Node) {
+        node.set_orientation(Orientation::Vertical);
+        node.set_min_numeric_value(0.0);
+        node.set_max_numeric_value(100.0);
+        node.set_numeric_value(scrolled_percent(
+            -f32::from(self.handle.offset().y),
+            f32::from(self.handle.max_offset().y),
+        ));
     }
 
     fn request_layout(
@@ -370,6 +395,15 @@ impl Element for Scrollbar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_scroll_position_reads_as_a_percentage() {
+        assert_eq!(scrolled_percent(0.0, 0.0), 0.0);
+        assert_eq!(scrolled_percent(0.0, 300.0), 0.0);
+        assert_eq!(scrolled_percent(100.0, 300.0), 33.0);
+        assert_eq!(scrolled_percent(300.0, 300.0), 100.0);
+        assert_eq!(scrolled_percent(400.0, 300.0), 100.0);
+    }
 
     #[test]
     fn nothing_to_scroll_means_no_thumb() {

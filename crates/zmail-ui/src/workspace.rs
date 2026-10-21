@@ -15,8 +15,8 @@ use std::{collections::HashSet, time::Duration};
 use anyhow::{Context as _, Result, bail};
 use gpui::{
     AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight,
-    IntoElement, MouseButton, Render, StyleRefinement, Styled, Window, WindowAppearance, div, hsla,
-    prelude::*, px, rgb,
+    IntoElement, MouseButton, Render, Role, StyleRefinement, Styled, Window, WindowAppearance, div,
+    hsla, prelude::*, px, rgb,
 };
 use std::sync::Arc;
 use zmail_core::{
@@ -33,6 +33,7 @@ use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
 use super::{DetailMode, InitialView, ListMode, WorkspaceView};
+use crate::a11y::AccessibleExt;
 use crate::account_setup::{
     AccountSetupEvent, AccountSetupServices, AccountSetupView, open_add_account,
     open_add_account_with_notice,
@@ -2873,6 +2874,7 @@ impl WorkspaceView {
                 this.child(self.sidebar.clone().cached(fixed_pane_style(width)))
                     .child(
                         SplitHandle::new("sidebar-split", width)
+                            .label("Resize sidebar")
                             .range(SIDEBAR_MIN_WIDTH, layout.sidebar_max)
                             .default_width(SIDEBAR_WIDTH)
                             .on_resize(cx.listener(|this, width: &f32, _, cx| {
@@ -2903,6 +2905,7 @@ impl WorkspaceView {
                 )
                 .child(
                     SplitHandle::new("list-split", layout.list)
+                        .label("Resize message list")
                         .range(MESSAGE_LIST_MIN_WIDTH, layout.list_max)
                         .default_width(MESSAGE_LIST_WIDTH)
                         .on_resize(cx.listener(|this, width: &f32, _, cx| {
@@ -3064,6 +3067,8 @@ impl Render for WorkspaceView {
                     // ---- Status / error banners at the bottom ----------------
                     .when_some(self.status_message.clone(), |this, message| {
                         this.child(status_banner(
+                            "status-message",
+                            Role::Status,
                             &message,
                             "check-circle",
                             colors.success,
@@ -3074,6 +3079,8 @@ impl Render for WorkspaceView {
                     .when_some(self.store_error.clone(), |this, error| {
                         this.child(
                             status_banner(
+                                "store-error",
+                                Role::Alert,
                                 &error,
                                 "alert-circle",
                                 colors.danger,
@@ -3083,6 +3090,8 @@ impl Render for WorkspaceView {
                             .child(
                                 div()
                                     .id("dismiss-error")
+                                    .accessible(Role::Button, "Dismiss error")
+                                    .tab_index(0)
                                     .flex()
                                     .flex_none()
                                     .items_center()

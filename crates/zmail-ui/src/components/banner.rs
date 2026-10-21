@@ -16,6 +16,7 @@ use gpui::{
     SharedString, Window, div, prelude::*, px, rgb,
 };
 
+use crate::a11y::AccessibleExt;
 use crate::styles::{
     ICON_SIZE_MD, ICON_SIZE_SM, RADIUS_MD, SPACE_1, SPACE_2, SPACE_3, STATUS_BANNER_STRIP_WIDTH,
     TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TypeStyleExt, UiColors,
@@ -129,10 +130,14 @@ impl RenderOnce for Banner {
             })
         });
         let showing_details = details_open.as_ref().is_some_and(|state| *state.read(cx));
-        let label = match &self.title {
-            Some(title) => SharedString::from(format!("{title}. {}", self.message)),
-            None => self.message.clone(),
-        };
+        let label = accessible_label(self.tone, self.title.as_deref(), &self.message);
+        let details_text = showing_details.then(|| {
+            self.details
+                .iter()
+                .map(|(label, value)| format!("{label}: {value}"))
+                .collect::<Vec<_>>()
+                .join(". ")
+        });
         let toggle_id = ElementId::from((self.id.clone(), "toggle-details"));
         // Test hooks: `{id}`, `{id}-details` and `{id}-toggle-details`.
         let selector = self.id.to_string();
@@ -142,8 +147,8 @@ impl RenderOnce for Banner {
         div()
             .id(self.id)
             .debug_selector(|| root_selector)
-            .role(Role::Status)
-            .aria_label(label)
+            .accessible(Role::Status, label)
+            .when_some(details_text, |this, details| this.aria_description(details))
             .flex()
             .w_full()
             .min_w_0()
@@ -245,6 +250,22 @@ impl RenderOnce for Banner {
     }
 }
 
+/// What a screen reader reads for a banner: the tone, when it is a
+/// warning, then the title and the message. The colour and icon say the
+/// tone to everyone else.
+pub(crate) fn accessible_label(tone: BannerTone, title: Option<&str>, message: &str) -> String {
+    let tone = match tone {
+        BannerTone::Neutral | BannerTone::Info => None,
+        BannerTone::Caution => Some("Caution"),
+        BannerTone::Danger => Some("Warning"),
+    };
+    tone.into_iter()
+        .chain(title)
+        .chain(Some(message))
+        .collect::<Vec<_>>()
+        .join(". ")
+}
+
 /// The evidence lines: a muted label over each value, so
 /// long addresses wrap instead of being cut off.
 fn render_details(details: &[(SharedString, SharedString)], colors: &UiColors) -> gpui::Div {
@@ -281,6 +302,26 @@ mod tests {
 
     use super::*;
     use crate::styles::contrast::{MIN_NON_TEXT_CONTRAST, MIN_TEXT_CONTRAST, contrast_ratio};
+
+    #[test]
+    fn warnings_say_their_tone_to_screen_readers() {
+        assert_eq!(
+            accessible_label(BannerTone::Neutral, None, "Remote content is blocked."),
+            "Remote content is blocked."
+        );
+        assert_eq!(
+            accessible_label(
+                BannerTone::Danger,
+                Some("This might not be who it seems"),
+                "The sender's domain looks like paypal.com."
+            ),
+            "Warning. This might not be who it seems. The sender's domain looks like paypal.com."
+        );
+        assert_eq!(
+            accessible_label(BannerTone::Caution, None, "Replies go elsewhere."),
+            "Caution. Replies go elsewhere."
+        );
+    }
 
     #[test]
     fn every_tone_has_its_own_icon() {

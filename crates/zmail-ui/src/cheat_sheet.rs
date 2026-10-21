@@ -26,8 +26,9 @@ use gpui::{
 use zmail_core::preferences::KeymapName;
 
 use crate::WorkspaceView;
+use crate::a11y::AccessibleExt;
 use crate::actions::ShowKeyboardShortcuts;
-use crate::components::kbd::keystrokes_label;
+use crate::components::kbd::spoken_keystrokes;
 use crate::components::{Button, ComponentTheme, Kbd, Modal};
 use crate::keymap::active_keymap;
 use crate::menus::{MenuModel, binding_label};
@@ -261,8 +262,7 @@ impl WorkspaceView {
             .map(|(index, group)| {
                 div()
                     .id(("keyboard-shortcuts-group", index))
-                    .role(Role::List)
-                    .aria_label(SharedString::from(group.name.clone()))
+                    .accessible(Role::List, SharedString::from(group.name.clone()))
                     .flex()
                     .flex_col()
                     .gap(px(SPACE_1))
@@ -275,23 +275,23 @@ impl WorkspaceView {
                             .child(group.name.clone()),
                     )
                     .children(group.rows.iter().enumerate().map(move |(row_index, row)| {
-                        // Spoken as the key caps read ("⌘N", "Ctrl+N").
+                        // Spelled out ("Command+N", "Ctrl+N"): screen
+                        // readers do not all read ⌘ and ↩.
                         let keys = row
                             .keys
                             .iter()
-                            .map(|key| keystrokes_label(key, platform))
+                            .map(|key| spoken_keystrokes(key, platform))
                             .collect::<Vec<_>>()
-                            .join(", ");
+                            .join(" or ");
                         div()
                             .id(SharedString::from(format!(
                                 "keyboard-shortcut-{index}-{row_index}"
                             )))
-                            .role(Role::ListItem)
+                            .accessible(Role::ListItem, format!("{}: {keys}", row.label))
                             .flex()
                             .items_center()
                             .gap(px(SPACE_2))
                             .type_style(TYPE_BODY)
-                            .aria_label(SharedString::from(format!("{}: {keys}", row.label)))
                             .child(div().flex_1().min_w_0().ellipsis().child(row.label.clone()))
                             .child(
                                 div()

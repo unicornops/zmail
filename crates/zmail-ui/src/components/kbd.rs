@@ -5,6 +5,9 @@
 //! platform's primary modifier: Cmd on macOS, Ctrl elsewhere. macOS shows
 //! symbols in Apple's modifier order (`⌃⌥⇧⌘K`); Windows and Linux spell
 //! the names out and join them with `+` (`Ctrl+Shift+K`).
+//!
+//! A key cap has no accessibility node: the control or list item it
+//! belongs to carries the shortcut, spelled out by [`spoken_keystrokes`].
 
 use gpui::{
     App, FontWeight, IntoElement, RenderOnce, SharedString, Window, div, prelude::*, px, rgb,
@@ -78,6 +81,82 @@ pub(crate) fn keystrokes_label(keystrokes: &str, platform: Platform) -> String {
         .map(|keystroke| keystroke_label(keystroke, platform))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Spell a whole key sequence out in words for a screen reader:
+/// "Shift+Command+K" on macOS, "Ctrl+Shift+K" elsewhere, and
+/// "G, then I" for a two-key sequence. Symbols such as ⌘ and ↩ read
+/// inconsistently across screen readers, so none are used.
+pub(crate) fn spoken_keystrokes(keystrokes: &str, platform: Platform) -> String {
+    keystrokes
+        .split_whitespace()
+        .map(|keystroke| spoken_keystroke(keystroke, platform))
+        .collect::<Vec<_>>()
+        .join(", then ")
+}
+
+/// Spell a single keystroke out in words.
+fn spoken_keystroke(keystroke: &str, platform: Platform) -> String {
+    let (modifiers, key) = parse_keystroke(keystroke, platform);
+    let mac = platform == Platform::MacOs;
+    let platform_key = match platform {
+        Platform::MacOs => "Command",
+        Platform::Windows => "Windows",
+        Platform::Linux => "Super",
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for (on, name) in [
+        (modifiers.control, if mac { "Control" } else { "Ctrl" }),
+        (modifiers.alt, if mac { "Option" } else { "Alt" }),
+        (modifiers.shift, "Shift"),
+        (modifiers.platform, platform_key),
+        (modifiers.function, "Fn"),
+    ] {
+        if on {
+            parts.push(name.to_owned());
+        }
+    }
+    parts.push(spoken_key_name(key, platform));
+    parts.join("+")
+}
+
+/// The spoken name of a key.
+fn spoken_key_name(key: &str, platform: Platform) -> String {
+    let mac = platform == Platform::MacOs;
+    let named = match key.to_ascii_lowercase().as_str() {
+        "enter" | "return" => Some(if mac { "Return" } else { "Enter" }),
+        // The Mac keyboard calls Backspace "Delete".
+        "backspace" => Some(if mac { "Delete" } else { "Backspace" }),
+        "delete" => Some(if mac { "Forward Delete" } else { "Delete" }),
+        "escape" | "esc" => Some("Escape"),
+        "tab" => Some("Tab"),
+        "space" => Some("Space"),
+        "up" => Some("Up Arrow"),
+        "down" => Some("Down Arrow"),
+        "left" => Some("Left Arrow"),
+        "right" => Some("Right Arrow"),
+        "pageup" => Some("Page Up"),
+        "pagedown" => Some("Page Down"),
+        "home" => Some("Home"),
+        "end" => Some("End"),
+        "insert" => Some("Insert"),
+        "-" => Some("Minus"),
+        "=" => Some("Equals"),
+        "," => Some("Comma"),
+        "." => Some("Period"),
+        "/" => Some("Slash"),
+        "\\" => Some("Backslash"),
+        "?" => Some("Question Mark"),
+        "#" => Some("Number Sign"),
+        "[" => Some("Left Bracket"),
+        "]" => Some("Right Bracket"),
+        _ => None,
+    };
+    match named {
+        Some(named) => named.to_owned(),
+        // Letters, digits and function keys read fine as drawn.
+        None => key_name(key, Platform::Linux),
+    }
 }
 
 /// Label a single keystroke (`"secondary-shift-k"`) for `platform`.
@@ -272,6 +351,27 @@ mod tests {
             "Ctrl+K Ctrl+S"
         );
         assert_eq!(keystrokes_label("secondary-k secondary-s", Mac), "⌘K ⌘S");
+    }
+
+    #[test]
+    fn spoken_shortcuts_spell_out_modifiers_and_keys() {
+        // Apple order on macOS, as its menus write it.
+        assert_eq!(
+            spoken_keystrokes("secondary-shift-k", Mac),
+            "Shift+Command+K"
+        );
+        assert_eq!(
+            spoken_keystrokes("secondary-shift-k", Linux),
+            "Ctrl+Shift+K"
+        );
+        assert_eq!(spoken_keystrokes("alt-up", Mac), "Option+Up Arrow");
+        assert_eq!(spoken_keystrokes("super-l", Windows), "Windows+L");
+        assert_eq!(spoken_keystrokes("secondary-enter", Mac), "Command+Return");
+        assert_eq!(spoken_keystrokes("backspace", Mac), "Delete");
+        assert_eq!(spoken_keystrokes("shift-/", Linux), "Shift+Slash");
+        assert_eq!(spoken_keystrokes("shift-3", Linux), "Shift+3");
+        assert_eq!(spoken_keystrokes("g i", Linux), "G, then I");
+        assert_eq!(spoken_keystrokes("f5", Windows), "F5");
     }
 
     /// The rendered cap uses the platform from the active theme.
