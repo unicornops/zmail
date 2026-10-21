@@ -26,7 +26,7 @@ use gpui::{
 
 use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::styles::{
-    ICON_SIZE_SM, RADIUS_SM, SPACE_1, SPACE_2, TYPE_BODY, TYPE_CAPTION, TypeStyleExt,
+    ICON_SIZE_SM, RADIUS_SM, SPACE_1, SPACE_2, TYPE_BODY, TYPE_CAPTION, TextScale, TypeStyleExt,
 };
 use crate::widgets::{EllipsisExt, icon};
 
@@ -298,7 +298,7 @@ impl Menu {
             .flex()
             .items_center()
             .gap(px(SPACE_2))
-            .h(px(MENU_ITEM_HEIGHT))
+            .h(TextScale::get(cx).fit(MENU_ITEM_HEIGHT, TYPE_BODY))
             .px(px(SPACE_2))
             .rounded(px(RADIUS_SM))
             .type_style(TYPE_BODY)

@@ -42,6 +42,7 @@ mod reader_attachments;
 mod reader_safety;
 mod search;
 mod settings;
+mod text_scale;
 
 /// What the store holds when the window opens.
 #[derive(Clone, Copy, PartialEq, Eq)]

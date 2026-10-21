@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::a11y::{A11yFlags, AccessibleExt};
-use crate::styles::{ICON_SIZE_SM, SPACE_2, TYPE_BODY, TypeStyleExt};
+use crate::styles::{ICON_SIZE_SM, SPACE_2, TYPE_BODY, TextScale, TypeStyleExt, rems_from_px};
 use crate::widgets::{EllipsisExt, icon};
 
 use super::actions::{SELECT_CONTEXT, SelectNext, SelectPrevious};
@@ -85,7 +85,8 @@ impl Select {
         self
     }
 
-    /// A fixed trigger width.
+    /// A fixed trigger width at the default text size; it grows with the
+    /// text size.
     pub(crate) fn width(mut self, width: Pixels) -> Self {
         self.width = Some(width);
         self
@@ -193,7 +194,9 @@ impl Render for Select {
         div()
             .relative()
             .flex_none()
-            .when_some(self.width, |this, width| this.w(width))
+            .when_some(self.width, |this, width| {
+                this.w(rems_from_px(f32::from(width)))
+            })
             .child(
                 div()
                     .id("select-trigger")
@@ -203,7 +206,7 @@ impl Render for Select {
                     .items_center()
                     .gap(px(SPACE_2))
                     .w_full()
-                    .h(px(theme.platform.control_height))
+                    .h(TextScale::get(cx).fit(theme.platform.control_height, TYPE_BODY))
                     .px(px(10.0))
                     .rounded(px(theme.platform.control_radius))
                     .bg(rgb(fill))

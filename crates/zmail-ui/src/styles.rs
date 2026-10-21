@@ -38,8 +38,8 @@ pub use platform::{
 };
 #[allow(unused_imports)]
 pub use typography::{
-    TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TYPE_HEADLINE, TYPE_SCALE, TYPE_TITLE, TypeStyle,
-    TypeStyleExt,
+    BASE_REM_PX, TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TYPE_HEADLINE, TYPE_SCALE, TYPE_TITLE,
+    TextScale, TypeStyle, TypeStyleExt, rems_from_px,
 };
 
 use zmail_core::{ThemeAppearance, ThemeSummary};

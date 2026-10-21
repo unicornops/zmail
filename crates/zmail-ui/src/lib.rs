@@ -487,6 +487,9 @@ struct WorkspaceView {
     /// The running read of the system's reduce-motion setting; a newer
     /// read replaces it.
     system_motion_read: gpui::Task<()>,
+    /// Text size in percent (persisted); every window's rem size follows
+    /// it.
+    text_size: u16,
     /// The user's sidebar width (persisted); the layout clamps it to
     /// what the window fits.
     sidebar_width: f32,

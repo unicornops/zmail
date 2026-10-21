@@ -40,7 +40,7 @@ use crate::search::{RowMatches, SearchHighlighter};
 use crate::styles::{
     DensityTokens, ICON_SIZE_SM, ROW_PREVIEW_LINE_HEIGHT, ROW_SENDER_LINE_HEIGHT,
     ROW_TITLE_LINE_HEIGHT, TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TypeStyleExt,
-    UNREAD_INDICATOR_SIZE, UiColors,
+    UNREAD_INDICATOR_SIZE, UiColors, rems_from_px,
 };
 use crate::widgets::{EllipsisExt, HoverExt, account_dot, icon};
 
@@ -522,7 +522,9 @@ fn comfortable_row(
         .left(px(
             -(density.message_row_padding_x + UNREAD_INDICATOR_SIZE) / 2.0
         ))
-        .top(px((ROW_SENDER_LINE_HEIGHT - UNREAD_INDICATOR_SIZE) / 2.0));
+        .top(px((density.text(ROW_SENDER_LINE_HEIGHT)
+            - UNREAD_INDICATOR_SIZE)
+            / 2.0));
 
     div()
         .relative()
@@ -550,19 +552,19 @@ fn comfortable_row(
                 .flex_col()
                 .gap(px(density.message_row_line_gap))
                 .child(
-                    line(ROW_SENDER_LINE_HEIGHT)
+                    line(density.text(ROW_SENDER_LINE_HEIGHT))
                         .child(sender(&row, colors).flex_1())
                         .children(thread_count(&row))
                         .child(trailing(&row, quick_actions, colors)),
                 )
                 .child(
-                    line(ROW_TITLE_LINE_HEIGHT)
+                    line(density.text(ROW_TITLE_LINE_HEIGHT))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .type_style(TYPE_BODY)
-                                .line_height(px(ROW_TITLE_LINE_HEIGHT))
+                                .line_height(rems_from_px(ROW_TITLE_LINE_HEIGHT))
                                 .ellipsis()
                                 .child(highlighted(
                                     &row.subject,
@@ -576,9 +578,9 @@ fn comfortable_row(
                 .child(
                     div()
                         .w_full()
-                        .h(px(ROW_PREVIEW_LINE_HEIGHT))
+                        .h(rems_from_px(ROW_PREVIEW_LINE_HEIGHT))
                         .type_style(TYPE_BODY)
-                        .line_height(px(ROW_PREVIEW_LINE_HEIGHT))
+                        .line_height(rems_from_px(ROW_PREVIEW_LINE_HEIGHT))
                         .text_color(rgb(snippet_color(&row, colors)))
                         .ellipsis()
                         .child(highlighted(
@@ -725,7 +727,7 @@ fn sender(row: &MessageRow, colors: &UiColors) -> gpui::Div {
         } else {
             TYPE_BODY
         })
-        .line_height(px(ROW_SENDER_LINE_HEIGHT))
+        .line_height(rems_from_px(ROW_SENDER_LINE_HEIGHT))
         .text_color(rgb(colors.foreground))
         .ellipsis()
         .child(row.sender.clone())

@@ -2,7 +2,7 @@
 //! skeleton rows while an account syncs for the first time, and empty
 //! states with one action each.
 
-use gpui::{AnyElement, IntoElement, SharedString, div, prelude::*};
+use gpui::{AnyElement, App, IntoElement, SharedString, div, prelude::*};
 use zmail_core::{MailboxRole, MailboxSelection, VirtualMailbox};
 
 use super::MessageListView;
@@ -22,8 +22,8 @@ const SKELETON_ROWS: usize = 12;
 impl MessageListView {
     /// Grey placeholder rows in the list's density while the account's
     /// first sync fills the mailbox.
-    pub(super) fn render_skeleton(&self) -> AnyElement {
-        let density = self.density_tokens();
+    pub(super) fn render_skeleton(&self, cx: &App) -> AnyElement {
+        let density = self.density_tokens(cx);
         div()
             .flex_1()
             .overflow_hidden()

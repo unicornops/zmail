@@ -12,7 +12,7 @@
 //! A click anywhere else on the header collapses the message.
 
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, Role, SharedString, div, prelude::*, px, rgb,
+    AnyElement, Context, FontWeight, IntoElement, Role, SharedString, div, prelude::*, rgb,
 };
 use zmail_core::{
     ThreadMessage,
@@ -26,7 +26,7 @@ use super::popover::PopoverAnchor;
 use crate::a11y::{AccessibleExt, readable};
 use crate::actions::ReplyToMessage;
 use crate::components::{Avatar, ButtonSize, IconButton};
-use crate::styles::{ICON_SIZE_SM, UiColors};
+use crate::styles::{ICON_SIZE_SM, UiColors, rems_from_px};
 use crate::tooltip::text_tooltip;
 use crate::widgets::{EllipsisExt, icon};
 
@@ -249,7 +249,7 @@ fn detail_line(label: &str, value: &str, colors: &UiColors) -> gpui::Div {
         .child(
             div()
                 .flex_none()
-                .w(px(40.))
+                .w(rems_from_px(40.))
                 .text_color(rgb(colors.muted))
                 .child(readable(
                     SharedString::from(format!("detail-label-{label}")),

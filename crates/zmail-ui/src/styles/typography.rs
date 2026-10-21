@@ -2,7 +2,13 @@
 //!
 //! Sizes and line heights are in `rem`, so the whole UI scales with the
 //! window's rem size (`Window::set_rem_size`, 16px by default). That is
-//! the single knob for honouring the operating system's text-size setting.
+//! the single knob for the text size (Settings → Appearance, see
+//! [`TextScale`]): every window frame sets its rem size from it.
+//!
+//! Anything that has to grow with its text (a row's height, a control's
+//! height, a dialog's width) is sized with [`rems_from_px`], which takes
+//! the size in pixels at the default text size. Spacing, borders and
+//! icons stay in pixels.
 //!
 //! Apply a style with [`TypeStyleExt::type_style`]:
 //!
@@ -15,7 +21,53 @@
 //! (popovers and menus included) inherits it. That is the system UI font on
 //! macOS and Windows and the bundled Inter on Linux (see `crate::fonts`).
 
-use gpui::{FontWeight, Styled, rems};
+use gpui::{App, FontWeight, Global, Pixels, Rems, Styled, px, rems};
+
+/// The rem size at the default text size (GPUI's default).
+pub const BASE_REM_PX: f32 = 16.0;
+
+/// A size designed in pixels at the default text size, in rems, so that it
+/// grows with the text size.
+pub fn rems_from_px(pixels: f32) -> Rems {
+    rems(pixels / BASE_REM_PX)
+}
+
+/// The text size as a factor of the default (1.0 to 2.0). The view that
+/// owns the main window installs it from the saved preferences, and
+/// `components::window_frame` sets every window's rem size from it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextScale(pub f32);
+
+impl Global for TextScale {}
+
+impl TextScale {
+    /// The scale for a text size in percent.
+    pub fn from_percent(percent: u16) -> Self {
+        Self(f32::from(percent) / 100.0)
+    }
+
+    /// The active scale; 1.0 until one is installed.
+    pub fn get(cx: &App) -> Self {
+        cx.try_global::<Self>().copied().unwrap_or(Self(1.0))
+    }
+
+    /// The rem size for this scale.
+    pub fn rem_size(self) -> Pixels {
+        px(BASE_REM_PX * self.0)
+    }
+
+    /// `pixels` at the default text size, at this scale.
+    pub fn scale(self, pixels: f32) -> f32 {
+        pixels * self.0
+    }
+
+    /// The height of a control `pixels` tall at the default text size
+    /// that holds one line of `style`: it grows by as much as the line
+    /// does, so its padding stays the same.
+    pub fn fit(self, pixels: f32, style: TypeStyle) -> Pixels {
+        px(pixels + style.line_height_px(BASE_REM_PX) * (self.0 - 1.0))
+    }
+}
 
 /// One step of the type scale.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -119,5 +171,15 @@ mod tests {
         assert_eq!(TYPE_BODY.size_px(16.0), 14.0);
         assert_eq!(TYPE_BODY.size_px(20.0), 17.5);
         assert_eq!(TYPE_CAPTION.line_height_px(16.0), 16.0);
+    }
+
+    #[test]
+    fn text_scales_set_the_rem_size() {
+        assert_eq!(TextScale::from_percent(100).rem_size(), px(16.0));
+        assert_eq!(TextScale::from_percent(150).rem_size(), px(24.0));
+        assert_eq!(TextScale::from_percent(200).rem_size(), px(32.0));
+        assert_eq!(rems_from_px(24.0), rems(1.5));
+        assert_eq!(TextScale::from_percent(200).fit(32.0, TYPE_BODY), px(52.0));
+        assert_eq!(TextScale::from_percent(100).fit(32.0, TYPE_BODY), px(32.0));
     }
 }

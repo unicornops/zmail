@@ -45,7 +45,10 @@ HARNESS_STARTED=0
 # is the palette open over it; `cheat-sheet` is the keyboard shortcuts with
 # the Gmail keymap on. The compose views are
 # captured from their compose window (see window_title_for), at its default
-# 760x680, and the settings views from the Settings window.
+# 760x680, and the settings views from the Settings window. A VIEW of
+# `VIEW@SIZE` opens that view at a text size in percent (Settings →
+# Appearance → Text size); the main views are captured at 150% and 200% in
+# a 1280x800 window.
 MATRIX=(
   "empty-dark empty dark 1440 920"
   "empty-light empty light 1440 920"
@@ -144,6 +147,24 @@ MATRIX=(
   "settings-sending-light settings-sending light 820 600"
   "settings-about-dark settings-about dark 820 900"
   "settings-about-light settings-about light 820 900"
+  "inbox-dark-150 inbox@150 dark 1280 800"
+  "reader-dark-150 reader@150 dark 1280 800"
+  "compose-dark-150 compose@150 dark 760 680"
+  "onboarding-credentials-dark-150 onboarding-credentials@150 dark 1280 800"
+  "command-palette-dark-150 command-palette@150 dark 1280 800"
+  "settings-appearance-dark-150 settings-appearance@150 dark 1280 800"
+  "inbox-dark-200 inbox@200 dark 1280 800"
+  "inbox-compact-dark-200 inbox-compact@200 dark 1280 800"
+  "reader-dark-200 reader@200 dark 1280 800"
+  "reader-reply-dark-200 reader-reply@200 dark 1280 800"
+  "compose-dark-200 compose@200 dark 1280 800"
+  "compose-dark-200-small compose@200 dark 760 680"
+  "onboarding-provider-dark-200 onboarding-provider@200 dark 1280 800"
+  "onboarding-credentials-dark-200 onboarding-credentials@200 dark 1280 800"
+  "command-palette-dark-200 command-palette@200 dark 1280 800"
+  "search-filters-dark-200 search-filters@200 dark 1280 800"
+  "settings-appearance-dark-200 settings-appearance@200 dark 1280 800"
+  "settings-accounts-dark-200 settings-accounts@200 dark 1280 800"
 )
 
 usage() {
@@ -219,7 +240,29 @@ wait_for_window() {
 
   echo "timed out waiting for the ${title} window" >&2
   cat "${APP_LOG}" >&2
+  dump_app_state >&2
   return 1
+}
+
+# After a window wait times out (#186): the windows that are mapped,
+# under any title, and every thread's stack, to tell a slow cold start
+# from a hang. Needs gdb; ptrace needs root on most runners.
+dump_app_state() {
+  echo "--- mapped windows"
+  xdotool search --name . 2>/dev/null | while read -r id; do
+    echo "${id} $(xdotool getwindowname "${id}" 2>/dev/null || true)"
+  done
+  echo "--- zmail-app threads (pid ${APP_PID})"
+  if command -v gdb >/dev/null 2>&1; then
+    local gdb=(gdb)
+    sudo -n true 2>/dev/null && gdb=(sudo -n gdb)
+    timeout 60 "${gdb[@]}" -p "${APP_PID}" -batch -ex 'thread apply all bt' 2>&1 \
+      | grep -v '^\[New LWP\|^\[Thread debugging' || true
+  else
+    for task in /proc/"${APP_PID}"/task/*; do
+      echo "${task##*/} $(cat "${task}/comm" 2>/dev/null) $(cat "${task}/wchan" 2>/dev/null)"
+    done
+  fi
 }
 
 start_session() {
@@ -265,14 +308,20 @@ capture_state() {
   local output_dir="$1" name="$2" view="$3" theme="$4" width="$5" height="$6"
   local pointer_x="${7:-}" pointer_y="${8:-}"
   local output_path="${output_dir}/${name}.png"
+  # VIEW@SIZE: the view at a text size.
+  local fixture_view="${view%@*}" text_size=()
+  if [[ "${view}" == *@* ]]; then
+    text_size=("${view##*@}")
+  fi
 
   echo "capturing ${name} (${view}, ${theme}, ${width}x${height})"
   echo "=== ${name}" >> "${APP_LOG}"
-  "${APP_BINARY}" launch-ui-fixture "${view}" "${theme}" >>"${APP_LOG}" 2>&1 &
+  "${APP_BINARY}" launch-ui-fixture "${fixture_view}" "${theme}" "${text_size[@]}" \
+    >>"${APP_LOG}" 2>&1 &
   APP_PID=$!
 
   local window_id
-  window_id="$(wait_for_window "$(window_title_for "${view}")")"
+  window_id="$(wait_for_window "$(window_title_for "${fixture_view}")")"
   xdotool windowactivate "${window_id}" >/dev/null 2>&1 || true
   xdotool windowmove "${window_id}" 0 0 >/dev/null 2>&1 || true
   xdotool windowsize "${window_id}" "${width}" "${height}"

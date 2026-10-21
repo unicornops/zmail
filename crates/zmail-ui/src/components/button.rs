@@ -13,7 +13,7 @@ use gpui::{
 };
 
 use crate::a11y::{A11yFlags, AccessibleExt};
-use crate::styles::{ICON_SIZE_MD, ICON_SIZE_SM, TYPE_BODY, TYPE_CAPTION, TypeStyleExt};
+use crate::styles::{ICON_SIZE_MD, ICON_SIZE_SM, TYPE_BODY, TYPE_CAPTION, TextScale, TypeStyleExt};
 use crate::widgets::icon;
 
 use super::kbd::spoken_keystrokes;
@@ -270,7 +270,15 @@ impl RenderOnce for Button {
                 role: self.role,
             },
         )
-        .h(px(self.size.height(&theme)))
+        // Grows with the text size; icon buttons keep their size.
+        .h(TextScale::get(cx).fit(
+            self.size.height(&theme),
+            if self.size == ButtonSize::Small {
+                TYPE_CAPTION
+            } else {
+                TYPE_BODY
+            },
+        ))
         .px(px(self.size.padding_x()))
         .gap(px(6.0))
         .when(self.full_width, |this| this.w_full())

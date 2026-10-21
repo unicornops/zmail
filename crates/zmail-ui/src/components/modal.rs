@@ -34,6 +34,7 @@ use gpui::{
 use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::styles::{
     RADIUS_XL, SPACE_2, SPACE_3, SPACE_4, SPACE_6, TYPE_BODY, TYPE_TITLE, TypeStyleExt,
+    rems_from_px,
 };
 
 use super::actions::{Cancel, FocusNext, FocusPrevious, MODAL_CONTEXT};
@@ -239,7 +240,8 @@ impl Modal {
         self
     }
 
-    /// The card width (default [`MODAL_WIDTH`]).
+    /// The card width at the default text size (default
+    /// [`MODAL_WIDTH`]); it grows with the text size, up to the window's.
     pub(crate) fn width(mut self, width: Pixels) -> Self {
         self.width = width;
         self
@@ -321,9 +323,17 @@ impl RenderOnce for Modal {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .flex()
             .flex_col()
-            .w(self.width)
+            .w(rems_from_px(f32::from(self.width)))
             .max_w(viewport.width - px(SPACE_6 * 2.0))
-            .max_h(viewport.height - px(SPACE_6 * 2.0))
+            .map(|this| {
+                // The palette hangs lower, so it has less room.
+                let top = if palette {
+                    viewport.height * PALETTE_TOP
+                } else {
+                    px(SPACE_6)
+                };
+                this.max_h(viewport.height - top - px(SPACE_6))
+            })
             .bg(rgb(colors.background))
             .border_1()
             .border_color(rgb(colors.border))

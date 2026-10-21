@@ -25,7 +25,7 @@ use super::quoted::split_folded_tail;
 use super::{attachments, banners};
 use crate::a11y::AccessibleExt;
 use crate::components::{Avatar, ButtonSize, IconButton};
-use crate::styles::{AVATAR_SIZE, UiColors};
+use crate::styles::{AVATAR_SIZE, UiColors, rems_from_px};
 use crate::widgets::EllipsisExt;
 
 /// The avatar size on a collapsed message's summary line.
@@ -169,7 +169,7 @@ fn collapsed_summary(
         .child(
             div()
                 .flex_none()
-                .max_w(px(220.))
+                .max_w(rems_from_px(220.))
                 .ellipsis()
                 .when(!message.is_read, |this| {
                     this.font_weight(FontWeight::SEMIBOLD)
