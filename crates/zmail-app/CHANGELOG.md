@@ -5,6 +5,7 @@
 
 ### Features
 
+* **proton:** key salts, user and address key unlocking, two-password mode ([#246](https://github.com/unicornops/zmail/issues/246)) ([17ac086](https://github.com/unicornops/zmail/commit/17ac08629d95bb5123f4b1ba06a812fed03367f8))
 * **ui:** 24px minimum pointer targets, checked by walking each view ([#231](https://github.com/unicornops/zmail/issues/231)) ([aa8ace5](https://github.com/unicornops/zmail/commit/aa8ace51b3000264f755b3b9987284f56e7f9384))
 * **ui:** read reduced motion on Windows and through AppKit on macOS ([#248](https://github.com/unicornops/zmail/issues/248)) ([d7671f0](https://github.com/unicornops/zmail/commit/d7671f0075c1de74bd636a15925e56f5401550b6))
 * **ui:** text size setting that scales every window's rem size ([#228](https://github.com/unicornops/zmail/issues/228)) ([ee06d4b](https://github.com/unicornops/zmail/commit/ee06d4b961019692143a178bb24d53f6979b1c72))
