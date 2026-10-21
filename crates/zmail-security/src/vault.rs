@@ -22,7 +22,7 @@ use anyhow::{Context, anyhow};
 
 mod blob;
 
-pub use blob::{BlobVault, is_encrypted_file};
+pub use blob::{BlobReader, BlobVault, file_key_id, is_encrypted_file};
 use hkdf::Hkdf;
 use rand::{RngCore, rngs::OsRng};
 use sha2::Sha256;
@@ -279,6 +279,10 @@ fn store_entry(id: KeyId) -> anyhow::Result<keyring::Entry> {
 pub struct StoreKeyRecord {
     /// The key the store is encrypted with.
     pub key_id: KeyId,
+    /// The key a rotation is moving the store to, while one is under way
+    /// (ADR 0005 §3). Whichever of the two opens the database tells how
+    /// far it got.
+    pub pending_key_id: Option<KeyId>,
 }
 
 impl StoreKeyRecord {
@@ -323,7 +327,15 @@ impl StoreKeyRecord {
             .and_then(serde_json::Value::as_str)
             .context("no key id")?
             .parse()?;
-        Ok(Self { key_id })
+        let pending_key_id = value
+            .get("pending_key_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::parse)
+            .transpose()?;
+        Ok(Self {
+            key_id,
+            pending_key_id,
+        })
     }
 
     /// Writes the record to `path` atomically: a temporary file, synced,
@@ -333,12 +345,15 @@ impl StoreKeyRecord {
     }
 
     fn write_atomically(&self, path: &Path) -> anyhow::Result<()> {
-        let json = serde_json::json!({
+        let mut json = serde_json::json!({
             "format": RECORD_FORMAT,
             "key_id": self.key_id.to_string(),
             "database": RECORD_DATABASE,
             "files": RECORD_FILES,
         });
+        if let Some(pending) = self.pending_key_id {
+            json["pending_key_id"] = serde_json::Value::from(pending.to_string());
+        }
         let mut text =
             serde_json::to_string_pretty(&json).context("failed to encode the record")?;
         text.push('\n');
@@ -363,6 +378,18 @@ pub fn create_store_key(
     keychain: &dyn StoreKeychain,
     record_path: &Path,
 ) -> Result<StoreKey, StoreKeyError> {
+    let key = stash_new_key(keychain)?;
+    StoreKeyRecord {
+        key_id: key.id,
+        pending_key_id: None,
+    }
+    .write(record_path)?;
+    Ok(key)
+}
+
+/// A new random key, saved to the keychain and read back, that no record
+/// names yet.
+pub fn stash_new_key(keychain: &dyn StoreKeychain) -> Result<StoreKey, StoreKeyError> {
     let key = StoreKey::generate();
     keychain
         .save_store_key(&key)
@@ -380,7 +407,6 @@ pub fn create_store_key(
         }
         Err(error) => return Err(StoreKeyError::Keychain(error)),
     }
-    StoreKeyRecord { key_id: key.id }.write(record_path)?;
     Ok(key)
 }
 
@@ -393,11 +419,15 @@ pub fn load_store_key(
     let Some(record) = StoreKeyRecord::read(record_path)? else {
         return Ok(None);
     };
-    match keychain.load_store_key(record.key_id) {
-        Ok(Some(key)) => Ok(Some(key)),
-        Ok(None) => Err(StoreKeyError::Missing {
-            key_id: record.key_id,
-        }),
+    load_key(keychain, record.key_id).map(Some)
+}
+
+/// Loads the key with `id`, reporting a missing one as
+/// [`StoreKeyError::Missing`].
+pub fn load_key(keychain: &dyn StoreKeychain, id: KeyId) -> Result<StoreKey, StoreKeyError> {
+    match keychain.load_store_key(id) {
+        Ok(Some(key)) => Ok(key),
+        Ok(None) => Err(StoreKeyError::Missing { key_id: id }),
         Err(error) => Err(StoreKeyError::Keychain(error)),
     }
 }

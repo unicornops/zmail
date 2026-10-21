@@ -221,6 +221,23 @@ impl BlobVault {
     /// length. Nothing unauthenticated is written: each chunk is checked
     /// before its bytes go out, and a truncated file fails at its end.
     pub fn decrypt_file_to(&self, path: &Path, out: &mut dyn Write) -> Result<u64> {
+        let mut reader = self.reader(path)?;
+        let mut buffer = Zeroizing::new(vec![0; CHUNK_LEN]);
+        let mut total = 0;
+        loop {
+            let count = reader.read(&mut buffer).map_err(anyhow::Error::from)?;
+            if count == 0 {
+                return Ok(total);
+            }
+            out.write_all(&buffer[..count]).context("failed to write")?;
+            total += count as u64;
+        }
+    }
+
+    /// A reader that decrypts the file at `path` as it goes, chunk by
+    /// chunk; a damaged chunk is an `InvalidData` error before any of its
+    /// bytes are returned.
+    pub fn reader(&self, path: &Path) -> Result<BlobReader> {
         let mut file =
             fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
         let mut header = [0; HEADER_LEN];
@@ -235,36 +252,23 @@ impl BlobVault {
                 self.inner.key_id
             );
         }
-        let mut decryptor = DecryptorBE32::from_aead(
+        let decryptor = DecryptorBE32::from_aead(
             Aes256Gcm::new(file_key(&self.inner.blob_key, &salt).as_ref().into()),
             NONCE_PREFIX.as_ref().into(),
         );
         let mut current = vec![0; CHUNK_LEN + TAG_LEN];
-        let mut next = vec![0; CHUNK_LEN + TAG_LEN];
-        let mut current_len = read_full(&mut file, &mut current)?;
-        let mut total = 0;
-        let failed = || anyhow::anyhow!("{} is damaged or was tampered with", path.display());
-        loop {
-            let next_len = if current_len == current.len() {
-                read_full(&mut file, &mut next)?
-            } else {
-                0
-            };
-            let payload = Payload {
-                msg: &current[..current_len],
-                aad: &header,
-            };
-            if next_len == 0 {
-                let plain = Zeroizing::new(decryptor.decrypt_last(payload).map_err(|_| failed())?);
-                out.write_all(&plain).context("failed to write")?;
-                return Ok(total + plain.len() as u64);
-            }
-            let plain = Zeroizing::new(decryptor.decrypt_next(payload).map_err(|_| failed())?);
-            out.write_all(&plain).context("failed to write")?;
-            total += plain.len() as u64;
-            std::mem::swap(&mut current, &mut next);
-            current_len = next_len;
-        }
+        let current_len = read_full(&mut file, &mut current)?;
+        Ok(BlobReader {
+            file,
+            path: path.to_owned(),
+            header,
+            decryptor: Some(decryptor),
+            current,
+            current_len,
+            next: vec![0; CHUNK_LEN + TAG_LEN],
+            plain: Zeroizing::new(Vec::new()),
+            offset: 0,
+        })
     }
 
     /// Decrypts the file at `path` into memory.
@@ -302,6 +306,88 @@ impl zmail_core::BlobWriter for BlobVault {
 
     fn location(&self) -> &Path {
         self.directory()
+    }
+}
+
+/// Decrypts an encrypted file as it is read; from [`BlobVault::reader`].
+pub struct BlobReader {
+    file: fs::File,
+    path: PathBuf,
+    header: [u8; HEADER_LEN],
+    /// `None` once the last chunk is decrypted.
+    decryptor: Option<DecryptorBE32<Aes256Gcm>>,
+    /// The next sealed chunk, read ahead so the last one is known.
+    current: Vec<u8>,
+    current_len: usize,
+    next: Vec<u8>,
+    /// The decrypted chunk being handed out, from `offset`.
+    plain: Zeroizing<Vec<u8>>,
+    offset: usize,
+}
+
+impl BlobReader {
+    /// Decrypts the next chunk into `plain`; `false` at the end.
+    fn refill(&mut self) -> io::Result<bool> {
+        if self.decryptor.is_none() {
+            return Ok(false);
+        }
+        let next_len = if self.current_len == self.current.len() {
+            read_full(&mut self.file, &mut self.next).map_err(io::Error::other)?
+        } else {
+            0
+        };
+        let payload = Payload {
+            msg: &self.current[..self.current_len],
+            aad: &self.header,
+        };
+        let plain = if next_len == 0 {
+            self.decryptor
+                .take()
+                .expect("checked above")
+                .decrypt_last(payload)
+        } else {
+            self.decryptor
+                .as_mut()
+                .expect("checked above")
+                .decrypt_next(payload)
+        }
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is damaged or was tampered with", self.path.display()),
+            )
+        })?;
+        self.plain = Zeroizing::new(plain);
+        self.offset = 0;
+        std::mem::swap(&mut self.current, &mut self.next);
+        self.current_len = next_len;
+        Ok(true)
+    }
+}
+
+impl Read for BlobReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        while self.offset == self.plain.len() {
+            if !self.refill()? {
+                return Ok(0);
+            }
+        }
+        let count = buffer.len().min(self.plain.len() - self.offset);
+        buffer[..count].copy_from_slice(&self.plain[self.offset..self.offset + count]);
+        self.offset += count;
+        Ok(count)
+    }
+}
+
+/// The key id in the header of the encrypted file at `path`; `None` for a
+/// file that isn't one.
+pub fn file_key_id(path: &Path) -> io::Result<Option<KeyId>> {
+    let mut header = [0; HEADER_LEN];
+    let mut file = fs::File::open(path)?;
+    match file.read_exact(&mut header) {
+        Ok(()) => Ok(parse_header(&header).ok().map(|(key_id, _)| key_id)),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(error) => Err(error),
     }
 }
 

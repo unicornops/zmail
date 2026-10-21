@@ -75,6 +75,7 @@ fn main() -> Result<()> {
         Command::ProcessOutbox(account_id) => process_outbox(account_id),
         Command::Backup { directory } => create_backup(directory.as_deref()),
         Command::ResetStore => reset_unreadable_store(),
+        Command::RotateKey => rotate_store_key(),
         Command::ExportAccount { account_id, path } => export_account(account_id, &path),
         Command::DeadOps { account_id } => list_dead_ops(account_id),
         Command::RetryOp(op_id) => retry_dead_op(op_id),
@@ -109,6 +110,7 @@ enum Command {
         directory: Option<String>,
     },
     ResetStore,
+    RotateKey,
     DeadOps {
         account_id: Option<i64>,
     },
@@ -381,6 +383,7 @@ impl Command {
                 directory: args.next(),
             }),
             "reset-store" => Ok(Self::ResetStore),
+            "rotate-key" => Ok(Self::RotateKey),
             "dead-ops" => Ok(Self::DeadOps {
                 account_id: parse_optional_id(args.next(), "account id")?,
             }),
@@ -1808,6 +1811,7 @@ fn print_help() {
     println!("  zmail-app process-outbox [ACCOUNT]");
     println!("  zmail-app backup [DIRECTORY]");
     println!("  zmail-app reset-store     Move a store whose key is lost aside and start over");
+    println!("  zmail-app rotate-key      Re-encrypt the store under a new key (quit Zmail first)");
     println!("  zmail-app export-account ACCOUNT PATH");
     println!("  zmail-app attachments THREAD");
     println!("  zmail-app save-attachment ATTACHMENT [--dest DIRECTORY]");
@@ -1821,18 +1825,7 @@ fn print_help() {
 /// encrypting a plaintext store first and printing its progress.
 fn open_store() -> Result<LocalStore> {
     let path = store_path()?;
-    let progress = |step: MigrationProgress| match step {
-        MigrationProgress::Database { written, total } => {
-            let percent = (written * 100).checked_div(total).unwrap_or(100);
-            eprint!("\rEncrypting the mail store: {percent}%");
-        }
-        MigrationProgress::Verifying => eprint!("\rEncrypting the mail store: checking the copy"),
-        MigrationProgress::Attachments { done, total } => {
-            eprint!("\rEncrypting attachments: {done} of {total}          ");
-        }
-        MigrationProgress::Finished => eprintln!("\rEncrypting the mail store: done.            "),
-    };
-    match LocalStore::unlock(&path, &KeyringSecretStore, &progress) {
+    match LocalStore::unlock(&path, &KeyringSecretStore, &print_progress) {
         Ok((store, report)) => {
             if let Some(report) = report {
                 eprintln!(
@@ -1858,6 +1851,35 @@ fn open_store() -> Result<LocalStore> {
         )),
         Err(StoreOpenError::Other(error)) => Err(error.context("failed to open the local store")),
     }
+}
+
+/// Prints a migration's or a key rotation's progress on one line of
+/// stderr.
+fn print_progress(step: MigrationProgress) {
+    match step {
+        MigrationProgress::Database { written, total } => {
+            let percent = (written * 100).checked_div(total).unwrap_or(100);
+            eprint!("\rEncrypting the mail store: {percent}%");
+        }
+        MigrationProgress::Verifying => eprint!("\rEncrypting the mail store: checking the copy"),
+        MigrationProgress::Attachments { done, total } => {
+            eprint!("\rEncrypting attachments: {done} of {total}          ");
+        }
+        MigrationProgress::Finished => eprintln!("\rEncrypting the mail store: done.            "),
+    }
+}
+
+/// `rotate-key`: re-encrypts the store under a new key and deletes the old
+/// one (ADR 0005 §3). Refuses while the store is open anywhere.
+fn rotate_store_key() -> Result<()> {
+    let path = store_path()?;
+    let new = LocalStore::rotate_key(&path, &KeyringSecretStore, &print_progress)
+        .map_err(|error| anyhow::Error::from(error).context("the key was not changed"))?;
+    println!(
+        "The mail store is now encrypted with a new key ({new}); the old key is deleted. \
+         Backups made with the old key no longer open."
+    );
+    Ok(())
 }
 
 /// `reset-store`: moves a store whose key is gone aside, so the next start

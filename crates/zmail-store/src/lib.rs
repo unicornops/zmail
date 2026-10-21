@@ -33,6 +33,8 @@ pub use zmail_security::vault::{BlobVault, StoreKey, StoreKeychain};
 mod address_history;
 mod connection;
 mod encryption;
+mod lock;
+mod rotation;
 mod search;
 
 use connection::{StoreConnection, StoreToken};
@@ -566,6 +568,9 @@ pub struct LocalStore {
     /// Identifies this store in each thread's connection cache. Declared
     /// before `ephemeral_dir` so it is gone when the directory is removed.
     token: StoreToken,
+    /// Keeps other processes from rewriting the store's files while it is
+    /// open (see the `lock` module). Released before `ephemeral_dir` too.
+    _lock: Arc<lock::StoreLock>,
     /// Private directory of an ephemeral store, removed when the last handle
     /// drops. `None` for persistent stores.
     ephemeral_dir: Option<Arc<EphemeralDir>>,
@@ -596,6 +601,12 @@ impl LocalStore {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
+        let lock = Arc::new(lock::StoreLock::shared(&path)?);
+        Self::open_with_lock(path, key, lock)
+    }
+
+    /// [`LocalStore::open`] under a lock the caller already holds.
+    fn open_with_lock(path: PathBuf, key: StoreKey, lock: Arc<lock::StoreLock>) -> Result<Self> {
         if store_file_state(&path)? == StoreFileState::Plaintext {
             bail!(
                 "{} is not encrypted yet; it has to be encrypted before it opens",
@@ -609,6 +620,7 @@ impl LocalStore {
             key,
             vault,
             token: StoreToken::default(),
+            _lock: lock,
             ephemeral_dir: None,
         };
         store.apply_migrations()?;
