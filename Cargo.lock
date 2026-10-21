@@ -9285,6 +9285,7 @@ dependencies = [
  "serde_json",
  "zmail-core",
  "zmail-security",
+ "zmail-test-support",
 ]
 
 [[package]]
@@ -9352,6 +9353,7 @@ dependencies = [
  "zmail-security",
  "zmail-store",
  "zmail-sync",
+ "zmail-test-support",
  "zmail-theme",
 ]
 

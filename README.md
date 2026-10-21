@@ -33,6 +33,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - [`docs/adr/0001-jmap-client-strategy.md`](./docs/adr/0001-jmap-client-strategy.md): JMAP implementation decision
 - [`docs/adr/0003-gpui-zed-stable-pin.md`](./docs/adr/0003-gpui-zed-stable-pin.md): GPUI pinned to Zed stable release tags
 - [`docs/phase5-hardening.md`](./docs/phase5-hardening.md): accessibility, performance, crash policy, packaging, and release process
+- [`docs/performance.md`](./docs/performance.md): performance budgets, how they are measured, and the latest numbers
 - [`themes/phase0-dark.json`](./themes/phase0-dark.json): sample unchanged Zed-format theme file
 
 ## Commands

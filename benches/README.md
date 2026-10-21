@@ -14,6 +14,11 @@ sync changes.
 - `list_threads_paging` — one 50-thread page read.
 - `full_text_search` — one FTS5 query.
 - `pending_op_queue` — listing and counting write-back queue rows.
+- `large_mailbox_page`, `large_mailbox_refresh_counts`,
+  `thread_view_stress` — the store side of the UI performance budgets
+  over a 100k-thread Inbox (seeded once per run, which takes a few
+  seconds). The budgets, the UI-level timings and their baseline are in
+  [`docs/performance.md`](../docs/performance.md).
 
 ## Baseline (2026-10-07, 12-core Linux dev container, release profile)
 
