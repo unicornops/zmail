@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.15.0](https://github.com/unicornops/zmail/compare/v0.14.0...v0.15.0) (2026-10-21)
+
+
+### Features
+
+* **proton:** key salts, user and address key unlocking, two-password mode ([#246](https://github.com/unicornops/zmail/issues/246)) ([17ac086](https://github.com/unicornops/zmail/commit/17ac08629d95bb5123f4b1ba06a812fed03367f8))
+* **ui:** 24px minimum pointer targets, checked by walking each view ([#231](https://github.com/unicornops/zmail/issues/231)) ([aa8ace5](https://github.com/unicornops/zmail/commit/aa8ace51b3000264f755b3b9987284f56e7f9384))
+* **ui:** read reduced motion on Windows and through AppKit on macOS ([#248](https://github.com/unicornops/zmail/issues/248)) ([d7671f0](https://github.com/unicornops/zmail/commit/d7671f0075c1de74bd636a15925e56f5401550b6))
+* **ui:** text size setting that scales every window's rem size ([#228](https://github.com/unicornops/zmail/issues/228)) ([ee06d4b](https://github.com/unicornops/zmail/commit/ee06d4b961019692143a178bb24d53f6979b1c72))
+* **proton:** SRP login, TOTP 2FA, logout and human verification ([#245](https://github.com/unicornops/zmail/issues/245)) ([7cf5d45](https://github.com/unicornops/zmail/commit/7cf5d45b7eb36ba6688ac12a9ace24005ae7ce35))
+* **ui:** follow Windows contrast themes and macOS Increase Contrast ([#232](https://github.com/unicornops/zmail/issues/232)) ([c52f9c9](https://github.com/unicornops/zmail/commit/c52f9c9836f0ff587f85f9eb20dbc54b46bea570))
+* **proton:** add the zmail-proton-api client core ([#244](https://github.com/unicornops/zmail/issues/244)) ([42d827f](https://github.com/unicornops/zmail/commit/42d827f87b2d75e4c1930329c0871a2732b0df52))
+* **ui:** announce toasts, sync problems, search counts and errors ([#230](https://github.com/unicornops/zmail/issues/230)) ([3e16131](https://github.com/unicornops/zmail/commit/3e161319d19fff6e71bdeef4c67b561f202a61c2))
+* **ui:** give every component and view a screen-reader role and name ([#229](https://github.com/unicornops/zmail/issues/229)) ([4a1e874](https://github.com/unicornops/zmail/commit/4a1e8743dd524e1d5ebe4cf8785bf77f26f3009d))
+* **ui:** reduced motion from the system setting, with a Settings override ([#227](https://github.com/unicornops/zmail/issues/227)) ([fd76bf6](https://github.com/unicornops/zmail/commit/fd76bf66175b4b03bd63577c1eb1ce76a8808268))
+
 ## [0.14.0](https://github.com/unicornops/zmail/compare/v0.13.0...v0.14.0) (2026-10-20)
 
 
