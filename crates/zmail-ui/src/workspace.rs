@@ -21,7 +21,7 @@ use gpui::{
 use std::sync::Arc;
 use zmail_core::{
     AccountSummary, AppBootstrap, IdentitySummary, MailboxRole, MailboxSelection, MailboxSummary,
-    NewDraft, OutboxJobState, StoreStats, SyncPhase, ThemeAppearance, ThreadMessage, ThreadView,
+    NewDraft, OutboxJobState, SyncPhase, ThemeAppearance, ThreadMessage, ThreadView,
     VirtualMailbox,
     preferences::ReadingPanePosition,
     text::count_noun,
@@ -190,12 +190,6 @@ impl WorkspaceView {
             account: None,
             accounts: Vec::new(),
             identities: Vec::new(),
-            stats: StoreStats {
-                account_count: 0,
-                mailbox_count: 0,
-                thread_count: 0,
-                message_count: 0,
-            },
             all_mailboxes: Vec::new(),
             mailboxes: Vec::new(),
             drafts: Vec::new(),
@@ -635,13 +629,6 @@ impl WorkspaceView {
                 self.store_error = Some(error.to_string());
             }
         }
-
-        self.stats = self.store.stats().unwrap_or(StoreStats {
-            account_count: 0,
-            mailbox_count: 0,
-            thread_count: 0,
-            message_count: 0,
-        });
 
         self.all_mailboxes = match self.store.list_all_mailboxes() {
             Ok(mailboxes) => mailboxes,

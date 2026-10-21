@@ -45,7 +45,7 @@ use gpui::{
 };
 use zmail_core::{
     APP_NAME, AccountOverview, AccountSummary, AppBootstrap, DraftSummary, IdentitySummary,
-    MailboxSummary, OutboxJobSummary, SearchHit, StoreStats, ThreadCounts, VirtualMailbox,
+    MailboxSummary, OutboxJobSummary, SearchHit, ThreadCounts, VirtualMailbox,
 };
 use zmail_security::SecretStore;
 use zmail_store::LocalStore;
@@ -400,7 +400,6 @@ struct WorkspaceView {
     account: Option<AccountOverview>,
     accounts: Vec<AccountSummary>,
     identities: Vec<IdentitySummary>,
-    stats: StoreStats,
     /// Every account's mailboxes, for the sidebar.
     all_mailboxes: Vec<MailboxSummary>,
     /// The selected account's mailboxes.

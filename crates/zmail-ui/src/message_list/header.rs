@@ -60,6 +60,7 @@ impl MessageListView {
         }
         self.filter = filter;
         self.page = None;
+        self.first_row = None;
         self.selected_index_hint = None;
         self.count_filtered(cx);
         self.thread_scroll

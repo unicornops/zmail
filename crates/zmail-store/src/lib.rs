@@ -76,6 +76,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         address_history::ADDRESS_HISTORY_SCHEMA,
     ),
     ("0020_account_color", ACCOUNT_COLOR_SCHEMA),
+    ("0021_flagged_threads_index", FLAGGED_THREADS_INDEX_SCHEMA),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -329,6 +330,14 @@ ALTER TABLE accounts ADD COLUMN cache_policy_disk_budget_mb INTEGER;
 /// keeps the colour derived from the account id.
 const ACCOUNT_COLOR_SCHEMA: &str = r#"
 ALTER TABLE accounts ADD COLUMN color TEXT;
+"#;
+
+/// The flagged threads, with every column the Flagged virtual mailbox's
+/// filter and counts read, so its count (read on every store refresh)
+/// walks this index instead of every thread.
+const FLAGGED_THREADS_INDEX_SCHEMA: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_threads_flagged
+    ON threads(mailbox_id, remote_thread_id, unread_count) WHERE is_flagged = 1;
 "#;
 
 const MESSAGE_REPLY_TO_SCHEMA: &str = r#"
@@ -1657,6 +1666,11 @@ impl LocalStore {
         values.push(limit.into());
         values.push((range.start as i64).into());
         let conn = self.connection()?;
+        // The page's threads are picked from `threads` alone, so skipping
+        // the rows before it walks the mailbox's order index instead of
+        // joining every skipped row: a page deep in a large mailbox costs
+        // little more than the first. (Every thread has its mailbox and
+        // latest message, so the joins drop no rows.)
         let mut statement = conn.prepare(&format!(
             r#"
             SELECT
@@ -1672,12 +1686,17 @@ impl LocalStore {
                 threads.latest_message_at,
                 threads.mailbox_id,
                 mailboxes.account_id
-            FROM threads
+            FROM (
+                SELECT threads.id
+                FROM threads
+                WHERE {filter}
+                ORDER BY threads.latest_message_at DESC, threads.id DESC
+                LIMIT ?{next} OFFSET ?{}
+            ) AS page
+            JOIN threads ON threads.id = page.id
             JOIN messages ON messages.id = threads.latest_message_id
             JOIN mailboxes ON mailboxes.id = threads.mailbox_id
-            WHERE {filter}
             ORDER BY threads.latest_message_at DESC, threads.id DESC
-            LIMIT ?{next} OFFSET ?{}
             "#,
             next + 1
         ))?;
@@ -5183,8 +5202,12 @@ fn selection_filter(selection: &MailboxSelection) -> (String, Vec<rusqlite::type
         // One copy of each flagged conversation per account: a
         // conversation filed in several mailboxes (Gmail's labels, or All
         // Mail) is listed once, preferring its Inbox copy.
+        //
+        // `is_flagged = 1` lets the outer query walk the flagged-threads
+        // index; the `+` keeps SQLite from looking each listed id up in
+        // the table instead.
         MailboxSelection::Virtual(VirtualMailbox::Flagged) => (
-            r#"threads.id IN (
+            r#"threads.is_flagged = 1 AND +threads.id IN (
                 SELECT thread_id FROM (
                     SELECT
                         flagged.id AS thread_id,
@@ -7402,6 +7425,45 @@ mod tests {
         let mut expected = expect(work, &["INBOX", "Sent", "All Mail", "Trash"]);
         expected.extend(expect(home, &["Inbox", "Sent"]));
         assert_eq!(accounts, expected);
+    }
+
+    #[test]
+    fn a_deep_page_lists_the_same_rows_as_the_whole_mailbox() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let mut snapshot = merge_test_snapshot("Thread", "Body", "thread", "message", None);
+        let template = snapshot.mailboxes[0].threads[0].clone();
+        // Pairs of threads share a timestamp, so the id breaks the tie.
+        snapshot.mailboxes[0].threads = (0..300)
+            .map(|index| {
+                let mut thread = template.clone();
+                let at = format!("2026-03-21T09:{:02}:{:02}Z", index / 120, index / 2 % 60);
+                thread.remote_thread_id = format!("thread-{index}");
+                thread.subject = format!("Thread {index}");
+                thread.latest_message_at = at.clone();
+                thread.messages[0].remote_id = format!("message-{index}");
+                thread.messages[0].received_at = at;
+                thread
+            })
+            .collect();
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+        let inbox = store.list_mailboxes(account_id).expect("mailboxes load")[0].id;
+        let ids = |range| {
+            store
+                .list_threads(inbox, range)
+                .expect("threads load")
+                .into_iter()
+                .map(|thread| thread.id)
+                .collect::<Vec<_>>()
+        };
+        let all = ids(0..300);
+        assert_eq!(all.len(), 300);
+        assert_eq!(ids(150..175), all[150..175]);
+        assert_eq!(ids(290..310), all[290..300]);
     }
 
     fn merge_test_snapshot(

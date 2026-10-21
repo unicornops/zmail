@@ -204,6 +204,13 @@ pub(crate) fn scope_condition(scope: &SearchScope, query: &SearchQuery) -> (Stri
         SearchScope::Folder(MailboxSelection::Virtual(_)) if named_folder => {
             ("1 = 1".to_owned(), Vec::new())
         }
+        // On `t` itself, so the newest-first scan walks the mailbox's
+        // order index and stops at the limit; as an `IN` list of the
+        // mailbox's threads it read and sorted every match first.
+        SearchScope::Folder(MailboxSelection::Mailbox { mailbox_id, .. }) => (
+            "t.mailbox_id = ?".to_owned(),
+            vec![Value::Integer(*mailbox_id)],
+        ),
         SearchScope::Folder(selection) => {
             let (filter, values) = super::selection_filter(selection);
             (

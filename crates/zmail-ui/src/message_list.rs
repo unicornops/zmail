@@ -240,6 +240,10 @@ pub(crate) struct MessageListView {
     /// of its date.
     hovered_thread: Option<i64>,
     page: Option<RowPage>,
+    /// The first row, apart from `page`: the list renders row 0 on every
+    /// frame to measure the row height, which would otherwise evict the
+    /// page on screen whenever the list is scrolled away from the top.
+    first_row: Option<RowPage>,
     /// Where the selected thread was last seen, so the arrow keys do not
     /// have to search the mailbox for it.
     selected_index_hint: Option<(i64, usize)>,
@@ -286,6 +290,7 @@ impl MessageListView {
             swallow_date_click: false,
             hovered_thread: None,
             page: None,
+            first_row: None,
             selected_index_hint: None,
             thread_scroll: UniformListScrollHandle::new(),
             selection_anchor: None,
@@ -345,6 +350,7 @@ impl MessageListView {
         }
         if mailbox_changed || counts_changed {
             self.page = None;
+            self.first_row = None;
             self.count_filtered(cx);
         }
         if rows_changed {
@@ -369,22 +375,29 @@ impl MessageListView {
                 cx.notify();
             }
         }
-        let Some(page) = self.page.as_ref() else {
-            return;
-        };
-        let range = page.start..page.start + page.rows.len().max(1);
-        match self
-            .store
-            .list_filtered_threads(&page.selection, page.filter, range)
+        let mut changed = false;
+        for page in [self.page.as_mut(), self.first_row.as_mut()]
+            .into_iter()
+            .flatten()
         {
-            Ok(rows) if rows != page.rows => {
-                if let Some(page) = self.page.as_mut() {
+            let range = page.start..page.start + page.rows.len().max(1);
+            match self
+                .store
+                .list_filtered_threads(&page.selection, page.filter, range)
+            {
+                Ok(rows) if rows != page.rows => {
                     page.rows = rows;
+                    changed = true;
                 }
-                cx.notify();
+                Ok(_) => {}
+                Err(error) => {
+                    cx.emit(MessageListEvent::Error(error.to_string()));
+                    return;
+                }
             }
-            Ok(_) => {}
-            Err(error) => cx.emit(MessageListEvent::Error(error.to_string())),
+        }
+        if changed {
+            cx.notify();
         }
     }
 
@@ -394,14 +407,29 @@ impl MessageListView {
         let Some(selection) = self.state.mailbox.as_ref().map(|mailbox| mailbox.selection) else {
             return Vec::new();
         };
-        if !self
-            .page
-            .as_ref()
-            .is_some_and(|page| page.covers(&selection, self.filter, &range))
-        {
-            let total = self.thread_count();
-            let start = range.start.saturating_sub(ROW_PAGE_PADDING);
-            let end = (range.end + ROW_PAGE_PADDING).min(total.max(range.end));
+        let covers = |page: &Option<RowPage>| {
+            page.as_ref()
+                .is_some_and(|page| page.covers(&selection, self.filter, &range))
+        };
+        if covers(&self.first_row) && !covers(&self.page) {
+            return self
+                .first_row
+                .as_ref()
+                .map(|page| page.rows.clone())
+                .unwrap_or_default();
+        }
+        if !covers(&self.page) {
+            // Measuring row 0 away from the top reads just that row.
+            let measuring = range == (0..1) && self.page.is_some();
+            let (start, end) = if measuring {
+                (0, 1)
+            } else {
+                let total = self.thread_count();
+                (
+                    range.start.saturating_sub(ROW_PAGE_PADDING),
+                    (range.end + ROW_PAGE_PADDING).min(total.max(range.end)),
+                )
+            };
             #[cfg(test)]
             {
                 self.counters.queries += 1;
@@ -411,12 +439,18 @@ impl MessageListView {
                 .list_filtered_threads(&selection, self.filter, start..end)
             {
                 Ok(rows) => {
-                    self.page = Some(RowPage {
+                    let page = RowPage {
                         selection,
                         filter: self.filter,
                         start,
                         rows,
-                    })
+                    };
+                    if measuring {
+                        let rows = page.rows.clone();
+                        self.first_row = Some(page);
+                        return rows;
+                    }
+                    self.page = Some(page);
                 }
                 Err(error) => {
                     // Rendering never clears an error; only the user

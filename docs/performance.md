@@ -125,21 +125,80 @@ Seeding the store took 14.1 s.
 | `thread_view_stress`, 1 MB HTML body | 17.38 ms |
 | `thread_view_stress`, 60 attachments | 0.76 ms |
 
-### What misses
+### What missed
 
-- **Scrolling away from the top of a large mailbox.** Frames take about a
+- **Scrolling away from the top of a large mailbox.** Frames took about a
   second in the middle of the Inbox and almost two at its end. A page of
-  rows is read with `LIMIT … OFFSET`, which costs time in proportion to
-  the depth (40 ms at row 50,000), and every scroll frame reads four
-  pages: the list renders row 0 to measure the row height, which evicts
-  the cached page on screen, and the frame renders twice (the row under
-  the pointer changes). Near the top the list is mostly within
-  budget, with spikes when it reads the next page.
-- **Archive, flag and mark read** take 100–160 ms: each change re-reads
-  the whole shell state from the store.
-- **Search results** take about 200 ms of work over 100k indexed
-  bodies, on top of the 150 ms debounce.
+  rows was read with `LIMIT … OFFSET` joined to every skipped row (40 ms
+  at row 50,000), and every scroll frame read four pages: the list
+  renders row 0 to measure the row height, which evicted the cached page
+  on screen, and the frame renders twice (the row under the pointer
+  changes).
+- **Archive, flag and mark read** took 100–160 ms: the store refresh after
+  each change counted the Flagged virtual mailbox by scanning every thread
+  (45–65 ms), and read store-wide totals nothing showed (8 ms).
+- **Search results** took about 200 ms of work, on top of the 150 ms
+  debounce: a folder-scoped search listed the folder's 100k threads as an
+  `IN` list, then read and sorted every match before the first page.
 - **Opening a 1 MB HTML body** takes about 450 ms, of which loading the
   thread (and converting the HTML to text) is 17 ms.
 
-Fixes are tracked in #122.
+## After the fixes (2026-10-20)
+
+The same runs with the fixes in #122's second PR:
+
+- The list reads a page's threads from `threads` alone, so skipping to a
+  deep page walks the mailbox's order index (a page at row 99,850: 85 ms
+  to 8 ms), and the list keeps row 0 in its own cache, so a scroll frame
+  reads the store only when it reaches a new page.
+- A partial index over the flagged threads (migration
+  `0021_flagged_threads_index`) covers the Flagged count, and the refresh
+  no longer reads the store totals.
+- A folder-scoped search filters on the thread's mailbox directly, so it
+  walks the folder's newest-first index and stops at the page.
+
+This run had a higher load on the shared container (load average about
+12) than the baseline. An earlier, quieter run of the same fixes gave
+scroll medians of 4.4 ms, 32–40 ms for read, flag and archive, and 13 ms
+per scrollbar jump.
+
+| Measurement | n | Median | p95 | Max | Budget | Over budget |
+|---|---|---|---|---|---|---|
+| Scroll frame, flick (top) | 120 | 5.83 ms | 8.08 ms | 52.75 ms | 8.33 ms | 5 |
+| Scroll frame, flick (middle) | 120 | 6.37 ms | 8.78 ms | 13.93 ms | 8.33 ms | 8 |
+| Scroll frame, flick (end) | 120 | 6.49 ms | 7.68 ms | 18.26 ms | 8.33 ms | 2 |
+| Scroll frame, scrollbar jump | 100 | 18.27 ms | 22.61 ms | 27.07 ms | 8.33 ms | 100 |
+| Open thread (Select Next) | 30 | 10.01 ms | 11.63 ms | 33.58 ms | 100 ms | 0 |
+| Mark read / unread | 30 | 54.25 ms | 67.46 ms | 84.62 ms | 100 ms | 0 |
+| Flag / unflag | 30 | 47.56 ms | 55.89 ms | 61.70 ms | 100 ms | 0 |
+| Archive | 30 | 60.93 ms | 84.55 ms | 94.68 ms | 100 ms | 0 |
+| Open folder (20k Archive) | 30 | 19.33 ms | 28.37 ms | 31.72 ms | 100 ms | 0 |
+| Open folder (100k Inbox) | 30 | 27.87 ms | 48.71 ms | 69.45 ms | 100 ms | 0 |
+| Search keystroke, shows in the field | 32 | 1.21 ms | 1.92 ms | 11.53 ms | 100 ms | 0 |
+| Search keystroke, results after the debounce | 32 | 30.09 ms | 86.10 ms | 108.12 ms | 100 ms | 1 |
+| Open reader, 100 unread messages | 10 | 6.22 ms | 6.80 ms | 6.80 ms | 100 ms | 0 |
+| Open reader, 1 MB HTML body | 10 | 435.21 ms | 599.18 ms | 599.18 ms | 100 ms | 10 |
+| Open reader, 60 attachments | 10 | 12.77 ms | 13.44 ms | 13.44 ms | 100 ms | 0 |
+
+| Store benchmark | Median |
+|---|---|
+| `large_mailbox_page` at row 0 | 1.30 ms |
+| `large_mailbox_page` at row 50,000 | 4.85 ms |
+| `large_mailbox_page` at row 99,850 | 7.93 ms |
+| `large_mailbox_refresh_counts` | 8.73 ms |
+
+### What still misses
+
+- **Dragging the scrollbar** across a 100k mailbox: each frame lands on a
+  new page, and finding a page still walks the index up to its row (up to
+  8 ms at the end), so these frames take 13–18 ms. Scrolling with the
+  wheel or keys stays within the frame budget at any depth, apart from a
+  frame now and then that reads the next page.
+- **Opening a 1 MB HTML body** (about 450 ms). The HTML becomes one
+  537 KB paragraph of text, which the reader lays out in full in the
+  first frame: the conversation list only skips messages that are off
+  screen, not paragraphs. Fixing it means laying out long bodies in
+  pieces (or showing the start of a very long body first), which is a
+  reader change.
+- **Search**: a short prefix that expands to many index terms
+  (`budget r`) can still take about 100 ms.
