@@ -4,7 +4,7 @@ This document records the Phase 5 hardening work that is present in-repo today a
 
 ## Accessibility
 
-This section records what ships today, so nobody relies on support that does not exist. The UI plan (`UI_PLAN.md`) covers the remaining work. None of the screen-reader support below has been checked with a real screen reader yet; [Manual screen-reader check](#manual-screen-reader-check) is the script for doing that.
+This section records what ships today, so nobody relies on support that does not exist. None of the screen-reader support below has been checked with a real screen reader yet; [Manual screen-reader check](#manual-screen-reader-check) is the script for doing that.
 
 ### Keyboard
 
@@ -49,10 +49,24 @@ GPUI (pinned to a Zed stable release, see `docs/upstream/zed.md`) ships AccessKi
 - **macOS Increase Contrast** (System Settings → Accessibility → Display) keeps the theme but raises secondary text to 7:1 and borders to 4.5:1. It is read at the same times.
 - **Linux** has no high-contrast handling yet.
 - **Reduced motion.** Settings → Appearance → Motion offers Match System, Reduce and Full.
-  - Match System reads macOS Reduce Motion and GNOME's `enable-animations` at startup and whenever the window is activated. Windows' setting is not read yet, so on Windows motion stays on unless Reduce is chosen.
+  - Match System follows:
+    - macOS: Reduce motion (`NSWorkspace.accessibilityDisplayShouldReduceMotion`);
+    - GNOME: `org.gnome.desktop.interface enable-animations`, read by a short-lived `gsettings`;
+    - Windows: `HKCU\Control Panel\Desktop\WindowMetrics\MinAnimate`, as a proxy for Settings → Accessibility → Visual effects → Animation effects. Turning that switch off clears it. The value itself is the minimise and maximise animation, so turning off only the client-area animations in Performance Options is not detected, and turning off only the minimise animation reduces motion here.
+  - The setting is read at startup and whenever the window is activated. A setting that cannot be read allows motion.
   - With motion reduced, the loading placeholders stop pulsing, spinners stand still and animated images show their first frame.
-  - Nothing in the UI slides; menus, overlays, dialogs and toasts appear and go at once.
-- **Messages.** Undo toasts stay eight seconds and other toasts and status messages four; screen readers announce them as they appear. Errors stay until dismissed with the banner's close button, which is also a Tab stop.
+  - Nothing in the UI slides: menus, overlays, dialogs and toasts appear and go at once. `crates/zmail-ui/src/motion.rs` lists every animation.
+- **Text size.** Settings → Appearance → Text size scales text in every window from 100% to 200%, in 25% steps. It sets GPUI's rem size.
+  - Rows, buttons, selects, menus and the widths of dialogs, popovers and cards grow with the text. Spacing, borders and icons stay the same size. Settings rows wrap their control below the text when both do not fit.
+  - The main views are captured at 150% and 200% in the screenshot matrix, and view tests check that list rows grow to hold the larger text.
+  - GPUI exposes no OS text-scale setting, so the system's text size (macOS, Windows "Text size", GNOME's text scaling factor) is not followed yet; use the setting.
+
+### Pointer targets
+
+- Everything that takes a click is at least 24×24 px at the default text size (WCAG 2.2, 2.5.8 Target Size (Minimum)), and larger text only makes targets bigger. `crates/zmail-ui/src/view_tests/hit_targets.rs` checks every target the main window, onboarding, each Settings section, the compose window and the command palette draw.
+- Two exceptions are documented in `crates/zmail-ui/src/components/hit_target.rs` rather than counted as passes. Each has keyboard and wheel alternatives:
+  - The split handles between panes are 6 px wide. Arrow keys, Home and End resize them, and a double click restores the default width.
+  - The overlay scrollbar's strip is 12–15 px wide, though its thumb is at least 24 px long. The wheel, the trackpad and Page Up/Down scroll.
 
 ### Content
 
@@ -80,6 +94,8 @@ Run this on each platform before claiming screen-reader support works, and note 
 10. **Settings.** Press Ctrl+, (Cmd+,). Up and Down in the section list should read each tab, and Tab should move into the section, whose controls each read a name.
 11. **High contrast (Windows).** Turn on a contrast theme (Settings → Accessibility → Contrast themes) and switch back to Zmail. The window should redraw in the theme's colours, and the selected row should stay readable.
 12. **Increase Contrast (macOS).** Turn Increase contrast on and switch back to Zmail. Secondary text and borders should darken (in a light theme) or lighten (in a dark theme).
+13. **Reduced motion.** Turn the system's reduce-motion setting on and switch back to Zmail. Press F5 to sync: the toolbar's sync indicator should stand still instead of spinning.
+14. **Text size.** In Settings → Appearance, set Text size to 200%. Every window should grow its text, and nothing in the main views should be cut off at 1280×800.
 
 ## Performance
 
@@ -87,6 +103,10 @@ Run this on each platform before claiming screen-reader support works, and note 
 - The shell only schedules one delayed refresh at a time while background work is active.
 - Local browsing, mailbox switching, and search continue to read from the local mirror rather than from network paths.
 - Phase 5 adds tests that assert sync and outbox scheduling return immediately instead of waiting on slow background work.
+- UI plan Phase 8 sets numeric budgets over a 100,000-conversation mailbox: 8.3 ms per list scroll frame, and 100 ms from an action (archive, flag, mark read, opening a folder or conversation, a search keystroke, opening a heavy reader) to the visible change.
+  - [`docs/performance.md`](./performance.md) records the budgets, how they are measured and the latest numbers.
+  - CI runs the budgets on Linux with a gross-regression gate.
+  - Dragging the scrollbar across a 100k mailbox still misses the frame budget (#242). Wheel and keyboard scrolling stay within it.
 
 ## Mailbox Deletion Policy
 
