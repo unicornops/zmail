@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.16.0](https://github.com/unicornops/zmail/compare/v0.15.0...v0.16.0) (2026-10-21)
+
+
+### Features
+
+* **proton:** offer Proton Mail in release builds, marked experimental ([#273](https://github.com/unicornops/zmail/issues/273)) ([5ce3905](https://github.com/unicornops/zmail/commit/5ce390531f02d0d1a795c067736469533b4f86b5))
+* **proton:** add Proton Mail to onboarding behind the proton feature ([#267](https://github.com/unicornops/zmail/issues/267)) ([fc0346f](https://github.com/unicornops/zmail/commit/fc0346f78ec1994d3bfe207a5a46b6679726b73e))
+* **store:** rotate the store key, with a lock against concurrent rewrites ([#265](https://github.com/unicornops/zmail/issues/265)) ([245fba7](https://github.com/unicornops/zmail/commit/245fba7d6e66f13b8702be7d18052ca6c73f5abc))
+* **ui:** unlock the encrypted store before the workspace opens ([#263](https://github.com/unicornops/zmail/issues/263)) ([fd1c63f](https://github.com/unicornops/zmail/commit/fd1c63fea47d64087753526155f08285e253764f))
+* **store:** encrypt attachment files and short-lived opened copies ([#261](https://github.com/unicornops/zmail/issues/261)) ([37b1b7a](https://github.com/unicornops/zmail/commit/37b1b7abf239589fd7883f81e6727164acb64468))
+* **proton:** send to outside recipients by contact settings ([#264](https://github.com/unicornops/zmail/issues/264)) ([4539317](https://github.com/unicornops/zmail/commit/4539317d062459b2160a9c22bc92018eac14f269))
+* **proton:** send mail through Proton from the outbox ([#262](https://github.com/unicornops/zmail/issues/262)) ([ef183b7](https://github.com/unicornops/zmail/commit/ef183b78a3efcf5025ae3b34f8061f0beba27bc1))
+* **proton:** write local mailbox changes back to Proton with Bridge's rules ([#259](https://github.com/unicornops/zmail/issues/259)) ([c61ed90](https://github.com/unicornops/zmail/commit/c61ed9020bae842962b23178aebf0c0b9ff23769))
+* **onboarding:** guide Gmail users to their own Google OAuth client ([#272](https://github.com/unicornops/zmail/issues/272)) ([d2a5de5](https://github.com/unicornops/zmail/commit/d2a5de5e8c1bd8f90ae8a0cb9be4a4c39d3f3e7a))
+* **proton:** follow the Proton event stream for incremental sync ([#258](https://github.com/unicornops/zmail/issues/258)) ([dee55c9](https://github.com/unicornops/zmail/commit/dee55c98ac518f0064cd1fe53f19ab2ec3e68987))
+* **store:** encrypt the local store with SQLCipher, migrating plaintext stores ([#260](https://github.com/unicornops/zmail/issues/260)) ([52b02bd](https://github.com/unicornops/zmail/commit/52b02bd65adb58b01dcce13dd685bd97b4d61e09))
+* **proton:** hydrate Proton messages by decrypting and rebuilding RFC 822 ([#257](https://github.com/unicornops/zmail/issues/257)) ([98f0bb4](https://github.com/unicornops/zmail/commit/98f0bb41c4250cbd8ef908be1410556de533c4f7))
+* **proton:** read sync of labels as mailboxes and message metadata ([#253](https://github.com/unicornops/zmail/issues/253)) ([db8735a](https://github.com/unicornops/zmail/commit/db8735a8162647c0370a6f0449aa071cf42054d8))
+* **security:** store encryption key management (ADR 0005) ([#256](https://github.com/unicornops/zmail/issues/256)) ([ed4c51d](https://github.com/unicornops/zmail/commit/ed4c51daa3c6e86636057b0f55a71b91fc4f00fa))
+* **proton:** add the zmail-proton adapter behind zmail-sync's proton feature ([#252](https://github.com/unicornops/zmail/issues/252)) ([336d81b](https://github.com/unicornops/zmail/commit/336d81b472e3f3ca143d54fbc2ef0766ed38c84d))
+
+### Bug Fixes
+
+* **auth:** keep the client secret out of the browser, ask Microsoft 365 for SMTP.Send ([#271](https://github.com/unicornops/zmail/issues/271)) ([c5e0698](https://github.com/unicornops/zmail/commit/c5e06988eba868d8d1f5c1ae31ac1f7a9c594bca))
+
 ## [0.15.0](https://github.com/unicornops/zmail/compare/v0.14.0...v0.15.0) (2026-10-21)
 
 
