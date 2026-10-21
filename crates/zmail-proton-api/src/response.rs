@@ -167,6 +167,15 @@ pub enum Error {
     /// A response body could not be decoded.
     #[error("unexpected Proton response: {0}")]
     Decode(#[from] serde_json::Error),
+    /// The SRP challenge could not be answered: a bad or unsigned modulus,
+    /// an invalid salt or server ephemeral, or an unsupported version.
+    #[error("Proton sign-in failed: {0}")]
+    Srp(#[source] proton_srp::SRPError),
+    /// The server's SRP proof did not match: it does not know the
+    /// password verifier, so the session is not trusted
+    /// (go-proton-api's `ErrInvalidProof`).
+    #[error("unexpected server proof")]
+    InvalidServerProof,
     /// The client was configured with invalid values.
     #[error("invalid Proton client configuration: {0}")]
     Config(String),

@@ -16,6 +16,8 @@ test-harness = []
 base64.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+pgp.workspace = true
+proton-srp.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 rustls-native-certs.workspace = true
@@ -27,6 +29,11 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# Deterministic SRP proofs for the go-srp and proton-srp test vectors.
+proton-srp = { workspace = true, features = ["custom_csprng"] }
 
 [lints]
 workspace = true

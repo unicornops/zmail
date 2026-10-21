@@ -352,6 +352,16 @@ impl Request {
         Self::new(Method::POST, path)
     }
 
+    pub(crate) fn delete(path: impl Into<String>) -> Self {
+        Self::new(Method::DELETE, path)
+    }
+
+    /// Adds a header.
+    pub(crate) fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+        self.headers.push((name, value.into()));
+        self
+    }
+
     /// Sets a JSON body.
     pub(crate) fn json(mut self, body: &impl Serialize) -> Result<Self, Error> {
         self.body = Some(serde_json::to_vec(body)?);

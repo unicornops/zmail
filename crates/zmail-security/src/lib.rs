@@ -36,6 +36,9 @@ pub struct SanitizedHtml {
 /// The `Password` slot is the original single per-account secret; the
 /// OAuth2 slots hold the provider client secret and the granted tokens so
 /// background sync can refresh access tokens without user interaction.
+/// The Proton slots hold a Proton session (ADR 0004): the session UID, its
+/// refresh token and the salted key password that unlocks the account's
+/// keys. A Proton account never stores its login password.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SecretSlot {
     /// Account password or app password.
@@ -46,6 +49,13 @@ pub enum SecretSlot {
     AccessToken,
     /// OAuth2 refresh token used to obtain new access tokens.
     RefreshToken,
+    /// Proton session UID (`x-pm-uid`).
+    ProtonUid,
+    /// Proton session refresh token.
+    ProtonRefreshToken,
+    /// Proton salted key password (the bcrypt-derived secret that unlocks
+    /// the user keys, never the login password).
+    ProtonKeyPass,
 }
 
 impl SecretSlot {
@@ -56,6 +66,9 @@ impl SecretSlot {
             Self::ClientSecret => "client-secret",
             Self::AccessToken => "access-token",
             Self::RefreshToken => "refresh-token",
+            Self::ProtonUid => "proton-uid",
+            Self::ProtonRefreshToken => "proton-refresh-token",
+            Self::ProtonKeyPass => "proton-key-pass",
         }
     }
 }
@@ -750,6 +763,43 @@ mod tests {
         assert_eq!(SecretSlot::ClientSecret.as_str(), "client-secret");
         assert_eq!(SecretSlot::AccessToken.as_str(), "access-token");
         assert_eq!(SecretSlot::RefreshToken.as_str(), "refresh-token");
+        assert_eq!(SecretSlot::ProtonUid.as_str(), "proton-uid");
+        assert_eq!(
+            SecretSlot::ProtonRefreshToken.as_str(),
+            "proton-refresh-token"
+        );
+        assert_eq!(SecretSlot::ProtonKeyPass.as_str(), "proton-key-pass");
+    }
+
+    #[test]
+    fn proton_slots_are_separate_from_oauth_slots() {
+        let store = InMemorySecretStore::default();
+        store
+            .set_account_secret_in_slot(9, SecretSlot::RefreshToken, "oauth-refresh")
+            .expect("oauth");
+        store
+            .set_account_secret_in_slot(9, SecretSlot::ProtonRefreshToken, "proton-refresh")
+            .expect("proton");
+        store
+            .set_account_secret_in_slot(9, SecretSlot::ProtonKeyPass, "salted")
+            .expect("key pass");
+        assert_eq!(
+            store
+                .get_account_secret_from_slot(9, SecretSlot::RefreshToken)
+                .expect("oauth"),
+            "oauth-refresh"
+        );
+        assert_eq!(
+            store
+                .get_account_secret_from_slot(9, SecretSlot::ProtonRefreshToken)
+                .expect("proton"),
+            "proton-refresh"
+        );
+        assert!(
+            store
+                .get_account_secret_from_slot(9, SecretSlot::Password)
+                .is_err()
+        );
     }
 
     #[test]

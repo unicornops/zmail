@@ -591,3 +591,252 @@ async fn refuses_a_certificate_from_another_ca_even_when_pinned() {
     assert!(matches!(error, Error::Certificate(_)), "{error:?}");
     assert!(server.requests().is_empty());
 }
+
+/// A fake Proton login endpoint: the SRP server side from `proton-srp`
+/// with go-srp's signed test modulus, so the client's whole login path
+/// (modulus signature, proofs, server proof) runs for real.
+struct FakeSrpServer {
+    salt: String,
+    verifier: proton_srp::ServerClientVerifier,
+    session: Mutex<Option<proton_srp::ServerInteraction>>,
+}
+
+const PASSWORD: &str = "correct horse battery staple";
+
+impl FakeSrpServer {
+    fn new() -> Arc<Self> {
+        let verifier: proton_srp::SRPVerifierB64 = proton_srp::SRPAuth::generate_verifier(
+            &crate::srp_modulus::ModulusVerifier,
+            PASSWORD,
+            None,
+            crate::srp_modulus::tests::TEST_MODULUS_CLEAR_SIGN,
+        )
+        .expect("verifier")
+        .into();
+        Arc::new(Self {
+            salt: verifier.salt.clone(),
+            verifier: proton_srp::ServerClientVerifier::try_from(&verifier).expect("verifier"),
+            session: Mutex::new(None),
+        })
+    }
+
+    fn info(&self) -> Reply {
+        let mut session = proton_srp::ServerInteraction::new_with_modulus_extractor(
+            &crate::srp_modulus::ModulusVerifier,
+            crate::srp_modulus::tests::TEST_MODULUS_CLEAR_SIGN,
+            &self.verifier,
+        )
+        .expect("server session");
+        let challenge = session.generate_challenge();
+        *self.session.lock().expect("session") = Some(session);
+        // The fake server omits `Code` here; the client must cope.
+        Reply::json(
+            200,
+            serde_json::json!({
+                "Version": 4,
+                "Modulus": crate::srp_modulus::tests::TEST_MODULUS_CLEAR_SIGN,
+                "ServerEphemeral": challenge.encode_b64(),
+                "Salt": self.salt,
+                "SRPSession": "srp-session-1",
+            }),
+        )
+    }
+
+    fn auth(&self, request: &Recorded, server_proof_override: Option<&str>) -> Reply {
+        let body = request.json();
+        let proof = proton_srp::ServerClientProof::new(
+            body["ClientEphemeral"].as_str().expect("ephemeral"),
+            body["ClientProof"].as_str().expect("proof"),
+        )
+        .expect("proof");
+        let mut session = self.session.lock().expect("session");
+        let Some(session) = session.as_mut() else {
+            return api_error(422, 2001, "No SRP session");
+        };
+        match session.verify_proof(&proof) {
+            Ok(server_proof) => Reply::json(
+                200,
+                serde_json::json!({
+                    "Code": 1000,
+                    "UserID": "user-1",
+                    "UID": "uid-1",
+                    "AccessToken": "access-1",
+                    "RefreshToken": "refresh-1",
+                    "ServerProof": server_proof_override
+                        .map_or_else(|| server_proof.encode_b64(), str::to_owned),
+                    "Scope": "full mail",
+                    "2FA": {"Enabled": 1, "FIDO2": {"AuthenticationOptions": null, "RegisteredKeys": []}},
+                    "PasswordMode": 1,
+                }),
+            ),
+            Err(_) => api_error(422, 8002, "Incorrect login credentials"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn logs_in_with_srp_and_checks_the_server_proof() {
+    let srp = FakeSrpServer::new();
+    let fake = srp.clone();
+    let server = MockServer::start(move |request, _| match request.path.as_str() {
+        "/auth/v4/info" => fake.info(),
+        "/auth/v4" if request.method == "POST" => fake.auth(request, None),
+        "/auth/v4/2fa" => Reply::json(200, serde_json::json!({"Code": 1000, "Scope": "full mail"})),
+        "/auth/v4" if request.method == "DELETE" => {
+            Reply::json(200, serde_json::json!({"Code": 1000}))
+        }
+        _ => user_reply(),
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+
+    let (client, auth) = manager.login("zmail", PASSWORD).await.expect("login");
+    assert_eq!(auth.uid, "uid-1");
+    assert_eq!(auth.user_id, "user-1");
+    assert!(auth.two_fa.enabled.has_totp());
+    assert_eq!(client.uid(), "uid-1");
+    client.auth_2fa("123456").await.expect("2fa");
+    client.get_user().await.expect("user");
+    client.auth_delete().await.expect("logout");
+
+    let requests = server.requests();
+    let calls: Vec<(&str, &str)> = requests
+        .iter()
+        .map(|r| (r.method.as_str(), r.path.as_str()))
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            ("POST", "/auth/v4/info"),
+            ("POST", "/auth/v4"),
+            ("POST", "/auth/v4/2fa"),
+            ("GET", "/core/v4/users"),
+            ("DELETE", "/auth/v4"),
+        ]
+    );
+    assert_eq!(requests[0].json(), serde_json::json!({"Username": "zmail"}));
+    let login = requests[1].json();
+    assert_eq!(login["Username"], "zmail");
+    assert_eq!(login["SRPSession"], "srp-session-1");
+    assert!(login.get("TwoFactorCode").is_none());
+    assert_eq!(login["FIDO2"]["ClientData"], "");
+    // The password never leaves the client.
+    assert!(!String::from_utf8_lossy(&requests[1].body).contains(PASSWORD));
+    for request in &requests[..2] {
+        assert_eq!(request.header("x-pm-uid"), None);
+        assert_eq!(request.header("authorization"), None);
+        assert_eq!(request.header("x-pm-appversion"), Some("zmail@0.14.0"));
+    }
+    assert_eq!(requests[2].json()["TwoFactorCode"], "123456");
+    for request in &requests[2..] {
+        assert_eq!(request.header("x-pm-uid"), Some("uid-1"));
+        assert_eq!(request.header("authorization"), Some("Bearer access-1"));
+    }
+}
+
+#[tokio::test]
+async fn wrong_password_is_a_typed_error() {
+    let srp = FakeSrpServer::new();
+    let fake = srp.clone();
+    let server = MockServer::start(move |request, _| match request.path.as_str() {
+        "/auth/v4/info" => fake.info(),
+        _ => fake.auth(request, None),
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let error = manager
+        .login("zmail", "not the password")
+        .await
+        .expect_err("wrong password");
+    assert!(matches!(error, Error::PasswordWrong(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn refuses_a_server_that_cannot_prove_the_password() {
+    let srp = FakeSrpServer::new();
+    let fake = srp.clone();
+    let server = MockServer::start(move |request, _| match request.path.as_str() {
+        "/auth/v4/info" => fake.info(),
+        _ => fake.auth(request, Some(&BASE64.encode([7u8; 256]))),
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let error = manager
+        .login("zmail", PASSWORD)
+        .await
+        .expect_err("bad proof");
+    assert!(matches!(error, Error::InvalidServerProof), "{error:?}");
+}
+
+#[tokio::test]
+async fn refuses_an_unsigned_modulus() {
+    let server = MockServer::start(|_, _| {
+        Reply::json(
+            200,
+            serde_json::json!({
+                "Version": 4,
+                "Modulus": crate::srp_modulus::tests::TEST_MODULUS_CLEAR_SIGN.replacen("W2z5", "W2z6", 1),
+                "ServerEphemeral": BASE64.encode([1u8; 256]),
+                "Salt": BASE64.encode([2u8; 10]),
+                "SRPSession": "s",
+            }),
+        )
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let error = manager.login("zmail", PASSWORD).await.expect_err("modulus");
+    assert!(matches!(error, Error::Srp(_)), "{error:?}");
+    // Only the challenge was fetched; no proof was sent.
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn human_verification_round_trip() {
+    let srp = FakeSrpServer::new();
+    let fake = srp.clone();
+    let server = MockServer::start(move |request, _| match request.path.as_str() {
+        "/auth/v4/info" => fake.info(),
+        _ if request.header("x-pm-human-verification-token") == Some("hv-token") => {
+            fake.auth(request, None)
+        }
+        _ => Reply::json(
+            422,
+            serde_json::json!({
+                "Code": 9001,
+                "Error": "Human verification required",
+                "Details": {
+                    "HumanVerificationMethods": ["captcha", "email"],
+                    "HumanVerificationToken": "hv-token",
+                },
+            }),
+        ),
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+
+    let error = manager.login("zmail", PASSWORD).await.expect_err("hv");
+    let hv = error
+        .human_verification()
+        .expect("hv error")
+        .expect("hv details");
+    assert_eq!(
+        hv.verify_url(),
+        "https://verify.proton.me/?methods=captcha,email&token=hv-token"
+    );
+
+    let (_, auth) = manager
+        .login_with_hv("zmail", PASSWORD, Some(&hv))
+        .await
+        .expect("login after hv");
+    assert_eq!(auth.uid, "uid-1");
+    let requests = server.requests();
+    let retried = requests.last().expect("auth request");
+    assert_eq!(
+        retried.header("x-pm-human-verification-token"),
+        Some("hv-token")
+    );
+    assert_eq!(
+        retried.header("x-pm-human-verification-token-type"),
+        Some("captcha,email")
+    );
+}
