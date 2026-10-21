@@ -264,6 +264,12 @@ impl ReaderView {
         self.message_items(index).len()
     }
 
+    /// The conversation list item at the top of the pane.
+    #[cfg(test)]
+    pub(crate) fn top_item(&self) -> usize {
+        self.list_state.logical_scroll_top().item_ix
+    }
+
     /// Which messages are expanded and which is current.
     #[cfg(test)]
     pub(crate) fn conversation(&self) -> &ConversationState {

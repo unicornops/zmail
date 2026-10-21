@@ -42,7 +42,8 @@
 //!   results row times only the work after the pause.
 //! - **Reader open** (budget 100 ms): opening a conversation of 100 unread
 //!   messages (all expanded), one with a 1 MB HTML body, and one with 60
-//!   attachments.
+//!   attachments; then 240 scroll-wheel frames down the 1 MB body
+//!   (budget 8.3 ms), which the reader lays out a chunk at a time.
 
 use std::{
     sync::Arc,
@@ -78,9 +79,6 @@ struct Samples {
     name: String,
     budget: Duration,
     times: Vec<Duration>,
-    /// Whether `ZMAIL_PERF_GATE` checks it: false for a known miss that
-    /// a fix is still pending for.
-    gated: bool,
 }
 
 impl Samples {
@@ -89,14 +87,7 @@ impl Samples {
             name: name.into(),
             budget,
             times: Vec::new(),
-            gated: true,
         }
-    }
-
-    /// Leaves a known miss out of the gate (it is still reported).
-    fn ungated(mut self) -> Self {
-        self.gated = false;
-        self
     }
 
     /// Times `step` and records it.
@@ -155,7 +146,6 @@ impl Samples {
             "max_ms": ms(self.max()),
             "budget_ms": ms(self.budget),
             "over_budget": self.over_budget(),
-            "gated": self.gated,
         })
     }
 }
@@ -476,17 +466,12 @@ fn measure_reader_open(
     view.update(cx, |view, cx| view.select_mailbox(seeded.inbox, cx));
     cx.run_until_parked();
     let mut results = Vec::new();
-    // The 1 MB body is a known miss: the reader lays the whole body out
-    // in its first frame until long bodies are laid out in pieces.
-    for (label, thread_id, gated) in [
-        ("100 unread messages", seeded.long, true),
-        ("1 MB HTML body", seeded.html, false),
-        ("60 attachments", seeded.attachments, true),
+    for (label, thread_id) in [
+        ("100 unread messages", seeded.long),
+        ("1 MB HTML body", seeded.html),
+        ("60 attachments", seeded.attachments),
     ] {
         let mut samples = Samples::new(format!("open reader ({label})"), ACTION_BUDGET);
-        if !gated {
-            samples = samples.ungated();
-        }
         for _ in 0..RUNS {
             // Another conversation first, so each open loads and lays out
             // this one from scratch.
@@ -508,6 +493,38 @@ fn measure_reader_open(
         }
         results.push(samples);
     }
+
+    // Reading down the 1 MB body: scroll frames over the reader.
+    let inbox = seeded.inbox;
+    let html = seeded.html;
+    view.update(cx, |view, cx| view.select_thread(html, inbox, cx));
+    cx.run_until_parked();
+    let over_reader = point(
+        px(SIDEBAR_WIDTH + MESSAGE_LIST_WIDTH + 300.),
+        px(WINDOW_HEIGHT / 2.),
+    );
+    cx.simulate_mouse_move(over_reader, None, Modifiers::none());
+    let reader = cx.read_entity(view, |view, _| view.reader.clone());
+    let top = |cx: &mut VisualTestContext| cx.read_entity(&reader, |reader, _| reader.top_item());
+    let before = top(cx);
+    let mut samples = Samples::new("reader scroll frame (1 MB HTML body)", FRAME_BUDGET);
+    for _ in 0..240 {
+        samples.time(|| {
+            cx.simulate_event(ScrollWheelEvent {
+                position: over_reader,
+                delta: ScrollDelta::Pixels(point(px(0.), px(-64.))),
+                modifiers: Modifiers::none(),
+                touch_phase: TouchPhase::Moved,
+            })
+        });
+    }
+    let after = top(cx);
+    assert!(
+        after > before + 2,
+        "the reader scrolled down the body ({before} to {after})"
+    );
+    println!("reader scroll: list items {before} to {after}");
+    results.push(samples);
     results
 }
 
@@ -635,7 +652,7 @@ fn performance_budgets() {
         let over = groups
             .iter()
             .flat_map(|(_, samples)| samples)
-            .filter(|samples| samples.gated && samples.percentile(50) > samples.budget * factor)
+            .filter(|samples| samples.percentile(50) > samples.budget * factor)
             .map(|samples| {
                 format!(
                     "{}: median {} over {factor} × {}",

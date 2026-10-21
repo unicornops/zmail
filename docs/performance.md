@@ -15,6 +15,7 @@ and the latest numbers.
 | Opening a conversation (the next one, from the list) | 100 ms |
 | A keystroke in the search field | 100 ms |
 | Opening the reader on a heavy conversation | 100 ms |
+| Scrolling the reader down a long body | 8.3 ms per frame (120 Hz) |
 
 Which budgets become hard CI gates, and with what tolerance, is still open
 (see #137).
@@ -68,6 +69,9 @@ time" below means this CPU time, not a measured frame rate.
   times the work after the pause, not the pause.
 - **Reader open:** each stress conversation opened 10 times, from another
   conversation each time so it loads and lays out from scratch.
+- **Reader scroll:** 240 scroll-wheel events of 64 px down the 1 MB HTML
+  body, which the reader lays out a chunk of the body per conversation
+  list item.
 
 ### In CI
 
@@ -81,9 +85,8 @@ uploads them, with `performance.json`, as the `performance` artefact
 The job reports; it is not the budget. Shared runners vary from run to
 run, so a median only fails the job when it is more than five times its
 budget (`ZMAIL_PERF_GATE=5`): it catches regressions of the
-order-of-magnitude kind the baseline below found. Known misses with a fix still
-pending (opening the 1 MB HTML body) are reported but left out of the
-gate. Which budgets should become hard gates, and at what tolerance, is
+order-of-magnitude kind the baseline below found. Every measurement is
+gated. Which budgets should become hard gates, and at what tolerance, is
 still open.
 
 ### Store: `cargo bench -p zmail-store`
@@ -212,10 +215,50 @@ per scrollbar jump.
   wheel or keys stays within the frame budget at any depth, apart from a
   frame now and then that reads the next page.
 - **Opening a 1 MB HTML body** (about 450 ms). The HTML becomes one
-  537 KB paragraph of text, which the reader lays out in full in the
-  first frame: the conversation list only skips messages that are off
-  screen, not paragraphs. Fixing it means laying out long bodies in
-  pieces (or showing the start of a very long body first), which is a
-  reader change.
+  537 KB paragraph of text, which the reader laid out in full in the
+  first frame: the conversation list only skipped messages that were off
+  screen, not paragraphs. Fixed by the reader chunking below.
 - **Search**: a short prefix that expands to many index terms
   (`budget r`) can still take about 100 ms.
+
+The scrollbar drag is tracked in #242.
+
+## After the reader chunking (2026-10-21)
+
+The reader lays out a paragraph longer than 2 KB in pieces of whole
+lines, and an expanded message whose body is longer than about 6 KB
+takes one conversation list item per chunk of pieces, so the list lays
+out only the part on screen (#249). Opening the 1 MB HTML message went
+from about 450 ms to under 40 ms, and the CI job now gates it like every
+other measurement.
+
+`main` at dfd386a, the same machine, release profile. The shared
+container's load average was about 5 when the run started and about 11
+when it finished (other agents were building), so treat differences under
+about 30% as noise.
+
+| Measurement | n | Median | p95 | Max | Budget | Over budget |
+|---|---|---|---|---|---|---|
+| Scroll frame, flick (top) | 120 | 5.41 ms | 8.80 ms | 14.19 ms | 8.33 ms | 11 |
+| Scroll frame, flick (middle) | 120 | 4.61 ms | 7.33 ms | 12.94 ms | 8.33 ms | 4 |
+| Scroll frame, flick (end) | 120 | 4.96 ms | 7.18 ms | 14.49 ms | 8.33 ms | 3 |
+| Scroll frame, scrollbar jump | 100 | 15.54 ms | 21.59 ms | 23.45 ms | 8.33 ms | 100 |
+| Open thread (Select Next) | 30 | 6.12 ms | 7.59 ms | 24.42 ms | 100 ms | 0 |
+| Mark read / unread | 30 | 33.82 ms | 43.70 ms | 53.24 ms | 100 ms | 0 |
+| Flag / unflag | 30 | 32.42 ms | 33.56 ms | 33.70 ms | 100 ms | 0 |
+| Archive | 30 | 38.30 ms | 39.73 ms | 40.60 ms | 100 ms | 0 |
+| Open folder (20k Archive) | 30 | 22.63 ms | 28.46 ms | 32.73 ms | 100 ms | 0 |
+| Open folder (100k Inbox) | 30 | 32.52 ms | 40.86 ms | 44.57 ms | 100 ms | 0 |
+| Search keystroke, shows in the field | 32 | 1.18 ms | 1.58 ms | 14.84 ms | 100 ms | 0 |
+| Search keystroke, results after the debounce | 32 | 30.80 ms | 93.58 ms | 105.73 ms | 100 ms | 1 |
+| Open reader, 100 unread messages | 10 | 7.21 ms | 8.20 ms | 8.20 ms | 100 ms | 0 |
+| Open reader, 1 MB HTML body | 10 | 38.60 ms | 41.45 ms | 41.45 ms | 100 ms | 0 |
+| Open reader, 60 attachments | 10 | 11.02 ms | 11.58 ms | 11.58 ms | 100 ms | 0 |
+| Reader scroll frame, 1 MB HTML body | 240 | 1.23 ms | 2.12 ms | 8.12 ms | 8.33 ms | 0 |
+
+Seeding the store took 15.3 s. With `ZMAIL_PERF_GATE=5`, as in CI, the run
+passes.
+
+What still misses: dragging the scrollbar across a 100k mailbox (#242),
+and the occasional search for a short prefix that expands to many index
+terms.
