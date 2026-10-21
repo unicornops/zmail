@@ -1,0 +1,30 @@
+# Trusted SPKI pins for Proton's API, one `pin-sha256="..."` line each:
+# the base64 SHA-256 of a certificate's DER SubjectPublicKeyInfo.
+#
+# Copied from `TrustedAPIPins` in proton-bridge internal/dialer/dialer_pinning.go
+# at v3.27.1 (43b9237786204a0215abfd4dcc51ee7bb92f52d4),
+# Copyright (c) 2026 Proton AG, GPL-3.0-or-later (used under GPL-3.0-only).
+# Keep the lines identical to upstream so the upstream check can compare them;
+# see docs/upstream/proton.md. Text after `#` is a comment.
+
+# api.protonmail.ch
+pin-sha256="drtmcR2kFkM8qJClsuWgUzxgBkePfRCkRpqUesyDmeE=" # current
+pin-sha256="YRGlaY0jyJ4Jw2/4M8FIftwbDIQfh8Sdro96CeEel54=" # hot backup
+pin-sha256="AfMENBVvOS8MnISprtvyPsjKlPooqh8nMB/pvCrpJpw=" # cold backup
+
+# protonmail.com
+pin-sha256="8joiNBdqaYiQpKskgtkJsqRxF7zN0C0aqfi8DacknnI=" # current
+pin-sha256="JMI8yrbc6jB1FYGyyWRLFTmDNgIszrNEMGlgy972e7w=" # hot backup
+pin-sha256="Iu44zU84EOCZ9vx/vz67/MRVrxF1IO4i4NIa8ETwiIY=" # cold backup
+
+# proton.me
+pin-sha256="CT56BhOTmj5ZIPgb/xD5mH8rY3BLo/MlhP7oPyJUEDo=" # current
+pin-sha256="35Dx28/uzN3LeltkCBQ8RHK0tlNSa2kCpCRGNp34Gxc=" # hot backup
+pin-sha256="qYIukVc63DEITct8sFT7ebIq5qsWmuscaIKeJx+5J5A=" # cold backup
+
+# proxies (Bridge's alternative routing; Zmail does not use proxies, but
+# keeps the list identical to upstream)
+pin-sha256="EU6TS9MO0L/GsDHvVc9D5fChYLNy5JdGYpJw0ccgetM=" # main
+pin-sha256="iKPIHPnDNqdkvOnTClQ8zQAIKG0XavaPkcEo0LBAABA=" # backup 1
+pin-sha256="MSlVrBCdL0hKyczvgYVSRNm88RicyY04Q2y5qrBt0xA=" # backup 2
+pin-sha256="C2UxW0T1Ckl9s+8cXfjXxlEqwAfPM4HiW2y3UdtBeCw=" # backup 3

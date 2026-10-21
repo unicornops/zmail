@@ -8258,6 +8258,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "zmail-proton-api"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "futures-util",
+ "rand 0.8.8",
+ "reqwest",
+ "rustls-native-certs",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "url",
+]
+
+[[package]]
 name = "zmail-security"
 version = "0.0.1"
 dependencies = [

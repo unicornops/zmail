@@ -9,6 +9,7 @@ members = [
     "crates/zmail-index",
     "crates/zmail-jmap",
     "crates/zmail-notify",
+    "crates/zmail-proton-api",
     "crates/zmail-security",
     "crates/zmail-smtp",
     "crates/zmail-store",
@@ -29,6 +30,7 @@ version = "0.0.1"
 [workspace.dependencies]
 anyhow = "1"
 async-imap = { version = "0.11.2", default-features = false, features = ["runtime-tokio"] }
+base64 = "0.22.1"
 chrono = "0.4"
 futures-util = "0.3"
 # GPUI is pinned to a Zed stable release tag; see docs/upstream/zed.md. The
@@ -57,8 +59,12 @@ rpassword = "7.4.0"
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustls-native-certs = "0.8.2"
+# SPKI extraction for the Proton API pins (zmail-proton-api); already in the
+# tree through rustls.
+rustls-webpki = { version = "0.103.16", default-features = false, features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2.0.21"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = "0.26.4"
 unicode-segmentation = "1.13"
