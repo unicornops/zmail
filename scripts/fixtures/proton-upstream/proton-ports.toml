@@ -1,0 +1,26 @@
+# Fixture manifest for scripts/test-check-proton-upstream.sh.
+
+[[port]]
+repo = "go-proton-api"
+upstream = "auth.go"
+local = "crates/zmail-proton-api/src/auth.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/events/"
+local = "crates/zmail-proton/src/events.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/imapservice/imap_connector.go"
+local = "crates/zmail-proton/src/mailbox.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/dialer/dialer_pinning.go"
+local = "crates/zmail-proton-api/src/pinning.rs"
+
+[[port]]
+repo = "go-message"
+upstream = "textproto/"
+local = "crates/zmail-proton/src/message.rs"

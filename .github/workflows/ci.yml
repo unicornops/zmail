@@ -66,6 +66,9 @@ jobs:
                         app_code=true
                         workspace_checks=true
                         ;;
+                      scripts/check-proton-upstream.sh|scripts/test-check-proton-upstream.sh|scripts/fixtures/proton-upstream/*)
+                        workspace_checks=true
+                        ;;
                       crates/*)
                         if [[ "$file" != *.md ]]; then
                           app_code=true
@@ -131,6 +134,10 @@ jobs:
 
             - name: Format
               run: cargo fmt --all -- --check
+
+            # Offline: runs the weekly proton-upstream check against fixtures.
+            - name: Proton upstream check self-test
+              run: scripts/test-check-proton-upstream.sh
 
             - name: Clippy
               run: cargo clippy --workspace --all-targets -- -D warnings

@@ -1,0 +1,30 @@
+{
+  "status": "ahead",
+  "files": [
+    {
+      "filename": "README.md",
+      "status": "modified"
+    },
+    {
+      "filename": "internal/events/user.go",
+      "status": "modified"
+    },
+    {
+      "filename": "internal/events/user_test.go",
+      "status": "added"
+    },
+    {
+      "filename": "internal/dialer/dialer_pinning.go",
+      "status": "modified"
+    },
+    {
+      "filename": "internal/services/imapservice/connector.go",
+      "status": "renamed",
+      "previous_filename": "internal/services/imapservice/imap_connector.go"
+    },
+    {
+      "filename": "internal/services/smtp/smtp.go",
+      "status": "modified"
+    }
+  ]
+}
