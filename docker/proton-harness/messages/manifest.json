@@ -1,0 +1,8 @@
+[
+  {"file": "welcome.eml", "address": "zmail@proton.local", "labels": ["Inbox"], "unread": true, "starred": true, "subject": "Welcome to the harness"},
+  {"file": "welcome-reply.eml", "address": "zmail@proton.local", "labels": ["Inbox"], "unread": false, "starred": false, "subject": "Re: Welcome to the harness"},
+  {"file": "report.eml", "address": "zmail@proton.local", "labels": ["Work"], "unread": false, "starred": false, "subject": "Quarterly report"},
+  {"file": "dinner.eml", "address": "zmail@proton.local", "labels": ["Inbox", "Family"], "unread": true, "starred": false, "subject": "Dinner on Sunday"},
+  {"file": "alias.eml", "address": "zmail.alias@proton.local", "labels": ["Inbox"], "unread": true, "starred": false, "subject": "To the alias"},
+  {"file": "receipt.eml", "address": "zmail@proton.local", "labels": ["Archive"], "unread": false, "starred": false, "subject": "Old receipt"}
+]

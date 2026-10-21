@@ -1,0 +1,19 @@
+From: Carol Example <carol@example.com>
+To: zmail@proton.local
+Subject: Quarterly report
+Date: Tue, 20 Oct 2026 08:30:00 +0000
+Message-ID: <report@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="zmail-boundary"
+
+--zmail-boundary
+Content-Type: text/plain; charset=utf-8
+
+The report is attached.
+--zmail-boundary
+Content-Type: text/csv; name="report.csv"
+Content-Disposition: attachment; filename="report.csv"
+Content-Transfer-Encoding: base64
+
+cXVhcnRlcix0b3RhbAoxLDEwCg==
+--zmail-boundary--

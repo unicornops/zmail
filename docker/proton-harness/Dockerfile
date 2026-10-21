@@ -1,6 +1,7 @@
 # Proton API test double: go-proton-api's fake server (server/cmd/server)
 # and its gRPC control client (server/cmd/client), built at the pinned
-# commit with api-port.patch and srp-salt.patch applied. Test-only; nothing
+# commit with api-port.patch and srp-salt.patch applied, plus zmail-seed
+# (seed/main.go), which imports the message fixtures. Test-only; nothing
 # from this image ships in zmail. See README.md and scripts/proton-harness.sh.
 
 # golang:1.26.7-bookworm (multi-arch index digest). go-proton-api's go.mod
@@ -28,13 +29,16 @@ COPY api-port.patch srp-salt.patch /src/
 RUN git apply /src/api-port.patch \
     && git apply /src/srp-salt.patch
 
+COPY seed/main.go ./server/cmd/zmail-seed/main.go
+
 RUN go build -trimpath -o /out/proton-server ./server/cmd/server \
-    && go build -trimpath -o /out/proton-client ./server/cmd/client
+    && go build -trimpath -o /out/proton-client ./server/cmd/client \
+    && go build -trimpath -o /out/zmail-seed ./server/cmd/zmail-seed
 
 # gcr.io/distroless/static-debian12:nonroot (multi-arch index digest).
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
-COPY --from=build /out/proton-server /out/proton-client /usr/local/bin/
+COPY --from=build /out/proton-server /out/proton-client /out/zmail-seed /usr/local/bin/
 
 # 8080: gRPC control service (create users, addresses, labels).
 # 8443: the Proton API, over TLS when started with --tls-cert/--tls-key.

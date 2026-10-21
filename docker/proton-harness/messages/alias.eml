@@ -1,0 +1,9 @@
+From: Erin Example <erin@example.com>
+To: zmail.alias@proton.local
+Subject: To the alias
+Date: Wed, 21 Oct 2026 07:00:00 +0000
+Message-ID: <alias@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Sent to the second address.

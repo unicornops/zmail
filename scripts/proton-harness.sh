@@ -22,7 +22,7 @@ set -euo pipefail
 # $PROTON_HARNESS_STATE_DIR (default target/proton-harness):
 #
 #   ca.pem       the CA to trust; nothing else is signed by it
-#   state.json   base URL, CA path, account, addresses and labels
+#   state.json   base URL, CA path, account, addresses, labels and messages
 #   env          the same as PROTON_HARNESS_* shell exports
 #
 # PROTON_HARNESS_MODE=native builds and runs the server with a local Go
@@ -55,7 +55,7 @@ GRPC_PORT=18080
 BASE_URL="https://127.0.0.1:${API_PORT}"
 CONTAINER="zmail-proton-harness"
 # Tagged by the build inputs, so a changed Dockerfile or patch rebuilds.
-IMAGE="zmail-proton-harness:$(cat "${HARNESS_DIR}/Dockerfile" "${HARNESS_DIR}/api-port.patch" "${HARNESS_DIR}/srp-salt.patch" | sha256sum | cut -c1-16)"
+IMAGE="zmail-proton-harness:$(cat "${HARNESS_DIR}/Dockerfile" "${HARNESS_DIR}/api-port.patch" "${HARNESS_DIR}/srp-salt.patch" "${HARNESS_DIR}/seed/main.go" | sha256sum | cut -c1-16)"
 # Proton rejects API calls without an app version; the fake server only
 # checks that one is present.
 APP_VERSION="zmail@0.0.0-harness"
@@ -67,6 +67,9 @@ PASSWORD="zmail-proton-password"
 ALIAS_ADDRESS="zmail.alias@proton.local"
 # name:folder|label
 SEED_LABELS=("Work:folder" "Receipts:folder" "Follow up:label" "Family:label")
+# Messages imported by zmail-seed (docker/proton-harness/seed) once the
+# labels exist.
+MESSAGES_DIR="${HARNESS_DIR}/messages"
 
 TLS_DIR="${STATE_DIR}/tls"
 CA_PEM="${STATE_DIR}/ca.pem"
@@ -175,6 +178,7 @@ docker_start() {
     --publish "127.0.0.1:${API_PORT}:8443" \
     --publish "127.0.0.1:${GRPC_PORT}:8080" \
     --volume "${TLS_DIR}:/tls:ro" \
+    --volume "${MESSAGES_DIR}:/seed:ro" \
     "${IMAGE}" \
     --port 8080 --api-port 8443 --tls-cert /tls/server.pem --tls-key /tls/server-key.pem \
     >/dev/null || die "could not start the ${CONTAINER} container"
@@ -198,8 +202,9 @@ native_build() {
   require go git
   NATIVE_BIN="${NATIVE_SRC}/bin"
   local stamp="${NATIVE_BIN}/patch.sha256" want
-  want="$(cat "${HARNESS_DIR}/api-port.patch" "${HARNESS_DIR}/srp-salt.patch" | sha256sum | cut -d' ' -f1)"
+  want="$(cat "${HARNESS_DIR}/api-port.patch" "${HARNESS_DIR}/srp-salt.patch" "${HARNESS_DIR}/seed/main.go" | sha256sum | cut -d' ' -f1)"
   if [[ -x "${NATIVE_BIN}/proton-server" && -x "${NATIVE_BIN}/proton-client" \
+    && -x "${NATIVE_BIN}/zmail-seed" \
     && "$(cat "${stamp}" 2>/dev/null)" == "${want}" ]]; then
     return
   fi
@@ -218,13 +223,16 @@ native_build() {
     || die "go-proton-api checkout is not at ${GO_PROTON_API_COMMIT}"
   git -C "${repo}" apply "${HARNESS_DIR}/api-port.patch" || die "api-port.patch does not apply"
   git -C "${repo}" apply "${HARNESS_DIR}/srp-salt.patch" || die "srp-salt.patch does not apply"
+  mkdir -p "${repo}/server/cmd/zmail-seed"
+  cp "${HARNESS_DIR}/seed/main.go" "${repo}/server/cmd/zmail-seed/main.go"
   (cd "${repo}" && CGO_ENABLED=0 GOFLAGS=-mod=readonly retry 3 5 go mod download) \
     || die "could not download go-proton-api's modules"
   if ! (
     cd "${repo}" \
       && export CGO_ENABLED=0 GOFLAGS=-mod=readonly \
       && go build -trimpath -o "${NATIVE_BIN}/proton-server" ./server/cmd/server \
-      && go build -trimpath -o "${NATIVE_BIN}/proton-client" ./server/cmd/client
+      && go build -trimpath -o "${NATIVE_BIN}/proton-client" ./server/cmd/client \
+      && go build -trimpath -o "${NATIVE_BIN}/zmail-seed" ./server/cmd/zmail-seed
   ); then
     die "could not build go-proton-api"
   fi
@@ -283,6 +291,23 @@ control() {
   fi
 }
 
+# seed_messages - imports the message fixtures through the API as the
+# seeded user and prints what zmail-seed reports (a JSON list).
+seed_messages() {
+  local limit=()
+  command -v timeout >/dev/null 2>&1 && limit=(timeout 120)
+  if [[ "${MODE}" == docker ]]; then
+    ${limit[@]+"${limit[@]}"} docker exec "${CONTAINER}" /usr/local/bin/zmail-seed \
+      --api "https://127.0.0.1:8443" --ca /tls/ca.pem \
+      --username "${USERNAME}" --password "${PASSWORD}" --manifest /seed/manifest.json
+  else
+    native_build
+    ${limit[@]+"${limit[@]}"} "${NATIVE_BIN}/zmail-seed" \
+      --api "${BASE_URL}" --ca "${CA_PEM}" \
+      --username "${USERNAME}" --password "${PASSWORD}" --manifest "${MESSAGES_DIR}/manifest.json"
+  fi
+}
+
 # --- Readiness and seeding ---------------------------------------------------
 
 api_ping() {
@@ -337,7 +362,7 @@ seed() {
   # Each call runs once: retrying a call that half-succeeded would only meet
   # "already exists" (see #201). A failed seed fails `up`, and
   # ProtonHarness::start retries with a whole fresh harness (`reset`).
-  local output user_id primary_id alias_id labels="[]" entry name kind flag label_id
+  local output user_id primary_id alias_id labels="[]" entry name kind flag label_id messages
   output="$(control user create --username "${USERNAME}" --password "${PASSWORD}")" \
     || die "could not create the ${USERNAME} user: ${output}"
   user_id="$(json_field "${output}" userID)"
@@ -359,6 +384,10 @@ seed() {
       '. + [{name: $name, kind: $kind, id: $id}]' <<<"${labels}")"
   done
 
+  messages="$(seed_messages)" || die "could not import the message fixtures: ${messages}"
+  jq -e 'type == "array"' <<<"${messages}" >/dev/null \
+    || die "zmail-seed printed no message list: ${messages}"
+
   jq -n \
     --arg base_url "${BASE_URL}" \
     --arg ca_pem "${CA_PEM}" \
@@ -371,6 +400,7 @@ seed() {
     --arg alias "${ALIAS_ADDRESS}" \
     --arg alias_id "${alias_id}" \
     --argjson labels "${labels}" \
+    --argjson messages "${messages}" \
     '{
       base_url: $base_url,
       ca_pem: $ca_pem,
@@ -382,7 +412,8 @@ seed() {
         {email: $primary, id: $primary_id},
         {email: $alias, id: $alias_id}
       ],
-      labels: $labels
+      labels: $labels,
+      messages: $messages
     }' > "${STATE_JSON}.tmp"
   mv "${STATE_JSON}.tmp" "${STATE_JSON}"
 
@@ -393,7 +424,7 @@ export PROTON_HARNESS_USERNAME='${USERNAME}'
 export PROTON_HARNESS_PASSWORD='${PASSWORD}'
 export PROTON_HARNESS_STATE='${STATE_JSON}'
 EOF
-  log "seeded ${USERNAME} (${USERNAME}@proton.local, ${ALIAS_ADDRESS}) with ${#SEED_LABELS[@]} labels; state in ${STATE_JSON}"
+  log "seeded ${USERNAME} (${USERNAME}@proton.local, ${ALIAS_ADDRESS}) with ${#SEED_LABELS[@]} labels and $(jq length <<<"${messages}") messages; state in ${STATE_JSON}"
 }
 
 up() {

@@ -68,6 +68,17 @@ pub struct ProtonHarnessLabel {
     pub id: String,
 }
 
+/// One message imported from `docker/proton-harness/messages`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtonHarnessMessage {
+    /// The fixture file, such as `welcome.eml`.
+    pub file: String,
+    /// The server's message ID.
+    pub id: String,
+    /// The fixture's subject, as listed in the manifest.
+    pub subject: String,
+}
+
 /// Everything the script recorded about a running, seeded harness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtonHarnessState {
@@ -87,6 +98,8 @@ pub struct ProtonHarnessState {
     pub addresses: Vec<ProtonHarnessAddress>,
     /// The seeded folders and labels.
     pub labels: Vec<ProtonHarnessLabel>,
+    /// The imported messages, in manifest order.
+    pub messages: Vec<ProtonHarnessMessage>,
 }
 
 impl ProtonHarnessState {
@@ -120,6 +133,17 @@ impl ProtonHarnessState {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        let messages = array(&value, "messages")?
+            .iter()
+            .map(|message| {
+                Ok(ProtonHarnessMessage {
+                    file: string(message, "file")?,
+                    id: string(message, "id")?,
+                    subject: string(message, "subject")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         Ok(Self {
             base_url: string(&value, "base_url")?,
             ca_pem_path: PathBuf::from(string(&value, "ca_pem")?),
@@ -129,6 +153,7 @@ impl ProtonHarnessState {
             user_id: string(&value, "user_id")?,
             addresses,
             labels,
+            messages,
         })
     }
 }
@@ -316,6 +341,9 @@ mod tests {
           "labels": [
             {"name": "Work", "kind": "folder", "id": "label-1"},
             {"name": "Follow up", "kind": "label", "id": "label-2"}
+          ],
+          "messages": [
+            {"file": "welcome.eml", "id": "msg-1", "subject": "Welcome to the harness"}
           ]
         }"#;
 
@@ -333,6 +361,8 @@ mod tests {
         assert_eq!(state.labels[0].kind, ProtonHarnessLabelKind::Folder);
         assert_eq!(state.labels[1].kind, ProtonHarnessLabelKind::Label);
         assert_eq!(state.labels[1].id, "label-2");
+        assert_eq!(state.messages[0].id, "msg-1");
+        assert_eq!(state.messages[0].subject, "Welcome to the harness");
     }
 
     #[test]

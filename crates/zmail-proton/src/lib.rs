@@ -7,7 +7,11 @@
 //! store is encrypted at rest (#139); `zmail-sync` only builds it with its
 //! `proton` feature, which `zmail-app` does not enable.
 
+mod mailbox;
 mod session;
+mod sync;
+
+use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use zmail_core::{
@@ -21,10 +25,11 @@ pub use zmail_proton_api::{AppVersion, ClientConfig};
 
 /// Syncs a Proton account and returns the snapshot written into the store.
 ///
-/// The identities come from the account's enabled addresses (combined
-/// address mode: one account, all addresses). The checkpoint is the
-/// newest event ID, taken before anything else so no change made during
-/// the sync is missed. Mailboxes and messages arrive with read sync (#237).
+/// The checkpoint is the newest event ID, taken before anything else so no
+/// change made during the sync is missed. Identities come from the
+/// account's enabled addresses (combined address mode: one account, all
+/// addresses). Then the labels become mailboxes and every message's
+/// metadata is placed in them; bodies are fetched when a message is opened.
 pub async fn discover_and_sync(
     target: &SyncTarget,
     session: &ProtonSession,
@@ -37,9 +42,12 @@ pub async fn discover_and_sync(
     let checkpoint = client.get_latest_event_id().await?;
     let user = client.get_user().await?;
     let addresses = client.get_addresses().await?;
-    let identities: Vec<NewIdentity> = addresses
+    let enabled: Vec<_> = addresses
         .iter()
         .filter(|address| address.status == AddressStatus::ENABLED)
+        .collect();
+    let identities: Vec<NewIdentity> = enabled
+        .iter()
         .enumerate()
         .map(|(index, address)| NewIdentity {
             display_name: if address.display_name.is_empty() {
@@ -52,17 +60,35 @@ pub async fn discover_and_sync(
             is_primary: index == 0,
         })
         .collect();
+    let identity_for_address: HashMap<String, String> = addresses
+        .iter()
+        .map(|address| (address.id.clone(), address.email.clone()))
+        .collect();
+    let fallback_identity = enabled
+        .first()
+        .map(|address| address.email.clone())
+        .unwrap_or_else(|| user.email.clone());
+
+    let labels = client.get_labels(&sync::LABEL_TYPES).await?;
+    let metadata = sync::fetch_all_metadata(client).await?;
+    let mailboxes = sync::build_mailboxes(
+        &labels,
+        &metadata,
+        &identity_for_address,
+        &fallback_identity,
+    );
+
     let detail = format!(
-        "Proton account {} with {} address{}",
+        "Proton account {}: {} messages in {} mailboxes",
         user.name,
-        identities.len(),
-        if identities.len() == 1 { "" } else { "es" }
+        metadata.len(),
+        mailboxes.len()
     );
     Ok(AccountSyncSnapshot {
         checkpoint,
         detail,
         identities: (!identities.is_empty()).then_some(identities),
-        mailboxes: Vec::new(),
+        mailboxes,
     })
 }
 

@@ -362,6 +362,12 @@ impl Request {
         self
     }
 
+    /// Adds a query parameter.
+    pub(crate) fn query(mut self, name: impl Into<String>, value: impl ToString) -> Self {
+        self.query.push((name.into(), value.to_string()));
+        self
+    }
+
     /// Sets a JSON body.
     pub(crate) fn json(mut self, body: &impl Serialize) -> Result<Self, Error> {
         self.body = Some(serde_json::to_vec(body)?);

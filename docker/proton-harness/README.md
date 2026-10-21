@@ -13,7 +13,8 @@ Once started it serves:
   users, addresses and labels
 - a seeded account: `zmail` / `zmail-proton-password` (single-password mode),
   with the addresses `zmail@proton.local` and `zmail.alias@proton.local`, the
-  folders `Work` and `Receipts` and the labels `Follow up` and `Family`
+  folders `Work` and `Receipts`, the labels `Follow up` and `Family`, and
+  the messages in `messages/` (see below)
 
 Commands:
 
@@ -91,6 +92,19 @@ which is also what Proton uses.
 When the pin moves, check that both patches still apply in order
 (`git apply --check`). The image build and native mode both fail loudly if
 one doesn't.
+
+## Message fixtures
+
+The gRPC control service creates users, addresses and labels, but no
+messages. `seed/main.go` (`zmail-seed`, built into the image next to the
+server) signs in as the seeded user with go-proton-api's own client,
+unlocks the address keys and imports the `.eml` files listed in
+`messages/manifest.json` through the API, the way Bridge imports an IMAP
+`APPEND`, then stars the ones the manifest marks. `seed` runs it after the
+labels exist and records each message's ID and subject under `messages` in
+`state.json`. To add a fixture, add the `.eml` file and a manifest entry
+(`address` is one of the account's addresses; `labels` are label or folder
+names, at most one of them a folder or system label).
 
 ## Licence
 

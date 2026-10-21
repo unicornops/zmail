@@ -199,3 +199,45 @@ local = "crates/zmail-proton-api/src/unlock.rs"
 repo = "go-proton-api"
 upstream = "event.go"
 local = "crates/zmail-proton-api/src/event.rs"
+
+# Read sync: labels to mailboxes, message metadata.
+
+[[port]]
+repo = "go-proton-api"
+upstream = "label.go"
+local = "crates/zmail-proton-api/src/label.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "label_types.go"
+local = "crates/zmail-proton-api/src/label.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "message.go"
+local = "crates/zmail-proton-api/src/message.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "message_types.go"
+local = "crates/zmail-proton-api/src/message.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/imapservice/helpers.go"
+local = "crates/zmail-proton/src/mailbox.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/imapservice/imap_updates.go"
+local = "crates/zmail-proton/src/mailbox.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/imapservice/connector.go"
+local = "crates/zmail-proton/src/mailbox.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/syncservice/stage_metadata.go"
+local = "crates/zmail-proton/src/sync.rs"
