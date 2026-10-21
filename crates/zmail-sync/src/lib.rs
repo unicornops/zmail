@@ -26,8 +26,9 @@ use tokio::{
 };
 use wake::{WakeSignal, unless_woken};
 use zmail_core::{
-    AuthKind, MailboxSnapshot, PendingOutboxJob, ProtocolKind, RuntimeSummary, SubmissionKind,
-    SyncPhase, SyncTarget,
+    AuthKind, MailboxSnapshot, OutboxJobState, PendingOutboxJob, ProtocolKind, RuntimeSummary,
+    SubmissionKind, SyncPhase, SyncTarget,
+    reauth::{ReauthReason, ReauthRequired},
 };
 use zmail_notify::{NewMailArrival, NewMailBatch, Notifier};
 use zmail_security::{SecretSlot, SecretStore};
@@ -776,6 +777,34 @@ impl SyncService {
             .map_err(anyhow::Error::msg)
     }
 
+    /// Requeues the account's messages whose sending was refused for its
+    /// sign-in ([`ReauthRequired`]) and sends them, once the user has
+    /// signed in again. Returns how many were requeued.
+    pub fn retry_refused_sends(&self, account_id: i64) -> Result<usize> {
+        let refused = self
+            .inner
+            .store
+            .list_outbox_jobs(Some(account_id))?
+            .into_iter()
+            .filter(|job| {
+                job.state == OutboxJobState::Failed
+                    && job
+                        .last_error_message
+                        .as_deref()
+                        .and_then(ReauthReason::of_message)
+                        .is_some()
+            })
+            .map(|job| job.id)
+            .collect::<Vec<_>>();
+        for job_id in &refused {
+            self.inner.store.retry_outbox_job(*job_id)?;
+        }
+        if !refused.is_empty() {
+            self.process_outbox(Some(account_id))?;
+        }
+        Ok(refused.len())
+    }
+
     /// Queues a draft and immediately schedules outbox processing for its account.
     pub fn queue_draft_and_send(&self, draft_id: i64) -> Result<i64> {
         self.queue_draft_and_send_after(draft_id, Duration::ZERO)
@@ -1085,7 +1114,14 @@ impl SyncService {
             match self.deliver_outbox_job(&job).await {
                 Ok(()) => self.inner.store.record_outbox_sent(job.job_id)?,
                 Err(error) => {
-                    if job.attempt_count >= MAX_OUTBOX_ATTEMPTS {
+                    // A refused sign-in fails at once: retrying the same
+                    // credentials cannot work, and the stored message
+                    // tells the shell to offer Re-authenticate.
+                    if let Some(reauth) = reauth_required(&error) {
+                        self.inner
+                            .store
+                            .record_outbox_failure(job.job_id, reauth.to_string())?;
+                    } else if job.attempt_count >= MAX_OUTBOX_ATTEMPTS {
                         self.inner
                             .store
                             .record_outbox_failure(job.job_id, error.to_string())?;
@@ -1228,6 +1264,12 @@ fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as i64)
         .unwrap_or_default()
+}
+
+/// The [`ReauthRequired`] failure somewhere in `error`'s chain, if any:
+/// the user has to sign in again before the operation can work.
+fn reauth_required(error: &anyhow::Error) -> Option<&ReauthRequired> {
+    error.chain().find_map(|cause| cause.downcast_ref())
 }
 
 /// Persists a granted OAuth2 token set for an account.
@@ -2046,6 +2088,218 @@ mod oauth2_refresh_tests {
         assert!(
             format!("{error:#}").contains("missing OAuth2 access token"),
             "the error should mention the missing token: {error:#}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod outbox_reauth_tests {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+        sync::Arc,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use zmail_core::{
+        AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutboxJobState, OutboxJobSummary,
+        OutgoingConfig, ProtocolKind, SubmissionKind, SubmissionSecurity, reauth::ReauthReason,
+    };
+    use zmail_security::{InMemorySecretStore, SecretSlot, SecretStore};
+    use zmail_store::LocalStore;
+
+    use super::{SyncService, unix_now};
+
+    /// A one-connection SMTP server that refuses every sign-in the way
+    /// Microsoft 365 refuses a token without `SMTP.Send`. It returns the
+    /// commands it was sent.
+    fn refusing_smtp_server() -> (u16, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("the mock binds");
+        let port = listener.local_addr().expect("the mock has a port").port();
+        let server = thread::spawn(move || {
+            let mut commands = Vec::new();
+            let Ok((stream, _)) = listener.accept() else {
+                return commands;
+            };
+            let mut writer = stream.try_clone().expect("the stream clones");
+            let mut reader = BufReader::new(stream);
+            let _ = writer.write_all(b"220 mock.example.test ESMTP\r\n");
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|read| read > 0) {
+                let command = line.trim_end().to_owned();
+                line.clear();
+                let upper = command.to_ascii_uppercase();
+                let reply: &[u8] = if upper.starts_with("EHLO") {
+                    b"250-mock.example.test\r\n250 AUTH PLAIN XOAUTH2\r\n"
+                } else if upper.starts_with("AUTH") {
+                    b"535 5.7.3 Authentication unsuccessful\r\n"
+                } else {
+                    b"221 bye\r\n"
+                };
+                commands.push(command);
+                if writer.write_all(reply).is_err() || upper.starts_with("QUIT") {
+                    break;
+                }
+            }
+            commands
+        });
+        (port, server)
+    }
+
+    /// Sends one message from an account signed in with `auth` through
+    /// [`refusing_smtp_server`]; returns the outbox job afterwards and the
+    /// commands the server saw.
+    fn refused_send(auth: AuthKind) -> (OutboxJobSummary, Vec<String>) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the runtime starts");
+        let (port, server) = refusing_smtp_server();
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let account_id = store
+            .insert_account(&NewAccount {
+                display_name: "Test Account".to_owned(),
+                protocol: ProtocolKind::Imap,
+                auth,
+                endpoint: "imaps://mail.example.test:993".to_owned(),
+                username: "user@example.test".to_owned(),
+                cache_policy: CachePolicySummary::performance_first(),
+                outgoing: Some(OutgoingConfig {
+                    kind: SubmissionKind::Smtp,
+                    host: Some("127.0.0.1".to_owned()),
+                    port: Some(port),
+                    username: Some("user@example.test".to_owned()),
+                    security: Some(SubmissionSecurity::Plain),
+                    hello_name: "localhost".to_owned(),
+                }),
+                identities: vec![NewIdentity {
+                    display_name: "Test Account".to_owned(),
+                    email_address: "user@example.test".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }],
+            })
+            .expect("the account should be inserted");
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        match auth {
+            AuthKind::OAuth2 => {
+                // A live access token granted without SMTP.Send.
+                store
+                    .save_account_oauth2_client(
+                        account_id,
+                        "https://login.example.test/token",
+                        "client-1",
+                    )
+                    .expect("the client saves");
+                store
+                    .set_account_oauth2_expiry(account_id, Some(unix_now() + 3600))
+                    .expect("the expiry saves");
+                secrets
+                    .set_account_secret_in_slot(account_id, SecretSlot::AccessToken, "imap-only")
+                    .expect("the token stores");
+            }
+            _ => secrets
+                .set_account_secret(account_id, "old-password")
+                .expect("the password stores"),
+        }
+        let identity_id = store.list_identities(account_id).expect("identities load")[0].id;
+        let draft_id = store
+            .create_draft(&zmail_core::NewDraft {
+                account_id,
+                identity_id,
+                to: vec!["dest@example.test".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Refused".to_owned(),
+                body: "Never sent".to_owned(),
+            })
+            .expect("draft should be created");
+        store.queue_draft(draft_id).expect("draft should queue");
+
+        let service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+        // The service's own outbox poll may take the job first; either
+        // way one pass tries it once it is due (the store rounds the due
+        // time up to the next whole second).
+        let job = |store: &LocalStore| {
+            store
+                .list_outbox_jobs(Some(account_id))
+                .expect("jobs load")
+                .into_iter()
+                .next()
+                .expect("the job is kept")
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while matches!(
+            job(&store).state,
+            OutboxJobState::Queued | OutboxJobState::Sending
+        ) {
+            assert!(Instant::now() < deadline, "the job was never tried");
+            let _ = service.process_outbox_and_wait(Some(account_id));
+            thread::sleep(Duration::from_millis(100));
+        }
+        let commands = server.join().expect("the mock finishes");
+        let failed = job(&store);
+
+        // Signing in again requeues it.
+        assert_eq!(
+            service
+                .retry_refused_sends(account_id)
+                .expect("the retry runs"),
+            1
+        );
+        assert_ne!(job(&store).state, OutboxJobState::Failed);
+        (failed, commands)
+    }
+
+    /// The job failed for good after one attempt, asking to sign in again.
+    fn assert_asks_to_sign_in_again(job: &OutboxJobSummary) {
+        // No retries on a schedule: the same credentials cannot work.
+        assert_eq!(job.state, OutboxJobState::Failed);
+        assert_eq!(job.attempt_count, 1);
+        let message = job
+            .last_error_message
+            .as_deref()
+            .expect("the failure is recorded");
+        assert_eq!(
+            ReauthReason::of_message(message),
+            Some(ReauthReason::SendRefused),
+            "the stored message asks to sign in again: {message}"
+        );
+        assert!(
+            message.contains("535 5.7.3 Authentication unsuccessful"),
+            "the server's words are kept: {message}"
+        );
+    }
+
+    #[test]
+    fn a_refused_password_fails_the_send_at_once_and_asks_to_sign_in_again() {
+        let (job, commands) = refused_send(AuthKind::Password);
+        assert_asks_to_sign_in_again(&job);
+        assert!(
+            commands
+                .iter()
+                .any(|command| command.starts_with("AUTH PLAIN")),
+            "password accounts sign in with AUTH PLAIN: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn oauth2_accounts_send_with_xoauth2_and_a_refused_token_asks_to_sign_in_again() {
+        let (job, commands) = refused_send(AuthKind::OAuth2);
+        assert_asks_to_sign_in_again(&job);
+        assert!(
+            commands
+                .iter()
+                .any(|command| command.starts_with("AUTH XOAUTH2 ")),
+            "OAuth2 accounts sign in with AUTH XOAUTH2: {commands:?}"
+        );
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command.starts_with("AUTH PLAIN")),
+            "the access token is never sent as a password: {commands:?}"
         );
     }
 }

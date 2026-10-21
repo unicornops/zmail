@@ -156,7 +156,7 @@ fn heading(
 
 /// A labelled text field with its error underneath.
 fn field(view: &AccountSetupView, field: AccountField, colors: &UiColors) -> gpui::Div {
-    input_card(field.label(), view.form.input(field), colors)
+    input_card(view.form.label(field), view.form.input(field), colors)
         .children(error_line(view, field, colors))
 }
 

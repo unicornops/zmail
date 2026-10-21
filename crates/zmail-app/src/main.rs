@@ -1449,8 +1449,14 @@ fn prompt_oauth2_client(protocol: ProtocolKind) -> Result<zmail_auth::OAuth2Clie
     match preset.trim() {
         "1" => {
             let client_id = prompt("Google OAuth2 client id")?;
-            let client_secret = prompt_optional("Client secret (embedded in desktop clients)")?;
-            Ok(zmail_auth::OAuth2Preset::Gmail.client(client_id, client_secret, redirect_port))
+            // Google's desktop clients need their secret at the token
+            // exchange, so it is required here.
+            let client_secret = prompt("Google OAuth2 client secret")?;
+            Ok(zmail_auth::OAuth2Preset::Gmail.client(
+                client_id,
+                Some(client_secret),
+                redirect_port,
+            ))
         }
         "2" => {
             let client_id = prompt("Microsoft application (client) id")?;

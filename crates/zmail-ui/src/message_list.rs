@@ -174,6 +174,9 @@ pub(crate) enum MessageListEvent {
     SelectOutboxJob(i64),
     /// An outbox row's Retry now was clicked.
     RetryOutboxJob(i64),
+    /// An outbox row's Re-authenticate was clicked: the server refused the
+    /// account's sign-in.
+    ReauthenticateAccount(i64),
     /// Enter: move on to the detail pane.
     Activate,
     /// A thread, search result or draft row was clicked (after its open
@@ -1016,10 +1019,16 @@ impl MessageListView {
                             self.hour_cycle,
                         );
                         // A message waiting for a retry, or one that gave up,
-                        // offers Retry now where the date goes.
-                        let retry = outbox_status(job, &now)
-                            .can_retry
-                            .then(|| self.retry_now_button(job_id, &row_id, cx));
+                        // offers Retry now where the date goes; one refused
+                        // for the account's sign-in offers Re-authenticate.
+                        let status = outbox_status(job, &now);
+                        let retry = if status.needs_reauth {
+                            Some(self.reauthenticate_button(job.account_id, &row_id, cx))
+                        } else {
+                            status
+                                .can_retry
+                                .then(|| self.retry_now_button(job_id, &row_id, cx))
+                        };
 
                         row_shell(row_id, is_selected, focused, density, colors)
                             .map(|this| {
@@ -1067,6 +1076,32 @@ impl MessageListView {
                         // Not the row's click as well.
                         cx.stop_propagation();
                         cx.emit(MessageListEvent::RetryOutboxJob(job_id));
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The "Re-authenticate" button on an outbox row whose sending was
+    /// refused for the account's sign-in.
+    fn reauthenticate_button(
+        &self,
+        account_id: i64,
+        row_id: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = format!("{row_id}-reauth");
+        div()
+            .debug_selector({
+                let id = id.clone();
+                move || id
+            })
+            .child(
+                Button::new(SharedString::from(id), "Re-authenticate")
+                    .size(ButtonSize::Small)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        // Not the row's click as well.
+                        cx.stop_propagation();
+                        cx.emit(MessageListEvent::ReauthenticateAccount(account_id));
                     })),
             )
             .into_any_element()

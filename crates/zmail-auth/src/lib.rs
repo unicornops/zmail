@@ -32,6 +32,8 @@ pub struct OAuth2Client {
     /// Provider application client id.
     pub client_id: String,
     /// Provider application client secret (confidential clients only).
+    /// It is sent to the token endpoint only, never in the browser's
+    /// authorization URL.
     pub client_secret: Option<String>,
     /// Authorization endpoint URL.
     pub authorization_endpoint: String,
@@ -54,6 +56,13 @@ pub enum OAuth2Preset {
     /// Microsoft 365 / Outlook.com.
     Microsoft365,
 }
+
+/// The scopes the Microsoft 365 preset asks for.
+pub const MICROSOFT_365_SCOPES: [&str; 3] = [
+    "https://outlook.office.com/IMAP.AccessAsUser.All",
+    "https://outlook.office.com/SMTP.Send",
+    "offline_access",
+];
 
 /// The local port the browser flow's redirect comes back to by default.
 pub const DEFAULT_REDIRECT_PORT: u16 = 8357;
@@ -108,10 +117,17 @@ impl OAuth2Preset {
                     "https://login.microsoftonline.com/common/oauth2/v2.0/authorize".to_owned(),
                 token_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/token"
                     .to_owned(),
-                scopes: vec![
-                    "https://outlook.office365.com/IMAP.AccessAsUser.All".to_owned(),
-                    "offline_access".to_owned(),
-                ],
+                // IMAP for reading, SMTP.Send for XOAUTH2 submission
+                // through smtp.office365.com, both on Exchange Online's
+                // `outlook.office.com` resource as Microsoft documents
+                // them (one token covers one resource). Accounts signed in
+                // before SMTP.Send was asked for keep their grant until
+                // they sign in again: a refresh never widens it, and a
+                // send refused for it asks the user to Re-authenticate.
+                scopes: MICROSOFT_365_SCOPES
+                    .iter()
+                    .map(|scope| (*scope).to_owned())
+                    .collect(),
                 redirect_port: port,
                 extra_authorize_params: Vec::new(),
             },
@@ -205,10 +221,9 @@ impl OAuth2Client {
             url.push_str("&scope=");
             url.push_str(&scopes);
         }
-        if let Some(secret) = &self.client_secret {
-            url.push_str("&client_secret=");
-            url.push_str(&urlencode(secret));
-        }
+        // The client secret never goes in this URL: the browser, its
+        // history and any redirect logs would all see it. Only the token
+        // endpoint request carries it.
         for (key, value) in &self.extra_authorize_params {
             url.push('&');
             url.push_str(&urlencode(key));
@@ -512,7 +527,59 @@ mod tests {
         let request = client.authorization_request();
         assert!(request.url.contains("access_type=offline"));
         assert!(request.url.contains("prompt=consent"));
-        assert!(request.url.contains("client_secret=gmail-secret"));
+    }
+
+    #[test]
+    fn authorization_urls_never_carry_the_client_secret() {
+        for preset in [OAuth2Preset::Gmail, OAuth2Preset::Microsoft365] {
+            let client = preset.client(
+                "client-id".to_owned(),
+                Some("very-secret-value".to_owned()),
+                8357,
+            );
+            let url = client.authorization_request().url;
+            assert!(
+                !url.contains("client_secret"),
+                "{} must not name the secret: {url}",
+                preset.name()
+            );
+            assert!(
+                !url.contains("very-secret-value"),
+                "{} must not carry the secret: {url}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_token_exchange_carries_the_client_secret() {
+        let port = free_port();
+        let listener = TcpListener::bind(("127.0.0.1", port)).expect("the mock binds");
+        let server = thread::spawn(move || -> Result<String> {
+            let (mut stream, _) = listener.accept().context("accept")?;
+            let mut request = [0u8; 8192];
+            let read = stream.read(&mut request).context("read")?;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n\
+                      {\"access_token\":\"access-1\"}",
+                )
+                .context("write")?;
+            Ok(String::from_utf8_lossy(&request[..read]).into_owned())
+        });
+        let mut client = client(port);
+        client.client_secret = Some("very-secret-value".to_owned());
+
+        retry_until_bound(|| client.exchange_code("auth-code-1", &Pkce::generate()))
+            .expect("the exchange should succeed");
+        let request = server
+            .join()
+            .expect("the mock finishes")
+            .expect("the mock reads the request");
+        assert!(
+            request.contains("client_secret=very-secret-value"),
+            "the token request sends the secret: {request}"
+        );
     }
 
     #[test]
@@ -528,11 +595,19 @@ mod tests {
                 .token_endpoint
                 .starts_with("https://login.microsoftonline.com/common/oauth2/v2.0/token")
         );
-        assert!(client.scopes.contains(&"offline_access".to_owned()));
+        assert_eq!(
+            client.scopes,
+            [
+                "https://outlook.office.com/IMAP.AccessAsUser.All",
+                "https://outlook.office.com/SMTP.Send",
+                "offline_access",
+            ],
+            "IMAP, XOAUTH2 sending and a refresh token, on one resource"
+        );
+        let url = client.authorization_request().url;
         assert!(
-            client
-                .scopes
-                .contains(&"https://outlook.office365.com/IMAP.AccessAsUser.All".to_owned())
+            url.contains("SMTP.Send"),
+            "the sign-in asks for sending: {url}"
         );
     }
 

@@ -2365,3 +2365,41 @@ fn the_outbox_row_counts_waiting_mail_and_retries_failures(cx: &mut TestAppConte
         Some("1 message queued for another send attempt.".to_owned())
     );
 }
+
+#[gpui::test]
+fn a_send_refused_for_the_sign_in_offers_re_authenticate(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let account_id = cx.read_entity(&view, |view, _| view.accounts[0].id);
+    let job = queue_test_message(&harness.store, "Refused");
+    let refused = zmail_core::reauth::ReauthRequired::new(
+        zmail_core::reauth::ReauthReason::SendRefused,
+        "535 5.7.3 Authentication unsuccessful",
+    );
+    harness
+        .store
+        .record_outbox_failure(job, refused.to_string())
+        .expect("the failure is recorded");
+    cx.dispatch_action(crate::actions::ShowOutbox);
+    view.update(cx, |view, cx| {
+        view.refresh_from_store(cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    // Retrying the same sign-in cannot help: the row offers
+    // Re-authenticate instead.
+    assert!(!drawn(format!("outbox-row-{job}-retry"), cx));
+    click_on(format!("outbox-row-{job}-reauth"), cx);
+
+    // Settings → Accounts opens on the account, says why, and asks for
+    // the password (the browser sign-in, for an OAuth2 account).
+    let (root, mut window_cx) = settings::settings_window(cx);
+    let accounts = root.read_with(&window_cx, |root, _| root.accounts().clone());
+    assert_eq!(
+        accounts.read_with(&window_cx, |accounts, _| accounts.focused_account()),
+        Some(account_id)
+    );
+    assert!(accounts.read_with(&window_cx, |accounts, _| accounts.reauth_open()));
+    window_cx.run_until_parked();
+    assert!(window_cx.debug_bounds("account-fix").is_some());
+}
