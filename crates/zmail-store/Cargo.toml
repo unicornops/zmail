@@ -11,8 +11,19 @@ anyhow.workspace = true
 chrono.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
 zmail-core = { path = "../zmail-core" }
 zmail-security = { path = "../zmail-security" }
+
+# SQLCipher (ADR 0005). macOS uses the system's CommonCrypto; Linux and
+# Windows link a vendored, statically built OpenSSL, pinned in Cargo.lock
+# and tracked by RustSec. Windows needs NASM for OpenSSL's AES-NI code.
+[target.'cfg(target_os = "macos")'.dependencies]
+rusqlite = { workspace = true, features = ["bundled-sqlcipher"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+rusqlite = { workspace = true, features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [lints]
 workspace = true

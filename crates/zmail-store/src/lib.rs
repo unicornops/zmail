@@ -28,9 +28,18 @@ use zmail_core::{
     preferences::UiPreferences,
 };
 use zmail_security::sanitize_html_for_display;
+pub use zmail_security::vault::{StoreKey, StoreKeychain};
 
 mod address_history;
+mod connection;
+mod encryption;
 mod search;
+
+use connection::{StoreConnection, StoreToken};
+pub use encryption::{
+    MigrationProgress, MigrationReport, StoreFileState, StoreOpenError, encrypt_plaintext_store,
+    move_unreadable_store_aside, store_file_state,
+};
 
 /// What removing an account deletes besides its mail: unsent messages and
 /// drafts (see [`LocalStore::account_removal_impact`]).
@@ -494,10 +503,15 @@ const MAILBOX_ROLE_ORDER: &str = "CASE lower(role) \
 
 static EPHEMERAL_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// Thread-safe local store handle backed by a persistent SQLite database.
+/// Thread-safe local store handle backed by a persistent SQLite database,
+/// encrypted with SQLCipher under the store's key (ADR 0005).
 #[derive(Debug, Clone)]
 pub struct LocalStore {
     path: Arc<PathBuf>,
+    key: StoreKey,
+    /// Identifies this store in each thread's connection cache. Declared
+    /// before `ephemeral_dir` so it is gone when the directory is removed.
+    token: StoreToken,
     /// Private directory of an ephemeral store, removed when the last handle
     /// drops. `None` for persistent stores.
     ephemeral_dir: Option<Arc<EphemeralDir>>,
@@ -510,6 +524,8 @@ struct EphemeralDir(PathBuf);
 
 impl Drop for EphemeralDir {
     fn drop(&mut self) {
+        // This thread's kept connections would hold the files open.
+        connection::close_dropped_store_connections();
         // Best effort: on Windows a file still held open elsewhere can make
         // this fail, and a leftover temp directory is harmless.
         let _ = fs::remove_dir_all(&self.0);
@@ -517,16 +533,26 @@ impl Drop for EphemeralDir {
 }
 
 impl LocalStore {
-    /// Opens a persistent store at the given path and applies migrations.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    /// Opens the encrypted store at the given path with `key`, creating it
+    /// when there is none, and applies migrations. A plaintext store is
+    /// refused: [`LocalStore::unlock`] encrypts it first.
+    pub fn open(path: impl AsRef<Path>, key: StoreKey) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
+        if store_file_state(&path)? == StoreFileState::Plaintext {
+            bail!(
+                "{} is not encrypted yet; it has to be encrypted before it opens",
+                path.display()
+            );
+        }
 
         let store = Self {
             path: Arc::new(path),
+            key,
+            token: StoreToken::default(),
             ephemeral_dir: None,
         };
         store.apply_migrations()?;
@@ -539,12 +565,19 @@ impl LocalStore {
         &self.path
     }
 
+    /// The key the store is encrypted with.
+    pub fn store_key(&self) -> &StoreKey {
+        &self.key
+    }
+
     /// Opens an ephemeral store in its own directory under the OS temp
     /// directory, for tests and fixtures.
     ///
     /// Each ephemeral store gets a private directory so its attachment blobs
     /// (stored next to the database) never mix with another store's. The
-    /// directory is deleted when the last clone of the handle drops.
+    /// directory is deleted when the last clone of the handle drops. It is
+    /// encrypted like any other store, with a random key held only in
+    /// memory.
     pub fn open_ephemeral() -> Result<Self> {
         let sequence = EPHEMERAL_COUNTER.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
@@ -555,7 +588,7 @@ impl LocalStore {
             std::env::temp_dir().join(format!("zmail-{nanos}-{}-{sequence}", std::process::id()));
         // Created before opening so a failed open still cleans up.
         let guard = Arc::new(EphemeralDir(directory.clone()));
-        let mut store = Self::open(directory.join("store.sqlite3"))?;
+        let mut store = Self::open(directory.join("store.sqlite3"), StoreKey::generate())?;
         store.ephemeral_dir = Some(guard);
         Ok(store)
     }
@@ -1185,7 +1218,7 @@ impl LocalStore {
     /// the usage is an approximation that matches what the eviction pass
     /// frees.
     pub fn account_blob_usage(&self, account_id: i64) -> Result<u64> {
-        account_blob_usage(&self.connection()?, account_id)
+        account_blob_usage(&*self.connection()?, account_id)
     }
 
     /// Evicts the oldest hydrated bodies and attachment blobs until the
@@ -4395,11 +4428,11 @@ impl LocalStore {
     /// a deferred transaction that reads before writing fails at once with
     /// "database is locked" if the other side commits in between, because
     /// the busy timeout does not cover that upgrade.
-    fn connection(&self) -> Result<Connection> {
-        let conn = Connection::open(&*self.path)
-            .with_context(|| format!("failed to open {}", self.path.display()))?;
-        configure_connection(&conn)?;
-        Ok(conn)
+    ///
+    /// Connections are keyed with the store key and kept per thread for
+    /// reuse (see the `connection` module).
+    fn connection(&self) -> Result<StoreConnection> {
+        StoreConnection::get(&self.token, &self.path, &self.key)
     }
 
     fn thread_location(&self, thread_id: i64) -> Result<Option<ThreadLocation>> {
@@ -4530,20 +4563,6 @@ impl LocalStore {
             },
         }))
     }
-}
-
-fn configure_connection(conn: &Connection) -> Result<()> {
-    conn.busy_timeout(std::time::Duration::from_secs(5))
-        .context("failed to configure SQLite busy timeout")?;
-    conn.execute_batch(
-        r#"
-        PRAGMA foreign_keys = ON;
-        PRAGMA journal_mode = WAL;
-        PRAGMA synchronous = NORMAL;
-        PRAGMA temp_store = MEMORY;
-        "#,
-    )
-    .context("failed to configure SQLite pragmas")
 }
 
 fn query_count(conn: &Connection, sql: &str) -> Result<usize> {
@@ -8449,7 +8468,8 @@ mod tests {
         assert_eq!(remaining.len(), 2, "only the two newest backups remain");
         assert!(!remaining.contains(&first), "the oldest backup is pruned");
 
-        let restored = LocalStore::open(remaining[0].clone()).expect("the backup should reopen");
+        let restored = LocalStore::open(remaining[0].clone(), store.store_key().clone())
+            .expect("the backup should reopen");
         assert_eq!(
             restored.stats().expect("stats should load").message_count,
             store.stats().expect("stats should load").message_count,
@@ -9262,7 +9282,8 @@ mod tests {
             .next()
             .expect("demo account should have an identity");
 
-        let other = rusqlite::Connection::open(store.path()).expect("second connection opens");
+        let other = crate::connection::open_keyed(store.path(), store.store_key())
+            .expect("second connection opens");
         other
             .busy_timeout(Duration::from_secs(5))
             .expect("busy timeout set");
@@ -9639,7 +9660,8 @@ mod tests {
             .save_ui_preferences(&preferences)
             .expect("preferences should save");
         // A second handle on the same file sees the saved record.
-        let reopened = LocalStore::open(store.path()).expect("store should reopen");
+        let reopened =
+            LocalStore::open(store.path(), store.store_key().clone()).expect("store should reopen");
         assert_eq!(
             reopened.ui_preferences().expect("preferences should load"),
             preferences

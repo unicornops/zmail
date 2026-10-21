@@ -1033,7 +1033,8 @@ mod store_tests {
             .expect("index should reset");
         }
         assert!(search(&store, account, "budget").is_empty());
-        let reopened = LocalStore::open(store.path()).expect("store should reopen");
+        let reopened =
+            LocalStore::open(store.path(), store.store_key().clone()).expect("store should reopen");
         assert_eq!(index_size(&reopened), (4, 4));
         assert_eq!(search(&reopened, account, "budget").len(), 2);
     }
@@ -1063,7 +1064,8 @@ mod store_tests {
             )
             .expect("schema should roll back");
         }
-        let reopened = LocalStore::open(store.path()).expect("store should migrate");
+        let reopened = LocalStore::open(store.path(), store.store_key().clone())
+            .expect("store should migrate");
         assert_eq!(index_size(&reopened), (4, 4));
         assert_eq!(
             search(&reopened, account, "from:alice"),

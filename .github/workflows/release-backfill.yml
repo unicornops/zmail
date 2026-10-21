@@ -35,6 +35,18 @@ jobs:
               with:
                   toolchain: ${{ steps.toolchain.outputs.channel }}
 
+            # SQLCipher's vendored OpenSSL (ADR 0005) needs NASM for its AES-NI
+            # code: OPENSSL_RUST_USE_NASM=1 fails the build without it instead of
+            # falling back to slow C. Configure must run under Strawberry Perl, not
+            # Git's MSYS Perl.
+            - name: Install NASM for OpenSSL
+              shell: pwsh
+              run: |
+                  choco install nasm --no-progress -y
+                  Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files\NASM"
+                  Add-Content -Path $env:GITHUB_ENV -Value "OPENSSL_RUST_USE_NASM=1"
+                  Add-Content -Path $env:GITHUB_ENV -Value "OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe"
+
             - name: Build release binary
               run: cargo build -p zmail-app --release --locked
 
@@ -46,6 +58,13 @@ jobs:
                   Copy-Item assets/fonts/inter/LICENSE.txt archive/licenses/Inter-OFL.txt
                   Copy-Item assets/icons/LICENSE.txt archive/licenses/Lucide-LICENSE.txt
                   Copy-Item crates/zmail-ui/LICENSE-APACHE archive/licenses/GPUI-Apache-2.0.txt
+                  # Releases from before store encryption (ADR 0005) have neither.
+                  foreach ($notice in @("SQLCIPHER:SQLCipher", "OPENSSL:OpenSSL")) {
+                      $source, $name = $notice -split ":"
+                      if (Test-Path "crates/zmail-store/LICENSE-$source") {
+                          Copy-Item "crates/zmail-store/LICENSE-$source" "archive/licenses/$name-LICENSE.txt"
+                      }
+                  }
                   Compress-Archive -Path archive/* -DestinationPath "zmail-windows-x86_64.zip"
 
             - name: Create Windows installer

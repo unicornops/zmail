@@ -262,6 +262,19 @@ jobs:
                   key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
                   restore-keys: cargo-git-${{ runner.os }}-
 
+            # SQLCipher's vendored OpenSSL (ADR 0005) needs NASM for its AES-NI
+            # code: OPENSSL_RUST_USE_NASM=1 fails the build without it instead of
+            # falling back to slow C. Configure must run under Strawberry Perl, not
+            # Git's MSYS Perl.
+            - name: Install NASM for OpenSSL
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  choco install nasm --no-progress -y
+                  Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files\NASM"
+                  Add-Content -Path $env:GITHUB_ENV -Value "OPENSSL_RUST_USE_NASM=1"
+                  Add-Content -Path $env:GITHUB_ENV -Value "OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe"
+
             - name: Build release binary
               run: cargo build -p zmail-app --release --locked
 
