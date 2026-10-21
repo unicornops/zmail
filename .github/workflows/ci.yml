@@ -178,10 +178,10 @@ jobs:
             # off by default until the local store is encrypted (#139), so
             # the workspace runs above never build it. Lint the app with it
             # on, and run the onboarding view tests that cover it.
-            - name: Proton feature build
-              run: |
-                  cargo clippy -p zmail-app --features proton --all-targets --locked -- -D warnings
-                  cargo test -p zmail-ui --features proton --locked --lib -- onboarding account_setup
+            - name: Build without Proton
+              # Proton is a default feature of zmail-app, so the workspace
+              # steps above build it; this keeps the opt-out build compiling.
+              run: cargo clippy -p zmail-app --no-default-features --all-targets --locked -- -D warnings
 
             - name: Live Mail Harness Test
               # DOCKERHUB_* are optional: the harness script logs in when they
