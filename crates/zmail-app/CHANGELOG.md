@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.0](https://github.com/unicornops/zmail/compare/v0.14.0...v0.15.0) (2026-10-21)
+
+
+### Features
+
+* **ui:** follow Windows contrast themes and macOS Increase Contrast ([#232](https://github.com/unicornops/zmail/issues/232)) ([c52f9c9](https://github.com/unicornops/zmail/commit/c52f9c9836f0ff587f85f9eb20dbc54b46bea570))
+* **ui:** text size setting that scales every window's rem size ([#228](https://github.com/unicornops/zmail/issues/228)) ([ee06d4b](https://github.com/unicornops/zmail/commit/ee06d4b961019692143a178bb24d53f6979b1c72))
+
 ## [0.14.0](https://github.com/unicornops/zmail/compare/v0.13.0...v0.14.0) (2026-10-20)
 
 
