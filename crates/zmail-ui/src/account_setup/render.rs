@@ -64,6 +64,14 @@ impl Render for AccountSetupView {
             Stage::Manual => self.render_manual(&colors, cx),
             Stage::Colour => self.render_colour(&colors, cx),
             Stage::Syncing => self.render_syncing(&colors),
+            #[cfg(feature = "proton")]
+            Stage::ProtonSignIn => self.render_proton_sign_in(&colors),
+            #[cfg(feature = "proton")]
+            Stage::ProtonVerification => self.render_proton_verification(&colors),
+            #[cfg(feature = "proton")]
+            Stage::ProtonTotp => self.render_proton_totp(&colors),
+            #[cfg(feature = "proton")]
+            Stage::ProtonMailboxPassword => self.render_proton_mailbox_password(&colors),
         };
         let footer = self.render_footer(cx);
 
@@ -232,7 +240,7 @@ pub(super) fn caption(text: impl Into<SharedString>, colors: &UiColors) -> gpui:
 }
 
 /// A spinning loader icon.
-fn spinner(id: &'static str, color: u32) -> AnyElement {
+pub(super) fn spinner(id: &'static str, color: u32) -> AnyElement {
     icon("loader", ICON_SIZE_SM, color)
         .with_animation(id, Animation::new(SPIN_PERIOD).repeat(), |glyph, delta| {
             glyph.with_transformation(Transformation::rotate(percentage(delta)))
@@ -348,6 +356,34 @@ impl AccountSetupView {
         ] {
             tiles.push(tile(id, provider.name(), hint, Some(provider), cx));
         }
+        #[cfg(feature = "proton")]
+        tiles.push(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_1))
+                .debug_selector(|| "account-setup-provider-proton".into())
+                .child(
+                    Button::new("account-setup-provider-proton", "Proton Mail")
+                        .size(ButtonSize::Large)
+                        .full_width()
+                        .icon("shield")
+                        .selected(self.history.contains(&Stage::ProtonSignIn))
+                        .tooltip(
+                            "Paid Proton plans; zmail signs in the way Proton Mail Bridge does",
+                        )
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.choose_proton(window, cx);
+                        })),
+                )
+                .child(
+                    caption(
+                        "Paid Proton plans; zmail signs in the way Proton Mail Bridge does",
+                        colors,
+                    )
+                    .pl(px(SPACE_2)),
+                ),
+        );
         tiles.push(tile(
             "account-setup-provider-other",
             "Other",
@@ -1020,6 +1056,19 @@ impl AccountSetupView {
                 vec![primary("account-setup-add", "Add account", cx).into_any_element()]
             }
             Stage::Colour => {
+                vec![primary("account-setup-continue", "Continue", cx).into_any_element()]
+            }
+            #[cfg(feature = "proton")]
+            Stage::ProtonSignIn => {
+                vec![primary("account-setup-proton-sign-in", "Sign in", cx).into_any_element()]
+            }
+            #[cfg(feature = "proton")]
+            Stage::ProtonVerification => vec![
+                primary("account-setup-proton-retry", "I've finished, continue", cx)
+                    .into_any_element(),
+            ],
+            #[cfg(feature = "proton")]
+            Stage::ProtonTotp | Stage::ProtonMailboxPassword => {
                 vec![primary("account-setup-continue", "Continue", cx).into_any_element()]
             }
             Stage::Syncing => vec![

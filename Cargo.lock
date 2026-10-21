@@ -9431,6 +9431,7 @@ dependencies = [
  "zmail-autodiscover",
  "zmail-core",
  "zmail-notify",
+ "zmail-proton",
  "zmail-security",
  "zmail-store",
  "zmail-sync",

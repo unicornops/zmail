@@ -43,6 +43,12 @@ zmail-store = { path = "../zmail-store" }
 zmail-theme = { path = "../zmail-theme" }
 zmail-ui = { path = "../zmail-ui" }
 
+[features]
+# Proton Mail accounts (docs/adr/0004-proton-native.md): the provider in the
+# add-account flow and Proton sync. Off by default, so no release build has
+# it, until the local store is encrypted at rest (#139) and Rob turns it on.
+proton = ["zmail-ui/proton", "zmail-sync/proton"]
+
 [build-dependencies]
 winresource = "0.1"
 

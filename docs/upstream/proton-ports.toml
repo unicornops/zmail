@@ -399,3 +399,10 @@ local = "crates/zmail-proton-api/src/contact.rs"
 repo = "go-proton-api"
 upstream = "contact_types.go"
 local = "crates/zmail-proton-api/src/contact.rs"
+
+# Sign-in for onboarding.
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/bridge/user.go"
+local = "crates/zmail-proton/src/signin.rs"

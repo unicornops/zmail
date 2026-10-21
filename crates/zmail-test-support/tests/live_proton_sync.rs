@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail, ensure};
 use zmail_core::{
     AuthKind, CachePolicySummary, NewAccount, NewDraft, NewIdentity, OutboxJobState, ProtocolKind,
 };
-use zmail_proton::{ClientConfig, store_new_session};
+use zmail_proton::{ClientConfig, SignInStep, store_new_session};
 use zmail_proton_api::{AppVersion, CardType, EncryptionScheme, Manager};
 use zmail_security::{InMemorySecretStore, SecretSlot, SecretStore};
 use zmail_store::LocalStore;
@@ -800,4 +800,59 @@ fn file_containing(
         }
     }
     Ok(None)
+}
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn onboarding_signs_in_step_by_step_and_the_session_syncs() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
+    sync_service.configure_proton(harness_config(&harness)?)?;
+
+    // A wrong password is an error, not a step. (The fake server answers
+    // a bare 401 where Proton sends code 8002, which the sign-in words as
+    // "the Proton username or password is wrong".)
+    let wrong = sync_service.begin_proton_sign_in(harness.username(), "not the password")?;
+    ensure!(
+        runtime.handle().block_on(wrong.login()).is_err(),
+        "a wrong password signed in"
+    );
+
+    // The harness account has one password and no second factor, so the
+    // first step signs in.
+    let sign_in = sync_service.begin_proton_sign_in(harness.username(), harness.password())?;
+    let step = runtime.handle().block_on(sync_service.run_proton({
+        let sign_in = sign_in.clone();
+        async move { sign_in.login().await }
+    }))??;
+    let SignInStep::SignedIn(account) = step else {
+        anyhow::bail!("expected to be signed in, got {step:?}");
+    };
+    ensure!(
+        account.email == PROTON_HARNESS_PRIMARY_ADDRESS,
+        "{account:?}"
+    );
+
+    // Onboarding stores the account, then the session (never the password).
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    runtime
+        .handle()
+        .block_on(sign_in.store(secrets.as_ref(), account_id))?;
+    ensure!(
+        !secrets
+            .get_account_secret_from_slot(account_id, SecretSlot::ProtonUid)?
+            .is_empty()
+    );
+    let key_pass = secrets.get_account_secret_from_slot(account_id, SecretSlot::ProtonKeyPass)?;
+    ensure!(!key_pass.is_empty() && key_pass != harness.password());
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
+    ensure!(subjects(&store, account_id, "INBOX")?.contains(&"Welcome to the harness".to_owned()));
+    Ok(())
 }

@@ -46,6 +46,8 @@ use crate::components::{Select, SelectEvent, TextInputEvent};
 mod fixture;
 mod form;
 mod google_guide;
+#[cfg(feature = "proton")]
+mod proton;
 mod render;
 mod window;
 
@@ -122,6 +124,32 @@ pub(crate) enum Stage {
     Colour,
     /// The first sync, with progress.
     Syncing,
+    /// Proton Mail: address and password, with the risk note.
+    #[cfg(feature = "proton")]
+    ProtonSignIn,
+    /// Proton Mail: human verification in the browser.
+    #[cfg(feature = "proton")]
+    ProtonVerification,
+    /// Proton Mail: the two-factor code.
+    #[cfg(feature = "proton")]
+    ProtonTotp,
+    /// Proton Mail: the mailbox password.
+    #[cfg(feature = "proton")]
+    ProtonMailboxPassword,
+}
+
+#[cfg(feature = "proton")]
+impl Stage {
+    /// Whether this is one of the Proton sign-in steps.
+    fn is_proton(self) -> bool {
+        matches!(
+            self,
+            Stage::ProtonSignIn
+                | Stage::ProtonVerification
+                | Stage::ProtonTotp
+                | Stage::ProtonMailboxPassword
+        )
+    }
 }
 
 /// A state of the flow for the UI screenshot matrix
@@ -214,6 +242,9 @@ pub(crate) struct AccountSetupView {
     pub(crate) color: AccountColor,
     pub(crate) sync: SyncProgress,
     sync_task: Option<Task<()>>,
+    /// The Proton sign-in in progress.
+    #[cfg(feature = "proton")]
+    pub(crate) proton: proton::ProtonFlow,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -293,6 +324,8 @@ impl AccountSetupView {
             color: AccountColor::Blue,
             sync: SyncProgress::default(),
             sync_task: None,
+            #[cfg(feature = "proton")]
+            proton: proton::ProtonFlow::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -361,6 +394,16 @@ impl AccountSetupView {
                 ProtocolKind::Jmap => AccountField::JmapUrl,
                 ProtocolKind::Proton => AccountField::Email,
             }),
+            #[cfg(feature = "proton")]
+            Stage::ProtonSignIn => Some(if self.form.text(AccountField::Email, cx).is_empty() {
+                AccountField::Email
+            } else {
+                AccountField::Password
+            }),
+            #[cfg(feature = "proton")]
+            Stage::ProtonTotp => Some(AccountField::ProtonTotp),
+            #[cfg(feature = "proton")]
+            Stage::ProtonMailboxPassword => Some(AccountField::ProtonMailboxPassword),
             _ => None,
         };
         match field {
@@ -382,6 +425,28 @@ impl AccountSetupView {
         if self.stage == Stage::GoogleGuide {
             self.form.use_oauth = false;
             self.form.errors.clear();
+        }
+        // Leaving a Proton step signs the unfinished session out; signing
+        // in starts again from the password.
+        #[cfg(feature = "proton")]
+        if self.stage.is_proton() {
+            self.proton_abort(cx);
+            while self
+                .history
+                .last()
+                .is_some_and(|stage| stage.is_proton() && *stage != Stage::ProtonSignIn)
+            {
+                self.history.pop();
+            }
+            if self.stage != Stage::ProtonSignIn
+                && self.history.last() == Some(&Stage::ProtonSignIn)
+            {
+                self.history.pop();
+                self.stage = Stage::ProtonSignIn;
+                self.focus_stage(window, cx);
+                cx.notify();
+                return;
+            }
         }
         // Discovery and consent are not places to go back to: Back from
         // the result or the manual form returns to the sign-in step.
@@ -431,6 +496,11 @@ impl AccountSetupView {
             Stage::Result | Stage::Manual => self.save(window, cx),
             Stage::Colour => self.confirm_colour(window, cx),
             Stage::Syncing => self.finish(cx),
+            #[cfg(feature = "proton")]
+            Stage::ProtonSignIn
+            | Stage::ProtonVerification
+            | Stage::ProtonTotp
+            | Stage::ProtonMailboxPassword => self.proton_advance(window, cx),
         }
     }
 

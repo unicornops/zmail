@@ -85,7 +85,14 @@ pub struct Card {
 impl Card {
     /// Decrypts and verifies the card as its type says, and parses it
     /// (`decode`).
+    ///
+    /// Nothing in the card is read before its signature is checked, and
+    /// oversized cards are refused before any decryption or verification.
     fn decode(&self, kr: &KeyRing) -> Result<vcard::Card, Error> {
+        // Armor adds about a third; the vCard reader caps the plaintext.
+        if self.data.len() > 2 * vcard::MAX_CARD_BYTES {
+            return Err(Error::Key("the contact card is too large".to_owned()));
+        }
         let mut data = self.data.clone();
         if self.kind.0 & CardType::ENCRYPTED.0 != 0 {
             let plain = kr.decrypt_armored(&data)?;
@@ -379,5 +386,96 @@ mod tests {
                 .is_err()
         );
         assert_eq!(parse_bool("True").ok(), Some(true));
+    }
+
+    #[test]
+    fn hostile_cards_give_errors_or_nothing_never_a_panic() {
+        let kr = keyring();
+        let settings = |card: &str| {
+            Contact {
+                cards: vec![signed(card, &kr)],
+                ..Contact::default()
+            }
+            .get_settings(&kr, "bob@example.com", CardType::SIGNED)
+        };
+        let card = |lines: &str| {
+            format!(
+                "BEGIN:VCARD\r\nVERSION:4.0\r\nitem1.EMAIL:bob@example.com\r\n{lines}END:VCARD\r\n"
+            )
+        };
+
+        // Duplicate X-PM-* fields: the first one counts, as upstream.
+        let duplicate = settings(&card(
+            "item1.X-PM-ENCRYPT:false\r\nitem1.X-PM-ENCRYPT:true\r\n\
+             item1.X-PM-SCHEME:pgp-mime\r\nitem1.X-PM-SCHEME:pgp-inline\r\n",
+        ))
+        .expect("settings");
+        assert_eq!(duplicate.encrypt, Some(false));
+        assert_eq!(duplicate.scheme, Some(EncryptionScheme::PGP_MIME));
+
+        // Fields of another group, and unknown fields, are not read.
+        let other = settings(&card(
+            "item2.X-PM-ENCRYPT:true\r\nitem1.X-PM-UNKNOWN:whatever\r\n\
+             item1.X-PM-SCHEME:something-else\r\n",
+        ))
+        .expect("settings");
+        assert_eq!(other.encrypt, None);
+        assert_eq!(other.scheme, None);
+
+        // Bad keys are errors: not base64, not a key, no data part.
+        for key in [
+            "data:application/pgp-keys;base64,!!!not base64!!!",
+            "data:application/pgp-keys;base64,QUJDREVG",
+            "no-comma-at-all",
+        ] {
+            assert!(
+                settings(&card(&format!("item1.KEY:{key}\r\n"))).is_err(),
+                "accepted key {key:?}"
+            );
+        }
+
+        // A malformed, unterminated or oversized card gives no settings.
+        for text in [
+            "BEGIN:VCARD\r\nitem1.EMAIL:bob@example.com\r\nitem1.X-PM-SIGN:true\r\n".to_owned(),
+            card(&format!(
+                "NOTE:{}\r\n",
+                "a".repeat(vcard::MAX_LINE_BYTES + 1)
+            )),
+            card("not a property line\r\nitem1.X-PM-SIGN:true\r\n"),
+        ] {
+            let parsed = settings(&text).expect("no error, no settings");
+            assert!(parsed.sign.is_none());
+        }
+        let oversized = Contact {
+            cards: vec![Card {
+                kind: CardType::SIGNED,
+                data: "a".repeat(2 * vcard::MAX_CARD_BYTES + 1),
+                signature: Some(String::new()),
+            }],
+            ..Contact::default()
+        };
+        assert!(
+            oversized
+                .get_settings(&kr, "bob@example.com", CardType::SIGNED)
+                .expect("settings")
+                .sign
+                .is_none()
+        );
+
+        // A signed card without its signature is not trusted.
+        let unsigned = Contact {
+            cards: vec![Card {
+                signature: None,
+                ..signed(&card("item1.X-PM-SIGN:true\r\n"), &kr)
+            }],
+            ..Contact::default()
+        };
+        assert!(
+            unsigned
+                .get_settings(&kr, "bob@example.com", CardType::SIGNED)
+                .expect("settings")
+                .sign
+                .is_none()
+        );
     }
 }

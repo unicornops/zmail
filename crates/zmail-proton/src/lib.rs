@@ -16,6 +16,7 @@ mod outgoing;
 mod send;
 mod send_prefs;
 mod session;
+mod signin;
 mod sync;
 
 use std::collections::HashMap;
@@ -30,7 +31,8 @@ use zmail_proton_api::AddressStatus;
 pub use events::{EVENT_JITTER, EVENT_PERIOD, event_poll_delay, has_new_events};
 pub use hydrate::fetch_message_bodies;
 pub use session::{ProtonSession, ProtonSessions, delete_session, has_session, store_new_session};
-pub use zmail_proton_api::{AppVersion, ClientConfig};
+pub use signin::{ProtonSignIn, SignInStep, SignedInAccount};
+pub use zmail_proton_api::{API_HOST_URL, AppVersion, ClientConfig};
 
 /// Syncs a Proton account and returns the snapshot written into the store.
 ///

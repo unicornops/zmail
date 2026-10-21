@@ -174,6 +174,15 @@ jobs:
             - name: Workspace tests
               run: cargo test --workspace --locked
 
+            # The Proton provider in the app is behind the `proton` feature,
+            # off by default until the local store is encrypted (#139), so
+            # the workspace runs above never build it. Lint the app with it
+            # on, and run the onboarding view tests that cover it.
+            - name: Proton feature build
+              run: |
+                  cargo clippy -p zmail-app --features proton --all-targets --locked -- -D warnings
+                  cargo test -p zmail-ui --features proton --locked --lib -- onboarding account_setup
+
             - name: Live Mail Harness Test
               # DOCKERHUB_* are optional: the harness script logs in when they
               # are configured, so image pulls use a personal quota instead

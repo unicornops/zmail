@@ -3,6 +3,8 @@
 mod backoff;
 mod imap_watch;
 mod proton;
+#[cfg(feature = "proton")]
+pub use proton::proton_production_config;
 mod wake;
 
 use std::{
