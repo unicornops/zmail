@@ -146,6 +146,18 @@ message decryption and Zmail's own OpenPGP support use the same
 implementation, the same advisory exceptions and the same audit
 history.
 
+**Zmail-specific key check.** go-crypto validates private key material
+against the public key when it decrypts a key (gopenpgp's `Key.Check` is
+a no-op for that reason); rPGP does not. Proton's server stores the
+locked keys, so a malicious or compromised server could swap in other
+private material for a key's public key ("key overwriting", the KO
+attacks on OpenPGP) and learn key material from what the client then
+produces. After unlocking, Zmail therefore signs a probe with every key
+that can sign and verifies it with the public key, and decrypts a probe
+encrypted to every key that can encrypt. A key that fails is treated as
+not unlocked. This check has no upstream counterpart in Bridge; it is
+there because the crypto library changed.
+
 If Proton accounts with post-quantum keys need support later, `pgp`'s
 `pqc` feature adds them. Messages compressed with bzip2 by external
 OpenPGP senders need `pgp`'s `bzip2` feature, which the hydration phase

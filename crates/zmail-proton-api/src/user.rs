@@ -4,14 +4,13 @@
 // Copyright (c) 2020 James Houlahan, Copyright (c) 2022 Proton AG.
 // Licensed under the MIT License; see crates/zmail-proton-api/LICENSE-MIT.
 // Modified by UnicornOps on 2026-10-20: rewritten in Rust. Only `GetUser`
-// is ported; the user's keys arrive with the key unlocking work (#237).
-// `DeleteUser` is not ported.
+// is ported; `DeleteUser` is not.
 
 //! The signed-in user.
 
 use serde::Deserialize;
 
-use crate::{client::Client, manager::Request, response::Error};
+use crate::{client::Client, keyring::Keys, manager::Request, response::Error};
 
 /// Storage used per Proton product, in bytes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -42,6 +41,8 @@ pub struct User {
     pub display_name: String,
     /// Primary email address.
     pub email: String,
+    /// The user keys.
+    pub keys: Keys,
     /// Storage used, in bytes.
     pub used_space: u64,
     /// Storage quota, in bytes.

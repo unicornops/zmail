@@ -840,3 +840,61 @@ async fn human_verification_round_trip() {
         Some("captcha,email")
     );
 }
+
+#[tokio::test]
+async fn salts_the_key_password_and_lists_addresses() {
+    use crate::keyring::tests::{ADDRESS_KEY, USER_KEY_ID, USER_KEY_SALT, USER_KEY_SALTED};
+
+    let server = MockServer::start(|request, _| match request.path.as_str() {
+        "/core/v4/users" => Reply::json(
+            200,
+            serde_json::json!({"Code": 1000, "User": {"ID": "user-1", "Name": "zmail", "Keys": [
+                {"ID": USER_KEY_ID, "PrivateKey": USER_KEY_SALTED, "Primary": 1, "Active": 1, "Flags": 3},
+            ]}}),
+        ),
+        "/core/v4/keys/salts" => Reply::json(
+            200,
+            serde_json::json!({"Code": 1000, "KeySalts": [
+                {"ID": "other", "KeySalt": null},
+                {"ID": USER_KEY_ID, "KeySalt": USER_KEY_SALT},
+            ]}),
+        ),
+        _ => Reply::json(
+            200,
+            serde_json::json!({"Code": 1000, "Addresses": [
+                {"ID": "b", "Email": "zmail.alias@proton.local", "Send": 1, "Receive": 1, "Status": 1, "Type": 2, "Order": 2, "Keys": []},
+                {"ID": "a", "Email": "zmail@proton.local", "Send": 1, "Receive": 1, "Status": 1, "Type": 1, "Order": 1, "DisplayName": "Zmail", "Keys": [
+                    {"ID": "addr-key", "PrivateKey": ADDRESS_KEY, "Token": "t", "Signature": "s", "Primary": 1, "Active": 1, "Flags": 3},
+                ]},
+            ]}),
+        ),
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+
+    let user = client.get_user().await.expect("user");
+    assert_eq!(
+        user.keys.primary().map(|key| key.id.as_str()),
+        Some(USER_KEY_ID)
+    );
+    let salted = client
+        .salted_key_pass(&user, "password")
+        .await
+        .expect("salted key pass");
+    assert_eq!(salted.as_bytes().len(), 31);
+    let error = client
+        .salted_key_pass(&user, "not the password")
+        .await
+        .expect_err("wrong key password");
+    assert!(matches!(error, Error::KeyPasswordWrong), "{error:?}");
+
+    let addresses = client.get_addresses().await.expect("addresses");
+    let emails: Vec<&str> = addresses.iter().map(|a| a.email.as_str()).collect();
+    assert_eq!(emails, ["zmail@proton.local", "zmail.alias@proton.local"]);
+    assert!(addresses[0].send && addresses[0].receive);
+    assert_eq!(addresses[0].kind, crate::AddressType::ORIGINAL);
+    assert_eq!(addresses[0].status, crate::AddressStatus::ENABLED);
+    assert_eq!(addresses[0].keys.0.len(), 1);
+    assert!(!addresses[0].is_byoe());
+}
