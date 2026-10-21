@@ -22,6 +22,9 @@ zmail-security = { path = "../zmail-security" }
 zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }
 zmail-theme = { path = "../zmail-theme" }
+# Proton Mail sign-in (docs/adr/0004-proton-native.md); only with the
+# `proton` feature.
+zmail-proton = { path = "../zmail-proton", optional = true }
 
 # High contrast (`styles/high_contrast.rs`) and reduced motion
 # (`motion.rs`): the platforms' settings, read through safe APIs. Both are
@@ -31,6 +34,11 @@ windows-registry = "0.6.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAccessibility", "NSWorkspace"] }
+
+[features]
+# The Proton Mail provider in the add-account flow. Off by default, and not
+# enabled by zmail-app, until the local store is encrypted at rest (#139).
+proton = ["dep:zmail-proton", "zmail-sync/proton"]
 
 [dev-dependencies]
 # `#[gpui::test]`, `TestAppContext` and `VisualTestContext` for view tests.

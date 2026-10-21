@@ -49,11 +49,15 @@ pub(crate) enum AccountField {
     SmtpSecurity,
     SmtpUsername,
     AllowCleartext,
+    /// Proton sign-in: the two-factor code.
+    ProtonTotp,
+    /// Proton sign-in: the mailbox password (two-password accounts).
+    ProtonMailboxPassword,
 }
 
 impl AccountField {
     /// The text fields, in form order.
-    pub(crate) const TEXT: [AccountField; 15] = [
+    pub(crate) const TEXT: [AccountField; 17] = [
         AccountField::Name,
         AccountField::Email,
         AccountField::Password,
@@ -69,6 +73,8 @@ impl AccountField {
         AccountField::SmtpHost,
         AccountField::SmtpPort,
         AccountField::SmtpUsername,
+        AccountField::ProtonTotp,
+        AccountField::ProtonMailboxPassword,
     ];
 
     /// The visible label, also the field's accessible name.
@@ -92,6 +98,8 @@ impl AccountField {
             AccountField::SmtpSecurity => "Security",
             AccountField::SmtpUsername => "User name",
             AccountField::AllowCleartext => "Connect without encryption",
+            AccountField::ProtonTotp => "Two-factor code",
+            AccountField::ProtonMailboxPassword => "Mailbox password",
         }
     }
 
@@ -112,6 +120,8 @@ impl AccountField {
             AccountField::ImapUsername | AccountField::SmtpUsername => "Usually your email address",
             AccountField::SmtpHost => "smtp.example.com",
             AccountField::SmtpPort => "465",
+            AccountField::ProtonTotp => "6-digit code from your authenticator app",
+            AccountField::ProtonMailboxPassword => "Your Proton mailbox password",
             AccountField::ImapSecurity
             | AccountField::SmtpSecurity
             | AccountField::AllowCleartext => "",
@@ -262,6 +272,8 @@ impl AccountFormValues {
             AccountField::SmtpHost => &self.smtp_host,
             AccountField::SmtpPort => &self.smtp_port,
             AccountField::SmtpUsername => &self.smtp_username,
+            // Proton sign-in fields are read when submitted, not stored.
+            AccountField::ProtonTotp | AccountField::ProtonMailboxPassword => "",
             AccountField::ImapSecurity
             | AccountField::SmtpSecurity
             | AccountField::AllowCleartext => "",
@@ -312,7 +324,9 @@ impl AccountForm {
                         .label(field.label())
                         .placeholder(field.placeholder());
                     let input = match field {
-                        AccountField::Password | AccountField::OauthClientSecret => input.masked(),
+                        AccountField::Password
+                        | AccountField::OauthClientSecret
+                        | AccountField::ProtonMailboxPassword => input.masked(),
                         _ => input,
                     };
                     input.with_text(value)

@@ -25,6 +25,14 @@ pub(crate) enum Credentials {
     Proton(std::sync::Arc<zmail_proton::ProtonSession>),
 }
 
+/// The client configuration for Proton's production API: Bridge's TLS pins
+/// and an honest `x-pm-appversion` of `zmail@<version>`.
+#[cfg(feature = "proton")]
+pub fn proton_production_config(version: &str) -> Result<zmail_proton::ClientConfig> {
+    let app_version = zmail_proton::AppVersion::zmail(version)?;
+    Ok(zmail_proton::ClientConfig::production(app_version)?)
+}
+
 impl SyncService {
     /// Resolves what the account's adapter connects with.
     pub(crate) async fn connect(&self, target: &SyncTarget) -> Result<Credentials> {
@@ -55,6 +63,39 @@ impl SyncService {
             .expect("proton session mutex should not be poisoned") =
             Some(std::sync::Arc::new(sessions));
         Ok(())
+    }
+
+    /// Starts signing in to a Proton account for onboarding, on the
+    /// shared Proton connection. Drive its steps with [`Self::run_proton`].
+    #[cfg(feature = "proton")]
+    pub fn begin_proton_sign_in(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<zmail_proton::ProtonSignIn> {
+        let sessions = self
+            .proton_sessions()
+            .context("Proton support has not been configured")?;
+        Ok(zmail_proton::ProtonSignIn::new(
+            sessions.manager().clone(),
+            username,
+            password,
+        ))
+    }
+
+    /// Runs a Proton sign-in step on the sync runtime. The returned future
+    /// can be awaited from any executor (the UI's).
+    #[cfg(feature = "proton")]
+    pub fn run_proton<F>(
+        &self,
+        future: F,
+    ) -> impl std::future::Future<Output = Result<F::Output>> + use<F>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let task = self.inner.handle.spawn(future);
+        async move { task.await.context("the Proton sign-in task stopped") }
     }
 
     #[cfg(feature = "proton")]

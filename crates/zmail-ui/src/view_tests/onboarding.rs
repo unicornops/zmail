@@ -528,3 +528,47 @@ fn a_provider_preset_fills_the_server_fields(cx: &mut TestAppContext) {
     );
     assert_eq!(values.imap_username, "me@example.test");
 }
+
+/// Release builds have no Proton provider until the local store is
+/// encrypted at rest (#139).
+#[cfg(not(feature = "proton"))]
+#[gpui::test]
+fn the_proton_provider_is_absent_without_the_feature(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::NoAccount);
+    let setup = onboarding(&view, cx);
+    keys("secondary-enter", cx);
+    assert_eq!(stage(&setup, cx), Stage::Provider);
+    assert!(drawn("account-setup-provider-google".into(), cx));
+    assert!(!drawn("account-setup-provider-proton".into(), cx));
+}
+
+#[cfg(feature = "proton")]
+#[gpui::test]
+fn proton_sign_in_shows_the_risk_note_and_checks_its_fields(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::NoAccount);
+    let setup = onboarding(&view, cx);
+    keys("secondary-enter", cx);
+    click("account-setup-provider-proton", cx);
+    assert_eq!(stage(&setup, cx), Stage::ProtonSignIn);
+    assert!(drawn("account-setup-proton-risk".into(), cx));
+
+    // Both fields are required.
+    click("account-setup-proton-sign-in", cx);
+    assert_eq!(
+        errors(&setup, cx),
+        [AccountField::Email, AccountField::Password]
+    );
+
+    // This harness has no Proton connection configured, so signing in
+    // fails with a message and stays on the step, storing nothing.
+    fill(&setup, AccountField::Email, "me@proton.test", cx);
+    fill(&setup, AccountField::Password, "secret", cx);
+    click("account-setup-proton-sign-in", cx);
+    assert_eq!(stage(&setup, cx), Stage::ProtonSignIn);
+    assert!(drawn("account-setup-proton-error".into(), cx));
+    assert!(harness.store.list_accounts().expect("accounts").is_empty());
+
+    // Back returns to the provider step.
+    click("account-setup-back", cx);
+    assert_eq!(stage(&setup, cx), Stage::Provider);
+}
