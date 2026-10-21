@@ -10,15 +10,107 @@
 # after the pin. See docs/upstream/proton.md.
 #
 # Planned ports (added as [[port]] entries when the files land, issue #237):
-#   go-proton-api: manager.go, manager_builder.go, client.go, response.go,
-#                  paging.go, option.go -> crates/zmail-proton-api (client core)
-#   proton-bridge: internal/dialer/dialer_pinning.go,
-#                  internal/dialer/dialer_pinning_checker*.go
-#                  -> crates/zmail-proton-api (TLS pinning)
 #   go-proton-api: manager_auth.go, manager_auth_types.go, auth.go, hv.go
 #                  -> crates/zmail-proton-api (auth)
 #   go-srp:        srp.go (modulus signature check), srp_test.go (vectors)
 #   go-proton-api: salt.go, salt_types.go, keyring.go, keys_types.go,
-#                  unlock.go, user_types.go, address_types.go
+#                  unlock.go, address.go, address_types.go
 #                  -> crates/zmail-proton-api (keys)
 #   proton-bridge: internal/hv/hv_default.go (verification URL)
+
+# Client core and TLS pinning (crates/zmail-proton-api).
+
+[[port]]
+repo = "go-proton-api"
+upstream = "manager.go"
+local = "crates/zmail-proton-api/src/manager.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "manager_builder.go"
+local = "crates/zmail-proton-api/src/manager.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "manager_builder.go"
+local = "crates/zmail-proton-api/src/config.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "manager_status.go"
+local = "crates/zmail-proton-api/src/manager.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "manager_ping.go"
+local = "crates/zmail-proton-api/src/manager.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "option.go"
+local = "crates/zmail-proton-api/src/config.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "client.go"
+local = "crates/zmail-proton-api/src/client.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "response.go"
+local = "crates/zmail-proton-api/src/response.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "paging.go"
+local = "crates/zmail-proton-api/src/paging.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "manager_auth.go"
+local = "crates/zmail-proton-api/src/manager_auth.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "manager_auth_types.go"
+local = "crates/zmail-proton-api/src/manager_auth.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "user.go"
+local = "crates/zmail-proton-api/src/user.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "user_types.go"
+local = "crates/zmail-proton-api/src/user.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/dialer/dialer_pinning.go"
+local = "crates/zmail-proton-api/src/pins.txt"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/dialer/dialer_pinning.go"
+local = "crates/zmail-proton-api/src/pinning.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/dialer/dialer_pinning_checker.go"
+local = "crates/zmail-proton-api/src/pinning.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/dialer/dialer_pinning_checker_default.go"
+local = "crates/zmail-proton-api/src/pinning.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/dialer/dialer_basic.go"
+local = "crates/zmail-proton-api/src/config.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/constants/host_default.go"
+local = "crates/zmail-proton-api/src/config.rs"
