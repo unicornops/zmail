@@ -9,7 +9,14 @@ use zmail_autodiscover::{
 };
 use zmail_core::AccountColor;
 
-use super::{AccountField, AccountSetupServices, AccountSetupView, OnboardingStep, Stage};
+use super::{
+    AccountField, AccountSetupServices, AccountSetupView, Check, OnboardingStep, Stage,
+    validate_account_form,
+};
+
+/// A made-up Google client, shaped like a real one.
+const FIXTURE_CLIENT_ID: &str = "123456789012-fixture0example.apps.googleusercontent.com";
+const FIXTURE_SECRET: &str = "GOCSPX-fixture-not-a-secret";
 
 const NAME: &str = "Sam Taylor";
 const EMAIL: &str = "sam.taylor@example.com";
@@ -42,6 +49,27 @@ impl AccountSetupView {
             OnboardingStep::Credentials => {
                 fill(self, Some(Provider::Google), cx);
                 Stage::Credentials
+            }
+            OnboardingStep::GoogleGuide | OnboardingStep::GoogleGuideInvalid => {
+                fill(self, Some(Provider::Google), cx);
+                self.form.set_text(AccountField::Password, "", cx);
+                self.form.use_oauth = true;
+                path.push(Stage::Credentials);
+                if step == OnboardingStep::GoogleGuideInvalid {
+                    // The secret pasted as the ID, and the ID as the secret.
+                    self.form
+                        .set_text(AccountField::OauthClientId, FIXTURE_SECRET, cx);
+                    self.form
+                        .set_text(AccountField::OauthClientSecret, FIXTURE_CLIENT_ID, cx);
+                    let values = self.form.values(cx);
+                    self.form.errors = validate_account_form(&values, Check::Credentials)
+                        .into_iter()
+                        .collect();
+                } else {
+                    self.form
+                        .set_text(AccountField::OauthClientId, FIXTURE_CLIENT_ID, cx);
+                }
+                Stage::GoogleGuide
             }
             OnboardingStep::Discovering => {
                 fill(self, None, cx);

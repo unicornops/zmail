@@ -15,6 +15,7 @@ use zmail_core::{AccountColor, ProtocolKind, SyncPhase};
 use super::{AccountField, AccountSetupView, KEY_CONTEXT, Stage};
 use crate::a11y::{A11yFlags, AccessibleExt, Politeness, readable};
 use crate::components::{Banner, BannerTone, Button, ButtonSize, ComponentTheme, HitTargetExt};
+use crate::google_oauth;
 use crate::styles::{
     EMPTY_STATE_ICON_FRAME_SIZE, ICON_SIZE_LG, ICON_SIZE_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4,
     SPACE_6, SPACE_8, TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TYPE_HEADLINE, TypeStyleExt,
@@ -34,8 +35,8 @@ const SPIN_PERIOD: Duration = Duration::from_millis(1200);
 fn app_password_help(provider: Provider) -> Option<(&'static str, &'static str)> {
     match provider {
         Provider::Google => Some((
-            "Google needs an app password, not your Google password. Turn on 2-Step Verification, then create an app password for zmail.",
-            "https://support.google.com/accounts/answer/185833",
+            "Google needs an app password, not your Google password. App passwords need 2-Step Verification turned on for your Google account; then create one for zmail.",
+            google_oauth::APP_PASSWORDS_HELP_URL,
         )),
         Provider::ICloud => Some((
             "iCloud needs an app-specific password, not your Apple Account password. Create one for zmail in your Apple Account settings.",
@@ -56,6 +57,7 @@ impl Render for AccountSetupView {
             Stage::Welcome => self.render_welcome(&colors, cx),
             Stage::Provider => self.render_provider(&colors, cx),
             Stage::Credentials => self.render_credentials(&colors, cx),
+            Stage::GoogleGuide => self.render_google_guide(&colors),
             Stage::Discovering => self.render_discovering(&colors),
             Stage::Consent => self.render_consent(&colors, cx),
             Stage::Result => self.render_result(&colors, cx),
@@ -127,7 +129,7 @@ fn column() -> gpui::Div {
 }
 
 /// A stage's title and the sentence under it.
-fn heading(
+pub(super) fn heading(
     title: impl Into<SharedString>,
     detail: impl Into<SharedString>,
     colors: &UiColors,
@@ -155,7 +157,7 @@ fn heading(
 }
 
 /// A labelled text field with its error underneath.
-fn field(view: &AccountSetupView, field: AccountField, colors: &UiColors) -> gpui::Div {
+pub(super) fn field(view: &AccountSetupView, field: AccountField, colors: &UiColors) -> gpui::Div {
     input_card(view.form.label(field), view.form.input(field), colors)
         .children(error_line(view, field, colors))
 }
@@ -218,7 +220,7 @@ fn pair(wide: impl IntoElement, narrow: impl IntoElement, narrow_width: f32) -> 
 }
 
 /// A muted caption.
-fn caption(text: impl Into<SharedString>, colors: &UiColors) -> gpui::Div {
+pub(super) fn caption(text: impl Into<SharedString>, colors: &UiColors) -> gpui::Div {
     let text = text.into();
     div()
         .type_style(TYPE_CAPTION)
@@ -373,13 +375,55 @@ impl AccountSetupView {
             None => "Sign in".to_owned(),
         };
         let note = provider.and_then(app_password_help).map(|(message, url)| {
-            Banner::new("account-setup-app-password", message)
+            let banner = Banner::new("account-setup-app-password", message)
                 .tone(BannerTone::Info)
-                .title("Use an app password")
-                .action(
-                    Button::new("account-setup-app-password-help", "How to create one")
-                        .icon("external-link")
-                        .on_click(move |_, _, cx: &mut App| cx.open_url(url)),
+                .title("Use an app password");
+            // Google's app password page creates one directly.
+            let banner = match provider {
+                Some(Provider::Google) => banner.action(
+                    div()
+                        .debug_selector(|| "account-setup-app-password-create".into())
+                        .child(
+                            Button::new(
+                                "account-setup-app-password-create",
+                                "Create an app password",
+                            )
+                            .icon("external-link")
+                            .on_click(|_, _, cx: &mut App| {
+                                cx.open_url(google_oauth::APP_PASSWORDS_URL)
+                            }),
+                        ),
+                ),
+                _ => banner,
+            };
+            banner.action(
+                Button::new("account-setup-app-password-help", "How to create one")
+                    .icon("external-link")
+                    .on_click(move |_, _, cx: &mut App| cx.open_url(url)),
+            )
+        });
+        // Gmail's alternative to an app password: a Google OAuth client of
+        // the user's own, set up with the guide.
+        let own_client = (provider == Some(Provider::Google) && !self.form.use_oauth).then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(SPACE_2))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(caption("Can't use app passwords? Sign in with a Google OAuth client of your own instead.", colors)),
+                )
+                .child(
+                    div().flex_none().debug_selector(|| "account-setup-google-guide".into()).child(
+                        Button::new("account-setup-google-guide", "Set up your own client")
+                            .ghost()
+                            .icon("shield")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_google_guide(window, cx);
+                            })),
+                    ),
                 )
         });
         let oauth_note = (provider == Some(Provider::Microsoft365)).then(|| {
@@ -400,6 +444,7 @@ impl AccountSetupView {
                 colors,
             ))
             .children(note)
+            .children(own_client)
             .children(oauth_note)
             .child(field(self, AccountField::Name, colors))
             .child(field(self, AccountField::Email, colors))
@@ -956,7 +1001,7 @@ impl AccountSetupView {
         };
         let actions: Vec<AnyElement> = match self.stage {
             Stage::Welcome | Stage::Provider => Vec::new(),
-            Stage::Credentials => {
+            Stage::Credentials | Stage::GoogleGuide => {
                 vec![primary("account-setup-continue", "Continue", cx).into_any_element()]
             }
             Stage::Discovering | Stage::Consent => vec![manual(cx).into_any_element()],

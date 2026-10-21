@@ -652,3 +652,61 @@ fn keyboard_switches_the_keymap_and_searches_the_shortcuts(cx: &mut TestAppConte
         KeymapName::Default
     );
 }
+
+#[gpui::test]
+fn an_expired_google_sign_in_explains_the_7_day_testing_limit(cx: &mut TestAppContext) {
+    let (_view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Settings(SettingsSection::Accounts),
+        |_| {},
+    );
+    let store = &harness.store;
+    let account_id = store
+        .insert_account(&zmail_core::NewAccount {
+            display_name: "Gmail".to_owned(),
+            protocol: zmail_core::ProtocolKind::Imap,
+            auth: zmail_core::AuthKind::OAuth2,
+            endpoint: "imaps://imap.gmail.com:993".to_owned(),
+            username: "me@example.test".to_owned(),
+            cache_policy: zmail_core::CachePolicySummary::performance_first(),
+            outgoing: None,
+            identities: vec![zmail_core::NewIdentity {
+                display_name: "Me".to_owned(),
+                email_address: "me@example.test".to_owned(),
+                signature: String::new(),
+                is_primary: true,
+            }],
+        })
+        .expect("the account is stored");
+    store
+        .save_account_oauth2_client(
+            account_id,
+            "https://oauth2.googleapis.com/token",
+            "42-abc.apps.googleusercontent.com",
+        )
+        .expect("the client is stored");
+    let expired = zmail_core::reauth::ReauthRequired::new(
+        zmail_core::reauth::ReauthReason::GrantExpired,
+        "invalid_grant: Token has been expired or revoked.",
+    );
+    store
+        .record_sync_failure(account_id, "Sync failed after retry", expired.to_string())
+        .expect("the failure is recorded");
+
+    let (root, mut window_cx) = settings_window(cx);
+    let accounts = root.read_with(&window_cx, |root, _| root.accounts().clone());
+    accounts.update(&mut window_cx, |accounts, cx| {
+        accounts.focus_account(account_id, cx)
+    });
+    window_cx.run_until_parked();
+    assert!(window_cx.debug_bounds("account-fix").is_some());
+    assert!(
+        window_cx.debug_bounds("account-fix-reauth").is_some(),
+        "Re-authenticate is offered"
+    );
+    assert!(
+        window_cx.debug_bounds("account-fix-guide").is_some(),
+        "the guide's fix is linked"
+    );
+}

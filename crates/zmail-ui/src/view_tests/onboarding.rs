@@ -254,6 +254,69 @@ fn google_oauth_needs_the_client_secret_and_microsoft_does_not(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn gmail_offers_a_guide_to_an_oauth_client_of_your_own(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::NoAccount);
+    let setup = onboarding(&view, cx);
+    keys("secondary-enter", cx);
+    click("account-setup-provider-google", cx);
+
+    // App passwords stay the default: the banner links to creating one,
+    // and the password field shows.
+    assert!(drawn("account-setup-app-password".into(), cx));
+    assert!(drawn("account-setup-app-password-create".into(), cx));
+    cx.read_entity(&setup, |setup, _| assert!(!setup.form.use_oauth));
+
+    // The guide is the alternative.
+    fill(&setup, AccountField::Email, "me@example.test", cx);
+    click("account-setup-google-guide", cx);
+    assert_eq!(stage(&setup, cx), Stage::GoogleGuide);
+    cx.read_entity(&setup, |setup, _| assert!(setup.form.use_oauth));
+    for step in ["project", "branding", "audience", "scopes", "client"] {
+        assert!(
+            drawn(format!("account-setup-google-step-{step}-open"), cx),
+            "step {step} links to the console"
+        );
+    }
+    assert!(drawn("account-setup-google-step-paste".into(), cx));
+    assert!(drawn("account-setup-google-testing".into(), cx));
+    assert!(drawn("account-setup-google-guide-docs".into(), cx));
+
+    // Copy scope puts the one scope on the clipboard.
+    click("account-setup-google-copy-scope", cx);
+    assert_eq!(
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .as_deref(),
+        Some("https://mail.google.com/")
+    );
+
+    // A client pasted the wrong way round is caught before the browser
+    // opens, and nothing is stored.
+    fill(&setup, AccountField::OauthClientId, "GOCSPX-not-the-id", cx);
+    fill(
+        &setup,
+        AccountField::OauthClientSecret,
+        "42-abc.apps.googleusercontent.com",
+        cx,
+    );
+    click("account-setup-continue", cx);
+    assert_eq!(stage(&setup, cx), Stage::GoogleGuide);
+    assert_eq!(
+        errors(&setup, cx),
+        [AccountField::OauthClientId, AccountField::OauthClientSecret]
+    );
+    assert!(harness.store.list_accounts().expect("accounts").is_empty());
+
+    // Back returns to the app password.
+    click("account-setup-back", cx);
+    assert_eq!(stage(&setup, cx), Stage::Credentials);
+    cx.read_entity(&setup, |setup, _| {
+        assert!(!setup.form.use_oauth);
+        assert!(setup.form.errors.is_empty());
+    });
+}
+
+#[gpui::test]
 fn discovery_asks_before_ispdb_and_falls_back_to_the_manual_form(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::NoAccount);
     let web = Arc::new(FakeWeb::default());
@@ -398,6 +461,8 @@ fn every_onboarding_fixture_step_renders(cx: &mut TestAppContext) {
         OnboardingStep::Welcome,
         OnboardingStep::Provider,
         OnboardingStep::Credentials,
+        OnboardingStep::GoogleGuide,
+        OnboardingStep::GoogleGuideInvalid,
         OnboardingStep::Discovering,
         OnboardingStep::Consent,
         OnboardingStep::Result,
@@ -415,6 +480,7 @@ fn every_onboarding_fixture_step_renders(cx: &mut TestAppContext) {
             OnboardingStep::Welcome => Stage::Welcome,
             OnboardingStep::Provider => Stage::Provider,
             OnboardingStep::Credentials => Stage::Credentials,
+            OnboardingStep::GoogleGuide | OnboardingStep::GoogleGuideInvalid => Stage::GoogleGuide,
             OnboardingStep::Discovering => Stage::Discovering,
             OnboardingStep::Consent => Stage::Consent,
             OnboardingStep::Result => Stage::Result,
@@ -425,6 +491,12 @@ fn every_onboarding_fixture_step_renders(cx: &mut TestAppContext) {
         assert_eq!(stage(&setup, window_cx), expected, "{step:?}");
         if step == OnboardingStep::ManualCleartext {
             assert!(drawn("account-setup-cleartext".into(), window_cx));
+        }
+        if step == OnboardingStep::GoogleGuideInvalid {
+            assert_eq!(
+                errors(&setup, window_cx),
+                [AccountField::OauthClientId, AccountField::OauthClientSecret]
+            );
         }
     }
 }

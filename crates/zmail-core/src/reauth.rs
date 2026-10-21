@@ -17,11 +17,15 @@ pub enum ReauthReason {
     /// as Microsoft 365 accounts signed in before zmail asked for
     /// `SMTP.Send` have.
     SendRefused,
+    /// The provider refused to refresh the access token (`invalid_grant`):
+    /// the saved sign-in expired or was revoked. Google expires it after
+    /// 7 days for clients whose app is still in Testing.
+    GrantExpired,
 }
 
 impl ReauthReason {
     /// Every reason, for recognising stored messages.
-    const ALL: [ReauthReason; 1] = [ReauthReason::SendRefused];
+    const ALL: [ReauthReason; 2] = [ReauthReason::SendRefused, ReauthReason::GrantExpired];
 
     /// The sentence a stored message starts with. Changing it orphans
     /// messages already stored, which then read as ordinary errors.
@@ -29,6 +33,9 @@ impl ReauthReason {
         match self {
             ReauthReason::SendRefused => {
                 "Sign in again to send: the mail server refused zmail's sign-in."
+            }
+            ReauthReason::GrantExpired => {
+                "Sign in again: the provider no longer accepts zmail's saved sign-in."
             }
         }
     }
@@ -98,6 +105,18 @@ mod tests {
             ReauthReason::of_message(&bare),
             Some(ReauthReason::SendRefused)
         );
+    }
+
+    #[test]
+    fn every_reason_reads_back_as_itself() {
+        for reason in ReauthReason::ALL {
+            let message = ReauthRequired::new(reason, "detail").to_string();
+            assert_eq!(
+                ReauthReason::of_message(&message),
+                Some(reason),
+                "{message}"
+            );
+        }
     }
 
     #[test]

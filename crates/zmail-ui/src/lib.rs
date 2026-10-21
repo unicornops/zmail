@@ -14,6 +14,7 @@
 //! | `reader` | `ReaderView`: the open conversation and its actions |
 //! | `compose` | `ComposeView`: the draft editor; `ComposeWindow`, one window per draft; `RecipientField` chips |
 //! | `account_setup` | `AccountSetupView`: first-run onboarding and the add-account flow, with autodiscovery; `AddAccountWindow` |
+//! | `google_oauth` | the bring-your-own Google OAuth client guide's steps and checks, and the expired sign-in advice |
 //! | `mail_actions` | `MailActions`: store writes, `MailEvent`s and undo |
 //! | `attachments` | opening and saving received attachments (Open, Save As, Save All) |
 //! | `drag` | `DraggedThreads`: conversations dragged from the list onto sidebar folders |
@@ -73,6 +74,7 @@ mod compose;
 mod drag;
 mod fonts;
 mod fuzzy;
+mod google_oauth;
 mod keymap;
 mod layout;
 mod mail_actions;

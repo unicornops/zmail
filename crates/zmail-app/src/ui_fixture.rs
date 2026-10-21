@@ -106,6 +106,10 @@ pub(crate) enum FixtureView {
     /// that fails to sync, with three accounts: one with its own colour
     /// and one with a cache budget.
     SettingsAccounts,
+    /// Settings → Accounts on a Gmail account signed in with its own
+    /// OAuth client, whose sign-in Google stopped accepting
+    /// (`invalid_grant`, as a Testing app's does after 7 days).
+    SettingsAccountsExpired,
     /// The Settings window on Appearance.
     SettingsAppearance,
     /// The Settings window on Keyboard, with the Gmail keymap on.
@@ -149,6 +153,10 @@ impl FixtureView {
             "account-setup" => Self::AccountSetup,
             "onboarding-provider" => Self::Onboarding(OnboardingStep::Provider),
             "onboarding-credentials" => Self::Onboarding(OnboardingStep::Credentials),
+            "onboarding-google-guide" => Self::Onboarding(OnboardingStep::GoogleGuide),
+            "onboarding-google-guide-invalid" => {
+                Self::Onboarding(OnboardingStep::GoogleGuideInvalid)
+            }
             "onboarding-discovering" => Self::Onboarding(OnboardingStep::Discovering),
             "onboarding-consent" => Self::Onboarding(OnboardingStep::Consent),
             "onboarding-result" => Self::Onboarding(OnboardingStep::Result),
@@ -168,13 +176,14 @@ impl FixtureView {
             "command-palette" => Self::CommandPalette,
             "cheat-sheet" => Self::CheatSheet,
             "settings-accounts" => Self::SettingsAccounts,
+            "settings-accounts-expired" => Self::SettingsAccountsExpired,
             "settings-appearance" => Self::SettingsAppearance,
             "settings-keyboard" => Self::SettingsKeyboard,
             "settings-privacy" => Self::SettingsPrivacy,
             "settings-sending" => Self::SettingsSending,
             "settings-about" => Self::SettingsAbout,
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-appearance, settings-keyboard, settings-privacy, settings-sending or settings-about"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-appearance, settings-keyboard, settings-privacy, settings-sending or settings-about"
             ),
         })
     }
@@ -329,6 +338,9 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
                 .find(|account| account.sync_status.phase == SyncPhase::Failed)
                 .context("one fixture account fails to sync")?;
             InitialView::SettingsAccount(failing.id)
+        }
+        FixtureView::SettingsAccountsExpired => {
+            InitialView::SettingsAccount(seed_expired_google_account(store, now)?)
         }
         FixtureView::SettingsAppearance => InitialView::Settings(SettingsSection::Appearance),
         FixtureView::SettingsKeyboard => {
@@ -639,6 +651,38 @@ fn fixture_account() -> NewAccount {
             is_primary: true,
         }],
     }
+}
+
+/// A Gmail account signed in with its own OAuth client, whose last sync
+/// failed because Google refused to refresh its sign-in. Returns its id.
+fn seed_expired_google_account(store: &LocalStore, now: u64) -> Result<i64> {
+    let account_id = store.insert_account(&NewAccount {
+        display_name: "Gmail".to_owned(),
+        auth: AuthKind::OAuth2,
+        endpoint: "imaps://imap.gmail.com:993".to_owned(),
+        username: "sam.taylor@gmail.example".to_owned(),
+        outgoing: Some(OutgoingConfig {
+            port: Some(465),
+            security: Some(zmail_core::SubmissionSecurity::ImplicitTls),
+            username: Some("sam.taylor@gmail.example".to_owned()),
+            ..OutgoingConfig::smtp_default("smtp.gmail.com".to_owned())
+        }),
+        ..fixture_account()
+    })?;
+    // A made-up client; the token endpoint is Google's, which is what
+    // marks the account as a Gmail one.
+    store.save_account_oauth2_client(
+        account_id,
+        "https://oauth2.googleapis.com/token",
+        "123456789012-fixture0example.apps.googleusercontent.com",
+    )?;
+    store.set_account_oauth2_expiry(account_id, i64::try_from(now).ok())?;
+    let expired = zmail_core::reauth::ReauthRequired::new(
+        zmail_core::reauth::ReauthReason::GrantExpired,
+        "invalid_grant: Token has been expired or revoked.",
+    );
+    store.record_sync_failure(account_id, "Sync failed after retry", expired.to_string())?;
+    Ok(account_id)
 }
 
 /// One message of a seeded thread: sender, minutes before now, read state,
@@ -1216,6 +1260,9 @@ mod tests {
             "command-palette",
             "cheat-sheet",
             "settings-accounts",
+            "settings-accounts-expired",
+            "onboarding-google-guide",
+            "onboarding-google-guide-invalid",
             "settings-appearance",
             "settings-keyboard",
             "settings-privacy",
@@ -1234,6 +1281,35 @@ mod tests {
         assert_eq!(parse_text_size(Some("200"))?, Some(200));
         assert!(parse_text_size(Some("120")).is_err());
         assert!(parse_text_size(Some("big")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn settings_accounts_expired_opens_on_an_expired_google_sign_in() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::SettingsAccountsExpired)?;
+        let InitialView::SettingsAccount(account_id) = initial_view else {
+            bail!("expected Settings on an account, got {initial_view:?}");
+        };
+        let account = store
+            .list_accounts()?
+            .into_iter()
+            .find(|account| account.id == account_id)
+            .context("the expired account exists")?;
+        assert_eq!(account.sync_status.phase, SyncPhase::Failed);
+        assert_eq!(
+            account
+                .sync_status
+                .last_error_message
+                .as_deref()
+                .and_then(zmail_core::reauth::ReauthReason::of_message),
+            Some(zmail_core::reauth::ReauthReason::GrantExpired)
+        );
+        let target = store.sync_target(account_id)?.context("a sync target")?;
+        assert_eq!(target.auth, AuthKind::OAuth2);
+        assert_eq!(
+            target.oauth2.map(|config| config.token_endpoint).as_deref(),
+            Some("https://oauth2.googleapis.com/token")
+        );
         Ok(())
     }
 

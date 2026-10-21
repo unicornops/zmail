@@ -17,7 +17,8 @@ runs below should be filed as a follow-up issue.
 
 Prerequisites: a Google account, and a Google Cloud OAuth client
 configured as a **desktop** application with the
-`https://mail.google.com/` scope. Google requires the client's secret at
+`https://mail.google.com/` scope ([gmail-oauth.md](gmail-oauth.md) has
+the steps). Google requires the client's secret at
 the token exchange even for desktop clients (PKCE is used on top), so
 zmail asks for it. The secret is sent only to the token endpoint, never
 in the browser's authorization URL.
@@ -30,10 +31,13 @@ in the browser's authorization URL.
    IDLE watcher reports new mail.
 3. Compose and send a message; confirm Gmail accepts the submission with
    `AUTH XOAUTH2` (no password prompt, message arrives at the recipient).
-4. Let the access token expire (or use a test client with a short token
+4. With the app left in Testing, wait 7 days: the refresh fails with
+   `invalid_grant`, and Settings → Accounts says the sign-in has expired,
+   with Re-authenticate and the guide's fix.
+5. Let the access token expire (or use a test client with a short token
    lifetime). Confirm background refresh keeps sync, IDLE, and sending
    working without user interaction.
-5. Revoke the grant at `myaccount.google.com > Security > Third-party
+6. Revoke the grant at `myaccount.google.com > Security > Third-party
    access`, trigger a sync, and confirm the failure surfaces as a sync
    failure status in the UI rather than a hang.
 
