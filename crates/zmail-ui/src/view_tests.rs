@@ -40,6 +40,7 @@ mod palette;
 mod perf;
 mod reader;
 mod reader_attachments;
+mod reader_long;
 mod reader_safety;
 mod search;
 mod settings;

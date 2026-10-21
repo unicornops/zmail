@@ -2,10 +2,14 @@
 //! clickable links.
 //!
 //! The body is split into paragraphs at blank lines and laid out with
-//! space between them, no wider than about 72 characters. Each paragraph
-//! is a [`SelectableText`] around an `InteractiveText`: the reader keeps
-//! one selection, as byte offsets into the whole body, so a drag can run
-//! across paragraphs and copying keeps the blank lines between them.
+//! space between them, no wider than about 72 characters. A long
+//! paragraph is laid out in pieces of a few lines each, and the pieces of
+//! a long body are spread over several items of the conversation list
+//! ([`BodyModel::chunks`]), so opening a huge message shapes only the part
+//! on screen. Each piece is a [`SelectableText`] around an
+//! `InteractiveText`: the reader keeps one selection, as byte offsets into
+//! the whole body, so a drag can run across paragraphs, pieces and list
+//! items, and copying keeps the line breaks between them.
 
 use std::{ops::Range, rc::Rc};
 
@@ -30,6 +34,13 @@ const BODY_MEASURE_REM: f32 = 39.;
 /// Line height of body text, roomier than the UI's for reading.
 const BODY_LINE_HEIGHT_REM: f32 = 1.375;
 
+/// A paragraph longer than this many bytes is laid out in pieces of
+/// whole lines (or, for a longer line, words) of about this size.
+const PIECE_BYTES: usize = 2_000;
+
+/// About how many bytes of body text one conversation list item lays out.
+const CHUNK_BYTES: usize = 6_000;
+
 /// A message body prepared for display. Built once per message and kept
 /// while the conversation is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,8 +51,22 @@ pub(crate) struct BodyModel {
     pub(crate) fold_start: Option<usize>,
     /// The paragraphs, as byte ranges of `text`, in order.
     pub(crate) paragraphs: Vec<Range<usize>>,
+    /// The pieces the paragraphs are laid out in, in order: a paragraph is
+    /// one piece unless it is longer than [`PIECE_BYTES`].
+    pub(crate) pieces: Vec<Piece>,
     /// The links, in order.
     pub(crate) links: Vec<BodyLink>,
+}
+
+/// A run of a paragraph's lines, laid out as one text element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Piece {
+    /// The piece's text, as a byte range of the body.
+    pub(crate) range: Range<usize>,
+    /// The index of its paragraph.
+    pub(crate) paragraph: usize,
+    /// Whether it starts its paragraph.
+    pub(crate) starts_paragraph: bool,
 }
 
 impl BodyModel {
@@ -55,12 +80,47 @@ impl BodyModel {
             .then_some(message.sanitized_html.as_deref())
             .flatten();
         let fold_start = folded_tail_start(&text);
+        let paragraphs = paragraphs(&text, fold_start);
+        let links = body_links(&text, html);
         Self {
-            paragraphs: paragraphs(&text, fold_start),
-            links: body_links(&text, html),
+            pieces: pieces(&text, &paragraphs, &links),
+            paragraphs,
+            links,
             fold_start,
             text: text.into(),
         }
+    }
+
+    /// How many pieces are above the fold: they come first.
+    pub(super) fn visible_pieces(&self) -> usize {
+        let fold = self.fold_start.unwrap_or(self.text.len());
+        self.pieces
+            .partition_point(|piece| piece.range.start < fold)
+    }
+
+    /// The pieces each conversation list item lays out, as index ranges
+    /// of [`Self::pieces`]: those above the fold, and those below it when
+    /// `unfolded`, about [`CHUNK_BYTES`] of text per item. A short body is
+    /// one chunk.
+    pub(super) fn chunks(&self, unfolded: bool) -> Vec<Range<usize>> {
+        let shown = if unfolded {
+            self.pieces.len()
+        } else {
+            self.visible_pieces()
+        };
+        let mut chunks = Vec::new();
+        let mut start = 0;
+        let mut bytes = 0;
+        for (index, piece) in self.pieces[..shown].iter().enumerate() {
+            bytes += piece.range.len();
+            if bytes >= CHUNK_BYTES && index + 1 < shown {
+                chunks.push(start..index + 1);
+                start = index + 1;
+                bytes = 0;
+            }
+        }
+        chunks.push(start..shown);
+        chunks
     }
 
     /// The paragraphs above the fold, or below it.
@@ -109,8 +169,51 @@ fn paragraphs(text: &str, fold_start: Option<usize>) -> Vec<Range<usize>> {
     paragraphs
 }
 
-/// The highlight runs for one paragraph: its links, and the part of the
-/// selection inside it, both relative to the paragraph. Sorted and
+/// Splits the paragraphs longer than [`PIECE_BYTES`] into pieces at line
+/// breaks, or, for a line longer than that, at a space (or anywhere, for
+/// a run without one). A cut never falls inside a link. The line break or
+/// space a cut falls on belongs to no piece; the selection still copies it.
+fn pieces(text: &str, paragraphs: &[Range<usize>], links: &[BodyLink]) -> Vec<Piece> {
+    let inside_link = |offset: usize| {
+        let after = links.partition_point(|link| link.range.start < offset);
+        after > 0 && links[after - 1].range.end > offset
+    };
+    let mut pieces = Vec::new();
+    for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
+        let mut start = paragraph.start;
+        while paragraph.end - start > PIECE_BYTES {
+            let window = start..text.floor_char_boundary(start + PIECE_BYTES);
+            let cut_at = |separator: char| {
+                text[window.clone()]
+                    .rmatch_indices(separator)
+                    .map(|(index, _)| start + index)
+                    .find(|&cut| cut > start && !inside_link(cut))
+            };
+            let (end, next) = match cut_at('\n').or_else(|| cut_at(' ')) {
+                Some(cut) => (cut, cut + 1),
+                None if window.end > start => (window.end, window.end),
+                // A single character longer than a piece: impossible for
+                // UTF-8, but never loop.
+                None => break,
+            };
+            pieces.push(Piece {
+                range: start..end,
+                paragraph: paragraph_index,
+                starts_paragraph: start == paragraph.start,
+            });
+            start = next;
+        }
+        pieces.push(Piece {
+            range: start..paragraph.end,
+            paragraph: paragraph_index,
+            starts_paragraph: start == paragraph.start,
+        });
+    }
+    pieces
+}
+
+/// The highlight runs for one piece: its links, and the part of the
+/// selection inside it, both relative to the piece. Sorted and
 /// non-overlapping, as `StyledText` needs them.
 fn highlights(
     links: &[Range<usize>],
@@ -155,6 +258,8 @@ pub(super) struct BodyContext<'a> {
     /// The message's position in the conversation.
     pub(super) index: usize,
     pub(super) model: &'a BodyModel,
+    /// The pieces this list item lays out (one chunk of the body).
+    pub(super) pieces: Range<usize>,
     /// The selection in this message, if it is here.
     pub(super) selection: Option<Range<usize>>,
     /// A drag is selecting in this message.
@@ -162,10 +267,13 @@ pub(super) struct BodyContext<'a> {
     pub(super) colors: UiColors,
 }
 
-/// The paragraphs above the fold (`folded` false) or below it, selectable,
-/// with their links.
-pub(super) fn render_paragraphs(
+/// The pieces `pieces` (indices into [`BodyModel::pieces`], all above the
+/// fold or all below it, as `folded` says), selectable, with their links.
+/// A piece that starts a paragraph has space above it, unless it is the
+/// first here.
+pub(super) fn render_pieces(
     body: &BodyContext<'_>,
+    pieces: Range<usize>,
     folded: bool,
     cx: &mut Context<ReaderView>,
 ) -> AnyElement {
@@ -196,108 +304,102 @@ pub(super) fn render_paragraphs(
         background_color: Some(rgb(colors.selection_background).into()),
         ..HighlightStyle::default()
     };
-    let paragraphs: Vec<&Range<usize>> = body.model.paragraphs(folded).collect();
-    let all = &body.model.paragraphs;
-    let count = paragraphs.len();
+    // The side of the fold these pieces are on: a drag past its first or
+    // last piece selects to that end.
+    let visible = body.model.visible_pieces();
+    let side = if folded {
+        visible..body.model.pieces.len()
+    } else {
+        0..visible
+    };
+    let first_here = pieces.start;
 
     div()
         .flex()
         .flex_col()
-        .gap_3()
         .w_full()
         .max_w(rems(BODY_MEASURE_REM))
         .text_sm()
         .line_height(rems(BODY_LINE_HEIGHT_REM))
         .when(folded, |this| this.text_color(rgb(colors.muted)))
-        .children(
-            paragraphs
-                .into_iter()
+        .children(pieces.map(|piece_index| {
+            let piece = &body.model.pieces[piece_index];
+            let range = piece.range.clone();
+            let text = &body.model.text[range.clone()];
+            // Links inside this piece, by their index in the body.
+            let links: Vec<(usize, Range<usize>)> = body
+                .model
+                .links
+                .iter()
                 .enumerate()
-                .map(|(index, paragraph)| {
-                    let text = &body.model.text[paragraph.clone()];
-                    // Links inside this paragraph, by their index in the body.
-                    let links: Vec<(usize, Range<usize>)> = body
-                        .model
-                        .links
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, link)| {
-                            paragraph.start <= link.range.start && link.range.end <= paragraph.end
-                        })
-                        .map(|(link_index, link)| {
-                            (
-                                link_index,
-                                link.range.start - paragraph.start
-                                    ..link.range.end - paragraph.start,
-                            )
-                        })
-                        .collect();
-                    let local_links: Vec<Range<usize>> =
-                        links.iter().map(|(_, range)| range.clone()).collect();
-                    let selection = body.selection.as_ref().and_then(|selection| {
-                        let start = selection.start.max(paragraph.start);
-                        let end = selection.end.min(paragraph.end);
-                        (start < end).then(|| start - paragraph.start..end - paragraph.start)
-                    });
-                    let styled =
-                        StyledText::new(SharedString::from(text.to_owned())).with_highlights(
-                            highlights(&local_links, selection, link_style, selection_style),
-                        );
-                    let layout = styled.layout().clone();
-                    let link_targets: Vec<(Range<usize>, String)> = links
-                        .iter()
-                        .map(|(link_index, range)| {
-                            (range.clone(), body.model.links[*link_index].target.clone())
-                        })
-                        .collect();
-                    let tooltip_colors = *colors;
-                    let link_indices: Vec<usize> = links.iter().map(|(index, _)| *index).collect();
-                    let reader = reader.clone();
-                    let interactive = InteractiveText::new(
-                        (
-                            "reader-paragraph-text",
-                            (message_id as u64) << 16 | paragraph.start as u64,
-                        ),
-                        styled,
+                .filter(|(_, link)| range.start <= link.range.start && link.range.end <= range.end)
+                .map(|(link_index, link)| {
+                    (
+                        link_index,
+                        link.range.start - range.start..link.range.end - range.start,
                     )
-                    .on_click(local_links, move |clicked, window, cx| {
-                        let link = link_indices[clicked];
-                        let _ = reader.update(cx, |reader, cx| {
-                            reader.link_clicked(message_id, link, window, cx);
-                        });
-                    })
-                    .tooltip(move |index, window, cx| {
-                        link_targets
-                            .iter()
-                            .find(|(range, _)| range.contains(&index))
-                            .map(|(_, target)| {
-                                text_tooltip(target.clone(), tooltip_colors)(window, cx)
-                            })
+                })
+                .collect();
+            let local_links: Vec<Range<usize>> =
+                links.iter().map(|(_, range)| range.clone()).collect();
+            let selection = body.selection.as_ref().and_then(|selection| {
+                let start = selection.start.max(range.start);
+                let end = selection.end.min(range.end);
+                (start < end).then(|| start - range.start..end - range.start)
+            });
+            let styled = StyledText::new(SharedString::from(text.to_owned())).with_highlights(
+                highlights(&local_links, selection, link_style, selection_style),
+            );
+            let layout = styled.layout().clone();
+            let link_targets: Vec<(Range<usize>, String)> = links
+                .iter()
+                .map(|(link_index, range)| {
+                    (range.clone(), body.model.links[*link_index].target.clone())
+                })
+                .collect();
+            let tooltip_colors = *colors;
+            let link_indices: Vec<usize> = links.iter().map(|(index, _)| *index).collect();
+            let reader = reader.clone();
+            // Unique per message and piece (bodies stay well under 4 GB).
+            let element_id = (message_id as u64) << 32 | range.start as u64;
+            let interactive = InteractiveText::new(("reader-paragraph-text", element_id), styled)
+                .on_click(local_links, move |clicked, window, cx| {
+                    let link = link_indices[clicked];
+                    let _ = reader.update(cx, |reader, cx| {
+                        reader.link_clicked(message_id, link, window, cx);
                     });
-                    let paragraph_index = all
+                })
+                .tooltip(move |index, window, cx| {
+                    link_targets
                         .iter()
-                        .position(|candidate| candidate == paragraph)
-                        .unwrap_or_default();
-                    div()
-                        .debug_selector(move || {
-                            format!("reader-paragraph-{message_index}-{paragraph_index}")
-                        })
-                        .child(
-                            SelectableText::new(
-                                (
-                                    "reader-paragraph",
-                                    (message_id as u64) << 16 | paragraph.start as u64,
-                                ),
-                                interactive,
-                                layout,
-                                paragraph.clone(),
-                                on_input.clone(),
-                            )
-                            .edges(index == 0, index + 1 == count)
-                            .dragging(body.dragging),
-                        )
-                }),
-        )
+                        .find(|(range, _)| range.contains(&index))
+                        .map(|(_, target)| text_tooltip(target.clone(), tooltip_colors)(window, cx))
+                });
+            let paragraph_index = piece.paragraph;
+            let starts_paragraph = piece.starts_paragraph;
+            div()
+                .debug_selector(move || {
+                    if starts_paragraph {
+                        format!("reader-paragraph-{message_index}-{paragraph_index}")
+                    } else {
+                        format!("reader-piece-{message_index}-{piece_index}")
+                    }
+                })
+                .when(starts_paragraph && piece_index != first_here, |this| {
+                    this.mt_3()
+                })
+                .child(
+                    SelectableText::new(
+                        ("reader-paragraph", element_id),
+                        interactive,
+                        layout,
+                        range,
+                        on_input.clone(),
+                    )
+                    .edges(piece_index == side.start, piece_index + 1 == side.end)
+                    .dragging(body.dragging),
+                )
+        }))
         .into_any_element()
 }
 
@@ -508,7 +610,7 @@ impl ReaderView {
 mod tests {
     use gpui::HighlightStyle;
 
-    use super::{highlights, paragraphs};
+    use super::{BodyLink, CHUNK_BYTES, PIECE_BYTES, highlights, paragraphs, pieces};
 
     #[test]
     fn paragraphs_split_at_blank_lines_and_the_fold() {
@@ -521,6 +623,107 @@ mod tests {
         let ranges = paragraphs(text, Some(fold));
         let parts: Vec<&str> = ranges.iter().map(|range| &text[range.clone()]).collect();
         assert_eq!(parts, ["Hi Sam,", "Line one", "line two", "-- \nGrace"]);
+    }
+
+    #[test]
+    fn a_long_paragraph_is_cut_into_pieces_at_line_breaks_spaces_and_not_links() {
+        let line = "word ".repeat(30);
+        let lines = vec![line.trim_end(); 40].join("\n");
+        let long_line = "word ".repeat(1_000);
+        let text = format!("Short.\n\n{lines}\n\n{}", long_line.trim_end());
+        let paragraphs = paragraphs(&text, None);
+        assert_eq!(paragraphs.len(), 3);
+        let link_start = text.find("word\nword").expect("a line break");
+        let links = vec![BodyLink {
+            range: link_start..link_start + 9,
+            target: "https://example.com".to_owned(),
+        }];
+        let pieces = pieces(&text, &paragraphs, &links);
+
+        // The short paragraph is one piece.
+        assert_eq!(pieces[0].range, paragraphs[0]);
+        assert!(pieces[0].starts_paragraph);
+        for piece in &pieces {
+            let piece_text = &text[piece.range.clone()];
+            assert!(piece.range.len() <= PIECE_BYTES, "{}", piece.range.len());
+            assert!(!piece_text.starts_with(['\n', ' ']), "{piece_text:?}");
+            assert!(
+                !(piece.range.start < links[0].range.end && links[0].range.start < piece.range.end)
+                    || (piece.range.start <= links[0].range.start
+                        && links[0].range.end <= piece.range.end),
+                "no piece cuts the link"
+            );
+        }
+        // Each paragraph's pieces cover it, cut at line breaks or spaces.
+        for (index, paragraph) in paragraphs.iter().enumerate() {
+            let of_paragraph: Vec<_> = pieces
+                .iter()
+                .filter(|piece| piece.paragraph == index)
+                .collect();
+            assert!(of_paragraph[0].starts_paragraph);
+            assert!(
+                of_paragraph[1..]
+                    .iter()
+                    .all(|piece| !piece.starts_paragraph)
+            );
+            assert_eq!(of_paragraph[0].range.start, paragraph.start);
+            assert_eq!(
+                of_paragraph.last().map(|piece| piece.range.end),
+                Some(paragraph.end)
+            );
+            for pair in of_paragraph.windows(2) {
+                let gap = &text[pair[0].range.end..pair[1].range.start];
+                assert!(gap == "\n" || gap == " ", "{gap:?}");
+            }
+        }
+        assert!(pieces.iter().filter(|piece| piece.paragraph == 1).count() > 1);
+        assert!(pieces.iter().filter(|piece| piece.paragraph == 2).count() > 1);
+    }
+
+    #[test]
+    fn a_long_body_is_chunked_and_a_short_one_is_not() {
+        let model = |text: &str| super::BodyModel {
+            text: text.to_owned().into(),
+            fold_start: text.find("\n> ").map(|at| at + 1),
+            paragraphs: Vec::new(),
+            pieces: Vec::new(),
+            links: Vec::new(),
+        };
+        let with_pieces = |text: &str| {
+            let mut body = model(text);
+            body.paragraphs = paragraphs(text, body.fold_start);
+            body.pieces = pieces(text, &body.paragraphs, &[]);
+            body
+        };
+        let short = with_pieces("Hi.\n\nThanks.");
+        let chunks = short.chunks(false);
+        assert_eq!((chunks.len(), chunks[0].clone()), (1, 0..2));
+
+        let paragraph = "word ".repeat(100);
+        let mut text = vec![paragraph.trim_end(); 40].join("\n\n");
+        text.push_str("\n> quoted\n> more");
+        let long = with_pieces(&text);
+        let visible = long.visible_pieces();
+        assert_eq!(visible, 40);
+        let chunks = long.chunks(false);
+        assert!(chunks.len() > 2);
+        assert_eq!(chunks.first().map(|chunk| chunk.start), Some(0));
+        assert_eq!(chunks.last().map(|chunk| chunk.end), Some(visible));
+        for pair in chunks.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start);
+        }
+        for chunk in &chunks[..chunks.len() - 1] {
+            let bytes: usize = long.pieces[chunk.clone()]
+                .iter()
+                .map(|piece| piece.range.len())
+                .sum();
+            assert!((CHUNK_BYTES..CHUNK_BYTES + PIECE_BYTES).contains(&bytes));
+        }
+        // Unfolded, the quoted pieces follow in the last chunk.
+        assert_eq!(
+            long.chunks(true).last().map(|chunk| chunk.end),
+            Some(long.pieces.len())
+        );
     }
 
     #[test]

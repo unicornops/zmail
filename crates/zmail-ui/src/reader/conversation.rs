@@ -1,8 +1,11 @@
 //! The conversation view: the open thread as a variable-height `list`.
 //!
 //! The list's items are the conversation header (subject, mailbox and the
-//! conversation's banners), then one item per message, then a footer that
-//! holds the inline reply (UI plan Phase 5).
+//! conversation's banners), then each message, then a footer that holds
+//! the inline reply (UI plan Phase 5). A message is one item, or, when its
+//! expanded body is long, several: one per chunk of its body
+//! ([`super::body::BodyModel::chunks`]), so the list lays out only the
+//! part on screen.
 //!
 //! Read messages collapse to a summary line; the latest message and the
 //! unread ones open expanded. That choice is made when the conversation
@@ -10,7 +13,7 @@
 //! user is reading. Messages that arrive while it is open follow the same
 //! rule.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::Range};
 
 use gpui::{AnyElement, FontWeight, IntoElement, Role, div, prelude::*, rgb};
 use zmail_core::{ThreadView, text::count_noun};
@@ -132,31 +135,35 @@ impl ConversationState {
 pub(super) enum ConversationItem {
     /// The subject, mailbox and conversation banners.
     Header,
-    /// The message at this index.
-    Message(usize),
+    /// Part `part` of the message at `index`: part 0 has its header.
+    Message { index: usize, part: usize },
     /// The space below the last message, where the inline reply goes.
     Footer,
 }
 
 impl ConversationItem {
-    /// The item at list index `index` of a conversation of `messages`
-    /// messages.
-    pub(super) fn at(index: usize, messages: usize) -> Self {
-        match index {
-            0 => Self::Header,
-            index if index <= messages => Self::Message(index - 1),
-            _ => Self::Footer,
+    /// The items of a conversation whose messages take `parts` items
+    /// each, in order.
+    pub(super) fn layout(parts: impl IntoIterator<Item = usize>) -> Vec<Self> {
+        let mut items = vec![Self::Header];
+        for (index, count) in parts.into_iter().enumerate() {
+            items.extend((0..count.max(1)).map(|part| Self::Message { index, part }));
         }
+        items.push(Self::Footer);
+        items
     }
 
-    /// The list index of the message at `message`.
-    pub(super) fn message_index(message: usize) -> usize {
-        message + 1
-    }
-
-    /// How many list items a conversation of `messages` messages has.
-    pub(super) fn count(messages: usize) -> usize {
-        messages + 2
+    /// Where the message at `index` starts in `items`, and how many items
+    /// it takes.
+    pub(super) fn message_items(items: &[Self], index: usize) -> Option<Range<usize>> {
+        let is_message =
+            |item: &Self| matches!(item, Self::Message { index: at, .. } if *at == index);
+        let start = items.iter().position(is_message)?;
+        let count = items[start..]
+            .iter()
+            .take_while(|item| is_message(item))
+            .count();
+        Some(start..start + count)
     }
 }
 
