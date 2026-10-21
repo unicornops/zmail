@@ -293,6 +293,12 @@ impl KeyRing {
         self.keys.is_empty()
     }
 
+    /// The first key (gopenpgp's `FirstKey`): the one go-proton-api
+    /// encrypts drafts and attachments with.
+    pub fn first(&self) -> Option<&UnlockedKey> {
+        self.keys.first()
+    }
+
     /// The primary key, if it is unlocked.
     pub fn primary(&self) -> Option<&UnlockedKey> {
         self.keys.iter().find(|key| key.primary)

@@ -12,6 +12,8 @@ mod hydrate;
 mod mailbox;
 mod message;
 mod ops;
+mod send;
+mod send_prefs;
 mod session;
 mod sync;
 
@@ -19,8 +21,8 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use zmail_core::{
-    AccountSyncSnapshot, MailboxSnapshot, NewIdentity, OpApplyReport, PendingOp, ProtocolKind,
-    SyncTarget,
+    AccountSyncSnapshot, MailboxSnapshot, NewIdentity, OpApplyReport, OutgoingMessage, PendingOp,
+    ProtocolKind, SyncTarget,
 };
 use zmail_proton_api::AddressStatus;
 
@@ -124,4 +126,17 @@ pub async fn apply_pending_ops(
         bail!("Proton adapter received a non-Proton sync target");
     }
     ops::apply(session.client(), ops).await
+}
+
+/// Sends a composed message from one of the account's addresses, the way
+/// Bridge's SMTP service does (see `send.rs`): a draft encrypted to the
+/// sender, the attachments uploaded to it, and one package per body format
+/// with each recipient's key packets (Proton recipients) or session keys
+/// (clear recipients). Proton files the sent message in Sent; the next
+/// sync brings it in.
+pub async fn submit_outgoing_message(
+    session: &ProtonSession,
+    message: &OutgoingMessage,
+) -> Result<()> {
+    send::send_message(session, message).await
 }

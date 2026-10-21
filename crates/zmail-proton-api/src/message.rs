@@ -12,7 +12,8 @@
 // Modified by UnicornOps on 2026-10-21: rewritten in Rust. Adds the
 // `ConversationID` field Proton returns (go-proton-api does not read it),
 // which Zmail uses to group threads. Chunks run one after another rather
-// than in parallel. Sending follows later (#237).
+// than in parallel. Sending is in `draft.rs`, `package.rs` and
+// `attachment.rs`.
 
 //! Message metadata: what a message list needs, without the encrypted body.
 
@@ -24,7 +25,7 @@ use crate::{
 };
 
 /// An email address as the API sends it (Go's `mail.Address`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmailAddress {
     /// Display name, possibly empty.
     #[serde(rename = "Name", default)]

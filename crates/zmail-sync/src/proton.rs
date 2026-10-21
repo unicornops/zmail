@@ -12,7 +12,7 @@ use std::time::Duration;
 #[cfg(not(feature = "proton"))]
 use anyhow::bail;
 use anyhow::{Context, Result};
-use zmail_core::{ProtocolKind, SyncTarget};
+use zmail_core::{OutgoingMessage, ProtocolKind, SyncTarget};
 
 use crate::{SyncService, backoff::Backoff, wake::unless_woken};
 
@@ -77,6 +77,31 @@ impl SyncService {
     #[cfg(not(feature = "proton"))]
     async fn connect_proton(&self, _target: &SyncTarget) -> Result<Credentials> {
         bail!("this build of Zmail has no Proton Mail support")
+    }
+
+    /// Delivers an outbox message through the account's Proton session
+    /// (Bridge's SMTP send path). The outbox's undo window and retries
+    /// apply as for SMTP and JMAP: this runs when the job is claimed.
+    pub(crate) async fn deliver_proton(
+        &self,
+        target: &SyncTarget,
+        message: &OutgoingMessage,
+    ) -> Result<()> {
+        if target.protocol != ProtocolKind::Proton {
+            anyhow::bail!("Proton submission needs a Proton account");
+        }
+        #[cfg(feature = "proton")]
+        {
+            let Credentials::Proton(session) = self.connect_proton(target).await? else {
+                anyhow::bail!("Proton accounts need a Proton session");
+            };
+            zmail_proton::submit_outgoing_message(&session, message).await
+        }
+        #[cfg(not(feature = "proton"))]
+        {
+            let _ = message;
+            self.connect_proton(target).await.map(|_| ())
+        }
     }
 
     /// Whether a Proton account has a session to resume (and this build

@@ -8,13 +8,17 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use zmail_core::{AuthKind, CachePolicySummary, NewAccount, NewIdentity, ProtocolKind};
+use zmail_core::{
+    AuthKind, CachePolicySummary, NewAccount, NewDraft, NewIdentity, OutboxJobState, ProtocolKind,
+};
 use zmail_proton::{ClientConfig, store_new_session};
 use zmail_proton_api::{AppVersion, Manager};
 use zmail_security::{InMemorySecretStore, SecretSlot, SecretStore};
 use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
-use zmail_test_support::{ProtonHarness, live_harness_lock};
+use zmail_test_support::{
+    PROTON_HARNESS_ALIAS_ADDRESS, PROTON_HARNESS_PRIMARY_ADDRESS, ProtonHarness, live_harness_lock,
+};
 
 fn harness_config(harness: &ProtonHarness) -> Result<ClientConfig> {
     Ok(
@@ -542,6 +546,117 @@ fn writes_local_mailbox_changes_back_with_bridges_rules() -> Result<()> {
     ensure!(
         meta("Old receipt").is_err(),
         "a message destroyed from Trash should be deleted"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn sends_through_the_outbox_with_internal_and_clear_packages() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, secrets.as_ref(), account_id)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.configure_proton(harness_config(&harness)?)?;
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
+
+    // The sync made the Proton addresses the account's identities.
+    let identity = store
+        .list_identities(account_id)?
+        .into_iter()
+        .find(|identity| identity.email_address == PROTON_HARNESS_PRIMARY_ADDRESS)
+        .context("no identity for the primary address")?;
+    let draft = |subject: &str| NewDraft {
+        account_id,
+        identity_id: identity.id,
+        // The alias is a Proton address (an internal package); the Bcc
+        // is outside Proton (a clear package).
+        to: vec![PROTON_HARNESS_ALIAS_ADDRESS.to_owned()],
+        cc: Vec::new(),
+        bcc: vec!["someone@example.com".to_owned()],
+        subject: subject.to_owned(),
+        body: "Hello from Zmail over Proton.\nSecond line.".to_owned(),
+    };
+
+    // Undo send: a job inside its undo window is not sent, and cancelling
+    // takes it back.
+    let undone = store.create_draft(&draft("Never sent"))?;
+    let job = store.queue_draft_after(undone, std::time::Duration::from_secs(3600))?;
+    ensure!(sync_service.process_outbox_and_wait(Some(account_id))? == 0);
+    ensure!(
+        store.cancel_queued_outbox_job(job)?,
+        "the job was not cancelled"
+    );
+
+    // A message with an attachment goes out.
+    let draft_id = store.create_draft(&draft("Sent from Zmail"))?;
+    let scratch = std::env::temp_dir().join(format!("zmail-proton-send-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    let notes = scratch.join("notes.txt");
+    std::fs::write(&notes, b"line one\nline two\n")?;
+    store.add_draft_attachment(draft_id, &notes)?;
+    store.queue_draft(draft_id)?;
+    let processed = sync_service.process_outbox_and_wait(Some(account_id))?;
+    let jobs = store.list_outbox_jobs(Some(account_id))?;
+    let sent = jobs
+        .iter()
+        .find(|job| job.draft_id == draft_id)
+        .context("no outbox job")?;
+    ensure!(
+        processed == 1 && sent.state == OutboxJobState::Sent,
+        "job {sent:?}; server log:\n{}",
+        harness.logs()
+    );
+
+    // Proton files it in Sent, and delivers the alias its copy, which
+    // decrypts with the alias's key.
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
+    ensure!(subjects(&store, account_id, "Sent")?.contains(&"Sent from Zmail".to_owned()));
+    ensure!(
+        !subjects(&store, account_id, "Sent")?.contains(&"Never sent".to_owned()),
+        "the cancelled message was sent"
+    );
+    let inbox = store
+        .list_mailboxes(account_id)?
+        .into_iter()
+        .find(|mailbox| mailbox.name == "INBOX")
+        .context("no INBOX")?;
+    let thread = store
+        .list_threads(inbox.id, 0..100)?
+        .into_iter()
+        .find(|thread| thread.subject == "Sent from Zmail")
+        .context("the alias did not receive the message")?;
+    let hydrated = runtime
+        .handle()
+        .block_on(sync_service.hydrate_thread_body_and_wait(account_id, thread.id))?;
+    ensure!(hydrated == 1);
+    let view = store.thread_view(thread.id)?.context("thread")?;
+    let message = view
+        .messages
+        .iter()
+        .find(|message| message.attachments.len() == 1)
+        .context("no message with the attachment")?;
+    let body = message.body_text.clone().unwrap_or_default();
+    ensure!(
+        body.contains("Hello from Zmail over Proton.") && body.contains("Second line."),
+        "body: {body:?}"
+    );
+    ensure!(message.attachments[0].filename == "notes.txt");
+    let saved = store.save_attachment(message.attachments[0].id, scratch.join("saved"))?;
+    let bytes = std::fs::read(&saved)?;
+    let _ = std::fs::remove_dir_all(&scratch);
+    ensure!(
+        bytes == b"line one\nline two\n",
+        "attachment bytes: {bytes:?}"
     );
     Ok(())
 }
