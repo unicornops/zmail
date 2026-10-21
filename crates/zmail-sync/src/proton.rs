@@ -104,8 +104,10 @@ impl SyncService {
         let _ = account_id;
     }
 
-    /// Watches a Proton account until the next reconnect. Until the event
-    /// loop lands (#237) this syncs the account every `poll_interval`.
+    /// Watches a Proton account until the next reconnect: Bridge's event
+    /// loop. Every 20 s plus up to 20 s of jitter it polls the event stream
+    /// from the stored checkpoint, and syncs when something changed (the
+    /// sync applies the events). A wake signal syncs at once.
     pub(crate) async fn watch_proton(
         &self,
         target: &SyncTarget,
@@ -113,12 +115,54 @@ impl SyncService {
         backoff: &mut Backoff,
         wake: &mut tokio::sync::watch::Receiver<u64>,
     ) {
-        self.request_sync(target.id);
-        if unless_woken(wake, tokio::time::sleep(poll_interval))
-            .await
-            .is_none()
+        #[cfg(feature = "proton")]
         {
-            backoff.reset();
+            let _ = poll_interval;
+            if unless_woken(wake, tokio::time::sleep(zmail_proton::event_poll_delay()))
+                .await
+                .is_none()
+            {
+                backoff.reset();
+                self.request_sync(target.id);
+                return;
+            }
+            let checkpoint = self
+                .inner
+                .store
+                .sync_target(target.id)
+                .ok()
+                .flatten()
+                .and_then(|target| target.checkpoint)
+                .filter(|checkpoint| !checkpoint.is_empty());
+            let Some(checkpoint) = checkpoint else {
+                // Never synced: the first sync sets the checkpoint.
+                self.request_sync(target.id);
+                return;
+            };
+            let changed = match self.connect_proton(target).await {
+                Ok(Credentials::Proton(session)) => {
+                    zmail_proton::has_new_events(&session, &checkpoint).await
+                }
+                Ok(Credentials::Secret(_)) => Ok(false),
+                Err(error) => Err(error),
+            };
+            match changed {
+                Ok(true) => {
+                    backoff.reset();
+                    self.request_sync(target.id);
+                }
+                Ok(false) => backoff.reset(),
+                Err(_) => {
+                    let _ = unless_woken(wake, tokio::time::sleep(backoff.next_delay())).await;
+                }
+            }
+        }
+        #[cfg(not(feature = "proton"))]
+        {
+            // Without Proton support no Proton account is watched; this
+            // only keeps the loop from spinning if one ever is.
+            let _ = (target, backoff);
+            let _ = unless_woken(wake, tokio::time::sleep(poll_interval)).await;
         }
     }
 }

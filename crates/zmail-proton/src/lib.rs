@@ -7,6 +7,7 @@
 //! store is encrypted at rest (#139); `zmail-sync` only builds it with its
 //! `proton` feature, which `zmail-app` does not enable.
 
+mod events;
 mod hydrate;
 mod mailbox;
 mod message;
@@ -22,25 +23,41 @@ use zmail_core::{
 };
 use zmail_proton_api::AddressStatus;
 
+pub use events::{EVENT_JITTER, EVENT_PERIOD, event_poll_delay, has_new_events};
 pub use hydrate::fetch_message_bodies;
 pub use session::{ProtonSession, ProtonSessions, delete_session, has_session, store_new_session};
 pub use zmail_proton_api::{AppVersion, ClientConfig};
 
 /// Syncs a Proton account and returns the snapshot written into the store.
 ///
-/// The checkpoint is the newest event ID, taken before anything else so no
-/// change made during the sync is missed. Identities come from the
-/// account's enabled addresses (combined address mode: one account, all
-/// addresses). Then the labels become mailboxes and every message's
-/// metadata is placed in them; bodies are fetched when a message is opened.
+/// With a checkpoint from an earlier sync, the account's events since then
+/// are applied to the stored mirror (Bridge's event loop): message changes
+/// update their mailboxes in place. A refresh request from the server, or a
+/// label, address or user change, falls back to a full sync.
+///
+/// A full sync takes the newest event ID first, so no change made during
+/// it is missed, then mirrors the identities (combined address mode: one
+/// account, all addresses), the labels as mailboxes and every message's
+/// metadata. Bodies are fetched when a message is opened.
 pub async fn discover_and_sync(
     target: &SyncTarget,
     session: &ProtonSession,
-    _existing_mailboxes: &[MailboxSnapshot],
+    existing_mailboxes: &[MailboxSnapshot],
 ) -> Result<AccountSyncSnapshot> {
     if target.protocol != ProtocolKind::Proton {
         bail!("Proton adapter received a non-Proton sync target");
     }
+    if let Some(checkpoint) = target.checkpoint.as_deref().filter(|id| !id.is_empty())
+        && !existing_mailboxes.is_empty()
+        && let Some(snapshot) =
+            events::apply_events(session.client(), checkpoint, existing_mailboxes).await?
+    {
+        return Ok(snapshot);
+    }
+    full_sync(session).await
+}
+
+async fn full_sync(session: &ProtonSession) -> Result<AccountSyncSnapshot> {
     let client = session.client();
     let checkpoint = client.get_latest_event_id().await?;
     let user = client.get_user().await?;

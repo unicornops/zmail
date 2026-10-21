@@ -361,3 +361,81 @@ fn hydrates_decrypted_bodies_and_attachments_on_open() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn applies_server_changes_from_the_event_stream() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+    let state = harness.state().clone();
+    let message_id = |subject: &str| -> Result<String> {
+        state
+            .messages
+            .iter()
+            .find(|message| message.subject == subject)
+            .map(|message| message.id.clone())
+            .with_context(|| format!("no fixture {subject}"))
+    };
+    let family_id = state
+        .labels
+        .iter()
+        .find(|label| label.name == "Family")
+        .map(|label| label.id.clone())
+        .context("no Family label")?;
+
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, secrets.as_ref(), account_id)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.configure_proton(harness_config(&harness)?)?;
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
+    let first_checkpoint = store.list_accounts()?[0].sync_status.checkpoint.clone();
+
+    // Change things on the server, as another Proton client would.
+    let manager = Manager::new(harness_config(&harness)?)?;
+    runtime.handle().block_on(async {
+        let (client, _) = manager
+            .login(harness.username(), harness.password())
+            .await?;
+        let dinner = vec![message_id("Dinner on Sunday")?];
+        client.mark_messages_read(&dinner).await?;
+        client.unlabel_messages(&dinner, &family_id).await?;
+        client
+            .label_messages(&[message_id("Re: Welcome to the harness")?], "10")
+            .await?;
+        anyhow::Ok(())
+    })?;
+
+    sync_service.sync_account_and_wait(account_id)?;
+    let status = store.list_accounts()?[0].sync_status.clone();
+    ensure!(
+        status.detail.contains("applied"),
+        "expected an incremental sync, got {:?}",
+        status.detail
+    );
+    ensure!(
+        status.checkpoint != first_checkpoint,
+        "the checkpoint did not move"
+    );
+    ensure!(subjects(&store, account_id, "Labels/Family")?.is_empty());
+    let inbox_id = store
+        .list_mailboxes(account_id)?
+        .into_iter()
+        .find(|mailbox| mailbox.name == "INBOX")
+        .map(|mailbox| mailbox.id)
+        .context("no INBOX")?;
+    let threads = store.list_threads(inbox_id, 0..100)?;
+    let thread = |subject: &str| {
+        threads
+            .iter()
+            .find(|thread| thread.subject == subject)
+            .with_context(|| format!("no thread {subject}"))
+    };
+    ensure!(thread("Dinner on Sunday")?.unread_count == 0);
+    ensure!(thread("Re: Welcome to the harness")?.is_flagged);
+    Ok(())
+}
