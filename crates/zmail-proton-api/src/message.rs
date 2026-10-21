@@ -212,7 +212,7 @@ struct LabelResponse {
 }
 
 /// A label action's result (`LabelMessagesRes`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct LabelMessagesRes {
     #[serde(rename = "Responses", default, deserialize_with = "null_as_empty")]
     responses: Vec<LabelMessageRes>,
@@ -304,7 +304,14 @@ impl Client {
                 label_id,
                 ids: chunk,
             })?;
-            let res: LabelMessagesRes = self.json(&request).await?;
+            // An empty body (as go-proton-api's fake server sends) is the
+            // zero value, as resty's `SetResult` leaves it.
+            let response = self.send(&request).await?;
+            let res: LabelMessagesRes = if response.body.iter().all(u8::is_ascii_whitespace) {
+                LabelMessagesRes::default()
+            } else {
+                response.json()?
+            };
             if let Some(failed) = res.responses.iter().find(|item| item.response.code != 1000) {
                 let reason = failed.response.error.clone();
                 self.undo_actions(&tokens).await?;

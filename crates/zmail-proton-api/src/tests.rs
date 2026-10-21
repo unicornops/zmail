@@ -898,3 +898,25 @@ async fn salts_the_key_password_and_lists_addresses() {
     assert_eq!(addresses[0].keys.0.len(), 1);
     assert!(!addresses[0].is_byoe());
 }
+
+#[tokio::test]
+async fn label_actions_accept_an_empty_body() {
+    // go-proton-api's fake server answers label actions with no body;
+    // upstream (resty) reads that as an empty result.
+    let server = MockServer::start(|_, _| Reply {
+        status: 200,
+        headers: Vec::new(),
+        body: String::new(),
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+
+    let ids = ["m1".to_owned()];
+    client.label_messages(&ids, "10").await.expect("label");
+    client.unlabel_messages(&ids, "10").await.expect("unlabel");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/mail/v4/messages/label");
+    assert_eq!(requests[1].json()["LabelID"], "10");
+}
