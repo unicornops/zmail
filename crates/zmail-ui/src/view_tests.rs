@@ -39,6 +39,7 @@ mod onboarding;
 mod palette;
 mod reader;
 mod reader_attachments;
+mod reader_long;
 mod reader_safety;
 mod search;
 mod settings;

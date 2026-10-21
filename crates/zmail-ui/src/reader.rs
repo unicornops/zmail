@@ -43,7 +43,7 @@ mod quoted;
 mod selectable;
 mod source;
 
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, ops::Range, rc::Rc};
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, IntoElement, ListAlignment, ListOffset,
@@ -113,6 +113,8 @@ pub(crate) struct ReaderView {
     state: ReaderState,
     /// The conversation list's scroll position and measured item heights.
     list_state: ListState,
+    /// What each item of the conversation list shows.
+    items: Vec<ConversationItem>,
     /// Which messages are expanded and which is current.
     conversation: ConversationState,
     /// The open menu or folder picker.
@@ -156,6 +158,7 @@ impl ReaderView {
             hour_cycle,
             state: ReaderState::default(),
             list_state: ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)),
+            items: Vec::new(),
             conversation: ConversationState::default(),
             popover: None,
             swallow_click: None,
@@ -180,7 +183,7 @@ impl ReaderView {
         if self.state == state {
             return;
         }
-        let old_count = self.list_state.item_count();
+        let old_count = self.items.len();
         if self.state.reply != state.reply {
             self.reply_observation = state.reply.as_ref().map(|reply| {
                 cx.observe(reply, |reader, _, cx| {
@@ -192,7 +195,6 @@ impl ReaderView {
         }
         self.state = state;
         let thread = self.state.thread.as_ref();
-        let count = thread.map_or(0, |thread| ConversationItem::count(thread.messages.len()));
         if self.conversation.is_for(thread) {
             if let Some(thread) = thread {
                 self.conversation.update(thread);
@@ -206,16 +208,19 @@ impl ReaderView {
             }
             // The messages may have changed height (a body downloaded, a
             // message arrived); the scroll position stays.
-            if count == old_count {
+            let items = self.layout();
+            if items.len() == old_count {
                 self.list_state.remeasure();
             } else {
-                self.list_state.splice(0..old_count, count);
+                self.list_state.splice(0..old_count, items.len());
             }
+            self.items = items;
         } else {
             self.conversation = ConversationState::open(thread);
-            self.list_state.reset(count);
-            self.popover = None;
             self.bodies.clear();
+            self.items = self.layout();
+            self.list_state.reset(self.items.len());
+            self.popover = None;
             self.selection = None;
             self.dragging = false;
         }
@@ -253,6 +258,12 @@ impl ReaderView {
             .is_some_and(|popover| popover.anchor == anchor)
     }
 
+    /// How many conversation list items the message at `index` takes.
+    #[cfg(test)]
+    pub(crate) fn message_parts(&self, index: usize) -> usize {
+        self.message_items(index).len()
+    }
+
     /// Which messages are expanded and which is current.
     #[cfg(test)]
     pub(crate) fn conversation(&self) -> &ConversationState {
@@ -272,9 +283,53 @@ impl ReaderView {
     pub(crate) fn expand_all(&mut self, cx: &mut Context<Self>) {
         if let Some(thread) = self.state.thread.as_ref() {
             self.conversation.expand_all(thread);
-            self.list_state.remeasure();
+            let old_count = self.items.len();
+            self.items = self.layout();
+            self.list_state.splice(0..old_count, self.items.len());
             cx.notify();
         }
+    }
+
+    /// The list items for the open conversation as it shows now: how
+    /// many items each message takes depends on whether it is expanded and
+    /// how long its body is.
+    fn layout(&mut self) -> Vec<ConversationItem> {
+        let Some(thread) = self.state.thread.clone() else {
+            return Vec::new();
+        };
+        let parts = thread
+            .messages
+            .iter()
+            .map(|message| {
+                if self.conversation.is_expanded(message.id) {
+                    let unfolded = self.conversation.is_unfolded(message.id);
+                    self.body_model(message).chunks(unfolded).len()
+                } else {
+                    1
+                }
+            })
+            .collect::<Vec<_>>();
+        ConversationItem::layout(parts)
+    }
+
+    /// The list items of the message at `index`.
+    fn message_items(&self, index: usize) -> Range<usize> {
+        ConversationItem::message_items(&self.items, index).unwrap_or(0..0)
+    }
+
+    /// The message at `index` changed how it shows: lays it out again,
+    /// splicing in its new items when their number changed.
+    fn relayout_message(&mut self, index: usize, cx: &mut Context<Self>) {
+        let old = self.message_items(index);
+        let items = self.layout();
+        let new = ConversationItem::message_items(&items, index).unwrap_or(0..0);
+        if new.len() == old.len() {
+            self.list_state.remeasure_items(old);
+        } else {
+            self.list_state.splice(old, new.len());
+        }
+        self.items = items;
+        cx.notify();
     }
 
     fn message_count(&self) -> usize {
@@ -296,9 +351,7 @@ impl ReaderView {
         };
         self.conversation.toggle_expanded(message.id);
         self.conversation.set_current(index);
-        let item = ConversationItem::message_index(index);
-        self.list_state.remeasure_items(item..item + 1);
-        cx.notify();
+        self.relayout_message(index, cx);
     }
 
     /// Shows or hides the full From, To and Date lines of the message at
@@ -313,9 +366,7 @@ impl ReaderView {
             return;
         };
         self.conversation.toggle_details(message.id);
-        let item = ConversationItem::message_index(index);
-        self.list_state.remeasure_items(item..item + 1);
-        cx.notify();
+        self.relayout_message(index, cx);
     }
 
     /// Shows or hides the quoted text of the message at `index`.
@@ -329,16 +380,14 @@ impl ReaderView {
             return;
         };
         self.conversation.toggle_unfolded(message.id);
-        let item = ConversationItem::message_index(index);
-        self.list_state.remeasure_items(item..item + 1);
-        cx.notify();
+        self.relayout_message(index, cx);
     }
 
     /// Makes the message at `index` current and scrolls it to the top.
     fn go_to_message(&mut self, index: usize, cx: &mut Context<Self>) {
         self.conversation.set_current(index);
         self.list_state.scroll_to(ListOffset {
-            item_ix: ConversationItem::message_index(index),
+            item_ix: self.message_items(index).start,
             offset_in_item: px(0.),
         });
         cx.notify();
@@ -400,11 +449,26 @@ impl ReaderView {
             return div().into_any_element();
         };
         let thread = &thread;
-        match ConversationItem::at(index, thread.messages.len()) {
+        let Some(&item) = self.items.get(index) else {
+            return div().into_any_element();
+        };
+        match item {
             ConversationItem::Header => render_conversation_header(thread, &colors),
-            ConversationItem::Message(index) => {
-                let message = &thread.messages[index];
+            ConversationItem::Message { index, part } => {
+                let Some(message) = thread.messages.get(index) else {
+                    return div().into_any_element();
+                };
                 let model = self.body_model(message);
+                let expanded = self.conversation.is_expanded(message.id);
+                let unfolded = self.conversation.is_unfolded(message.id);
+                // This item's chunk of the body, and how many items the
+                // message takes.
+                let (pieces, parts) = if expanded {
+                    let chunks = model.chunks(unfolded);
+                    (chunks.get(part).cloned().unwrap_or_default(), chunks.len())
+                } else {
+                    (0..0, 1)
+                };
                 let context = MessageContext {
                     now: chrono::Local::now(),
                     hour_cycle: self.hour_cycle,
@@ -416,15 +480,18 @@ impl ReaderView {
                 };
                 let display = MessageDisplay {
                     index,
-                    expanded: self.conversation.is_expanded(message.id),
-                    unfolded: self.conversation.is_unfolded(message.id),
+                    expanded,
+                    unfolded,
                     details: self.conversation.shows_details(message.id),
                     current: self.conversation.current() == Some(index),
+                    part,
+                    parts,
                 };
                 let body = BodyContext {
                     message_id: message.id,
                     index,
                     model: &model,
+                    pieces,
                     selection: self.selection_in(message.id),
                     dragging: self.dragging
                         && self

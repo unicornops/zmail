@@ -6,6 +6,10 @@
 //! then the attachments slot. A collapsed message is a single
 //! summary line: sender, a snippet and the date. Clicking either header
 //! switches between the two.
+//!
+//! An expanded message with a long body takes several conversation list
+//! items, one per chunk of its body: the first has the header and the
+//! first chunk, the last the attachments, and together they draw one card.
 
 use chrono::{DateTime, Local};
 use gpui::{
@@ -19,7 +23,7 @@ use zmail_core::{
 };
 
 use super::ReaderView;
-use super::body::{BodyContext, render_paragraphs};
+use super::body::{BodyContext, render_pieces};
 use super::header::{render_details, render_header};
 use super::quoted::split_folded_tail;
 use super::{attachments, banners};
@@ -62,9 +66,13 @@ pub(super) struct MessageDisplay {
     pub(super) details: bool,
     /// The message n/p moved to; Enter expands or collapses it.
     pub(super) current: bool,
+    /// Which of the message's list items this is, and how many it takes.
+    pub(super) part: usize,
+    pub(super) parts: usize,
 }
 
-/// One message as a card: expanded or a summary line.
+/// One message as a card: expanded or a summary line. For a message that
+/// takes several list items, the part of the card this item draws.
 pub(super) fn render_message(
     reader: &ReaderView,
     message: &ThreadMessage,
@@ -75,45 +83,67 @@ pub(super) fn render_message(
 ) -> AnyElement {
     let colors = &context.colors;
     let index = display.index;
-    let reader_entity = cx.entity().downgrade();
-    let card = div()
-        .id(("reader-message", message.id as u64))
-        .debug_selector(move || format!("reader-message-{index}"))
-        .accessible(Role::Article, message_label(message, context))
-        .aria_expanded(display.expanded)
-        .aria_position_in_set(index + 1)
-        .aria_size_of_set(context.message_count)
-        // n and p move between messages while focus stays on the reader.
-        .when(display.current && context.focused, |this| {
-            this.aria_active_descendant()
-        })
-        .on_a11y_action(
-            if display.expanded {
-                AccessibleAction::Collapse
-            } else {
-                AccessibleAction::Expand
-            },
-            move |_, _, cx| {
-                let _ = reader_entity.update(cx, |reader, cx| reader.toggle_message(index, cx));
-            },
-        )
-        .rounded_lg()
-        .border_1()
+    let first = display.part == 0;
+    let last = display.part + 1 >= display.parts;
+    let card = if first {
+        let reader_entity = cx.entity().downgrade();
+        div()
+            .id(("reader-message", message.id as u64))
+            .debug_selector(move || format!("reader-message-{index}"))
+            .accessible(Role::Article, message_label(message, context))
+            .aria_expanded(display.expanded)
+            .aria_position_in_set(index + 1)
+            .aria_size_of_set(context.message_count)
+            // n and p move between messages while focus stays on the reader.
+            .when(display.current && context.focused, |this| {
+                this.aria_active_descendant()
+            })
+            .on_a11y_action(
+                if display.expanded {
+                    AccessibleAction::Collapse
+                } else {
+                    AccessibleAction::Expand
+                },
+                move |_, _, cx| {
+                    let _ = reader_entity.update(cx, |reader, cx| reader.toggle_message(index, cx));
+                },
+            )
+    } else {
+        // The rest of a long message's card, below its first list item.
+        let part = display.part as u64;
+        div()
+            .id(("reader-message-part", (message.id as u64) << 16 | part))
+            .accessible(
+                Role::Group,
+                format!("{}, continued", message_label(message, context)),
+            )
+    };
+    let card = card
         .border_color(rgb(if display.current && context.focused {
             colors.focus_ring
         } else {
             colors.border
         }))
+        .border_l_1()
+        .border_r_1()
+        .when(first, |this| this.border_t_1().rounded_t_lg())
+        .when(last, |this| this.border_b_1().rounded_b_lg())
         .bg(rgb(colors.surface))
         .overflow_hidden();
     let card = if display.expanded {
-        card.child(render_header(reader, message, display, context, cx))
-            .child(expanded_content(message, display, context, body, cx))
+        card.when(first, |this| {
+            this.child(render_header(reader, message, display, context, cx))
+        })
+        .child(expanded_content(message, display, context, body, cx))
     } else {
         card.child(collapsed_summary(message, display, context, cx))
     };
     // Padding, not margin: the list measures an item without its margins.
-    div().px_4().pb_2().child(card).into_any_element()
+    div()
+        .px_4()
+        .when(last, |this| this.pb_2())
+        .child(card)
+        .into_any_element()
 }
 
 /// What a screen reader reads for a message card: whether it is unread,
@@ -210,7 +240,8 @@ pub(super) fn snippet(body: &str) -> String {
 
 /// An expanded message below its header: banners, body, the fold toggle
 /// and the quoted tail, then attachments. Indented to line up with the
-/// sender's name.
+/// sender's name. A part of a long message has its share of the body: the
+/// first part also has the banners, the last the attachments.
 fn expanded_content(
     message: &ThreadMessage,
     display: MessageDisplay,
@@ -219,14 +250,40 @@ fn expanded_content(
     cx: &mut Context<ReaderView>,
 ) -> AnyElement {
     let colors = &context.colors;
-    let banners = banners::message_banners(message, context.sender_warnings);
-    let attachments = message_attachments(message, colors);
+    let first = display.part == 0;
+    let last = display.part + 1 >= display.parts;
+    let banners = if first {
+        banners::message_banners(message, context.sender_warnings)
+    } else {
+        Vec::new()
+    };
+    let attachments = if last {
+        message_attachments(message, colors)
+    } else {
+        Vec::new()
+    };
     let index = display.index;
     let fold_label = if display.unfolded {
         "Hide quoted text"
     } else {
         "Show quoted text"
     };
+    // This part's pieces above and below the fold; the fold toggle goes
+    // after the last piece above it.
+    let model = body.model;
+    let fold = model.visible_pieces();
+    let pieces = body.pieces.clone();
+    let above = pieces.start.min(fold)..pieces.end.min(fold);
+    let below = pieces.start.max(fold)..pieces.end.max(fold);
+    let fold_toggle =
+        model.fold_start.is_some() && pieces.end >= fold && (first || pieces.start < fold);
+    // A part that goes on from the one above starts with the space between
+    // paragraphs when its first piece starts one.
+    let starts_paragraph = !first
+        && model
+            .pieces
+            .get(pieces.start)
+            .is_some_and(|piece| piece.starts_paragraph);
 
     div()
         .flex()
@@ -234,16 +291,19 @@ fn expanded_content(
         .gap_3()
         .pl(px(16. + AVATAR_SIZE + 12.))
         .pr_4()
-        .pb_4()
+        .when(last, |this| this.pb_4())
+        .when(starts_paragraph, |this| this.pt_3())
         .min_w_0()
-        .when(display.details, |this| {
+        .when(first && display.details, |this| {
             this.child(render_details(message, context))
         })
         .when(!banners.is_empty(), |this| {
             this.child(div().flex().flex_col().gap_2().children(banners))
         })
-        .child(render_paragraphs(body, false, cx))
-        .when(body.model.fold_start.is_some(), |this| {
+        .when(first || !above.is_empty(), |this| {
+            this.child(render_pieces(body, above, false, cx))
+        })
+        .when(fold_toggle, |this| {
             // In a row, so the toggle is only as wide as its button.
             this.child(
                 div().flex().child(
@@ -266,9 +326,9 @@ fn expanded_content(
                         ),
                 ),
             )
-            .when(display.unfolded, |this| {
-                this.child(render_paragraphs(body, true, cx))
-            })
+        })
+        .when(display.unfolded && !below.is_empty(), |this| {
+            this.child(render_pieces(body, below, true, cx))
         })
         .when(!attachments.is_empty(), |this| {
             this.child(div().flex().flex_wrap().gap_2().children(attachments))
