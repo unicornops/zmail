@@ -19,6 +19,10 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+
+mod blob;
+
+pub use blob::{BlobVault, is_encrypted_file};
 use hkdf::Hkdf;
 use rand::{RngCore, rngs::OsRng};
 use sha2::Sha256;
@@ -409,6 +413,14 @@ pub fn sync_parent_dir(path: &Path) {
     }
     #[cfg(not(unix))]
     let _ = path;
+}
+
+/// `count` random bytes from the OS, as hexadecimal: for names that must
+/// not be guessable, such as the open cache's directories.
+pub fn random_hex(count: usize) -> String {
+    let mut bytes = vec![0; count];
+    OsRng.fill_bytes(&mut bytes);
+    hex(&bytes)
 }
 
 fn hex(bytes: &[u8]) -> String {

@@ -281,14 +281,16 @@ touches the store:
    directory fsynced, and `MoveFileEx` with replace on Windows).
    In-place encryption isn't offered by SQLCipher for a plaintext file,
    and a copy is what makes it crash-safe.
-4. **Blobs, file by file.** For each distinct `storage_path` in
-   `message_attachments` and `draft_attachments`: if the file isn't a
-   `ZMB1` file, encrypt it to its opaque name (temp, fsync, rename), point
-   every row that used the old path at the new one in one transaction,
-   then delete the plaintext file. Then the open cache is emptied, and
-   files in `attachments/` that no row references are deleted (orphans
-   from a crash between steps; nothing else writes blobs at this point,
-   because sync hasn't started).
+4. **Blobs, file by file.** For each `storage_path` in
+   `message_attachments` and `draft_attachments` that isn't an opaque
+   name yet: encrypt the plaintext file to its opaque name (temp, fsync,
+   rename), delete the plaintext file, then point every row that used the
+   old name at the new one. The new name follows from the old one, so a
+   crash between the steps is finished by the next start, which runs this
+   step whenever a row still has an old name. Last, any plaintext file left
+   in `attachments/` (no row names one any more) is deleted, and so are
+   temporary files older than an hour. The open cache is emptied at every
+   start anyway (§2).
 5. **Crash safety.** A crash before the rename leaves the plaintext
    database untouched; the next start deletes the partial `.encrypting`
    file and starts again. A crash after it leaves an encrypted database

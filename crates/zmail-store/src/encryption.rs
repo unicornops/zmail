@@ -86,6 +86,14 @@ pub enum MigrationProgress {
     },
     /// Checking the encrypted copy against the original.
     Verifying,
+    /// Encrypting attachment files written before encryption: `done` of
+    /// `total`.
+    Attachments {
+        /// Files encrypted so far.
+        done: usize,
+        /// Files to encrypt.
+        total: usize,
+    },
     /// Done.
     Finished,
 }
@@ -96,6 +104,8 @@ pub struct MigrationReport {
     /// Backups made before encryption (`zmail-app backup`), which are still
     /// plaintext. Zmail leaves them alone; the user decides.
     pub plaintext_backups: Vec<PathBuf>,
+    /// Attachment files that were encrypted.
+    pub encrypted_attachments: usize,
 }
 
 /// Why the store couldn't be opened. The app shows each differently.
@@ -159,11 +169,24 @@ impl LocalStore {
             }
             None => vault::create_store_key(keychain, &record)?,
         };
-        let report = match state {
+        let mut report = match state {
             StoreFileState::Plaintext => Some(encrypt_plaintext_store(path, &key, progress)?),
             StoreFileState::Missing | StoreFileState::Encrypted => None,
         };
         let store = Self::open(path, key)?;
+        // Also after a crash between the two steps, so whatever is still
+        // plaintext gets encrypted on the next start.
+        let encrypted_attachments = store.encrypt_plaintext_blobs(progress)?;
+        if encrypted_attachments > 0 {
+            report.get_or_insert_with(|| MigrationReport {
+                plaintext_backups: plaintext_backups(path),
+                encrypted_attachments: 0,
+            });
+        }
+        if let Some(report) = report.as_mut() {
+            report.encrypted_attachments = encrypted_attachments;
+            progress(MigrationProgress::Finished);
+        }
         Ok((store, report))
     }
 }
@@ -278,9 +301,9 @@ pub(crate) fn encrypt_plaintext_store_until(
     remove_journals(path)?;
     remove_with_journals(&encrypting)?;
 
-    progress(MigrationProgress::Finished);
     Ok(MigrationReport {
         plaintext_backups: plaintext_backups(path),
+        encrypted_attachments: 0,
     })
 }
 
@@ -359,6 +382,164 @@ fn verify_copy(source: &Connection, copy: &Connection) -> Result<()> {
             .with_context(|| format!("the encrypted copy has no table {table}"))?;
         if original != copied {
             bail!("the encrypted copy of {table} has {copied} rows, the original {original}");
+        }
+    }
+    Ok(())
+}
+
+impl LocalStore {
+    /// Encrypts the attachment files written before encryption: received
+    /// blobs and draft attachment copies whose rows still name a plaintext
+    /// file. Returns how many it encrypted.
+    ///
+    /// Each file is encrypted to its opaque name, then the plaintext file is
+    /// deleted, then the rows are pointed at the new name. A crash between
+    /// those steps is finished by the next run: the new file's name follows
+    /// from the old one. Last, any plaintext file left in the attachment
+    /// directory (no row names one any more) is deleted.
+    pub(crate) fn encrypt_plaintext_blobs(
+        &self,
+        progress: &(dyn Fn(MigrationProgress) + Sync),
+    ) -> Result<usize> {
+        let directory = self.vault.directory().to_owned();
+        let conn = self.connection()?;
+        let received: Vec<String> = {
+            let mut statement =
+                conn.prepare("SELECT DISTINCT storage_path FROM message_attachments")?;
+            statement
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?
+                .into_iter()
+                .filter(|name| !is_opaque_name(name))
+                .collect()
+        };
+        let drafts: Vec<(i64, String)> = {
+            let mut statement = conn.prepare("SELECT id, storage_path FROM draft_attachments")?;
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<(i64, String)>>>()?
+                .into_iter()
+                .filter(|(_, path)| {
+                    !Path::new(path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(is_opaque_name)
+                })
+                .collect()
+        };
+        drop(conn);
+        let total = received.len() + drafts.len();
+        if total == 0 {
+            return Ok(0);
+        }
+
+        let mut done = 0;
+        progress(MigrationProgress::Attachments { done, total });
+        for name in received {
+            // A name from the database must stay inside the directory.
+            let relative = Path::new(&name);
+            if !relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+            {
+                continue;
+            }
+            let new_name = self.encrypt_legacy_file(&[directory.join(relative)], &name)?;
+            self.connection()?
+                .execute(
+                    "UPDATE message_attachments SET storage_path = ?2 WHERE storage_path = ?1",
+                    rusqlite::params![name, new_name],
+                )
+                .context("failed to record an encrypted attachment")?;
+            done += 1;
+            progress(MigrationProgress::Attachments { done, total });
+        }
+        for (id, path) in drafts {
+            let old = PathBuf::from(&path);
+            let Some(file_name) = old.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let file_name = file_name.to_owned();
+            // A draft copy is stored by absolute path; if the data directory
+            // has moved since, it is beside the other attachments.
+            let new_name =
+                self.encrypt_legacy_file(&[old.clone(), directory.join(&file_name)], &file_name)?;
+            let new_path = self.vault.path_of(&new_name)?;
+            self.connection()?
+                .execute(
+                    "UPDATE draft_attachments SET storage_path = ?2 WHERE id = ?1",
+                    rusqlite::params![id, new_path.display().to_string()],
+                )
+                .context("failed to record an encrypted draft attachment")?;
+            done += 1;
+            progress(MigrationProgress::Attachments { done, total });
+        }
+        remove_plaintext_leftovers(&directory)?;
+        Ok(done)
+    }
+
+    /// Encrypts the first of `candidates` that is a plaintext file under
+    /// `logical_name`, deletes it, and returns the opaque name. When none
+    /// exists (already done, or missing) the name is returned as is.
+    fn encrypt_legacy_file(&self, candidates: &[PathBuf], logical_name: &str) -> Result<String> {
+        let new_name = self.vault.storage_name(logical_name);
+        for old in candidates {
+            if !old.is_file() || vault::is_encrypted_file(old).unwrap_or(false) {
+                continue;
+            }
+            let mut file =
+                fs::File::open(old).with_context(|| format!("failed to open {}", old.display()))?;
+            let (written, _) = self.vault.write_from(logical_name, &mut file)?;
+            debug_assert_eq!(written, new_name);
+            drop(file);
+            fs::remove_file(old).with_context(|| format!("failed to remove {}", old.display()))?;
+            break;
+        }
+        Ok(new_name)
+    }
+}
+
+/// Whether `name` is one of the vault's opaque file names (32 hex digits).
+fn is_opaque_name(name: &str) -> bool {
+    name.len() == 32
+        && name
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Deletes plaintext files from the attachment directory once no row names
+/// one, and temporary files from interrupted writes older than an hour.
+fn remove_plaintext_leftovers(directory: &Path) -> Result<()> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to list {}", directory.display()));
+        }
+    };
+    let hour_ago = SystemTime::now()
+        .checked_sub(Duration::from_secs(60 * 60))
+        .unwrap_or(UNIX_EPOCH);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let temporary = path.extension().is_some_and(|extension| extension == "tmp");
+        let stale = metadata
+            .modified()
+            .is_ok_and(|modified| modified < hour_ago);
+        let remove = if temporary {
+            stale
+        } else {
+            !vault::is_encrypted_file(&path).unwrap_or(true)
+        };
+        if remove {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
         }
     }
     Ok(())
@@ -871,5 +1052,259 @@ mod tests {
         assert!(finds_secret(&restored, account));
         drop(restored);
         let _ = fs::remove_dir_all(directory);
+    }
+
+    /// Text inside the seeded attachment files, and nowhere else.
+    const ATTACHMENT_PHRASE: &[u8] = b"pelican-ledger-of-november";
+
+    /// An attachment row named `storage_path` on a new message.
+    fn seed_attachment(store: &LocalStore, account: i64, storage_path: &str) {
+        let snapshot = AccountSyncSnapshot {
+            checkpoint: "seed-attachment".to_owned(),
+            detail: "seed".to_owned(),
+            identities: None,
+            mailboxes: vec![MailboxSnapshot {
+                name: "Inbox".to_owned(),
+                role: Some("inbox".to_owned()),
+                threads: vec![ThreadSnapshot {
+                    remote_thread_id: "files".to_owned(),
+                    subject: "Files".to_owned(),
+                    participants: "Alice -> me@example.com".to_owned(),
+                    preview: "Files".to_owned(),
+                    is_flagged: false,
+                    has_attachments: true,
+                    unread_count: 1,
+                    latest_message_at: "2026-10-02T09:00:00Z".to_owned(),
+                    messages: vec![MessageSnapshot {
+                        remote_id: "files-1".to_owned(),
+                        identity_email: "me@example.com".to_owned(),
+                        sender: "Alice <alice@example.com>".to_owned(),
+                        reply_to: None,
+                        recipients: "me@example.com".to_owned(),
+                        subject: "Files".to_owned(),
+                        body_preview: "Files".to_owned(),
+                        body_text: Some("Files".to_owned()),
+                        sanitized_html: None,
+                        has_remote_content: false,
+                        is_read: false,
+                        is_flagged: false,
+                        received_at: "2026-10-02T09:00:00Z".to_owned(),
+                        attachments: vec![zmail_core::MessageAttachment {
+                            filename: "ledger.txt".to_owned(),
+                            content_type: "text/plain".to_owned(),
+                            size_bytes: ATTACHMENT_PHRASE.len() as u64,
+                            storage_path: storage_path.to_owned(),
+                        }],
+                    }],
+                }],
+                ..Default::default()
+            }],
+        };
+        store
+            .replace_account_snapshot(account, &snapshot)
+            .expect("snapshot applies");
+    }
+
+    /// The id of the one received attachment in the store.
+    fn only_attachment(store: &LocalStore) -> i64 {
+        store
+            .connection()
+            .expect("connection")
+            .query_row("SELECT id FROM message_attachments", [], |row| row.get(0))
+            .expect("one attachment")
+    }
+
+    /// A store as an older Zmail left it: plaintext attachment files named
+    /// after their mailbox and filename, a plaintext draft attachment copy
+    /// named by absolute path, and a stray plaintext file.
+    fn store_with_plaintext_files(path: &Path, keychain: &InMemorySecretStore) -> i64 {
+        let (store, _) = LocalStore::unlock(path, keychain, &no_progress).expect("unlocks");
+        let account = seed(&store);
+        let directory = store.attachment_storage_dir();
+        fs::create_dir_all(&directory).expect("attachments dir");
+        fs::write(
+            directory.join("incoming-INBOX-7-0-ledger.txt"),
+            ATTACHMENT_PHRASE,
+        )
+        .expect("written");
+        seed_attachment(&store, account, "incoming-INBOX-7-0-ledger.txt");
+
+        let identity = store.list_identities(account).expect("identities")[0].id;
+        let draft = store
+            .create_draft(&zmail_core::NewDraft {
+                account_id: account,
+                identity_id: identity,
+                to: vec!["bob@example.com".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Draft".to_owned(),
+                body: "Draft".to_owned(),
+            })
+            .expect("draft");
+        let draft_copy = directory.join("draft-1-1-ledger.txt");
+        fs::write(&draft_copy, ATTACHMENT_PHRASE).expect("written");
+        store
+            .connection()
+            .expect("connection")
+            .execute(
+                "INSERT INTO draft_attachments(draft_id, filename, content_type, size_bytes, \
+                 original_path, storage_path, created_at) \
+                 VALUES (?1, 'ledger.txt', 'text/plain', ?2, '/tmp/ledger.txt', ?3, '2026-10-02')",
+                rusqlite::params![
+                    draft,
+                    ATTACHMENT_PHRASE.len() as i64,
+                    draft_copy.display().to_string()
+                ],
+            )
+            .expect("legacy draft attachment");
+        fs::write(
+            directory.join("incoming-INBOX-9-0-orphan.txt"),
+            ATTACHMENT_PHRASE,
+        )
+        .expect("written");
+        account
+    }
+
+    #[test]
+    fn plaintext_attachment_files_are_encrypted_on_the_next_open() {
+        let directory = temp_dir("blobs");
+        let path = directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        store_with_plaintext_files(&path, &keychain);
+        assert!(any_file_contains(&directory, ATTACHMENT_PHRASE).is_some());
+
+        let seen = Mutex::new(Vec::new());
+        let (store, report) = LocalStore::unlock(&path, &keychain, &|step| {
+            seen.lock().expect("lock").push(step);
+        })
+        .expect("unlocks");
+        let report = report.expect("the files were migrated");
+        assert_eq!(report.encrypted_attachments, 2);
+        let seen = seen.into_inner().expect("lock");
+        assert!(seen.contains(&MigrationProgress::Attachments { done: 2, total: 2 }));
+        assert_eq!(seen.last(), Some(&MigrationProgress::Finished));
+
+        assert_eq!(
+            any_file_contains(&directory, ATTACHMENT_PHRASE),
+            None,
+            "no attachment bytes are left in plaintext"
+        );
+        for entry in fs::read_dir(store.attachment_storage_dir()).expect("listed") {
+            let name = entry.expect("entry").file_name();
+            let name = name.to_str().expect("utf-8");
+            assert!(is_opaque_name(name), "{name} names nothing");
+        }
+        let blob = store
+            .attachment_blob(only_attachment(&store))
+            .expect("the blob loads");
+        assert_eq!(blob.read().expect("decrypts"), ATTACHMENT_PHRASE);
+        let draft_path: String = store
+            .connection()
+            .expect("connection")
+            .query_row("SELECT storage_path FROM draft_attachments", [], |row| {
+                row.get(0)
+            })
+            .expect("draft attachment");
+        assert_eq!(
+            store
+                .vault
+                .read_file(Path::new(&draft_path))
+                .expect("decrypts"),
+            ATTACHMENT_PHRASE
+        );
+        drop(store);
+
+        // Nothing is left to do on the next open.
+        let (_, report) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert_eq!(report, None);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_file_migration_interrupted_before_its_row_moved_recovers() {
+        let directory = temp_dir("blob-crash");
+        let path = directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        store_with_plaintext_files(&path, &keychain);
+
+        // Encrypted and the plaintext deleted, but the row still names the
+        // old file, as after a crash at that point.
+        {
+            let key = vault::load_store_key(&keychain, &StoreKeyRecord::path_for(&path))
+                .expect("loads")
+                .expect("exists");
+            let store = LocalStore::open(&path, key).expect("opens");
+            let old = store
+                .attachment_storage_dir()
+                .join("incoming-INBOX-7-0-ledger.txt");
+            store
+                .encrypt_legacy_file(std::slice::from_ref(&old), "incoming-INBOX-7-0-ledger.txt")
+                .expect("encrypted");
+            assert!(!old.exists());
+        }
+
+        let (store, report) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert!(report.is_some());
+        let blob = store
+            .attachment_blob(only_attachment(&store))
+            .expect("the row points at the encrypted file");
+        assert_eq!(blob.read().expect("decrypts"), ATTACHMENT_PHRASE);
+        assert_eq!(any_file_contains(&directory, ATTACHMENT_PHRASE), None);
+        drop(store);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn new_attachments_and_draft_copies_are_encrypted() {
+        let directory = temp_dir("new-files");
+        let path = directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        let account = seed(&store);
+        let target = store.sync_target(account).expect("target").expect("exists");
+        let storage_path = target
+            .blobs
+            .write("incoming-INBOX-3-0-ledger.txt", ATTACHMENT_PHRASE)
+            .expect("written");
+        assert!(is_opaque_name(&storage_path));
+        seed_attachment(&store, account, &storage_path);
+
+        let outside = temp_dir("draft-source");
+        let source = outside.join("ledger.txt");
+        fs::write(&source, ATTACHMENT_PHRASE).expect("written");
+        let identity = store.list_identities(account).expect("identities")[0].id;
+        let draft = store
+            .create_draft(&zmail_core::NewDraft {
+                account_id: account,
+                identity_id: identity,
+                to: vec!["bob@example.com".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Draft".to_owned(),
+                body: "Draft".to_owned(),
+            })
+            .expect("draft");
+        let attachment = store.add_draft_attachment(draft, &source).expect("added");
+        assert_eq!(attachment.size_bytes, ATTACHMENT_PHRASE.len() as u64);
+
+        assert_eq!(any_file_contains(&directory, ATTACHMENT_PHRASE), None);
+        assert_eq!(
+            store
+                .attachment_blob(only_attachment(&store))
+                .expect("loads")
+                .read()
+                .expect("decrypts"),
+            ATTACHMENT_PHRASE
+        );
+        // The outbox reads the draft's copy back to send it.
+        let job = store.queue_draft(draft).expect("queued");
+        let pending = store
+            .pending_outbox_job(job)
+            .expect("loads")
+            .expect("exists");
+        assert_eq!(pending.message.attachments[0].bytes, ATTACHMENT_PHRASE);
+        drop(store);
+        let _ = fs::remove_dir_all(directory);
+        let _ = fs::remove_dir_all(outside);
     }
 }

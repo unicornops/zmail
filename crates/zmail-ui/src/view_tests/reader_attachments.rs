@@ -22,20 +22,20 @@ const FILES: &[(&str, &str, &[u8])] = &[
 ];
 
 /// One thread whose message carries [`FILES`], with their blobs written
-/// to the store's attachment directory.
+/// (encrypted) to the store's attachment files.
 fn seed(store: &LocalStore) {
     let account_id = store.list_accounts().expect("the accounts load")[0].id;
     let target = store
         .sync_target(account_id)
         .expect("the target loads")
         .expect("the account exists");
-    let blobs = PathBuf::from(&target.attachments_dir);
-    fs::create_dir_all(&blobs).expect("the attachment dir is created");
     let attachments = FILES
         .iter()
         .map(|(name, content_type, bytes)| {
-            let storage_path = format!("blob-{name}");
-            fs::write(blobs.join(&storage_path), bytes).expect("the blob is written");
+            let storage_path = target
+                .blobs
+                .write(&format!("blob-{name}"), bytes)
+                .expect("the blob is written");
             MessageAttachment {
                 filename: (*name).to_owned(),
                 content_type: (*content_type).to_owned(),

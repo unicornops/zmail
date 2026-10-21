@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use zmail_core::{
     AuthKind, CachePolicySummary, NewAccount, NewDraft, NewIdentity, OutboxJobState, ProtocolKind,
 };
@@ -348,6 +348,19 @@ fn hydrates_decrypted_bodies_and_attachments_on_open() -> Result<()> {
         bytes == b"quarter,total\n1,10\n",
         "attachment bytes: {bytes:?}"
     );
+    // Decrypted Proton mail never reaches the disk in plaintext (ADR 0005):
+    // the body and the attachment are in the encrypted store and its
+    // encrypted files, under opaque names.
+    let data_dir = store.path().parent().context("the store's directory")?;
+    for (what, needle) in [
+        ("the body", &b"The report is attached."[..]),
+        ("the attachment", &b"quarter,total"[..]),
+        ("the attachment's name", &b"report.csv"[..]),
+    ] {
+        if let Some(file) = file_containing(data_dir, needle)? {
+            bail!("{} holds {what} in plaintext", file.display());
+        }
+    }
 
     // HTML goes through the sanitizer, with remote content blocked.
     let dinner = thread_id("Labels/Family", "Dinner on Sunday")?;
@@ -759,4 +772,32 @@ fn sends_to_outside_recipients_by_their_contact_settings() -> Result<()> {
     ensure!(subjects(&store, account_id, "Sent")?.contains(&"To the outside".to_owned()));
     ensure!(subjects(&store, account_id, "INBOX")?.contains(&"To the outside".to_owned()));
     Ok(())
+}
+
+/// The first file under `directory` whose bytes or name contain `needle`.
+fn file_containing(
+    directory: &std::path::Path,
+    needle: &[u8],
+) -> Result<Option<std::path::PathBuf>> {
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if let Some(found) = file_containing(&path, needle)? {
+                return Ok(Some(found));
+            }
+            continue;
+        }
+        let named = path.file_name().is_some_and(|name| {
+            name.as_encoded_bytes()
+                .windows(needle.len())
+                .any(|w| w == needle)
+        });
+        let held = std::fs::read(&path)?
+            .windows(needle.len())
+            .any(|window| window == needle);
+        if named || held {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }

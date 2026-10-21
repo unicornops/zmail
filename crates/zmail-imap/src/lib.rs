@@ -5,8 +5,6 @@ mod watch;
 
 use std::{
     collections::BTreeMap,
-    fs,
-    path::Path,
     sync::{Arc, Once},
     time::Duration,
 };
@@ -30,7 +28,7 @@ use tokio_rustls::{
 };
 use url::Url;
 use zmail_core::{
-    AccountSyncSnapshot, AuthKind, HydratedBody, MailboxSnapshot, MessageAttachment,
+    AccountSyncSnapshot, AuthKind, BlobStore, HydratedBody, MailboxSnapshot, MessageAttachment,
     MessageSnapshot, OpApplyReport, PendingOp, PendingOpKind, ProtocolKind, SyncTarget,
     ThreadSnapshot,
 };
@@ -85,7 +83,7 @@ pub async fn discover_and_sync(
     }
 
     let endpoint = parse_endpoint(&target.endpoint)?;
-    let attachments_dir = std::path::PathBuf::from(&target.attachments_dir);
+    let blobs = target.blobs.clone();
     let identity_email = target
         .identities
         .iter()
@@ -256,14 +254,8 @@ pub async fn discover_and_sync(
             let mut merged = existing_mailbox;
             merge_flag_changes(&mut merged, &flag_map);
             if !new_uids.is_empty() {
-                append_new_threads(
-                    &mut session,
-                    &mut merged,
-                    &new_uids,
-                    identity_email,
-                    &attachments_dir,
-                )
-                .await?;
+                append_new_threads(&mut session, &mut merged, &new_uids, identity_email, &blobs)
+                    .await?;
             }
             mailbox_checkpoint.last_seen_uid =
                 Some(new_uids.last().copied().unwrap_or(0).max(last_seen_uid));
@@ -275,7 +267,7 @@ pub async fn discover_and_sync(
 
         refreshed += 1;
         let (snapshot, uid_flags) =
-            fetch_mailbox_snapshot(&mut session, &name, identity_email, &attachments_dir).await?;
+            fetch_mailbox_snapshot(&mut session, &name, identity_email, &blobs).await?;
         mailbox_checkpoint.last_seen_uid = uid_flags.keys().last().copied();
         mailbox_checkpoint.uid_flags = uid_flags;
         next_checkpoint.insert(name, mailbox_checkpoint);
@@ -353,7 +345,7 @@ pub async fn fetch_message_bodies(
     }
 
     let endpoint = parse_endpoint(&target.endpoint)?;
-    let attachments_dir = std::path::PathBuf::from(&target.attachments_dir);
+    let blobs = target.blobs.clone();
     let mut session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
     session
         .examine(mailbox_name)
@@ -375,7 +367,7 @@ pub async fn fetch_message_bodies(
 
     Ok(fetches
         .iter()
-        .filter_map(|fetch| hydrated_body_from_fetch(fetch, mailbox_name, &attachments_dir))
+        .filter_map(|fetch| hydrated_body_from_fetch(fetch, mailbox_name, &blobs))
         .collect())
 }
 
@@ -384,32 +376,27 @@ pub async fn fetch_message_bodies(
 fn hydrated_body_from_fetch(
     fetch: &Fetch,
     mailbox_name: &str,
-    attachments_dir: &Path,
+    blobs: &BlobStore,
 ) -> Option<(u32, HydratedBody)> {
     let uid = fetch.uid?;
-    let body = hydrated_body_from_rfc822(
-        fetch.body()?,
-        mailbox_name,
-        &uid.to_string(),
-        attachments_dir,
-    )?;
+    let body = hydrated_body_from_rfc822(fetch.body()?, mailbox_name, &uid.to_string(), blobs)?;
     Some((uid, body))
 }
 
 /// Parses a full RFC 822 message into the stored body fields, through the
 /// same sanitizer and attachment path IMAP hydration uses, persisting its
-/// attachment blobs. Adapters that rebuild RFC 822 themselves (Proton) use
+/// attachment blobs through `blobs`, which encrypts them (ADR 0005). Adapters that rebuild RFC 822 themselves (Proton) use
 /// it so every protocol renders and stores mail the same way. Returns
 /// `None` when the bytes do not parse as a message.
 pub fn hydrated_body_from_rfc822(
     raw: &[u8],
     mailbox_name: &str,
     remote_id: &str,
-    attachments_dir: &Path,
+    blobs: &BlobStore,
 ) -> Option<HydratedBody> {
     let message = MessageParser::default().parse(raw)?;
     let (body_text, sanitized_html, has_remote_content, preview_source) = hydrate_bodies(&message);
-    let attachments = persist_attachments(&message, mailbox_name, remote_id, attachments_dir);
+    let attachments = persist_attachments(&message, mailbox_name, remote_id, blobs);
     Some(HydratedBody {
         body_text,
         sanitized_html,
@@ -433,7 +420,7 @@ pub struct IndexedBodies {
 /// pass, so indexing a large mailbox does not log in once per batch.
 pub struct BodyIndexSession {
     session: Session<DynImapStream>,
-    attachments_dir: std::path::PathBuf,
+    blobs: BlobStore,
     examined: Option<String>,
 }
 
@@ -456,7 +443,7 @@ impl BodyIndexSession {
         let session = connect_session(&endpoint, &target.username, secret, target.auth).await?;
         Ok(Self {
             session,
-            attachments_dir: std::path::PathBuf::from(&target.attachments_dir),
+            blobs: target.blobs.clone(),
             examined: None,
         })
     }
@@ -521,9 +508,7 @@ impl BodyIndexSession {
         result.bodies = fetches
             .iter()
             .filter(|fetch| fetch.uid.is_some_and(|uid| within.contains(&uid)))
-            .filter_map(|fetch| {
-                hydrated_body_from_fetch(fetch, mailbox_name, &self.attachments_dir)
-            })
+            .filter_map(|fetch| hydrated_body_from_fetch(fetch, mailbox_name, &self.blobs))
             .collect();
         Ok(result)
     }
@@ -1055,7 +1040,7 @@ async fn fetch_mailbox_snapshot(
     session: &mut Session<DynImapStream>,
     mailbox_name: &str,
     identity_email: &str,
-    attachments_dir: &Path,
+    blobs: &BlobStore,
 ) -> Result<(MailboxSnapshot, BTreeMap<u32, Vec<String>>)> {
     session
         .examine(mailbox_name)
@@ -1104,7 +1089,7 @@ async fn fetch_mailbox_snapshot(
                 fetch,
                 mailbox_name,
                 identity_email,
-                attachments_dir,
+                blobs,
             );
         }
     }
@@ -1293,7 +1278,7 @@ async fn append_new_threads(
     mailbox: &mut MailboxSnapshot,
     new_uids: &[u32],
     identity_email: &str,
-    attachments_dir: &Path,
+    blobs: &BlobStore,
 ) -> Result<()> {
     let mailbox_name = mailbox.name.clone();
     let mut conversations: BTreeMap<String, ImapThreadAccumulator> = BTreeMap::new();
@@ -1317,7 +1302,7 @@ async fn append_new_threads(
                 fetch,
                 &mailbox_name,
                 identity_email,
-                attachments_dir,
+                blobs,
             );
         }
     }
@@ -1433,7 +1418,7 @@ fn accumulate_fetch(
     fetch: Fetch,
     mailbox_name: &str,
     identity_email: &str,
-    attachments_dir: &Path,
+    blobs: &BlobStore,
 ) {
     // Header-only syncs carry the message in the BODY[HEADER] section;
     // full fetches (hydration) carry it in BODY[].
@@ -1457,7 +1442,7 @@ fn accumulate_fetch(
     let preview = excerpt(&preview_source, 180);
     let has_attachments = message.attachment_count() > 0;
     let remote_stub = fetch.uid.map(|uid| uid.to_string()).unwrap_or_default();
-    let attachments = persist_attachments(&message, mailbox_name, &remote_stub, attachments_dir);
+    let attachments = persist_attachments(&message, mailbox_name, &remote_stub, blobs);
     let received_at = fetch
         .internal_date()
         .map(|date| date.to_rfc3339())
@@ -1503,9 +1488,11 @@ fn accumulate_fetch(
 }
 
 /// Persists the attachment parts of a parsed message into the store's
-/// attachments directory and returns their metadata.
+/// encrypted attachment files and returns their metadata.
 ///
-/// Blobs go straight to disk; only the raw fetched message is held in memory,
+/// Blobs go straight to `blobs`, which encrypts them (ADR 0005); the
+/// storage name it returns is opaque. Only the raw fetched message is held
+/// in memory,
 /// so attachment bytes never round-trip through the store or the database.
 /// Parts beyond the per-message count or single-part size caps are skipped
 /// rather than half-persisted.
@@ -1513,16 +1500,10 @@ fn persist_attachments(
     message: &mail_parser::Message<'_>,
     mailbox_name: &str,
     remote_id: &str,
-    attachments_dir: &Path,
+    blobs: &BlobStore,
 ) -> Vec<MessageAttachment> {
     let mut attachments = Vec::new();
     if message.attachment_count() == 0 {
-        return attachments;
-    }
-
-    if !attachments_dir.is_dir() && fs::create_dir_all(attachments_dir).is_err() {
-        // Without a writable blob directory the sync must not fail: the
-        // message still stores, the attachment parts are simply not kept.
         return attachments;
     }
 
@@ -1552,15 +1533,16 @@ fn persist_attachments(
             sanitize_component(mailbox_name),
             sanitize_component(&filename),
         );
-        let storage_path = attachments_dir.join(&storage_name);
-        if fs::write(&storage_path, contents).is_err() {
+        // Without a writable blob store the sync must not fail: the
+        // message still stores, the attachment part is simply not kept.
+        let Ok(storage_path) = blobs.write(&storage_name, contents) else {
             continue;
-        }
+        };
         attachments.push(MessageAttachment {
             filename,
             content_type,
             size_bytes: contents.len() as u64,
-            storage_path: storage_name,
+            storage_path,
         });
     }
 
@@ -1850,8 +1832,9 @@ mod tests {
 
     use super::{
         ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, conversation_key, excerpt, guess_role,
-        hydrate_bodies, mailbox_roles, parent_name, parse_endpoint, persist_attachments,
-        recompute_thread_aggregates, resume_uid, special_use_role, xoauth2_response,
+        hydrate_bodies, hydrated_body_from_rfc822, mailbox_roles, parent_name, parse_endpoint,
+        persist_attachments, recompute_thread_aggregates, resume_uid, special_use_role,
+        xoauth2_response,
     };
     use zmail_core::{MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
 
@@ -1934,19 +1917,103 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("zmail-imap-attach-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        let vault = zmail_security::vault::BlobVault::new(
+            &dir,
+            &zmail_security::vault::StoreKey::generate(),
+        );
+        let blobs = zmail_core::BlobStore::new(std::sync::Arc::new(vault.clone()));
 
-        let attachments = persist_attachments(&message, "Inbox", "42", &dir);
+        let attachments = persist_attachments(&message, "Inbox", "42", &blobs);
         assert_eq!(attachments.len(), 1, "one attachment should persist");
         let attachment = &attachments[0];
         assert_eq!(attachment.filename, "notes.txt");
         assert_eq!(attachment.content_type, "text/plain");
         assert_eq!(attachment.size_bytes, "attachment payload".len() as u64);
-        assert_eq!(attachment.storage_path, "incoming-Inbox-42-0-notes.txt");
+        // The name on disk is opaque: neither the mailbox nor the filename.
+        assert_eq!(
+            attachment.storage_path,
+            vault.storage_name("incoming-Inbox-42-0-notes.txt")
+        );
 
         let blob_path = dir.join(&attachment.storage_path);
-        let blob = std::fs::read(&blob_path).expect("the blob should be readable");
-        assert_eq!(blob, b"attachment payload");
+        let stored = std::fs::read(&blob_path).expect("the blob should be readable");
+        assert!(
+            !stored
+                .windows(b"attachment payload".len())
+                .any(|window| window == b"attachment payload"),
+            "the blob is encrypted on disk"
+        );
+        assert_eq!(
+            vault.read_file(&blob_path).expect("the blob decrypts"),
+            b"attachment payload"
+        );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The path Proton hydration takes (`zmail-proton` rebuilds RFC 822 and
+    /// hands it here): the attachment lands encrypted under an opaque name,
+    /// and neither its bytes nor its name nor the mailbox appear on disk.
+    #[test]
+    fn rfc822_hydration_writes_attachments_encrypted() {
+        let raw = concat!(
+            "From: sender@example.test\r\n",
+            "Subject: hydrated\r\n",
+            "To: rcpt@example.test\r\n",
+            "Content-Type: multipart/mixed; boundary=\"BOUND\"\r\n",
+            "\r\n",
+            "--BOUND\r\n",
+            "Content-Type: text/plain\r\n",
+            "\r\n",
+            "Body text.\r\n",
+            "--BOUND\r\n",
+            "Content-Type: text/csv; name=\"ledger-zebra.csv\"\r\n",
+            "Content-Disposition: attachment; filename=\"ledger-zebra.csv\"\r\n",
+            "\r\n",
+            "quarter,total,pangolin\r\n",
+            "--BOUND--\r\n",
+        );
+        let dir = std::env::temp_dir().join(format!(
+            "zmail-imap-rfc822-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let vault = zmail_security::vault::BlobVault::new(
+            &dir,
+            &zmail_security::vault::StoreKey::generate(),
+        );
+        let blobs = zmail_core::BlobStore::new(std::sync::Arc::new(vault.clone()));
+
+        let body =
+            hydrated_body_from_rfc822(raw.as_bytes(), "Labels/Secret-folder", "msg-1", &blobs)
+                .expect("the message parses");
+        assert_eq!(body.attachments.len(), 1);
+        let attachment = &body.attachments[0];
+        assert_eq!(attachment.filename, "ledger-zebra.csv");
+
+        for entry in std::fs::read_dir(&dir).expect("the blob dir exists") {
+            let path = entry.expect("entry").path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            assert!(
+                !name.contains("ledger") && !name.contains("Secret"),
+                "{name} reveals the attachment or mailbox"
+            );
+            let stored = std::fs::read(&path).expect("readable");
+            assert!(
+                !stored
+                    .windows(b"pangolin".len())
+                    .any(|window| window == b"pangolin"),
+                "{name} holds the attachment in plaintext"
+            );
+        }
+        let decrypted = vault
+            .read_file(&dir.join(&attachment.storage_path))
+            .expect("the blob decrypts");
+        assert!(String::from_utf8_lossy(&decrypted).contains("quarter,total,pangolin"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

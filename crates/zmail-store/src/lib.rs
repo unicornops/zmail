@@ -15,7 +15,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use zmail_core::{
-    AccountColor, AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind,
+    AccountColor, AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, BlobStore,
     CachePolicySummary, DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary,
     DraftUpdate, HydratedBody, IdentitySummary, IndexCandidate, IndexProgress, MailboxRole,
     MailboxSelection, MailboxSnapshot, MailboxSummary, MessageAttachment, MessageFlagState,
@@ -28,7 +28,7 @@ use zmail_core::{
     preferences::UiPreferences,
 };
 use zmail_security::sanitize_html_for_display;
-pub use zmail_security::vault::{StoreKey, StoreKeychain};
+pub use zmail_security::vault::{BlobVault, StoreKey, StoreKeychain};
 
 mod address_history;
 mod connection;
@@ -40,6 +40,58 @@ pub use encryption::{
     MigrationProgress, MigrationReport, StoreFileState, StoreOpenError, encrypt_plaintext_store,
     move_unreadable_store_aside, store_file_state,
 };
+
+/// A received attachment's encrypted blob (ADR 0005), from
+/// [`LocalStore::attachment_blob`]. Its contents are only ever written out
+/// decrypted where the caller asks.
+#[derive(Debug, Clone)]
+pub struct AttachmentBlob {
+    path: PathBuf,
+    filename: String,
+    vault: BlobVault,
+}
+
+impl AttachmentBlob {
+    /// The attachment's original filename, from the sender: sanitise it
+    /// before it names a file.
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    /// Decrypts the attachment to `destination`, replacing a file there.
+    /// The plaintext goes to a temporary file beside it first, so a failed
+    /// or tampered blob never leaves a partial copy.
+    pub fn save_to(&self, destination: &Path) -> Result<u64> {
+        let parent = destination.parent().unwrap_or(Path::new("."));
+        let temporary = parent.join(format!(
+            ".{}.zmail-{}.part",
+            destination
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            zmail_security::vault::random_hex(6)
+        ));
+        let length = self.vault.decrypt_file_to_path(&self.path, &temporary)?;
+        fs::rename(&temporary, destination).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            anyhow::Error::from(error).context(format!(
+                "failed to save the attachment to {}",
+                destination.display()
+            ))
+        })?;
+        Ok(length)
+    }
+
+    /// Decrypts the attachment to `destination`, which must not exist yet.
+    pub fn save_new(&self, destination: &Path) -> Result<u64> {
+        self.vault.decrypt_file_to_path(&self.path, destination)
+    }
+
+    /// Decrypts the attachment into memory.
+    pub fn read(&self) -> Result<Vec<u8>> {
+        self.vault.read_file(&self.path)
+    }
+}
 
 /// What removing an account deletes besides its mail: unsent messages and
 /// drafts (see [`LocalStore::account_removal_impact`]).
@@ -509,6 +561,8 @@ static EPHEMERAL_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub struct LocalStore {
     path: Arc<PathBuf>,
     key: StoreKey,
+    /// The encrypted attachment files beside the database.
+    vault: BlobVault,
     /// Identifies this store in each thread's connection cache. Declared
     /// before `ephemeral_dir` so it is gone when the directory is removed.
     token: StoreToken,
@@ -549,9 +603,11 @@ impl LocalStore {
             );
         }
 
+        let vault = BlobVault::new(attachment_storage_dir(&path), &key);
         let store = Self {
             path: Arc::new(path),
             key,
+            vault,
             token: StoreToken::default(),
             ephemeral_dir: None,
         };
@@ -932,7 +988,7 @@ impl LocalStore {
             auth,
             endpoint,
             username,
-            attachments_dir: self.attachment_storage_dir().display().to_string(),
+            blobs: BlobStore::new(Arc::new(self.vault.clone())),
             cache_policy: CachePolicySummary {
                 name: policy_name,
                 description: policy_description,
@@ -2265,10 +2321,10 @@ impl LocalStore {
         Ok(changed > 0)
     }
 
-    /// The stored blob of a received attachment and its original filename.
-    /// The filename comes from the sender: sanitise it before it names a
-    /// file (`zmail_security::attachment_safety::sanitize_filename`).
-    pub fn attachment_blob(&self, attachment_id: i64) -> Result<(PathBuf, String)> {
+    /// The encrypted blob of a received attachment, with its original
+    /// filename. The filename comes from the sender: sanitise it before it
+    /// names a file (`zmail_security::attachment_safety::sanitize_filename`).
+    pub fn attachment_blob(&self, attachment_id: i64) -> Result<AttachmentBlob> {
         let conn = self.connection()?;
         let (filename, storage_path) = conn
             .query_row(
@@ -2301,7 +2357,11 @@ impl LocalStore {
                 source.display()
             );
         }
-        Ok((source, filename))
+        Ok(AttachmentBlob {
+            path: source,
+            filename,
+            vault: self.vault.clone(),
+        })
     }
 
     /// Copies a received attachment into `destination_dir` using its original
@@ -2311,15 +2371,13 @@ impl LocalStore {
         attachment_id: i64,
         destination_dir: impl AsRef<Path>,
     ) -> Result<PathBuf> {
-        let (source, filename) = self.attachment_blob(attachment_id)?;
+        let blob = self.attachment_blob(attachment_id)?;
         let destination_dir = destination_dir.as_ref();
         fs::create_dir_all(destination_dir)
             .with_context(|| format!("failed to create {}", destination_dir.display()))?;
-        let safe_filename = sanitize_filename(&filename);
+        let safe_filename = sanitize_filename(blob.filename());
         let destination = destination_dir.join(&safe_filename);
-        fs::copy(&source, &destination).with_context(|| {
-            format!("failed to copy the attachment to {}", destination.display())
-        })?;
+        blob.save_to(&destination)?;
         Ok(destination)
     }
 
@@ -3740,24 +3798,25 @@ impl LocalStore {
             .to_owned();
         let metadata = fs::metadata(source_path)
             .with_context(|| format!("failed to inspect {}", source_path.display()))?;
-        let size_bytes = metadata.len();
-        let content_type = guess_content_type(source_path);
-        let storage_path = self.attachment_storage_dir().join(format!(
-            "draft-{draft_id}-{}-{}",
-            EPHEMERAL_COUNTER.fetch_add(1, Ordering::Relaxed),
-            sanitize_filename(&filename)
-        ));
-        if let Some(parent) = storage_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+        if !metadata.is_file() {
+            bail!("{} is not a file", source_path.display());
         }
-        fs::copy(source_path, &storage_path).with_context(|| {
-            format!(
-                "failed to copy attachment {} into {}",
-                source_path.display(),
-                storage_path.display()
+        let content_type = guess_content_type(source_path);
+        // The copy is encrypted like received attachments (ADR 0005).
+        let mut source = fs::File::open(source_path)
+            .with_context(|| format!("failed to open {}", source_path.display()))?;
+        let (storage_name, size_bytes) = self
+            .vault
+            .write_from(
+                &format!(
+                    "draft-{draft_id}-{}-{}",
+                    EPHEMERAL_COUNTER.fetch_add(1, Ordering::Relaxed),
+                    sanitize_filename(&filename)
+                ),
+                &mut source,
             )
-        })?;
+            .with_context(|| format!("failed to copy attachment {}", source_path.display()))?;
+        let storage_path = self.vault.path_of(&storage_name)?;
 
         let mut conn = self.connection()?;
         let transaction = conn
@@ -4441,10 +4500,7 @@ impl LocalStore {
     }
 
     fn attachment_storage_dir(&self) -> PathBuf {
-        self.path
-            .parent()
-            .map(|parent| parent.join("attachments"))
-            .unwrap_or_else(|| PathBuf::from("attachments"))
+        self.vault.directory().to_owned()
     }
 
     fn pending_outbox_job(&self, job_id: i64) -> Result<Option<PendingOutboxJob>> {
@@ -4536,9 +4592,12 @@ impl LocalStore {
         let attachments = load_draft_attachments(&conn, target.draft_id)?
             .into_iter()
             .map(|attachment| {
-                let bytes = fs::read(&attachment.storage_path).with_context(|| {
-                    format!("failed to read attachment {}", attachment.storage_path)
-                })?;
+                let bytes = self
+                    .vault
+                    .read_file(Path::new(&attachment.storage_path))
+                    .with_context(|| {
+                        format!("failed to read attachment {}", attachment.filename)
+                    })?;
                 Ok(OutgoingAttachment {
                     filename: attachment.filename,
                     content_type: attachment.content_type,
@@ -4563,6 +4622,14 @@ impl LocalStore {
             },
         }))
     }
+}
+
+/// The directory of the store's attachment files, beside the database.
+fn attachment_storage_dir(database: &Path) -> PathBuf {
+    database
+        .parent()
+        .map(|parent| parent.join("attachments"))
+        .unwrap_or_else(|| PathBuf::from("attachments"))
 }
 
 fn query_count(conn: &Connection, sql: &str) -> Result<usize> {
@@ -8491,9 +8558,9 @@ mod tests {
             .sync_target(account_id)
             .expect("the sync target should load")
             .expect("the sync target should exist");
-        let attachments_dir = std::path::PathBuf::from(&target.attachments_dir);
-        std::fs::create_dir_all(&attachments_dir).expect("the attachments dir should be created");
-        std::fs::write(attachments_dir.join("incoming-inbox-1-0-report.txt"), &blob)
+        let storage_path = target
+            .blobs
+            .write("incoming-inbox-1-0-report.txt", &blob)
             .expect("the blob should be written");
 
         let mut snapshot = merge_test_snapshot(
@@ -8507,7 +8574,7 @@ mod tests {
             filename: "report.txt".to_owned(),
             content_type: "text/plain".to_owned(),
             size_bytes: blob.len() as u64,
-            storage_path: "incoming-inbox-1-0-report.txt".to_owned(),
+            storage_path: storage_path.clone(),
         }];
         store
             .replace_account_snapshot(account_id, &snapshot)
@@ -8526,7 +8593,7 @@ mod tests {
         assert_eq!(attachment.filename, "report.txt");
         assert_eq!(attachment.content_type, "text/plain");
         assert_eq!(attachment.size_bytes, blob.len() as u64);
-        assert_eq!(attachment.storage_path, "incoming-inbox-1-0-report.txt");
+        assert_eq!(attachment.storage_path, storage_path);
 
         // An identical re-merge skips the thread and does not duplicate rows.
         store
@@ -8550,6 +8617,12 @@ mod tests {
         assert_eq!(saved, destination.join("report.txt"));
         let written = std::fs::read(&saved).expect("the saved blob should read back");
         assert_eq!(written, blob, "save-as writes the original bytes");
+        let stored = std::fs::read(store.attachment_storage_dir().join(&storage_path))
+            .expect("the stored blob reads");
+        assert!(
+            !stored.windows(blob.len()).any(|window| window == blob),
+            "the stored blob is encrypted"
+        );
         let _ = std::fs::remove_dir_all(&destination);
     }
 
