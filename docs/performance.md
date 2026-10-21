@@ -160,8 +160,8 @@ Seeding the store took 14.1 s.
 - **Search results** took about 200 ms of work, on top of the 150 ms
   debounce: a folder-scoped search listed the folder's 100k threads as an
   `IN` list, then read and sorted every match before the first page.
-- **Opening a 1 MB HTML body** takes about 450 ms, of which loading the
-  thread (and converting the HTML to text) is 17 ms.
+- **Opening a 1 MB HTML body** took about 450 ms, of which loading the
+  thread (and converting the HTML to text) was 17 ms.
 
 ## After the fixes (2026-10-20)
 
@@ -207,22 +207,6 @@ per scrollbar jump.
 | `large_mailbox_page` at row 99,850 | 7.93 ms |
 | `large_mailbox_refresh_counts` | 8.73 ms |
 
-### What still misses
-
-- **Dragging the scrollbar** across a 100k mailbox: each frame lands on a
-  new page, and finding a page still walks the index up to its row (up to
-  8 ms at the end), so these frames take 13–18 ms. Scrolling with the
-  wheel or keys stays within the frame budget at any depth, apart from a
-  frame now and then that reads the next page.
-- **Opening a 1 MB HTML body** (about 450 ms). The HTML becomes one
-  537 KB paragraph of text, which the reader laid out in full in the
-  first frame: the conversation list only skipped messages that were off
-  screen, not paragraphs. Fixed by the reader chunking below.
-- **Search**: a short prefix that expands to many index terms
-  (`budget r`) can still take about 100 ms.
-
-The scrollbar drag is tracked in #242.
-
 ## After the reader chunking (2026-10-21)
 
 The reader lays out a paragraph longer than 2 KB in pieces of whole
@@ -259,6 +243,22 @@ about 30% as noise.
 Seeding the store took 15.3 s. With `ZMAIL_PERF_GATE=5`, as in CI, the run
 passes.
 
-What still misses: dragging the scrollbar across a 100k mailbox (#242),
-and the occasional search for a short prefix that expands to many index
-terms.
+## What still misses
+
+From the run above (`main` at dfd386a):
+
+- **Dragging the scrollbar** across a 100k mailbox: 15.5 ms a frame
+  (median; p95 21.6 ms) against 8.3 ms. Each frame lands on a new page,
+  and finding a page still walks the mailbox's order index up to its row
+  (about 8 ms at the end). Wheel and keyboard scrolling stay within budget
+  at any depth, apart from a frame now and then that reads the next page
+  (p95 7–9 ms). Tracked in #242, which proposes seeking pages by a
+  position index.
+- **A short word typed after a full one** in a 100k folder: `budget r`
+  took 107.6 ms after the debounce (the store read alone 102 ms, and
+  `budget re` 82 ms), against 100 ms; it is the only search sample over
+  budget, and every other keystroke took 25–45 ms. FTS5 expands `r*`
+  into every indexed term starting with `r` and merges their doclists
+  before the page limit applies. Tracked in #250.
+
+Everything else in the tables is within its budget.
