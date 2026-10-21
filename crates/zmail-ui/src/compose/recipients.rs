@@ -37,7 +37,7 @@ use crate::components::text_input::{Backspace, Paste};
 use crate::components::{ComponentTheme, TextInput, TextInputEvent};
 use crate::styles::{
     ICON_SIZE_SM, RADIUS_FULL, RADIUS_MD, RADIUS_SM, SPACE_0_5, SPACE_1, SPACE_2, TYPE_BODY,
-    TYPE_CAPTION, TypeStyleExt, rems_from_px,
+    TYPE_CAPTION, TextScale, TypeStyleExt, rems_from_px,
 };
 use crate::widgets::{EllipsisExt, icon};
 
@@ -479,7 +479,7 @@ impl Render for RecipientField {
                             .flex()
                             .items_center()
                             .gap(px(SPACE_2))
-                            .min_h(rems_from_px(MENU_ITEM_HEIGHT))
+                            .min_h(TextScale::get(cx).fit(MENU_ITEM_HEIGHT, TYPE_BODY))
                             .px(px(SPACE_2))
                             .rounded(px(RADIUS_SM))
                             .accessible(

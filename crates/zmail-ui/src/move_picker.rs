@@ -27,7 +27,7 @@ use crate::components::menu::{MENU_ITEM_HEIGHT, MENU_MIN_WIDTH};
 use crate::components::popover::Popover;
 use crate::components::{ComponentTheme, TextInput, TextInputEvent};
 use crate::styles::{
-    ICON_SIZE_SM, RADIUS_SM, SPACE_1, SPACE_2, TYPE_BODY, TypeStyleExt, rems_from_px,
+    ICON_SIZE_SM, RADIUS_SM, SPACE_1, SPACE_2, TYPE_BODY, TextScale, TypeStyleExt,
 };
 use crate::widgets::{EllipsisExt, icon};
 
@@ -190,7 +190,7 @@ impl Render for MovePicker {
                     .flex_none()
                     .items_center()
                     .gap(px(SPACE_2))
-                    .h(rems_from_px(MENU_ITEM_HEIGHT))
+                    .h(TextScale::get(cx).fit(MENU_ITEM_HEIGHT, TYPE_BODY))
                     .px(px(SPACE_2))
                     .rounded(px(RADIUS_SM))
                     .type_style(TYPE_BODY)
@@ -245,7 +245,9 @@ impl Render for MovePicker {
                             .id("move-picker-folders")
                             .flex()
                             .flex_col()
-                            .max_h(rems_from_px(MENU_ITEM_HEIGHT * VISIBLE_ROWS))
+                            .max_h(
+                                TextScale::get(cx).fit(MENU_ITEM_HEIGHT, TYPE_BODY) * VISIBLE_ROWS,
+                            )
                             .overflow_y_scroll()
                             .children(rows),
                     )

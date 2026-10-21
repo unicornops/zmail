@@ -8,7 +8,7 @@ use gpui::{
 };
 
 use crate::styles::{
-    BADGE_SIZE, RADIUS_FULL, TYPE_CAPTION, TypeStyleExt, UNREAD_INDICATOR_SIZE, rems_from_px,
+    BADGE_SIZE, RADIUS_FULL, TYPE_CAPTION, TextScale, TypeStyleExt, UNREAD_INDICATOR_SIZE,
 };
 
 use super::theme::ComponentTheme;
@@ -99,8 +99,8 @@ impl RenderOnce for Badge {
                 .flex_none()
                 .items_center()
                 .justify_center()
-                .min_w(rems_from_px(BADGE_SIZE))
-                .h(rems_from_px(BADGE_SIZE))
+                .min_w(TextScale::get(cx).fit(BADGE_SIZE, TYPE_CAPTION))
+                .h(TextScale::get(cx).fit(BADGE_SIZE, TYPE_CAPTION))
                 .px(px(6.0))
                 .rounded(px(RADIUS_FULL))
                 .bg(rgb(fill))

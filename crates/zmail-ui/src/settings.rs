@@ -59,7 +59,7 @@ use crate::components::{
 };
 use crate::styles::{
     ICON_SIZE_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6, TYPE_BODY, TYPE_BODY_STRONG,
-    TYPE_CAPTION, TYPE_TITLE, TypeStyleExt, UiColors, rems_from_px,
+    TYPE_CAPTION, TYPE_TITLE, TextScale, TypeStyleExt, UiColors, rems_from_px,
 };
 use crate::widgets::{EllipsisExt, HoverExt, account_dot, icon, interactive_background};
 
@@ -562,7 +562,7 @@ impl SettingsWindow {
                     .flex()
                     .items_center()
                     .gap(px(SPACE_2))
-                    .min_h(rems_from_px(NAV_ROW_HEIGHT))
+                    .min_h(TextScale::get(cx).fit(NAV_ROW_HEIGHT, TYPE_BODY))
                     .px(px(SPACE_2))
                     .rounded(px(ComponentTheme::get(cx).platform.control_radius))
                     .bg(rgb(fill))

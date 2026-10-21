@@ -41,7 +41,7 @@ use gpui::{
 };
 
 use crate::a11y::{A11yFlags, AccessibleExt};
-use crate::styles::{ICON_SIZE_SM, Platform};
+use crate::styles::{ICON_SIZE_SM, Platform, TYPE_BODY, TextScale};
 use crate::widgets::icon;
 
 use super::theme::ComponentTheme;
@@ -224,7 +224,8 @@ impl RenderOnce for TitleBar {
             .flex_none()
             .items_center()
             .w_full()
-            .min_h(px(style.title_bar_height))
+            // Taller with larger text, so its controls keep a margin.
+            .min_h(TextScale::get(cx).fit(style.title_bar_height, TYPE_BODY))
             .bg(rgb(colors.background))
             .border_b_1()
             .border_color(rgb(colors.border))

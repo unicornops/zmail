@@ -43,7 +43,7 @@ use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 use super::{ButtonSize, IconButton};
 use crate::a11y::{A11yFlags, AccessibleExt};
-use crate::styles::{ICON_SIZE_SM, TOOLBAR_BUTTON_HEIGHT, UiColors, rems_from_px};
+use crate::styles::{ICON_SIZE_SM, TOOLBAR_BUTTON_HEIGHT, TYPE_BODY, TextScale, UiColors};
 use crate::widgets::icon;
 
 #[cfg(test)]
@@ -1712,7 +1712,7 @@ impl Render for TextInput {
                     .min_w_0()
                     .when(self.compact, |this| {
                         // The ring adds 1px on each side.
-                        this.h(rems_from_px(TOOLBAR_BUTTON_HEIGHT - 2.))
+                        this.h(TextScale::get(cx).fit(TOOLBAR_BUTTON_HEIGHT - 2., TYPE_BODY))
                     })
                     .when(!self.compact, |this| this.py_2())
                     .when(self.borderless, |this| this.px_1())

@@ -43,7 +43,7 @@ use crate::pane::Pane;
 use crate::sidebar::{folder_label, mailbox_icon_name};
 use crate::styles::{
     ICON_SIZE_SM, Platform, RADIUS_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_8, TYPE_BODY, TYPE_CAPTION,
-    TypeStyleExt, rems_from_px,
+    TextScale, TypeStyleExt,
 };
 use crate::widgets::{EllipsisExt, icon};
 
@@ -479,7 +479,7 @@ impl CommandPalette {
                         .w_full()
                         .items_center()
                         .gap(px(SPACE_2))
-                        .h(rems_from_px(ROW_HEIGHT))
+                        .h(TextScale::get(cx).fit(ROW_HEIGHT, TYPE_BODY))
                         .px(px(SPACE_2))
                         .rounded(px(RADIUS_SM))
                         .accessible(Role::ListBoxOption, accessible_name)
@@ -584,7 +584,7 @@ impl Render for CommandPalette {
                             .track_scroll(&self.scroll)
                             .w_full()
                             .min_h_0()
-                            .h(rems_from_px(ROW_HEIGHT * visible as f32)),
+                            .h(TextScale::get(cx).fit(ROW_HEIGHT, TYPE_BODY) * visible as f32),
                         )
                     })
                     .when(count == 0, |this| {

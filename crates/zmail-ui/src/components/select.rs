@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::a11y::{A11yFlags, AccessibleExt};
-use crate::styles::{ICON_SIZE_SM, SPACE_2, TYPE_BODY, TypeStyleExt, rems_from_px};
+use crate::styles::{ICON_SIZE_SM, SPACE_2, TYPE_BODY, TextScale, TypeStyleExt, rems_from_px};
 use crate::widgets::{EllipsisExt, icon};
 
 use super::actions::{SELECT_CONTEXT, SelectNext, SelectPrevious};
@@ -206,7 +206,7 @@ impl Render for Select {
                     .items_center()
                     .gap(px(SPACE_2))
                     .w_full()
-                    .h(rems_from_px(theme.platform.control_height))
+                    .h(TextScale::get(cx).fit(theme.platform.control_height, TYPE_BODY))
                     .px(px(10.0))
                     .rounded(px(theme.platform.control_radius))
                     .bg(rgb(fill))

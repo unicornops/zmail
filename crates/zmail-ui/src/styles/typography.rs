@@ -60,6 +60,13 @@ impl TextScale {
     pub fn scale(self, pixels: f32) -> f32 {
         pixels * self.0
     }
+
+    /// The height of a control `pixels` tall at the default text size
+    /// that holds one line of `style`: it grows by as much as the line
+    /// does, so its padding stays the same.
+    pub fn fit(self, pixels: f32, style: TypeStyle) -> Pixels {
+        px(pixels + style.line_height_px(BASE_REM_PX) * (self.0 - 1.0))
+    }
 }
 
 /// One step of the type scale.
@@ -172,5 +179,7 @@ mod tests {
         assert_eq!(TextScale::from_percent(150).rem_size(), px(24.0));
         assert_eq!(TextScale::from_percent(200).rem_size(), px(32.0));
         assert_eq!(rems_from_px(24.0), rems(1.5));
+        assert_eq!(TextScale::from_percent(200).fit(32.0, TYPE_BODY), px(52.0));
+        assert_eq!(TextScale::from_percent(100).fit(32.0, TYPE_BODY), px(32.0));
     }
 }
