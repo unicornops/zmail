@@ -479,21 +479,23 @@ The implementation stack, each PR "Part of #139":
 
 0. `chore(deps)`: rusqlite 0.37 → 0.40 (SQLCipher 4.14 / SQLite 3.51), #255.
 1. Key management: `zmail_security::vault` keys, keychain slot, sidecar,
-   HKDF subkeys; no behaviour change yet.
+   HKDF subkeys; this ADR (#256).
 2. Database encryption with migration: SQLCipher features, the key on
    every connection, a per-thread connection cache, `LocalStore::open`
    with a key, the migration and its crash recovery, CLI progress,
    encrypted backups, and the SQLCipher and OpenSSL notices in
-   `about.toml` and the `.deb`.
+   `about.toml` and the `.deb` (#260).
 3. File encryption: blob format, the adapters writing through the vault,
    opaque names, draft attachments, the outbox reading through it, the
-   open cache (tmpfs on Linux, shorter lifetime), blob migration.
-4. UI: the migration progress window and the key-loss recovery screen.
-5. Tests: the store opens only with its key; no known message text or
-   attachment bytes appear in any file under the data directory (raw
-   byte scan of the database, WAL, blobs and sidecar); migration round
-   trips; a crash injected at each migration step recovers; and the
-   performance budgets (and this ADR's numbers) re-measured.
+   open cache (tmpfs on Linux, shorter lifetime), blob migration (#261).
+4. UI: the migration progress window and the key-loss recovery screen
+   (#263).
+5. Key rotation (`zmail-app rotate-key`) and the store lock (#265).
+6. Tests: an end-to-end scan of every file under the data directory for
+   known message text, attachment bytes and names, open and closed, and
+   the performance budgets re-measured. The store opening only with its
+   key, migration round trips and a crash at each migration and rotation
+   step are tested in the PRs that added them.
 
 ## Decisions
 

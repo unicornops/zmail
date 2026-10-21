@@ -287,4 +287,9 @@ medians):
 | Open reader (100 unread / 1 MB HTML / 60 attachments) | 100 ms | 7.2 / 36.4–36.6 / 11.0–11.4 ms | 4.9–5.0 / 33.3 / 9.5 ms |
 
 ADR 0005 §5 has the measurements without the connection cache and the
-store benchmarks.
+store benchmarks. Re-measured with the whole of #139 in place (encrypted
+attachment files too, `main` at cc1ab3b against the stack's last PR, two
+runs each on a busier container, load 9–20): mark read 17.8–19.3 ms
+against 34.2–36.1 ms, archive 18.7–21.1 ms against 39.1–43.1 ms, the
+scrollbar jump 11.1–12.8 ms against 12.7–13.2 ms, and every other median
+within noise of the table above.
