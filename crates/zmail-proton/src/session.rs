@@ -19,8 +19,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use tokio::sync::Mutex;
-use zmail_proton_api::{Auth, Client, ClientConfig, Error, Manager, SaltedKeyPass};
+use tokio::sync::{Mutex, OnceCell};
+use zmail_proton_api::{
+    Auth, Client, ClientConfig, Error, Manager, SaltedKeyPass, UnlockedAccount,
+};
 use zmail_security::{SecretSlot, SecretStore};
 
 /// A connected Proton account: its API client and salted key password.
@@ -28,6 +30,9 @@ pub struct ProtonSession {
     client: Client,
     key_pass: SaltedKeyPass,
     signed_out: Arc<AtomicBool>,
+    /// The unlocked user and address keys, unlocked on first use and kept
+    /// in memory only for the session's lifetime (zeroized on drop).
+    keys: OnceCell<Arc<UnlockedAccount>>,
 }
 
 impl ProtonSession {
@@ -39,6 +44,28 @@ impl ProtonSession {
     /// The salted key password that unlocks the account's keys.
     pub fn key_pass(&self) -> &SaltedKeyPass {
         &self.key_pass
+    }
+
+    /// The account's unlocked keys, unlocking them the first time.
+    ///
+    /// Unlocking is local CPU work (bcrypt was done at sign-in; this is
+    /// the OpenPGP unlock and key checks), so it runs off the async
+    /// workers.
+    pub async fn unlocked_keys(&self) -> Result<Arc<UnlockedAccount>> {
+        self.keys
+            .get_or_try_init(|| async {
+                let user = self.client.get_user().await?;
+                let addresses = self.client.get_addresses().await?;
+                let key_pass = self.key_pass.clone();
+                let account = tokio::task::spawn_blocking(move || {
+                    zmail_proton_api::unlock(&user, &addresses, &key_pass)
+                })
+                .await
+                .context("the key unlock task stopped")??;
+                anyhow::Ok(Arc::new(account))
+            })
+            .await
+            .cloned()
     }
 
     /// Whether Proton rejected the session's refresh token, so the user
@@ -144,6 +171,7 @@ impl ProtonSessions {
             client,
             key_pass,
             signed_out,
+            keys: OnceCell::new(),
         })
     }
 }

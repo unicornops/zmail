@@ -241,3 +241,35 @@ local = "crates/zmail-proton/src/mailbox.rs"
 repo = "proton-bridge"
 upstream = "internal/services/syncservice/stage_metadata.go"
 local = "crates/zmail-proton/src/sync.rs"
+
+# Hydration: full messages, attachments, decryption and the RFC 822 rebuild.
+
+[[port]]
+repo = "go-proton-api"
+upstream = "header_types.go"
+local = "crates/zmail-proton-api/src/header_types.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "attachment.go"
+local = "crates/zmail-proton-api/src/attachment.rs"
+
+[[port]]
+repo = "go-proton-api"
+upstream = "attachment_types.go"
+local = "crates/zmail-proton-api/src/attachment.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "pkg/message/decrypt.go"
+local = "crates/zmail-proton/src/message.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "pkg/message/build.go"
+local = "crates/zmail-proton/src/message.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "pkg/message/build_custom.go"
+local = "crates/zmail-proton/src/message.rs"

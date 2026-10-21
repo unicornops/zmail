@@ -462,7 +462,7 @@ impl SyncService {
         let Some(target) = self.inner.store.sync_target(account_id)? else {
             bail!("account {account_id} no longer exists");
         };
-        if target.protocol != ProtocolKind::Imap {
+        if target.protocol == ProtocolKind::Jmap {
             // JMAP delivers bodies with the sync snapshot; nothing to fetch.
             return Ok(0);
         }
@@ -478,22 +478,33 @@ impl SyncService {
             .store
             .thread_view(thread_id)?
             .with_context(|| format!("thread {thread_id} does not exist"))?;
-        let secret = self
-            .connect_secret(&target)
-            .await
-            .with_context(|| format!("missing credentials for account {account_id}"))?;
-
-        let uids = missing
-            .iter()
-            .filter_map(|(_, remote_id)| remote_id.parse::<u32>().ok())
-            .collect::<Vec<_>>();
-        let bodies =
-            zmail_imap::fetch_message_bodies(&target, &secret, &thread.mailbox_name, &uids).await?;
-
-        let mut by_uid = std::collections::HashMap::new();
-        for (uid, body) in bodies {
-            by_uid.insert(uid.to_string(), body);
-        }
+        let by_uid: std::collections::HashMap<String, zmail_core::HydratedBody> = match self
+            .connect(&target)
+            .await?
+        {
+            Credentials::Secret(secret) => {
+                let uids = missing
+                    .iter()
+                    .filter_map(|(_, remote_id)| remote_id.parse::<u32>().ok())
+                    .collect::<Vec<_>>();
+                zmail_imap::fetch_message_bodies(&target, &secret, &thread.mailbox_name, &uids)
+                    .await?
+                    .into_iter()
+                    .map(|(uid, body)| (uid.to_string(), body))
+                    .collect()
+            }
+            #[cfg(feature = "proton")]
+            Credentials::Proton(session) => {
+                let ids = missing
+                    .iter()
+                    .map(|(_, remote_id)| remote_id.clone())
+                    .collect::<Vec<_>>();
+                zmail_proton::fetch_message_bodies(&target, &session, &thread.mailbox_name, &ids)
+                    .await?
+                    .into_iter()
+                    .collect()
+            }
+        };
 
         let mut hydrated = 0;
         for (message_id, remote_id) in &missing {

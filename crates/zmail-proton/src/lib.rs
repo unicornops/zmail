@@ -7,7 +7,9 @@
 //! store is encrypted at rest (#139); `zmail-sync` only builds it with its
 //! `proton` feature, which `zmail-app` does not enable.
 
+mod hydrate;
 mod mailbox;
+mod message;
 mod session;
 mod sync;
 
@@ -20,6 +22,7 @@ use zmail_core::{
 };
 use zmail_proton_api::AddressStatus;
 
+pub use hydrate::fetch_message_bodies;
 pub use session::{ProtonSession, ProtonSessions, delete_session, has_session, store_new_session};
 pub use zmail_proton_api::{AppVersion, ClientConfig};
 

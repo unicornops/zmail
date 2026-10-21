@@ -9,13 +9,19 @@ description = "Proton Mail sync adapter for Zmail, following Proton Mail Bridge'
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 chrono.workspace = true
+rand.workspace = true
 tokio.workspace = true
 zmail-core = { path = "../zmail-core" }
+# The shared RFC 822 hydration path (sanitizer, attachment blobs).
+zmail-imap = { path = "../zmail-imap" }
 zmail-proton-api = { path = "../zmail-proton-api" }
 zmail-security = { path = "../zmail-security" }
+zeroize.workspace = true
 
 [dev-dependencies]
+mail-parser.workspace = true
 serde_json.workspace = true
 
 [lints]
