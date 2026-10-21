@@ -245,19 +245,28 @@ then shows a recovery screen instead of the workspace:
 
 **Rotation.** Two cases, both reusing the migration code below:
 
-- *Rotating the data key* (suspected compromise, or a periodic policy):
-  a new key id, the database re-encrypted by copy with `sqlcipher_export`
-  into a new file, every blob re-encrypted (the header names its key id,
-  so a crash midway leaves a mix that still opens with both keys), then
-  the swap, then the old keychain entry deleted. A user who fears their
-  old key leaked must also assume old disk images are readable;
+- *Rotating the data key* (suspected compromise, or a periodic policy),
+  `zmail-app rotate-key`: a new key goes into the keychain and the record
+  names it as `pending_key_id`; the database is copied under the new key
+  with `sqlcipher_export` and checked; every attachment file is
+  re-encrypted under the new key and a new opaque name, with the copy's
+  rows pointing at the new names; the copy is renamed over the database;
+  then the record names the new key alone, and the old key's files and
+  keychain entry are deleted. The database opens with exactly one of the
+  two keys, which tells the next start how far a crashed rotation got:
+  before the swap it is undone (the copy, the new key's files and the new
+  key go), after it it is finished. A user who fears their old key leaked
+  must also assume old disk images and backups are readable with it;
   rotation protects what is written afterwards.
 - *Changing how the key is wrapped* (adding a passphrase later) does not
   touch the data, because the data key itself doesn't change.
 
-This stack ships the format support (key ids in the sidecar and in every
-blob header) and an `zmail-app store rotate-key` command; a Settings
-button can follow.
+Rotation and migration rewrite the store's files, so they must not run
+while another process has the store open. Every open store holds a shared
+advisory lock on `<store>.lock` (`File::lock_shared`, released by the OS
+when the process ends); rotation and migration take it exclusively and
+refuse, rather than wait, when they can't. A Settings button for rotation
+can follow.
 
 ### 4. Migrating existing plaintext stores
 

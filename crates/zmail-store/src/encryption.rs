@@ -17,7 +17,10 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -25,7 +28,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags};
 use zmail_security::vault::{self, KeyId, StoreKey, StoreKeyError, StoreKeyRecord, StoreKeychain};
 
-use crate::{LocalStore, connection};
+use crate::{LocalStore, connection, lock::StoreLock};
 
 /// SQLite's plaintext file header.
 const PLAINTEXT_HEADER: &[u8; 16] = b"SQLite format 3\0";
@@ -158,6 +161,39 @@ impl LocalStore {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
+        // Encrypting and finishing a key rotation rewrite the store's files,
+        // so they run only when no other process has the store open. One
+        // that has it open has already done them.
+        let report = match StoreLock::exclusive(path)? {
+            Some(lock) => Self::prepare(path, keychain, progress, Arc::new(lock))?,
+            None => None,
+        };
+        let record = StoreKeyRecord::path_for(path);
+        let key = match vault::load_store_key(keychain, &record)? {
+            Some(key) => key,
+            None if store_file_state(path)? == StoreFileState::Encrypted => {
+                return Err(StoreOpenError::Unreadable { key_id: None });
+            }
+            None => {
+                return Err(StoreOpenError::Other(anyhow!(
+                    "another program has the mail store open; quit it and try again"
+                )));
+            }
+        };
+        let store = Self::open(path, key)?;
+        Ok((store, report))
+    }
+
+    /// The work [`LocalStore::unlock`] does under the exclusive lock: finish
+    /// or undo an interrupted key rotation, create the key of a new store,
+    /// encrypt a plaintext database, then any plaintext attachment files.
+    fn prepare(
+        path: &Path,
+        keychain: &dyn StoreKeychain,
+        progress: &(dyn Fn(MigrationProgress) + Sync),
+        lock: Arc<StoreLock>,
+    ) -> Result<Option<MigrationReport>, StoreOpenError> {
+        crate::rotation::resolve_interrupted(path, keychain)?;
         let record = StoreKeyRecord::path_for(path);
         let state = store_file_state(path)?;
         let key = match vault::load_store_key(keychain, &record)? {
@@ -173,10 +209,12 @@ impl LocalStore {
             StoreFileState::Plaintext => Some(encrypt_plaintext_store(path, &key, progress)?),
             StoreFileState::Missing | StoreFileState::Encrypted => None,
         };
-        let store = Self::open(path, key)?;
         // Also after a crash between the two steps, so whatever is still
         // plaintext gets encrypted on the next start.
+        let store = Self::open_with_lock(path.to_owned(), key, lock)?;
         let encrypted_attachments = store.encrypt_plaintext_blobs(progress)?;
+        drop(store);
+        crate::connection::close_dropped_store_connections();
         if encrypted_attachments > 0 {
             report.get_or_insert_with(|| MigrationReport {
                 plaintext_backups: plaintext_backups(path),
@@ -187,7 +225,7 @@ impl LocalStore {
             report.encrypted_attachments = encrypted_attachments;
             progress(MigrationProgress::Finished);
         }
-        Ok((store, report))
+        Ok(report)
     }
 }
 
@@ -265,7 +303,7 @@ pub(crate) fn encrypt_plaintext_store_until(
     source
         .execute_batch(&attach)
         .context("failed to create the encrypted copy")?;
-    let exported = export_with_progress(&source, &encrypting, total, progress);
+    let exported = export_with_progress(&source, "encrypted", &encrypting, total, progress);
     source
         .execute_batch("DETACH DATABASE encrypted;")
         .context("failed to close the encrypted copy")?;
@@ -309,8 +347,9 @@ pub(crate) fn encrypt_plaintext_store_until(
 
 /// Runs `sqlcipher_export` into the attached copy, reporting the copy's
 /// size from another thread while it runs.
-fn export_with_progress(
+pub(crate) fn export_with_progress(
     source: &Connection,
+    attached: &str,
     encrypting: &Path,
     total: u64,
     progress: &(dyn Fn(MigrationProgress) + Sync),
@@ -328,7 +367,7 @@ fn export_with_progress(
             }
         });
         let result = source
-            .query_row("SELECT sqlcipher_export('encrypted')", [], |_| Ok(()))
+            .query_row("SELECT sqlcipher_export(?1)", [attached], |_| Ok(()))
             .context("failed to write the encrypted copy of the store");
         done.store(true, Ordering::Relaxed);
         result
@@ -342,7 +381,7 @@ fn export_with_progress(
 
 /// Checks the encrypted copy: SQLCipher's page MACs, SQLite's structure,
 /// and every table's row count against the original.
-fn verify_copy(source: &Connection, copy: &Connection) -> Result<()> {
+pub(crate) fn verify_copy(source: &Connection, copy: &Connection) -> Result<()> {
     let mut statement = copy
         .prepare("PRAGMA cipher_integrity_check")
         .context("failed to check the encrypted copy")?;
@@ -500,7 +539,7 @@ impl LocalStore {
 }
 
 /// Whether `name` is one of the vault's opaque file names (32 hex digits).
-fn is_opaque_name(name: &str) -> bool {
+pub(crate) fn is_opaque_name(name: &str) -> bool {
     name.len() == 32
         && name
             .bytes()
@@ -599,14 +638,14 @@ pub fn move_unreadable_store_aside(path: &Path) -> Result<PathBuf> {
 }
 
 /// The database's companion file `<path><suffix>`.
-fn suffixed(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
     PathBuf::from(name)
 }
 
 /// Removes `<path>-wal`, `<path>-shm` and `<path>-journal` if present.
-fn remove_journals(path: &Path) -> Result<()> {
+pub(crate) fn remove_journals(path: &Path) -> Result<()> {
     for suffix in ["-wal", "-shm", "-journal"] {
         let journal = suffixed(path, suffix);
         match fs::remove_file(&journal) {
@@ -622,7 +661,7 @@ fn remove_journals(path: &Path) -> Result<()> {
 }
 
 /// Removes `path` and its journals: a partial copy from an interrupted run.
-fn remove_with_journals(path: &Path) -> Result<()> {
+pub(crate) fn remove_with_journals(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -633,7 +672,7 @@ fn remove_with_journals(path: &Path) -> Result<()> {
     remove_journals(path)
 }
 
-fn sync_file(path: &Path) -> Result<()> {
+pub(crate) fn sync_file(path: &Path) -> Result<()> {
     fs::File::open(path)
         .and_then(|file| file.sync_all())
         .with_context(|| format!("failed to sync {}", path.display()))
