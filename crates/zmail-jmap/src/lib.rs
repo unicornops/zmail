@@ -5,8 +5,6 @@ mod push;
 
 use std::collections::{BTreeMap, HashMap};
 
-use std::fs;
-
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use jmap_client::{
@@ -21,7 +19,7 @@ use jmap_client::{
 use serde::{Deserialize, Serialize};
 use url::Url;
 use zmail_core::{
-    AccountSyncSnapshot, AuthKind, MailboxSnapshot, MessageAttachment, MessageSnapshot,
+    AccountSyncSnapshot, AuthKind, BlobStore, MailboxSnapshot, MessageAttachment, MessageSnapshot,
     NewIdentity, OpApplyReport, OutgoingMessage, PendingOp, PendingOpKind, ProtocolKind,
     SyncTarget, ThreadSnapshot,
 };
@@ -102,7 +100,7 @@ pub async fn discover_and_sync(
             &mailbox_details,
             existing_mailboxes,
             &primary,
-            &target.attachments_dir,
+            &target.blobs,
         )
         .await?
         {
@@ -152,7 +150,7 @@ pub async fn discover_and_sync(
         });
     }
 
-    let emails = fetch_emails(&client, &email_query.ids, &target.attachments_dir).await?;
+    let emails = fetch_emails(&client, &email_query.ids, &target.blobs).await?;
     let mailboxes = group_mailboxes(mailbox_details, emails, &identities, &target.username);
 
     Ok(AccountSyncSnapshot {
@@ -683,9 +681,8 @@ fn search_filter<Tz: chrono::TimeZone>(
 pub(crate) async fn fetch_emails(
     client: &Client,
     ids: &[String],
-    attachments_dir: &str,
+    blobs: &BlobStore,
 ) -> Result<Vec<JmapEmail>> {
-    let attachments_dir = std::path::PathBuf::from(attachments_dir);
     let mut emails = Vec::with_capacity(ids.len());
     let properties = vec![
         Property::Id,
@@ -730,7 +727,7 @@ pub(crate) async fn fetch_emails(
 
             let (body_text, sanitized_html, has_remote_content, hydrated_preview) =
                 extract_renderable_bodies(&email);
-            let attachments = download_attachments(client, &email, &id, &attachments_dir).await;
+            let attachments = download_attachments(client, &email, &id, blobs).await;
             emails.push(JmapEmail {
                 id,
                 thread_id,
@@ -772,13 +769,13 @@ async fn download_attachments(
     client: &Client,
     email: &jmap_client::email::Email,
     email_id: &str,
-    attachments_dir: &std::path::Path,
+    blobs: &BlobStore,
 ) -> Vec<MessageAttachment> {
     let mut attachments = Vec::new();
     let Some(parts) = email.attachments() else {
         return attachments;
     };
-    if parts.is_empty() || !ensure_blob_directory(attachments_dir) {
+    if parts.is_empty() {
         return attachments;
     }
 
@@ -808,10 +805,11 @@ async fn download_attachments(
             "incoming-jmap-{email_id}-{index}-{}",
             sanitize_component(&filename)
         );
-        let storage_path = attachments_dir.join(&storage_name);
-        if fs::write(&storage_path, &contents).is_err() {
+        // The blob store encrypts the part (ADR 0005); a failed write skips
+        // it rather than failing the sync.
+        let Ok(storage_path) = blobs.write(&storage_name, &contents) else {
             continue;
-        }
+        };
         attachments.push(MessageAttachment {
             filename,
             content_type: part
@@ -819,18 +817,11 @@ async fn download_attachments(
                 .map(str::to_owned)
                 .unwrap_or_else(|| "application/octet-stream".to_owned()),
             size_bytes: contents.len() as u64,
-            storage_path: storage_name,
+            storage_path,
         });
     }
 
     attachments
-}
-
-/// Creates the blob directory when it is missing, reporting whether it is
-/// usable; without a writable directory the sync must not fail, the
-/// attachment parts are simply not kept.
-fn ensure_blob_directory(attachments_dir: &std::path::Path) -> bool {
-    attachments_dir.is_dir() || fs::create_dir_all(attachments_dir).is_ok()
 }
 
 /// Restricts a filename-derived path component to safe characters.

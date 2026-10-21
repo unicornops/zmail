@@ -29,6 +29,9 @@ rust-version = "1.98"
 version = "0.0.1"
 
 [workspace.dependencies]
+# AES-256-GCM in STREAM chunks for the store's attachment files (ADR 0005);
+# already in the tree through pgp, which doesn't use `stream`.
+aes-gcm = { version = "0.10.3", features = ["stream"] }
 anyhow = "1"
 async-imap = { version = "0.11.2", default-features = false, features = ["runtime-tokio"] }
 base64 = "0.22.1"
@@ -46,6 +49,9 @@ hickory-resolver = { version = "0.26.3", default-features = false, features = ["
 # HKDF-SHA256 for the store key's subkeys (ADR 0005); already in the tree
 # through pgp.
 hkdf = "0.12.4"
+# HMAC-SHA256 for the store's opaque attachment file names (ADR 0005);
+# already in the tree through pgp.
+hmac = "0.12.1"
 jmap-client = { version = "0.4.0", default-features = false, features = ["async", "rustls"] }
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 # DKIM signing is the sending server's job; leaving out mail-send's default `dkim`

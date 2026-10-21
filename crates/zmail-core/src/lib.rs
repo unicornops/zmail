@@ -534,6 +534,44 @@ pub struct AccountOverview {
     pub cache_policy: CachePolicySummary,
 }
 
+/// Writes attachment blobs for the sync adapters. The store implements it
+/// with its encrypted files (ADR 0005), so an adapter never writes a
+/// received attachment to disk itself.
+pub trait BlobWriter: Send + Sync + fmt::Debug {
+    /// Stores `contents` under the adapter's `logical_name` (which may
+    /// carry a mailbox or a filename: it never reaches the disk), replacing
+    /// an earlier blob with the same name, and returns the storage name
+    /// to record in [`MessageAttachment::storage_path`].
+    fn write_blob(&self, logical_name: &str, contents: &[u8]) -> std::io::Result<String>;
+
+    /// Where the blobs live, for equality and diagnostics.
+    fn location(&self) -> &std::path::Path;
+}
+
+/// A shared [`BlobWriter`], carried in a [`SyncTarget`].
+#[derive(Debug, Clone)]
+pub struct BlobStore(std::sync::Arc<dyn BlobWriter>);
+
+impl BlobStore {
+    /// Wraps a writer.
+    pub fn new(writer: std::sync::Arc<dyn BlobWriter>) -> Self {
+        Self(writer)
+    }
+
+    /// Stores `contents` under `logical_name`; see [`BlobWriter::write_blob`].
+    pub fn write(&self, logical_name: &str, contents: &[u8]) -> std::io::Result<String> {
+        self.0.write_blob(logical_name, contents)
+    }
+}
+
+impl PartialEq for BlobStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.location() == other.0.location()
+    }
+}
+
+impl Eq for BlobStore {}
+
 /// Immutable sync target assembled from the local store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncTarget {
@@ -553,9 +591,9 @@ pub struct SyncTarget {
     pub cache_policy: CachePolicySummary,
     /// Configured identities.
     pub identities: Vec<IdentitySummary>,
-    /// Absolute path of the store's attachments directory, where sync
-    /// adapters persist received attachment blobs.
-    pub attachments_dir: String,
+    /// Where sync adapters persist received attachment blobs: the store's
+    /// encrypted attachment files.
+    pub blobs: BlobStore,
     /// Previous checkpoint token for incremental sync.
     pub checkpoint: Option<String>,
     /// OAuth2 client configuration for accounts that authenticate with

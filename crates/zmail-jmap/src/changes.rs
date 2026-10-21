@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use jmap_client::{client::Client, core::response::EmailGetResponse, email::Property};
-use zmail_core::{MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
+use zmail_core::{BlobStore, MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
 
 use crate::{JmapMailbox, QUERY_PAGE_SIZE, fetch_emails, message_snapshot};
 
@@ -43,7 +43,7 @@ pub(crate) async fn sync_email_changes(
     details: &[JmapMailbox],
     existing: &[MailboxSnapshot],
     primary_identity: &str,
-    attachments_dir: &str,
+    blobs: &BlobStore,
 ) -> Result<Option<IncrementalSync>> {
     let Some(by_id) = mailboxes_by_id(previous_mailbox_ids, existing) else {
         return Ok(None);
@@ -81,7 +81,7 @@ pub(crate) async fn sync_email_changes(
             None => full_ids.push(update.id),
         }
     }
-    for email in fetch_emails(client, &full_ids, attachments_dir).await? {
+    for email in fetch_emails(client, &full_ids, blobs).await? {
         placed.push(PlacedEmail {
             message: message_snapshot(&email, primary_identity),
             thread_id: email.thread_id,

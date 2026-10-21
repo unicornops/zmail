@@ -1806,6 +1806,9 @@ fn open_store() -> Result<LocalStore> {
             eprint!("\rEncrypting the mail store: {percent}%");
         }
         MigrationProgress::Verifying => eprint!("\rEncrypting the mail store: checking the copy"),
+        MigrationProgress::Attachments { done, total } => {
+            eprint!("\rEncrypting attachments: {done} of {total}          ");
+        }
         MigrationProgress::Finished => eprintln!("\rEncrypting the mail store: done.            "),
     };
     match LocalStore::unlock(&path, &KeyringSecretStore, &progress) {

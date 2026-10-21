@@ -13,8 +13,6 @@
 //!    message is stored the way Bridge presents it (the armored ciphertext
 //!    with a note), so it counts as hydrated and stays as it is.
 
-use std::path::PathBuf;
-
 use anyhow::{Context, Result, bail};
 use zmail_core::{HydratedBody, ProtocolKind, SyncTarget};
 use zmail_proton_api::Message;
@@ -58,7 +56,10 @@ pub async fn fetch_message_bodies(
     }
 
     let mailbox_name = mailbox_name.to_owned();
-    let attachments_dir = PathBuf::from(&target.attachments_dir);
+    // Attachments are written through the store's blob store, which
+    // encrypts them (ADR 0005): decrypted Proton mail never sits on disk in
+    // plaintext.
+    let blobs = target.blobs.clone();
     tokio::task::spawn_blocking(move || {
         downloaded
             .into_iter()
@@ -71,7 +72,7 @@ pub async fn fetch_message_bodies(
                     &raw,
                     &mailbox_name,
                     &storage_id(&id),
-                    &attachments_dir,
+                    &blobs,
                 )
                 .unwrap_or_else(undecryptable_body);
                 (id, body)

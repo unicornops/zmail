@@ -1,12 +1,16 @@
 //! Opening and saving received attachments: the workspace's handlers for
 //! the attachment cards' Open and Save As buttons and for Save All.
 //!
-//! - **Open** copies the attachment into a private cache directory (owner
+//! - **Open** decrypts the attachment into a private cache directory (owner
 //!   only on macOS and Linux) and hands it to the system's default app. A
 //!   program or script, or a web page or SVG that would run scripts in the
 //!   browser (`attachment_safety::open_risk`), gets a warning first, and
-//!   opens only on "Open Anyway". Copies older than a day are removed when
-//!   the window opens ([`prune_open_cache`]).
+//!   opens only on "Open Anyway". The other app can only read a plaintext
+//!   file, so the copy is kept short-lived (ADR 0005 §2): on Linux the
+//!   cache is in `$XDG_RUNTIME_DIR`, a per-user RAM file system; copies
+//!   older than an hour are removed while Zmail runs
+//!   ([`prune_open_cache`]), and the whole cache when it quits and again
+//!   when the window opens.
 //! - **Save As** asks for a path with the platform save dialog, which
 //!   itself asks before replacing an existing file.
 //! - **Save All** ([`SaveAttachments`](crate::actions::SaveAttachments)
@@ -14,7 +18,8 @@
 //!   asks for a folder and saves every attachment there. A name that is taken gets a number ("report (1).pdf"); no
 //!   file is ever overwritten.
 //!
-//! Every name written to disk goes through
+//! The stored attachments are encrypted; every copy here is decrypted from
+//! them. Every name written to disk goes through
 //! `attachment_safety::sanitize_filename` first. The copies run on the
 //! background executor.
 
@@ -25,22 +30,28 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Context, IntoElement, PathPromptOptions, SharedString, Window, div, prelude::*,
+    AnyElement, App, Context, IntoElement, PathPromptOptions, SharedString, Subscription, Window,
+    div, prelude::*,
 };
 use zmail_core::{ReceivedAttachment, text::count_noun};
 use zmail_security::attachment_safety::{OpenRisk, open_risk, sanitize_filename};
+use zmail_store::AttachmentBlob;
 
 use crate::WorkspaceView;
 use crate::actions::{OpenAttachment, SaveAttachmentAs, SaveMessageAttachments};
 use crate::components::{Button, Modal, ModalState};
 
-/// Directory under the store's directory that opened attachments are
-/// copied into.
+/// Directory that opened attachments are decrypted into, under
+/// `$XDG_RUNTIME_DIR/zmail` on Linux and the store's directory elsewhere.
 const OPEN_CACHE_DIR: &str = "opened-attachments";
 
-/// How long an opened copy stays in the open cache: the app it was handed
-/// to has long finished reading it by then.
-const OPEN_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long an opened copy stays in the open cache while Zmail runs: the
+/// app it was handed to has read it by then, and the plaintext should not
+/// outlive that by much.
+const OPEN_CACHE_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// How often the open cache is pruned while Zmail runs.
+const OPEN_CACHE_PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// How many numbered names Save All tries before giving up on a file.
 const MAX_NUMBERED_NAMES: u32 = 999;
@@ -54,6 +65,8 @@ pub(crate) struct AttachmentState {
     /// The folder of the last Save As or Save All, where the next Save As
     /// dialog starts.
     last_save_dir: Option<PathBuf>,
+    /// Empties the open cache when the app quits.
+    _quit_subscription: Option<Subscription>,
     /// Test instrumentation: the files handed to the system to open. (The
     /// test platform cannot open files.)
     #[cfg(test)]
@@ -66,6 +79,7 @@ impl AttachmentState {
             open_warning: ModalState::new(cx),
             pending_open: None,
             last_save_dir: None,
+            _quit_subscription: None,
             #[cfg(test)]
             opened: Vec::new(),
         }
@@ -122,18 +136,15 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Copies the attachment into the private cache and opens it with the
-    /// system's default app.
+    /// Decrypts the attachment into the private cache and opens it with
+    /// the system's default app.
     fn open_attachment_now(&mut self, attachment: &ReceivedAttachment, cx: &mut Context<Self>) {
-        let (source, filename) = match self.store.attachment_blob(attachment.id) {
+        let blob = match self.store.attachment_blob(attachment.id) {
             Ok(blob) => blob,
             Err(error) => return self.show_error(format!("{error:#}"), cx),
         };
-        let cache_root = self.store_dir().join(OPEN_CACHE_DIR);
-        let attachment_id = attachment.id;
-        let copy = cx.background_spawn(async move {
-            copy_to_open_cache(&source, &cache_root, attachment_id, &filename)
-        });
+        let cache_root = self.open_cache_root();
+        let copy = cx.background_spawn(async move { copy_to_open_cache(&blob, &cache_root) });
         cx.spawn(async move |this, cx| {
             let result = copy.await;
             let _ = this.update(cx, |view, cx| match result {
@@ -164,7 +175,7 @@ impl WorkspaceView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (source, filename) = match self.store.attachment_blob(action.attachment_id) {
+        let blob = match self.store.attachment_blob(action.attachment_id) {
             Ok(blob) => blob,
             Err(error) => return self.show_error(format!("{error:#}"), cx),
         };
@@ -173,7 +184,7 @@ impl WorkspaceView {
             .last_save_dir
             .clone()
             .unwrap_or_else(default_save_dir);
-        let suggested = sanitize_filename(&filename);
+        let suggested = sanitize_filename(blob.filename());
         let prompt = cx.prompt_for_new_path(&directory, Some(&suggested));
         cx.spawn(async move |this, cx| {
             let destination = match prompt.await {
@@ -189,7 +200,7 @@ impl WorkspaceView {
             // The save dialog has already asked before replacing a file.
             let target = destination.clone();
             let result = cx
-                .background_spawn(async move { fs::copy(&source, &target).map(|_| ()) })
+                .background_spawn(async move { blob.save_to(&target).map(|_| ()) })
                 .await;
             let _ = this.update(cx, |view, cx| match result {
                 Ok(()) => {
@@ -197,7 +208,7 @@ impl WorkspaceView {
                     view.show_status(format!("Saved {}.", destination.display()), cx);
                 }
                 Err(error) => view.show_error(
-                    format!("Could not save {}: {error}", destination.display()),
+                    format!("Could not save {}: {error:#}", destination.display()),
                     cx,
                 ),
             });
@@ -267,9 +278,13 @@ impl WorkspaceView {
                 .background_spawn(async move {
                     files
                         .iter()
-                        .map(|(source, filename)| {
-                            copy_to_unique_path(source, &target, &sanitize_filename(filename))
-                                .map_err(|error| format!("{filename}: {error}"))
+                        .map(|blob| {
+                            copy_to_unique_path(
+                                |destination| save_new(blob, destination),
+                                &target,
+                                &sanitize_filename(blob.filename()),
+                            )
+                            .map_err(|error| format!("{}: {error}", blob.filename()))
                         })
                         .collect::<Vec<_>>()
                 })
@@ -303,18 +318,60 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// Removes opened copies older than a day from the open cache, in the
-    /// background. Called once when the window opens.
-    pub(crate) fn prune_open_cache_later(&self, cx: &mut Context<Self>) {
-        let cache_root = self.store_dir().join(OPEN_CACHE_DIR);
+    /// Keeps the open cache short-lived. Called once when the window
+    /// opens: removes every copy left from an earlier run, then removes
+    /// copies older than [`OPEN_CACHE_MAX_AGE`] every
+    /// [`OPEN_CACHE_PRUNE_INTERVAL`], and the whole cache when the app
+    /// quits.
+    pub(crate) fn prune_open_cache_later(&mut self, cx: &mut Context<Self>) {
+        let cache_root = self.open_cache_root();
+        let startup_root = cache_root.clone();
         cx.background_spawn(async move {
-            let cutoff = SystemTime::now()
-                .checked_sub(OPEN_CACHE_MAX_AGE)
-                .unwrap_or(SystemTime::UNIX_EPOCH);
             // A failed prune leaves files behind; it never blocks opening.
-            let _ = prune_open_cache(&cache_root, cutoff);
+            let _ = prune_open_cache(&startup_root, SystemTime::now());
         })
         .detach();
+
+        let periodic_root = cache_root.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(OPEN_CACHE_PRUNE_INTERVAL)
+                    .await;
+                if this.upgrade().is_none() {
+                    break;
+                }
+                let root = periodic_root.clone();
+                cx.background_spawn(async move {
+                    let cutoff = SystemTime::now()
+                        .checked_sub(OPEN_CACHE_MAX_AGE)
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    let _ = prune_open_cache(&root, cutoff);
+                })
+                .await;
+            }
+        })
+        .detach();
+
+        self.attachments._quit_subscription = Some(cx.on_app_quit(move |_, _| {
+            let _ = fs::remove_dir_all(&cache_root);
+            async {}
+        }));
+    }
+
+    /// Where opened attachments are decrypted to. Tests keep the cache
+    /// beside their ephemeral store, away from the user's runtime directory.
+    fn open_cache_root(&self) -> PathBuf {
+        let runtime_dir = if cfg!(test) {
+            None
+        } else {
+            std::env::var_os("XDG_RUNTIME_DIR")
+        };
+        open_cache_root(
+            &self.store_dir(),
+            runtime_dir,
+            &self.store.store_key().id().to_string(),
+        )
     }
 
     /// The warning shown before opening a program, a script, or a web page
@@ -386,26 +443,51 @@ fn default_save_dir() -> PathBuf {
     }
 }
 
-/// Copies `source` to `<cache_root>/<attachment_id>/<sanitised name>` and
-/// returns that path. The cache directories are created owner-only on
-/// Unix, and an earlier copy of the same attachment is replaced.
-pub(crate) fn copy_to_open_cache(
-    source: &Path,
-    cache_root: &Path,
-    attachment_id: i64,
-    filename: &str,
-) -> io::Result<PathBuf> {
-    let directory = cache_root.join(attachment_id.to_string());
-    create_private_dir(cache_root)?;
-    create_private_dir(&directory)?;
-    let destination = directory.join(sanitize_filename(filename));
-    match fs::remove_file(&destination) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+/// The open cache for the store in `store_dir`: in the per-user RAM file
+/// system `$XDG_RUNTIME_DIR` on Linux when there is one, so the plaintext
+/// copies never reach the disk (apart from swap), and beside the store
+/// elsewhere. In the runtime directory each store (named by its key id)
+/// has its own cache, so one store's pruning never touches another's.
+fn open_cache_root(
+    store_dir: &Path,
+    runtime_dir: Option<std::ffi::OsString>,
+    store_id: &str,
+) -> PathBuf {
+    if cfg!(target_os = "linux")
+        && let Some(runtime_dir) = runtime_dir.map(PathBuf::from)
+        && runtime_dir.is_absolute()
+        && runtime_dir.is_dir()
+    {
+        return runtime_dir
+            .join("zmail")
+            .join(store_id)
+            .join(OPEN_CACHE_DIR);
     }
-    copy_new(source, &destination)?;
+    store_dir.join(OPEN_CACHE_DIR)
+}
+
+/// Decrypts `blob` to `<cache_root>/<random>/<sanitised name>` and returns
+/// that path. The directories are created owner-only on Unix; the random
+/// directory name keeps the path unguessable and each open separate.
+pub(crate) fn copy_to_open_cache(blob: &AttachmentBlob, cache_root: &Path) -> io::Result<PathBuf> {
+    create_private_dir(cache_root)?;
+    let directory = cache_root.join(zmail_security::vault::random_hex(8));
+    create_private_dir(&directory)?;
+    let destination = directory.join(sanitize_filename(blob.filename()));
+    save_new(blob, &destination)?;
     Ok(destination)
+}
+
+/// Decrypts `blob` to a new file at `destination`, failing with
+/// `AlreadyExists` if anything is there.
+fn save_new(blob: &AttachmentBlob, destination: &Path) -> io::Result<()> {
+    blob.save_new(destination).map(|_| ()).map_err(|error| {
+        let kind = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<io::Error>())
+            .map_or(io::ErrorKind::Other, io::Error::kind);
+        io::Error::new(kind, format!("{error:#}"))
+    })
 }
 
 /// The open warning's explanation for a file of `risk`.
@@ -470,17 +552,19 @@ fn create_private_dir(directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Copies `source` into `directory` as `filename`, or the first free
-/// numbered name ("report (1).pdf", "report (2).pdf", …). Returns the path
-/// written. Never replaces an existing file, even one created meanwhile.
+/// Writes a file into `directory` as `filename`, or the first free
+/// numbered name ("report (1).pdf", "report (2).pdf", …), with `write_new`,
+/// which must fail with `AlreadyExists` when its destination exists.
+/// Returns the path written. Never replaces an existing file, even one
+/// created meanwhile.
 pub(crate) fn copy_to_unique_path(
-    source: &Path,
+    write_new: impl Fn(&Path) -> io::Result<()>,
     directory: &Path,
     filename: &str,
 ) -> io::Result<PathBuf> {
     for number in 0..=MAX_NUMBERED_NAMES {
         let destination = directory.join(numbered_name(filename, number));
-        match copy_new(source, &destination) {
+        match write_new(&destination) {
             Ok(()) => return Ok(destination),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
@@ -504,22 +588,6 @@ fn numbered_name(filename: &str, number: u32) -> String {
     }
 }
 
-/// Copies `source` to a new file at `destination`, failing with
-/// `AlreadyExists` if anything is there.
-fn copy_new(source: &Path, destination: &Path) -> io::Result<()> {
-    let mut input = fs::File::open(source)?;
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)?;
-    if let Err(error) = io::copy(&mut input, &mut output) {
-        drop(output);
-        let _ = fs::remove_file(destination);
-        return Err(error);
-    }
-    output.sync_all()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,21 +601,35 @@ mod tests {
             .expect("the modification time is set");
     }
 
+    /// A copy in the open cache, as [`copy_to_open_cache`] lays it out.
+    fn cached_copy(cache: &Path, directory: &str, name: &str) -> PathBuf {
+        let directory = cache.join(directory);
+        fs::create_dir_all(&directory).expect("the copy's directory is created");
+        let path = directory.join(name);
+        fs::write(&path, b"pdf").expect("the copy is written");
+        path
+    }
+
     #[test]
     fn pruning_removes_only_copies_older_than_the_cutoff() {
         let root = scratch("prune");
-        let source = root.join("source.pdf");
-        fs::write(&source, b"pdf").expect("the source is written");
         let cache = root.join(OPEN_CACHE_DIR);
-        let old = copy_to_open_cache(&source, &cache, 1, "old.pdf").expect("old copy");
-        let fresh = copy_to_open_cache(&source, &cache, 2, "fresh.pdf").expect("fresh copy");
-        age_file(&old, Duration::from_secs(2 * 24 * 60 * 60));
+        let old = cached_copy(&cache, "a1", "old.pdf");
+        let fresh = cached_copy(&cache, "b2", "fresh.pdf");
+        age_file(&old, Duration::from_secs(2 * 60 * 60));
 
         let cutoff = SystemTime::now() - OPEN_CACHE_MAX_AGE;
         assert_eq!(prune_open_cache(&cache, cutoff).expect("prune"), 1);
         assert!(!old.exists());
-        assert!(!cache.join("1").exists());
+        assert!(!cache.join("a1").exists());
         assert!(fresh.exists());
+
+        // At startup everything left from the last run goes.
+        assert_eq!(
+            prune_open_cache(&cache, SystemTime::now() + Duration::from_secs(1)).expect("prune"),
+            1
+        );
+        assert!(!fresh.exists());
 
         assert_eq!(
             prune_open_cache(&root.join("missing"), cutoff).expect("a missing cache"),
@@ -582,16 +664,49 @@ mod tests {
     }
 
     #[test]
+    fn the_open_cache_is_in_the_runtime_dir_on_linux_one_per_store() {
+        let dir = scratch("cache-root");
+        let store_dir = dir.join("store");
+        let runtime = dir.join("run");
+        fs::create_dir_all(&runtime).expect("the runtime dir is created");
+
+        let root = open_cache_root(&store_dir, Some(runtime.clone().into()), "abc");
+        if cfg!(target_os = "linux") {
+            assert_eq!(root, runtime.join("zmail").join("abc").join(OPEN_CACHE_DIR));
+        } else {
+            assert_eq!(root, store_dir.join(OPEN_CACHE_DIR));
+        }
+        assert_eq!(
+            open_cache_root(&store_dir, None, "abc"),
+            store_dir.join(OPEN_CACHE_DIR)
+        );
+        assert_eq!(
+            open_cache_root(&store_dir, Some("relative".into()), "abc"),
+            store_dir.join(OPEN_CACHE_DIR),
+            "a relative runtime dir is not trusted"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Writes "new" to a new file, as [`save_new`] does with a blob.
+    fn write_new(destination: &Path) -> io::Result<()> {
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)?
+            .write_all(b"new")
+    }
+
+    #[test]
     fn saving_never_overwrites_an_existing_file() {
         let dir = scratch("unique");
-        let source = dir.join("blob");
-        fs::write(&source, b"new").expect("the source is written");
         let folder = dir.join("out");
         fs::create_dir_all(&folder).expect("the folder is created");
         fs::write(folder.join("report.pdf"), b"old").expect("the existing file is written");
 
-        let first = copy_to_unique_path(&source, &folder, "report.pdf").expect("saves");
-        let second = copy_to_unique_path(&source, &folder, "report.pdf").expect("saves");
+        let first = copy_to_unique_path(write_new, &folder, "report.pdf").expect("saves");
+        let second = copy_to_unique_path(write_new, &folder, "report.pdf").expect("saves");
         assert_eq!(first, folder.join("report (1).pdf"));
         assert_eq!(second, folder.join("report (2).pdf"));
         assert_eq!(fs::read(folder.join("report.pdf")).expect("reads"), b"old");
@@ -602,23 +717,98 @@ mod tests {
     #[test]
     fn the_open_cache_is_private_and_keeps_names_inside_it() {
         let dir = scratch("cache");
-        let source = dir.join("blob");
-        fs::write(&source, b"payload").expect("the source is written");
+        let store = zmail_store::LocalStore::open_ephemeral().expect("the store opens");
+        let account_id = store
+            .create_demo_account(zmail_core::ProtocolKind::Imap)
+            .expect("the account is created");
+        let target = store
+            .sync_target(account_id)
+            .expect("the target loads")
+            .expect("the account exists");
+        let storage_path = target
+            .blobs
+            .write("payload", b"payload")
+            .expect("the blob is written");
+        let mut snapshot = zmail_core::AccountSyncSnapshot {
+            checkpoint: "test".to_owned(),
+            detail: "test".to_owned(),
+            identities: None,
+            mailboxes: Vec::new(),
+        };
+        snapshot.mailboxes.push(zmail_core::MailboxSnapshot {
+            name: "Inbox".to_owned(),
+            role: Some("inbox".to_owned()),
+            threads: vec![zmail_core::ThreadSnapshot {
+                remote_thread_id: "t".to_owned(),
+                subject: "s".to_owned(),
+                participants: "p".to_owned(),
+                preview: "p".to_owned(),
+                is_flagged: false,
+                has_attachments: true,
+                unread_count: 0,
+                latest_message_at: "2026-03-24T09:00:00Z".to_owned(),
+                messages: vec![zmail_core::MessageSnapshot {
+                    remote_id: "m".to_owned(),
+                    identity_email: "me@example.test".to_owned(),
+                    sender: "a@example.test".to_owned(),
+                    reply_to: None,
+                    recipients: "me@example.test".to_owned(),
+                    subject: "s".to_owned(),
+                    body_preview: "p".to_owned(),
+                    body_text: Some("p".to_owned()),
+                    sanitized_html: None,
+                    has_remote_content: false,
+                    is_read: true,
+                    is_flagged: false,
+                    received_at: "2026-03-24T09:00:00Z".to_owned(),
+                    attachments: vec![zmail_core::MessageAttachment {
+                        filename: "../../escape.txt".to_owned(),
+                        content_type: "text/plain".to_owned(),
+                        size_bytes: 7,
+                        storage_path,
+                    }],
+                }],
+            }],
+            ..Default::default()
+        });
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("the snapshot applies");
+        let thread = store.list_all_mailboxes().expect("mailboxes")[0].id;
+        let thread = store.list_threads(thread, 0..1).expect("threads")[0].id;
+        let attachment = store
+            .thread_view(thread)
+            .expect("the thread loads")
+            .expect("the thread exists")
+            .messages[0]
+            .attachments[0]
+            .id;
+        let blob = store.attachment_blob(attachment).expect("the blob loads");
         let cache = dir.join(OPEN_CACHE_DIR);
 
-        let path = copy_to_open_cache(&source, &cache, 7, "../../escape.txt").expect("copies");
-        assert_eq!(path, cache.join("7").join("_.._escape.txt"));
+        let path = copy_to_open_cache(&blob, &cache).expect("copies");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("_.._escape.txt")
+        );
+        assert_eq!(path.parent().and_then(Path::parent), Some(cache.as_path()));
         assert_eq!(fs::read(&path).expect("reads"), b"payload");
-        // Opening again replaces the cached copy.
-        fs::write(&source, b"updated").expect("the source is rewritten");
-        let again = copy_to_open_cache(&source, &cache, 7, "../../escape.txt").expect("copies");
-        assert_eq!(again, path);
-        assert_eq!(fs::read(&path).expect("reads"), b"updated");
+        // Each open gets its own unguessable directory.
+        let again = copy_to_open_cache(&blob, &cache).expect("copies");
+        assert_ne!(again.parent(), path.parent());
+        assert_eq!(
+            path.parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .map(str::len),
+            Some(16)
+        );
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            for directory in [&cache, &cache.join("7")] {
+            let copy_dir = path.parent().expect("the copy has a directory");
+            for directory in [cache.as_path(), copy_dir] {
                 let mode = fs::metadata(directory).expect("stat").permissions().mode();
                 assert_eq!(mode & 0o777, 0o700, "{}", directory.display());
             }
