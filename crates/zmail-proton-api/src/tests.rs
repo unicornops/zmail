@@ -76,6 +76,16 @@ impl Reply {
         }
     }
 
+    /// Closes the connection after reading the request, without
+    /// answering (a connection dropped mid-request).
+    fn drop_connection() -> Self {
+        Self {
+            status: 0,
+            headers: Vec::new(),
+            body: String::new(),
+        }
+    }
+
     fn with_header(mut self, name: &'static str, value: &str) -> Self {
         self.headers.push((name, value.to_owned()));
         self
@@ -196,6 +206,9 @@ where
         all.len() - 1
     };
     let reply = handler(&request, index);
+    if reply.status == 0 {
+        return;
+    }
     let mut response = format!(
         "HTTP/1.1 {} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nDate: Tue, 20 Oct 2026 10:00:00 GMT\r\n",
         reply.status,
@@ -981,4 +994,60 @@ async fn null_fields_decode_to_their_defaults_as_in_go() {
     assert_eq!(message.to_list.len(), 1);
     assert!(message.cc_list.is_empty());
     assert_eq!(message.time, 0);
+}
+
+#[tokio::test]
+async fn retries_a_dropped_message_listing_but_not_a_dropped_post() {
+    // Message listing is a POST carrying `X-HTTP-Method-Override: GET`;
+    // 0.16.3's first sync failed when Proton dropped one mid-request.
+    let server = MockServer::start(|request, index| match (request.path.as_str(), index) {
+        ("/mail/v4/messages", 0) => Reply::drop_connection(),
+        ("/mail/v4/messages", _) => {
+            Reply::json(200, serde_json::json!({"Code": 1000, "Messages": []}))
+        }
+        _ => Reply::drop_connection(),
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+
+    let page = client
+        .get_message_metadata_page(0, 128, &crate::MessageFilter::default())
+        .await
+        .expect("listing after a dropped connection");
+    assert!(page.is_empty());
+    assert_eq!(server.requests().len(), 2);
+
+    // A plain POST is not repeated: it could create or send something twice.
+    let request = Request::post("/core/v4/something")
+        .json(&serde_json::json!({}))
+        .expect("body");
+    let error = manager.send(&request, None).await.expect_err("dropped");
+    assert!(error.is_network(), "{error:?}");
+    assert_eq!(server.requests().len(), 3);
+    // The message carries the cause, not only reqwest's summary.
+    let message = error.to_string();
+    assert!(
+        message.starts_with("could not reach Proton: error sending request"),
+        "{message}"
+    );
+    assert!(message.matches(": ").count() >= 2, "{message}");
+}
+
+#[test]
+fn idempotent_requests_are_the_ones_safe_to_repeat() {
+    assert!(Request::get("/x").is_idempotent());
+    assert!(Request::put("/x").is_idempotent());
+    assert!(Request::delete("/x").is_idempotent());
+    assert!(!Request::post("/x").is_idempotent());
+    assert!(
+        Request::post("/x")
+            .header(crate::manager::METHOD_OVERRIDE_HEADER, "GET")
+            .is_idempotent()
+    );
+    assert!(
+        !Request::post("/x")
+            .header(crate::manager::METHOD_OVERRIDE_HEADER, "DELETE")
+            .is_idempotent()
+    );
 }

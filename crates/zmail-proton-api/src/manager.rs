@@ -44,6 +44,8 @@ use crate::{
 pub(crate) const APP_VERSION_HEADER: &str = "x-pm-appversion";
 /// Header carrying the session UID.
 pub(crate) const UID_HEADER: &str = "x-pm-uid";
+/// Header that turns a `POST` into the method it names.
+pub(crate) const METHOD_OVERRIDE_HEADER: &str = "X-HTTP-Method-Override";
 
 /// Whether the API is reachable (go-proton-api's `Status`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +167,13 @@ impl Manager {
 
     /// Sends a request, retrying 429/503 responses and connection errors,
     /// and turns error responses into [`Error`]s.
+    ///
+    /// go-proton-api retries every request that got no response
+    /// (`catchDialError`). Zmail retries a request that got no response
+    /// only if it is safe to repeat ([`Request::is_idempotent`]); any
+    /// request is retried when the connection could not be opened, since
+    /// nothing was sent. A dropped `POST` that creates or sends something
+    /// is reported instead, so it is never done twice.
     pub(crate) async fn send(
         &self,
         request: &Request,
@@ -189,7 +198,7 @@ impl Manager {
                 }
                 Err(Error::Network(error))
                     if attempt < policy.max_retries
-                        && (error.is_connect() || request.method == Method::GET) =>
+                        && (error.is_connect() || request.is_idempotent()) =>
                 {
                     Some(policy.backoff_delay(attempt))
                 }
@@ -365,6 +374,17 @@ impl Request {
 
     pub(crate) fn delete(path: impl Into<String>) -> Self {
         Self::new(Method::DELETE, path)
+    }
+
+    /// Whether sending the request twice does no more than sending it
+    /// once: `GET`, `PUT` and `DELETE`, and a `POST` that is a `GET` sent
+    /// with `X-HTTP-Method-Override` (message listing, which carries its
+    /// filter in a body).
+    pub(crate) fn is_idempotent(&self) -> bool {
+        matches!(self.method, Method::GET | Method::PUT | Method::DELETE)
+            || self.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case(METHOD_OVERRIDE_HEADER) && value == "GET"
+            })
     }
 
     /// Adds a header.

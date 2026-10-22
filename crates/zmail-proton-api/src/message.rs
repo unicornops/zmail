@@ -20,8 +20,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    attachment::Attachment, boolean::api_bool, client::Client, header_types::Headers,
-    label::STARRED_LABEL, manager::Request, response::Error,
+    attachment::Attachment,
+    boolean::api_bool,
+    client::Client,
+    header_types::Headers,
+    label::STARRED_LABEL,
+    manager::{METHOD_OVERRIDE_HEADER, Request},
+    response::Error,
 };
 
 /// An email address as the API sends it (Go's `mail.Address`).
@@ -382,7 +387,7 @@ impl Client {
             stale: bool,
         }
         let request = Request::post("/mail/v4/messages")
-            .header("X-HTTP-Method-Override", "GET")
+            .header(METHOD_OVERRIDE_HEADER, "GET")
             .json(&Req {
                 filter,
                 page,
@@ -413,7 +418,7 @@ impl Client {
             total: usize,
         }
         let request = Request::post("/mail/v4/messages")
-            .header("X-HTTP-Method-Override", "GET")
+            .header(METHOD_OVERRIDE_HEADER, "GET")
             .json(&Req { filter, limit: "0" })?;
         let res: Res = self.json(&request).await?;
         Ok(res.total)
