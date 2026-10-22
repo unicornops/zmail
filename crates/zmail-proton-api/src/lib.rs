@@ -9,9 +9,9 @@
 //! Nothing here is reachable from the UI until the local store is
 //! encrypted at rest (#139).
 //!
-//! - [`ClientConfig`] fixes the API host, the honest identity
-//!   (`x-pm-appversion: <os>-other@<version>` and a User-Agent naming
-//!   Zmail) and TLS trust: the platform's roots plus Bridge's SPKI pins.
+//! - [`ClientConfig`] fixes the API host, Zmail's identity (Bridge's
+//!   `x-pm-appversion` and a User-Agent naming Zmail, ADR 0004) and TLS
+//!   trust: the platform's roots plus Bridge's SPKI pins.
 //! - [`Manager`] owns the HTTP connection pool, the cookie jar, the
 //!   connection status and the retry rules (429 and 503 honour
 //!   `Retry-After`; failed connects back off).

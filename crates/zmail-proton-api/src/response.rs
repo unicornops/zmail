@@ -34,6 +34,8 @@ impl Code {
     pub const INVALID_VALUE: Self = Self(2001);
     /// The `x-pm-appversion` header was missing.
     pub const APP_VERSION_MISSING: Self = Self(5001);
+    /// Proton refused this `x-pm-appversion` ("Invalid app version").
+    pub const APP_VERSION_INVALID: Self = Self(5002);
     /// Proton does not accept this `x-pm-appversion`.
     pub const APP_VERSION_BAD: Self = Self(5003);
     /// The username is invalid (deprecated upstream, but still sent).
@@ -127,8 +129,8 @@ impl fmt::Display for ApiError {
 /// every other error response is [`Error::Api`].
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// Proton refused this app version (codes 5001 and 5003). Zmail sends
-    /// `<os>-other@<version>`; switching identity is not a fallback (ADR 0004).
+    /// Proton refused this app version (codes 5001 to 5003). Zmail sends
+    /// Bridge's app version; switching identity is not a fallback (ADR 0004).
     #[error("Proton did not accept this version of Zmail: {0}")]
     AppVersion(ApiError),
     /// Wrong password (code 8002).
@@ -200,7 +202,9 @@ impl Error {
     /// Maps an API error response to its typed variant.
     pub fn from_api(error: ApiError) -> Self {
         match error.code {
-            Code::APP_VERSION_MISSING | Code::APP_VERSION_BAD => Self::AppVersion(error),
+            Code::APP_VERSION_MISSING | Code::APP_VERSION_INVALID | Code::APP_VERSION_BAD => {
+                Self::AppVersion(error)
+            }
             Code::PASSWORD_WRONG => Self::PasswordWrong(error),
             Code::HUMAN_VERIFICATION_REQUIRED => Self::HumanVerificationRequired(error),
             Code::HUMAN_VALIDATION_INVALID_TOKEN => Self::HumanVerificationInvalid(error),
@@ -381,6 +385,7 @@ mod tests {
             details: None,
         };
         assert!(matches!(Error::from_api(make(5001)), Error::AppVersion(_)));
+        assert!(matches!(Error::from_api(make(5002)), Error::AppVersion(_)));
         assert!(matches!(Error::from_api(make(5003)), Error::AppVersion(_)));
         assert!(matches!(
             Error::from_api(make(8002)),

@@ -47,21 +47,30 @@ enough that upstream changes can be tracked file by file:
   issue when one of those upstream paths changes after the pin. Each
   ported file starts with a header naming its upstream path and pin, the
   upstream copyright and licence, and what Zmail changed.
-- **Honest client identity.** Every request sends
-  `x-pm-appversion: <os>-other@<version>` and
-  `User-Agent: zmail/<version> (<os>)`, where `<os>` is `macos`,
-  `windows` or `linux` as Bridge's `getAPIOS()` names it and `<version>`
-  is Zmail's release version. Proton requires
-  `<platform>-<product>@<version>` with a product from its own list (API
-  code 2064 otherwise): 0.16.0's `zmail@0.16.0` was refused for the
-  missing platform, and `<os>-zmail@<version>` is refused because `zmail`
-  is not a product Proton knows. `other` is Proton's generic product, so
-  Rob chose it on 2026-10-22, with the User-Agent still naming Zmail.
-  Zmail never sends Bridge's identity (`<os>-bridge@<version>`), Proton
-  Mail's (`<os>-mail@<version>`) or any other Proton client's. If Proton
-  refuses the header (API codes 2064, 5001 or 5003), Zmail reports that
-  to the user and stops; switching the header is Rob's decision, not a
-  fallback.
+- **Client identity: Bridge's app version, Zmail's User-Agent.** Every
+  request sends `x-pm-appversion: <os>-bridge@<Bridge pin>` (today
+  `macos-bridge@3.27.1`, `windows-…` or `linux-…`, the platform as
+  Bridge's `getAPIOS()` names it) and `User-Agent: zmail/<version> (<os>)`.
+  The plan was an honest `zmail@<version>`, but Proton's sign-in only
+  accepts Proton's own clients:
+  - `zmail@0.16.0` was refused with code 2064 (no platform).
+  - `<os>-zmail@<version>` is refused with 2064, "Product `zmail` is not
+    valid".
+  - `<os>-other@<version>`, Proton's generic product, passes the format
+    check but sign-in refuses it with 5002, "Invalid app version"
+    (0.16.1).
+
+  On 2026-10-22 Rob decided to send Bridge's app version, since Zmail
+  ports Bridge's API behaviour, and to ask Proton for permission and a
+  registered identity at the same time. The User-Agent still names Zmail,
+  as Bridge itself sends the name of the IMAP client connected to it.
+  `BRIDGE_VERSION` in `zmail-proton-api` follows the Bridge pin (a test
+  checks it), so the app version moves with the code Zmail ports. The
+  sign-in screen tells users that Zmail signs in as Bridge and appears as
+  Bridge in their Proton sessions. If Proton grants Zmail its own
+  identity, Zmail switches to it. If Proton refuses the header (API codes
+  2064, 5001, 5002 or 5003), Zmail reports that to the user and stops;
+  trying other identities is Rob's decision, not a fallback.
 - **Paid plans only is acceptable.** Proton answers some free accounts
   with code 10004 ("paid plan required") for non-web clients, as it does
   for Bridge. Zmail surfaces that as its own error and does not try to
@@ -238,13 +247,13 @@ network peer.**
 
 - **Terms of service and account blocking.** Proton may block or
   restrict accounts whose traffic it sees as abnormal, and its terms
-  exclude support or recourse for those restrictions. Zmail's identity is
-  honest and its request pattern follows Bridge's, but Proton can still
-  decide to refuse `<os>-other@<version>` (2064, 5001 or 5003) at any time. If that
-  happens Zmail stops and the decision goes back to Rob. The fake server
-  doesn't check the header, so only a live login shows what Proton
-  accepts: the first one (0.16.0) found the format and product rules
-  above.
+  exclude support or recourse for those restrictions. Zmail's request
+  pattern follows Bridge's, but it sends Bridge's app version, so Proton
+  can refuse or block it at any time and may treat Bridge's identity from
+  another client as a breach of its terms. If that happens Zmail stops
+  and the decision goes back to Rob. The fake server doesn't check the
+  header, so only a live sign-in shows what Proton accepts; 0.16.0 and
+  0.16.1 found the rules above.
 - **Private API.** Endpoints, fields and error codes can change without
   notice. Mirroring Bridge's pinned revisions, plus the weekly upstream
   check, is how Zmail notices; a Proton-side change that lands before

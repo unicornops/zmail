@@ -100,7 +100,7 @@ func run(ctx context.Context, api, caFile, username, password, manifestFile, con
 
 	manager := proton.New(
 		proton.WithHostURL(api),
-		proton.WithAppVersion("linux-other@0.0.0-harness"),
+		proton.WithAppVersion("linux-bridge@3.27.1"),
 		proton.WithTransport(&http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}),
 	)
 	defer manager.Close()
