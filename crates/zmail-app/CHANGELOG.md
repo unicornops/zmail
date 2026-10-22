@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.3](https://github.com/unicornops/zmail/compare/v0.16.2...v0.16.3) (2026-10-22)
+
+
+### Bug Fixes
+
+* **proton:** decode null fields as their defaults, as go-proton-api does ([#278](https://github.com/unicornops/zmail/issues/278)) ([7c356ad](https://github.com/unicornops/zmail/commit/7c356ad602838a4b551aeade46e4322cb866e8e7))
+
 ## [0.16.2](https://github.com/unicornops/zmail/compare/v0.16.1...v0.16.2) (2026-10-22)
 
 
