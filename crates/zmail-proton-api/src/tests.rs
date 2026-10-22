@@ -924,3 +924,61 @@ async fn label_actions_accept_an_empty_body() {
     assert_eq!(requests[0].path, "/mail/v4/messages/label");
     assert_eq!(requests[1].json()["LabelID"], "10");
 }
+
+#[tokio::test]
+async fn null_fields_decode_to_their_defaults_as_in_go() {
+    // Proton sends `null` where go-proton-api's Go structs simply keep the
+    // zero value; 0.16.2's first real sync failed on one ("invalid type:
+    // null, expected a string").
+    let server = MockServer::start(|_, _| {
+        Reply::json(
+            200,
+            serde_json::json!({
+                "Code": 1000,
+                "Stale": null,
+                "Messages": [{
+                    "ID": "m1",
+                    "AddressID": null,
+                    "LabelIDs": ["0", "5"],
+                    "ExternalID": null,
+                    "ConversationID": "c1",
+                    "Subject": null,
+                    "Sender": {"Name": null, "Address": "a@proton.me"},
+                    "ToList": [{"Name": null, "Address": "b@proton.me"}],
+                    "CCList": null,
+                    "BCCList": null,
+                    "ReplyTos": null,
+                    "Flags": null,
+                    "Time": null,
+                    "Size": null,
+                    "Unread": null,
+                    "IsReplied": null,
+                    "NumAttachments": null
+                }]
+            }),
+        )
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+
+    let page = client
+        .get_message_metadata_page(0, 150, &crate::MessageFilter::default())
+        .await
+        .expect("metadata with nulls");
+    assert_eq!(page.len(), 1);
+    let message = &page[0];
+    assert_eq!(message.id, "m1");
+    assert_eq!(message.external_id, "");
+    assert_eq!(message.subject, "");
+    assert_eq!(message.address_id, "");
+    assert_eq!(message.label_ids, ["0", "5"]);
+    assert_eq!(
+        message.sender.as_ref().map(|s| s.address.as_str()),
+        Some("a@proton.me")
+    );
+    assert_eq!(message.sender.as_ref().map(|s| s.name.as_str()), Some(""));
+    assert_eq!(message.to_list.len(), 1);
+    assert!(message.cc_list.is_empty());
+    assert_eq!(message.time, 0);
+}

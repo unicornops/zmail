@@ -405,8 +405,28 @@ pub(crate) struct Response {
 impl Response {
     /// Decodes the JSON body. Success bodies are not required to carry
     /// `Code` (the fake server omits it on some routes).
+    ///
+    /// Proton sends `null` for many fields (`ExternalID` on mail between
+    /// Proton users, for one). Go's `encoding/json`, which go-proton-api
+    /// decodes with, leaves such a field at its zero value, while serde
+    /// refuses `null` for a `String` or a number. So `null` members are
+    /// dropped first and each field falls back to its default, as in Go.
     pub(crate) fn json<T: DeserializeOwned>(&self) -> Result<T, Error> {
-        Ok(serde_json::from_slice(&self.body)?)
+        let mut value: serde_json::Value = serde_json::from_slice(&self.body)?;
+        drop_null_members(&mut value);
+        Ok(serde_json::from_value(value)?)
+    }
+}
+
+/// Removes every object member whose value is `null`, at any depth.
+fn drop_null_members(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(members) => {
+            members.retain(|_, member| !member.is_null());
+            members.values_mut().for_each(drop_null_members);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(drop_null_members),
+        _ => {}
     }
 }
 
