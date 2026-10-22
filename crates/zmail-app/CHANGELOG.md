@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.2](https://github.com/unicornops/zmail/compare/v0.16.1...v0.16.2) (2026-10-22)
+
+
+### Bug Fixes
+
+* **proton:** sign in with Bridge's app version, keeping a User-Agent naming Zmail ([#276](https://github.com/unicornops/zmail/issues/276)) ([c282c8f](https://github.com/unicornops/zmail/commit/c282c8fb15dad4b4d291e38ac1f9f713c36a9118))
+
 ## [0.16.1](https://github.com/unicornops/zmail/compare/v0.16.0...v0.16.1) (2026-10-22)
 
 
