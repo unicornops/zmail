@@ -58,7 +58,7 @@ CONTAINER="zmail-proton-harness"
 IMAGE="zmail-proton-harness:$(cat "${HARNESS_DIR}/Dockerfile" "${HARNESS_DIR}/api-port.patch" "${HARNESS_DIR}/srp-salt.patch" "${HARNESS_DIR}/seed/main.go" | sha256sum | cut -c1-16)"
 # Proton rejects API calls without an app version; the fake server only
 # checks that one is present.
-APP_VERSION="zmail@0.0.0-harness"
+APP_VERSION="linux-other@0.0.0-harness"
 
 # The seeded account. The fake server's domain is proton.local, so the
 # primary address is <username>@proton.local.

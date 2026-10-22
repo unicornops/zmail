@@ -48,11 +48,20 @@ enough that upstream changes can be tracked file by file:
   ported file starts with a header naming its upstream path and pin, the
   upstream copyright and licence, and what Zmail changed.
 - **Honest client identity.** Every request sends
-  `x-pm-appversion: zmail@<version>`, where `<version>` is Zmail's
-  release version. Zmail never sends Bridge's identity
-  (`<os>-bridge@<version>`) or any other Proton client's. If Proton
-  refuses the header (API codes 5001 or 5003), Zmail reports that to the
-  user and stops; switching the header is Rob's decision, not a fallback.
+  `x-pm-appversion: <os>-other@<version>` and
+  `User-Agent: zmail/<version> (<os>)`, where `<os>` is `macos`,
+  `windows` or `linux` as Bridge's `getAPIOS()` names it and `<version>`
+  is Zmail's release version. Proton requires
+  `<platform>-<product>@<version>` with a product from its own list (API
+  code 2064 otherwise): 0.16.0's `zmail@0.16.0` was refused for the
+  missing platform, and `<os>-zmail@<version>` is refused because `zmail`
+  is not a product Proton knows. `other` is Proton's generic product, so
+  Rob chose it on 2026-10-22, with the User-Agent still naming Zmail.
+  Zmail never sends Bridge's identity (`<os>-bridge@<version>`), Proton
+  Mail's (`<os>-mail@<version>`) or any other Proton client's. If Proton
+  refuses the header (API codes 2064, 5001 or 5003), Zmail reports that
+  to the user and stops; switching the header is Rob's decision, not a
+  fallback.
 - **Paid plans only is acceptable.** Proton answers some free accounts
   with code 10004 ("paid plan required") for non-web clients, as it does
   for Bridge. Zmail surfaces that as its own error and does not try to
@@ -231,10 +240,11 @@ network peer.**
   restrict accounts whose traffic it sees as abnormal, and its terms
   exclude support or recourse for those restrictions. Zmail's identity is
   honest and its request pattern follows Bridge's, but Proton can still
-  decide to refuse `zmail@<version>` (5001 or 5003) at any time. If that
-  happens Zmail stops and the decision goes back to Rob. The first live
-  login will be the first time Proton sees the header; the fake server
-  doesn't check it.
+  decide to refuse `<os>-other@<version>` (2064, 5001 or 5003) at any time. If that
+  happens Zmail stops and the decision goes back to Rob. The fake server
+  doesn't check the header, so only a live login shows what Proton
+  accepts: the first one (0.16.0) found the format and product rules
+  above.
 - **Private API.** Endpoints, fields and error codes can change without
   notice. Mirroring Bridge's pinned revisions, plus the weekly upstream
   check, is how Zmail notices; a Proton-side change that lands before

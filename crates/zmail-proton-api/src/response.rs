@@ -128,7 +128,7 @@ impl fmt::Display for ApiError {
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Proton refused this app version (codes 5001 and 5003). Zmail sends
-    /// `zmail@<version>`; switching identity is not a fallback (ADR 0004).
+    /// `<os>-other@<version>`; switching identity is not a fallback (ADR 0004).
     #[error("Proton did not accept this version of Zmail: {0}")]
     AppVersion(ApiError),
     /// Wrong password (code 8002).

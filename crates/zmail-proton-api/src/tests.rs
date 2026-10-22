@@ -253,7 +253,9 @@ async fn sends_identity_session_and_auth_headers() {
     let request = &requests[0];
     assert_eq!(request.method, "GET");
     assert_eq!(request.path, "/core/v4/users");
-    assert_eq!(request.header("x-pm-appversion"), Some("zmail@0.14.0"));
+    let identity = AppVersion::zmail("0.14.0").expect("version");
+    assert_eq!(request.header("x-pm-appversion"), Some(identity.as_str()));
+    assert_eq!(request.header("user-agent"), Some(identity.user_agent()));
     assert_eq!(request.header("x-pm-uid"), Some("uid-1"));
     assert_eq!(request.header("authorization"), Some("Bearer access-1"));
     assert_eq!(
@@ -725,7 +727,9 @@ async fn logs_in_with_srp_and_checks_the_server_proof() {
     for request in &requests[..2] {
         assert_eq!(request.header("x-pm-uid"), None);
         assert_eq!(request.header("authorization"), None);
-        assert_eq!(request.header("x-pm-appversion"), Some("zmail@0.14.0"));
+        let identity = AppVersion::zmail("0.14.0").expect("version");
+        assert_eq!(request.header("x-pm-appversion"), Some(identity.as_str()));
+        assert_eq!(request.header("user-agent"), Some(identity.user_agent()));
     }
     assert_eq!(requests[2].json()["TwoFactorCode"], "123456");
     for request in &requests[2..] {
