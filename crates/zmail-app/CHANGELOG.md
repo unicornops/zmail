@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.1](https://github.com/unicornops/zmail/compare/v0.16.0...v0.16.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* **proton:** send an app version Proton accepts, with a User-Agent naming Zmail ([#274](https://github.com/unicornops/zmail/issues/274)) ([5493207](https://github.com/unicornops/zmail/commit/54932075afb66c3c302d3dda4b356525850e8959))
+
 ## [0.16.0](https://github.com/unicornops/zmail/compare/v0.15.0...v0.16.0) (2026-10-21)
 
 
