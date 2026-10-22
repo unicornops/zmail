@@ -330,7 +330,7 @@ mod tests {
         let json = r#"{
           "base_url": "https://127.0.0.1:18443",
           "ca_pem": "/repo/target/proton-harness/ca.pem",
-          "app_version": "zmail@0.0.0-harness",
+          "app_version": "linux-other@0.0.0-harness",
           "username": "zmail",
           "password": "zmail-proton-password",
           "user_id": "user-1",

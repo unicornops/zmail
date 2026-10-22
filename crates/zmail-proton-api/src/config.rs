@@ -9,7 +9,10 @@
 // GPL-3.0-only.
 // Modified by UnicornOps on 2026-10-20: the functional options became a
 // config struct. The host and the pins are constants with no production
-// override. The app version is always `zmail@<version>`. Bridge's transport
+// override. The app version is always `<os>-other@<version>` (Bridge's
+// `getAPIOS()` and format with Proton's generic product, since Proton
+// rejects unregistered products such as `zmail`) and the User-Agent names
+// Zmail. Bridge's transport
 // timeouts and HTTP/1.1-only TLS dialer are rebuilt on reqwest and rustls.
 
 //! Client configuration: the API host, the app version header and TLS trust.
@@ -43,32 +46,63 @@ pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Idle pooled connections are closed after this (Bridge: 5 minutes).
 pub(crate) const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// The `x-pm-appversion` value Zmail sends: always `zmail@<version>`.
+/// Zmail's identity: the `x-pm-appversion` and `User-Agent` values.
 ///
-/// Zmail identifies itself honestly and never sends another client's
-/// identity (ADR 0004).
+/// Proton requires `<platform>-<product>@<version>` with a product from
+/// its own list (code 2064 otherwise), and `zmail` is not on it, so the
+/// app version is `<os>-other@<version>`: Proton's generic product, the
+/// platform as Bridge's `getAPIOS()` names it and Zmail's version. The
+/// User-Agent is `zmail/<version> (<os>)`, so the requests still say they
+/// come from Zmail. Zmail never sends another client's identity (ADR 0004).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppVersion(String);
+pub struct AppVersion {
+    header: String,
+    user_agent: String,
+}
 
 impl AppVersion {
-    /// Builds `zmail@<version>` from Zmail's release version, such as
-    /// `env!("CARGO_PKG_VERSION")` in `zmail-app`.
+    /// Builds Zmail's identity for the platform it runs on from Zmail's
+    /// release version, such as `env!("CARGO_PKG_VERSION")` in `zmail-app`.
     pub fn zmail(version: &str) -> Result<Self, Error> {
+        Self::zmail_on(api_os(), version)
+    }
+
+    fn zmail_on(os: &str, version: &str) -> Result<Self, Error> {
         let valid = !version.is_empty()
             && version.starts_with(|ch: char| ch.is_ascii_digit())
             && version
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+'));
         if valid {
-            Ok(Self(format!("zmail@{version}")))
+            Ok(Self {
+                header: format!("{os}-other@{version}"),
+                user_agent: format!("zmail/{version} ({os})"),
+            })
         } else {
             Err(Error::Config(format!("invalid Zmail version {version:?}")))
         }
     }
 
-    /// The header value.
+    /// The `x-pm-appversion` value.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.header
+    }
+
+    /// The `User-Agent` value.
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
+    }
+}
+
+/// The platform part of the app version, as Bridge's `getAPIOS()` names it
+/// (anything other than macOS and Windows is `linux`).
+fn api_os() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
     }
 }
 
@@ -112,7 +146,7 @@ impl ClientConfig {
     /// Only `https://` URLs on a loopback host (`127.0.0.1`, `::1` or
     /// `localhost`) are accepted. The client then trusts only the given CA
     /// (no platform roots) and skips SPKI pinning. The app version is
-    /// `zmail@` plus this crate's version; use [`Self::with_app_version`]
+    /// Zmail's identity with this crate's version; use [`Self::with_app_version`]
     /// to change it.
     #[cfg(feature = "test-harness")]
     pub fn for_test_harness(base_url: &str, ca_pem: &[u8]) -> Result<Self, Error> {
@@ -245,20 +279,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_version_is_zmail_at_version() {
-        assert_eq!(
-            AppVersion::zmail("0.14.0").expect("valid").as_str(),
-            "zmail@0.14.0"
-        );
-        assert_eq!(
-            AppVersion::zmail("1.2.3-rc.1+build.5")
-                .expect("valid")
-                .as_str(),
-            "zmail@1.2.3-rc.1+build.5"
-        );
+    fn app_version_is_os_dash_other_at_version() {
+        let macos = AppVersion::zmail_on("macos", "0.14.0").expect("valid");
+        assert_eq!(macos.as_str(), "macos-other@0.14.0");
+        assert_eq!(macos.user_agent(), "zmail/0.14.0 (macos)");
+        let linux = AppVersion::zmail_on("linux", "1.2.3-rc.1+build.5").expect("valid");
+        assert_eq!(linux.as_str(), "linux-other@1.2.3-rc.1+build.5");
+        assert_eq!(linux.user_agent(), "zmail/1.2.3-rc.1+build.5 (linux)");
         for invalid in ["", "v1.0.0", "1.0 beta", "1.0@x", "linux-bridge@3.27.1"] {
             assert!(AppVersion::zmail(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn app_version_names_this_platform_like_bridge() {
+        let os = if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "windows") {
+            "windows"
+        } else {
+            "linux"
+        };
+        let version = AppVersion::zmail("0.14.0").expect("valid");
+        assert_eq!(version.as_str(), format!("{os}-other@0.14.0"));
+        assert_eq!(version.user_agent(), format!("zmail/0.14.0 ({os})"));
     }
 
     #[test]
@@ -266,7 +310,10 @@ mod tests {
         let config = ClientConfig::production(AppVersion::zmail("0.14.0").expect("valid"))
             .expect("production config");
         assert_eq!(config.base_url().as_str(), "https://mail-api.proton.me/");
-        assert_eq!(config.app_version().as_str(), "zmail@0.14.0");
+        assert_eq!(
+            config.app_version(),
+            &AppVersion::zmail("0.14.0").expect("valid")
+        );
         assert!(matches!(&config.trust, Trust::PinnedPlatformRoots(pins) if pins.len() == 13));
     }
 

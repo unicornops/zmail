@@ -587,7 +587,7 @@ fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
             let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
             let sync_service = SyncService::new(handle.clone(), store, secrets.clone());
             // Proton accounts talk to Proton's production API with Bridge's
-            // pins and an honest `zmail@<version>` app version (ADR 0004).
+            // pins and an honest app version (ADR 0004).
             #[cfg(feature = "proton")]
             sync_service.configure_proton(zmail_sync::proton_production_config(env!(
                 "CARGO_PKG_VERSION"

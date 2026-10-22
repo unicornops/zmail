@@ -26,7 +26,9 @@ use std::{
 use chrono::{DateTime, Utc};
 use reqwest::{
     Method, StatusCode,
-    header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, DATE, HeaderMap, RETRY_AFTER, SET_COOKIE},
+    header::{
+        AUTHORIZATION, CONTENT_TYPE, COOKIE, DATE, HeaderMap, RETRY_AFTER, SET_COOKIE, USER_AGENT,
+    },
     redirect,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -37,7 +39,8 @@ use crate::{
     response::{ApiError, Code, Error, is_retryable_status},
 };
 
-/// Header carrying Zmail's identity (`zmail@<version>`).
+/// Header carrying the app version (`<os>-other@<version>`, see
+/// [`AppVersion`](crate::AppVersion)).
 pub(crate) const APP_VERSION_HEADER: &str = "x-pm-appversion";
 /// Header carrying the session UID.
 pub(crate) const UID_HEADER: &str = "x-pm-uid";
@@ -214,7 +217,8 @@ impl Manager {
             .inner
             .http
             .request(request.method.clone(), &url)
-            .header(APP_VERSION_HEADER, self.inner.config.app_version.as_str());
+            .header(APP_VERSION_HEADER, self.inner.config.app_version.as_str())
+            .header(USER_AGENT, self.inner.config.app_version.user_agent());
         if !request.query.is_empty() {
             builder = builder.query(&request.query);
         }
