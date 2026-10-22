@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.4](https://github.com/unicornops/zmail/compare/v0.16.3...v0.16.4) (2026-10-22)
+
+
+### Bug Fixes
+
+* **proton:** retry message listings dropped mid-request, and say why a request failed ([#280](https://github.com/unicornops/zmail/issues/280)) ([6517229](https://github.com/unicornops/zmail/commit/6517229be48e21b48c6ede83fe9785a0f04806fe))
+
 ## [0.16.3](https://github.com/unicornops/zmail/compare/v0.16.2...v0.16.3) (2026-10-22)
 
 
