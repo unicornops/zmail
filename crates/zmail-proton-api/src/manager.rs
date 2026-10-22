@@ -39,7 +39,7 @@ use crate::{
     response::{ApiError, Code, Error, is_retryable_status},
 };
 
-/// Header carrying the app version (`<os>-other@<version>`, see
+/// Header carrying the app version (Bridge's, see
 /// [`AppVersion`](crate::AppVersion)).
 pub(crate) const APP_VERSION_HEADER: &str = "x-pm-appversion";
 /// Header carrying the session UID.

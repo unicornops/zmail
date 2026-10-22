@@ -9,11 +9,11 @@
 // GPL-3.0-only.
 // Modified by UnicornOps on 2026-10-20: the functional options became a
 // config struct. The host and the pins are constants with no production
-// override. The app version is always `<os>-other@<version>` (Bridge's
-// `getAPIOS()` and format with Proton's generic product, since Proton
-// rejects unregistered products such as `zmail`) and the User-Agent names
-// Zmail. Bridge's transport
-// timeouts and HTTP/1.1-only TLS dialer are rebuilt on reqwest and rustls.
+// override. The app version is Bridge's own (`<os>-bridge@<pinned Bridge
+// version>`, Bridge's `getAPIOS()` and format), because Proton's sign-in
+// refuses every other client (ADR 0004); the User-Agent names Zmail.
+// Bridge's transport timeouts and HTTP/1.1-only TLS dialer are rebuilt on
+// reqwest and rustls.
 
 //! Client configuration: the API host, the app version header and TLS trust.
 
@@ -46,14 +46,21 @@ pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Idle pooled connections are closed after this (Bridge: 5 minutes).
 pub(crate) const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+/// The Proton Mail Bridge release Zmail ports, and whose app version it
+/// sends: the `v3.27.1` pin in `docs/upstream/proton.md`.
+pub const BRIDGE_VERSION: &str = "3.27.1";
+
 /// Zmail's identity: the `x-pm-appversion` and `User-Agent` values.
 ///
-/// Proton requires `<platform>-<product>@<version>` with a product from
-/// its own list (code 2064 otherwise), and `zmail` is not on it, so the
-/// app version is `<os>-other@<version>`: Proton's generic product, the
-/// platform as Bridge's `getAPIOS()` names it and Zmail's version. The
-/// User-Agent is `zmail/<version> (<os>)`, so the requests still say they
-/// come from Zmail. Zmail never sends another client's identity (ADR 0004).
+/// Proton's sign-in only accepts Proton's own clients: `zmail` is not a
+/// product it knows (code 2064) and its generic `other` product is refused
+/// at sign-in (code 5002). Zmail ports Bridge's API behaviour, so it sends
+/// Bridge's app version, `<os>-bridge@<BRIDGE_VERSION>` with the platform
+/// as Bridge's `getAPIOS()` names it. Rob decided this on 2026-10-22
+/// while Proton is asked for a registered identity (ADR 0004). The
+/// User-Agent is `zmail/<version> (<os>)`, as Bridge itself sends the name
+/// of the mail client connected to it, so the requests still say they come
+/// from Zmail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppVersion {
     header: String,
@@ -75,7 +82,7 @@ impl AppVersion {
                 .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+'));
         if valid {
             Ok(Self {
-                header: format!("{os}-other@{version}"),
+                header: format!("{os}-bridge@{BRIDGE_VERSION}"),
                 user_agent: format!("zmail/{version} ({os})"),
             })
         } else {
@@ -279,12 +286,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_version_is_os_dash_other_at_version() {
+    fn app_version_is_bridges_with_a_zmail_user_agent() {
         let macos = AppVersion::zmail_on("macos", "0.14.0").expect("valid");
-        assert_eq!(macos.as_str(), "macos-other@0.14.0");
+        assert_eq!(macos.as_str(), "macos-bridge@3.27.1");
         assert_eq!(macos.user_agent(), "zmail/0.14.0 (macos)");
         let linux = AppVersion::zmail_on("linux", "1.2.3-rc.1+build.5").expect("valid");
-        assert_eq!(linux.as_str(), "linux-other@1.2.3-rc.1+build.5");
+        assert_eq!(linux.as_str(), "linux-bridge@3.27.1");
         assert_eq!(linux.user_agent(), "zmail/1.2.3-rc.1+build.5 (linux)");
         for invalid in ["", "v1.0.0", "1.0 beta", "1.0@x", "linux-bridge@3.27.1"] {
             assert!(AppVersion::zmail(invalid).is_err(), "{invalid}");
@@ -301,8 +308,22 @@ mod tests {
             "linux"
         };
         let version = AppVersion::zmail("0.14.0").expect("valid");
-        assert_eq!(version.as_str(), format!("{os}-other@0.14.0"));
+        assert_eq!(version.as_str(), format!("{os}-bridge@{BRIDGE_VERSION}"));
         assert_eq!(version.user_agent(), format!("zmail/0.14.0 ({os})"));
+    }
+
+    #[test]
+    fn bridge_version_matches_the_upstream_pin() {
+        // Bumping the Bridge pin bumps the app version Zmail sends.
+        let pins = include_str!("../../../docs/upstream/proton.md");
+        let row = pins
+            .lines()
+            .find(|line| line.contains("[ProtonMail/proton-bridge]"))
+            .expect("Bridge pin row");
+        assert!(
+            row.contains(&format!("`v{BRIDGE_VERSION}`")),
+            "BRIDGE_VERSION {BRIDGE_VERSION} does not match the pin: {row}"
+        );
     }
 
     #[test]

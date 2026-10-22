@@ -34,7 +34,7 @@ use crate::components::{Banner, BannerTone, Button};
 use crate::styles::{SPACE_2, SPACE_4, UiColors};
 
 /// What a third-party Proton client means, shown on the sign-in step.
-pub(crate) const RISK_NOTE: &str = "Zmail is an independent client, not made or supported by Proton. It talks to Proton's private API the way Proton Mail Bridge does, so Proton may change or block it at any time, and Proton only allows it on paid plans. Zmail keeps a session token and the key that unlocks your mail in the system keychain, never your password.";
+pub(crate) const RISK_NOTE: &str = "Zmail is an independent client, not made or supported by Proton. It talks to Proton's private API the way Proton Mail Bridge does and signs in as Bridge, because Proton doesn't accept other clients, so your Proton sessions list shows it as Proton Mail Bridge. Proton may change or block it at any time, and only allows it on paid plans. Zmail keeps a session token and the key that unlocks your mail in the system keychain, never your password.";
 
 /// The Proton sign-in in progress.
 #[derive(Default)]

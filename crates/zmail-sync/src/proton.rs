@@ -26,8 +26,8 @@ pub(crate) enum Credentials {
 }
 
 /// The client configuration for Proton's production API: Bridge's TLS pins
-/// and an honest identity: `x-pm-appversion: <os>-other@<version>` and a
-/// User-Agent naming Zmail.
+/// and Zmail's identity: Bridge's `x-pm-appversion` and a User-Agent
+/// naming Zmail (ADR 0004).
 #[cfg(feature = "proton")]
 pub fn proton_production_config(version: &str) -> Result<zmail_proton::ClientConfig> {
     let app_version = zmail_proton::AppVersion::zmail(version)?;
