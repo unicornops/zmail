@@ -164,7 +164,7 @@ pub enum Error {
     #[error("Proton's TLS certificate is not trusted")]
     Certificate(#[source] reqwest::Error),
     /// The API could not be reached, or the connection dropped.
-    #[error("could not reach Proton: {0}")]
+    #[error("could not reach Proton: {}", error_chain(.0))]
     Network(#[source] reqwest::Error),
     /// A response body could not be decoded.
     #[error("unexpected Proton response: {0}")]
@@ -196,6 +196,23 @@ pub enum Error {
     /// A send package could not be built from the recipients' preferences.
     #[error("cannot build the Proton send package: {0}")]
     Package(String),
+}
+
+/// An error and its sources, joined with `: `. reqwest's own message
+/// ("error sending request for url …") leaves out the cause, such as a
+/// timeout or a reset connection, which is what tells failures apart.
+fn error_chain(error: &reqwest::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.ends_with(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
 }
 
 impl Error {
