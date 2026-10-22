@@ -1,5 +1,5 @@
 {
-  "crates/zmail-app": "0.16.0",
+  "crates/zmail-app": "0.16.1",
   "crates/zmail-assets": "0.0.1",
   "crates/zmail-auth": "0.0.1",
   "crates/zmail-autodiscover": "0.0.1",
