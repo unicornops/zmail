@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/unicornops/zmail/compare/v0.16.4...v0.17.0) (2026-10-23)
+
+
+### Features
+
+* **proton:** show how far the first message listing has got ([#282](https://github.com/unicornops/zmail/issues/282)) ([74e71d1](https://github.com/unicornops/zmail/commit/74e71d1504720d0322e418671e5b19d39138e3da))
+
 ## [0.16.4](https://github.com/unicornops/zmail/compare/v0.16.3...v0.16.4) (2026-10-22)
 
 
