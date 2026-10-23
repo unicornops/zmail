@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/unicornops/zmail/compare/v0.18.0...v0.19.0) (2026-10-23)
+
+
+### Features
+
+* **proton:** apply events to just the messages they change ([#285](https://github.com/unicornops/zmail/issues/285)) ([b40e184](https://github.com/unicornops/zmail/commit/b40e184fb5ea8d1987c9d1232d00fee306f98a3a))
+
 ## [0.18.0](https://github.com/unicornops/zmail/compare/v0.17.0...v0.18.0) (2026-10-23)
 
 
