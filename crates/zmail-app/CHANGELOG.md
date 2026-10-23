@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/unicornops/zmail/compare/v0.17.0...v0.18.0) (2026-10-23)
+
+
+### Features
+
+* **proton:** show the newest mail first and fetch older mail in the background ([#284](https://github.com/unicornops/zmail/issues/284)) ([4848a86](https://github.com/unicornops/zmail/commit/4848a86d4cb7c0009e6c9d4d594df4f281b57af3))
+
 ## [0.17.0](https://github.com/unicornops/zmail/compare/v0.16.4...v0.17.0) (2026-10-23)
 
 
