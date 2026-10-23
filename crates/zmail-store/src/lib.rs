@@ -34,6 +34,7 @@ mod address_history;
 mod connection;
 mod encryption;
 mod lock;
+mod merge;
 mod rotation;
 mod search;
 
@@ -1665,49 +1666,7 @@ impl LocalStore {
                 latest_message_at,
             ) in thread_rows
             {
-                let messages = conn
-                    .prepare(
-                        r#"
-                        SELECT
-                            COALESCE(messages.remote_id, ''),
-                            identities.email_address,
-                            messages.sender,
-                            messages.reply_to,
-                            messages.recipients,
-                            messages.subject,
-                            messages.body_preview,
-                            messages.body_text,
-                            messages.sanitized_html,
-                            messages.has_remote_content,
-                            messages.is_read,
-                            messages.is_flagged,
-                            messages.received_at
-                        FROM messages
-                        JOIN identities ON identities.id = messages.identity_id
-                        WHERE messages.thread_id = ?1
-                        ORDER BY messages.received_at ASC, messages.id ASC
-                        "#,
-                    )?
-                    .query_map(params![thread_id], |row| {
-                        Ok(MessageSnapshot {
-                            remote_id: row.get(0)?,
-                            identity_email: row.get(1)?,
-                            sender: row.get(2)?,
-                            reply_to: row.get(3)?,
-                            recipients: row.get(4)?,
-                            subject: row.get(5)?,
-                            body_preview: row.get(6)?,
-                            body_text: row.get(7)?,
-                            sanitized_html: row.get(8)?,
-                            has_remote_content: row.get::<_, bool>(9)?,
-                            is_read: row.get::<_, bool>(10)?,
-                            is_flagged: row.get::<_, bool>(11)?,
-                            received_at: row.get(12)?,
-                            attachments: Vec::new(),
-                        })
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .context("failed to list message snapshots")?;
+                let messages = thread_message_snapshots(&conn, thread_id)?;
 
                 threads.push(ThreadSnapshot {
                     remote_thread_id,
@@ -2952,10 +2911,7 @@ impl LocalStore {
         }
 
         let identity_map = identity_id_map(&transaction, account_id)?;
-        let fallback_identity_id = identity_map
-            .values()
-            .next()
-            .copied()
+        let fallback_identity_id = primary_identity_id(&transaction, account_id)?
             .context("cannot apply a mailbox snapshot without identities")?;
 
         let existing_mailboxes = load_account_mailbox_ids(&transaction, account_id)?;
@@ -3067,6 +3023,25 @@ impl LocalStore {
         transaction
             .commit()
             .context("failed to commit the snapshot transaction")
+    }
+
+    /// Stores a checkpoint in the middle of a sync, once a write it
+    /// covers is committed, so a failure later in the same sync resumes
+    /// from it. The phase and status are left alone.
+    pub fn record_sync_checkpoint(
+        &self,
+        account_id: i64,
+        checkpoint: impl AsRef<str>,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE sync_state SET checkpoint = ?2 WHERE account_id = ?1",
+            params![account_id, checkpoint.as_ref()],
+        )
+        .with_context(|| {
+            format!("failed to record the sync checkpoint for account {account_id}")
+        })?;
+        Ok(())
     }
 
     /// Records a successful sync and resets the failure counter.
@@ -5204,6 +5179,20 @@ fn identity_id_map(
     Ok(pairs.into_iter().collect())
 }
 
+/// The identity for messages addressed to none of the account's
+/// identities: the primary one, else the oldest.
+fn primary_identity_id(transaction: &Transaction<'_>, account_id: i64) -> Result<Option<i64>> {
+    transaction
+        .query_row(
+            "SELECT id FROM identities WHERE account_id = ?1 \
+             ORDER BY is_primary DESC, id ASC LIMIT 1",
+            params![account_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("failed to load the primary identity")
+}
+
 fn replace_account_identities(
     transaction: &Transaction<'_>,
     account_id: i64,
@@ -5379,6 +5368,53 @@ struct ExistingMailbox {
     sort_order: i64,
     delimiter: Option<String>,
     parent: Option<String>,
+}
+
+/// A stored thread's messages as snapshot rows, oldest first, with their
+/// bodies but without attachment metadata.
+fn thread_message_snapshots(conn: &Connection, thread_id: i64) -> Result<Vec<MessageSnapshot>> {
+    conn.prepare_cached(
+        r#"
+        SELECT
+            COALESCE(messages.remote_id, ''),
+            identities.email_address,
+            messages.sender,
+            messages.reply_to,
+            messages.recipients,
+            messages.subject,
+            messages.body_preview,
+            messages.body_text,
+            messages.sanitized_html,
+            messages.has_remote_content,
+            messages.is_read,
+            messages.is_flagged,
+            messages.received_at
+        FROM messages
+        JOIN identities ON identities.id = messages.identity_id
+        WHERE messages.thread_id = ?1
+        ORDER BY messages.received_at ASC, messages.id ASC
+        "#,
+    )?
+    .query_map(params![thread_id], |row| {
+        Ok(MessageSnapshot {
+            remote_id: row.get(0)?,
+            identity_email: row.get(1)?,
+            sender: row.get(2)?,
+            reply_to: row.get(3)?,
+            recipients: row.get(4)?,
+            subject: row.get(5)?,
+            body_preview: row.get(6)?,
+            body_text: row.get(7)?,
+            sanitized_html: row.get(8)?,
+            has_remote_content: row.get::<_, bool>(9)?,
+            is_read: row.get::<_, bool>(10)?,
+            is_flagged: row.get::<_, bool>(11)?,
+            received_at: row.get(12)?,
+            attachments: Vec::new(),
+        })
+    })?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .context("failed to list message snapshots")
 }
 
 /// Loads the mailbox rows for an account, keyed by mailbox name.

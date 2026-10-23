@@ -7,7 +7,9 @@
 // version; this file is part of Zmail and is used under GPL-3.0-only.
 // Modified by UnicornOps on 2026-10-21: rewritten in Rust as one sequential
 // pass that builds Zmail mailbox snapshots instead of Bridge's download
-// pipeline; the snapshot building is Zmail's own.
+// pipeline; the snapshot building is Zmail's own. Modified on 2026-10-23:
+// the pass stops after a number of pages and resumes later from its cursor,
+// so a first sync shows the newest mail and the rest arrives in chunks.
 
 //! Read sync: labels to mailboxes and message metadata into the store.
 //!
@@ -16,8 +18,17 @@
 //! messages a page, each page continuing from the last message ID of the
 //! one before. Only metadata is fetched; bodies stay encrypted on the
 //! server until a message is opened (hydration).
+//!
+//! Unlike Bridge, Zmail does not list the whole mailbox before showing it.
+//! A first sync lists the newest [`FIRST_SYNC_PAGES`] pages and writes
+//! them; each later sync lists up to [`BACKFILL_PAGES_PER_RUN`] older pages
+//! from the stored cursor and adds them to the mirror, until a page comes
+//! back empty.
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    future::Future,
+};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -31,39 +42,116 @@ use crate::mailbox::{DELIMITER, ProtonMailbox, mailboxes_for};
 /// Bridge's `MetadataPageSize`.
 pub(crate) const METADATA_PAGE_SIZE: usize = 128;
 
+/// Pages a first sync lists before the account is shown: the newest 512
+/// messages.
+pub(crate) const FIRST_SYNC_PAGES: usize = 4;
+
+/// Older pages each later sync lists while the history is still arriving:
+/// 1,024 messages a run, with event polling, write-back and sending in
+/// between runs.
+pub(crate) const BACKFILL_PAGES_PER_RUN: usize = 8;
+
 /// Every label type Bridge mirrors.
 pub(crate) const LABEL_TYPES: [LabelType; 3] =
     [LabelType::System, LabelType::Folder, LabelType::Label];
 
-/// Fetches every message's metadata, newest first (Bridge's
-/// `metadataIterator`), calling `listed` with the running count after
-/// each page.
-pub(crate) async fn fetch_all_metadata(
+/// How much of the message listing one sync does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncPaging {
+    /// Messages a page (Bridge's `MetadataPageSize`).
+    pub page_size: usize,
+    /// Pages a first sync lists before it writes the mirror.
+    pub first_sync_pages: usize,
+    /// Older pages each later sync lists until the history is complete.
+    pub backfill_pages_per_run: usize,
+}
+
+impl Default for SyncPaging {
+    fn default() -> Self {
+        Self {
+            page_size: METADATA_PAGE_SIZE,
+            first_sync_pages: FIRST_SYNC_PAGES,
+            backfill_pages_per_run: BACKFILL_PAGES_PER_RUN,
+        }
+    }
+}
+
+/// One stretch of the message listing.
+#[derive(Debug, Default)]
+pub(crate) struct MetadataPages {
+    /// The messages listed, newest first.
+    pub(crate) messages: Vec<MessageMetadata>,
+    /// The oldest message listed, to carry on from, when the listing
+    /// stopped at its page limit; `None` when it reached the oldest
+    /// message.
+    pub(crate) next_end_id: Option<String>,
+}
+
+/// Lists up to `pages` pages of metadata, newest first, from the message
+/// `end_id` (or the newest message when it is empty), the way Bridge's
+/// `metadataIterator` does: each page ends at the last ID of the page
+/// before, which the server returns again first and is dropped. The
+/// listing is complete when a page comes back with nothing new. `listed`
+/// is called after each page with the number listed so far.
+pub(crate) async fn fetch_metadata_pages(
     client: &Client,
+    end_id: &str,
+    pages: usize,
+    page_size: usize,
     listed: &(dyn Fn(usize) + Send + Sync),
-) -> Result<Vec<MessageMetadata>> {
+) -> Result<MetadataPages> {
+    list_pages(
+        |filter| async move {
+            client
+                .get_message_metadata_page(0, page_size, &filter)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+        end_id,
+        pages,
+        listed,
+    )
+    .await
+}
+
+/// The cursor walk of [`fetch_metadata_pages`], over any page source.
+async fn list_pages<F, Fut>(
+    mut fetch: F,
+    end_id: &str,
+    pages: usize,
+    listed: &(dyn Fn(usize) + Send + Sync),
+) -> Result<MetadataPages>
+where
+    F: FnMut(MessageFilter) -> Fut,
+    Fut: Future<Output = Result<Vec<MessageMetadata>>>,
+{
     let mut all = Vec::new();
-    let mut last_id = String::new();
-    loop {
-        let filter = MessageFilter {
+    let mut last_id = end_id.to_owned();
+    for _ in 0..pages.max(1) {
+        let mut page = fetch(MessageFilter {
             end_id: last_id.clone(),
             desc: true,
             ..MessageFilter::default()
-        };
-        let mut page = client
-            .get_message_metadata_page(0, METADATA_PAGE_SIZE, &filter)
-            .await?;
+        })
+        .await?;
         // The cursor message comes back first when it still exists.
         if !last_id.is_empty() && page.first().is_some_and(|meta| meta.id == last_id) {
             page.remove(0);
         }
         let Some(last) = page.last() else {
-            return Ok(all);
+            return Ok(MetadataPages {
+                messages: all,
+                next_end_id: None,
+            });
         };
         last_id = last.id.clone();
         all.extend(page);
         listed(all.len());
     }
+    Ok(MetadataPages {
+        messages: all,
+        next_end_id: Some(last_id),
+    })
 }
 
 /// A message and where it goes: its labels and conversation.
@@ -349,6 +437,97 @@ mod tests {
             "NumAttachments": 0,
         }))
         .expect("metadata")
+    }
+
+    /// A listing that pages like Proton's: newest first, `EndID`
+    /// inclusive, `page_size` at a time.
+    fn listing(
+        messages: &[MessageMetadata],
+        page_size: usize,
+        requests: &std::sync::Mutex<usize>,
+        filter: MessageFilter,
+    ) -> Result<Vec<MessageMetadata>> {
+        *requests.lock().expect("requests") += 1;
+        assert!(filter.desc);
+        let start = if filter.end_id.is_empty() {
+            0
+        } else {
+            messages
+                .iter()
+                .position(|meta| meta.id == filter.end_id)
+                .expect("the cursor message exists")
+        };
+        Ok(messages
+            .iter()
+            .skip(start)
+            .take(page_size)
+            .cloned()
+            .collect())
+    }
+
+    fn ids(messages: &[MessageMetadata]) -> Vec<String> {
+        messages.iter().map(|meta| meta.id.clone()).collect()
+    }
+
+    fn newest_first(count: usize) -> Vec<MessageMetadata> {
+        (0..count)
+            .map(|index| {
+                let id = format!("m{:03}", count - index);
+                meta(&id, "", &["5"], 1_700_000_000 - index as i64, false)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn pages_resume_from_the_cursor_without_duplicates() {
+        let messages = newest_first(10);
+        let requests = std::sync::Mutex::new(0);
+        let fetch = |filter| std::future::ready(listing(&messages, 4, &requests, filter));
+        let counts = std::sync::Mutex::new(Vec::new());
+        let listed = |count| counts.lock().expect("counts").push(count);
+
+        // The first stretch stops at its page limit with a cursor.
+        let first = list_pages(fetch, "", 2, &listed).await.expect("first");
+        assert_eq!(ids(&first.messages), ids(&messages[..7]));
+        assert_eq!(first.next_end_id.as_deref(), Some("m004"));
+        assert_eq!(*counts.lock().expect("counts"), [4, 7]);
+
+        // The next carries on after the cursor and finds the end.
+        let end_id = first.next_end_id.expect("cursor");
+        let rest = list_pages(fetch, &end_id, 8, &|_| {}).await.expect("rest");
+        assert_eq!(ids(&rest.messages), ids(&messages[7..]));
+        assert_eq!(rest.next_end_id, None, "an empty page ends the listing");
+        // Two pages, then one more that held only the cursor message.
+        assert_eq!(*requests.lock().expect("requests"), 2 + 2);
+    }
+
+    #[tokio::test]
+    async fn a_short_history_completes_in_the_first_stretch() {
+        let messages = newest_first(5);
+        let requests = std::sync::Mutex::new(0);
+        let fetch = |filter| std::future::ready(listing(&messages, 4, &requests, filter));
+        let all = list_pages(fetch, "", 4, &|_| {}).await.expect("listing");
+        assert_eq!(ids(&all.messages), ids(&messages));
+        assert_eq!(all.next_end_id, None);
+
+        let empty: Vec<MessageMetadata> = Vec::new();
+        let fetch = |filter| std::future::ready(listing(&empty, 4, &requests, filter));
+        let none = list_pages(fetch, "", 4, &|_| {}).await.expect("listing");
+        assert!(none.messages.is_empty() && none.next_end_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stretch_ending_exactly_at_the_oldest_message_finishes_next_time() {
+        // 4 + 3 messages fill exactly two pages; only the next request
+        // can tell that nothing older exists.
+        let messages = newest_first(7);
+        let requests = std::sync::Mutex::new(0);
+        let fetch = |filter| std::future::ready(listing(&messages, 4, &requests, filter));
+        let first = list_pages(fetch, "", 2, &|_| {}).await.expect("first");
+        assert_eq!(first.messages.len(), 7);
+        let end_id = first.next_end_id.expect("cursor");
+        let rest = list_pages(fetch, &end_id, 8, &|_| {}).await.expect("rest");
+        assert!(rest.messages.is_empty() && rest.next_end_id.is_none());
     }
 
     #[test]

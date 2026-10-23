@@ -113,6 +113,58 @@ enough that upstream changes can be tracked file by file:
   `ProtonMail/clients` monorepo or from the AGPL Rust parts of Proton's
   mail apps.
 
+### Sync: newest mail first, older mail in the background
+
+Bridge lists every message's metadata before its IMAP clients see any
+mail. On a large mailbox that is thousands of requests, and a failure
+part-way through loses them all. Zmail keeps Bridge's listing (newest
+first, 128 messages a page, each page continuing from the last message
+ID of the one before, from `stage_metadata.go`) but splits it up
+(October 23, 2026, from Rob's testing of 0.17.0 with a large mailbox):
+
+- **First sync.** Take the newest event ID, the user, addresses and
+  labels as before, then list only the newest 4 pages (512 messages) and
+  write them with every label's mailbox, so the account is usable within
+  seconds. A page that comes back with nothing new means the history is
+  complete.
+- **Checkpoint.** The account's checkpoint is JSON:
+  `{"event_id": "...", "backfill_end_id": "<oldest message listed>",
+  "listed": 512, "total": 85000}`. `backfill_end_id` is absent once the
+  history is complete; `listed` and `total` (Proton's message count when
+  the first sync started) only word the progress. A bare event ID, as
+  0.17.0 and earlier stored, reads as "events from this ID, history
+  complete", so existing accounts carry on without a resync.
+- **Backfill.** Every sync first applies the events as before, then,
+  while there is a cursor, lists up to 8 older pages (1,024 messages)
+  from it, places them with the same label-to-mailbox code and writes them
+  with `LocalStore::merge_account_snapshot`. That write only adds: it
+  creates missing mailboxes but never removes one, adds threads but never
+  prunes them, and adds a conversation's older messages to the thread that
+  already holds its newer ones, working out the thread's counts, latest
+  time, participants, subject and preview over all of them. Queued local
+  read and flag state, hydrated bodies and attachments survive, as with
+  the full write. The checkpoint is stored after each write, so a failure
+  resumes from the cursor and earlier stretches are kept. While older mail
+  is still to come, the sync service starts the next sync 1.5 s later
+  (and each event poll starts one, so a backfill stopped by a failure
+  carries on); write-back, sending and events run between the stretches.
+  Older mail never raises new-mail notifications. The status reads
+  "Fetched 2,048 of 85,000 messages; older mail is still arriving".
+- **Events during a backfill.** The event step rebuilds the mailboxes
+  from the stored mirror, which then holds only part of the history. A
+  change to a message not listed yet places it at once; listing it later
+  finds it already there. The mirror is read only when an event changed a
+  message, and an event batch with no message changes writes nothing.
+- **Resyncs.** A refresh, label, address or user event still resyncs the
+  account, and the resync is paged too: the newest pages replace the
+  mirror, which drops the older mail fetched so far (and its downloaded
+  bodies), and the backfill starts again from the top.
+
+This sends fewer requests per second than Bridge's sync, with the same
+endpoints and page size. Applying each event batch still rebuilds the
+whole mirror, which costs time in proportion to the mailbox; making that
+incremental is follow-up work.
+
 ### Crypto: `proton-srp` for SRP, a port onto `pgp` for keys
 
 Two paths were assessed for SRP login and key unlocking.
