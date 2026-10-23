@@ -9397,6 +9397,7 @@ dependencies = [
  "zmail-core",
  "zmail-imap",
  "zmail-jmap",
+ "zmail-notify",
  "zmail-proton",
  "zmail-proton-api",
  "zmail-security",

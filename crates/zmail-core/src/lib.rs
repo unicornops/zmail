@@ -1519,6 +1519,21 @@ pub struct AccountSyncSnapshot {
     pub mailboxes: Vec<MailboxSnapshot>,
 }
 
+/// Changes to some of an account's messages, for adapters that learn of
+/// changes message by message (a Proton event batch). Unlike an
+/// [`AccountSyncSnapshot`] it holds only the messages that changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MailDelta {
+    /// The changed messages, in their mailboxes and conversations. A
+    /// message's places here are all of its places. Mailboxes that are not
+    /// in the store yet are created, even when empty.
+    pub mailboxes: Vec<MailboxSnapshot>,
+    /// Remote ids of every message the delta covers: each leaves any
+    /// mailbox and conversation `mailboxes` does not put it in. A deleted
+    /// message is listed here and placed nowhere.
+    pub message_ids: Vec<String>,
+}
+
 /// Mailbox snapshot written into the local store by a sync adapter.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MailboxSnapshot {

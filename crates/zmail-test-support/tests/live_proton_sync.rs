@@ -1022,3 +1022,187 @@ fn shows_the_newest_mail_first_and_fetches_older_mail_in_the_background() -> Res
     );
     Ok(())
 }
+
+/// Keeps every new-mail notification a sync raises.
+#[derive(Default)]
+struct RecordingNotifier(std::sync::Mutex<Vec<zmail_notify::NewMailArrival>>);
+
+impl zmail_notify::Notifier for RecordingNotifier {
+    fn notify_new_mail(&self, batch: &zmail_notify::NewMailBatch) {
+        self.0
+            .lock()
+            .expect("notifications")
+            .extend(batch.arrivals.iter().cloned());
+    }
+}
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn applies_events_to_just_the_changed_messages() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+    let state = harness.state().clone();
+    let message_id = |subject: &str| -> Result<String> {
+        state
+            .messages
+            .iter()
+            .find(|message| message.subject == subject)
+            .map(|message| message.id.clone())
+            .with_context(|| format!("no fixture {subject}"))
+    };
+
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, secrets.as_ref(), account_id)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.configure_proton(harness_config(&harness)?)?;
+    let notifier = Arc::new(RecordingNotifier::default());
+    sync_service.set_notifier(notifier.clone());
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
+    ensure!(
+        notifier.0.lock().expect("notifications").is_empty(),
+        "a first sync is an import, not new mail"
+    );
+
+    // Opened before it moves: the body must move with it.
+    let mailbox_id = |name: &str| -> Result<i64> {
+        store
+            .list_mailboxes(account_id)?
+            .into_iter()
+            .find(|mailbox| mailbox.name == name)
+            .map(|mailbox| mailbox.id)
+            .with_context(|| format!("no {name} mailbox"))
+    };
+    let thread_id = |mailbox: &str, subject: &str| -> Result<i64> {
+        store
+            .list_threads(mailbox_id(mailbox)?, 0..100)?
+            .into_iter()
+            .find(|thread| thread.subject == subject)
+            .map(|thread| thread.id)
+            .with_context(|| format!("no {subject} in {mailbox}"))
+    };
+    let dinner = thread_id("INBOX", "Dinner on Sunday")?;
+    ensure!(
+        runtime
+            .handle()
+            .block_on(sync_service.hydrate_thread_body_and_wait(account_id, dinner))?
+            == 1
+    );
+    let untouched = thread_id("Folders/Work", "Quarterly report")?;
+    let untouched_rows: Vec<i64> = store
+        .thread_view(untouched)?
+        .context("thread")?
+        .messages
+        .iter()
+        .map(|message| message.id)
+        .collect();
+
+    // Another client moves, flags, reads and deletes mail, and a new
+    // message arrives from Zmail's own outbox.
+    let manager = Manager::new(harness_config(&harness)?)?;
+    runtime.handle().block_on(async {
+        let (client, _) = manager
+            .login(harness.username(), harness.password())
+            .await?;
+        let dinner = vec![message_id("Dinner on Sunday")?];
+        client.label_messages(&dinner, "6").await?;
+        client.unlabel_messages(&dinner, "0").await?;
+        client
+            .label_messages(&[message_id("Re: Welcome to the harness")?], "10")
+            .await?;
+        client
+            .mark_messages_read(&[message_id("To the alias")?])
+            .await?;
+        client
+            .delete_messages(&[message_id("Old receipt")?])
+            .await?;
+        anyhow::Ok(())
+    })?;
+    let identity = store
+        .list_identities(account_id)?
+        .into_iter()
+        .find(|identity| identity.email_address == PROTON_HARNESS_PRIMARY_ADDRESS)
+        .context("no identity for the primary address")?;
+    let draft_id = store.create_draft(&NewDraft {
+        account_id,
+        identity_id: identity.id,
+        to: vec![PROTON_HARNESS_ALIAS_ADDRESS.to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "Fresh news".to_owned(),
+        body: "Something new.".to_owned(),
+    })?;
+    store.queue_draft(draft_id)?;
+    ensure!(sync_service.process_outbox_and_wait(Some(account_id))? == 1);
+    // The outbox pass may start a sync of its own; wait it out.
+    wait_for("the incremental sync", || {
+        Ok(sync_service.sync_account_and_wait(account_id).is_ok())
+    })
+    .with_context(|| format!("server log:\n{}", harness.logs()))?;
+
+    let status = store.list_accounts()?[0].sync_status.clone();
+    ensure!(
+        status.detail.contains("applied"),
+        "expected an incremental sync, got {:?}",
+        status.detail
+    );
+    ensure!(subjects(&store, account_id, "Archive")?.contains(&"Dinner on Sunday".to_owned()));
+    ensure!(!subjects(&store, account_id, "INBOX")?.contains(&"Dinner on Sunday".to_owned()));
+    let moved = store
+        .thread_view(thread_id("Archive", "Dinner on Sunday")?)?
+        .context("thread")?;
+    ensure!(
+        moved.messages[0].sanitized_html.is_some() || moved.messages[0].body_text.is_some(),
+        "the opened body did not move with the message"
+    );
+    ensure!(!subjects(&store, account_id, "All Mail")?.contains(&"Old receipt".to_owned()));
+    let rows_now: Vec<i64> = store
+        .thread_view(untouched)?
+        .context("thread")?
+        .messages
+        .iter()
+        .map(|message| message.id)
+        .collect();
+    ensure!(
+        rows_now == untouched_rows,
+        "an unchanged thread was rewritten"
+    );
+
+    // Only the new message notifies: once, in the INBOX the alias got it
+    // in (and in All Mail and Sent, which the mirror also had).
+    let arrivals: Vec<String> = notifier
+        .0
+        .lock()
+        .expect("notifications")
+        .iter()
+        .map(|arrival| arrival.subject.clone())
+        .collect();
+    ensure!(
+        !arrivals.is_empty() && arrivals.iter().all(|subject| subject == "Fresh news"),
+        "arrivals: {arrivals:?}"
+    );
+
+    // The same mirror a full sync of the account gives now.
+    let reference = Arc::new(LocalStore::open_ephemeral()?);
+    let reference_id = reference.insert_account(&proton_account(harness.username()))?;
+    let reference_secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, reference_secrets.as_ref(), reference_id)?;
+    let reference_service = SyncService::new(
+        runtime.handle().clone(),
+        reference.clone(),
+        reference_secrets,
+    );
+    reference_service.configure_proton(harness_config(&harness)?)?;
+    reference_service.sync_account_and_wait(reference_id)?;
+    let incremental = mirror_contents(&store, account_id)?;
+    let full = mirror_contents(&reference, reference_id)?;
+    ensure!(
+        incremental == full,
+        "incremental mirror {incremental:#?}\n!= full sync {full:#?}"
+    );
+    Ok(())
+}

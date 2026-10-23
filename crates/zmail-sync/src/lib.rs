@@ -1128,13 +1128,22 @@ impl SyncService {
             return;
         };
         let arrivals = collect_arrivals(existing_mailboxes, snapshot);
-        if arrivals.is_empty() {
+        notify_with(notifier.as_ref(), target, arrivals);
+    }
+
+    /// Reports new mail found some other way than diffing a snapshot.
+    #[cfg(feature = "proton")]
+    fn notify_arrivals(&self, target: &SyncTarget, arrivals: Vec<NewMailArrival>) {
+        let Some(notifier) = self
+            .inner
+            .notifier
+            .lock()
+            .expect("notifier mutex should not be poisoned")
+            .clone()
+        else {
             return;
-        }
-        notifier.notify_new_mail(&NewMailBatch {
-            account: target.display_name.clone(),
-            arrivals,
-        });
+        };
+        notify_with(notifier.as_ref(), target, arrivals);
     }
 
     async fn process_due_outbox_jobs(&self, account_id: Option<i64>) -> Result<usize> {
@@ -1293,6 +1302,48 @@ fn collect_arrivals(
     arrivals
 }
 
+fn notify_with(notifier: &dyn Notifier, target: &SyncTarget, arrivals: Vec<NewMailArrival>) {
+    if arrivals.is_empty() {
+        return;
+    }
+    notifier.notify_new_mail(&NewMailBatch {
+        account: target.display_name.clone(),
+        arrivals,
+    });
+}
+
+/// The threads of a [`zmail_core::MailDelta`] that gained new mail: the
+/// `arrived` messages, in mailboxes the mirror already had. As with
+/// [`collect_arrivals`], a mailbox new to the mirror is an import, not new
+/// mail.
+#[cfg(any(feature = "proton", test))]
+fn collect_delta_arrivals(
+    known_mailboxes: &HashSet<String>,
+    delta: &zmail_core::MailDelta,
+    arrived: &HashSet<&str>,
+) -> Vec<NewMailArrival> {
+    let mut arrivals = Vec::new();
+    for mailbox in &delta.mailboxes {
+        if !known_mailboxes.contains(&mailbox.name) {
+            continue;
+        }
+        for thread in &mailbox.threads {
+            let newest = thread
+                .messages
+                .iter()
+                .filter(|message| arrived.contains(message.remote_id.as_str()))
+                .max_by(|left, right| left.received_at.cmp(&right.received_at));
+            if let Some(newest) = newest {
+                arrivals.push(NewMailArrival {
+                    subject: thread.subject.clone(),
+                    sender: zmail_core::participants::sender_display_name(&newest.sender),
+                });
+            }
+        }
+    }
+    arrivals
+}
+
 /// Current wall-clock time in seconds since the Unix epoch.
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
@@ -1385,12 +1436,13 @@ pub fn persist_oauth2_grant(
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         sync::Arc,
         thread,
         time::{Duration, Instant},
     };
 
-    use super::{BackgroundRuntime, SyncService, collect_arrivals};
+    use super::{BackgroundRuntime, SyncService, collect_arrivals, collect_delta_arrivals};
     use anyhow::{Result, anyhow};
     use zmail_core::{
         AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxSnapshot, MessageSnapshot,
@@ -1890,6 +1942,26 @@ mod tests {
             arrivals.is_empty(),
             "the first sync of a mailbox is an import, not new mail"
         );
+    }
+
+    #[test]
+    fn delta_arrivals_name_only_arrived_mail_in_known_mailboxes() {
+        let mut gained = thread("c1", 2, "Lunch");
+        gained.messages[0].remote_id = "old".to_owned();
+        gained.messages[1].remote_id = "new".to_owned();
+        let delta = zmail_core::MailDelta {
+            mailboxes: vec![
+                mailbox("INBOX", vec![gained.clone(), thread("c2", 1, "Moved")]),
+                mailbox("Labels/New", vec![gained]),
+            ],
+            message_ids: Vec::new(),
+        };
+        let known = HashSet::from(["INBOX".to_owned()]);
+        let arrived = HashSet::from(["new"]);
+        let arrivals = collect_delta_arrivals(&known, &delta, &arrived);
+        assert_eq!(arrivals.len(), 1, "{arrivals:?}");
+        assert_eq!(arrivals[0].subject, "Lunch");
+        assert!(collect_delta_arrivals(&known, &delta, &HashSet::new()).is_empty());
     }
 
     fn thread(remote_id: &str, message_count: usize, subject: &str) -> ThreadSnapshot {

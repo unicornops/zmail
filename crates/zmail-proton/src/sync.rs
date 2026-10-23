@@ -33,9 +33,7 @@ use std::{
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use zmail_core::{MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
-use zmail_proton_api::{
-    Client, EmailAddress, Label, LabelType, MessageFilter, MessageMetadata, STARRED_LABEL,
-};
+use zmail_proton_api::{Client, EmailAddress, Label, LabelType, MessageFilter, MessageMetadata};
 
 use crate::mailbox::{DELIMITER, ProtonMailbox, mailboxes_for};
 
@@ -177,17 +175,6 @@ impl PlacedMessage {
             has_attachments: meta.num_attachments > 0,
         }
     }
-
-    /// Keeps the body fields a previous hydration stored, so a flag or
-    /// label change does not drop an opened message's body.
-    pub(crate) fn keep_body_of(mut self, previous: &MessageSnapshot) -> Self {
-        self.snapshot.body_preview = previous.body_preview.clone();
-        self.snapshot.body_text = previous.body_text.clone();
-        self.snapshot.sanitized_html = previous.sanitized_html.clone();
-        self.snapshot.has_remote_content = previous.has_remote_content;
-        self.snapshot.attachments = previous.attachments.clone();
-        self
-    }
 }
 
 /// Builds the mailbox snapshots from the labels and message metadata.
@@ -237,44 +224,6 @@ pub(crate) fn place_messages(
         .zip(threads)
         .map(|(mailbox, threads)| mailbox_snapshot(mailbox, threads))
         .collect()
-}
-
-/// Recovers the placed messages from the stored mirror: each message's
-/// labels are the mailboxes it is in, plus Starred when it is flagged.
-pub(crate) fn placed_from_mirror(
-    labels: &[Label],
-    mirror: &[MailboxSnapshot],
-) -> HashMap<String, PlacedMessage> {
-    let (mailboxes, _) = mailboxes_for(labels);
-    let label_for_name: HashMap<&str, &str> = mailboxes
-        .iter()
-        .map(|mailbox| (mailbox.name.as_str(), mailbox.label_id.as_str()))
-        .collect();
-    let mut placed: HashMap<String, PlacedMessage> = HashMap::new();
-    for mailbox in mirror {
-        let Some(label_id) = label_for_name.get(mailbox.name.as_str()) else {
-            continue;
-        };
-        for thread in &mailbox.threads {
-            for message in &thread.messages {
-                let entry =
-                    placed
-                        .entry(message.remote_id.clone())
-                        .or_insert_with(|| PlacedMessage {
-                            snapshot: message.clone(),
-                            label_ids: if message.is_flagged {
-                                vec![STARRED_LABEL.to_owned()]
-                            } else {
-                                Vec::new()
-                            },
-                            thread_id: thread.remote_thread_id.clone(),
-                            has_attachments: thread.has_attachments,
-                        });
-                entry.label_ids.push((*label_id).to_owned());
-            }
-        }
-    }
-    placed
 }
 
 fn mailbox_snapshot(

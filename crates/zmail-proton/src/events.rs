@@ -10,21 +10,24 @@
 // version; this file is part of Zmail and is used under GPL-3.0-only.
 // Modified by UnicornOps on 2026-10-21: rewritten in Rust against Zmail's
 // mailbox snapshots. Label, address and user changes resync the account
-// instead of being applied one by one. Modified on 2026-10-23: the stored
-// mirror is read only when a message changed, and may hold only part of
-// the history while older mail is fetched.
+// instead of being applied one by one. Modified on 2026-10-23: message
+// events become a delta of just the changed messages, written without
+// reading or rewriting the rest of the mirror.
 
 //! Incremental sync from the account's event stream.
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    time::Duration,
+};
 
 use anyhow::Result;
 use rand::Rng;
-use zmail_core::MailboxSnapshot;
-use zmail_proton_api::{Client, Event, EventAction, Label, MessageEvent};
+use zmail_core::MailDelta;
+use zmail_proton_api::{Client, Event, EventAction, Label, MessageEvent, MessageMetadata};
 
 use crate::{
-    MirrorLoader, ProtonCheckpoint,
+    ProtonCheckpoint, address_identities,
     sync::{self, PlacedMessage},
 };
 
@@ -51,33 +54,29 @@ pub async fn has_new_events(session: &crate::ProtonSession, checkpoint: &str) ->
     Ok(more || events.iter().any(Event::has_changes))
 }
 
-/// The events after a checkpoint, applied.
+/// The events after a checkpoint, read.
 #[derive(Debug)]
 pub(crate) struct AppliedEvents {
     /// The last event read: the next checkpoint.
     pub(crate) event_id: String,
-    /// The mailboxes rebuilt from the mirror, or `None` when no event
-    /// changed a message.
-    pub(crate) mailboxes: Option<Vec<MailboxSnapshot>>,
-    /// The number of message changes applied.
+    /// The changed messages, or `None` when no event changed one.
+    pub(crate) delta: Option<MailDelta>,
+    /// Messages the events created, newest state last: the candidates for
+    /// new-mail notifications.
+    pub(crate) created: Vec<String>,
+    /// The number of message changes read.
     pub(crate) changes: usize,
-    /// Messages an update placed that the mirror did not hold: older mail
-    /// the backfill has not listed yet, not new mail.
-    pub(crate) not_new: Vec<String>,
 }
 
-/// Applies the events after `event_id` to the stored mirror, which is only
-/// loaded when a message changed. Returns `None` when the account needs a
-/// first sync instead.
+/// Reads the events after `event_id` and turns their message changes into
+/// a delta of just those messages (Bridge applies each event to its IMAP
+/// state the same way, message by message). Returns `None` when the
+/// account needs a first sync instead.
 ///
 /// While older mail is still being fetched the mirror holds only part of
 /// the history; an event for a message not listed yet places it now, and
 /// the backfill listing it later finds it already there.
-pub(crate) async fn apply_events(
-    client: &Client,
-    event_id: &str,
-    mirror: MirrorLoader<'_>,
-) -> Result<Option<AppliedEvents>> {
+pub(crate) async fn apply_events(client: &Client, event_id: &str) -> Result<Option<AppliedEvents>> {
     let mut events = Vec::new();
     let mut from = event_id.to_owned();
     loop {
@@ -98,67 +97,65 @@ pub(crate) async fn apply_events(
     if changes.is_empty() {
         return Ok(Some(AppliedEvents {
             event_id: from,
-            mailboxes: None,
+            delta: None,
+            created: Vec::new(),
             changes: 0,
-            not_new: Vec::new(),
         }));
     }
 
     let labels = client.get_labels(&sync::LABEL_TYPES).await?;
-    let identity_for_address: HashMap<String, String> = client
-        .get_addresses()
-        .await?
-        .into_iter()
-        .map(|address| (address.id, address.email))
-        .collect();
-    let mirror = mirror()?;
-    let (mailboxes, not_new) =
-        apply_message_changes(&labels, &mirror, &changes, &identity_for_address);
+    let addresses = client.get_addresses().await?;
+    let (identity_for_address, fallback_identity) = address_identities(&addresses, "");
+    let (delta, created) =
+        message_delta(&labels, &changes, &identity_for_address, &fallback_identity);
     Ok(Some(AppliedEvents {
         event_id: from,
-        mailboxes: Some(mailboxes),
+        delta: Some(delta),
+        created,
         changes: changes.len(),
-        not_new,
     }))
 }
 
-/// Applies message events to the mirror and rebuilds the mailboxes. Also
-/// returns the messages that updates placed without the mirror holding
-/// them (older mail the backfill has not reached), which are not new.
-fn apply_message_changes(
+/// The delta for a batch of message events: each changed message placed by
+/// its latest labels (none, once deleted), and the messages created.
+fn message_delta(
     labels: &[Label],
-    mirror: &[MailboxSnapshot],
     changes: &[&MessageEvent],
     identity_for_address: &HashMap<String, String>,
-) -> (Vec<MailboxSnapshot>, Vec<String>) {
-    let mut placed = sync::placed_from_mirror(labels, mirror);
-    let mut not_new = Vec::new();
+    fallback_identity: &str,
+) -> (MailDelta, Vec<String>) {
+    // The last change to a message wins.
+    let mut latest: BTreeMap<&str, Option<&MessageMetadata>> = BTreeMap::new();
+    let mut created: BTreeSet<&str> = BTreeSet::new();
     for change in changes {
         match (change.action, &change.message) {
             (EventAction::Delete, _) => {
-                placed.remove(&change.id);
+                latest.insert(&change.id, None);
+                created.remove(change.id.as_str());
             }
             (EventAction::Create | EventAction::Update | EventAction::UpdateFlags, Some(meta)) => {
-                let previous = placed.remove(&meta.id);
-                let identity = identity_for_address
-                    .get(&meta.address_id)
-                    .cloned()
-                    .or_else(|| previous.as_ref().map(|p| p.snapshot.identity_email.clone()))
-                    .unwrap_or_default();
-                let mut updated = PlacedMessage::from_metadata(meta, &identity);
-                match &previous {
-                    Some(previous) => updated = updated.keep_body_of(&previous.snapshot),
-                    None if change.action != EventAction::Create => not_new.push(meta.id.clone()),
-                    None => {}
+                latest.insert(&meta.id, Some(meta));
+                if change.action == EventAction::Create {
+                    created.insert(&meta.id);
                 }
-                placed.insert(meta.id.clone(), updated);
             }
             // An update without metadata, or an unknown action: nothing to
             // apply here.
             _ => {}
         }
     }
-    (sync::place_messages(labels, placed.into_values()), not_new)
+    let placed = latest.values().flatten().map(|meta| {
+        let identity = identity_for_address
+            .get(&meta.address_id)
+            .map(String::as_str)
+            .unwrap_or(fallback_identity);
+        PlacedMessage::from_metadata(meta, identity)
+    });
+    let delta = MailDelta {
+        mailboxes: sync::place_messages(labels, placed),
+        message_ids: latest.keys().map(|id| (*id).to_owned()).collect(),
+    };
+    (delta, created.into_iter().map(str::to_owned).collect())
 }
 
 /// Whether an event needs a full sync rather than message updates.
@@ -178,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn applies_message_changes_to_the_mirror() {
+    fn turns_message_events_into_a_delta_of_those_messages() {
         use crate::mailbox::tests::label;
 
         let labels = [
@@ -187,125 +184,78 @@ mod tests {
             label("10", "Starred", "Starred", 4),
             label("l", "Family", "Family", 1),
         ];
-        let meta = |id: &str, labels: &[&str], unread: bool| {
+        let meta = |id: &str, conversation: &str, labels: &[&str], unread: bool| {
             serde_json::json!({
-                "ID": id, "AddressID": "a1", "LabelIDs": labels, "Subject": format!("S {id}"),
+                "ID": id, "AddressID": "a1", "ConversationID": conversation,
+                "LabelIDs": labels, "Subject": format!("S {id}"),
                 "Sender": {"Name": "", "Address": "x@example.com"}, "Flags": 1,
                 "Time": 1_700_000_000, "Unread": i64::from(unread),
             })
         };
         let identities = HashMap::from([("a1".to_owned(), "me@proton.local".to_owned())]);
-        let metadata: Vec<zmail_proton_api::MessageMetadata> = [
-            meta("m1", &["0", "5"], true),
-            meta("m2", &["0", "5", "l"], false),
-            meta("m3", &["5"], false),
-        ]
-        .into_iter()
-        .map(|json| serde_json::from_value(json).expect("metadata"))
-        .collect();
-        let mut mirror = sync::build_mailboxes(&labels, &metadata, &identities, "me@proton.local");
-        // m2 was opened: its stored body must survive a flag change.
-        for mailbox in &mut mirror {
-            for thread in &mut mailbox.threads {
-                for message in &mut thread.messages {
-                    if message.remote_id == "m2" {
-                        message.body_text = Some("opened body".to_owned());
-                    }
-                }
-            }
-        }
-
         let events: Vec<MessageEvent> = serde_json::from_value(serde_json::json!([
             // m1 read and starred.
-            {"ID": "m1", "Action": 3, "Message": meta("m1", &["0", "5", "10"], false)},
+            {"ID": "m1", "Action": 3, "Message": meta("m1", "c1", &["0", "5", "10"], false)},
             // m2 loses its label.
-            {"ID": "m2", "Action": 2, "Message": meta("m2", &["0", "5"], false)},
-            // m3 deleted, m4 arrives.
+            {"ID": "m2", "Action": 2, "Message": meta("m2", "c2", &["0", "5"], false)},
+            // m3 deleted; m4 arrives in conversation c1.
             {"ID": "m3", "Action": 0},
-            {"ID": "m4", "Action": 1, "Message": meta("m4", &["0", "5"], true)},
+            {"ID": "m4", "Action": 1, "Message": meta("m4", "c1", &["0", "5"], true)},
+            // m5 arrives, then is moved out of the inbox, then deleted.
+            {"ID": "m5", "Action": 1, "Message": meta("m5", "c5", &["0", "5"], true)},
+            {"ID": "m5", "Action": 2, "Message": meta("m5", "c5", &["5"], true)},
+            {"ID": "m5", "Action": 0},
+            // An update without metadata changes nothing.
+            {"ID": "m6", "Action": 2},
         ]))
         .expect("events");
         let changes: Vec<&MessageEvent> = events.iter().collect();
-        let (mailboxes, not_new) = apply_message_changes(&labels, &mirror, &changes, &identities);
-        assert!(
-            not_new.is_empty(),
-            "every changed message was in the mirror"
-        );
+        let (delta, created) = message_delta(&labels, &changes, &identities, "me@proton.local");
 
-        let ids = |name: &str| {
-            let mut ids: Vec<String> = mailboxes
+        assert_eq!(delta.message_ids, ["m1", "m2", "m3", "m4", "m5"]);
+        assert_eq!(created, ["m4"], "m5 was deleted again");
+        let places = |name: &str| {
+            let mut places: Vec<(String, String)> = delta
+                .mailboxes
                 .iter()
                 .find(|mailbox| mailbox.name == name)
                 .map(|mailbox| {
                     mailbox
                         .threads
                         .iter()
-                        .flat_map(|thread| thread.messages.iter().map(|m| m.remote_id.clone()))
+                        .flat_map(|thread| {
+                            thread.messages.iter().map(|message| {
+                                (thread.remote_thread_id.clone(), message.remote_id.clone())
+                            })
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
-            ids.sort();
-            ids
+            places.sort();
+            places
         };
-        assert_eq!(ids("INBOX"), ["m1", "m2", "m4"]);
-        assert_eq!(ids("All Mail"), ["m1", "m2", "m4"]);
-        assert!(ids("Labels/Family").is_empty());
-        let messages: HashMap<String, &zmail_core::MessageSnapshot> = mailboxes[0]
-            .threads
-            .iter()
-            .flat_map(|thread| thread.messages.iter())
-            .map(|message| (message.remote_id.clone(), message))
-            .collect();
-        assert!(messages["m1"].is_read && messages["m1"].is_flagged);
-        assert_eq!(messages["m2"].body_text.as_deref(), Some("opened body"));
-        assert!(!messages["m4"].is_read);
-        assert_eq!(messages["m4"].identity_email, "me@proton.local");
-    }
-
-    #[test]
-    fn places_older_mail_the_backfill_has_not_reached() {
-        use crate::mailbox::tests::label;
-
-        let labels = [
-            label("0", "Inbox", "Inbox", 4),
-            label("5", "All Mail", "All Mail", 4),
-            label("l", "Family", "Family", 1),
-        ];
-        let meta = |id: &str, labels: &[&str], time: i64| {
-            serde_json::json!({
-                "ID": id, "AddressID": "a1", "ConversationID": "c1", "LabelIDs": labels,
-                "Subject": format!("S {id}"), "Sender": {"Name": "", "Address": "x@example.com"},
-                "Flags": 1, "Time": time, "Unread": 0,
-            })
+        let pair = |thread: &str, message: &str| (thread.to_owned(), message.to_owned());
+        assert_eq!(
+            places("INBOX"),
+            [pair("c1", "m1"), pair("c1", "m4"), pair("c2", "m2")]
+        );
+        assert_eq!(places("All Mail"), places("INBOX"));
+        assert!(
+            places("Labels/Family").is_empty(),
+            "m2 is placed nowhere else, so it leaves Family"
+        );
+        let inbox = &delta.mailboxes[0];
+        let message = |id: &str| {
+            inbox
+                .threads
+                .iter()
+                .flat_map(|thread| thread.messages.iter())
+                .find(|message| message.remote_id == id)
+                .expect("message")
         };
-        let identities = HashMap::from([("a1".to_owned(), "me@proton.local".to_owned())]);
-        // The mirror so far holds only the newest message of c1.
-        let newest: zmail_proton_api::MessageMetadata =
-            serde_json::from_value(meta("m3", &["0", "5"], 1_700_000_300)).expect("metadata");
-        let mirror = sync::build_mailboxes(&labels, &[newest], &identities, "me@proton.local");
-
-        let events: Vec<MessageEvent> = serde_json::from_value(serde_json::json!([
-            // An older message of c1 is labelled before the backfill
-            // reaches it, and a new one arrives.
-            {"ID": "m1", "Action": 2, "Message": meta("m1", &["0", "5", "l"], 1_700_000_100)},
-            {"ID": "m4", "Action": 1, "Message": meta("m4", &["0", "5"], 1_700_000_400)},
-        ]))
-        .expect("events");
-        let changes: Vec<&MessageEvent> = events.iter().collect();
-        let (mailboxes, not_new) = apply_message_changes(&labels, &mirror, &changes, &identities);
-
-        assert_eq!(not_new, ["m1"], "only the update is older mail");
-        let inbox = &mailboxes[0];
-        assert_eq!(inbox.threads.len(), 1);
-        let mut ids: Vec<&str> = inbox.threads[0]
-            .messages
-            .iter()
-            .map(|message| message.remote_id.as_str())
-            .collect();
-        ids.sort_unstable();
-        assert_eq!(ids, ["m1", "m3", "m4"]);
-        assert_eq!(mailboxes[2].name, "Labels/Family");
-        assert_eq!(mailboxes[2].threads[0].messages[0].remote_id, "m1");
+        assert!(message("m1").is_read && message("m1").is_flagged);
+        assert!(!message("m4").is_read);
+        assert_eq!(message("m4").identity_email, "me@proton.local");
     }
 
     #[test]

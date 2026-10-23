@@ -20,11 +20,11 @@ mod session;
 mod signin;
 mod sync;
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use zmail_core::{
-    AccountSyncSnapshot, MailboxSnapshot, NewIdentity, OpApplyReport, OutgoingMessage, PendingOp,
+    AccountSyncSnapshot, MailDelta, NewIdentity, OpApplyReport, OutgoingMessage, PendingOp,
     ProtocolKind, SyncTarget,
 };
 use zmail_proton_api::{Address, AddressStatus};
@@ -37,25 +37,28 @@ pub use signin::{ProtonSignIn, SignInStep, SignedInAccount};
 pub use sync::SyncPaging;
 pub use zmail_proton_api::{API_HOST_URL, AppVersion, ClientConfig};
 
-/// Loads the account's stored mirror. A sync calls it at most once, and
-/// only when events changed messages.
-pub type MirrorLoader<'a> = &'a (dyn Fn() -> Result<Arc<Vec<MailboxSnapshot>>> + Send + Sync);
-
 /// Reports how far a sync has got, as a status line.
 pub type Progress<'a> = &'a (dyn Fn(&str) + Send + Sync);
 
 /// What a sync does to the account's mirror.
 #[derive(Debug)]
 pub enum MirrorUpdate {
-    /// Replace the mirror with this snapshot: a first (or full) sync, or
-    /// the events since the checkpoint applied to the stored mirror.
-    Replace {
-        /// The account's mailboxes.
-        snapshot: AccountSyncSnapshot,
-        /// Messages it adds that are not new mail: older messages an event
-        /// changed before the backfill listed them. They must not raise
-        /// new-mail notifications.
-        not_new: Vec<String>,
+    /// Replace the mirror with this snapshot: a first sync, or the paged
+    /// resync a refresh, label, address or user event asks for.
+    Replace(AccountSyncSnapshot),
+    /// Apply the changes to these messages; nothing else in the mirror is
+    /// read or rewritten.
+    Apply {
+        /// The changed messages.
+        delta: MailDelta,
+        /// The messages the events created. Those the mirror did not hold
+        /// yet are new mail; messages an update placed before the backfill
+        /// listed them are not.
+        created: Vec<String>,
+        /// The checkpoint to store.
+        checkpoint: String,
+        /// The status detail.
+        detail: String,
     },
     /// The events since the checkpoint changed nothing Zmail mirrors: only
     /// the checkpoint moves.
@@ -71,16 +74,16 @@ impl MirrorUpdate {
     /// The checkpoint to store once the update is written.
     pub fn checkpoint(&self) -> &str {
         match self {
-            Self::Replace { snapshot, .. } => &snapshot.checkpoint,
-            Self::Unchanged { checkpoint, .. } => checkpoint,
+            Self::Replace(snapshot) => &snapshot.checkpoint,
+            Self::Apply { checkpoint, .. } | Self::Unchanged { checkpoint, .. } => checkpoint,
         }
     }
 
     /// The status detail.
     pub fn detail(&self) -> &str {
         match self {
-            Self::Replace { snapshot, .. } => &snapshot.detail,
-            Self::Unchanged { detail, .. } => detail,
+            Self::Replace(snapshot) => &snapshot.detail,
+            Self::Apply { detail, .. } | Self::Unchanged { detail, .. } => detail,
         }
     }
 }
@@ -100,10 +103,10 @@ pub struct Backfill {
 /// store.
 ///
 /// With a checkpoint from an earlier sync and a stored mirror, the
-/// account's events since then are applied to the mirror (Bridge's event
-/// loop): message changes update their mailboxes in place. A refresh
-/// request from the server, or a label, address or user change, falls back
-/// to a first sync.
+/// account's events since then become changes to just the messages they
+/// name (Bridge's event loop), so a new message costs the same however
+/// large the mailbox is. A refresh request from the server, or a label,
+/// address or user change, falls back to a first sync.
 ///
 /// A first sync takes the newest event ID first, so no change made during
 /// it is missed, then mirrors the identities (combined address mode: one
@@ -116,7 +119,6 @@ pub async fn discover_and_sync(
     target: &SyncTarget,
     session: &ProtonSession,
     has_mirror: bool,
-    mirror: MirrorLoader<'_>,
     paging: &SyncPaging,
     progress: Progress<'_>,
 ) -> Result<MirrorUpdate> {
@@ -128,26 +130,22 @@ pub async fn discover_and_sync(
         .as_deref()
         .and_then(ProtonCheckpoint::parse)
         && has_mirror
-        && let Some(applied) =
-            events::apply_events(session.client(), &checkpoint.event_id, mirror).await?
+        && let Some(applied) = events::apply_events(session.client(), &checkpoint.event_id).await?
     {
         let checkpoint = ProtonCheckpoint {
             event_id: applied.event_id,
             ..checkpoint
         }
         .to_json();
-        return Ok(match applied.mailboxes {
-            Some(mailboxes) => MirrorUpdate::Replace {
-                snapshot: AccountSyncSnapshot {
-                    checkpoint,
-                    detail: format!(
-                        "Proton account: applied {} message changes",
-                        applied.changes
-                    ),
-                    identities: None,
-                    mailboxes,
-                },
-                not_new: applied.not_new,
+        return Ok(match applied.delta {
+            Some(delta) => MirrorUpdate::Apply {
+                delta,
+                created: applied.created,
+                checkpoint,
+                detail: format!(
+                    "Proton account: applied {} message changes",
+                    applied.changes
+                ),
             },
             None => MirrorUpdate::Unchanged {
                 checkpoint,
@@ -157,10 +155,7 @@ pub async fn discover_and_sync(
     }
     first_sync(session, paging, progress)
         .await
-        .map(|snapshot| MirrorUpdate::Replace {
-            snapshot,
-            not_new: Vec::new(),
-        })
+        .map(MirrorUpdate::Replace)
 }
 
 async fn first_sync(

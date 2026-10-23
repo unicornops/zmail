@@ -150,20 +150,31 @@ ID of the one before, from `stage_metadata.go`) but splits it up
   carries on); write-back, sending and events run between the stretches.
   Older mail never raises new-mail notifications. The status reads
   "Fetched 2,048 of 85,000 messages; older mail is still arriving".
-- **Events during a backfill.** The event step rebuilds the mailboxes
-  from the stored mirror, which then holds only part of the history. A
-  change to a message not listed yet places it at once; listing it later
-  finds it already there. The mirror is read only when an event changed a
-  message, and an event batch with no message changes writes nothing.
+- **Events.** Each event batch becomes a delta of just the messages it
+  names (`MailDelta`): every created or changed message placed by its
+  latest labels, every deleted one placed nowhere.
+  `LocalStore::apply_mail_delta` takes each message out of the mailboxes
+  and conversations it no longer belongs to (removing a thread left
+  empty, and working out the others' counts, latest time, subject and
+  participants again), then merges the placed messages like a backfill
+  stretch. A moved message keeps its downloaded body and attachments.
+  Only the touched threads and mailboxes are written, in one
+  transaction, so new mail costs the same however large the mailbox is;
+  the stored mirror is not read at all. New-mail notifications come from
+  the messages the events created that the mirror did not hold yet. An
+  update to a message the backfill has not reached places it at once
+  without notifying, and listing it later finds it already there. An
+  event batch with no message changes writes nothing.
 - **Resyncs.** A refresh, label, address or user event still resyncs the
   account, and the resync is paged too: the newest pages replace the
   mirror, which drops the older mail fetched so far (and its downloaded
   bodies), and the backfill starts again from the top.
 
 This sends fewer requests per second than Bridge's sync, with the same
-endpoints and page size. Applying each event batch still rebuilds the
-whole mirror, which costs time in proportion to the mailbox; making that
-incremental is follow-up work.
+endpoints and page size. Two steps of a write still grow with the
+account: rebuilding the address-autocomplete history after mail changed
+(one grouped query over the account's messages), and recounting the
+threads of each touched mailbox (an indexed count per mailbox).
 
 ### Crypto: `proton-srp` for SRP, a port onto `pgp` for keys
 
