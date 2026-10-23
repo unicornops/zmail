@@ -36,8 +36,12 @@ pub(crate) const LABEL_TYPES: [LabelType; 3] =
     [LabelType::System, LabelType::Folder, LabelType::Label];
 
 /// Fetches every message's metadata, newest first (Bridge's
-/// `metadataIterator`).
-pub(crate) async fn fetch_all_metadata(client: &Client) -> Result<Vec<MessageMetadata>> {
+/// `metadataIterator`), calling `listed` with the running count after
+/// each page.
+pub(crate) async fn fetch_all_metadata(
+    client: &Client,
+    listed: &(dyn Fn(usize) + Send + Sync),
+) -> Result<Vec<MessageMetadata>> {
     let mut all = Vec::new();
     let mut last_id = String::new();
     loop {
@@ -58,6 +62,7 @@ pub(crate) async fn fetch_all_metadata(client: &Client) -> Result<Vec<MessageMet
         };
         last_id = last.id.clone();
         all.extend(page);
+        listed(all.len());
     }
 }
 

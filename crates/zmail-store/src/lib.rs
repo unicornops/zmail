@@ -2898,6 +2898,18 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Replaces the status detail of the attempt in progress, such as how
+    /// far a long listing has got, leaving the phase and times alone.
+    pub fn record_sync_progress(&self, account_id: i64, detail: impl AsRef<str>) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE sync_state SET detail = ?2 WHERE account_id = ?1",
+            params![account_id, detail.as_ref()],
+        )
+        .with_context(|| format!("failed to update sync progress for account {account_id}"))?;
+        Ok(())
+    }
+
     /// Records an automatic retry backoff after a failed attempt.
     pub fn record_sync_backoff(
         &self,
@@ -7082,6 +7094,38 @@ mod tests {
         assert_eq!(
             account.sync_status.last_error_message.as_deref(),
             Some("server greeting timeout")
+        );
+    }
+
+    #[test]
+    fn records_progress_without_touching_the_failure() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Proton)
+            .expect("account should be created");
+        store
+            .record_sync_failure(account_id, "Sync failed", "could not reach Proton")
+            .expect("failure should record");
+        store
+            .begin_sync_attempt(account_id, SyncPhase::Discovering, "Discovering")
+            .expect("phase update should work");
+        store
+            .record_sync_progress(account_id, "Listing Proton messages: 256 so far")
+            .expect("progress should record");
+
+        let status = store
+            .list_accounts()
+            .expect("accounts should load")
+            .into_iter()
+            .find(|account| account.id == account_id)
+            .expect("account should exist")
+            .sync_status;
+        assert_eq!(status.phase, SyncPhase::Discovering);
+        assert_eq!(status.detail, "Listing Proton messages: 256 so far");
+        assert_eq!(status.failure_count, 1);
+        assert_eq!(
+            status.last_error_message.as_deref(),
+            Some("could not reach Proton")
         );
     }
 

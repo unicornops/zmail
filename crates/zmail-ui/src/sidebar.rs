@@ -911,7 +911,17 @@ impl SidebarView {
         let status = &account.sync_status;
         let failing = status.phase == SyncPhase::Failed || status.failure_count > 0;
         let (status_icon, status_color, status_label) = sync_badge(status.phase, colors);
+        let in_progress = matches!(
+            status.phase,
+            SyncPhase::Connecting | SyncPhase::Discovering | SyncPhase::Syncing
+        );
+        // While an attempt runs, its own progress comes first; an earlier
+        // failure stays visible as such, not as what is happening now.
         let status_tooltip = match status.last_error_message.as_deref() {
+            Some(error) if failing && in_progress && !status.detail.is_empty() => format!(
+                "{status_label}: {}. Last failure: {error}",
+                status.detail.trim_end_matches('.')
+            ),
             Some(error) if failing => format!("{status_label}: {error}"),
             _ => status_label.to_owned(),
         };
