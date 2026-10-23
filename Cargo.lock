@@ -9278,9 +9278,6 @@ dependencies = [
 [[package]]
 name = "zmail-notify"
 version = "0.0.1"
-dependencies = [
- "notify-rust",
-]
 
 [[package]]
 name = "zmail-proton"

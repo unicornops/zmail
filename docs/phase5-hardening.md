@@ -118,8 +118,10 @@ Run this on each platform before claiming screen-reader support works, and note 
 
 ## New Mail Notification Policy
 
-- Notifications are raised by the `zmail-notify` crate through `notify-rust`, which resolves to D-Bus `org.freedesktop.Notifications` on Linux, the notification center on macOS, and toast notifications on Windows.
-- One notification is raised per arrival batch — one sync that found new mail — naming the account and up to three arrival subjects.
+- The `zmail-notify` crate composes the notifications; the GUI posts them through GPUI's system notifications, which use `UNUserNotificationCenter` on macOS (macOS asks once whether Zmail may notify; only the `.app` bundle can post, so an unbundled `cargo run` build shows none), toast notifications under the `ie.unicornops.zmail` AppUserModelID on Windows (the MSI's Start menu shortcut carries the same id), and D-Bus `org.freedesktop.Notifications` on Linux.
+- One notification is raised per arrival batch — one sync that found new mail — naming the account and up to three arrival subjects, newest first.
+- Clicking a notification brings the window forward with the batch's newest arrival open: its mailbox selected, the conversation selected in the list and shown in the reader (and marked read, as a click in the list would). A conversation no longer in the local mirror, or a notification from an earlier run, only brings the window forward. Linux needs a notification server that supports the `default` action (a click on the body); Windows delivers the click to the running app.
+- The notification's tag, the only identifier the operating system keeps, is an opaque counter; the account, mailbox and server thread id it opens stay in the app's memory.
 - The first sync of a mailbox counts as an initial import, not new mail, and never notifies; reconnecting a large account therefore cannot flood the user.
 - Notifications are capped at six per rolling minute; batches beyond the cap collapse into a summary line until the window frees up.
 - The GUI suppresses notifications while its window is focused (the quiet flag mirrors window activation), so mail arriving while the user reads it does not interrupt.

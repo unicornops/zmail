@@ -1807,6 +1807,34 @@ impl LocalStore {
         .context("failed to query the first thread id")
     }
 
+    /// The stored thread a sync named by its account, mailbox name and
+    /// remote thread id (a new-mail notification's target), as its
+    /// `(thread id, mailbox id)`, if it is still in the mirror.
+    pub fn find_remote_thread(
+        &self,
+        account_id: i64,
+        mailbox_name: &str,
+        remote_thread_id: &str,
+    ) -> Result<Option<(i64, i64)>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            r#"
+            SELECT threads.id, mailboxes.id
+            FROM threads
+            JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+            WHERE mailboxes.account_id = ?1
+              AND mailboxes.name = ?2
+              AND threads.remote_thread_id = ?3
+            ORDER BY threads.id
+            LIMIT 1
+            "#,
+            params![account_id, mailbox_name, remote_thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .context("failed to find a thread by its remote id")
+    }
+
     /// The newest thread a mailbox or virtual mailbox shows, if any.
     pub fn first_selection_thread(
         &self,
@@ -7276,6 +7304,38 @@ mod tests {
             )
             .expect("snapshot should apply");
         (store, work, home)
+    }
+
+    #[test]
+    fn remote_threads_resolve_within_their_account_and_mailbox() {
+        let (store, work, home) = two_account_store();
+        let (thread_id, mailbox_id) = store
+            .find_remote_thread(work, "All Mail", "work-flagged")
+            .expect("lookup")
+            .expect("the thread is stored");
+        assert_eq!(
+            Some(mailbox_id),
+            store.mailbox_id_by_role(work, "archive").expect("lookup"),
+            "the copy in the named mailbox, not the one in INBOX"
+        );
+        let view = store
+            .thread_view(thread_id)
+            .expect("thread view")
+            .expect("the thread exists");
+        assert_eq!(view.mailbox_id, mailbox_id);
+        assert_eq!(
+            store
+                .find_remote_thread(home, "All Mail", "work-flagged")
+                .expect("lookup"),
+            None,
+            "another account's thread does not resolve"
+        );
+        assert_eq!(
+            store
+                .find_remote_thread(work, "INBOX", "gone")
+                .expect("lookup"),
+            None
+        );
     }
 
     #[test]
