@@ -45,10 +45,15 @@ pub use zmail_proton_api::{API_HOST_URL, AppVersion, ClientConfig};
 /// it is missed, then mirrors the identities (combined address mode: one
 /// account, all addresses), the labels as mailboxes and every message's
 /// metadata. Bodies are fetched when a message is opened.
+///
+/// A full sync lists every message's metadata before it returns, which
+/// takes many requests on a large mailbox; `listed` is called after each
+/// page with the number of messages listed so far.
 pub async fn discover_and_sync(
     target: &SyncTarget,
     session: &ProtonSession,
     existing_mailboxes: &[MailboxSnapshot],
+    listed: &(dyn Fn(usize) + Send + Sync),
 ) -> Result<AccountSyncSnapshot> {
     if target.protocol != ProtocolKind::Proton {
         bail!("Proton adapter received a non-Proton sync target");
@@ -60,10 +65,13 @@ pub async fn discover_and_sync(
     {
         return Ok(snapshot);
     }
-    full_sync(session).await
+    full_sync(session, listed).await
 }
 
-async fn full_sync(session: &ProtonSession) -> Result<AccountSyncSnapshot> {
+async fn full_sync(
+    session: &ProtonSession,
+    listed: &(dyn Fn(usize) + Send + Sync),
+) -> Result<AccountSyncSnapshot> {
     let client = session.client();
     let checkpoint = client.get_latest_event_id().await?;
     let user = client.get_user().await?;
@@ -96,7 +104,7 @@ async fn full_sync(session: &ProtonSession) -> Result<AccountSyncSnapshot> {
         .unwrap_or_else(|| user.email.clone());
 
     let labels = client.get_labels(&sync::LABEL_TYPES).await?;
-    let metadata = sync::fetch_all_metadata(client).await?;
+    let metadata = sync::fetch_all_metadata(client, listed).await?;
     let mailboxes = sync::build_mailboxes(
         &labels,
         &metadata,

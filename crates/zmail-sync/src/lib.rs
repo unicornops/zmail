@@ -1046,7 +1046,16 @@ impl SyncService {
             },
             #[cfg(feature = "proton")]
             Credentials::Proton(session) => {
-                zmail_proton::discover_and_sync(&target, session, &existing_mailboxes).await?
+                let store = self.inner.store.clone();
+                let listed = move |count: usize| {
+                    // Progress is only shown; a failed write must not stop the sync.
+                    let _ = store.record_sync_progress(
+                        account_id,
+                        format!("Listing Proton messages: {count} so far"),
+                    );
+                };
+                zmail_proton::discover_and_sync(&target, session, &existing_mailboxes, &listed)
+                    .await?
             }
         };
 
