@@ -182,6 +182,9 @@ struct SyncServiceInner {
     /// Proton sessions, one per account, once `configure_proton` ran.
     #[cfg(feature = "proton")]
     proton: Mutex<Option<Arc<zmail_proton::ProtonSessions>>>,
+    /// How much of the message listing each Proton sync does.
+    #[cfg(feature = "proton")]
+    proton_paging: Mutex<zmail_proton::SyncPaging>,
 }
 
 impl std::fmt::Debug for SyncService {
@@ -223,6 +226,8 @@ impl SyncService {
                 wake_watchdog_started: AtomicBool::new(false),
                 #[cfg(feature = "proton")]
                 proton: Mutex::new(None),
+                #[cfg(feature = "proton")]
+                proton_paging: Mutex::new(zmail_proton::SyncPaging::default()),
             }),
         };
         service.start_outbox_supervisor();
@@ -951,13 +956,14 @@ impl SyncService {
         // `connect` names the problem itself: missing credentials, or a
         // Proton session that has ended and needs signing in again.
         let credentials = self.connect(&target).await?;
-        let existing_mailboxes = self
-            .inner
-            .store
-            .account_mailbox_snapshots(account_id)
-            .with_context(|| {
-                format!("failed to read the current local mirror for account {account_id}")
-            })?;
+        // Full-snapshot adapters diff against the mirror as it was before
+        // the write-back below. Proton reads the mirror only when its
+        // events need it (see `proton.rs`).
+        let existing_mailboxes = match &credentials {
+            Credentials::Secret(_) => self.local_mirror(account_id)?,
+            #[cfg(feature = "proton")]
+            Credentials::Proton(_) => Vec::new(),
+        };
 
         // Locally applied mailbox operations are written back before the
         // snapshot is fetched, so the fetched state includes them. Failed
@@ -1034,47 +1040,28 @@ impl SyncService {
             ),
         )?;
 
-        let snapshot = match &credentials {
-            Credentials::Secret(secret) => match target.protocol {
-                ProtocolKind::Imap => {
-                    zmail_imap::discover_and_sync(&target, secret, &existing_mailboxes).await?
-                }
-                ProtocolKind::Jmap => {
-                    zmail_jmap::discover_and_sync(&target, secret, &existing_mailboxes).await?
-                }
-                ProtocolKind::Proton => bail!("Proton accounts need a Proton session"),
-            },
-            #[cfg(feature = "proton")]
-            Credentials::Proton(session) => {
-                let store = self.inner.store.clone();
-                let listed = move |count: usize| {
-                    // Progress is only shown; a failed write must not stop the sync.
-                    let _ = store.record_sync_progress(
-                        account_id,
-                        format!("Listing Proton messages: {count} so far"),
-                    );
+        let (detail, checkpoint) = match &credentials {
+            Credentials::Secret(secret) => {
+                let snapshot = match target.protocol {
+                    ProtocolKind::Imap => {
+                        zmail_imap::discover_and_sync(&target, secret, &existing_mailboxes).await?
+                    }
+                    ProtocolKind::Jmap => {
+                        zmail_jmap::discover_and_sync(&target, secret, &existing_mailboxes).await?
+                    }
+                    ProtocolKind::Proton => bail!("Proton accounts need a Proton session"),
                 };
-                zmail_proton::discover_and_sync(&target, session, &existing_mailboxes, &listed)
-                    .await?
+                self.write_snapshot(&target, &existing_mailboxes, &snapshot)?;
+                (snapshot.detail, snapshot.checkpoint)
             }
+            // Proton writes its newest mail, then the next stretch of older
+            // mail, each as it arrives (see `proton.rs`).
+            #[cfg(feature = "proton")]
+            Credentials::Proton(session) => self.sync_proton_mail(&target, session).await?,
         };
-
-        self.inner.store.begin_sync_attempt(
-            account_id,
-            SyncPhase::Syncing,
-            format!(
-                "Writing {} mailbox metadata into the local mirror",
-                target.protocol
-            ),
-        )?;
-
         self.inner
             .store
-            .replace_account_snapshot(account_id, &snapshot)?;
-        self.inner
-            .store
-            .record_sync_success(account_id, &snapshot.detail, &snapshot.checkpoint)?;
-        self.notify_new_mail(&target, &existing_mailboxes, &snapshot);
+            .record_sync_success(account_id, &detail, &checkpoint)?;
         // A configured disk budget evicts the oldest hydrated bodies and
         // attachment blobs after each sync, so the local mirror never grows
         // past the budget; the run stays on the background runtime, off the
@@ -1086,6 +1073,40 @@ impl SyncService {
         // New mail is indexed newest first by the background indexer.
         self.inner.index_wake.notify_one();
 
+        Ok(())
+    }
+
+    /// The account's whole local mirror, which full-snapshot syncs diff
+    /// against.
+    fn local_mirror(&self, account_id: i64) -> Result<Vec<MailboxSnapshot>> {
+        self.inner
+            .store
+            .account_mailbox_snapshots(account_id)
+            .with_context(|| {
+                format!("failed to read the current local mirror for account {account_id}")
+            })
+    }
+
+    /// Writes a full snapshot over the local mirror and reports the mail
+    /// that arrived with it.
+    fn write_snapshot(
+        &self,
+        target: &SyncTarget,
+        existing_mailboxes: &[MailboxSnapshot],
+        snapshot: &zmail_core::AccountSyncSnapshot,
+    ) -> Result<()> {
+        self.inner.store.begin_sync_attempt(
+            target.id,
+            SyncPhase::Syncing,
+            format!(
+                "Writing {} mailbox metadata into the local mirror",
+                target.protocol
+            ),
+        )?;
+        self.inner
+            .store
+            .replace_account_snapshot(target.id, snapshot)?;
+        self.notify_new_mail(target, existing_mailboxes, snapshot);
         Ok(())
     }
 

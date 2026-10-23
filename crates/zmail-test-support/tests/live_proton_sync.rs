@@ -856,3 +856,169 @@ fn onboarding_signs_in_step_by_step_and_the_session_syncs() -> Result<()> {
     ensure!(subjects(&store, account_id, "INBOX")?.contains(&"Welcome to the harness".to_owned()));
     Ok(())
 }
+
+/// Each mailbox's threads, as (conversation, messages, unread, flagged),
+/// for comparing two mirrors of the same account.
+type MirrorContents = Vec<(String, Vec<(String, Vec<String>, usize, bool)>)>;
+
+fn mirror_contents(store: &LocalStore, account_id: i64) -> Result<MirrorContents> {
+    let mut mailboxes: MirrorContents = store
+        .account_mailbox_snapshots(account_id)?
+        .into_iter()
+        .map(|mailbox| {
+            let mut threads: Vec<_> = mailbox
+                .threads
+                .into_iter()
+                .map(|thread| {
+                    let mut ids: Vec<String> = thread
+                        .messages
+                        .iter()
+                        .map(|message| message.remote_id.clone())
+                        .collect();
+                    ids.sort();
+                    (
+                        thread.remote_thread_id,
+                        ids,
+                        thread.unread_count,
+                        thread.is_flagged,
+                    )
+                })
+                .collect();
+            threads.sort();
+            (mailbox.name, threads)
+        })
+        .collect();
+    mailboxes.sort();
+    Ok(mailboxes)
+}
+
+/// Waits for `ready` to hold, up to a minute.
+fn wait_for(what: &str, mut ready: impl FnMut() -> Result<bool>) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !ready()? {
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn shows_the_newest_mail_first_and_fetches_older_mail_in_the_background() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+    let state = harness.state().clone();
+    let message_id = |subject: &str| -> Result<String> {
+        state
+            .messages
+            .iter()
+            .find(|message| message.subject == subject)
+            .map(|message| message.id.clone())
+            .with_context(|| format!("no fixture {subject}"))
+    };
+    let family_id = state
+        .labels
+        .iter()
+        .find(|label| label.name == "Family")
+        .map(|label| label.id.clone())
+        .context("no Family label")?;
+    let runtime = BackgroundRuntime::start(2)?;
+    // Signed in up front, so the server changes below land while the older
+    // mail is still arriving.
+    let manager = Manager::new(harness_config(&harness)?)?;
+    let (client, _) = runtime
+        .handle()
+        .block_on(manager.login(harness.username(), harness.password()))?;
+
+    // Two messages a page, one page first and one more each sync: the six
+    // seeded messages take several stretches.
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, secrets.as_ref(), account_id)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.configure_proton(harness_config(&harness)?)?;
+    sync_service.set_proton_paging(zmail_proton::SyncPaging {
+        page_size: 2,
+        first_sync_pages: 1,
+        backfill_pages_per_run: 1,
+    });
+    let checkpoint = |store: &LocalStore| -> Result<zmail_proton::ProtonCheckpoint> {
+        store.list_accounts()?[0]
+            .sync_status
+            .checkpoint
+            .as_deref()
+            .and_then(zmail_proton::ProtonCheckpoint::parse)
+            .context("no Proton checkpoint")
+    };
+
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("first sync failed; server log:\n{}", harness.logs()))?;
+    // The newest two, then one older message from the first stretch.
+    let shown = subjects(&store, account_id, "All Mail")?;
+    ensure!(shown.len() == 3, "after the first sync: {shown:?}");
+    ensure!(checkpoint(&store)?.backfill_pending());
+    let status = store.list_accounts()?[0].sync_status.clone();
+    ensure!(
+        status.detail == "Fetched 3 of 6 messages; older mail is still arriving",
+        "detail: {:?}",
+        status.detail
+    );
+
+    // Another client changes mail the backfill has not reached yet: the
+    // events place it now and the backfill finds it already there.
+    runtime.handle().block_on(async {
+        client
+            .mark_messages_read(&[message_id("Welcome to the harness")?])
+            .await?;
+        client
+            .label_messages(&[message_id("Quarterly report")?], &family_id)
+            .await?;
+        anyhow::Ok(())
+    })?;
+
+    wait_for("the older mail", || {
+        Ok(!checkpoint(&store)?.backfill_pending())
+    })
+    .with_context(|| format!("server log:\n{}", harness.logs()))?;
+    // One more sync once the scheduled ones are done: nothing changes.
+    wait_for("the last scheduled sync", || {
+        Ok(sync_service.sync_account_and_wait(account_id).is_ok())
+    })?;
+    let status = store.list_accounts()?[0].sync_status.clone();
+    ensure!(
+        status.detail == "Proton account up to date",
+        "detail: {:?}",
+        status.detail
+    );
+
+    // The paged mirror ends up the same as a full sync of the account now.
+    let reference = Arc::new(LocalStore::open_ephemeral()?);
+    let reference_id = reference.insert_account(&proton_account(harness.username()))?;
+    let reference_secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, reference_secrets.as_ref(), reference_id)?;
+    let reference_service = SyncService::new(
+        runtime.handle().clone(),
+        reference.clone(),
+        reference_secrets,
+    );
+    reference_service.configure_proton(harness_config(&harness)?)?;
+    reference_service.sync_account_and_wait(reference_id)?;
+    ensure!(!checkpoint(&reference)?.backfill_pending());
+
+    let paged = mirror_contents(&store, account_id)?;
+    ensure!(
+        paged == mirror_contents(&reference, reference_id)?,
+        "paged mirror {paged:#?}\n!= full sync {:#?}",
+        mirror_contents(&reference, reference_id)?
+    );
+    ensure!(subjects(&store, account_id, "All Mail")?.len() == 6);
+    ensure!(
+        subjects(&store, account_id, "Labels/Family")?.contains(&"Quarterly report".to_owned())
+    );
+    Ok(())
+}

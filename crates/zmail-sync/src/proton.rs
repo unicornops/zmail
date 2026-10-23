@@ -6,6 +6,15 @@
 //! does not enable until the local store is encrypted at rest (#139);
 //! without it a Proton account fails to connect with a clear message and
 //! is never watched.
+//!
+//! A Proton sync writes in two steps. First the account's events since the
+//! checkpoint (or, the first time, its newest mail) replace the mirror, as
+//! other protocols' snapshots do. Then, while the checkpoint has a backfill
+//! cursor, the next stretch of older mail is merged in without removing
+//! anything and without new-mail notifications. Each step stores its
+//! checkpoint, so a failure resumes where it stopped, and the next sync is
+//! scheduled [`BACKFILL_PAUSE`] later until the history is complete;
+//! write-back, sending and events run between the stretches.
 
 use std::time::Duration;
 
@@ -15,6 +24,10 @@ use anyhow::{Context, Result};
 use zmail_core::{OutgoingMessage, ProtocolKind, SyncTarget};
 
 use crate::{SyncService, backoff::Backoff, wake::unless_woken};
+
+/// The pause between two syncs that fetch older Proton mail.
+#[cfg(feature = "proton")]
+const BACKFILL_PAUSE: Duration = Duration::from_millis(1500);
 
 /// What a protocol adapter connects with.
 pub(crate) enum Credentials {
@@ -64,6 +77,122 @@ impl SyncService {
             .expect("proton session mutex should not be poisoned") =
             Some(std::sync::Arc::new(sessions));
         Ok(())
+    }
+
+    /// Sets how much of the message listing each Proton sync does. Zmail
+    /// keeps Bridge's page size and its own first-sync and backfill page
+    /// counts ([`zmail_proton::SyncPaging::default`]); tests use small
+    /// pages so a handful of messages spans several stretches.
+    #[cfg(feature = "proton")]
+    pub fn set_proton_paging(&self, paging: zmail_proton::SyncPaging) {
+        *self
+            .inner
+            .proton_paging
+            .lock()
+            .expect("proton paging mutex should not be poisoned") = paging;
+    }
+
+    /// Syncs a Proton account's mail and returns the status detail and the
+    /// checkpoint to record: the events (or a first sync) replace the
+    /// mirror, then the next stretch of older mail is merged into it.
+    #[cfg(feature = "proton")]
+    pub(crate) async fn sync_proton_mail(
+        &self,
+        target: &SyncTarget,
+        session: &zmail_proton::ProtonSession,
+    ) -> Result<(String, String)> {
+        use std::sync::{Arc, Mutex};
+
+        use zmail_core::{MailboxSnapshot, SyncPhase};
+
+        let account_id = target.id;
+        let store = &self.inner.store;
+        let paging = *self
+            .inner
+            .proton_paging
+            .lock()
+            .expect("proton paging mutex should not be poisoned");
+        let has_mirror = !store.list_mailboxes(account_id)?.is_empty();
+        // The whole mirror is read only when events changed messages, and
+        // then once for both the update and the new-mail diff.
+        let mirror: Mutex<Option<Arc<Vec<MailboxSnapshot>>>> = Mutex::new(None);
+        let load_mirror = || -> Result<Arc<Vec<MailboxSnapshot>>> {
+            let mut cached = mirror
+                .lock()
+                .expect("mirror cache mutex should not be poisoned");
+            if let Some(mirror) = cached.as_ref() {
+                return Ok(mirror.clone());
+            }
+            let loaded = Arc::new(self.local_mirror(account_id)?);
+            *cached = Some(loaded.clone());
+            Ok(loaded)
+        };
+        let progress = |detail: &str| {
+            // Progress is only shown; a failed write must not stop the sync.
+            let _ = store.record_sync_progress(account_id, detail);
+        };
+
+        let update = zmail_proton::discover_and_sync(
+            target,
+            session,
+            has_mirror,
+            &load_mirror,
+            &paging,
+            &progress,
+        )
+        .await?;
+        if let zmail_proton::MirrorUpdate::Replace { snapshot, not_new } = &update {
+            let existing = if has_mirror {
+                load_mirror()?
+            } else {
+                Arc::default()
+            };
+            store.begin_sync_attempt(
+                account_id,
+                SyncPhase::Syncing,
+                "Writing Proton mailbox metadata into the local mirror",
+            )?;
+            store.replace_account_snapshot(account_id, snapshot)?;
+            if not_new.is_empty() {
+                self.notify_new_mail(target, &existing, snapshot);
+            } else {
+                // Older mail an event placed before the backfill listed it
+                // is not new mail.
+                let mut arrived = snapshot.clone();
+                for mailbox in &mut arrived.mailboxes {
+                    for thread in &mut mailbox.threads {
+                        thread
+                            .messages
+                            .retain(|message| !not_new.contains(&message.remote_id));
+                    }
+                }
+                self.notify_new_mail(target, &existing, &arrived);
+            }
+            self.inner.index_wake.notify_one();
+        }
+        store.record_sync_checkpoint(account_id, update.checkpoint())?;
+        let mut detail = update.detail().to_owned();
+        let mut checkpoint = update.checkpoint().to_owned();
+
+        let backfill =
+            zmail_proton::backfill_older_mail(session, &checkpoint, &paging, &progress).await?;
+        if let Some(backfill) = backfill {
+            store.begin_sync_attempt(account_id, SyncPhase::Syncing, &backfill.snapshot.detail)?;
+            // Older mail never notifies: it is history, not new mail.
+            store.merge_account_snapshot(account_id, &backfill.snapshot)?;
+            store.record_sync_checkpoint(account_id, &backfill.snapshot.checkpoint)?;
+            self.inner.index_wake.notify_one();
+            checkpoint = backfill.snapshot.checkpoint;
+            if !backfill.complete {
+                detail = backfill.snapshot.detail;
+                let service = self.clone();
+                self.inner.handle.spawn(async move {
+                    tokio::time::sleep(BACKFILL_PAUSE).await;
+                    service.request_sync(account_id);
+                });
+            }
+        }
+        Ok((detail, checkpoint))
     }
 
     /// Starts signing in to a Proton account for onboarding, on the
@@ -206,6 +335,15 @@ impl SyncService {
                 self.request_sync(target.id);
                 return;
             };
+            if zmail_proton::ProtonCheckpoint::parse(&checkpoint)
+                .is_some_and(|checkpoint| checkpoint.backfill_pending())
+            {
+                // Older mail is still to come. Each sync schedules the next
+                // stretch; this carries on after one that failed.
+                backoff.reset();
+                self.request_sync(target.id);
+                return;
+            }
             let changed = match self.connect_proton(target).await {
                 Ok(Credentials::Proton(session)) => {
                     zmail_proton::has_new_events(&session, &checkpoint).await
