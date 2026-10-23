@@ -27,6 +27,8 @@ zmail-proton-api = { path = "../zmail-proton-api", features = ["test-harness"] }
 # Proton sync tests drive the real sync runtime with Proton support built in.
 zmail-proton = { path = "../zmail-proton" }
 zmail-sync = { path = "../zmail-sync", features = ["proton"] }
+# Records the new-mail notifications a Proton sync raises.
+zmail-notify = { path = "../zmail-notify" }
 
 [lints]
 workspace = true

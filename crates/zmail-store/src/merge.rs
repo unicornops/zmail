@@ -1,22 +1,28 @@
-//! Additive snapshot writes: mail fetched in stretches, such as a Proton
-//! account's older mail arriving after its newest (ADR 0004).
+//! Partial writes to the mirror: mail fetched in stretches, such as a
+//! Proton account's older mail arriving after its newest, and changes to
+//! single messages, such as a Proton event batch (ADR 0004).
 //!
 //! [`LocalStore::replace_account_snapshot`] mirrors a complete snapshot and
 //! removes whatever it does not hold. A stretch of history holds only some
 //! of the account's mail, so it is merged instead: nothing is removed, and
 //! a conversation whose older messages arrive in a later stretch than its
-//! newer ones keeps both.
+//! newer ones keeps both. A [`MailDelta`] is merged the same way, and its
+//! messages also leave the places they no longer have; nothing else is
+//! read or rewritten.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use rusqlite::{Transaction, TransactionBehavior, params};
-use zmail_core::{AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
+use zmail_core::{
+    AccountSyncSnapshot, MailDelta, MailboxSnapshot, MessageAttachment, MessageSnapshot,
+    ThreadSnapshot,
+};
 
 use crate::{
-    LocalStore, address_history, flush_search_index, identity_id_map, load_account_mailbox_ids,
-    load_pending_op_remote_ids, load_stored_thread, merge_mailbox_threads, primary_identity_id,
-    thread_message_snapshots,
+    ExistingMailbox, LocalStore, address_history, flush_search_index, identity_id_map,
+    load_account_mailbox_ids, load_pending_op_remote_ids, load_stored_message_attachments,
+    load_stored_thread, merge_mailbox_threads, primary_identity_id, thread_message_snapshots,
 };
 
 impl LocalStore {
@@ -46,89 +52,368 @@ impl LocalStore {
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the snapshot merge transaction")?;
-
-        let identity_map = identity_id_map(&transaction, account_id)?;
-        let fallback_identity_id = primary_identity_id(&transaction, account_id)?
-            .context("cannot merge a mailbox snapshot without identities")?;
-        let existing_mailboxes = load_account_mailbox_ids(&transaction, account_id)?;
-        let pending_remote_ids = load_pending_op_remote_ids(&transaction, account_id)?;
-
-        let mut mail_changed = false;
-        for (sort_order, mailbox) in snapshot.mailboxes.iter().enumerate() {
-            let mailbox_id = match existing_mailboxes.get(&mailbox.name) {
-                Some(existing) => existing.id,
-                None => {
-                    transaction
-                        .execute(
-                            r#"
-                            INSERT INTO mailboxes(
-                                account_id, name, role, sort_order, delimiter, parent_name,
-                                total_threads, unread_threads
-                            )
-                            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0)
-                            "#,
-                            params![
-                                account_id,
-                                mailbox.name,
-                                mailbox.role,
-                                sort_order as i64,
-                                mailbox.delimiter,
-                                mailbox.parent
-                            ],
-                        )
-                        .context("failed to insert the mailbox during the snapshot merge")?;
-                    transaction.last_insert_rowid()
-                }
-            };
-            if mailbox.threads.is_empty() {
-                continue;
-            }
-
-            let combined = MailboxSnapshot {
-                name: mailbox.name.clone(),
-                role: mailbox.role.clone(),
-                delimiter: mailbox.delimiter.clone(),
-                parent: mailbox.parent.clone(),
-                threads: combine_with_stored_threads(&transaction, mailbox_id, &mailbox.threads)?,
-            };
-            let (_, changed) = merge_mailbox_threads(
-                &transaction,
-                mailbox_id,
-                &combined,
-                &identity_map,
-                fallback_identity_id,
-                &pending_remote_ids,
-            )?;
-            if changed {
-                mail_changed = true;
-                transaction
-                    .execute(
-                        r#"
-                        UPDATE mailboxes
-                        SET
-                            total_threads = (
-                                SELECT COUNT(*) FROM threads WHERE mailbox_id = mailboxes.id
-                            ),
-                            unread_threads = (
-                                SELECT COUNT(*) FROM threads
-                                WHERE mailbox_id = mailboxes.id AND unread_count > 0
-                            )
-                        WHERE id = ?1
-                        "#,
-                        params![mailbox_id],
-                    )
-                    .context("failed to refresh the mailbox counters during the snapshot merge")?;
-            }
-        }
-
-        if mail_changed {
-            address_history::rebuild_account_address_history(&transaction, account_id)?;
-        }
-        flush_search_index(&transaction)?;
+        let context = MergeContext::load(&transaction, account_id)?;
+        let changed = merge_mailboxes(&transaction, &context, &snapshot.mailboxes)?;
+        finish(&transaction, account_id, &changed)?;
         transaction
             .commit()
             .context("failed to commit the snapshot merge transaction")
     }
+
+    /// Applies changes to some messages of an account, touching only those
+    /// messages, their threads and their mailboxes.
+    ///
+    /// Each message in [`MailDelta::message_ids`] is first removed from
+    /// every mailbox and thread the delta does not place it in (all of
+    /// them, for a deleted message); a thread left empty is removed, and
+    /// the others have their counts, latest time, subject and participants
+    /// worked out again. The placed messages are then merged as
+    /// [`Self::merge_account_snapshot`] merges them. A message that moves
+    /// keeps its hydrated body and attachment metadata, and queued read
+    /// and flag state survives as with a snapshot. One transaction.
+    ///
+    /// Returns the remote ids of the delta's messages the mirror did not
+    /// hold before.
+    pub fn apply_mail_delta(&self, account_id: i64, delta: &MailDelta) -> Result<Vec<String>> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin the mail delta transaction")?;
+        let context = MergeContext::load(&transaction, account_id)?;
+
+        let mut places: HashMap<&str, HashSet<(&str, &str)>> = HashMap::new();
+        for mailbox in &delta.mailboxes {
+            for thread in &mailbox.threads {
+                for message in &thread.messages {
+                    places
+                        .entry(message.remote_id.as_str())
+                        .or_default()
+                        .insert((mailbox.name.as_str(), thread.remote_thread_id.as_str()));
+                }
+            }
+        }
+        let mut covered: Vec<&str> = delta
+            .message_ids
+            .iter()
+            .map(String::as_str)
+            .chain(places.keys().copied())
+            .filter(|id| !id.is_empty())
+            .collect();
+        covered.sort_unstable();
+        covered.dedup();
+
+        // Leave the old places, remembering each message's hydrated state
+        // so a move does not lose it.
+        let mut unknown = Vec::new();
+        let mut hydration: HashMap<&str, Hydration> = HashMap::new();
+        let mut touched_threads: HashSet<i64> = HashSet::new();
+        let mut changed: HashSet<i64> = HashSet::new();
+        for remote_id in covered {
+            let rows = stored_places(&transaction, account_id, remote_id)?;
+            if rows.is_empty() {
+                unknown.push(remote_id.to_owned());
+            }
+            let keep = places.get(remote_id);
+            for row in rows {
+                if row.has_body && !hydration.contains_key(remote_id) {
+                    hydration.insert(remote_id, load_hydration(&transaction, row.message_id)?);
+                }
+                let stays = keep.is_some_and(|keep| {
+                    keep.contains(&(row.mailbox_name.as_str(), row.remote_thread_id.as_str()))
+                });
+                if !stays {
+                    transaction
+                        .execute(
+                            "DELETE FROM messages WHERE id = ?1",
+                            params![row.message_id],
+                        )
+                        .context("failed to remove a message during the mail delta")?;
+                    touched_threads.insert(row.thread_id);
+                    changed.insert(row.mailbox_id);
+                }
+            }
+        }
+        for thread_id in touched_threads {
+            settle_thread(&transaction, thread_id)?;
+        }
+
+        let mut mailboxes = delta.mailboxes.clone();
+        for message in mailboxes
+            .iter_mut()
+            .flat_map(|mailbox| mailbox.threads.iter_mut())
+            .flat_map(|thread| thread.messages.iter_mut())
+        {
+            if message.body_text.is_none()
+                && message.sanitized_html.is_none()
+                && let Some(stored) = hydration.get(message.remote_id.as_str())
+            {
+                stored.apply_to(message);
+            }
+        }
+        changed.extend(merge_mailboxes(&transaction, &context, &mailboxes)?);
+        finish(&transaction, account_id, &changed)?;
+        transaction
+            .commit()
+            .context("failed to commit the mail delta transaction")?;
+        Ok(unknown)
+    }
+}
+
+/// What every partial write reads once up front.
+struct MergeContext {
+    account_id: i64,
+    identity_map: HashMap<String, i64>,
+    fallback_identity_id: i64,
+    existing_mailboxes: HashMap<String, ExistingMailbox>,
+    pending_remote_ids: HashSet<String>,
+}
+
+impl MergeContext {
+    fn load(transaction: &Transaction<'_>, account_id: i64) -> Result<Self> {
+        Ok(Self {
+            account_id,
+            identity_map: identity_id_map(transaction, account_id)?,
+            fallback_identity_id: primary_identity_id(transaction, account_id)?
+                .context("cannot merge mail without identities")?,
+            existing_mailboxes: load_account_mailbox_ids(transaction, account_id)?,
+            pending_remote_ids: load_pending_op_remote_ids(transaction, account_id)?,
+        })
+    }
+}
+
+/// Merges partial mailboxes into the mirror, creating missing mailboxes,
+/// and returns the ids of the mailboxes whose threads changed.
+fn merge_mailboxes(
+    transaction: &Transaction<'_>,
+    context: &MergeContext,
+    mailboxes: &[MailboxSnapshot],
+) -> Result<HashSet<i64>> {
+    let mut changed_mailboxes = HashSet::new();
+    for (sort_order, mailbox) in mailboxes.iter().enumerate() {
+        let mailbox_id = match context.existing_mailboxes.get(&mailbox.name) {
+            Some(existing) => existing.id,
+            None => {
+                transaction
+                    .execute(
+                        r#"
+                        INSERT INTO mailboxes(
+                            account_id, name, role, sort_order, delimiter, parent_name,
+                            total_threads, unread_threads
+                        )
+                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0)
+                        "#,
+                        params![
+                            context.account_id,
+                            mailbox.name,
+                            mailbox.role,
+                            sort_order as i64,
+                            mailbox.delimiter,
+                            mailbox.parent
+                        ],
+                    )
+                    .context("failed to insert the mailbox during the snapshot merge")?;
+                transaction.last_insert_rowid()
+            }
+        };
+        if mailbox.threads.is_empty() {
+            continue;
+        }
+
+        let combined = MailboxSnapshot {
+            name: mailbox.name.clone(),
+            role: mailbox.role.clone(),
+            delimiter: mailbox.delimiter.clone(),
+            parent: mailbox.parent.clone(),
+            threads: combine_with_stored_threads(transaction, mailbox_id, &mailbox.threads)?,
+        };
+        let (_, changed) = merge_mailbox_threads(
+            transaction,
+            mailbox_id,
+            &combined,
+            &context.identity_map,
+            context.fallback_identity_id,
+            &context.pending_remote_ids,
+        )?;
+        if changed {
+            changed_mailboxes.insert(mailbox_id);
+        }
+    }
+    Ok(changed_mailboxes)
+}
+
+/// Refreshes the changed mailboxes' counters, the address history when
+/// mail changed, and the search index.
+fn finish(
+    transaction: &Transaction<'_>,
+    account_id: i64,
+    changed_mailboxes: &HashSet<i64>,
+) -> Result<()> {
+    for mailbox_id in changed_mailboxes {
+        transaction
+            .execute(
+                r#"
+                UPDATE mailboxes
+                SET
+                    total_threads = (
+                        SELECT COUNT(*) FROM threads WHERE mailbox_id = mailboxes.id
+                    ),
+                    unread_threads = (
+                        SELECT COUNT(*) FROM threads
+                        WHERE mailbox_id = mailboxes.id AND unread_count > 0
+                    )
+                WHERE id = ?1
+                "#,
+                params![mailbox_id],
+            )
+            .context("failed to refresh the mailbox counters during the snapshot merge")?;
+    }
+    if !changed_mailboxes.is_empty() {
+        address_history::rebuild_account_address_history(transaction, account_id)?;
+    }
+    flush_search_index(transaction)
+}
+
+/// One stored copy of a message: where it is, and whether it has a body.
+struct StoredPlace {
+    message_id: i64,
+    thread_id: i64,
+    remote_thread_id: String,
+    mailbox_id: i64,
+    mailbox_name: String,
+    has_body: bool,
+}
+
+/// Every stored copy of a message in the account's mailboxes.
+fn stored_places(
+    transaction: &Transaction<'_>,
+    account_id: i64,
+    remote_id: &str,
+) -> Result<Vec<StoredPlace>> {
+    transaction
+        .prepare_cached(
+            r#"
+            SELECT messages.id, threads.id, COALESCE(threads.remote_thread_id, ''),
+                   mailboxes.id, mailboxes.name,
+                   messages.body_text IS NOT NULL OR messages.sanitized_html IS NOT NULL
+            FROM messages
+            JOIN threads ON threads.id = messages.thread_id
+            JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+            WHERE mailboxes.account_id = ?1 AND messages.remote_id = ?2
+            ORDER BY messages.id ASC
+            "#,
+        )?
+        .query_map(params![account_id, remote_id], |row| {
+            Ok(StoredPlace {
+                message_id: row.get(0)?,
+                thread_id: row.get(1)?,
+                remote_thread_id: row.get(2)?,
+                mailbox_id: row.get(3)?,
+                mailbox_name: row.get(4)?,
+                has_body: row.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to find a message's stored copies")
+}
+
+/// A message's hydrated state, carried to its new place on a move.
+struct Hydration {
+    body_text: Option<String>,
+    sanitized_html: Option<String>,
+    has_remote_content: bool,
+    body_preview: String,
+    attachments: Vec<MessageAttachment>,
+}
+
+impl Hydration {
+    fn apply_to(&self, message: &mut MessageSnapshot) {
+        message.body_text = self.body_text.clone();
+        message.sanitized_html = self.sanitized_html.clone();
+        message.has_remote_content = self.has_remote_content;
+        message.body_preview = self.body_preview.clone();
+        if message.attachments.is_empty() {
+            message.attachments = self.attachments.clone();
+        }
+    }
+}
+
+fn load_hydration(transaction: &Transaction<'_>, message_id: i64) -> Result<Hydration> {
+    let (body_text, sanitized_html, has_remote_content, body_preview) = transaction
+        .query_row(
+            "SELECT body_text, sanitized_html, has_remote_content, body_preview \
+             FROM messages WHERE id = ?1",
+            params![message_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .context("failed to load a message body during the mail delta")?;
+    let attachments = load_stored_message_attachments(transaction, message_id)?
+        .into_iter()
+        .map(|attachment| MessageAttachment {
+            filename: attachment.filename,
+            content_type: attachment.content_type,
+            size_bytes: attachment.size_bytes,
+            storage_path: attachment.storage_path,
+        })
+        .collect();
+    Ok(Hydration {
+        body_text,
+        sanitized_html,
+        has_remote_content,
+        body_preview,
+        attachments,
+    })
+}
+
+/// Removes a thread that lost its last message, or works out its counts,
+/// latest time, subject and participants again from the messages left.
+fn settle_thread(transaction: &Transaction<'_>, thread_id: i64) -> Result<()> {
+    let messages = thread_message_snapshots(transaction, thread_id)?;
+    let Some(newest) = messages.last() else {
+        transaction
+            .execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
+            .context("failed to remove an emptied thread during the mail delta")?;
+        return Ok(());
+    };
+    transaction
+        .execute(
+            r#"
+            UPDATE threads
+            SET
+                subject = ?2,
+                participants = ?3,
+                is_flagged = ?4,
+                message_count = ?5,
+                unread_count = ?6,
+                latest_message_at = ?7,
+                latest_message_id = (
+                    SELECT id FROM messages WHERE thread_id = ?1
+                    ORDER BY received_at DESC, id DESC LIMIT 1
+                )
+            WHERE id = ?1
+            "#,
+            params![
+                thread_id,
+                newest.subject,
+                newest_first_senders(&messages),
+                messages.iter().any(|message| message.is_flagged),
+                messages.len() as i64,
+                messages.iter().filter(|message| !message.is_read).count() as i64,
+                newest.received_at,
+            ],
+        )
+        .context("failed to update a thread during the mail delta")?;
+    Ok(())
+}
+
+/// The distinct senders of messages sorted oldest first, newest first.
+fn newest_first_senders(messages: &[MessageSnapshot]) -> String {
+    let mut senders: Vec<&str> = Vec::new();
+    for message in messages.iter().rev() {
+        if !senders.contains(&message.sender.as_str()) {
+            senders.push(&message.sender);
+        }
+    }
+    senders.join(", ")
 }
 
 /// Each incoming thread joined with the messages its stored counterpart
@@ -214,13 +499,7 @@ fn combine(
             .then_with(|| left.remote_id.cmp(&right.remote_id))
     });
 
-    let mut participants: Vec<&str> = Vec::new();
-    for message in messages.iter().rev() {
-        if !participants.contains(&message.sender.as_str()) {
-            participants.push(&message.sender);
-        }
-    }
-    let participants = participants.join(", ");
+    let participants = newest_first_senders(&messages);
 
     let (subject, preview, latest_message_at, had_attachments) = match stored {
         Some(stored) if stored.latest_message_at > incoming.latest_message_at => (
@@ -258,8 +537,8 @@ fn combine(
 #[cfg(test)]
 mod tests {
     use zmail_core::{
-        AccountSyncSnapshot, MailboxSnapshot, MessageAttachment, MessageSnapshot, ProtocolKind,
-        ThreadSnapshot,
+        AccountSyncSnapshot, MailDelta, MailboxSnapshot, MessageAttachment, MessageSnapshot,
+        ProtocolKind, ThreadSnapshot,
     };
 
     use crate::LocalStore;
@@ -646,5 +925,311 @@ mod tests {
         assert!(summary.is_flagged, "the queued flag survives");
         assert_eq!(summary.unread_count, 0, "the queued read state survives");
         assert!(summary.has_attachments);
+    }
+
+    fn delta(mailboxes: Vec<(&str, Vec<ThreadSnapshot>)>, message_ids: &[&str]) -> MailDelta {
+        MailDelta {
+            mailboxes: snapshot(mailboxes).mailboxes,
+            message_ids: message_ids.iter().map(|id| (*id).to_owned()).collect(),
+        }
+    }
+
+    fn counters(store: &LocalStore, account_id: i64) -> Vec<(String, usize, usize)> {
+        let mut counters: Vec<(String, usize, usize)> = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes")
+            .into_iter()
+            .map(|mailbox| (mailbox.name, mailbox.total_threads, mailbox.unread_threads))
+            .collect();
+        counters.sort();
+        counters
+    }
+
+    /// INBOX and All Mail with conversation c1 (m1, m2) and c2 (m3); m1 is
+    /// opened.
+    fn mirrored() -> (LocalStore, i64) {
+        let (store, account_id) = store();
+        let mut m1 = message("m1", "Ann", "2026-10-01T00:00:00+00:00", true);
+        m1.body_text = Some("m1 body".to_owned());
+        m1.body_preview = "m1 body".to_owned();
+        let c1 = thread(
+            "c1",
+            vec![m1, message("m2", "Bea", "2026-10-02T00:00:00+00:00", false)],
+        );
+        let c2 = thread(
+            "c2",
+            vec![message("m3", "Cy", "2026-10-03T00:00:00+00:00", false)],
+        );
+        store
+            .replace_account_snapshot(
+                account_id,
+                &snapshot(vec![
+                    ("INBOX", vec![c1.clone(), c2.clone()]),
+                    ("All Mail", vec![c1, c2]),
+                    ("Archive", Vec::new()),
+                ]),
+            )
+            .expect("mirror");
+        (store, account_id)
+    }
+
+    /// Message row ids of every thread, by mailbox and conversation.
+    fn rows(store: &LocalStore, account_id: i64) -> Vec<(String, String, Vec<i64>)> {
+        let mut rows = Vec::new();
+        for mailbox in store.list_mailboxes(account_id).expect("mailboxes") {
+            for thread in store.list_threads(mailbox.id, 0..100).expect("threads") {
+                let view = store.thread_view(thread.id).expect("view").expect("thread");
+                let remote = store
+                    .account_mailbox_snapshots(account_id)
+                    .expect("mirror")
+                    .into_iter()
+                    .find(|snapshot| snapshot.name == mailbox.name)
+                    .and_then(|snapshot| {
+                        snapshot
+                            .threads
+                            .into_iter()
+                            .find(|candidate| candidate.subject == thread.subject)
+                    })
+                    .map(|candidate| candidate.remote_thread_id)
+                    .unwrap_or_default();
+                rows.push((
+                    mailbox.name.clone(),
+                    remote,
+                    view.messages.iter().map(|message| message.id).collect(),
+                ));
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn a_message_moves_between_mailboxes_with_its_body() {
+        let (store, account_id) = mirrored();
+        let before = rows(&store, account_id);
+        // m1 is archived: it leaves INBOX, joins Archive, stays in All Mail.
+        let unknown = store
+            .apply_mail_delta(
+                account_id,
+                &delta(
+                    vec![
+                        (
+                            "Archive",
+                            vec![thread(
+                                "c1",
+                                vec![message("m1", "Ann", "2026-10-01T00:00:00+00:00", true)],
+                            )],
+                        ),
+                        (
+                            "All Mail",
+                            vec![thread(
+                                "c1",
+                                vec![message("m1", "Ann", "2026-10-01T00:00:00+00:00", true)],
+                            )],
+                        ),
+                    ],
+                    &["m1"],
+                ),
+            )
+            .expect("delta");
+        assert!(unknown.is_empty(), "m1 was mirrored: {unknown:?}");
+
+        assert_eq!(
+            contents(&store, account_id, "INBOX"),
+            [
+                ("c1".to_owned(), vec!["m2".to_owned()]),
+                ("c2".to_owned(), vec!["m3".to_owned()]),
+            ]
+        );
+        assert_eq!(
+            contents(&store, account_id, "Archive"),
+            [("c1".to_owned(), vec!["m1".to_owned()])]
+        );
+        assert_eq!(
+            contents(&store, account_id, "All Mail"),
+            [
+                ("c1".to_owned(), vec!["m1".to_owned(), "m2".to_owned()]),
+                ("c2".to_owned(), vec!["m3".to_owned()]),
+            ]
+        );
+        let archived = store
+            .account_mailbox_snapshots(account_id)
+            .expect("mirror")
+            .into_iter()
+            .find(|mailbox| mailbox.name == "Archive")
+            .expect("Archive");
+        assert_eq!(
+            archived.threads[0].messages[0].body_text.as_deref(),
+            Some("m1 body"),
+            "the body moves with the message"
+        );
+        // c1 in INBOX now holds only m2: named and counted by it.
+        let inbox = mailbox_id(&store, account_id, "INBOX");
+        let c1 = store
+            .list_threads(inbox, 0..10)
+            .expect("threads")
+            .into_iter()
+            .find(|thread| thread.subject == "Subject m2")
+            .expect("c1 in INBOX");
+        assert_eq!(c1.unread_count, 1);
+        assert_eq!(
+            counters(&store, account_id),
+            [
+                ("All Mail".to_owned(), 2, 2),
+                ("Archive".to_owned(), 1, 0),
+                ("INBOX".to_owned(), 2, 2),
+            ]
+        );
+        // c2 was not touched at all.
+        let untouched = |rows: &[(String, String, Vec<i64>)]| {
+            rows.iter()
+                .filter(|(_, thread, _)| thread == "c2")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(untouched(&rows(&store, account_id)), untouched(&before));
+    }
+
+    #[test]
+    fn a_deleted_message_leaves_every_mailbox() {
+        let (store, account_id) = mirrored();
+        store
+            .apply_mail_delta(account_id, &delta(Vec::new(), &["m2", "m3"]))
+            .expect("delta");
+        for name in ["INBOX", "All Mail"] {
+            assert_eq!(
+                contents(&store, account_id, name),
+                [("c1".to_owned(), vec!["m1".to_owned()])],
+                "{name}"
+            );
+        }
+        let inbox = mailbox_id(&store, account_id, "INBOX");
+        let threads = store.list_threads(inbox, 0..10).expect("threads");
+        assert_eq!(threads.len(), 1, "c2 lost its only message");
+        assert_eq!(threads[0].subject, "Subject m1", "m1 names c1 now");
+        assert_eq!(threads[0].unread_count, 0);
+        let mirror = store.account_mailbox_snapshots(account_id).expect("mirror");
+        assert_eq!(mirror[0].threads[0].participants, "Ann");
+        assert_eq!(
+            mirror[0].threads[0].latest_message_at,
+            "2026-10-01T00:00:00+00:00"
+        );
+        assert_eq!(
+            counters(&store, account_id),
+            [
+                ("All Mail".to_owned(), 1, 0),
+                ("Archive".to_owned(), 0, 0),
+                ("INBOX".to_owned(), 1, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_flag_change_rewrites_only_its_thread() {
+        let (store, account_id) = mirrored();
+        let before = rows(&store, account_id);
+        let mut flagged = message("m3", "Cy", "2026-10-03T00:00:00+00:00", true);
+        flagged.is_flagged = true;
+        let c2 = thread("c2", vec![flagged]);
+        store
+            .apply_mail_delta(
+                account_id,
+                &delta(
+                    vec![("INBOX", vec![c2.clone()]), ("All Mail", vec![c2])],
+                    &["m3"],
+                ),
+            )
+            .expect("delta");
+        let inbox = mailbox_id(&store, account_id, "INBOX");
+        let c2 = store
+            .list_threads(inbox, 0..10)
+            .expect("threads")
+            .into_iter()
+            .find(|thread| thread.subject == "Subject m3")
+            .expect("c2");
+        assert!(c2.is_flagged && c2.unread_count == 0);
+        let c1_rows = |rows: &[(String, String, Vec<i64>)]| {
+            rows.iter()
+                .filter(|(_, thread, _)| thread == "c1")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(c1_rows(&rows(&store, account_id)), c1_rows(&before));
+        assert_eq!(
+            counters(&store, account_id),
+            [
+                ("All Mail".to_owned(), 2, 1),
+                ("Archive".to_owned(), 0, 0),
+                ("INBOX".to_owned(), 2, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_message_joins_its_conversation() {
+        let (store, account_id) = mirrored();
+        let c1 = thread(
+            "c1",
+            vec![message("m4", "Dee", "2026-10-04T00:00:00+00:00", false)],
+        );
+        let unknown = store
+            .apply_mail_delta(
+                account_id,
+                &delta(
+                    vec![("INBOX", vec![c1.clone()]), ("All Mail", vec![c1])],
+                    &["m4"],
+                ),
+            )
+            .expect("delta");
+        assert_eq!(unknown, ["m4"]);
+        assert_eq!(
+            contents(&store, account_id, "INBOX"),
+            [
+                (
+                    "c1".to_owned(),
+                    vec!["m1".to_owned(), "m2".to_owned(), "m4".to_owned()]
+                ),
+                ("c2".to_owned(), vec!["m3".to_owned()]),
+            ]
+        );
+        let mirror = store.account_mailbox_snapshots(account_id).expect("mirror");
+        let c1 = mirror[0]
+            .threads
+            .iter()
+            .find(|thread| thread.remote_thread_id == "c1")
+            .expect("c1");
+        assert_eq!(c1.subject, "Subject m4");
+        assert_eq!(c1.unread_count, 2);
+        assert_eq!(c1.participants, "Dee, Bea, Ann");
+        assert_eq!(
+            c1.messages[0].body_text.as_deref(),
+            Some("m1 body"),
+            "the conversation's opened message keeps its body"
+        );
+        // Applying the same delta again changes nothing.
+        let before = rows(&store, account_id);
+        let again = thread(
+            "c1",
+            vec![message("m4", "Dee", "2026-10-04T00:00:00+00:00", false)],
+        );
+        let unknown = store
+            .apply_mail_delta(
+                account_id,
+                &delta(
+                    vec![("INBOX", vec![again.clone()]), ("All Mail", vec![again])],
+                    &["m4"],
+                ),
+            )
+            .expect("delta again");
+        assert!(unknown.is_empty());
+        assert_eq!(rows(&store, account_id), before);
+        assert_eq!(
+            counters(&store, account_id),
+            [
+                ("All Mail".to_owned(), 2, 2),
+                ("Archive".to_owned(), 0, 0),
+                ("INBOX".to_owned(), 2, 2),
+            ]
+        );
     }
 }

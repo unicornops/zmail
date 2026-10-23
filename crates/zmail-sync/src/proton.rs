@@ -93,17 +93,18 @@ impl SyncService {
     }
 
     /// Syncs a Proton account's mail and returns the status detail and the
-    /// checkpoint to record: the events (or a first sync) replace the
-    /// mirror, then the next stretch of older mail is merged into it.
+    /// checkpoint to record: the events become changes to just the messages
+    /// they name (or a first sync replaces the mirror), then the next
+    /// stretch of older mail is merged in.
     #[cfg(feature = "proton")]
     pub(crate) async fn sync_proton_mail(
         &self,
         target: &SyncTarget,
         session: &zmail_proton::ProtonSession,
     ) -> Result<(String, String)> {
-        use std::sync::{Arc, Mutex};
+        use std::collections::HashSet;
 
-        use zmail_core::{MailboxSnapshot, SyncPhase};
+        use zmail_core::SyncPhase;
 
         let account_id = target.id;
         let store = &self.inner.store;
@@ -112,21 +113,11 @@ impl SyncService {
             .proton_paging
             .lock()
             .expect("proton paging mutex should not be poisoned");
-        let has_mirror = !store.list_mailboxes(account_id)?.is_empty();
-        // The whole mirror is read only when events changed messages, and
-        // then once for both the update and the new-mail diff.
-        let mirror: Mutex<Option<Arc<Vec<MailboxSnapshot>>>> = Mutex::new(None);
-        let load_mirror = || -> Result<Arc<Vec<MailboxSnapshot>>> {
-            let mut cached = mirror
-                .lock()
-                .expect("mirror cache mutex should not be poisoned");
-            if let Some(mirror) = cached.as_ref() {
-                return Ok(mirror.clone());
-            }
-            let loaded = Arc::new(self.local_mirror(account_id)?);
-            *cached = Some(loaded.clone());
-            Ok(loaded)
-        };
+        let mailboxes: HashSet<String> = store
+            .list_mailboxes(account_id)?
+            .into_iter()
+            .map(|mailbox| mailbox.name)
+            .collect();
         let progress = |detail: &str| {
             // Progress is only shown; a failed write must not stop the sync.
             let _ = store.record_sync_progress(account_id, detail);
@@ -135,40 +126,48 @@ impl SyncService {
         let update = zmail_proton::discover_and_sync(
             target,
             session,
-            has_mirror,
-            &load_mirror,
+            !mailboxes.is_empty(),
             &paging,
             &progress,
         )
         .await?;
-        if let zmail_proton::MirrorUpdate::Replace { snapshot, not_new } = &update {
-            let existing = if has_mirror {
-                load_mirror()?
-            } else {
-                Arc::default()
-            };
-            store.begin_sync_attempt(
-                account_id,
-                SyncPhase::Syncing,
-                "Writing Proton mailbox metadata into the local mirror",
-            )?;
-            store.replace_account_snapshot(account_id, snapshot)?;
-            if not_new.is_empty() {
-                self.notify_new_mail(target, &existing, snapshot);
-            } else {
-                // Older mail an event placed before the backfill listed it
-                // is not new mail.
-                let mut arrived = snapshot.clone();
-                for mailbox in &mut arrived.mailboxes {
-                    for thread in &mut mailbox.threads {
-                        thread
-                            .messages
-                            .retain(|message| !not_new.contains(&message.remote_id));
-                    }
-                }
-                self.notify_new_mail(target, &existing, &arrived);
+        match &update {
+            zmail_proton::MirrorUpdate::Replace(snapshot) => {
+                // A resync diffs against the whole mirror for its new-mail
+                // notifications; a first sync has nothing to diff against.
+                let existing = if mailboxes.is_empty() {
+                    Vec::new()
+                } else {
+                    self.local_mirror(account_id)?
+                };
+                self.write_snapshot(target, &existing, snapshot)?;
+                self.inner.index_wake.notify_one();
             }
-            self.inner.index_wake.notify_one();
+            zmail_proton::MirrorUpdate::Apply { delta, created, .. } => {
+                store.begin_sync_attempt(
+                    account_id,
+                    SyncPhase::Syncing,
+                    "Writing Proton message changes into the local mirror",
+                )?;
+                let unknown: HashSet<String> = store
+                    .apply_mail_delta(account_id, delta)?
+                    .into_iter()
+                    .collect();
+                // New mail is what the events created and the mirror did not
+                // hold; an update placing older mail the backfill has not
+                // reached is not.
+                let arrived: HashSet<&str> = created
+                    .iter()
+                    .filter(|id| unknown.contains(*id))
+                    .map(String::as_str)
+                    .collect();
+                self.notify_arrivals(
+                    target,
+                    crate::collect_delta_arrivals(&mailboxes, delta, &arrived),
+                );
+                self.inner.index_wake.notify_one();
+            }
+            zmail_proton::MirrorUpdate::Unchanged { .. } => {}
         }
         store.record_sync_checkpoint(account_id, update.checkpoint())?;
         let mut detail = update.detail().to_owned();
