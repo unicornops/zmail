@@ -176,7 +176,11 @@ impl Focusable for ReaderView {
 }
 
 impl ReaderView {
-    pub(crate) fn new(hour_cycle: HourCycle, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        hour_cycle: HourCycle,
+        store: std::sync::Arc<zmail_store::LocalStore>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             hour_cycle,
@@ -195,7 +199,7 @@ impl ReaderView {
             link_prompt: None,
             link_modal: ModalState::new(cx),
             reply_observation: None,
-            web: web::ReaderWeb::default(),
+            web: web::ReaderWeb::new(store),
             #[cfg(test)]
             counters: Default::default(),
         }
@@ -225,7 +229,7 @@ impl ReaderView {
             .unwrap_or_default();
         self.web.retain(&message_ids);
         self.web
-            .prepare(thread, !crate::components::ComponentTheme::get(cx).is_light);
+            .set_dark(!crate::components::ComponentTheme::get(cx).is_light);
         if self.conversation.is_for(thread) {
             if let Some(thread) = thread {
                 self.conversation.update(thread);
@@ -360,6 +364,7 @@ impl ReaderView {
             .iter()
             .map(|message| {
                 if self.conversation.is_expanded(message.id) {
+                    self.web.prepare_message(message);
                     if self.shows_web(message) {
                         // One item, as tall as the page.
                         return 1;

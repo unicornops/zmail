@@ -16,14 +16,16 @@
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
+    sync::Arc,
 };
 
 use gpui::{AnyElement, AppContext as _, Context, IntoElement, Window, px};
-use zmail_core::{ThreadMessage, ThreadView};
+use zmail_core::ThreadMessage;
 use zmail_render::{
-    MessageRenderer, PrepareOptions, PreparedMessage, RenderSource, ThemeHint, prepare,
+    MessageRenderer, PrepareOptions, PreparedMessage, ThemeHint, prepare, render_source,
 };
 use zmail_render_web::{Appearance, WebDocument, WebEvent, WebHost, WebRenderer};
+use zmail_store::LocalStore;
 
 use super::ReaderView;
 use super::links::{LinkPrompt, link_target};
@@ -37,11 +39,15 @@ const UNMEASURED_HEIGHT: f32 = 120.;
 pub(super) struct ReaderWeb {
     /// Whether this build and platform render HTML mail formatted.
     enabled: bool,
+    /// Where each message's render source (raw HTML, inline parts) is read.
+    store: Arc<LocalStore>,
     /// Created at the first render, which has the window.
     host: Option<WebHost>,
-    /// Each HTML message of the open conversation, prepared, with the
-    /// stored HTML it was prepared from.
+    /// The expanded messages of the open conversation, prepared, with the
+    /// body text they were prepared for (a new body prepares again).
     prepared: HashMap<i64, (String, Rc<PreparedMessage>)>,
+    /// The app is in a dark theme.
+    dark: bool,
     /// Each message's page, while the conversation is open.
     documents: HashMap<i64, Rc<WebDocument>>,
     /// Each page's measured height.
@@ -55,15 +61,17 @@ pub(super) struct ReaderWeb {
     active: Option<i64>,
 }
 
-impl Default for ReaderWeb {
-    fn default() -> Self {
+impl ReaderWeb {
+    pub(super) fn new(store: Arc<LocalStore>) -> Self {
         let disabled = std::env::var_os("ZMAIL_WEB_RENDERER").is_some_and(|value| value == "0");
         Self {
             // GPUI's test platform has no native composition; view tests
             // use the text view on every OS.
             enabled: zmail_render_web::SUPPORTED && !disabled && !cfg!(test),
+            store,
             host: None,
             prepared: HashMap::new(),
+            dark: false,
             documents: HashMap::new(),
             heights: HashMap::new(),
             simple: HashSet::new(),
@@ -71,9 +79,7 @@ impl Default for ReaderWeb {
             active: None,
         }
     }
-}
 
-impl ReaderWeb {
     /// Forgets everything but `message_ids` (a new conversation keeps
     /// nothing).
     pub(super) fn retain(&mut self, message_ids: &HashSet<i64>) {
@@ -102,59 +108,53 @@ impl ReaderWeb {
         self.host.as_ref()
     }
 
-    /// Prepares the HTML messages of `thread` that are new or changed.
-    /// Only where the web renderer runs: elsewhere nothing is prepared and
-    /// every message keeps the text view.
-    pub(super) fn prepare(&mut self, thread: Option<&ThreadView>, dark: bool) {
-        if !self.enabled {
-            return;
-        }
-        let Some(thread) = thread else {
-            return;
-        };
-        for message in &thread.messages {
-            let Some(html) = message
-                .sanitized_html
-                .as_deref()
-                .filter(|html| !html.trim().is_empty())
-            else {
-                self.prepared.remove(&message.id);
-                continue;
-            };
-            if self
+    /// Prepares `message` for the web renderer, once per body: reads its
+    /// render source (the raw HTML part and inline parts) from the store
+    /// and runs it through `zmail_render::prepare`. Only where the web
+    /// renderer runs: elsewhere nothing is prepared and every message
+    /// keeps the text view.
+    pub(super) fn prepare_message(&mut self, message: &ThreadMessage) {
+        if !self.enabled
+            || self
                 .prepared
                 .get(&message.id)
-                .is_some_and(|(source, _)| source == html)
-            {
-                continue;
-            }
-            // The store keeps the sanitised HTML; the original part and
-            // its inline parts come with the store's render source
-            // (ADR 0006 Phase 0, next step). Bodies stored before ADR 0006
-            // have `blocked://` links, which the sanitiser reads back.
-            let source = RenderSource {
-                message_id: message.id,
-                body_text: message.body_text.clone(),
-                html: Some(html.to_owned()),
-                html_is_legacy: true,
-                inline_parts: Vec::new(),
-            };
-            let options = PrepareOptions {
-                theme: if dark {
-                    ThemeHint::Dark
-                } else {
-                    ThemeHint::Light
-                },
-                ..PrepareOptions::default()
-            };
-            let prepared = prepare(&source, &options);
-            if let Err(reason) = prepared.html() {
-                eprintln!("zmail: message {} shows as text: {reason}", message.id);
-            }
-            self.prepared
-                .insert(message.id, (html.to_owned(), Rc::new(prepared)));
-            self.documents.remove(&message.id);
+                .is_some_and(|(body, _)| *body == message.rendered_body)
+        {
+            return;
         }
+        let source = match render_source(&self.store, message.id) {
+            Ok(Some(source)) => source,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!(
+                    "zmail: message {} shows as text: its HTML could not be read: {error:#}",
+                    message.id
+                );
+                return;
+            }
+        };
+        let options = PrepareOptions {
+            theme: if self.dark {
+                ThemeHint::Dark
+            } else {
+                ThemeHint::Light
+            },
+            ..PrepareOptions::default()
+        };
+        let prepared = prepare(&source, &options);
+        if let Err(zmail_render::HtmlUnavailable::TooComplex(reason)) = prepared.html() {
+            eprintln!("zmail: message {} shows as text: {reason:?}", message.id);
+        }
+        self.prepared.insert(
+            message.id,
+            (message.rendered_body.clone(), Rc::new(prepared)),
+        );
+        self.documents.remove(&message.id);
+    }
+
+    /// Follows the app theme, for messages prepared from now on.
+    pub(super) fn set_dark(&mut self, dark: bool) {
+        self.dark = dark;
     }
 }
 
@@ -408,20 +408,12 @@ impl ReaderView {
         else {
             return;
         };
-        // The link's text, for the look-alike check: from the text derived
-        // from the HTML, where the sanitiser recorded each link's runs.
+        // The link's visible text, for the look-alike check.
         let text = prepared
-            .text_links
-            .iter()
-            .filter(|link| link.link == id)
-            .filter_map(|link| prepared.text.get(link.range.clone()))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let text = if text.trim().is_empty() {
-            target.clone()
-        } else {
-            text
-        };
+            .link(id)
+            .map(|link| link.text.trim())
+            .filter(|text| !text.is_empty())
+            .map_or_else(|| target.clone(), str::to_owned);
         self.link_prompt = Some(LinkPrompt::new(&text, &target));
         self.link_modal.open(window, cx);
         cx.notify();

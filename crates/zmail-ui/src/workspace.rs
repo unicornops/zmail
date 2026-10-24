@@ -117,7 +117,7 @@ impl WorkspaceView {
         let sidebar = cx.new(SidebarView::new);
         let message_list =
             cx.new(|cx| MessageListView::new(store.clone(), mail_actions.clone(), hour_cycle, cx));
-        let reader = cx.new(|cx| ReaderView::new(hour_cycle, cx));
+        let reader = cx.new(|cx| ReaderView::new(hour_cycle, store.clone(), cx));
         let compose = cx.new(|cx| {
             ComposeView::new(
                 store.clone(),
