@@ -1,5 +1,6 @@
-//! The reader's banners (UI plan Phase 4): the remote-content notice and
-//! the tiered sender-safety banners with "Looks safe" and "Show details".
+//! The reader's banners (UI plan Phase 4): the remote-content notice with
+//! its choices (ADR 0006) and the tiered sender-safety banners with
+//! "Looks safe" and "Show details".
 
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 use zmail_core::{
@@ -118,7 +119,7 @@ fn a_lookalike_sender_shows_a_danger_banner_until_looks_safe(cx: &mut TestAppCon
     let (thread_id, message_id) = only_thread(&harness);
     assert_eq!(reader_thread(&view, cx), Some(thread_id));
 
-    assert!(drawn(format!("remote-content-{thread_id}"), cx));
+    assert!(drawn(format!("remote-content-{message_id}"), cx));
     assert!(drawn(format!("sender-safety-{message_id}"), cx));
     // The evidence stays hidden until asked for.
     assert!(!drawn(format!("sender-safety-{message_id}-details"), cx));
@@ -128,13 +129,113 @@ fn a_lookalike_sender_shows_a_danger_banner_until_looks_safe(cx: &mut TestAppCon
     click_on(format!("sender-safety-dismiss-{message_id}"), cx);
     assert!(!drawn(format!("sender-safety-{message_id}"), cx));
     // Only the sender warning goes; the remote-content notice stays.
-    assert!(drawn(format!("remote-content-{thread_id}"), cx));
+    assert!(drawn(format!("remote-content-{message_id}"), cx));
     let thread = harness
         .store
         .thread_view(thread_id)
         .expect("the thread loads")
         .expect("the thread exists");
     assert!(thread.messages[0].sender_warning_dismissed);
+}
+
+#[gpui::test]
+fn remote_content_loads_per_message_or_always_for_the_sender(cx: &mut TestAppContext) {
+    let (view, cx, harness) =
+        open_thread(cx, thread("remote", "News <news@example.test>", None, true));
+    let (_, message_id) = only_thread(&harness);
+    let remote_state = |cx: &mut VisualTestContext| {
+        cx.read_entity(&view, |view, cx| {
+            let reader = view.reader.read(cx);
+            let state = reader.state();
+            let message = &state.thread.as_ref().expect("a thread").messages[0];
+            crate::reader::remote_content_state_for_test(
+                message,
+                state.remote_content_messages.contains(&message.id),
+            )
+        })
+    };
+    let sender_allowed = |harness: &Harness| {
+        let account_id = harness.store.list_accounts().expect("the accounts load")[0].id;
+        harness
+            .store
+            .remote_content_allowed_for_sender(account_id, "news@example.test")
+            .expect("the choice loads")
+    };
+
+    // Blocked by default, with both choices offered.
+    assert_eq!(remote_state(cx), Some("blocked"));
+    assert!(drawn(format!("remote-content-load-{message_id}"), cx));
+    assert!(drawn(format!("remote-content-always-{message_id}"), cx));
+
+    // Load remote content: this message, this session, nothing stored.
+    click_on(format!("remote-content-load-{message_id}"), cx);
+    assert_eq!(remote_state(cx), Some("message"));
+    assert!(!drawn(format!("remote-content-load-{message_id}"), cx));
+    assert!(drawn(format!("remote-content-always-{message_id}"), cx));
+    assert!(!sender_allowed(&harness));
+
+    // Always for this sender: stored per account and address.
+    click_on(format!("remote-content-always-{message_id}"), cx);
+    assert_eq!(remote_state(cx), Some("sender"));
+    assert!(sender_allowed(&harness));
+    assert!(drawn(format!("remote-content-block-{message_id}"), cx));
+
+    // Block undoes both.
+    click_on(format!("remote-content-block-{message_id}"), cx);
+    assert_eq!(remote_state(cx), Some("blocked"));
+    assert!(!sender_allowed(&harness));
+    assert!(drawn(format!("remote-content-load-{message_id}"), cx));
+}
+
+#[gpui::test]
+fn a_suspect_sender_is_never_trusted_for_remote_content(cx: &mut TestAppContext) {
+    // A look-alike domain (Danger): only this message's content can load,
+    // even after Looks safe.
+    let (_view, cx, harness) = open_thread(
+        cx,
+        thread("lookalike", "PayPal <security@paypa1.com>", None, true),
+    );
+    let (_, message_id) = only_thread(&harness);
+    assert!(drawn(format!("sender-safety-{message_id}"), cx));
+    assert!(drawn(format!("remote-content-load-{message_id}"), cx));
+    assert!(!drawn(format!("remote-content-always-{message_id}"), cx));
+    click_on(format!("sender-safety-dismiss-{message_id}"), cx);
+    assert!(!drawn(format!("remote-content-always-{message_id}"), cx));
+    click_on(format!("remote-content-load-{message_id}"), cx);
+    assert!(drawn(format!("remote-content-{message_id}"), cx));
+    assert!(!drawn(format!("remote-content-always-{message_id}"), cx));
+}
+
+#[gpui::test]
+fn a_reply_to_elsewhere_is_not_trusted_for_remote_content(cx: &mut TestAppContext) {
+    // Caution: the same.
+    let (_view, cx, harness) = open_thread(
+        cx,
+        thread(
+            "reply-to",
+            "Billing <billing@example.test>",
+            Some("collect@elsewhere.example"),
+            true,
+        ),
+    );
+    let (_, message_id) = only_thread(&harness);
+    assert!(drawn(format!("remote-content-load-{message_id}"), cx));
+    assert!(!drawn(format!("remote-content-always-{message_id}"), cx));
+}
+
+#[gpui::test]
+fn an_info_warning_still_offers_always_for_this_sender(cx: &mut TestAppContext) {
+    let (_view, cx, harness) = open_thread(
+        cx,
+        thread(
+            "info",
+            "Kai Santos <kai@example.test>",
+            Some("replies@news.example.test"),
+            true,
+        ),
+    );
+    let (_, message_id) = only_thread(&harness);
+    assert!(drawn(format!("remote-content-always-{message_id}"), cx));
 }
 
 #[gpui::test]
@@ -145,7 +246,7 @@ fn a_safe_sender_without_remote_content_shows_no_banners(cx: &mut TestAppContext
     );
     let (thread_id, message_id) = only_thread(&harness);
     assert_eq!(reader_thread(&view, cx), Some(thread_id));
-    assert!(!drawn(format!("remote-content-{thread_id}"), cx));
+    assert!(!drawn(format!("remote-content-{message_id}"), cx));
     assert!(!drawn(format!("sender-safety-{message_id}"), cx));
 }
 

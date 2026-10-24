@@ -628,6 +628,9 @@ struct WorkspaceView {
     reading_pane: zmail_core::preferences::ReadingPanePosition,
     /// Which sender-safety warnings the reader shows (persisted).
     sender_warnings: zmail_core::preferences::SenderWarnings,
+    /// Messages whose remote content the user chose to load ("Load remote
+    /// content", ADR 0006): for this session only, never stored.
+    remote_content_messages: std::collections::HashSet<i64>,
     /// Whether animations follow the system or are forced on or off
     /// (persisted).
     motion: zmail_core::preferences::MotionMode,

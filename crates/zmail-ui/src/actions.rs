@@ -227,6 +227,33 @@ pub struct DismissSenderWarning {
     pub message_id: i64,
 }
 
+/// "Load remote content" on a message's remote-content banner: allows it
+/// for that message until Zmail quits (ADR 0006).
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = zmail, no_json)]
+pub struct LoadRemoteContent {
+    /// Message id.
+    pub message_id: i64,
+}
+
+/// "Always for this sender" on a message's remote-content banner: stores
+/// the choice for the message's sender on its account.
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = zmail, no_json)]
+pub struct AlwaysLoadRemoteContent {
+    /// Message id.
+    pub message_id: i64,
+}
+
+/// "Block" on the banner of a sender whose remote content always loads:
+/// undoes "Always for this sender".
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = zmail, no_json)]
+pub struct BlockRemoteContent {
+    /// Message id.
+    pub message_id: i64,
+}
+
 /// Send the open draft from another of the account's identities.
 #[derive(Clone, Debug, PartialEq, Eq, Action)]
 #[action(namespace = zmail, no_json)]
@@ -248,6 +275,18 @@ pub(crate) const ACTIONS_WITHOUT_KEYS: &[(&str, &str)] = &[
     (
         "zmail::DismissSenderWarning",
         "needs a message argument; it is the banner's Looks safe button",
+    ),
+    (
+        "zmail::LoadRemoteContent",
+        "needs a message argument; it is the remote-content banner's button",
+    ),
+    (
+        "zmail::AlwaysLoadRemoteContent",
+        "needs a message argument; it is the remote-content banner's button",
+    ),
+    (
+        "zmail::BlockRemoteContent",
+        "needs a message argument; it is the remote-content banner's button",
     ),
     (
         "zmail::ToggleDensity",

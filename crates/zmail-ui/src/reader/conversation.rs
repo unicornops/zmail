@@ -18,7 +18,6 @@ use std::{collections::HashSet, ops::Range};
 use gpui::{AnyElement, FontWeight, IntoElement, Role, div, prelude::*, rgb};
 use zmail_core::{ThreadView, text::count_noun};
 
-use super::banners;
 use crate::a11y::{AccessibleExt, readable};
 use crate::styles::UiColors;
 use crate::widgets::empty_state;
@@ -192,9 +191,8 @@ pub(super) fn render_no_conversation(colors: &UiColors) -> AnyElement {
 }
 
 /// The first item of the list: the subject, where the conversation is and
-/// how long it is, then the conversation's banners.
+/// how long it is. (Banners are on each message.)
 pub(super) fn render_conversation_header(thread: &ThreadView, colors: &UiColors) -> AnyElement {
-    let banners = conversation_banners(thread, colors);
     div()
         .debug_selector(|| "reader-subject".into())
         .flex()
@@ -237,14 +235,5 @@ pub(super) fn render_conversation_header(thread: &ThreadView, colors: &UiColors)
                     ),
                 )),
         )
-        .when(!banners.is_empty(), |this| {
-            this.child(div().flex().flex_wrap().gap_2().children(banners))
-        })
         .into_any_element()
-}
-
-/// The conversation's banner slot, under the subject: the remote-content
-/// notice.
-fn conversation_banners(thread: &ThreadView, _colors: &UiColors) -> Vec<AnyElement> {
-    banners::conversation_banners(thread)
 }

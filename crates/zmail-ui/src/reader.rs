@@ -72,6 +72,20 @@ use crate::compose::ComposeView;
 use crate::pane::{dispatch_from, pane_focus_indicator};
 use crate::styles::UiColors;
 
+/// The remote-content state the banner of `message` shows, as a word,
+/// for view tests.
+#[cfg(test)]
+pub(crate) fn remote_content_state_for_test(
+    message: &zmail_core::ThreadMessage,
+    remote_allowed: bool,
+) -> Option<&'static str> {
+    banners::remote_content_state(message, remote_allowed).map(|state| match state {
+        banners::RemoteContentState::Blocked => "blocked",
+        banners::RemoteContentState::AllowedForMessage => "message",
+        banners::RemoteContentState::AllowedForSender => "sender",
+    })
+}
+
 /// The key context the reader sets.
 pub(crate) const KEY_CONTEXT: &str = "Reader";
 
@@ -105,6 +119,8 @@ pub(crate) struct ReaderState {
     pub(crate) reply: Option<Entity<ComposeView>>,
     /// Which sender-safety warnings show (Settings → Privacy).
     pub(crate) sender_warnings: SenderWarnings,
+    /// Messages whose remote content the user chose to load this session.
+    pub(crate) remote_content_messages: std::collections::HashSet<i64>,
 }
 
 pub(crate) struct ReaderView {
@@ -482,6 +498,7 @@ impl ReaderView {
                     colors,
                     focused: self.focus_handle.contains_focused(window, cx),
                     sender_warnings: self.state.sender_warnings,
+                    remote_content_messages: &self.state.remote_content_messages,
                     message_count: thread.messages.len(),
                 };
                 let display = MessageDisplay {
