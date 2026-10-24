@@ -155,6 +155,7 @@ Run this on each platform before claiming screen-reader support works, and note 
 - No signing step may block the release when its secrets are absent, and no signing secret may ever be printed into build logs.
 - No packaging step may introduce a background helper process that outlives the GUI binary.
 - The release workflow can be exercised without cutting a release: dispatch **Release Please** manually with a tag or branch and the dry-run flag to build, sign, notarize, and produce the DMG without uploading anything.
+- Unmerged work can be tried on a Mac through a preview build: dispatch **Preview Build** (`.github/workflows/preview-build.yml`) with a branch, tag or commit and a preview name such as `web-preview-1`. It builds only the macOS app, signs and notarizes it like a release (and fails instead of falling back to an ad-hoc signature), and publishes a GitHub pre-release tagged with the preview name, never marked "Latest", carrying `Zmail-<name>.dmg`, the app zip and their checksums. The app is bundled as "Zmail Preview" (`ie.unicornops.zmail.preview`) so it installs next to Zmail, but it uses the same local store, settings and keychain entries.
 
 ## Release Process
 
