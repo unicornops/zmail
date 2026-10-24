@@ -77,6 +77,8 @@ MATRIX=(
   "reader-link-warning-light reader-link-warning light 1440 920"
   "reader-reply-dark reader-reply dark 1440 920"
   "reader-reply-light reader-reply light 1440 920"
+  "reader-html-dark reader-html dark 1440 920"
+  "reader-html-light reader-html light 1440 920"
   "compose-dark compose dark 760 680"
   "compose-light compose light 760 680"
   "compose-invalid-dark compose-invalid dark 760 680"

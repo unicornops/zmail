@@ -314,6 +314,27 @@ impl ReaderView {
         }
     }
 
+    /// Opens the current message's More menu (the screenshot fixture's
+    /// menu over a message).
+    pub(crate) fn open_message_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(current) = self.conversation.current() {
+            self.toggle_popover(PopoverAnchor::MessageMore(current), window, cx);
+        }
+    }
+
+    /// Scrolls the conversation down a little once its messages have had
+    /// time to lay out, web views included (the screenshot fixture's
+    /// clipped message).
+    pub(crate) fn scroll_down_later(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |reader, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(2500))
+                .await;
+            let _ = reader.update(cx, |reader, cx| reader.scroll_by(SCROLL_STEP * 5., cx));
+        })
+        .detach();
+    }
+
     /// Expands every message of the open conversation.
     pub(crate) fn expand_all(&mut self, cx: &mut Context<Self>) {
         if let Some(thread) = self.state.thread.as_ref() {

@@ -334,6 +334,24 @@ jobs:
                   ZMAIL_WEB_DEBUG: "1"
               run: cargo test -p zmail-render-web --locked -- --nocapture
 
+            # The app itself on fixture states with HTML mail: the page in the
+            # reader, a menu and a dialog over it, and the page clipped by the
+            # scrolled list. Uploaded as the macos-web-screenshots artefact.
+            - name: Build the app
+              run: cargo build -p zmail-app --locked
+
+            - name: Capture web renderer screenshots
+              timeout-minutes: 10
+              run: scripts/capture-macos-web-screenshots.sh artifacts/macos-web-screenshots
+
+            - name: Upload web renderer screenshots
+              if: always()
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: macos-web-screenshots
+                  path: artifacts/macos-web-screenshots
+                  if-no-files-found: ignore
+
     # The UI screenshot matrix (UI_PLAN.md Phase 1.8): every UI state in
     # light and dark plus 900px and 1920px windows, captured from seeded
     # fixture data (no mail server) and uploaded as the ui-screenshots

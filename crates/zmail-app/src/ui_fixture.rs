@@ -60,6 +60,13 @@ pub(crate) enum FixtureView {
     ReaderLinkWarning,
     /// The reader's conversation with an inline reply open below it.
     ReaderReply,
+    /// An HTML newsletter (table layout, inline styles): formatted in a web
+    /// view on macOS, as text elsewhere.
+    ReaderHtml,
+    /// The newsletter with its message More menu open over the page.
+    ReaderHtmlMenu,
+    /// The newsletter scrolled down, so the page is cut off by the list.
+    ReaderHtmlScrolled,
     /// A half-written reply in its compose window.
     Compose,
     /// A new message whose recipients include addresses that are not
@@ -151,6 +158,9 @@ impl FixtureView {
             "reader-selection" => Self::ReaderSelection,
             "reader-link-warning" => Self::ReaderLinkWarning,
             "reader-reply" => Self::ReaderReply,
+            "reader-html" => Self::ReaderHtml,
+            "reader-html-menu" => Self::ReaderHtmlMenu,
+            "reader-html-scrolled" => Self::ReaderHtmlScrolled,
             "compose" => Self::Compose,
             "compose-invalid" => Self::ComposeInvalid,
             "undo-send" => Self::UndoSend,
@@ -190,7 +200,7 @@ impl FixtureView {
             "unlock-keychain" => Self::Unlock(UnlockFixture::Keychain),
             "unlock-unreadable" => Self::Unlock(UnlockFixture::Unreadable),
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
             ),
         })
     }
@@ -390,6 +400,24 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
             account_id,
             "archive",
             LINK_THREAD_SUBJECT,
+        )?),
+        FixtureView::ReaderHtml => InitialView::Thread(thread_id(
+            store,
+            account_id,
+            "archive",
+            HTML_THREAD_SUBJECT,
+        )?),
+        FixtureView::ReaderHtmlMenu => InitialView::ThreadMessageMenu(thread_id(
+            store,
+            account_id,
+            "archive",
+            HTML_THREAD_SUBJECT,
+        )?),
+        FixtureView::ReaderHtmlScrolled => InitialView::ThreadScrolled(thread_id(
+            store,
+            account_id,
+            "archive",
+            HTML_THREAD_SUBJECT,
         )?),
         FixtureView::ReaderSafetyInfo
         | FixtureView::ReaderSafetyCaution
@@ -897,6 +925,9 @@ const LONG_THREAD_SUBJECT: &str = "Draft release notes for 0.13";
 /// The subject of the `reader-link-warning` conversation.
 const LINK_THREAD_SUBJECT: &str = "Unusual sign-in to your account";
 
+/// The subject of the `reader-html` conversation.
+const HTML_THREAD_SUBJECT: &str = "The Example Weekly: offline search ships";
+
 const ARCHIVE: &[Thread] = &[
     Thread {
         id: "t-archived",
@@ -967,7 +998,56 @@ const ARCHIVE: &[Thread] = &[
             attachments: &[],
         }],
     },
+    Thread {
+        id: "t-newsletter",
+        subject: HTML_THREAD_SUBJECT,
+        flagged: false,
+        messages: &[Message {
+            sender: "The Example Weekly <weekly@example.org>",
+            minutes_ago: 30 * DAY,
+            is_read: true,
+            // HTML as newsletters are written: nested tables, inline styles
+            // and a button link.
+            body: NEWSLETTER_HTML,
+            attachments: &[],
+        }],
+    },
 ];
+
+/// The `reader-html` newsletter.
+const NEWSLETTER_HTML: &str = "<table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" \
+    style=\"background:#f4f1ea\"><tr><td align=\"center\" style=\"padding:24px 12px\">\
+    <table width=\"560\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#ffffff;\
+    border-radius:8px;font-family:Georgia,serif;color:#333333\">\
+    <tr><td style=\"background:#1d3557;color:#ffffff;padding:24px 28px;font-size:24px;\
+    font-weight:bold;border-radius:8px 8px 0 0\">The Example Weekly</td></tr>\
+    <tr><td style=\"padding:24px 28px;font-size:15px;line-height:1.6\">\
+    <h2 style=\"color:#e63946;margin:0 0 12px\">Offline search ships</h2>\
+    <p>Search now works without a connection: every message you keep on this \
+    device is indexed as it arrives, and results show up as you type.</p>\
+    <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr>\
+    <td width=\"50%\" valign=\"top\" style=\"padding:12px 12px 12px 0\">\
+    <h3 style=\"margin:0 0 6px;color:#1d3557\">Faster lists</h3>\
+    <p style=\"margin:0\">Folders with a hundred thousand messages scroll \
+    without a stutter.</p></td>\
+    <td width=\"50%\" valign=\"top\" style=\"padding:12px 0 12px 12px;\
+    border-left:1px solid #eeeeee\"><h3 style=\"margin:0 0 6px;color:#1d3557\">\
+    Kinder reading</h3><p style=\"margin:0\">Quoted text folds away, and \
+    conversations open on the newest reply.</p></td></tr></table>\
+    <p style=\"text-align:center;margin:28px 0\"><a href=\"https://example.org/weekly/42\" \
+    style=\"background:#e63946;color:#ffffff;padding:12px 22px;border-radius:6px;\
+    text-decoration:none;font-family:Helvetica,Arial,sans-serif\">Read the full issue</a></p>\
+    <h2 style=\"color:#e63946;margin:24px 0 12px\">From the mailbag</h2>\
+    <p>Readers asked whether the new search needs a server. It does not: the index \
+    lives next to your mail and never leaves your machine.</p>\
+    <p>Others asked about dark mode for newsletters like this one. Mail that says it \
+    supports a dark colour scheme is drawn dark; the rest keeps its own colours.</p>\
+    <p>Thanks for reading, and see you next week.</p></td></tr>\
+    <tr><td style=\"padding:16px 28px;color:#888888;font-size:12px;\
+    border-top:1px solid #eeeeee;font-family:Helvetica,Arial,sans-serif\">\
+    You receive The Example Weekly because you signed up at example.org. \
+    <a href=\"https://example.org/unsubscribe\" style=\"color:#888888\">Unsubscribe</a>\
+    </td></tr></table></td></tr></table>";
 
 fn fixture_snapshot(now: u64) -> AccountSyncSnapshot {
     let mailbox = |name: &str, role: Option<&str>, threads: &[Thread]| MailboxSnapshot {
@@ -1257,6 +1337,9 @@ mod tests {
             "reader-selection",
             "reader-link-warning",
             "reader-reply",
+            "reader-html",
+            "reader-html-menu",
+            "reader-html-scrolled",
             "compose",
             "compose-invalid",
             "undo-send",
@@ -1527,6 +1610,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["https://bank-example.net/verify?id=8812"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn reader_html_opens_the_html_newsletter() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::ReaderHtml)?;
+        let InitialView::Thread(thread_id) = initial_view else {
+            bail!("the reader-html fixture should open a thread, not {initial_view:?}");
+        };
+        let thread = store
+            .thread_view(thread_id)?
+            .context("thread should exist")?;
+        let message = &thread.messages[0];
+        assert_eq!(message.body_text, None);
+        let html = message
+            .sanitized_html
+            .as_deref()
+            .context("the HTML is stored")?;
+        assert!(html.contains("<table"), "{html}");
+        assert!(html.contains("blocked://example.org/weekly/42"), "{html}");
+        let (_, menu) = seeded(FixtureView::ReaderHtmlMenu)?;
+        assert!(matches!(menu, InitialView::ThreadMessageMenu(id) if id == thread_id));
+        let (_, scrolled) = seeded(FixtureView::ReaderHtmlScrolled)?;
+        assert!(matches!(scrolled, InitialView::ThreadScrolled(id) if id == thread_id));
         Ok(())
     }
 
