@@ -102,6 +102,7 @@ fn undecryptable_body() -> HydratedBody {
     HydratedBody {
         body_text: Some("This message could not be decrypted.".to_owned()),
         sanitized_html: None,
+        raw_html: None,
         has_remote_content: false,
         body_preview: "This message could not be decrypted.".to_owned(),
         attachments: Vec::new(),

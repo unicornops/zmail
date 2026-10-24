@@ -316,6 +316,7 @@ mod tests {
             body_preview: String::new(),
             body_text: None,
             sanitized_html: None,
+            raw_html: None,
             has_remote_content: false,
             is_read: true,
             is_flagged: false,

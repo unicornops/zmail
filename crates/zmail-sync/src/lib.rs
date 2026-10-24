@@ -2016,6 +2016,7 @@ mod tests {
                     body_preview: "preview".to_owned(),
                     body_text: None,
                     sanitized_html: None,
+                    raw_html: None,
                     has_remote_content: false,
                     is_read: false,
                     is_flagged: false,

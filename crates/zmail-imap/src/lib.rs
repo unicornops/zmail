@@ -400,6 +400,7 @@ pub fn hydrated_body_from_rfc822(
     Some(HydratedBody {
         body_text,
         sanitized_html,
+        raw_html: raw_html_part(&message),
         has_remote_content,
         body_preview: excerpt(&preview_source, 180),
         attachments,
@@ -1462,6 +1463,7 @@ fn accumulate_fetch(
         body_preview: preview,
         body_text,
         sanitized_html,
+        raw_html: raw_html_part(&message),
         has_remote_content,
         is_read,
         is_flagged,
@@ -1503,14 +1505,15 @@ fn persist_attachments(
     blobs: &BlobStore,
 ) -> Vec<MessageAttachment> {
     let mut attachments = Vec::new();
-    if message.attachment_count() == 0 {
-        return attachments;
-    }
+    let mut kept_parts = Vec::new();
 
-    for (index, part) in message.attachments().enumerate() {
+    for (index, &part_id) in message.attachments.iter().enumerate() {
         if attachments.len() >= MAX_ATTACHMENTS_PER_MESSAGE {
             break;
         }
+        let Some(part) = message.parts.get(part_id as usize) else {
+            continue;
+        };
         let contents = part.contents();
         if contents.len() > MAX_ATTACHMENT_BYTES {
             continue;
@@ -1521,13 +1524,6 @@ fn persist_attachments(
         if filename.trim().is_empty() {
             continue;
         }
-        let content_type = part
-            .content_type()
-            .map(|content_type| match content_type.subtype() {
-                Some(subtype) => format!("{}/{}", content_type.ctype(), subtype),
-                None => content_type.ctype().to_owned(),
-            })
-            .unwrap_or_else(|| "application/octet-stream".to_owned());
         let storage_name = format!(
             "incoming-{}-{remote_id}-{index}-{}",
             sanitize_component(mailbox_name),
@@ -1538,15 +1534,88 @@ fn persist_attachments(
         let Ok(storage_path) = blobs.write(&storage_name, contents) else {
             continue;
         };
+        kept_parts.push(part_id);
         attachments.push(MessageAttachment {
             filename,
-            content_type,
+            content_type: part_content_type(part),
             size_bytes: contents.len() as u64,
             storage_path,
+            content_id: content_id_of(part),
+            inline_only: false,
+        });
+    }
+
+    // Inline parts the HTML shows through `cid:` (images without a file
+    // name, or in the body's multipart/related): kept for renderers, not
+    // listed as attachments (ADR 0006).
+    for (part_id, part) in message.parts.iter().enumerate() {
+        if attachments.len() >= MAX_ATTACHMENTS_PER_MESSAGE {
+            break;
+        }
+        if kept_parts.contains(&(part_id as u32))
+            || !matches!(part.body, PartType::Binary(_) | PartType::InlineBinary(_))
+        {
+            continue;
+        }
+        let Some(content_id) = content_id_of(part) else {
+            continue;
+        };
+        let contents = part.contents();
+        if contents.len() > MAX_ATTACHMENT_BYTES {
+            continue;
+        }
+        let storage_name = format!(
+            "incoming-{}-{remote_id}-cid-{part_id}",
+            sanitize_component(mailbox_name),
+        );
+        let Ok(storage_path) = blobs.write(&storage_name, contents) else {
+            continue;
+        };
+        attachments.push(MessageAttachment {
+            filename: part
+                .attachment_name()
+                .map(str::to_owned)
+                .unwrap_or_else(|| content_id.clone()),
+            content_type: part_content_type(part),
+            size_bytes: contents.len() as u64,
+            storage_path,
+            content_id: Some(content_id),
+            inline_only: true,
         });
     }
 
     attachments
+}
+
+/// A part's media type, `application/octet-stream` when it has none.
+fn part_content_type(part: &mail_parser::MessagePart<'_>) -> String {
+    part.content_type()
+        .map(|content_type| match content_type.subtype() {
+            Some(subtype) => format!("{}/{}", content_type.ctype(), subtype),
+            None => content_type.ctype().to_owned(),
+        })
+        .unwrap_or_else(|| "application/octet-stream".to_owned())
+}
+
+/// A part's Content-ID without its angle brackets.
+fn content_id_of(part: &mail_parser::MessagePart<'_>) -> Option<String> {
+    let content_id = part
+        .content_id()?
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim();
+    (!content_id.is_empty()).then(|| content_id.to_owned())
+}
+
+/// The original `text/html` part, kept for HTML renderers (ADR 0006)
+/// even when the message also has a plain-text part. `None` for the empty
+/// shell mail-parser gives a header-only parse.
+fn raw_html_part(message: &mail_parser::Message<'_>) -> Option<String> {
+    match message.html_part(0).map(|part| &part.body) {
+        Some(PartType::Html(html)) if html_has_visible_text(html) => Some(html.to_string()),
+        _ => None,
+    }
 }
 
 /// Restricts a filename- or mailbox-derived path component to safe characters.
@@ -1675,8 +1744,12 @@ fn hydrate_bodies(
     (None, None, false, "Body not downloaded.".to_owned())
 }
 
-/// Returns whether an HTML fragment carries text outside its tags.
+/// Returns whether an HTML fragment carries text outside its tags, or an
+/// image (mail that is one picture).
 fn html_has_visible_text(html: &str) -> bool {
+    if html.to_ascii_lowercase().contains("<img") {
+        return true;
+    }
     let mut text = String::new();
     let mut inside_tag = false;
     for character in html.chars() {
@@ -2018,6 +2091,103 @@ mod tests {
     }
 
     #[test]
+    fn rfc822_hydration_keeps_the_html_part_and_inline_parts() {
+        // Plain text and HTML alternatives, the HTML in multipart/related
+        // with an inline logo (no file name) and a named inline photo, then
+        // an ordinary attachment.
+        let raw = concat!(
+            "From: sender@example.test\r\n",
+            "Subject: newsletter\r\n",
+            "To: rcpt@example.test\r\n",
+            "Content-Type: multipart/mixed; boundary=\"MIX\"\r\n",
+            "\r\n",
+            "--MIX\r\n",
+            "Content-Type: multipart/alternative; boundary=\"ALT\"\r\n",
+            "\r\n",
+            "--ALT\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "Hello in text.\r\n",
+            "--ALT\r\n",
+            "Content-Type: multipart/related; boundary=\"REL\"\r\n",
+            "\r\n",
+            "--REL\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "\r\n",
+            "<p>Hello <img src=\"cid:logo@example.test\"> <img src=\"cid:photo@example.test\"></p>\r\n",
+            "--REL\r\n",
+            "Content-Type: image/png\r\n",
+            "Content-ID: <logo@example.test>\r\n",
+            "Content-Disposition: inline\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "iVBORw0KGgo=\r\n",
+            "--REL\r\n",
+            "Content-Type: image/jpeg; name=\"photo.jpg\"\r\n",
+            "Content-ID: <photo@example.test>\r\n",
+            "Content-Disposition: inline; filename=\"photo.jpg\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "/9j/4AAQ\r\n",
+            "--REL--\r\n",
+            "--ALT--\r\n",
+            "--MIX\r\n",
+            "Content-Type: text/csv; name=\"report.csv\"\r\n",
+            "Content-Disposition: attachment; filename=\"report.csv\"\r\n",
+            "\r\n",
+            "a,b\r\n",
+            "--MIX--\r\n",
+        );
+        let dir = std::env::temp_dir().join(format!(
+            "zmail-imap-cid-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let vault = zmail_security::vault::BlobVault::new(
+            &dir,
+            &zmail_security::vault::StoreKey::generate(),
+        );
+        let blobs = zmail_core::BlobStore::new(std::sync::Arc::new(vault.clone()));
+
+        let body = hydrated_body_from_rfc822(raw.as_bytes(), "Inbox", "7", &blobs)
+            .expect("the message parses");
+        assert_eq!(body.body_text.as_deref(), Some("Hello in text."));
+        assert_eq!(body.sanitized_html, None, "the text alternative is shown");
+        assert!(
+            body.raw_html
+                .as_deref()
+                .is_some_and(|html| html.contains("cid:logo@example.test")),
+            "the HTML alternative is kept: {:?}",
+            body.raw_html
+        );
+
+        let by_id = |content_id: &str| {
+            body.attachments
+                .iter()
+                .find(|part| part.content_id.as_deref() == Some(content_id))
+                .unwrap_or_else(|| panic!("{content_id} is kept: {:#?}", body.attachments))
+        };
+        let logo = by_id("logo@example.test");
+        assert!(logo.inline_only, "a nameless inline part is not listed");
+        assert_eq!(logo.content_type, "image/png");
+        assert_eq!(
+            vault
+                .read_file(&dir.join(&logo.storage_path))
+                .expect("the logo decrypts"),
+            b"\x89PNG\r\n\x1a\n"
+        );
+        let photo = by_id("photo@example.test");
+        assert_eq!(photo.content_type, "image/jpeg");
+        assert!(
+            body.attachments
+                .iter()
+                .any(|part| part.filename == "report.csv" && !part.inline_only)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn parses_header_only_messages_for_lazy_sync() {
         let raw = concat!(
             "From: sender@example.test\r\n",
@@ -2259,6 +2429,7 @@ mod tests {
             body_preview: "older preview".to_owned(),
             body_text: None,
             sanitized_html: None,
+            raw_html: None,
             has_remote_content: false,
             is_read: false,
             is_flagged: false,
@@ -2275,6 +2446,7 @@ mod tests {
             body_preview: "newer preview".to_owned(),
             body_text: None,
             sanitized_html: None,
+            raw_html: None,
             has_remote_content: false,
             is_read: true,
             is_flagged: true,

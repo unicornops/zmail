@@ -100,6 +100,8 @@ impl SyntheticMailboxSpec {
                                         content_type: "application/pdf".to_owned(),
                                         size_bytes: 1_024,
                                         storage_path: format!("synthetic/{ordinal}.pdf"),
+                                        content_id: None,
+                                        inline_only: false,
                                     }]
                                 } else {
                                     Vec::new()
@@ -119,6 +121,7 @@ impl SyntheticMailboxSpec {
                                     body_preview: preview,
                                     body_text: hydrated.then_some(body),
                                     sanitized_html: None,
+                                    raw_html: None,
                                     has_remote_content: false,
                                     is_read: random.below(100) >= 20,
                                     is_flagged: random.below(100) < 5,
@@ -308,6 +311,8 @@ pub fn reader_stress_threads() -> Vec<ThreadSnapshot> {
             content_type: "application/pdf".to_owned(),
             size_bytes: 250_000 + index * 1_000,
             storage_path: format!("stress/{index}.pdf"),
+            content_id: None,
+            inline_only: false,
         })
         .collect();
     vec![
@@ -333,6 +338,7 @@ fn stress_message(id: &str, subject: &str, minute: usize, body: Option<String>) 
             .collect(),
         body_text: body,
         sanitized_html: None,
+        raw_html: None,
         has_remote_content: false,
         is_read: false,
         is_flagged: false,

@@ -1676,6 +1676,12 @@ pub struct MessageAttachment {
     pub size_bytes: u64,
     /// Path of the stored blob relative to the store's attachments directory.
     pub storage_path: String,
+    /// The part's Content-ID, without angle brackets, so HTML can show it
+    /// through `cid:` (ADR 0006).
+    pub content_id: Option<String>,
+    /// A body part kept only for its Content-ID (an inline image without
+    /// a file name): not listed as an attachment.
+    pub inline_only: bool,
 }
 
 /// A message body fetched on demand by a sync adapter.
@@ -1685,6 +1691,9 @@ pub struct HydratedBody {
     pub body_text: Option<String>,
     /// Sanitized HTML body when plain text is unavailable.
     pub sanitized_html: Option<String>,
+    /// The original `text/html` part, kept even when a plain-text part
+    /// exists, for HTML renderers (ADR 0006).
+    pub raw_html: Option<String>,
     /// Whether the source body referenced remote content.
     pub has_remote_content: bool,
     /// Preview excerpt derived from the fetched body.
@@ -1763,6 +1772,9 @@ pub struct MessageSnapshot {
     pub body_text: Option<String>,
     /// Sanitized HTML body when plain text is unavailable.
     pub sanitized_html: Option<String>,
+    /// The original `text/html` part, kept even when a plain-text part
+    /// exists, for HTML renderers (ADR 0006).
+    pub raw_html: Option<String>,
     /// Whether the source body referenced remote content.
     pub has_remote_content: bool,
     /// Whether the message is read.
