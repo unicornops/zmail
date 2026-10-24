@@ -351,6 +351,7 @@ pub(crate) struct JmapEmail {
     preview: String,
     body_text: Option<String>,
     sanitized_html: Option<String>,
+    raw_html: Option<String>,
     received_at: String,
     unread: bool,
     flagged: bool,
@@ -744,13 +745,15 @@ pub(crate) async fn fetch_emails(
                     .unwrap_or_else(|| "No preview available.".to_owned()),
                 body_text,
                 sanitized_html,
+                raw_html: raw_html_body(&email),
                 received_at: email
                     .received_at()
                     .map(timestamp_to_rfc3339)
                     .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),
                 unread: !email.keywords().contains(&"$seen"),
                 flagged: email.keywords().contains(&"$flagged"),
-                has_attachments: email.has_attachment() || !attachments.is_empty(),
+                has_attachments: email.has_attachment()
+                    || attachments.iter().any(|attachment| !attachment.inline_only),
                 has_remote_content,
                 identity_email,
                 attachments,
@@ -789,12 +792,27 @@ async fn download_attachments(
         if part.size() > MAX_ATTACHMENT_BYTES {
             continue;
         }
-        let Some(filename) = part.name().map(str::to_owned) else {
+        let content_id = part
+            .content_id()
+            .map(|content_id| {
+                content_id
+                    .trim()
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .trim()
+                    .to_owned()
+            })
+            .filter(|content_id| !content_id.is_empty());
+        // A part without a name is kept only for its Content-ID, so HTML
+        // can show it through `cid:` (ADR 0006); it is not listed.
+        let named = part
+            .name()
+            .map(str::to_owned)
+            .filter(|name| !name.trim().is_empty());
+        let inline_only = named.is_none();
+        let Some(filename) = named.or_else(|| content_id.clone()) else {
             continue;
         };
-        if filename.trim().is_empty() {
-            continue;
-        }
         let Ok(contents) = client.download(blob_id).await else {
             continue;
         };
@@ -818,6 +836,8 @@ async fn download_attachments(
                 .unwrap_or_else(|| "application/octet-stream".to_owned()),
             size_bytes: contents.len() as u64,
             storage_path,
+            content_id,
+            inline_only,
         });
     }
 
@@ -960,6 +980,7 @@ pub(crate) fn message_snapshot(email: &JmapEmail, primary_identity: &str) -> Mes
         body_preview: email.preview.clone(),
         body_text: email.body_text.clone(),
         sanitized_html: email.sanitized_html.clone(),
+        raw_html: email.raw_html.clone(),
         has_remote_content: email.has_remote_content,
         is_read: !email.unread,
         is_flagged: email.flagged,
@@ -1038,6 +1059,15 @@ fn extract_renderable_bodies(
     }
 
     (None, None, false, None)
+}
+
+/// The original `text/html` part, kept for HTML renderers (ADR 0006)
+/// even when the message also has a plain-text part.
+fn raw_html_body(email: &jmap_client::email::Email) -> Option<String> {
+    let text_parts = email.text_body().unwrap_or_default();
+    let html_parts = email.html_body().unwrap_or_default();
+    body_value_of_type(html_parts.iter().chain(text_parts), email, "text/html")
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// Returns the fetched value of the first part whose media type is
@@ -1139,7 +1169,7 @@ fn timestamp_to_rfc3339(timestamp: i64) -> String {
 mod tests {
     use super::{
         JmapCheckpoint, extract_renderable_bodies, format_jmap_addresses, jmap_credentials,
-        sanitize_component, timestamp_to_rfc3339,
+        raw_html_body, sanitize_component, timestamp_to_rfc3339,
     };
     use serde_json::json;
     use zmail_core::AuthKind;
@@ -1372,6 +1402,35 @@ mod tests {
         let preview = preview.expect("an HTML body has a preview");
         assert_eq!(preview, "Fish & chips <today> Café \"open\"");
         assert!(!preview.contains("<div>") && !preview.contains("&amp;"));
+    }
+
+    #[test]
+    fn the_original_html_part_is_kept_beside_the_text() {
+        let alternative = email(
+            json!([part("1", "text/plain")]),
+            json!([part("2", "text/html")]),
+            json!({
+                "1": value("Hello in text."),
+                "2": value(NEWSLETTER_HTML),
+            }),
+        );
+        assert_eq!(
+            raw_html_body(&alternative).as_deref(),
+            Some(NEWSLETTER_HTML),
+            "the HTML alternative is stored for HTML renderers"
+        );
+        let html_only = email(
+            json!([part("1", "text/html")]),
+            json!([part("1", "text/html")]),
+            json!({ "1": value(NEWSLETTER_HTML) }),
+        );
+        assert_eq!(raw_html_body(&html_only).as_deref(), Some(NEWSLETTER_HTML));
+        let text_only = email(
+            json!([part("1", "text/plain")]),
+            json!([part("1", "text/plain")]),
+            json!({ "1": value("Only text") }),
+        );
+        assert_eq!(raw_html_body(&text_only), None);
     }
 
     #[test]

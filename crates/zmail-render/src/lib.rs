@@ -2,8 +2,9 @@
 //!
 //! Every renderer (the text view today, the OS web engines and the native
 //! renderer later) is given the same [`PreparedMessage`], made by
-//! [`prepare`] from what the store holds for a message ([`RenderSource`])
-//! and the user's choices ([`PrepareOptions`]):
+//! [`prepare`] from what the store holds for a message ([`RenderSource`],
+//! read with [`render_source`]) and the user's choices
+//! ([`PrepareOptions`]):
 //!
 //! - **HTML**: sanitised by `zmail_security::html` (allowlisted elements
 //!   and attributes, a CSS pass, size and nesting caps), or a reason there
@@ -346,6 +347,44 @@ pub fn prepare(source: &RenderSource, options: &PrepareOptions) -> PreparedMessa
         cid_references: document.cid_references,
         theme: options.theme,
     }
+}
+
+/// The bytes of an inline part the store keeps, decrypted on demand.
+struct StoredPartBytes(zmail_store::AttachmentBlob);
+
+impl PartBytes for StoredPartBytes {
+    fn read(&self) -> anyhow::Result<Vec<u8>> {
+        self.0.read()
+    }
+}
+
+/// What the store holds for message `message_id`, ready for [`prepare`].
+/// `None` for a missing message.
+pub fn render_source(
+    store: &zmail_store::LocalStore,
+    message_id: i64,
+) -> anyhow::Result<Option<RenderSource>> {
+    let Some(parts) = store.message_render_parts(message_id)? else {
+        return Ok(None);
+    };
+    Ok(Some(RenderSource {
+        message_id,
+        body_text: parts.body_text,
+        html: parts.html,
+        html_is_legacy: parts.html_is_legacy,
+        inline_parts: parts
+            .inline_parts
+            .into_iter()
+            .map(|part| {
+                InlinePart::new(
+                    part.content_id,
+                    part.content_type,
+                    part.size_bytes,
+                    Arc::new(StoredPartBytes(part.blob)),
+                )
+            })
+            .collect(),
+    }))
 }
 
 /// Which kind of renderer draws a message.

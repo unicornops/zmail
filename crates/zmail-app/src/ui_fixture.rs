@@ -522,6 +522,8 @@ fn attachments_thread(now: u64) -> ThreadSnapshot {
             content_type: (*content_type).to_owned(),
             size_bytes: *size_bytes,
             storage_path: format!("fixture/{filename}"),
+            content_id: None,
+            inline_only: false,
         })
         .collect();
     thread
@@ -1178,6 +1180,7 @@ fn thread_snapshot(thread: &Thread, now: u64) -> ThreadSnapshot {
                 subject: thread.subject.to_owned(),
                 body_preview: preview.chars().take(160).collect(),
                 body_text: html.is_none().then(|| message.body.to_owned()),
+                raw_html: html.is_some().then(|| message.body.to_owned()),
                 sanitized_html: html.map(|html| html.html),
                 has_remote_content: false,
                 is_read: message.is_read,
@@ -1191,6 +1194,8 @@ fn thread_snapshot(thread: &Thread, now: u64) -> ThreadSnapshot {
                         content_type: content_type(filename).to_owned(),
                         size_bytes: 248_312,
                         storage_path: format!("fixture/{filename}"),
+                        content_id: None,
+                        inline_only: false,
                     })
                     .collect(),
             }
