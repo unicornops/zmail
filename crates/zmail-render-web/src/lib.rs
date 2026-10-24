@@ -1,7 +1,8 @@
 //! Zmail's web renderer for HTML mail (ADR 0006).
 //!
-//! A prepared message ([`WebDocument`]) is shown in a locked-down OS web
-//! view placed inside the GPUI window through GPUI's native window
+//! A prepared message (`zmail_render::PreparedMessage`, turned into a
+//! [`WebDocument`] by [`WebDocument::from_prepared`]) is shown in a
+//! locked-down OS web view placed inside the GPUI window through GPUI's native window
 //! composition (Zed PR #62379): the web view sits between GPUI's base
 //! surface and its overlay surface, so Zmail's menus, popovers, dialogs and
 //! tooltips draw above it.
@@ -27,9 +28,25 @@ use std::sync::OnceLock;
 
 pub use document::{Appearance, InlineResource, WebDocument};
 pub use host::{WebBody, WebHost, WebKey, WebViewport};
+use zmail_render::{MessageRenderer, PreparedMessage, RendererKind};
 
 /// Whether this platform has a web renderer.
 pub const SUPPORTED: bool = cfg!(target_os = "macos");
+
+/// The web renderer behind ADR 0006's renderer boundary: it takes any
+/// prepared message with sanitised HTML, on a platform that has it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WebRenderer;
+
+impl MessageRenderer for WebRenderer {
+    fn kind(&self) -> RendererKind {
+        RendererKind::Web
+    }
+
+    fn accepts(&self, message: &PreparedMessage) -> bool {
+        SUPPORTED && message.html().is_ok()
+    }
+}
 
 /// Something a web view reports back to Zmail.
 #[derive(Debug, Clone, PartialEq)]

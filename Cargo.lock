@@ -10197,6 +10197,7 @@ dependencies = [
  "raw-window-handle",
  "serde_json",
  "url",
+ "zmail-render",
 ]
 
 [[package]]
@@ -10313,6 +10314,7 @@ dependencies = [
  "zmail-core",
  "zmail-notify",
  "zmail-proton",
+ "zmail-render",
  "zmail-render-web",
  "zmail-security",
  "zmail-store",

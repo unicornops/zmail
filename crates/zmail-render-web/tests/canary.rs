@@ -41,6 +41,7 @@ mod macos {
     };
 
     use anyhow::{Context, Result, bail, ensure};
+    use zmail_render::{PrepareOptions, RenderSource, prepare};
     use zmail_render_web::{
         Appearance, InlineResource, WebDocument, WebEvent,
         macos_testing::{Frame, OffscreenWindow, PlatformWebView},
@@ -270,25 +271,45 @@ mod macos {
         let local = format!("localhost:{}", canary.port);
         let mut problems = Vec::new();
 
+        // Each hostile page twice: raw, so the web view's own walls are
+        // tested without the sanitiser, and as Zmail shows mail, prepared
+        // by `zmail_render::prepare` (with remote content blocked).
         for (name, template) in hostile_corpus() {
             let html = template.replace("HOST", &host).replace("LOCAL", &local);
-            let rendered = render(&window, &document(&html))
-                .with_context(|| format!("rendering hostile page {name:?}"))?;
-            if let Some(reason) = rendered.failure() {
-                problems.push(format!("hostile page {name:?} did not render: {reason}"));
-            }
-            let hits = canary.hits();
-            if !hits.is_empty() {
-                problems.push(format!(
-                    "hostile page {name:?} reached the network: {hits:?}"
-                ));
-                canary.hits.lock().map(|mut hits| hits.clear()).ok();
-            }
-            println!(
-                "canary: {name}: measured {:?}, {} requests",
-                rendered.measured_height(),
-                hits.len()
+            let prepared = prepare(
+                &RenderSource {
+                    message_id: 1,
+                    html: Some(html.clone()),
+                    ..RenderSource::default()
+                },
+                &PrepareOptions::default(),
             );
+            let mut documents = vec![("raw", document(&html))];
+            match WebDocument::from_prepared(&prepared, Appearance::default()) {
+                Ok(prepared) => documents.push(("prepared", prepared)),
+                Err(reason) => println!("canary: {name}: no prepared HTML ({reason})"),
+            }
+            for (form, page) in documents {
+                let rendered = render(&window, &page)
+                    .with_context(|| format!("rendering hostile page {name:?} ({form})"))?;
+                if let Some(reason) = rendered.failure() {
+                    problems.push(format!(
+                        "hostile page {name:?} ({form}) did not render: {reason}"
+                    ));
+                }
+                let hits = canary.hits();
+                if !hits.is_empty() {
+                    problems.push(format!(
+                        "hostile page {name:?} ({form}) reached the network: {hits:?}"
+                    ));
+                    canary.hits.lock().map(|mut hits| hits.clear()).ok();
+                }
+                println!(
+                    "canary: {name} ({form}): measured {:?}, {} requests",
+                    rendered.measured_height(),
+                    hits.len()
+                );
+            }
         }
 
         // Page JavaScript does not run.
