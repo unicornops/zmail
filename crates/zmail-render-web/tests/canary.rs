@@ -339,10 +339,29 @@ mod macos {
         )
         .map_err(|reason| anyhow::anyhow!("the rebinding page has no HTML: {reason}"))?;
         println!(
-            "canary: rebinding page fetches {:?}",
+            "canary: rebinding page fetches {:?} after preparing",
             allowed.remote.iter().flatten().collect::<Vec<_>>()
         );
         let rendered = render(&window, &allowed)?;
+        window.pump(Duration::from_secs(3));
+        drop(rendered);
+        // The sanitiser may already refuse those addresses; give Zmail's
+        // fetcher the same ones directly, so its own resolve-time check is
+        // what keeps the canary silent.
+        let mut direct = document(
+            r#"<img src="zmail-mail://remote/0"><div style="background:url(zmail-mail://remote/1)">x</div>"#,
+        );
+        direct.remote = vec![
+            Some(format!(
+                "https://127.0.0.1.nip.io:{}/rebind.png",
+                canary.port
+            )),
+            Some(format!(
+                "https://localtest.me:{}/rebind-bg.png",
+                canary.port
+            )),
+        ];
+        let rendered = render(&window, &direct)?;
         window.pump(Duration::from_secs(3));
         let hits = canary.hits();
         if !hits.is_empty() {
