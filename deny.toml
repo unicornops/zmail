@@ -10,7 +10,7 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant is pulled transitively by the pinned GPUI Linux accessibility stack (accesskit_unix, atspi) and folds into zbus 6, which that stack does not use yet" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names is pulled transitively by the pinned GPUI Linux accessibility stack (accesskit_unix, atspi) and folds into zbus 6, which that stack does not use yet" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is pulled transitively by the pinned GPUI Linux accessibility stack (accesskit_unix, atspi) and folds into zbus 6, which that stack does not use yet" },
-    { id = "RUSTSEC-2023-0071", reason = "rsa (Marvin) is a hard dependency of pgp (rPGP); zmail only decrypts locally and never exposes a decryption oracle to the network, see docs/adr/0004-proton-native.md; no upstream fix (RustCrypto/RSA#626), revisit when rsa ships one" },
+    { id = "RUSTSEC-2023-0071", reason = "rsa (Marvin) is a hard dependency of pgp (rPGP); zmail only decrypts locally and never exposes a decryption oracle to the network, see docs/adr/0004-proton-native.md; no upstream fix in rsa 0.9 or 0.10.0-rc.19 (RustCrypto/RSA#626), revisit when rsa ships one" },
     { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 (via jmap-client -> tokio-tungstenite 0.28) is a shim whose only code is `pub use parent::TLS_SERVER_ROOTS;`, re-exporting webpki-roots 1.x, which Cargo.lock pins to the fixed 1.0.10; there is no newer 0.26.x" },
 ]
 
@@ -52,9 +52,15 @@ allow-wildcard-paths = true
 [sources]
 unknown-git = "deny"
 unknown-registry = "deny"
-# Exactly the git repositories the pinned GPUI needs (docs/upstream/zed.md).
-# Each revision is fixed by Cargo.lock; keep this list in step with Zed.
+# Exactly the git repositories the pinned GPUI needs (docs/upstream/zed.md),
+# plus the rPGP fork below. Each revision is fixed by Cargo.lock; keep the
+# GPUI entries in step with Zed.
 allow-git = [
+    # rPGP fork at the head of rpgp/rpgp#573 (RustCrypto 0.14 stack,
+    # crypto-bigint 0.7.6), pinned by `rev` in Cargo.toml, so that pgp no
+    # longer pulls the crypto-bigint 0.5.5 of RUSTSEC-2026-0387. Drop it when
+    # a crates.io pgp release contains #573 (docs/upstream/proton.md).
+    "https://github.com/lazzurs/rpgp",
     # GPUI and its platform crates, pinned to a Zed stable release tag.
     "https://github.com/zed-industries/zed",
     # Zed forks GPUI depends on directly (Linux/Windows fonts, X11 input

@@ -227,6 +227,19 @@ message decryption and Zmail's own OpenPGP support use the same
 implementation, the same advisory exceptions and the same audit
 history.
 
+**rPGP fork (October 24, 2026).** `pgp` 0.21.0, the newest release,
+pulls `crypto-bigint` 0.5.5 (through `cx448` and the `elliptic-curve`
+0.13 curves), which `RUSTSEC-2026-0387` covers: timing side channels in
+subtraction, division and Montgomery multiplication, fixed only in
+0.7.6. Rob decided against ignoring it. Zmail instead takes `pgp` from a
+fork pinned to the head of rpgp/rpgp#573, which moves rPGP to the
+RustCrypto 0.14 stack (`crypto-bigint` 0.7.6, `rsa` 0.10.0-rc.19,
+`curve25519-dalek` 5), until a crates.io release contains it.
+`docs/upstream/proton.md` records the revision and how to move back. The
+key port is unchanged apart from handing rPGP a `rand` 0.10 RNG.
+`proton-srp` 0.8.4 (the newest release) still depends on `crypto-bigint`
+0.5.5 for SRP, so the fork alone does not clear the advisory.
+
 **Zmail-specific key check.** go-crypto validates private key material
 against the public key when it decrypts a key (gopenpgp's `Key.Check` is
 a no-op for that reason); rPGP does not. Proton's server stores the
@@ -257,7 +270,9 @@ rejection) and #702 (blinding by default) are open, and `rsa` 0.10 is
 still a release candidate (0.10.0-rc.19). The move to `crypto-bigint`
 closed the modular exponentiation timing but not the padding oracle.
 rPGP lists the issue in its security status, and its RSA decryption
-calls `rsa`'s unblinded `decrypt`.
+calls `rsa`'s unblinded `decrypt`. The rPGP fork above moved Zmail to
+`rsa` 0.10.0-rc.19, which is still affected and still decrypts
+unblinded, so the ignore below stays.
 
 How Zmail uses RSA: Proton accounts created before Curve25519 became
 the default (2019 to 2021) still have RSA user and address keys. Zmail

@@ -31,7 +31,42 @@ like any other dependency, not here:
   [ProtonMail/proton-crypto-rs](https://github.com/ProtonMail/proton-crypto-rs)):
   SRP proofs and the bcrypt password hashes, with the default
   `pgpinternal` feature off.
-- `pgp` (rPGP): OpenPGP, shared with ADR 0002.
+- `pgp` (rPGP): OpenPGP, shared with ADR 0002. Taken from a fork for
+  now; see below.
+
+## rPGP Fork
+
+`pgp` is a git dependency on
+[lazzurs/rpgp](https://github.com/lazzurs/rpgp) at
+`696fe2f437e401f21cac8a1f32f9144a4b95d951` (branch
+`zmail/rustcrypto-0.14`), the head of upstream pull request
+[rpgp/rpgp#573](https://github.com/rpgp/rpgp/pull/573) "Adopt
+RustCrypto new releases". The fork holds that commit unchanged; Zmail
+carries no patches of its own.
+
+Why: `pgp` 0.21.0, the newest release, depends on `crypto-bigint` 0.5.5
+(through `cx448` and the `elliptic-curve` 0.13 curves), and
+[RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387)
+covers every `crypto-bigint` before 0.7.6. #573 moves rPGP to the
+RustCrypto 0.14 stack (`crypto-bigint` 0.7.6, `elliptic-curve` 0.14,
+`rsa` 0.10.0-rc.19, `curve25519-dalek` 5, `rand` 0.10). Its own
+`[patch.crates-io]` for `rsa` does not apply to Zmail, which builds with
+crates.io `rsa` 0.10.0-rc.19. `deny.toml` allows the fork's git source.
+
+Zmail hands rPGP a `rand` 0.10 RNG through the `rand_pgp` workspace
+dependency; everything else keeps `rand` 0.8, which `proton-srp` uses.
+
+To move back once a `pgp` release on crates.io contains #573:
+
+1. Set `pgp = { version = "<release>", default-features = false }` in
+   the root `Cargo.toml` and run `cargo update -p pgp`.
+2. Remove `https://github.com/lazzurs/rpgp` from `allow-git` in
+   `deny.toml`.
+3. Keep `rand_pgp` while that release takes `rand` 0.10; drop it if it
+   matches the workspace `rand` again.
+4. Run the workspace tests (the key, unlock, sign, encrypt and send
+   package tests in `zmail-proton-api`) and the Proton harness, then
+   remove this section and update ADR 0004's crypto section.
 
 ## Licences
 
@@ -85,3 +120,5 @@ Things that need extra attention on every bump:
 ## History
 
 - **October 20, 2026 (issue #237):** first pin, Bridge `v3.27.1`.
+- **October 24, 2026:** `pgp` moved to the rPGP fork above
+  (RUSTSEC-2026-0387).
