@@ -573,6 +573,8 @@ impl ReaderView {
     pub(super) fn copy(&mut self, _: &text_input::Copy, _: &mut Window, cx: &mut Context<Self>) {
         match self.selected_text() {
             Some(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            // Text selected in a message's web view.
+            None if self.copy_from_web() => {}
             None => cx.propagate(),
         }
     }
@@ -589,6 +591,9 @@ impl ReaderView {
             cx.propagate();
             return;
         };
+        if self.select_all_in_web(&message) {
+            return;
+        }
         let body = self.body_model(&message);
         self.selection = Some(BodySelection {
             message_id: message.id,

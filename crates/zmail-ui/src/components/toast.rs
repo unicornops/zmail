@@ -21,8 +21,8 @@
 use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    App, Context, EventEmitter, IntoElement, Render, Role, SharedString, Task, Window, div,
-    prelude::*, px, rgb,
+    App, Context, EventEmitter, IntoElement, Render, Role, SharedString, Task, Window, deferred,
+    div, prelude::*, px, rgb,
 };
 
 use crate::a11y::{A11yFlags, AccessibleExt, Politeness};
@@ -318,17 +318,26 @@ impl Render for ToastHost {
             })
             .collect();
 
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .bottom(px(SPACE_4))
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(SPACE_2))
-            .px(px(SPACE_4))
-            .children(toasts)
+        if toasts.is_empty() {
+            return div().into_any_element();
+        }
+        // Deferred, so the toasts draw in GPUI's overlay surface, above a
+        // message's web view (native window composition, ADR 0006).
+        deferred(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(SPACE_4))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(SPACE_2))
+                .px(px(SPACE_4))
+                .children(toasts),
+        )
+        .with_priority(2)
+        .into_any_element()
     }
 }
 

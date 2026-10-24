@@ -18,6 +18,8 @@ zmail-auth = { path = "../zmail-auth" }
 zmail-autodiscover = { path = "../zmail-autodiscover" }
 zmail-core = { path = "../zmail-core" }
 zmail-notify = { path = "../zmail-notify" }
+# HTML mail in a web view (ADR 0006); macOS only, a no-op elsewhere.
+zmail-render-web = { path = "../zmail-render-web" }
 zmail-security = { path = "../zmail-security" }
 zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }

@@ -126,7 +126,15 @@ impl ReaderView {
         };
         let items = match anchor {
             PopoverAnchor::ActionBar => more_menu_items(Some(thread), &self.state),
-            PopoverAnchor::MessageMore(index) => message_menu_items(thread, index, &self.state),
+            PopoverAnchor::MessageMore(index) => message_menu_items(
+                thread,
+                index,
+                &self.state,
+                thread
+                    .messages
+                    .get(index)
+                    .and_then(|message| self.simple_view_label(message)),
+            ),
             PopoverAnchor::Sender(index) => thread
                 .messages
                 .get(index)
@@ -242,6 +250,7 @@ impl ReaderView {
         match command {
             ReaderCommand::MoveTo => self.open_move_picker(anchor, window, cx),
             ReaderCommand::ViewSource(index) => self.open_source(index, window, cx),
+            ReaderCommand::ToggleSimpleView(index) => self.toggle_simple_view(index, cx),
             ReaderCommand::CopyAddress(index) => {
                 if let Some((_, Some(email))) = sender(index) {
                     cx.write_to_clipboard(ClipboardItem::new_string(email));

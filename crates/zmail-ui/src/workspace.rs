@@ -15,8 +15,8 @@ use std::{collections::HashSet, time::Duration};
 use anyhow::{Context as _, Result, bail};
 use gpui::{
     AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight,
-    IntoElement, MouseButton, Render, Role, StyleRefinement, Styled, Window, WindowAppearance, div,
-    hsla, prelude::*, px, rgb,
+    IntoElement, MouseButton, Render, Role, StyleRefinement, Styled, Window, WindowAppearance,
+    deferred, div, hsla, prelude::*, px, rgb,
 };
 use std::sync::Arc;
 use zmail_core::{
@@ -3018,8 +3018,10 @@ impl WorkspaceView {
         } else {
             hsla(0.0, 0.0, 0.0, 0.45)
         };
+        // Deferred, so the overlay draws in GPUI's overlay surface, above a
+        // message's web view (native window composition, ADR 0006).
         panes.when(overlay, |this| {
-            this.child(
+            this.child(deferred(
                 // A click beside the overlay closes it.
                 div()
                     .id("sidebar-scrim")
@@ -3032,8 +3034,8 @@ impl WorkspaceView {
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| this.close_sidebar_overlay(window, cx)),
                     ),
-            )
-            .child(
+            ))
+            .child(deferred(
                 div()
                     .absolute()
                     .top_0()
@@ -3043,7 +3045,7 @@ impl WorkspaceView {
                     .shadow_lg()
                     .occlude()
                     .child(self.sidebar.clone().cached(fill_style())),
-            )
+            ))
         })
     }
 
@@ -3089,6 +3091,14 @@ impl Render for WorkspaceView {
             cx.set_global(colors);
         }
         let layout = self.pane_layout();
+        // A message's web view is a native view: when the reader is not
+        // drawn this frame, it must be hidden explicitly.
+        let reader_drawn = self.onboarding.is_none()
+            && matches!(self.detail_mode, DetailMode::Reader)
+            && (!layout.stacked || matches!(self.single_pane, SinglePane::Detail));
+        if !reader_drawn {
+            self.reader.read(cx).hide_web();
+        }
 
         let root = div()
             .id("workspace")

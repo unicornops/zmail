@@ -10313,6 +10313,7 @@ dependencies = [
  "zmail-core",
  "zmail-notify",
  "zmail-proton",
+ "zmail-render-web",
  "zmail-security",
  "zmail-store",
  "zmail-sync",
