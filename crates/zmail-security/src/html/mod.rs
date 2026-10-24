@@ -331,7 +331,8 @@ pub fn sanitize_html(input: &str, options: &SanitizeOptions) -> SanitizedDocumen
 
 /// Markup for the store: sanitised with remote content blocked, every
 /// `href` keeping its checked target (so the stored markup needs no side
-/// table), and the readable text. Mail too complex to sanitise is stored as
+/// table) and no `<style>` block (the text view and search do not use
+/// it; renderers sanitise the original part), and the readable text. Mail too complex to sanitise is stored as
 /// its text, with its links.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredHtml {
@@ -415,7 +416,9 @@ fn sanitize(input: &str, mut policy: UrlPolicy) -> SanitizedDocument {
         .map(|style| css::sanitize_stylesheet(style, &mut policy))
         .filter(|style| !style.is_empty())
         .collect();
-    if !styles.is_empty() {
+    // Stored markup serves the text view and search, which have no use
+    // for a stylesheet (its remote resources are still counted).
+    if !styles.is_empty() && !policy.inline_targets {
         html.push_str("<style>");
         html.push_str(&styles.join("\n"));
         html.push_str("</style>");

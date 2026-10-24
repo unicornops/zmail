@@ -302,18 +302,20 @@ fn link_text_never_spans_a_line_break() {
 #[test]
 fn stored_markup_reads_back_to_the_same_text_and_targets() {
     let source = concat!(
+        "<style>.x { background: url(https://t.example/bg.png) }</style>",
         "<p>Pay your <a href=\"http://evil.example/pay\">https://bank.example</a> bill.</p>",
         "<table><tr><td>A</td><td>B</td></tr></table>",
         "<img src=\"https://t.example/p.gif\">",
     );
     let stored = sanitize_html_for_storage(source);
     assert!(stored.has_remote_content);
+    assert!(!stored.html.contains("<style"), "{}", stored.html);
     assert!(
         stored.html.contains("href=\"http://evil.example/pay\""),
         "{}",
         stored.html
     );
-    assert!(stored.html.contains("zmail-blocked:0"), "{}", stored.html);
+    assert!(stored.html.contains("zmail-blocked:1"), "{}", stored.html);
     assert_eq!(stored.text, "Pay your https://bank.example bill.\n\nA  B");
     let (text, links) = text_of_stored_html(&stored.html, false);
     assert_eq!(text, stored.text);
