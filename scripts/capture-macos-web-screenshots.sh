@@ -97,13 +97,16 @@ if swiftc -O "${SCRIPT_DIR}/macos-ui-events.swift" -o "$EVENTS"; then
     cleanup
     app_pid=""
   }
+  # A launch from a shell does not make the app active, and a first click
+  # into an inactive window only activates it: each interaction starts by
+  # clicking the conversation's subject line.
   # The wheel over the page scrolls the conversation.
-  interact reader-html-wheel scroll 724 550 300
+  interact reader-html-wheel click 590 164 -- scroll 724 550 300
   # A link in the page opens Zmail's open-link dialog.
-  interact reader-html-link-click click 724 681
+  interact reader-html-link-click click 590 164 -- click 724 681
   # Text selected in the page is copied by Command-C, through Zmail.
   pbcopy < /dev/null
-  interact reader-html-copy drag 496 485 930 506 -- key-copy
+  interact reader-html-copy click 590 164 -- drag 496 485 930 506 -- key-copy
   pbpaste > "${OUTPUT_DIR}/reader-html-copy.txt" || true
   echo "Copied: $(cat "${OUTPUT_DIR}/reader-html-copy.txt")"
 else
