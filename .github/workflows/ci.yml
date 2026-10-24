@@ -293,6 +293,47 @@ jobs:
                   name: ${{ matrix.artifact_name }}
                   path: ${{ matrix.binary_path }}
 
+    # The macOS web renderer (ADR 0006): its macOS-only code
+    # can only be compiled and run here. Clippy covers the cfg(macos) code
+    # of the renderer and the reader; the canary test renders a hostile
+    # corpus in real WKWebViews and fails on any network request. It does
+    # not wait for the quality job, so macOS problems show early.
+    web_renderer_macos:
+        name: Web renderer (macOS)
+        needs: changes
+        if: github.event_name != 'pull_request' || needs.changes.outputs.app_code == 'true'
+        runs-on: macos-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Read the pinned Rust toolchain
+              id: toolchain
+              shell: bash
+              run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+              with:
+                  toolchain: ${{ steps.toolchain.outputs.channel }}
+                  components: clippy
+
+            - name: Cache Cargo git dependencies
+              uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: ~/.cargo/git/db
+                  key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-git-${{ runner.os }}-
+
+            - name: Clippy (macOS)
+              run: cargo clippy -p zmail-render-web -p zmail-ui -p zmail-app --all-targets --locked -- -D warnings
+
+            - name: Web renderer canary
+              timeout-minutes: 15
+              env:
+                  ZMAIL_WEB_DEBUG: "1"
+              run: cargo test -p zmail-render-web --locked -- --nocapture
+
     # The UI screenshot matrix (UI_PLAN.md Phase 1.8): every UI state in
     # light and dark plus 900px and 1920px windows, captured from seeded
     # fixture data (no mail server) and uploaded as the ui-screenshots
