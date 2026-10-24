@@ -47,6 +47,7 @@ fn seed(store: &LocalStore) {
         body_preview: body.chars().take(80).collect(),
         body_text: Some(body),
         sanitized_html: None,
+        raw_html: None,
         has_remote_content: false,
         is_read: false,
         is_flagged: false,

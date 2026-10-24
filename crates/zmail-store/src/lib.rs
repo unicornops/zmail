@@ -96,6 +96,40 @@ impl AttachmentBlob {
     }
 }
 
+/// What a renderer needs from the store for one message (ADR 0006), from
+/// [`LocalStore::message_render_parts`].
+#[derive(Debug, Clone)]
+pub struct MessageRenderParts {
+    /// The message's local id.
+    pub message_id: i64,
+    /// The account the message belongs to.
+    pub account_id: i64,
+    /// The sender, as stored (`Name <address>`).
+    pub sender: String,
+    /// The plain-text body, when the message has one.
+    pub body_text: Option<String>,
+    /// The original `text/html` part, or, for an HTML body stored before
+    /// ADR 0006, the old sanitiser's output (`html_is_legacy`).
+    pub html: Option<String>,
+    /// `html` is a body stored before ADR 0006.
+    pub html_is_legacy: bool,
+    /// The parts with a Content-ID whose encrypted blob is present.
+    pub inline_parts: Vec<StoredInlinePart>,
+}
+
+/// A part of a message addressable by Content-ID.
+#[derive(Debug, Clone)]
+pub struct StoredInlinePart {
+    /// The Content-ID, without angle brackets.
+    pub content_id: String,
+    /// The part's content type, from the sender.
+    pub content_type: String,
+    /// The part's size in bytes.
+    pub size_bytes: u64,
+    /// The part's encrypted blob.
+    pub blob: AttachmentBlob,
+}
+
 /// What removing an account deletes besides its mail: unsent messages and
 /// drafts (see [`LocalStore::account_removal_impact`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -141,6 +175,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ),
     ("0020_account_color", ACCOUNT_COLOR_SCHEMA),
     ("0021_flagged_threads_index", FLAGGED_THREADS_INDEX_SCHEMA),
+    ("0022_message_html_parts", MESSAGE_HTML_PARTS_SCHEMA),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -402,6 +437,24 @@ ALTER TABLE accounts ADD COLUMN color TEXT;
 const FLAGGED_THREADS_INDEX_SCHEMA: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_threads_flagged
     ON threads(mailbox_id, remote_thread_id, unread_count) WHERE is_flagged = 1;
+"#;
+
+/// What HTML renderers need (ADR 0006): each message's original
+/// `text/html` part (NULL when it has none, for bodies stored before this
+/// migration and for bodies not downloaded yet), and the Content-ID of each part,
+/// with the parts kept only for their Content-ID (inline images without a
+/// file name) marked so the reader does not list them as attachments.
+///
+/// HTML-only bodies stored before this migration are fetched again when
+/// their conversation is opened (IMAP and Proton; see
+/// [`LocalStore::messages_missing_bodies`]); JMAP ones when the server next
+/// sends them. Until then they render from the old sanitised HTML. Bodies
+/// with a plain-text part keep it, and gain their HTML part when the
+/// message is next fetched.
+const MESSAGE_HTML_PARTS_SCHEMA: &str = r#"
+ALTER TABLE messages ADD COLUMN raw_html TEXT;
+ALTER TABLE message_attachments ADD COLUMN content_id TEXT;
+ALTER TABLE message_attachments ADD COLUMN inline_only INTEGER NOT NULL DEFAULT 0;
 "#;
 
 const MESSAGE_REPLY_TO_SCHEMA: &str = r#"
@@ -1314,7 +1367,8 @@ impl LocalStore {
                 r#"
                 SELECT m.id,
                        LENGTH(COALESCE(m.body_text, '')) +
-                       LENGTH(COALESCE(m.sanitized_html, ''))
+                       LENGTH(COALESCE(m.sanitized_html, '')) +
+                       LENGTH(COALESCE(m.raw_html, ''))
                 FROM messages m
                 JOIN threads t ON t.id = m.thread_id
                 JOIN mailboxes b ON b.id = t.mailbox_id
@@ -1337,7 +1391,7 @@ impl LocalStore {
             transaction
                 .execute(
                     "UPDATE messages SET body_text = NULL, sanitized_html = NULL, \
-                     has_remote_content = 0 WHERE id = ?1",
+                     raw_html = NULL, has_remote_content = 0 WHERE id = ?1",
                     params![message_id],
                 )
                 .with_context(|| format!("failed to evict the body of message {message_id}"))?;
@@ -1522,6 +1576,7 @@ impl LocalStore {
                         &message.body_preview,
                         message.body_text.as_deref(),
                         message.sanitized_html.as_deref(),
+                        message.raw_html.is_none(),
                     );
                     let sender = message
                         .sender
@@ -2210,7 +2265,8 @@ impl LocalStore {
                 messages.is_flagged,
                 messages.has_remote_content,
                 messages.received_at,
-                messages.sender_warning_dismissed
+                messages.sender_warning_dismissed,
+                messages.raw_html IS NULL
             FROM messages
             WHERE messages.thread_id = ?1
             ORDER BY messages.received_at ASC, messages.id ASC
@@ -2226,6 +2282,7 @@ impl LocalStore {
                     &body_preview,
                     body_text.as_deref(),
                     sanitized_html.as_deref(),
+                    row.get::<_, bool>(13)?,
                 );
 
                 Ok(ThreadMessage {
@@ -2258,6 +2315,7 @@ impl LocalStore {
                 SELECT message_id, id, filename, content_type, size_bytes, storage_path
                 FROM message_attachments
                 WHERE message_id IN (SELECT id FROM messages WHERE thread_id = ?1)
+                  AND inline_only = 0
                 ORDER BY id ASC
                 "#,
             )?;
@@ -2364,6 +2422,82 @@ impl LocalStore {
         })
     }
 
+    /// What a renderer needs for message `message_id`: its bodies and its
+    /// parts with a Content-ID (ADR 0006). `None` for a missing message.
+    pub fn message_render_parts(&self, message_id: i64) -> Result<Option<MessageRenderParts>> {
+        let conn = self.connection()?;
+        let row = conn
+            .query_row(
+                r#"
+                SELECT mailboxes.account_id, messages.sender, messages.body_text,
+                       messages.sanitized_html, messages.raw_html
+                FROM messages
+                JOIN threads ON threads.id = messages.thread_id
+                JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+                WHERE messages.id = ?1
+                "#,
+                params![message_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("failed to load the message to render")?;
+        let Some((account_id, sender, body_text, sanitized_html, raw_html)) = row else {
+            return Ok(None);
+        };
+        let parts = conn
+            .prepare(
+                r#"
+                SELECT id, content_id, content_type, size_bytes
+                FROM message_attachments
+                WHERE message_id = ?1 AND content_id IS NOT NULL
+                ORDER BY id ASC
+                "#,
+            )?
+            .query_map(params![message_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load the message's inline parts")?;
+        drop(conn);
+        let inline_parts = parts
+            .into_iter()
+            .filter_map(|(id, content_id, content_type, size_bytes)| {
+                // A part whose blob was evicted or never written is left
+                // out; the renderer shows its placeholder.
+                let blob = self.attachment_blob(id).ok()?;
+                Some(StoredInlinePart {
+                    content_id,
+                    content_type,
+                    size_bytes: size_bytes.max(0) as u64,
+                    blob,
+                })
+            })
+            .collect();
+        let html_is_legacy = raw_html.is_none() && sanitized_html.is_some();
+        Ok(Some(MessageRenderParts {
+            message_id,
+            account_id,
+            sender,
+            body_text,
+            html: raw_html.or(sanitized_html),
+            html_is_legacy,
+            inline_parts,
+        }))
+    }
+
     /// Copies a received attachment into `destination_dir` using its original
     /// filename and returns the written path.
     pub fn save_attachment(
@@ -2383,6 +2517,11 @@ impl LocalStore {
 
     /// Lists the messages of a thread whose bodies are not hydrated yet,
     /// as `(row id, remote id)` pairs. Returns `None` for a missing thread.
+    ///
+    /// HTML bodies stored before ADR 0006 (sanitised HTML without the
+    /// original part) count as missing on IMAP and Proton accounts, so
+    /// opening their conversation fetches them again with the original
+    /// HTML and inline parts; JMAP sends bodies with its sync instead.
     pub fn messages_missing_bodies(&self, thread_id: i64) -> Result<Option<Vec<(i64, String)>>> {
         let conn = self.connection()?;
         let exists: Option<i64> = conn
@@ -2398,12 +2537,16 @@ impl LocalStore {
 
         let mut statement = conn.prepare(
             r#"
-            SELECT id, COALESCE(remote_id, '')
+            SELECT messages.id, COALESCE(messages.remote_id, '')
             FROM messages
-            WHERE thread_id = ?1
-              AND body_text IS NULL
-              AND sanitized_html IS NULL
-            ORDER BY received_at ASC, id ASC
+            JOIN threads ON threads.id = messages.thread_id
+            JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+            JOIN accounts ON accounts.id = mailboxes.account_id
+            WHERE messages.thread_id = ?1
+              AND ((messages.body_text IS NULL AND messages.sanitized_html IS NULL)
+                OR (messages.body_text IS NULL AND messages.sanitized_html IS NOT NULL
+                    AND messages.raw_html IS NULL AND accounts.protocol_kind != 'jmap'))
+            ORDER BY messages.received_at ASC, messages.id ASC
             "#,
         )?;
         let rows = statement
@@ -2576,7 +2719,8 @@ impl LocalStore {
                 SET body_text = ?2,
                     sanitized_html = ?3,
                     has_remote_content = ?4,
-                    body_preview = ?5
+                    body_preview = ?5,
+                    raw_html = ?6
                 WHERE id = ?1
                 "#,
                 params![
@@ -2585,6 +2729,7 @@ impl LocalStore {
                     hydration.sanitized_html,
                     hydration.has_remote_content,
                     hydration.body_preview,
+                    hydration.raw_html,
                 ],
             )
             .context("failed to store the hydrated body")?;
@@ -2601,9 +2746,11 @@ impl LocalStore {
                         filename,
                         content_type,
                         size_bytes,
-                        storage_path
+                        storage_path,
+                        content_id,
+                        inline_only
                     )
-                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                     "#,
                     params![
                         message_id,
@@ -2611,11 +2758,16 @@ impl LocalStore {
                         attachment.content_type,
                         attachment.size_bytes as i64,
                         attachment.storage_path,
+                        attachment.content_id,
+                        attachment.inline_only,
                     ],
                 )
                 .context("failed to store the hydrated attachment metadata")?;
         }
-        let has_attachments = !hydration.attachments.is_empty();
+        let has_attachments = hydration
+            .attachments
+            .iter()
+            .any(|attachment| !attachment.inline_only);
         transaction.execute(
             "UPDATE threads SET has_attachments = MAX(has_attachments, ?2) WHERE id = ?1",
             params![thread_id, has_attachments],
@@ -5056,7 +5208,8 @@ fn account_blob_usage(conn: &Connection, account_id: i64) -> Result<u64> {
         .query_row(
             r#"
             SELECT COALESCE(SUM(LENGTH(COALESCE(m.body_text, '')) +
-                                LENGTH(COALESCE(m.sanitized_html, ''))), 0)
+                                LENGTH(COALESCE(m.sanitized_html, '')) +
+                                LENGTH(COALESCE(m.raw_html, ''))), 0)
             FROM messages m
             JOIN threads t ON t.id = m.thread_id
             JOIN mailboxes b ON b.id = t.mailbox_id
@@ -5179,13 +5332,15 @@ fn move_thread_in_transaction(
 /// links of text read from HTML.
 ///
 /// Stored HTML is read through the sanitiser's text derivation, which is
-/// cheap (a tokenizer pass, no tree), so it runs on every load. Bodies
-/// stored before ADR 0006 hold the old sanitiser's output, whose remote
-/// links read `blocked://`; the derivation reads those as `https:`.
+/// cheap (a tokenizer pass, no tree), so it runs on every load. `legacy`
+/// bodies (stored before ADR 0006, with no `raw_html`) hold the old
+/// sanitiser's output, whose remote links read `blocked://`; the
+/// derivation reads those as `https:`.
 fn renderable_body(
     preview: &str,
     body_text: Option<&str>,
     sanitized_html: Option<&str>,
+    legacy: bool,
 ) -> (String, MessageRenderMode, Vec<BodyLink>) {
     if let Some(body_text) = body_text.filter(|value| !value.trim().is_empty()) {
         return (
@@ -5196,7 +5351,7 @@ fn renderable_body(
     }
 
     if let Some(sanitized_html) = sanitized_html.filter(|value| !value.trim().is_empty()) {
-        let (text, links) = text_of_stored_html(sanitized_html, true);
+        let (text, links) = text_of_stored_html(sanitized_html, legacy);
         if text.is_empty() {
             return (
                 "No body available.".to_owned(),
@@ -5464,6 +5619,7 @@ fn thread_message_snapshots(conn: &Connection, thread_id: i64) -> Result<Vec<Mes
             body_preview: row.get(6)?,
             body_text: row.get(7)?,
             sanitized_html: row.get(8)?,
+            raw_html: None,
             has_remote_content: row.get::<_, bool>(9)?,
             is_read: row.get::<_, bool>(10)?,
             is_flagged: row.get::<_, bool>(11)?,
@@ -5740,9 +5896,10 @@ fn merge_mailbox_threads(
                     is_read,
                     is_flagged,
                     received_at,
-                    sender_warning_dismissed
+                    sender_warning_dismissed,
+                    raw_html
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                 "#,
                     params![
                         thread_row_id,
@@ -5761,6 +5918,7 @@ fn merge_mailbox_threads(
                         message.received_at,
                         !message.remote_id.is_empty()
                             && dismissed_warnings.contains(&message.remote_id),
+                        message.raw_html,
                     ],
                 )
                 .context("failed to insert the message during the snapshot merge")?;
@@ -5774,9 +5932,11 @@ fn merge_mailbox_threads(
                         filename,
                         content_type,
                         size_bytes,
-                        storage_path
+                        storage_path,
+                        content_id,
+                        inline_only
                     )
-                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                     "#,
                         params![
                             message_row_id,
@@ -5784,6 +5944,8 @@ fn merge_mailbox_threads(
                             attachment.content_type,
                             attachment.size_bytes as i64,
                             attachment.storage_path,
+                            attachment.content_id,
+                            attachment.inline_only,
                         ],
                     )
                     .context("failed to insert the message attachment during the snapshot merge")?;
@@ -5861,6 +6023,7 @@ fn stored_thread_matches(
                 || stored.body_preview != message.body_preview
                 || stored.body_text != message.body_text
                 || stored.sanitized_html != message.sanitized_html
+                || stored.raw_html != message.raw_html
                 || stored.has_remote_content != message.has_remote_content
                 || stored.is_read != *is_read
                 || stored.is_flagged != *is_flagged
@@ -5899,6 +6062,8 @@ fn stored_thread_matches(
                 || stored.content_type != incoming.content_type
                 || stored.size_bytes != incoming.size_bytes
                 || stored.storage_path != incoming.storage_path
+                || stored.content_id != incoming.content_id
+                || stored.inline_only != incoming.inline_only
             {
                 return Ok(false);
             }
@@ -5910,13 +6075,14 @@ fn stored_thread_matches(
 
 /// Hydrated state re-attached to a lazy snapshot's messages during a
 /// rewrite: body, remote-content flag, preview, and attachment metadata.
-type StoredHydration = (
-    Option<String>,
-    Option<String>,
-    bool,
-    String,
-    Vec<MessageAttachment>,
-);
+struct StoredHydration {
+    body_text: Option<String>,
+    sanitized_html: Option<String>,
+    raw_html: Option<String>,
+    has_remote_content: bool,
+    body_preview: String,
+    attachments: Vec<MessageAttachment>,
+}
 
 /// The stored form of a message attachment for merge comparisons.
 struct StoredAttachment {
@@ -5924,6 +6090,21 @@ struct StoredAttachment {
     content_type: String,
     size_bytes: u64,
     storage_path: String,
+    content_id: Option<String>,
+    inline_only: bool,
+}
+
+impl From<StoredAttachment> for MessageAttachment {
+    fn from(stored: StoredAttachment) -> Self {
+        Self {
+            filename: stored.filename,
+            content_type: stored.content_type,
+            size_bytes: stored.size_bytes,
+            storage_path: stored.storage_path,
+            content_id: stored.content_id,
+            inline_only: stored.inline_only,
+        }
+    }
 }
 
 /// Loads the attachments of one stored message for merge comparison.
@@ -5933,7 +6114,7 @@ fn load_stored_message_attachments(
 ) -> Result<Vec<StoredAttachment>> {
     let mut statement = transaction.prepare(
         r#"
-        SELECT filename, content_type, size_bytes, storage_path
+        SELECT filename, content_type, size_bytes, storage_path, content_id, inline_only
         FROM message_attachments
         WHERE message_id = ?1
         ORDER BY id ASC
@@ -5946,6 +6127,8 @@ fn load_stored_message_attachments(
                 content_type: row.get(1)?,
                 size_bytes: row.get::<_, i64>(2)? as u64,
                 storage_path: row.get(3)?,
+                content_id: row.get(4)?,
+                inline_only: row.get(5)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -5977,6 +6160,7 @@ struct StoredMessage {
     body_preview: String,
     body_text: Option<String>,
     sanitized_html: Option<String>,
+    raw_html: Option<String>,
     has_remote_content: bool,
     is_read: bool,
     is_flagged: bool,
@@ -6023,7 +6207,7 @@ fn load_stored_messages(
         r#"
         SELECT id, COALESCE(remote_id, ''), identity_id, sender, reply_to, recipients, subject,
                body_preview, body_text, sanitized_html, has_remote_content,
-               is_read, is_flagged, received_at
+               is_read, is_flagged, received_at, raw_html
         FROM messages
         WHERE thread_id = ?1
         "#,
@@ -6044,6 +6228,7 @@ fn load_stored_messages(
             is_read: row.get(11)?,
             is_flagged: row.get(12)?,
             received_at: row.get(13)?,
+            raw_html: row.get(14)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -6378,10 +6563,20 @@ fn materialize_stored_state(
     thread: &ThreadSnapshot,
     thread_had_attachments: bool,
 ) -> Result<Vec<MessageSnapshot>> {
+    // Inline parts can sit in a thread with no listed attachment.
+    let load_parts = thread_had_attachments
+        || transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE message_id IN \
+                 (SELECT id FROM messages WHERE thread_id = ?1))",
+                params![thread_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .context("failed to look for stored parts during the snapshot merge")?;
     let mut statement = transaction.prepare(
         r#"
         SELECT id, COALESCE(remote_id, ''),
-               body_text, sanitized_html, has_remote_content, body_preview
+               body_text, sanitized_html, has_remote_content, body_preview, raw_html
         FROM messages
         WHERE thread_id = ?1
         "#,
@@ -6391,10 +6586,14 @@ fn materialize_stored_state(
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, bool>(4)?,
-                row.get::<_, String>(5)?,
+                StoredHydration {
+                    body_text: row.get(2)?,
+                    sanitized_html: row.get(3)?,
+                    has_remote_content: row.get(4)?,
+                    body_preview: row.get(5)?,
+                    raw_html: row.get(6)?,
+                    attachments: Vec::new(),
+                },
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -6402,48 +6601,30 @@ fn materialize_stored_state(
 
     let mut stored: std::collections::HashMap<String, StoredHydration> =
         std::collections::HashMap::with_capacity(rows.len());
-    for (message_id, remote_id, body_text, sanitized_html, has_remote_content, body_preview) in rows
-    {
-        let attachments = if thread_had_attachments {
-            load_stored_message_attachments(transaction, message_id)?
+    for (message_id, remote_id, mut hydration) in rows {
+        if load_parts {
+            hydration.attachments = load_stored_message_attachments(transaction, message_id)?
                 .into_iter()
-                .map(|attachment| MessageAttachment {
-                    filename: attachment.filename,
-                    content_type: attachment.content_type,
-                    size_bytes: attachment.size_bytes,
-                    storage_path: attachment.storage_path,
-                })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        stored.insert(
-            remote_id,
-            (
-                body_text,
-                sanitized_html,
-                has_remote_content,
-                body_preview,
-                attachments,
-            ),
-        );
+                .map(MessageAttachment::from)
+                .collect();
+        }
+        stored.insert(remote_id, hydration);
     }
 
     let mut materialized = Vec::with_capacity(thread.messages.len());
     for message in &thread.messages {
         let mut owned = message.clone();
-        if let Some((body_text, sanitized_html, has_remote_content, body_preview, attachments)) =
-            stored.get(&owned.remote_id)
-        {
-            let stored_has_body = body_text.is_some() || sanitized_html.is_some();
+        if let Some(stored) = stored.get(&owned.remote_id) {
+            let stored_has_body = stored.body_text.is_some() || stored.sanitized_html.is_some();
             if owned.body_text.is_none() && owned.sanitized_html.is_none() && stored_has_body {
-                owned.body_text = body_text.clone();
-                owned.sanitized_html = sanitized_html.clone();
-                owned.has_remote_content = *has_remote_content;
-                owned.body_preview = body_preview.clone();
+                owned.body_text = stored.body_text.clone();
+                owned.sanitized_html = stored.sanitized_html.clone();
+                owned.raw_html = stored.raw_html.clone();
+                owned.has_remote_content = stored.has_remote_content;
+                owned.body_preview = stored.body_preview.clone();
             }
-            if owned.attachments.is_empty() && thread_had_attachments {
-                owned.attachments = attachments.clone();
+            if owned.attachments.is_empty() && load_parts {
+                owned.attachments = stored.attachments.clone();
             }
         }
         materialized.push(owned);
@@ -6839,6 +7020,8 @@ mod tests {
             content_type: "application/octet-stream".to_owned(),
             size_bytes: 10,
             storage_path: "incoming-budget-report.bin".to_owned(),
+            content_id: None,
+            inline_only: false,
         }];
         let blob_dir = store.attachment_storage_dir();
         std::fs::create_dir_all(&blob_dir).expect("the attachments directory should be created");
@@ -6998,6 +7181,7 @@ mod tests {
                             "The background supervisor now persists sync state.".to_owned(),
                         ),
                         sanitized_html: None,
+                        raw_html: None,
                         has_remote_content: false,
                         is_read: false,
                         is_flagged: false,
@@ -7073,6 +7257,7 @@ mod tests {
                         body_preview: "Urgent: verify your account now.".to_owned(),
                         body_text: Some("Urgent: verify your account now.".to_owned()),
                         sanitized_html: None,
+                        raw_html: None,
                         has_remote_content: false,
                         is_read: false,
                         is_flagged: false,
@@ -7253,6 +7438,7 @@ mod tests {
                 body_preview: id.to_owned(),
                 body_text: None,
                 sanitized_html: None,
+                raw_html: None,
                 has_remote_content: false,
                 is_read: !unread,
                 is_flagged: flagged,
@@ -7484,6 +7670,8 @@ mod tests {
                     content_type: "application/octet-stream".to_owned(),
                     size_bytes: 1,
                     storage_path: path.to_owned(),
+                    content_id: None,
+                    inline_only: false,
                 })
                 .collect();
             store
@@ -7811,6 +7999,7 @@ mod tests {
                         body_preview: body.to_owned(),
                         body_text: Some(body.to_owned()),
                         sanitized_html: None,
+                        raw_html: None,
                         has_remote_content: false,
                         is_read: false,
                         is_flagged: false,
@@ -8440,6 +8629,7 @@ mod tests {
                         body_preview: "Initial body preview".to_owned(),
                         body_text: Some("Initial body preview".to_owned()),
                         sanitized_html: None,
+                        raw_html: None,
                         has_remote_content: false,
                         is_read: false,
                         is_flagged: false,
@@ -8486,6 +8676,7 @@ mod tests {
                         body_preview: "Updated body preview".to_owned(),
                         body_text: Some("Updated body preview".to_owned()),
                         sanitized_html: None,
+                        raw_html: None,
                         has_remote_content: false,
                         is_read: true,
                         is_flagged: true,
@@ -8559,6 +8750,7 @@ mod tests {
                         sanitized_html: Some(
                             "<div>Status page blocked://status.zmail.test details</div>".to_owned(),
                         ),
+                        raw_html: None,
                         has_remote_content: true,
                         is_read: false,
                         is_flagged: true,
@@ -8757,6 +8949,8 @@ mod tests {
             content_type: "text/plain".to_owned(),
             size_bytes: blob.len() as u64,
             storage_path: storage_path.clone(),
+            content_id: None,
+            inline_only: false,
         }];
         store
             .replace_account_snapshot(account_id, &snapshot)
@@ -8863,6 +9057,7 @@ mod tests {
                 &HydratedBody {
                     body_text: Some("Lazy body".to_owned()),
                     sanitized_html: None,
+                    raw_html: None,
                     has_remote_content: false,
                     body_preview: "Lazy body".to_owned(),
                     attachments: vec![MessageAttachment {
@@ -8870,6 +9065,8 @@ mod tests {
                         content_type: "text/plain".to_owned(),
                         size_bytes: 6,
                         storage_path: "incoming-inbox-1-0-notes.txt".to_owned(),
+                        content_id: None,
+                        inline_only: false,
                     }],
                 },
             )
@@ -8923,6 +9120,231 @@ mod tests {
     }
 
     #[test]
+    fn html_parts_and_inline_parts_are_kept_for_renderers() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let blobs = store
+            .sync_target(account_id)
+            .expect("the sync target should load")
+            .expect("the sync target should exist")
+            .blobs;
+        let logo = blobs
+            .write("incoming-inbox-1-cid-3", b"logo bytes")
+            .expect("the logo blob should be written");
+        let photo = blobs
+            .write("incoming-inbox-1-0-photo.jpg", b"photo bytes")
+            .expect("the photo blob should be written");
+
+        let mut snapshot =
+            merge_test_snapshot("Newsletter", "Lazy", "thread-html", "message-html", None);
+        let lazy = &mut snapshot.mailboxes[0].threads[0].messages[0];
+        lazy.body_text = None;
+        lazy.sanitized_html = None;
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+        let thread_id = store
+            .list_threads(mailbox_id_by_name(&store, account_id, "Inbox"), 0..10)
+            .expect("threads should load")[0]
+            .id;
+        let message_id = store
+            .messages_missing_bodies(thread_id)
+            .expect("missing bodies should load")
+            .expect("the thread should exist")[0]
+            .0;
+
+        let raw_html = "<p>Hi <img src=\"cid:logo@x\"> <img src=\"cid:photo@x\"></p>";
+        store
+            .hydrate_message_body(
+                message_id,
+                &HydratedBody {
+                    body_text: Some("Hi".to_owned()),
+                    sanitized_html: None,
+                    raw_html: Some(raw_html.to_owned()),
+                    has_remote_content: false,
+                    body_preview: "Hi".to_owned(),
+                    attachments: vec![
+                        MessageAttachment {
+                            filename: "logo@x".to_owned(),
+                            content_type: "image/png".to_owned(),
+                            size_bytes: 10,
+                            storage_path: logo,
+                            content_id: Some("logo@x".to_owned()),
+                            inline_only: true,
+                        },
+                        MessageAttachment {
+                            filename: "photo.jpg".to_owned(),
+                            content_type: "image/jpeg".to_owned(),
+                            size_bytes: 11,
+                            storage_path: photo,
+                            content_id: Some("photo@x".to_owned()),
+                            inline_only: false,
+                        },
+                    ],
+                },
+            )
+            .expect("hydration should persist");
+
+        let check = |store: &LocalStore| {
+            let view = store
+                .thread_view(thread_id)
+                .expect("the thread view should load")
+                .expect("the thread view should exist");
+            let listed: Vec<&str> = view.messages[0]
+                .attachments
+                .iter()
+                .map(|attachment| attachment.filename.as_str())
+                .collect();
+            assert_eq!(listed, ["photo.jpg"], "inline-only parts are not listed");
+
+            let parts = store
+                .message_render_parts(message_id)
+                .expect("the render parts should load")
+                .expect("the message exists");
+            assert_eq!(parts.account_id, account_id);
+            assert_eq!(parts.body_text.as_deref(), Some("Hi"));
+            assert_eq!(parts.html.as_deref(), Some(raw_html));
+            assert!(!parts.html_is_legacy);
+            let inline: Vec<(&str, &str, Vec<u8>)> = parts
+                .inline_parts
+                .iter()
+                .map(|part| {
+                    (
+                        part.content_id.as_str(),
+                        part.content_type.as_str(),
+                        part.blob.read().expect("the part decrypts"),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                inline,
+                [
+                    ("logo@x", "image/png", b"logo bytes".to_vec()),
+                    ("photo@x", "image/jpeg", b"photo bytes".to_vec()),
+                ]
+            );
+        };
+        check(&store);
+
+        // A header-only resync that rewrites the thread (the message was
+        // read elsewhere) keeps the HTML and the parts.
+        snapshot.mailboxes[0].threads[0].messages[0].is_read = true;
+        snapshot.mailboxes[0].threads[0].unread_count = 0;
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("the header-only snapshot should re-apply");
+        check(&store);
+        assert!(
+            store
+                .messages_missing_bodies(thread_id)
+                .expect("missing bodies should load")
+                .expect("the thread should exist")
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .message_render_parts(i64::MAX)
+                .expect("a missing message loads nothing")
+                .map(|parts| parts.message_id),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_html_bodies_are_fetched_again_when_opened() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        // An HTML-only body as the old sanitiser stored it: no raw HTML.
+        let mut snapshot = merge_test_snapshot("Old", "Old", "thread-old", "message-old", None);
+        let old = &mut snapshot.mailboxes[0].threads[0].messages[0];
+        old.body_text = None;
+        old.sanitized_html =
+            Some("<p>Read <a href=\"blocked://example.com/post\">the post</a></p>".to_owned());
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+        let thread_id = store
+            .list_threads(mailbox_id_by_name(&store, account_id, "Inbox"), 0..10)
+            .expect("threads should load")[0]
+            .id;
+
+        let view = store
+            .thread_view(thread_id)
+            .expect("the thread view should load")
+            .expect("the thread view should exist");
+        assert_eq!(view.messages[0].rendered_body, "Read the post");
+        assert_eq!(
+            view.messages[0].body_links[0].target, "https://example.com/post",
+            "old links open over https, as before"
+        );
+        let message_id = view.messages[0].id;
+        let parts = store
+            .message_render_parts(message_id)
+            .expect("the render parts should load")
+            .expect("the message exists");
+        assert!(parts.html_is_legacy);
+        let missing = store
+            .messages_missing_bodies(thread_id)
+            .expect("missing bodies should load")
+            .expect("the thread should exist");
+        assert_eq!(missing.len(), 1, "an old HTML body is fetched again");
+
+        let raw = "<p>Read <a href=\"http://example.com/post\">the post</a></p>";
+        let stored = zmail_security::sanitize_html_for_display(raw);
+        store
+            .hydrate_message_body(
+                message_id,
+                &HydratedBody {
+                    body_text: None,
+                    sanitized_html: Some(stored.html),
+                    raw_html: Some(raw.to_owned()),
+                    has_remote_content: false,
+                    body_preview: stored.text,
+                    attachments: Vec::new(),
+                },
+            )
+            .expect("hydration should persist");
+        assert!(
+            store
+                .messages_missing_bodies(thread_id)
+                .expect("missing bodies should load")
+                .expect("the thread should exist")
+                .is_empty()
+        );
+        let view = store
+            .thread_view(thread_id)
+            .expect("the thread view should load")
+            .expect("the thread view should exist");
+        assert_eq!(
+            view.messages[0].body_links[0].target, "http://example.com/post",
+            "the fetched body keeps the link's own scheme"
+        );
+
+        // JMAP sends bodies with its sync: nothing to fetch on open.
+        let jmap_account = store
+            .create_demo_account(ProtocolKind::Jmap)
+            .expect("account should be created");
+        store
+            .replace_account_snapshot(jmap_account, &snapshot)
+            .expect("snapshot should apply");
+        let jmap_thread = store
+            .list_threads(mailbox_id_by_name(&store, jmap_account, "Inbox"), 0..10)
+            .expect("threads should load")[0]
+            .id;
+        assert!(
+            store
+                .messages_missing_bodies(jmap_thread)
+                .expect("missing bodies should load")
+                .expect("the thread should exist")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn hydrated_bodies_become_searchable() {
         let store = LocalStore::open_ephemeral().expect("store should open");
         let account_id = store
@@ -8972,6 +9394,7 @@ mod tests {
                 &HydratedBody {
                     body_text: Some("The lazy cormorant body".to_owned()),
                     sanitized_html: None,
+                    raw_html: None,
                     has_remote_content: false,
                     body_preview: "The lazy cormorant body".to_owned(),
                     attachments: Vec::new(),
@@ -8992,6 +9415,7 @@ mod tests {
                 &HydratedBody {
                     body_text: Some("The lazy cormorant body".to_owned()),
                     sanitized_html: None,
+                    raw_html: None,
                     has_remote_content: false,
                     body_preview: "The lazy cormorant body".to_owned(),
                     attachments: Vec::new(),
@@ -9107,6 +9531,7 @@ mod tests {
             body_preview: "Undo body".to_owned(),
             body_text: Some("Undo body".to_owned()),
             sanitized_html: None,
+            raw_html: None,
             has_remote_content: false,
             is_read,
             is_flagged: false,
@@ -9410,6 +9835,7 @@ mod tests {
                             body_preview: "Handle mailbox ops".to_owned(),
                             body_text: Some("Handle mailbox ops".to_owned()),
                             sanitized_html: None,
+                            raw_html: None,
                             has_remote_content: false,
                             is_read: false,
                             is_flagged: false,

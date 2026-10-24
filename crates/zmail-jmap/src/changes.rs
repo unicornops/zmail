@@ -406,6 +406,7 @@ mod tests {
             body_preview: format!("Preview {id}"),
             body_text: Some(format!("Body {id}")),
             sanitized_html: None,
+            raw_html: None,
             has_remote_content: false,
             is_read: read,
             is_flagged: false,

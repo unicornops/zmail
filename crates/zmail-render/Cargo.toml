@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 zmail-security = { path = "../zmail-security" }
+zmail-store = { path = "../zmail-store" }
 
 [lints]
 workspace = true

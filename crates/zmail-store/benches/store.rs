@@ -41,6 +41,7 @@ fn synthetic_snapshot(thread_count: usize) -> AccountSyncSnapshot {
                 body_preview: format!("Benchmark body {index}"),
                 body_text: Some(format!("Benchmark body {index}")),
                 sanitized_html: None,
+                raw_html: None,
                 has_remote_content: false,
                 is_read: false,
                 is_flagged: false,

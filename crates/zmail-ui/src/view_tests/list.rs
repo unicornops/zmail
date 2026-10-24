@@ -30,6 +30,7 @@ fn message(sender: &str, at: &str, is_read: bool) -> MessageSnapshot {
         body_preview: "Moved offline search to November".to_owned(),
         body_text: None,
         sanitized_html: None,
+        raw_html: None,
         has_remote_content: false,
         is_read,
         is_flagged: false,
