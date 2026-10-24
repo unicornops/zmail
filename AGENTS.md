@@ -23,6 +23,8 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 - `docs/adr/0001-jmap-client-strategy.md`: JMAP implementation decision
 - `docs/adr/0004-proton-native.md` and `docs/upstream/proton.md`: native Proton Mail decision, upstream pins and ported files
 - `docs/adr/0005-store-encryption.md`: encryption of the local store at rest (SQLCipher, encrypted attachment files, the store key in the OS keychain)
+- `docs/adr/0006-html-email-renderer.md`: rendering HTML mail (OS web engines behind a renderer boundary, the shared sanitiser and remote-content policy); tracked in #294
+- `docs/adr/0006-html-email-renderer.md`: rendering HTML mail (OS web engines behind a renderer boundary, the shared sanitiser and remote-content policy); tracked in #294
 
 ## Workspace Overview
 
@@ -35,7 +37,8 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 - `crates/zmail-proton-api`: Proton Mail API client (go-proton-api port; not reachable from the UI until #139)
 - `crates/zmail-proton`: Proton Mail sync adapter (Bridge services port), built only with `zmail-sync`'s `proton` feature. `zmail-ui` and `zmail-app` have a `proton` feature too (the Proton Mail provider in onboarding); it is off by default, so no release build has Proton until #139. CI lints `zmail-app --features proton` and runs the onboarding view tests with it
 - `crates/zmail-smtp`: SMTP submission
-- `crates/zmail-security`: keychain and rendering safety helpers
+- `crates/zmail-security`: keychain and rendering safety helpers, including the HTML mail sanitiser (`html`: ammonia allowlist, CSS pass, caps, link side table, remote-content policing) and its hostile-corpus tests (`tests/hostile_corpus.rs`, fixtures in `tests/fixtures/hostile`)
+- `crates/zmail-render`: the renderer boundary of ADR 0006: `PreparedMessage` (sanitised HTML or why there is none, text, link table, `cid:` parts, remote content and the user's decision, theme) and `MessageRenderer`
 - `crates/zmail-theme`: Zed theme compatibility layer
 - `crates/zmail-test-support`: synthetic data, the live mail harness and the Proton API harness
 

