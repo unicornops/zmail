@@ -155,6 +155,12 @@ pub enum InitialView {
     /// The reader on this thread with the open-link dialog showing for the
     /// first link of its current message.
     ThreadLinkPrompt(i64),
+    /// The reader on this thread with its current message's More menu
+    /// open (over a message shown in a web view, on macOS).
+    ThreadMessageMenu(i64),
+    /// The reader on this thread, scrolled down a little once its message
+    /// has been laid out (a web view clipped by the list, on macOS).
+    ThreadScrolled(i64),
     /// The Add Account window over the inbox, at its provider step.
     AddAccount,
     /// The first-run onboarding at this step, even when accounts exist

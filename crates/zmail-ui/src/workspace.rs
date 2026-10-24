@@ -372,7 +372,9 @@ impl WorkspaceView {
             InitialView::Thread(thread_id)
             | InitialView::ThreadExpanded(thread_id)
             | InitialView::ThreadSelection(thread_id)
-            | InitialView::ThreadLinkPrompt(thread_id) => {
+            | InitialView::ThreadLinkPrompt(thread_id)
+            | InitialView::ThreadMessageMenu(thread_id)
+            | InitialView::ThreadScrolled(thread_id) => {
                 if let Ok(Some(thread)) = view.store.thread_view(thread_id) {
                     view.show_thread(thread_id, thread.mailbox_id, cx);
                     view.refresh_from_store(cx);
@@ -383,6 +385,8 @@ impl WorkspaceView {
                     InitialView::ThreadExpanded(_) => reader.expand_all(cx),
                     InitialView::ThreadSelection(_) => reader.select_paragraph(1, cx),
                     InitialView::ThreadLinkPrompt(_) => reader.open_first_link(window, cx),
+                    InitialView::ThreadMessageMenu(_) => reader.open_message_menu(window, cx),
+                    InitialView::ThreadScrolled(_) => reader.scroll_down_later(window, cx),
                     _ => {}
                 });
             }
