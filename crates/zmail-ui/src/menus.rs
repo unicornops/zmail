@@ -140,6 +140,18 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
         "zmail::DismissSenderWarning",
         "the Looks safe button on one message's sender-safety banner",
     ),
+    (
+        "zmail::LoadRemoteContent",
+        "the Load remote content button on one message's banner",
+    ),
+    (
+        "zmail::AlwaysLoadRemoteContent",
+        "the Always for this sender button on one message's banner",
+    ),
+    (
+        "zmail::BlockRemoteContent",
+        "the Block button on one message's remote-content banner",
+    ),
 ];
 
 /// `zmail::` actions only the macOS menus list: the system conventions

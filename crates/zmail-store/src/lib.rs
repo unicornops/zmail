@@ -113,6 +113,8 @@ pub struct MessageRenderParts {
     pub html: Option<String>,
     /// `html` is a body stored before ADR 0006.
     pub html_is_legacy: bool,
+    /// The user chose to always load remote content from the sender.
+    pub remote_content_sender_allowed: bool,
     /// The parts with a Content-ID whose encrypted blob is present.
     pub inline_parts: Vec<StoredInlinePart>,
 }
@@ -176,6 +178,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0020_account_color", ACCOUNT_COLOR_SCHEMA),
     ("0021_flagged_threads_index", FLAGGED_THREADS_INDEX_SCHEMA),
     ("0022_message_html_parts", MESSAGE_HTML_PARTS_SCHEMA),
+    ("0023_remote_content_senders", REMOTE_CONTENT_SENDERS_SCHEMA),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -455,6 +458,18 @@ const MESSAGE_HTML_PARTS_SCHEMA: &str = r#"
 ALTER TABLE messages ADD COLUMN raw_html TEXT;
 ALTER TABLE message_attachments ADD COLUMN content_id TEXT;
 ALTER TABLE message_attachments ADD COLUMN inline_only INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// Senders whose remote content the user chose to always load ("Always
+/// for this sender", ADR 0006), per account, by lowercase address.
+const REMOTE_CONTENT_SENDERS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS remote_content_senders (
+    account_id INTEGER NOT NULL,
+    address TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id, address),
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
 "#;
 
 const MESSAGE_REPLY_TO_SCHEMA: &str = r#"
@@ -2300,6 +2315,7 @@ impl LocalStore {
                     is_read: row.get::<_, bool>(8)?,
                     is_flagged: row.get::<_, bool>(9)?,
                     has_remote_content: row.get::<_, bool>(10)?,
+                    remote_content_sender_allowed: false,
                     sender_warning_dismissed: row.get::<_, bool>(12)?,
                     received_at: row.get(11)?,
                     attachments: Vec::new(),
@@ -2345,6 +2361,12 @@ impl LocalStore {
             if let Some(attachments) = attachments_by_message.remove(&message.id) {
                 message.attachments = attachments;
             }
+        }
+
+        let allowed_senders = remote_content_senders_of_mailbox(&conn, mailbox_id)?;
+        for message in &mut messages {
+            message.remote_content_sender_allowed = sender_address(&message.sender)
+                .is_some_and(|address| allowed_senders.contains(&address));
         }
 
         let has_remote_content = messages.iter().any(|message| message.has_remote_content);
@@ -2422,6 +2444,67 @@ impl LocalStore {
         })
     }
 
+    /// Whether the user chose to always load remote content from `sender`
+    /// (an address, or `Name <address>`) on `account_id`.
+    pub fn remote_content_allowed_for_sender(&self, account_id: i64, sender: &str) -> Result<bool> {
+        let Some(address) = sender_address(sender) else {
+            return Ok(false);
+        };
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM remote_content_senders \
+             WHERE account_id = ?1 AND address = ?2)",
+            params![account_id, address],
+            |row| row.get(0),
+        )
+        .context("failed to look up the remote-content choice")
+    }
+
+    /// "Always for this sender" (`allowed`) or its undo, for the sender of
+    /// message `message_id` on that message's account. Returns the
+    /// sender's address, or `None` when the message is missing or its
+    /// sender has no address.
+    pub fn set_remote_content_for_message_sender(
+        &self,
+        message_id: i64,
+        allowed: bool,
+    ) -> Result<Option<String>> {
+        let conn = self.connection()?;
+        let row = conn
+            .query_row(
+                r#"
+                SELECT mailboxes.account_id, messages.sender
+                FROM messages
+                JOIN threads ON threads.id = messages.thread_id
+                JOIN mailboxes ON mailboxes.id = threads.mailbox_id
+                WHERE messages.id = ?1
+                "#,
+                params![message_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .context("failed to load the message's sender")?;
+        let Some((account_id, sender)) = row else {
+            return Ok(None);
+        };
+        let Some(address) = sender_address(&sender) else {
+            return Ok(None);
+        };
+        if allowed {
+            conn.execute(
+                "INSERT OR IGNORE INTO remote_content_senders(account_id, address) VALUES (?1, ?2)",
+                params![account_id, address],
+            )
+        } else {
+            conn.execute(
+                "DELETE FROM remote_content_senders WHERE account_id = ?1 AND address = ?2",
+                params![account_id, address],
+            )
+        }
+        .context("failed to store the remote-content choice")?;
+        Ok(Some(address))
+    }
+
     /// What a renderer needs for message `message_id`: its bodies and its
     /// parts with a Content-ID (ADR 0006). `None` for a missing message.
     pub fn message_render_parts(&self, message_id: i64) -> Result<Option<MessageRenderParts>> {
@@ -2487,6 +2570,8 @@ impl LocalStore {
             })
             .collect();
         let html_is_legacy = raw_html.is_none() && sanitized_html.is_some();
+        let remote_content_sender_allowed =
+            self.remote_content_allowed_for_sender(account_id, &sender)?;
         Ok(Some(MessageRenderParts {
             message_id,
             account_id,
@@ -2494,6 +2579,7 @@ impl LocalStore {
             body_text,
             html: raw_html.or(sanitized_html),
             html_is_legacy,
+            remote_content_sender_allowed,
             inline_parts,
         }))
     }
@@ -5374,6 +5460,30 @@ fn renderable_body(
         MessageRenderMode::PreviewOnly,
         Vec::new(),
     )
+}
+
+/// A sender's address, lowercase, as remote-content choices key it.
+fn sender_address(sender: &str) -> Option<String> {
+    let (name, email) = zmail_core::participants::sender_identity(sender);
+    let address = email.unwrap_or(name).trim().to_ascii_lowercase();
+    address.contains('@').then_some(address)
+}
+
+/// The addresses whose remote content is always loaded on the account of
+/// mailbox `mailbox_id`.
+fn remote_content_senders_of_mailbox(
+    conn: &Connection,
+    mailbox_id: i64,
+) -> Result<HashSet<String>> {
+    conn.prepare(
+        r#"
+        SELECT address FROM remote_content_senders
+        WHERE account_id = (SELECT account_id FROM mailboxes WHERE id = ?1)
+        "#,
+    )?
+    .query_map(params![mailbox_id], |row| row.get::<_, String>(0))?
+    .collect::<rusqlite::Result<HashSet<_>>>()
+    .context("failed to load the remote-content choices")
 }
 
 fn identity_id_map(
@@ -9248,6 +9358,86 @@ mod tests {
                 .message_render_parts(i64::MAX)
                 .expect("a missing message loads nothing")
                 .map(|parts| parts.message_id),
+            None
+        );
+    }
+
+    #[test]
+    fn always_loading_remote_content_is_per_account_and_sender() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let other_account = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let mut snapshot = merge_test_snapshot("News", "News", "thread-news", "message-news", None);
+        snapshot.mailboxes[0].threads[0].messages[0].sender =
+            "Example News <News@Example.TEST>".to_owned();
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+        let thread_id = store
+            .list_threads(mailbox_id_by_name(&store, account_id, "Inbox"), 0..10)
+            .expect("threads should load")[0]
+            .id;
+        let message_id = store
+            .thread_view(thread_id)
+            .expect("the thread view should load")
+            .expect("the thread view should exist")
+            .messages[0]
+            .id;
+        let allowed = |store: &LocalStore| {
+            store
+                .thread_view(thread_id)
+                .expect("the thread view should load")
+                .expect("the thread view should exist")
+                .messages[0]
+                .remote_content_sender_allowed
+        };
+        assert!(!allowed(&store), "blocked by default");
+
+        assert_eq!(
+            store
+                .set_remote_content_for_message_sender(message_id, true)
+                .expect("the choice stores")
+                .as_deref(),
+            Some("news@example.test")
+        );
+        assert!(allowed(&store));
+        assert!(
+            store
+                .remote_content_allowed_for_sender(account_id, "news@example.test")
+                .expect("the choice loads")
+        );
+        assert!(
+            store
+                .remote_content_allowed_for_sender(account_id, "Someone <NEWS@example.test>")
+                .expect("the choice loads"),
+            "addresses compare without case or display name"
+        );
+        assert!(
+            !store
+                .remote_content_allowed_for_sender(other_account, "news@example.test")
+                .expect("the choice loads"),
+            "the choice belongs to one account"
+        );
+        assert!(
+            store
+                .message_render_parts(message_id)
+                .expect("the render parts load")
+                .expect("the message exists")
+                .remote_content_sender_allowed
+        );
+
+        store
+            .set_remote_content_for_message_sender(message_id, false)
+            .expect("the choice is undone");
+        assert!(!allowed(&store));
+        assert_eq!(
+            store
+                .set_remote_content_for_message_sender(i64::MAX, true)
+                .expect("a missing message stores nothing"),
             None
         );
     }

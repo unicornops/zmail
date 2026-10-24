@@ -32,6 +32,7 @@ fn newsletter() -> RenderSource {
             4,
             Arc::new(Bytes(b"\x89PNG")),
         )],
+        remote_content_sender_allowed: false,
     }
 }
 
@@ -52,6 +53,24 @@ fn blocked_remote_content_never_appears_in_the_html() {
     assert!(prepared.remote.allowed_origins().is_empty());
     assert_eq!(prepared.remote.blocked_count(), 3);
     assert_eq!(prepared.theme, ThemeHint::Light);
+}
+
+#[test]
+fn the_sender_choice_outranks_the_message_choice() {
+    assert_eq!(
+        RemoteContentDecision::new(false, false),
+        RemoteContentDecision::Blocked
+    );
+    assert_eq!(
+        RemoteContentDecision::new(true, false),
+        RemoteContentDecision::AllowedForMessage
+    );
+    assert_eq!(
+        RemoteContentDecision::new(true, true),
+        RemoteContentDecision::AllowedForSender
+    );
+    assert!(RemoteContentDecision::new(false, true).allows());
+    assert!(!RemoteContentDecision::default().allows());
 }
 
 #[test]

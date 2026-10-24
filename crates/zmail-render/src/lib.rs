@@ -108,6 +108,9 @@ pub struct RenderSource {
     pub html_is_legacy: bool,
     /// The message's inline parts.
     pub inline_parts: Vec<InlinePart>,
+    /// The user chose "Always for this sender" for the message's sender
+    /// (stored per account).
+    pub remote_content_sender_allowed: bool,
 }
 
 /// Whether a message's remote content may load.
@@ -123,6 +126,19 @@ pub enum RemoteContentDecision {
 }
 
 impl RemoteContentDecision {
+    /// The decision for a message: allowed for its sender (stored), else
+    /// for this message ("Load remote content", for the session), else
+    /// blocked.
+    pub fn new(allowed_for_message: bool, allowed_for_sender: bool) -> Self {
+        if allowed_for_sender {
+            Self::AllowedForSender
+        } else if allowed_for_message {
+            Self::AllowedForMessage
+        } else {
+            Self::Blocked
+        }
+    }
+
     /// Whether remote content may load.
     pub fn allows(self) -> bool {
         !matches!(self, Self::Blocked)
@@ -372,6 +388,7 @@ pub fn render_source(
         body_text: parts.body_text,
         html: parts.html,
         html_is_legacy: parts.html_is_legacy,
+        remote_content_sender_allowed: parts.remote_content_sender_allowed,
         inline_parts: parts
             .inline_parts
             .into_iter()

@@ -39,11 +39,12 @@ use crate::account_setup::{
     open_add_account_with_notice,
 };
 use crate::actions::{
-    AddAccount, Archive, Cancel, Delete, DismissSenderWarning, FocusNextPane, FocusPreviousPane,
-    FocusSearch, Forward, GoBack, GoToInbox, MoveToMailbox, NewMessage, Reply, ReplyAll,
-    ReplyToMessage, RetryOutbox, SaveAttachments, SelectNext, SelectPrevious, ShowDrafts,
-    ShowKeyboardShortcuts, ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleFlag, ToggleRead,
-    ToggleSidebar, ToggleTheme, Undo,
+    AddAccount, AlwaysLoadRemoteContent, Archive, BlockRemoteContent, Cancel, Delete,
+    DismissSenderWarning, FocusNextPane, FocusPreviousPane, FocusSearch, Forward, GoBack,
+    GoToInbox, LoadRemoteContent, MoveToMailbox, NewMessage, Reply, ReplyAll, ReplyToMessage,
+    RetryOutbox, SaveAttachments, SelectNext, SelectPrevious, ShowDrafts, ShowKeyboardShortcuts,
+    ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme,
+    Undo,
 };
 use crate::app_menu::AppMenuButton;
 use crate::components::{
@@ -230,6 +231,7 @@ impl WorkspaceView {
             density: Default::default(),
             reading_pane: Default::default(),
             sender_warnings: Default::default(),
+            remote_content_messages: Default::default(),
             motion: Default::default(),
             system_motion_read: gpui::Task::ready(()),
             text_size: zmail_core::preferences::DEFAULT_TEXT_SIZE,
@@ -597,6 +599,7 @@ impl WorkspaceView {
                 .filter(|reply| Some(reply.thread_id) == self.selected_thread_id)
                 .map(|reply| reply.compose.clone()),
             sender_warnings: self.sender_warnings,
+            remote_content_messages: self.remote_content_messages.clone(),
         };
         self.reader
             .update(cx, |reader, cx| reader.set_state(reader_state, cx));
@@ -2430,6 +2433,61 @@ impl WorkspaceView {
         }
     }
 
+    /// "Load remote content" on a message's banner: allowed for that
+    /// message until Zmail quits. The text view still loads nothing; HTML
+    /// renderers read the choice (ADR 0006).
+    fn load_remote_content(
+        &mut self,
+        action: &LoadRemoteContent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remote_content_messages.insert(action.message_id);
+        self.sync_panes(cx);
+        cx.notify();
+    }
+
+    /// "Always for this sender": stored for the message's sender on its
+    /// account.
+    fn always_load_remote_content(
+        &mut self,
+        action: &AlwaysLoadRemoteContent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_sender_remote_content(action.message_id, true, cx);
+    }
+
+    /// "Block" on an always-allowed sender's banner: undoes "Always for
+    /// this sender", and any "Load remote content" for the message.
+    fn block_remote_content(
+        &mut self,
+        action: &BlockRemoteContent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remote_content_messages.remove(&action.message_id);
+        self.set_sender_remote_content(action.message_id, false, cx);
+    }
+
+    fn set_sender_remote_content(
+        &mut self,
+        message_id: i64,
+        allowed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match self
+            .store
+            .set_remote_content_for_message_sender(message_id, allowed)
+        {
+            Ok(_) => {
+                self.refresh_from_store(cx);
+                cx.notify();
+            }
+            Err(error) => self.show_error(format!("{error:#}"), cx),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Workspace commands
     // -----------------------------------------------------------------------
@@ -3076,6 +3134,9 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::save_attachment_as))
             .on_action(cx.listener(Self::save_message_attachments))
             .on_action(cx.listener(Self::dismiss_sender_warning))
+            .on_action(cx.listener(Self::load_remote_content))
+            .on_action(cx.listener(Self::always_load_remote_content))
+            .on_action(cx.listener(Self::block_remote_content))
             .on_action(cx.listener(Self::move_to_mailbox))
             .size_full()
             .font_family(PlatformStyle::current().ui_font.family())

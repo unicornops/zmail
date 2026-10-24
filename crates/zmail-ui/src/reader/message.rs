@@ -50,6 +50,8 @@ pub(super) struct MessageContext<'a> {
     pub(super) focused: bool,
     /// Which sender-safety warnings show.
     pub(super) sender_warnings: SenderWarnings,
+    /// Messages whose remote content the user chose to load this session.
+    pub(super) remote_content_messages: &'a std::collections::HashSet<i64>,
     /// Messages in the conversation.
     pub(super) message_count: usize,
 }
@@ -253,7 +255,11 @@ fn expanded_content(
     let first = display.part == 0;
     let last = display.part + 1 >= display.parts;
     let banners = if first {
-        banners::message_banners(message, context.sender_warnings)
+        banners::message_banners(
+            message,
+            context.sender_warnings,
+            context.remote_content_messages.contains(&message.id),
+        )
     } else {
         Vec::new()
     };
