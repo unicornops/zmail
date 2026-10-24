@@ -1256,7 +1256,7 @@ impl SyncService {
 }
 
 /// Collects the threads that gained messages in a snapshot relative to the
-/// existing local mirror.
+/// existing local mirror, newest first.
 ///
 /// Mailboxes absent from the mirror (the first sync of an account) count as
 /// an initial import rather than new mail, so they never notify; reconnecting
@@ -1286,20 +1286,33 @@ fn collect_arrivals(
             if gained {
                 // The notification names whoever sent the newest message,
                 // not every participant in the thread.
-                let sender = thread
+                let newest = thread
                     .messages
                     .iter()
-                    .max_by(|left, right| left.received_at.cmp(&right.received_at))
+                    .max_by(|left, right| left.received_at.cmp(&right.received_at));
+                let sender = newest
                     .map(|message| zmail_core::participants::sender_display_name(&message.sender))
                     .unwrap_or_else(|| thread.participants.clone());
-                arrivals.push(NewMailArrival {
-                    subject: thread.subject.clone(),
-                    sender,
-                });
+                arrivals.push((
+                    newest.map(|message| message.received_at.as_str()),
+                    NewMailArrival {
+                        subject: thread.subject.clone(),
+                        sender,
+                        mailbox: mailbox.name.clone(),
+                        remote_thread_id: thread.remote_thread_id.clone(),
+                    },
+                ));
             }
         }
     }
-    arrivals
+    newest_first(arrivals)
+}
+
+/// Orders arrivals by their newest message's receipt time, newest first
+/// (the notification opens the first).
+fn newest_first(mut arrivals: Vec<(Option<&str>, NewMailArrival)>) -> Vec<NewMailArrival> {
+    arrivals.sort_by(|left, right| right.0.cmp(&left.0));
+    arrivals.into_iter().map(|(_, arrival)| arrival).collect()
 }
 
 fn notify_with(notifier: &dyn Notifier, target: &SyncTarget, arrivals: Vec<NewMailArrival>) {
@@ -1307,15 +1320,16 @@ fn notify_with(notifier: &dyn Notifier, target: &SyncTarget, arrivals: Vec<NewMa
         return;
     }
     notifier.notify_new_mail(&NewMailBatch {
+        account_id: target.id,
         account: target.display_name.clone(),
         arrivals,
     });
 }
 
 /// The threads of a [`zmail_core::MailDelta`] that gained new mail: the
-/// `arrived` messages, in mailboxes the mirror already had. As with
-/// [`collect_arrivals`], a mailbox new to the mirror is an import, not new
-/// mail.
+/// `arrived` messages, in mailboxes the mirror already had, newest first.
+/// As with [`collect_arrivals`], a mailbox new to the mirror is an import,
+/// not new mail.
 #[cfg(any(feature = "proton", test))]
 fn collect_delta_arrivals(
     known_mailboxes: &HashSet<String>,
@@ -1334,14 +1348,19 @@ fn collect_delta_arrivals(
                 .filter(|message| arrived.contains(message.remote_id.as_str()))
                 .max_by(|left, right| left.received_at.cmp(&right.received_at));
             if let Some(newest) = newest {
-                arrivals.push(NewMailArrival {
-                    subject: thread.subject.clone(),
-                    sender: zmail_core::participants::sender_display_name(&newest.sender),
-                });
+                arrivals.push((
+                    Some(newest.received_at.as_str()),
+                    NewMailArrival {
+                        subject: thread.subject.clone(),
+                        sender: zmail_core::participants::sender_display_name(&newest.sender),
+                        mailbox: mailbox.name.clone(),
+                        remote_thread_id: thread.remote_thread_id.clone(),
+                    },
+                ));
             }
         }
     }
-    arrivals
+    newest_first(arrivals)
 }
 
 /// Current wall-clock time in seconds since the Unix epoch.
@@ -1901,6 +1920,8 @@ mod tests {
                 thread("thread-b", 2, "Grown subject"),
             ],
         )];
+        let mut newest = thread("thread-c", 1, "New subject");
+        newest.messages[0].received_at = "2026-10-07T11:00:00Z".to_owned();
         let snapshot = AccountSyncSnapshot {
             checkpoint: "test".to_owned(),
             detail: "test".to_owned(),
@@ -1910,18 +1931,26 @@ mod tests {
                 vec![
                     thread("thread-a", 1, "Existing subject"),
                     thread("thread-b", 5, "Grown subject"),
-                    thread("thread-c", 1, "New subject"),
+                    newest,
                 ],
             )],
         };
 
         let arrivals = collect_arrivals(&existing, &snapshot);
         assert_eq!(arrivals.len(), 2, "only new and grown threads arrive");
-        assert_eq!(arrivals[0].subject, "Grown subject");
-        assert_eq!(arrivals[1].subject, "New subject");
+        assert_eq!(arrivals[0].subject, "New subject", "newest first");
+        assert_eq!(arrivals[1].subject, "Grown subject");
         assert_eq!(
-            arrivals[1].sender, "Sam Sender",
+            arrivals[0].sender, "Sam Sender",
             "the notification names the newest message's sender"
+        );
+        assert_eq!(
+            (
+                arrivals[0].mailbox.as_str(),
+                arrivals[0].remote_thread_id.as_str()
+            ),
+            ("Inbox", "thread-c"),
+            "an arrival names its thread for the notification to open"
         );
     }
 
@@ -1961,6 +1990,8 @@ mod tests {
         let arrivals = collect_delta_arrivals(&known, &delta, &arrived);
         assert_eq!(arrivals.len(), 1, "{arrivals:?}");
         assert_eq!(arrivals[0].subject, "Lunch");
+        assert_eq!(arrivals[0].mailbox, "INBOX");
+        assert_eq!(arrivals[0].remote_thread_id, "c1");
         assert!(collect_delta_arrivals(&known, &delta, &HashSet::new()).is_empty());
     }
 

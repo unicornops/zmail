@@ -58,7 +58,6 @@ keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sy
 # feature drops mail-auth and its report-parsing dependencies (zip, hickory DNS).
 mail-send = { version = "0.6.2", default-features = false, features = ["builder", "cram-md5", "digest-md5", "aws_lc_rs", "tls12"] }
 mail-parser = "0.11.2"
-notify-rust = "4"
 # OpenPGP (rPGP) for Proton key handling and the SRP modulus signature, shared
 # with ADR 0002. Default features off: no bzip2 (docs/adr/0004-proton-native.md).
 pgp = { version = "0.21.0", default-features = false }

@@ -27,7 +27,7 @@ use zmail_core::{
     text::count_noun,
     time::{HourCycle, format_full_date, next_local_midnight},
 };
-use zmail_notify::{NewMailNotifier, OsNotificationSink};
+use zmail_notify::ThreadRef;
 use zmail_security::SecretStore;
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
@@ -106,7 +106,7 @@ impl WorkspaceView {
         store: Arc<LocalStore>,
         sync_service: SyncService,
         secrets: Arc<dyn SecretStore>,
-        notifier: Arc<NewMailNotifier<OsNotificationSink>>,
+        notifier: Arc<crate::notifications::MailNotifier>,
         initial_view: InitialView,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1241,6 +1241,34 @@ impl WorkspaceView {
             .iter()
             .find(|mailbox| mailbox.id == mailbox_id)
             .map(|mailbox| mailbox.account_id)
+    }
+
+    /// Opens the conversation a clicked new-mail notification names, as
+    /// picking its mailbox in the sidebar and then the thread in the list
+    /// would. A conversation no longer in the mirror leaves the view as it
+    /// is.
+    pub(crate) fn open_notified_thread(
+        &mut self,
+        target: &ThreadRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.onboarding.is_some() {
+            return;
+        }
+        let Ok(Some((thread_id, mailbox_id))) = self.store.find_remote_thread(
+            target.account_id,
+            &target.mailbox,
+            &target.remote_thread_id,
+        ) else {
+            return;
+        };
+        // The sync that found the mail may have added the mailbox since
+        // the last refresh.
+        self.refresh_from_store(cx);
+        self.select_mailbox(mailbox_id, cx);
+        self.select_thread(thread_id, mailbox_id, cx);
+        self.focus_pane(Pane::Detail, window, cx);
     }
 
     /// Select a specific thread (from the list or the search results) and

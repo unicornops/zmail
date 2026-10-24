@@ -36,6 +36,7 @@ mod gmail_keymap;
 mod hit_targets;
 mod list;
 mod motion;
+mod notifications;
 mod onboarding;
 mod palette;
 mod perf;
@@ -327,7 +328,6 @@ fn open_workspace_with(
         store.clone(),
         secrets.clone(),
     );
-    let notifier = Arc::new(zmail_notify::NewMailNotifier::os_backed());
     let bootstrap = AppBootstrap {
         app_version: "0.0.0-test".to_owned(),
         runtime: RuntimeSummary {
@@ -344,10 +344,13 @@ fn open_workspace_with(
     prepare(&store);
     // The keymap the saved preferences pick, as `run()` binds it.
     let saved_keymap = store.ui_preferences().expect("the preferences load").keymap;
-    cx.update(|cx| {
+    let notifier = cx.update(|cx| {
         keymap::bind_keymap(saved_keymap, cx);
         // The app-wide commands (Settings…), as `run()` registers them.
         crate::menus::init(cx);
+        // The notification identity and notifier, as `run()` sets them up.
+        cx.set_app_identity(crate::APP_ID, zmail_core::APP_NAME);
+        crate::notifications::start(cx)
     });
     let initial_view = initial_view(&harness);
     let (view, cx) = cx.add_window_view(move |window, cx| {

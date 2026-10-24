@@ -36,6 +36,7 @@
 //! | `preferences` | loading and saving the persisted UI preferences (theme mode, sidebar, pane widths, density) |
 //! | `widgets` | `toolbar_button`, `input_card`, `empty_state`, `icon`, … |
 //! | `settings` | `SettingsWindow`: Accounts, Appearance, Keyboard, Privacy, Sending, About & Diagnostics |
+//! | `notifications` | new-mail notifications through GPUI; a click opens the conversation |
 //! | `store_unlock` | unlocking the encrypted store before the workspace: the "Encrypting your mail" progress window and the keychain and lost-key screens |
 
 use std::rc::Rc;
@@ -84,6 +85,7 @@ mod menus;
 mod message_list;
 mod motion;
 mod move_picker;
+mod notifications;
 mod pane;
 mod preferences;
 mod reader;
@@ -335,6 +337,9 @@ fn init_app(keymap: zmail_core::preferences::KeymapName, bootstrap: &AppBootstra
         ContrastSetting::refresh(cx);
     }
     components::ComponentTheme::sync(&bootstrap.theme, cx);
+    // Before any window or notification: Windows groups windows and
+    // attributes toasts by this id, and Linux names notifications by it.
+    cx.set_app_identity(APP_ID, APP_NAME);
 }
 
 /// The main window's view and its services.
@@ -358,7 +363,7 @@ fn open_main_window(
         secrets,
         initial_view,
     } = main;
-    let notifier = Arc::new(zmail_notify::NewMailNotifier::os_backed());
+    let notifier = notifications::start(cx);
     sync_service.set_notifier(notifier.clone());
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
     // The add-account flow reads these from any window.
@@ -489,7 +494,7 @@ struct WorkspaceView {
     bootstrap: AppBootstrap,
     store: Arc<LocalStore>,
     sync_service: SyncService,
-    notifier: Arc<zmail_notify::NewMailNotifier<zmail_notify::OsNotificationSink>>,
+    notifier: Arc<notifications::MailNotifier>,
     /// The root focus handle (`Workspace` key context).
     focus_handle: FocusHandle,
     mail_actions: Entity<MailActions>,
