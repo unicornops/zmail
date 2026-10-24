@@ -2,9 +2,9 @@
 
 ## Status
 
-Proposed on October 24, 2026, for Rob's decision. The questions that are
-his are listed under "Decisions needed" at the end. Supersedes the Blitz
-spike (#134, PR #163), which ended in a no-go.
+Accepted on October 24, 2026; Rob's decisions are recorded under
+"Decisions" at the end. Supersedes the Blitz spike (#134, PR #163),
+which ended in a no-go.
 
 ## Context
 
@@ -184,12 +184,16 @@ dialogs, and cannot be clipped. Zed PR #62379 ("native window
 composition": AppKit layers, DirectComposition visuals, Wayland
 subsurfaces) addresses exactly this and is in review. The plan:
 
-- **Track #62379** and move the GPUI pin to the first Zed release that
-  contains it (ADR 0003's normal bump). Offer review and testing upstream.
-- **Until then, interim mode**: one web view per open conversation,
-  placed in a clipped container sized to the visible reader. While a
-  GPUI overlay (menu, popover, dialog) is open, the view is swapped for a
-  snapshot image of itself and hidden.
+- **Build on #62379 now** (Rob's decision): the web renderer is
+  developed and prototyped against GPUI from that PR's head, pinned by
+  commit, so its composition support is tested with a real embedder today
+  and problems are reported on the PR. `main` and releases stay on a Zed
+  stable tag (ADR 0003) until a Zed release contains the composition
+  work, or until Rob decides the prototypes justify shipping on the PR's
+  commit.
+- **No interim overlay-swap mode** is built. If #62379 stalls or changes
+  shape, the snapshot swap described in the research remains the
+  fallback, decided then.
 - **Linux**: X11 gets the same native child view. Wayland has no way to
   put a WebKitGTK view inside a GPUI surface, so Wayland renders
   offscreen. A hidden WebKitGTK view draws the mail, Zmail shows a
@@ -213,12 +217,12 @@ Each phase ships on its own.
 | Phase | Work | Gate |
 | --- | --- | --- |
 | 0. Foundations | Store raw HTML, Content-IDs and link targets (migration and all three adapters); html5ever sanitiser with the CSS pass; link side table; fix #198. The reader still shows text, now with correct links and paragraphs. | Hostile-corpus tests: no script, handler, remote URL or `file:` survives; fuzzing in CI |
-| 1. Prototypes | Six short spikes, each with a go or no-go: (1) WKWebView child view in GPUI on macOS with the overlay swap; (2) WebView2 child on Windows with DirectComposition kept on, or the cost of turning it off; (3) WebKitGTK offscreen snapshot on Wayland; (4) a canary HTTP server that must see zero hits from a hostile corpus on all three engines; (5) keyboard, focus and IME hand-off; (6) content height with page JS off | All six written up; Rob decides go |
+| 1. Prototypes | Six short spikes against GPUI from Zed PR #62379, each with a go or no-go: (1) WKWebView child view in GPUI on macOS through native composition (overlays above it, clipping, scrolling); (2) WebView2 child on Windows with DirectComposition kept on, or the cost of turning it off; (3) WebKitGTK offscreen snapshot on Wayland; (4) a canary HTTP server that must see zero hits from a hostile corpus on all three engines; (5) keyboard, focus and IME hand-off; (6) content height with page JS off | All six written up; Rob decides go |
 | 2. macOS web renderer | Production WKWebView renderer behind the boundary (Rob's platform first), load remote content, dark mode, zoom to fit | Corpus renders compared against Apple Mail; canary test in CI |
 | 3. Native renderer | The in-house subset renderer replaces text rendering everywhere (tables, inline CSS, images, dark mode) | Same corpus, side by side with the web renderer |
 | 4. Windows | WebView2 renderer | As phase 2 |
 | 5. Linux | WebKitGTK on X11 (child view) and Wayland (snapshot) | As phase 2 |
-| 6. Upstream composition | GPUI pin bump once Zed ships #62379; drop the snapshot swap | Overlays, clipping and scrolling right on all OSes |
+| 6. Upstream composition | `main`'s GPUI pin moves to the first Zed release with #62379 (ADR 0003 bump); the web renderer leaves its PR-based pin | Overlays, clipping and scrolling right on all OSes |
 
 Effort, from the research: about 3-4 engineer-months for the web
 renderer on macOS, Windows and Linux X11, plus about a month for the
@@ -232,10 +236,11 @@ engines behind the same boundary.
 
 ## Risks
 
-- **GPUI composition**: until #62379 ships, the interim view can flicker
-  when overlays open, and the Windows DirectComposition conflict may
-  force a compromise. The prototypes decide this before any production
-  work.
+- **GPUI composition**: #62379 is unmerged and may change before it
+  lands; building on it means following its rebases, and its head is
+  ahead of the Zed stable tag `main` uses. The Windows DirectComposition
+  conflict may force a compromise. The prototypes decide this before any
+  production work.
 - **WebKitGTK patch lag**: stable distributions ran about 4 weeks behind
   WebKitGTK's last large security release (WSA-2026-0006, 233 CVEs).
   JavaScript off and no network narrow the exposure; Zmail shows a notice
@@ -247,20 +252,20 @@ engines behind the same boundary.
 - **Engine bugs we cannot fix**: an OS engine bug waits for the vendor's
   patch.
 
-## Decisions needed (Rob)
+## Decisions
 
-1. **The engine**: OS web engines as the main renderer (recommended),
-   accepting C++ engines that are vendor-sandboxed and vendor-patched,
-   over the memory-safe in-house renderer with a lower fidelity ceiling.
-2. **Wayland**: snapshot rendering with native-renderer selection until
-   upstream composition arrives (recommended), or prefer XWayland for
-   the reader.
-3. **GPUI composition**: build the interim overlay-swap mode now
-   (recommended, so macOS ships sooner), or wait for Zed #62379.
-4. **Remote content**: per message, plus "always for this sender"
-   (recommended), or per message only.
-5. **Order**: Phase 0 first, then the phase 1 prototypes, then macOS
-   (recommended).
+Rob, October 24, 2026:
+
+1. **Engine**: the OS web engines are the main renderer, with the
+   in-house native renderer as the fallback and Simple view.
+2. **GPUI composition**: build and test against Zed PR #62379 now and
+   feed back on the PR, instead of an interim overlay-swap mode.
+3. **Wayland**: snapshot rendering, with selection and find from the
+   native renderer, until upstream composition supports a live view.
+4. **Remote content**: blocked by default; load per message, with
+   "always for this sender".
+5. **Order**: Phase 0, then the Phase 1 prototypes, then macOS (as
+   proposed).
 
 ## References
 
