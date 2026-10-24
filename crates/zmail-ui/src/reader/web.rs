@@ -1,0 +1,339 @@
+//! Formatted HTML mail: the web renderer (`zmail-render-web`, ADR 0006).
+//!
+//! On macOS an expanded HTML message shows its body in a locked-down
+//! `WKWebView` placed in the conversation list by GPUI's native window
+//! composition. The body is one list item as tall as the measured page;
+//! the reader's popovers, dialogs and tooltips draw above it. Other
+//! platforms, and messages the user switched to the Simple view (message
+//! More menu), keep the text view. A page that cannot be shown falls back
+//! to the text view with a notice.
+//!
+//! Set `ZMAIL_WEB_RENDERER=0` to turn the web renderer off.
+
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
+
+use gpui::{AnyElement, AppContext as _, Context, IntoElement, Window, px};
+use zmail_core::ThreadMessage;
+use zmail_render_web::{Appearance, WebDocument, WebEvent, WebHost};
+
+use super::ReaderView;
+use super::links::{LinkPrompt, link_target};
+use crate::components::{Banner, BannerTone, ComponentTheme};
+use crate::styles::UiColors;
+
+/// The height a page takes in the list until it is measured.
+const UNMEASURED_HEIGHT: f32 = 120.;
+
+/// The reader's web renderer state.
+pub(super) struct ReaderWeb {
+    /// Whether this build and platform render HTML mail formatted.
+    enabled: bool,
+    /// Created at the first render, which has the window.
+    host: Option<WebHost>,
+    /// Each message's page, while the conversation is open.
+    documents: HashMap<i64, Rc<WebDocument>>,
+    /// Each page's measured height.
+    heights: HashMap<i64, f32>,
+    /// Messages switched to the Simple view.
+    simple: HashSet<i64>,
+    /// Messages whose page could not be shown, and why.
+    failed: HashMap<i64, String>,
+    /// The message whose page was pressed last: Copy and Select All go to
+    /// its page.
+    active: Option<i64>,
+}
+
+impl Default for ReaderWeb {
+    fn default() -> Self {
+        let disabled = std::env::var_os("ZMAIL_WEB_RENDERER").is_some_and(|value| value == "0");
+        Self {
+            // GPUI's test platform has no native composition; view tests
+            // use the text view on every OS.
+            enabled: zmail_render_web::SUPPORTED && !disabled && !cfg!(test),
+            host: None,
+            documents: HashMap::new(),
+            heights: HashMap::new(),
+            simple: HashSet::new(),
+            failed: HashMap::new(),
+            active: None,
+        }
+    }
+}
+
+impl ReaderWeb {
+    /// Forgets everything but `message_ids` (a new conversation keeps
+    /// nothing).
+    pub(super) fn retain(&mut self, message_ids: &HashSet<i64>) {
+        self.documents.retain(|id, _| message_ids.contains(id));
+        self.heights.retain(|id, _| message_ids.contains(id));
+        self.simple.retain(|id| message_ids.contains(id));
+        self.failed.retain(|id, _| message_ids.contains(id));
+        if self.active.is_some_and(|id| !message_ids.contains(&id)) {
+            self.active = None;
+        }
+        if let Some(host) = &self.host {
+            host.retain(|key| message_ids.contains(&(key as i64)));
+        }
+    }
+
+    /// Hides every page: the reader's list is not on screen.
+    pub(super) fn hide_all(&self) {
+        if let Some(host) = &self.host {
+            host.hide_all();
+        }
+    }
+
+    /// The host, once created.
+    pub(super) fn host(&self) -> Option<&WebHost> {
+        self.host.as_ref()
+    }
+}
+
+/// The HTML a message's formatted view shows: the sanitised HTML stored
+/// for messages without a plain-text part.
+fn html_source(message: &ThreadMessage) -> Option<&str> {
+    message
+        .body_text
+        .is_none()
+        .then_some(message.sanitized_html.as_deref())
+        .flatten()
+        .filter(|html| !html.trim().is_empty())
+}
+
+impl ReaderView {
+    /// Creates the web host the first time the reader renders in a window.
+    pub(super) fn ensure_web_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.web.enabled || self.web.host.is_some() {
+            return;
+        }
+        let reader = cx.entity().downgrade();
+        let handle = window.window_handle();
+        let app = cx.to_async();
+        self.web.host = Some(WebHost::new(move |key, event| {
+            // From AppKit, outside GPUI's update cycle: handle it on the
+            // next turn of the foreground executor.
+            let reader = reader.clone();
+            app.spawn(async move |cx| {
+                let _ = cx.update_window(handle, |_, window, cx| {
+                    reader.update(cx, |reader, cx| {
+                        reader.web_event(key as i64, event, window, cx);
+                    })
+                });
+            })
+            .detach();
+        }));
+    }
+
+    /// Whether the web renderer could show `message` formatted at all.
+    pub(super) fn can_show_formatted(&self, message: &ThreadMessage) -> bool {
+        self.web.enabled
+            && self.web.host.as_ref().is_none_or(WebHost::is_available)
+            && html_source(message).is_some()
+    }
+
+    /// Whether `message`'s body shows in a web view.
+    pub(super) fn shows_web(&self, message: &ThreadMessage) -> bool {
+        self.can_show_formatted(message)
+            && !self.web.simple.contains(&message.id)
+            && !self.web.failed.contains_key(&message.id)
+    }
+
+    /// The web view element for `message`'s body, when it shows formatted.
+    pub(super) fn web_body(
+        &mut self,
+        message: &ThreadMessage,
+        colors: &UiColors,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.shows_web(message) {
+            return None;
+        }
+        let host = self.web.host.clone()?;
+        let html = html_source(message)?;
+        let appearance = Appearance {
+            dark: !ComponentTheme::get(cx).is_light,
+            background: colors.surface,
+            foreground: colors.foreground,
+            link: colors.accent,
+        };
+        let document = match self.web.documents.get(&message.id) {
+            Some(document) if document.html == html && document.appearance == appearance => {
+                document.clone()
+            }
+            _ => {
+                let document = Rc::new(WebDocument::new(html, appearance));
+                self.web.documents.insert(message.id, document.clone());
+                document
+            }
+        };
+        let height = self
+            .web
+            .heights
+            .get(&message.id)
+            .copied()
+            .unwrap_or(UNMEASURED_HEIGHT);
+        Some(
+            host.body(message.id as u64, document, px(height))
+                .into_any_element(),
+        )
+    }
+
+    /// The notice on a message whose page could not be shown.
+    pub(super) fn web_failure_banner(&self, message: &ThreadMessage) -> Option<AnyElement> {
+        let reason = self.web.failed.get(&message.id)?;
+        Some(
+            Banner::new(
+                ("web-failed", message.id as u64),
+                format!(
+                    "This message could not be shown formatted ({reason}), so it shows as text."
+                ),
+            )
+            .tone(BannerTone::Caution)
+            .into_any_element(),
+        )
+    }
+
+    /// Switches the message at `index` between the formatted view and the
+    /// Simple view. Switching back to formatted also retries a page that
+    /// failed.
+    pub(super) fn toggle_simple_view(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(message) = self
+            .state
+            .thread
+            .as_ref()
+            .and_then(|thread| thread.messages.get(index))
+        else {
+            return;
+        };
+        let id = message.id;
+        if self.shows_web(message) {
+            self.web.simple.insert(id);
+        } else {
+            self.web.simple.remove(&id);
+            self.web.failed.remove(&id);
+            self.web.heights.remove(&id);
+        }
+        self.selection = None;
+        self.relayout_message(index, cx);
+    }
+
+    /// The menu entry that switches `message`'s view, if it has two.
+    pub(super) fn simple_view_label(&self, message: &ThreadMessage) -> Option<&'static str> {
+        if !self.can_show_formatted(message) {
+            return None;
+        }
+        Some(if self.shows_web(message) {
+            "Show Simple View"
+        } else {
+            "Show Formatted View"
+        })
+    }
+
+    /// Copies the selection in the page pressed last, when there is one.
+    /// Returns false when the reader has no page to copy from.
+    pub(super) fn copy_from_web(&self) -> bool {
+        match (self.web.active, self.web.host.as_ref()) {
+            (Some(id), Some(host)) => {
+                host.copy(id as u64);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Selects all of `message`'s page, when it shows formatted.
+    pub(super) fn select_all_in_web(&mut self, message: &ThreadMessage) -> bool {
+        if !self.shows_web(message) {
+            return false;
+        }
+        let Some(host) = self.web.host.as_ref() else {
+            return false;
+        };
+        host.select_all(message.id as u64);
+        self.web.active = Some(message.id);
+        true
+    }
+
+    /// Hides the pages: the shell shows another pane in the reader's place.
+    pub(crate) fn hide_web(&self) {
+        self.web.hide_all();
+    }
+
+    fn message_index(&self, message_id: i64) -> Option<usize> {
+        self.state
+            .thread
+            .as_ref()?
+            .messages
+            .iter()
+            .position(|message| message.id == message_id)
+    }
+
+    /// Something a page reported.
+    fn web_event(
+        &mut self,
+        message_id: i64,
+        event: WebEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.message_index(message_id) else {
+            return;
+        };
+        match event {
+            WebEvent::Measured { height } => {
+                let changed = self
+                    .web
+                    .heights
+                    .insert(message_id, height)
+                    .is_none_or(|old| (old - height).abs() >= 0.5);
+                if changed {
+                    self.relayout_message(index, cx);
+                }
+            }
+            WebEvent::Pressed => {
+                self.web.active = Some(message_id);
+                self.selection = None;
+                self.conversation.set_current(index);
+                window.focus(&self.focus_handle, cx);
+                cx.notify();
+            }
+            WebEvent::LinkActivated { url } => self.web_link_clicked(&url, window, cx),
+            WebEvent::ContentProcessTerminated => {
+                self.web_failed(message_id, index, "the web engine stopped".to_owned(), cx);
+            }
+            WebEvent::LoadFailed(reason) => self.web_failed(message_id, index, reason, cx),
+        }
+    }
+
+    fn web_failed(
+        &mut self,
+        message_id: i64,
+        index: usize,
+        reason: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.web.failed.insert(message_id, reason);
+        if self.web.active == Some(message_id) {
+            self.web.active = None;
+        }
+        if let Some(host) = &self.web.host {
+            host.retain(|key| key != message_id as u64);
+        }
+        self.relayout_message(index, cx);
+    }
+
+    /// A link in a page was clicked: the open-link dialog shows where it
+    /// goes, exactly like a link in the text view.
+    fn web_link_clicked(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = link_target(url) else {
+            eprintln!("zmail: web renderer: ignored a link to {url:?}");
+            return;
+        };
+        self.link_prompt = Some(LinkPrompt::new(&target, &target));
+        self.link_modal.open(window, cx);
+        cx.notify();
+    }
+}

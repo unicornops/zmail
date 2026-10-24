@@ -157,6 +157,9 @@ pub(crate) enum ReaderCommand {
     CopyAddress(usize),
     /// Copy the sender's name and address of the message at this index.
     CopyNameAndAddress(usize),
+    /// Switch the message at this index between its formatted view and
+    /// the Simple view.
+    ToggleSimpleView(usize),
 }
 
 /// One row of a reader menu.
@@ -242,6 +245,7 @@ pub(super) fn message_menu_items(
     thread: &ThreadView,
     index: usize,
     state: &ReaderState,
+    simple_view: Option<&'static str>,
 ) -> Vec<MoreItem> {
     let Some(message) = thread.messages.get(index) else {
         return Vec::new();
@@ -260,6 +264,15 @@ pub(super) fn message_menu_items(
         ReaderAction::new("Mark Unread", "eye-off", "secondary-shift-u", ToggleRead)
     }));
     items.push(MoreItem::Separator);
+    // "Show Simple View" or "Show Formatted View", for HTML mail shown in
+    // a web view.
+    if let Some(label) = simple_view {
+        items.push(MoreItem::command(
+            label,
+            "file-code",
+            ReaderCommand::ToggleSimpleView(index),
+        ));
+    }
     items.push(MoreItem::command(
         if message.body_text.is_none() && message.sanitized_html.is_some() {
             "View Source"
