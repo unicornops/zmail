@@ -1,5 +1,8 @@
 # Zmail
 
+> [!WARNING]
+> **Zmail is alpha software and is in no way ready for real use.** Expect bugs, missing features, breaking changes between releases and, at worst, lost or corrupted local data. Do not rely on it as your only mail client, keep your mail on the server, and keep backups of anything that matters. Native Proton Mail support is experimental on top of that (see below).
+
 Zmail is a Rust desktop email client focused on speed, standards compliance, security, and large-mailbox performance. The UI is built on GPUI, unchanged Zed theme files are supported through a thin local compatibility layer, and the local data path is designed so network activity never blocks mailbox browsing.
 
 ## Current Status
