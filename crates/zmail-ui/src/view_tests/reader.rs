@@ -38,14 +38,13 @@ fn message(sender: &str, at: &str, is_read: bool, body: &str) -> MessageSnapshot
 /// messages (an HTML one with a mismatched link, then one ending in a
 /// quote) and an unread two-paragraph reply. Archive is empty.
 fn seed_conversation(store: &LocalStore) {
-    let account_id = store.list_accounts().expect("the accounts load")[0].id;
     let messages = vec![
         MessageSnapshot {
             // HTML only, with a link whose text shows another site.
             body_text: None,
             sanitized_html: Some(
                 "<p>Attached is the draft roadmap.</p>\
-                 <p><a href=\"blocked://evil.example/login\">https://bank.example/login</a></p>"
+                 <p><a href=\"http://evil.example/login\">https://bank.example/login</a></p>"
                     .to_owned(),
             ),
             ..message(
@@ -69,6 +68,13 @@ fn seed_conversation(store: &LocalStore) {
              The plan is at https://example.com/roadmap for now.",
         ),
     ];
+    store_conversation(store, messages);
+}
+
+/// Replaces the account's mail with one Inbox conversation of `messages`
+/// (the last one unread) and an empty Archive.
+fn store_conversation(store: &LocalStore, messages: Vec<MessageSnapshot>) {
+    let account_id = store.list_accounts().expect("the accounts load")[0].id;
     store
         .replace_account_snapshot(
             account_id,
@@ -437,6 +443,68 @@ fn dragging_selects_body_text_and_secondary_c_copies_it(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn html_mail_reads_as_paragraphs_with_cells_apart(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace_with(
+        cx,
+        Setup::Account,
+        |_| InitialView::Inbox,
+        |store| {
+            store_conversation(
+                store,
+                vec![MessageSnapshot {
+                    body_text: None,
+                    sanitized_html: Some(
+                        zmail_security::sanitize_html_for_display(concat!(
+                            "<h1>Your order</h1>",
+                            "<table><tr><td>Plan</td><td>Price</td></tr>",
+                            "<tr><td>Starter</td><td>EUR&nbsp;9</td></tr></table>",
+                            "<p>Line one<br>line two</p>",
+                            "<p>Track it at <a href=\"http://shop.example/track\">the shop</a>.</p>",
+                        ))
+                        .html,
+                    ),
+                    ..message(
+                        "Shop <orders@shop.example>",
+                        "2026-03-24T09:00:00Z",
+                        false,
+                        "Your order",
+                    )
+                }],
+            )
+        },
+    );
+    let reader = cx.read_entity(&view, |view, _| view.reader.clone());
+    click_row(0, Modifiers::none(), cx);
+    for selector in [
+        "reader-paragraph-0-0",
+        "reader-paragraph-0-1",
+        "reader-paragraph-0-2",
+        "reader-paragraph-0-3",
+    ] {
+        assert!(drawn(selector, cx), "{selector}");
+    }
+    click("reader-subject", cx);
+    keys("secondary-a", cx);
+    assert_eq!(
+        selected(&reader, cx).as_deref(),
+        Some(
+            "Your order\n\nPlan  Price\nStarter  EUR 9\n\nLine one\nline two\n\n\
+             Track it at the shop."
+        )
+    );
+    let links = cx.read_entity(&reader, |reader, _| {
+        reader
+            .state()
+            .thread
+            .as_ref()
+            .map(|thread| thread.messages[0].body_links.clone())
+            .unwrap_or_default()
+    });
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].target, "http://shop.example/track");
+}
+
+#[gpui::test]
 fn a_link_shows_its_real_target_before_opening(cx: &mut TestAppContext) {
     let (_view, cx, reader) = open_conversation(cx);
     let prompt = |cx: &mut VisualTestContext| {
@@ -447,17 +515,18 @@ fn a_link_shows_its_real_target_before_opening(cx: &mut TestAppContext) {
         })
     };
 
-    // The HTML message's second line is a link showing bank.example that
-    // goes to evil.example.
+    // The HTML message's second paragraph is a link showing bank.example
+    // that goes to evil.example, over plain http: the scheme is the
+    // original one (#198).
     click("reader-message-summary-0", cx);
-    let body = paragraph("reader-paragraph-0-0", cx);
+    let body = paragraph("reader-paragraph-0-1", cx);
     let link = point(body.left() + px(12.), body.bottom() - px(6.));
     cx.simulate_click(link, Modifiers::none());
     cx.run_until_parked();
     assert_eq!(
         prompt(cx),
         Some((
-            "https://evil.example/login".to_owned(),
+            "http://evil.example/login".to_owned(),
             Some("bank.example".to_owned())
         ))
     );

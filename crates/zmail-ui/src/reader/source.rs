@@ -2,9 +2,10 @@
 //! stored locally.
 //!
 //! A plain-text message shows its text. An HTML message shows its
-//! sanitized HTML: scripts and styles removed, remote addresses rewritten
-//! to `blocked://`, which is what the store keeps. The raw RFC 5322 source
-//! is not stored, so it cannot be shown.
+//! sanitized HTML (`zmail_security::html`): scripts, handlers and frames
+//! removed, CSS checked, remote resources replaced by `zmail-blocked:`
+//! placeholders, which is what the store keeps for the text view. The raw
+//! RFC 5322 source is not stored, so it cannot be shown.
 
 use gpui::{
     AnyElement, ClipboardItem, Context, IntoElement, SharedString, Window, div, prelude::*, px, rgb,
