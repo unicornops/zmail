@@ -1,23 +1,71 @@
 # Zed Upstream Record
 
 Zmail's UI is built on GPUI, Zed's UI framework. GPUI is not consumed from
-crates.io: the workspace pins it to a **Zed stable release tag** through a
-git dependency, and a scheduled workflow proposes a bump whenever Zed ships a
-newer stable release (issue #113).
+crates.io: the workspace pins it to a Zed commit through a git dependency.
+ADR 0003 says that commit is a **Zed stable release tag**, and a scheduled
+workflow proposes a bump whenever Zed ships a newer stable release (issue
+#113). **For now Zmail deviates from that**: see below.
+
+## Deviation From ADR 0003: Zed PR #62379
+
+Since October 2026 the `gpui` and `gpui_platform` lines pin GPUI by commit
+to the head of [Zed PR #62379](https://github.com/zed-industries/zed/pull/62379)
+("native window composition"), an unmerged pull request from a fork. Rob
+decided this for ADR 0006: the macOS web renderer for HTML mail needs
+GPUI to place a native `WKWebView` between its base and overlay surfaces,
+which no Zed release can do yet. Zmail is alpha software, so the renderer
+ships in normal releases built on this pin instead of a preview build.
+
+| | |
+| --- | --- |
+| Pull request | [zed-industries/zed#62379](https://github.com/zed-industries/zed/pull/62379), open |
+| Repository | [`huacnlee/zed`](https://github.com/huacnlee/zed), branch `window-composition-tree` |
+| Commit | [`840e095adddab3b7a644b137c22254fb2d111491`](https://github.com/huacnlee/zed/commit/840e095adddab3b7a644b137c22254fb2d111491) (committed 2026-09-27, based on Zed `main` of that time) |
+| Rust toolchain (the PR's `rust-toolchain.toml`) | `1.98.1`, the same as `v1.24.2` |
+
+What changes while the pin is on the pull request:
+
+- `Cargo.toml`: both lines use `git = "https://github.com/huacnlee/zed"`
+  with the same `rev`. `deny.toml` allows the fork.
+- `[patch.crates-io]` follows the PR's root manifest: `async-task` is
+  unchanged; the PR's manifest names `calloop` without a revision, so the
+  patch pins the commit its `Cargo.lock` resolves
+  (`eb6b4fd17b9af5ecc226546bdd04185391b3e265`).
+- Zmail needed no source changes for this pin. Only
+  `crates/zmail-render-web` uses the composition API
+  (`Window::enable_window_composition`,
+  `WindowComposition::create_native_surface`), on macOS. Linux and Windows
+  build on the same pin and keep the text view.
+- The app's diagnostics strip shows the Zed tag as `untagged` (the pin has
+  no tag) and the PR commit.
+- The weekly `zed-upstream` workflow does not move the pin back to a
+  stable tag: `scripts/bump-zed-gpui.sh` sees the PR pin and asks GitHub
+  whether #62379 is merged and which commit it merged as. While it is
+  unmerged, or merged but in no stable release yet, the script stops with
+  a notice. Once a Zed stable release contains the merge commit, it bumps
+  to that release as usual, which ends the deviation; then delete this
+  section and the `deny.toml` entry for the fork.
+
+To follow a new head of the pull request by hand: change the `rev` on both
+lines, run `cargo update -p gpui -p gpui_platform`, compare the PR's root
+`[patch.crates-io]` and `Cargo.lock` entries for `async-task` and `calloop`
+with ours, update the table above, and fix any API breakage in the same
+pull request.
 
 ## Current Pin
 
 <!-- zed-pin:start -->
 | | |
 | --- | --- |
-| Zed release tag | [`v1.24.2`](https://github.com/zed-industries/zed/releases/tag/v1.24.2) |
-| Commit | [`fb69067729cb16a7f6135e2c1600c26a28c59659`](https://github.com/zed-industries/zed/commit/fb69067729cb16a7f6135e2c1600c26a28c59659) |
-| Released | 2026-10-14 |
-| Rust toolchain (Zed's `rust-toolchain.toml`) | `1.98.1` |
+| Zed pull request | [#62379](https://github.com/zed-industries/zed/pull/62379) (unmerged; see the deviation above) |
+| Commit | [`840e095adddab3b7a644b137c22254fb2d111491`](https://github.com/huacnlee/zed/commit/840e095adddab3b7a644b137c22254fb2d111491) |
+| Last stable tag before it | [`v1.24.2`](https://github.com/zed-industries/zed/releases/tag/v1.24.2) (`fb69067729cb16a7f6135e2c1600c26a28c59659`, 2026-10-14) |
+| Rust toolchain (the PR's `rust-toolchain.toml`) | `1.98.1` |
 <!-- zed-pin:end -->
 
 The table between the `zed-pin` markers is rewritten by
-`scripts/bump-zed-gpui.sh`; keep the markers. `Cargo.lock` is the source of
+`scripts/bump-zed-gpui.sh` when it bumps to a stable release; keep the
+markers. `Cargo.lock` is the source of
 truth for the exact commit, and the app's diagnostics strip reads the tag and
 commit from it at build time (`crates/zmail-app/build.rs`).
 
@@ -29,7 +77,8 @@ Other upstream inputs:
 ## What The Pin Consists Of
 
 - `Cargo.toml` `[workspace.dependencies]`: `gpui` and `gpui_platform`, both
-  `git = "https://github.com/zed-industries/zed"` with the same `tag`.
+  `git = "https://github.com/zed-industries/zed"` with the same `tag` (on
+  the #62379 pin: the fork's URL with the same `rev`).
   `gpui_platform` is the crate that now picks the OS backend
   (`gpui_platform::application()`); since Zed #49277 the platform code lives
   in `gpui_macos`, `gpui_windows`, `gpui_linux` and `gpui_wgpu`, and an app
@@ -120,3 +169,6 @@ the same branch.
 - **October 2026 (issue #113):** moved to the Zed `v1.24.2` stable tag.
   The decision, the API churn and the build-time and size deltas are
   recorded in [ADR 0003](../adr/0003-gpui-zed-stable-pin.md).
+- **October 2026 (ADR 0006):** moved off the stable tag to the head of Zed
+  PR #62379 (`huacnlee/zed@840e095`) for the macOS web renderer; see
+  "Deviation From ADR 0003" above.

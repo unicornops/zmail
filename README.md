@@ -35,7 +35,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 ## Workspace
 
 - [`PLAN.md`](./PLAN.md): master delivery plan
-- [`docs/upstream/zed.md`](./docs/upstream/zed.md): Zed and GPUI upstream pin record (GPUI is pinned to a Zed stable release tag and bumped by a weekly workflow)
+- [`docs/upstream/zed.md`](./docs/upstream/zed.md): Zed and GPUI upstream pin record (GPUI is normally pinned to a Zed stable release tag and bumped by a weekly workflow; for now it is pinned to Zed PR #62379 for the macOS web renderer)
 - [`docs/adr/0001-jmap-client-strategy.md`](./docs/adr/0001-jmap-client-strategy.md): JMAP implementation decision
 - [`docs/adr/0003-gpui-zed-stable-pin.md`](./docs/adr/0003-gpui-zed-stable-pin.md): GPUI pinned to Zed stable release tags
 - [`docs/phase5-hardening.md`](./docs/phase5-hardening.md): accessibility, performance, crash policy, packaging, and release process

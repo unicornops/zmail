@@ -20,6 +20,13 @@ set -euo pipefail
 #      a full `cargo update` only when the targeted update cannot resolve,
 #   5. rewrites the pin table in docs/upstream/zed.md.
 #
+# While GPUI is pinned by `rev` to a Zed pull request instead of a tag
+# (docs/upstream/zed.md, "Deviation From ADR 0003"; the pull request is
+# $ZED_PR, default 62379), the script never moves back to a release that
+# lacks that work: it bumps only once the pull request is merged and the
+# target stable release contains its merge commit, and otherwise stops
+# with a notice.
+#
 # It writes a pull request body to $PR_BODY_FILE (default: a temp file)
 # and, when $GITHUB_OUTPUT is set, the outputs updated, tag, previous_tag,
 # commit and body_file. See docs/upstream/zed.md.
@@ -47,9 +54,18 @@ zed_raw() {
   gh api -H "Accept: application/vnd.github.raw" "repos/${ZED_REPO}/contents/$1?ref=$2"
 }
 
+notice() {
+  echo "$1"
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    echo "::notice::$1"
+  fi
+}
+
+ZED_PR="${ZED_PR:-62379}"
 current_tag="$(sed -n 's|^gpui = { git = "https://github.com/zed-industries/zed", tag = "\(v[^"]*\)".*|\1|p' Cargo.toml)"
-if [[ -z "$current_tag" ]]; then
-  echo "error: could not find the gpui tag pin in Cargo.toml" >&2
+pr_rev="$(sed -n 's|^gpui = { git = "https://github.com/[^"]*", rev = "\([0-9a-f]\{7,40\}\)".*|\1|p' Cargo.toml)"
+if [[ -z "$current_tag" && -z "$pr_rev" ]]; then
+  echo "error: could not find the gpui tag (or pull request rev) pin in Cargo.toml" >&2
   exit 1
 fi
 
@@ -63,11 +79,30 @@ if [[ ! "$target_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
-newest="$(printf '%s\n%s\n' "$current_tag" "$target_tag" | sort -V | tail -n 1)"
-if [[ "$target_tag" == "$current_tag" || "$newest" != "$target_tag" ]]; then
-  echo "GPUI is pinned to ${current_tag}; ${target_tag} is not newer. Nothing to do."
-  output updated false
-  exit 0
+if [[ -n "$pr_rev" ]]; then
+  # Pinned to Zed PR $ZED_PR: only a release that contains it may replace it.
+  pr_json="$(gh api "repos/${ZED_REPO}/pulls/${ZED_PR}")"
+  merge_commit="$(jq -r 'select(.merged == true) | .merge_commit_sha // empty' <<<"$pr_json")"
+  if [[ -z "$merge_commit" ]]; then
+    notice "GPUI is pinned to Zed PR #${ZED_PR} (${pr_rev:0:12}), which is not merged; not moving to ${target_tag}, which lacks it. See docs/upstream/zed.md."
+    output updated false
+    exit 0
+  fi
+  containment="$(gh api "repos/${ZED_REPO}/compare/${merge_commit}...${target_tag}" --jq '.status')"
+  if [[ "$containment" != "ahead" && "$containment" != "identical" ]]; then
+    notice "Zed PR #${ZED_PR} merged as ${merge_commit:0:12}, but ${target_tag} does not contain it yet (${containment}); GPUI stays on the pull request pin."
+    output updated false
+    exit 0
+  fi
+  echo "${target_tag} contains Zed PR #${ZED_PR} (merged as ${merge_commit:0:12}); leaving the pull request pin."
+  current_tag="PR #${ZED_PR}"
+else
+  newest="$(printf '%s\n%s\n' "$current_tag" "$target_tag" | sort -V | tail -n 1)"
+  if [[ "$target_tag" == "$current_tag" || "$newest" != "$target_tag" ]]; then
+    echo "GPUI is pinned to ${current_tag}; ${target_tag} is not newer. Nothing to do."
+    output updated false
+    exit 0
+  fi
 fi
 
 echo "Bumping GPUI from Zed ${current_tag} to ${target_tag}"
@@ -80,8 +115,11 @@ fi
 released_on="$(jq -r '.published_at[0:10]' <<<"$release_json")"
 commit="$(gh api "repos/${ZED_REPO}/commits/${target_tag}" --jq '.sha')"
 
-# 1. The tag on the gpui lines.
+# 1. The tag on the gpui lines (replacing a pull request's fork and rev).
 sed -i -E "/^gpui(_platform)? = \{ git = \"https:\/\/github.com\/zed-industries\/zed\"/s/tag = \"v[^\"]*\"/tag = \"${target_tag}\"/" Cargo.toml
+if [[ -n "$pr_rev" ]]; then
+  sed -i -E "s|^(gpui(_platform)? = \{ )git = \"[^\"]*\", rev = \"[0-9a-f]+\"|\1git = \"${ZED_URL}\", tag = \"${target_tag}\"|" Cargo.toml
+fi
 
 # 2. The Rust toolchain Zed builds that tag with.
 zed_toolchain="$(zed_raw rust-toolchain.toml "$target_tag" | sed -n 's/^channel = "\(.*\)"/\1/p')"
@@ -109,6 +147,11 @@ for name, ours in our_patches.items():
     theirs = zed_patches.get(name)
     if theirs is None:
         notes.append(f"- Zed no longer patches `{name}`; review the mirrored patch in Cargo.toml.")
+        continue
+    if theirs.get("rev") is None:
+        # Zed's manifest can name a git patch without a revision; its
+        # Cargo.lock then decides, which this script does not read.
+        notes.append(f"- Zed patches `{name}` without a revision; pin the commit from Zed's `Cargo.lock` by hand.")
         continue
     if theirs.get("git") != ours.get("git") or theirs.get("rev") != ours.get("rev"):
         line = f'{name} = {{ git = "{theirs["git"]}", rev = "{theirs["rev"]}" }}'
@@ -172,20 +215,31 @@ release_links="$(gh api "repos/${ZED_REPO}/releases?per_page=100" \
       printf -- '- [%s release notes](%s/releases/tag/%s)\n' "$tag" "$ZED_URL" "$tag"
     done)"
 
+from_text="Zed [\`${current_tag}\`](${ZED_URL}/releases/tag/${current_tag})"
+if [[ -n "$pr_rev" ]]; then
+  from_text="the head of Zed [PR #${ZED_PR}](${ZED_URL}/pull/${ZED_PR})"
+  release_links=""
+  compare_link="- The pin was the head of [Zed PR #${ZED_PR}](${ZED_URL}/pull/${ZED_PR}) (\`${pr_rev:0:12}\` on a fork), which ${target_tag} contains."
+  deviation_note="- [ ] End the ADR 0003 deviation: delete \"Deviation From ADR 0003\" in \`docs/upstream/zed.md\` and its notes in \`AGENTS.md\`, \`README.md\` and ADR 0003, the fork's \`allow-git\` entry in \`deny.toml\`, and the pull request wording in the \`Cargo.toml\` comments."
+else
+  compare_link="- [Full diff ${current_tag}...${target_tag}](${ZED_URL}/compare/${current_tag}...${target_tag}) (GPUI lives in \`crates/gpui*\`)"
+  deviation_note=""
+fi
+
 toolchain_note="The Rust toolchain stays at \`${current_toolchain}\`."
 if [[ "$toolchain_now" != "$current_toolchain" ]]; then
   toolchain_note="Rust toolchain: \`${current_toolchain}\` → \`${toolchain_now}\` (Zed's \`rust-toolchain.toml\` at ${target_tag}); CI reads it from \`rust-toolchain.toml\`."
 fi
 
 cat > "$BODY_FILE" <<EOF
-Moves GPUI from Zed [\`${current_tag}\`](${ZED_URL}/releases/tag/${current_tag}) to the latest stable release, [\`${target_tag}\`](${ZED_URL}/releases/tag/${target_tag}) (released ${released_on}, commit [\`${commit:0:12}\`](${ZED_URL}/commit/${commit})).
+Moves GPUI from ${from_text} to the latest stable release, [\`${target_tag}\`](${ZED_URL}/releases/tag/${target_tag}) (released ${released_on}, commit [\`${commit:0:12}\`](${ZED_URL}/commit/${commit})).
 
 Opened by the weekly \`zed-upstream\` workflow (\`scripts/bump-zed-gpui.sh\`); see \`docs/upstream/zed.md\`.
 
 ## Release notes
 
 ${release_links:-- [${target_tag} release notes](${ZED_URL}/releases/tag/${target_tag})}
-- [Full diff ${current_tag}...${target_tag}](${ZED_URL}/compare/${current_tag}...${target_tag}) (GPUI lives in \`crates/gpui*\`)
+${compare_link}
 
 ## Changes
 
@@ -201,6 +255,7 @@ ${patch_notes}
 - [ ] Any GPUI API breakage is fixed on this branch.
 - [ ] \`cargo deny check sources\` passes; a new git dependency needs a narrow \`allow-git\` entry in \`deny.toml\`.
 - [ ] A local GUI launch (or the release screenshot script) still renders.
+${deviation_note}
 EOF
 
 echo "PR body written to ${BODY_FILE}"
