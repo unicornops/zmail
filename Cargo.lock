@@ -1622,17 +1622,6 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
-dependencies = [
- "rand_core 0.6.4",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "crypto-bigint"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6bb08299a6046833a879ace115697f12fd2bd6c8d3e93c909ffc9e0738e7cae0"
@@ -1674,7 +1663,7 @@ version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3633a51a39c69ebbaa4feaa694bd83d241e4093901c84a0963b19d9bb3f0cf8f"
 dependencies = [
- "crypto-bigint 0.7.6",
+ "crypto-bigint",
  "rand_core 0.10.1",
 ]
 
@@ -2037,7 +2026,7 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c8573b60d07b5b5cecadc1f978c9b71d5504151e703cbb0439ee4ad301338f3"
 dependencies = [
- "crypto-bigint 0.7.6",
+ "crypto-bigint",
  "crypto-common 0.2.2",
  "crypto-primes",
  "der",
@@ -2163,7 +2152,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d65aa39b3a5c1c9c1b745c9a019234bb7a21b77abcb4f4d266d706e2d577d65"
 dependencies = [
  "base16ct",
- "crypto-bigint 0.7.6",
+ "crypto-bigint",
  "crypto-common 0.2.2",
  "digest 0.11.3",
  "ff",
@@ -5202,7 +5191,7 @@ dependencies = [
  "cipher 0.5.2",
  "const-oid",
  "crc24",
- "crypto-bigint 0.7.6",
+ "crypto-bigint",
  "curve25519-dalek",
  "derive_builder",
  "derive_more",
@@ -5526,7 +5515,7 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c555a6e4eb7d4e158fcb028c835c3b8642206ddc279b5c6b202ef9a8bdb592f4"
 dependencies = [
- "crypto-bigint 0.7.6",
+ "crypto-bigint",
  "crypto-common 0.2.2",
  "ff",
  "rand_core 0.10.1",
@@ -5615,18 +5604,18 @@ dependencies = [
 [[package]]
 name = "proton-srp"
 version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5360dae8c6493ef957bf0c6d8ba1b3c6173a48b9defdc76092df21806e21b7d1"
+source = "git+https://github.com/lazzurs/proton-crypto-rs?rev=95455e84a43b12124dfd6febac3875d212797038#95455e84a43b12124dfd6febac3875d212797038"
 dependencies = [
  "base64 0.22.1",
  "bcrypt",
- "crypto-bigint 0.5.5",
+ "crypto-bigint",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "hex",
  "md-5 0.10.6",
- "rand 0.8.8",
+ "rand 0.10.3",
  "sha2 0.10.9",
+ "subtle",
  "thiserror 1.0.69",
  "zeroize",
 ]
@@ -6163,7 +6152,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4a459cddafb3fe76b31fd8f1108007566c40301feb64dc7b54656eb7388172b"
 dependencies = [
- "crypto-bigint 0.7.6",
+ "crypto-bigint",
  "hmac 0.13.0",
 ]
 
@@ -6232,7 +6221,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33405e321e16ef941ca66e254f6904c3aafd3c7ff001fb88bf11c73eb75c2b85"
 dependencies = [
  "const-oid",
- "crypto-bigint 0.7.6",
+ "crypto-bigint",
  "crypto-primes",
  "digest 0.11.3",
  "rand_core 0.10.1",

@@ -53,14 +53,20 @@ allow-wildcard-paths = true
 unknown-git = "deny"
 unknown-registry = "deny"
 # Exactly the git repositories the pinned GPUI needs (docs/upstream/zed.md),
-# plus the rPGP fork below. Each revision is fixed by Cargo.lock; keep the
-# GPUI entries in step with Zed.
+# plus the rPGP and proton-srp forks below. Each revision is fixed by
+# Cargo.lock; keep the GPUI entries in step with Zed.
 allow-git = [
     # rPGP fork at the head of rpgp/rpgp#573 (RustCrypto 0.14 stack,
     # crypto-bigint 0.7.6), pinned by `rev` in Cargo.toml, so that pgp no
     # longer pulls the crypto-bigint 0.5.5 of RUSTSEC-2026-0387. Drop it when
     # a crates.io pgp release contains #573 (docs/upstream/proton.md).
     "https://github.com/lazzurs/rpgp",
+    # proton-srp 0.8.4 from a fork (branch `zmail/crypto-bigint-0.7`, pinned
+    # by `rev` in Cargo.toml) ported to crypto-bigint 0.7.6, because the
+    # crates.io release depends on the crypto-bigint 0.5.5 of
+    # RUSTSEC-2026-0387 and upstream takes no contributions. Drop it when a
+    # proton-srp release moves off crypto-bigint 0.5 (docs/upstream/proton.md).
+    "https://github.com/lazzurs/proton-crypto-rs",
     # GPUI and its platform crates, pinned to a Zed stable release tag.
     "https://github.com/zed-industries/zed",
     # Zed forks GPUI depends on directly (Linux/Windows fonts, X11 input

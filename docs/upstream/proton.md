@@ -27,14 +27,23 @@ release tags at those commits.
 Rust crates that implement Proton protocols are pinned by `Cargo.lock`
 like any other dependency, not here:
 
-- `proton-srp` (crates.io, from
+- `proton-srp` (from
   [ProtonMail/proton-crypto-rs](https://github.com/ProtonMail/proton-crypto-rs)):
   SRP proofs and the bcrypt password hashes, with the default
-  `pgpinternal` feature off.
+  `pgpinternal` feature off. Taken from a fork for now; see below.
 - `pgp` (rPGP): OpenPGP, shared with ADR 0002. Taken from a fork for
   now; see below.
 
-## rPGP Fork
+## Forks for RUSTSEC-2026-0387
+
+[RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387)
+covers every `crypto-bigint` before 0.7.6 (timing side channels in
+subtraction, division and Montgomery multiplication). The newest
+crates.io releases of both Proton crypto dependencies still use
+`crypto-bigint` 0.5.5, so Zmail takes both from forks pinned by `rev`
+until upstream releases move. `deny.toml` allows both git sources.
+
+### rPGP
 
 `pgp` is a git dependency on
 [lazzurs/rpgp](https://github.com/lazzurs/rpgp) at
@@ -45,16 +54,15 @@ RustCrypto new releases". The fork holds that commit unchanged; Zmail
 carries no patches of its own.
 
 Why: `pgp` 0.21.0, the newest release, depends on `crypto-bigint` 0.5.5
-(through `cx448` and the `elliptic-curve` 0.13 curves), and
-[RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387)
-covers every `crypto-bigint` before 0.7.6. #573 moves rPGP to the
+(through `cx448` and the `elliptic-curve` 0.13 curves). #573 moves rPGP to the
 RustCrypto 0.14 stack (`crypto-bigint` 0.7.6, `elliptic-curve` 0.14,
 `rsa` 0.10.0-rc.19, `curve25519-dalek` 5, `rand` 0.10). Its own
 `[patch.crates-io]` for `rsa` does not apply to Zmail, which builds with
 crates.io `rsa` 0.10.0-rc.19. `deny.toml` allows the fork's git source.
 
-Zmail hands rPGP a `rand` 0.10 RNG through the `rand_pgp` workspace
-dependency; everything else keeps `rand` 0.8, which `proton-srp` uses.
+Zmail hands rPGP (and the proton-srp fork below) a `rand` 0.10 RNG
+through the `rand_pgp` workspace dependency; the rest of Zmail keeps
+`rand` 0.8.
 
 To move back once a `pgp` release on crates.io contains #573:
 
@@ -67,6 +75,45 @@ To move back once a `pgp` release on crates.io contains #573:
 4. Run the workspace tests (the key, unlock, sign, encrypt and send
    package tests in `zmail-proton-api`) and the Proton harness, then
    remove this section and update ADR 0004's crypto section.
+
+### proton-srp
+
+`proton-srp` is a git dependency on
+[lazzurs/proton-crypto-rs](https://github.com/lazzurs/proton-crypto-rs)
+at `95455e84a43b12124dfd6febac3875d212797038` (branch
+`zmail/crypto-bigint-0.7`): upstream `c468e282625206eda9b48d539949e6183b1da32a`
+(proton-srp 0.8.4) plus one commit that ports only `proton-srp` to
+`crypto-bigint` 0.7.6 and `rand` 0.10.
+
+Why: `proton-srp` 0.8.4, the newest release, depends on `crypto-bigint`
+0.5.5 and runs SRP's modular arithmetic on the hashed password and the
+ephemeral secrets with it. Upstream's repository is a read-only mirror
+that takes no pull requests or issues; the problem is reported to Proton
+through security@protonmail.com.
+
+The port keeps to `crypto-bigint`'s constant-time operations
+(`FixedMontyForm` `pow`/`mul`/`sub`, `rem`, `rem_wide`, `is_zero`, the
+constant-time comparisons). The one `_vartime` call is
+`random_mod_vartime` for the ephemeral secrets: 0.7 renamed 0.5's
+rejection-sampling `random_mod` to it, and its time depends only on the
+public modulus and rejected draws. The commit message gives the reasoning
+for each call. Upstream's test vectors pass unchanged, and so do Zmail's
+copies in `crates/zmail-proton-api/src/srp_vectors.rs`, whose replay RNG
+now implements `rand_core` 0.10's traits. The fork needs Rust 1.87
+(`crypto-bigint` 0.7.6's MSRV), which Zmail's toolchain exceeds.
+
+To move back once a crates.io `proton-srp` release no longer depends on
+`crypto-bigint` 0.5:
+
+1. Set `proton-srp = { version = "<release>", default-features = false }`
+   in the root `Cargo.toml` and run `cargo update -p proton-srp`.
+2. Remove `https://github.com/lazzurs/proton-crypto-rs` from `allow-git`
+   in `deny.toml`. Check that the `[[licenses.clarify]]` entry for
+   `proton-srp` still matches the published licence file.
+3. Match `ReplayRng` in `srp_vectors.rs` to the `rand_core` version that
+   release takes, and run the SRP vectors, the workspace tests and the
+   Proton harness.
+4. Remove this section and update ADR 0004's crypto section.
 
 ## Licences
 
@@ -120,5 +167,5 @@ Things that need extra attention on every bump:
 ## History
 
 - **October 20, 2026 (issue #237):** first pin, Bridge `v3.27.1`.
-- **October 24, 2026:** `pgp` moved to the rPGP fork above
+- **October 24, 2026:** `pgp` and `proton-srp` moved to the forks above
   (RUSTSEC-2026-0387).

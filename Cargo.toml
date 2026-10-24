@@ -67,10 +67,16 @@ mail-parser = "0.11.2"
 pgp = { git = "https://github.com/lazzurs/rpgp", rev = "696fe2f437e401f21cac8a1f32f9144a4b95d951", default-features = false }
 # Proton's SRP (ADR 0004); the modulus signature is checked with `pgp` in
 # zmail-proton-api, so the rPGP-based `pgpinternal` default stays off.
-proton-srp = { version = "0.8.4", default-features = false }
+# proton-srp 0.8.4 (the newest release) depends on the crypto-bigint 0.5.5 of
+# RUSTSEC-2026-0387, and upstream takes no contributions, so this is 0.8.4
+# from a fork ported to crypto-bigint 0.7.6 and rand 0.10 (branch
+# `zmail/crypto-bigint-0.7`). Back to crates.io once a proton-srp release
+# moves off crypto-bigint 0.5; see docs/upstream/proton.md.
+proton-srp = { git = "https://github.com/lazzurs/proton-crypto-rs", rev = "95455e84a43b12124dfd6febac3875d212797038", default-features = false }
 rand = "0.8"
-# The RNG that `pgp` takes (rand_core 0.10 traits since rpgp/rpgp#573), used
-# only where Zmail hands an RNG to rPGP; already in the tree through pgp.
+# The RNG traits (rand_core 0.10) that `pgp` (since rpgp/rpgp#573) and the
+# proton-srp fork take, used only where Zmail hands an RNG to either; already
+# in the tree through pgp.
 rand_pgp = { package = "rand", version = "0.10", default-features = false, features = ["thread_rng"] }
 # Autoconfig XML. Already in the tree through GPUI (usvg); it never fetches
 # external entities, and zmail-autodiscover also turns DTDs off.

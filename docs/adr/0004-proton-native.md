@@ -227,18 +227,24 @@ message decryption and Zmail's own OpenPGP support use the same
 implementation, the same advisory exceptions and the same audit
 history.
 
-**rPGP fork (October 24, 2026).** `pgp` 0.21.0, the newest release,
-pulls `crypto-bigint` 0.5.5 (through `cx448` and the `elliptic-curve`
-0.13 curves), which `RUSTSEC-2026-0387` covers: timing side channels in
-subtraction, division and Montgomery multiplication, fixed only in
-0.7.6. Rob decided against ignoring it. Zmail instead takes `pgp` from a
-fork pinned to the head of rpgp/rpgp#573, which moves rPGP to the
-RustCrypto 0.14 stack (`crypto-bigint` 0.7.6, `rsa` 0.10.0-rc.19,
-`curve25519-dalek` 5), until a crates.io release contains it.
-`docs/upstream/proton.md` records the revision and how to move back. The
-key port is unchanged apart from handing rPGP a `rand` 0.10 RNG.
-`proton-srp` 0.8.4 (the newest release) still depends on `crypto-bigint`
-0.5.5 for SRP, so the fork alone does not clear the advisory.
+**Forks for `RUSTSEC-2026-0387` (October 24, 2026).** `pgp` 0.21.0,
+the newest release, pulls `crypto-bigint` 0.5.5 (through `cx448` and the
+`elliptic-curve` 0.13 curves), which `RUSTSEC-2026-0387` covers: timing
+side channels in subtraction, division and Montgomery multiplication,
+fixed only in 0.7.6. Rob decided against ignoring it. Zmail instead
+takes `pgp` from a fork pinned to the head of rpgp/rpgp#573, which moves
+rPGP to the RustCrypto 0.14 stack (`crypto-bigint` 0.7.6, `rsa`
+0.10.0-rc.19, `curve25519-dalek` 5), until a crates.io release contains
+it. The key port is unchanged apart from handing rPGP a `rand` 0.10 RNG.
+`proton-srp` 0.8.4, also the newest release, depends on `crypto-bigint`
+0.5.5 for SRP itself, and Proton's repository takes no contributions, so
+Zmail takes it from a fork too: 0.8.4 with one commit that ports it to
+`crypto-bigint` 0.7.6 and `rand` 0.10. The port keeps to constant-time
+arithmetic on secrets; only the rejection sampler that draws the
+ephemeral secrets varies in time, and then only with the public modulus
+and the rejected draws, as before. The go-srp and Python SRP vectors pass
+unchanged. `docs/upstream/proton.md` records both revisions and how to
+move back.
 
 **Zmail-specific key check.** go-crypto validates private key material
 against the public key when it decrypts a key (gopenpgp's `Key.Check` is
