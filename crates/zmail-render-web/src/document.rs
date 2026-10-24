@@ -546,6 +546,7 @@ mod tests {
                     .to_owned(),
             ),
             html_is_legacy: false,
+            remote_content_sender_allowed: false,
             inline_parts: vec![
                 InlinePart::new("logo@x", "IMAGE/PNG", 3, Arc::new(Bytes(b"png"))),
                 InlinePart::new("doc@x", "application/pdf", 3, Arc::new(Bytes(b"pdf"))),

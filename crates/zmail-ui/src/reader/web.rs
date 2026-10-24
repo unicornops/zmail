@@ -50,7 +50,7 @@ pub(super) struct ReaderWeb {
     /// The app is in a dark theme.
     dark: bool,
     /// Each message's page, while the conversation is open.
-    documents: HashMap<i64, Rc<WebDocument>>,
+    documents: HashMap<i64, (RemoteContentDecision, Rc<WebDocument>)>,
     /// Each page's measured height.
     heights: HashMap<i64, f32>,
     /// Messages switched to the Simple view.
@@ -219,20 +219,26 @@ impl ReaderView {
             foreground: colors.foreground,
             link: colors.accent,
         };
+        // The user's choice for this message: "Load remote content" (this
+        // session) or "Always for this sender" (stored). The message was
+        // prepared with remote content blocked; an allowed decision makes
+        // Zmail fetch its public https images for the page.
+        let remote = RemoteContentDecision::new(
+            self.state.remote_content_messages.contains(&message.id),
+            message.remote_content_sender_allowed,
+        );
         let document = match self.web.documents.get(&message.id) {
-            Some(document) if document.appearance == appearance => document.clone(),
+            Some((decision, document))
+                if document.appearance == appearance && *decision == remote =>
+            {
+                document.clone()
+            }
             _ => {
-                // Remote content stays blocked until the reader has the
-                // user's decision (ADR 0006 Phase 0, remote policy).
-                let document = Rc::new(
-                    WebDocument::from_prepared(
-                        prepared,
-                        appearance,
-                        RemoteContentDecision::Blocked,
-                    )
-                    .ok()?,
-                );
-                self.web.documents.insert(message.id, document.clone());
+                let document =
+                    Rc::new(WebDocument::from_prepared(prepared, appearance, remote).ok()?);
+                self.web
+                    .documents
+                    .insert(message.id, (remote, document.clone()));
                 document
             }
         };
