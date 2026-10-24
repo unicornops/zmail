@@ -1629,7 +1629,10 @@ mod tests {
             .as_deref()
             .context("the HTML is stored")?;
         assert!(html.contains("<table"), "{html}");
-        assert!(html.contains("blocked://example.org/weekly/42"), "{html}");
+        assert!(
+            html.contains("href=\"https://example.org/weekly/42\""),
+            "{html}"
+        );
         let (_, menu) = seeded(FixtureView::ReaderHtmlMenu)?;
         assert!(matches!(menu, InitialView::ThreadMessageMenu(id) if id == thread_id));
         let (_, scrolled) = seeded(FixtureView::ReaderHtmlScrolled)?;

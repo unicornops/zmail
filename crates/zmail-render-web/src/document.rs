@@ -12,6 +12,7 @@
 use std::{collections::HashMap, fmt::Write as _, net::IpAddr, sync::Arc};
 
 use url::{Host, Url};
+use zmail_render::{HtmlUnavailable, PreparedMessage};
 
 /// The scheme Zmail serves message pages from.
 pub const MAIL_SCHEME: &str = "zmail-mail";
@@ -75,6 +76,52 @@ impl Default for Appearance {
 }
 
 impl WebDocument {
+    /// The document for a prepared message: its sanitised HTML, its inline
+    /// image parts (a part that cannot be read, or is not an image, is
+    /// left out) and the origins its remote content may load from, which
+    /// is none unless the user allowed it.
+    pub fn from_prepared(
+        prepared: &PreparedMessage,
+        appearance: Appearance,
+    ) -> Result<Self, HtmlUnavailable> {
+        let html = prepared.html()?;
+        let resources = prepared
+            .inline_parts
+            .iter()
+            .filter(|part| part.content_type.to_ascii_lowercase().starts_with("image/"))
+            .filter_map(|part| match part.read() {
+                Ok(bytes) => Some(InlineResource {
+                    content_id: part.content_id.clone(),
+                    mime_type: part.content_type.to_ascii_lowercase(),
+                    data: Arc::from(bytes),
+                }),
+                Err(error) => {
+                    eprintln!(
+                        "zmail: web renderer: inline part {} could not be read: {error:#}",
+                        part.content_id
+                    );
+                    None
+                }
+            })
+            .collect();
+        let remote_origins = if prepared.remote.decision.allows() {
+            prepared
+                .remote
+                .allowed_origins()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            html: html.to_owned(),
+            resources,
+            remote_origins,
+            appearance,
+        })
+    }
+
     /// A document with no inline parts and remote content blocked.
     pub fn new(html: impl Into<String>, appearance: Appearance) -> Self {
         Self {
@@ -516,6 +563,68 @@ mod tests {
         assert_eq!(parse_link_id("ZMAIL-LINK:12"), Some(12));
         assert_eq!(parse_link_id("zmail-link:x"), None);
         assert_eq!(parse_link_id("https://example.com/3"), None);
+    }
+
+    struct Bytes(&'static [u8]);
+
+    impl zmail_render::PartBytes for Bytes {
+        fn read(&self) -> anyhow::Result<Vec<u8>> {
+            Ok(self.0.to_vec())
+        }
+    }
+
+    #[test]
+    fn a_prepared_message_brings_its_html_images_and_allowed_origins() {
+        use zmail_render::{
+            InlinePart, PrepareOptions, RemoteContentDecision, RenderSource, prepare,
+        };
+        let source = RenderSource {
+            message_id: 7,
+            body_text: None,
+            html: Some(
+                "<p><a href=\"https://example.com/x\">x</a><img src=\"cid:logo@x\">\
+                 <img src=\"https://img.example.com/a.png\"></p>"
+                    .to_owned(),
+            ),
+            html_is_legacy: false,
+            inline_parts: vec![
+                InlinePart::new("logo@x", "IMAGE/PNG", 3, Arc::new(Bytes(b"png"))),
+                InlinePart::new("doc@x", "application/pdf", 3, Arc::new(Bytes(b"pdf"))),
+            ],
+        };
+        let blocked = prepare(&source, &PrepareOptions::default());
+        let document =
+            WebDocument::from_prepared(&blocked, Appearance::default()).expect("has HTML");
+        assert!(document.html.contains("zmail-link:0"), "{}", document.html);
+        assert!(
+            !document.html.contains("img.example.com"),
+            "{}",
+            document.html
+        );
+        assert!(document.remote_origins.is_empty());
+        assert_eq!(document.resources.len(), 1);
+        assert_eq!(document.resources[0].mime_type, "image/png");
+
+        let allowed = prepare(
+            &source,
+            &PrepareOptions {
+                remote: RemoteContentDecision::AllowedForMessage,
+                ..PrepareOptions::default()
+            },
+        );
+        let document =
+            WebDocument::from_prepared(&allowed, Appearance::default()).expect("has HTML");
+        assert_eq!(document.allowed_origins(), ["https://img.example.com"]);
+
+        let plain = prepare(
+            &RenderSource {
+                message_id: 8,
+                body_text: Some("text".to_owned()),
+                ..RenderSource::default()
+            },
+            &PrepareOptions::default(),
+        );
+        assert!(WebDocument::from_prepared(&plain, Appearance::default()).is_err());
     }
 
     #[test]

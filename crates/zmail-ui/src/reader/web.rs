@@ -2,7 +2,10 @@
 //!
 //! On macOS an expanded HTML message shows its body in a locked-down
 //! `WKWebView` placed in the conversation list by GPUI's native window
-//! composition. The body is one list item as tall as the measured page;
+//! composition. What the page shows is the message prepared by
+//! `zmail_render::prepare` (sanitised HTML whose links are `zmail-link:<n>`
+//! ids, blocked remote content); a link click comes back as its id and
+//! opens the same dialog as a link in the text view. The body is one list item as tall as the measured page;
 //! the reader's popovers, dialogs and tooltips draw above it. Other
 //! platforms, and messages the user switched to the Simple view (message
 //! More menu), keep the text view. A page that cannot be shown falls back
@@ -16,8 +19,11 @@ use std::{
 };
 
 use gpui::{AnyElement, AppContext as _, Context, IntoElement, Window, px};
-use zmail_core::ThreadMessage;
-use zmail_render_web::{Appearance, WebDocument, WebEvent, WebHost};
+use zmail_core::{ThreadMessage, ThreadView};
+use zmail_render::{
+    MessageRenderer, PrepareOptions, PreparedMessage, RenderSource, ThemeHint, prepare,
+};
+use zmail_render_web::{Appearance, WebDocument, WebEvent, WebHost, WebRenderer};
 
 use super::ReaderView;
 use super::links::{LinkPrompt, link_target};
@@ -33,6 +39,9 @@ pub(super) struct ReaderWeb {
     enabled: bool,
     /// Created at the first render, which has the window.
     host: Option<WebHost>,
+    /// Each HTML message of the open conversation, prepared, with the
+    /// stored HTML it was prepared from.
+    prepared: HashMap<i64, (String, Rc<PreparedMessage>)>,
     /// Each message's page, while the conversation is open.
     documents: HashMap<i64, Rc<WebDocument>>,
     /// Each page's measured height.
@@ -54,6 +63,7 @@ impl Default for ReaderWeb {
             // use the text view on every OS.
             enabled: zmail_render_web::SUPPORTED && !disabled && !cfg!(test),
             host: None,
+            prepared: HashMap::new(),
             documents: HashMap::new(),
             heights: HashMap::new(),
             simple: HashSet::new(),
@@ -67,6 +77,7 @@ impl ReaderWeb {
     /// Forgets everything but `message_ids` (a new conversation keeps
     /// nothing).
     pub(super) fn retain(&mut self, message_ids: &HashSet<i64>) {
+        self.prepared.retain(|id, _| message_ids.contains(id));
         self.documents.retain(|id, _| message_ids.contains(id));
         self.heights.retain(|id, _| message_ids.contains(id));
         self.simple.retain(|id| message_ids.contains(id));
@@ -90,17 +101,61 @@ impl ReaderWeb {
     pub(super) fn host(&self) -> Option<&WebHost> {
         self.host.as_ref()
     }
-}
 
-/// The HTML a message's formatted view shows: the sanitised HTML stored
-/// for messages without a plain-text part.
-fn html_source(message: &ThreadMessage) -> Option<&str> {
-    message
-        .body_text
-        .is_none()
-        .then_some(message.sanitized_html.as_deref())
-        .flatten()
-        .filter(|html| !html.trim().is_empty())
+    /// Prepares the HTML messages of `thread` that are new or changed.
+    /// Only where the web renderer runs: elsewhere nothing is prepared and
+    /// every message keeps the text view.
+    pub(super) fn prepare(&mut self, thread: Option<&ThreadView>, dark: bool) {
+        if !self.enabled {
+            return;
+        }
+        let Some(thread) = thread else {
+            return;
+        };
+        for message in &thread.messages {
+            let Some(html) = message
+                .sanitized_html
+                .as_deref()
+                .filter(|html| !html.trim().is_empty())
+            else {
+                self.prepared.remove(&message.id);
+                continue;
+            };
+            if self
+                .prepared
+                .get(&message.id)
+                .is_some_and(|(source, _)| source == html)
+            {
+                continue;
+            }
+            // The store keeps the sanitised HTML; the original part and
+            // its inline parts come with the store's render source
+            // (ADR 0006 Phase 0, next step). Bodies stored before ADR 0006
+            // have `blocked://` links, which the sanitiser reads back.
+            let source = RenderSource {
+                message_id: message.id,
+                body_text: message.body_text.clone(),
+                html: Some(html.to_owned()),
+                html_is_legacy: true,
+                inline_parts: Vec::new(),
+            };
+            let options = PrepareOptions {
+                theme: if dark {
+                    ThemeHint::Dark
+                } else {
+                    ThemeHint::Light
+                },
+                ..PrepareOptions::default()
+            };
+            let prepared = prepare(&source, &options);
+            if let Err(reason) = prepared.html() {
+                eprintln!("zmail: message {} shows as text: {reason}", message.id);
+            }
+            self.prepared
+                .insert(message.id, (html.to_owned(), Rc::new(prepared)));
+            self.documents.remove(&message.id);
+        }
+    }
 }
 
 impl ReaderView {
@@ -131,7 +186,11 @@ impl ReaderView {
     pub(super) fn can_show_formatted(&self, message: &ThreadMessage) -> bool {
         self.web.enabled
             && self.web.host.as_ref().is_none_or(WebHost::is_available)
-            && html_source(message).is_some()
+            && self
+                .web
+                .prepared
+                .get(&message.id)
+                .is_some_and(|(_, prepared)| WebRenderer.accepts(prepared))
     }
 
     /// Whether `message`'s body shows in a web view.
@@ -152,7 +211,7 @@ impl ReaderView {
             return None;
         }
         let host = self.web.host.clone()?;
-        let html = html_source(message)?;
+        let (_, prepared) = self.web.prepared.get(&message.id)?;
         let appearance = Appearance {
             dark: !ComponentTheme::get(cx).is_light,
             background: colors.surface,
@@ -160,11 +219,9 @@ impl ReaderView {
             link: colors.accent,
         };
         let document = match self.web.documents.get(&message.id) {
-            Some(document) if document.html == html && document.appearance == appearance => {
-                document.clone()
-            }
+            Some(document) if document.appearance == appearance => document.clone(),
             _ => {
-                let document = Rc::new(WebDocument::new(html, appearance));
+                let document = Rc::new(WebDocument::from_prepared(prepared, appearance).ok()?);
                 self.web.documents.insert(message.id, document.clone());
                 document
             }
@@ -300,7 +357,9 @@ impl ReaderView {
                 window.focus(&self.focus_handle, cx);
                 cx.notify();
             }
-            WebEvent::LinkActivated { url } => self.web_link_clicked(&url, window, cx),
+            WebEvent::LinkActivated { url } => {
+                self.web_link_clicked(message_id, &url, window, cx);
+            }
             WebEvent::ContentProcessTerminated => {
                 self.web_failed(message_id, index, "the web engine stopped".to_owned(), cx);
             }
@@ -325,14 +384,45 @@ impl ReaderView {
         self.relayout_message(index, cx);
     }
 
-    /// A link in a page was clicked: the open-link dialog shows where it
-    /// goes, exactly like a link in the text view.
-    fn web_link_clicked(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = link_target(url) else {
-            eprintln!("zmail: web renderer: ignored a link to {url:?}");
+    /// A link in a page was clicked: the page reports its `zmail-link:<n>`
+    /// id, and the open-link dialog shows where it really goes, with the
+    /// look-alike warning, exactly like a link in the text view.
+    fn web_link_clicked(
+        &mut self,
+        message_id: i64,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, prepared)) = self.web.prepared.get(&message_id) else {
             return;
         };
-        self.link_prompt = Some(LinkPrompt::new(&target, &target));
+        let Some(id) = zmail_render_web::document::parse_link_id(url) else {
+            eprintln!("zmail: web renderer: ignored a click on {url:?}, not a link id");
+            return;
+        };
+        // Only web and mail links open (no tel: or sms:), as in the text.
+        let Some(target) = prepared
+            .link(id)
+            .and_then(|target| link_target(&target.url))
+        else {
+            return;
+        };
+        // The link's text, for the look-alike check: from the text derived
+        // from the HTML, where the sanitiser recorded each link's runs.
+        let text = prepared
+            .text_links
+            .iter()
+            .filter(|link| link.link == id)
+            .filter_map(|link| prepared.text.get(link.range.clone()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = if text.trim().is_empty() {
+            target.clone()
+        } else {
+            text
+        };
+        self.link_prompt = Some(LinkPrompt::new(&text, &target));
         self.link_modal.open(window, cx);
         cx.notify();
     }

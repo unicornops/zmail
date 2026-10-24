@@ -208,6 +208,8 @@ impl ReaderView {
             .map(|thread| thread.messages.iter().map(|message| message.id).collect())
             .unwrap_or_default();
         self.web.retain(&message_ids);
+        self.web
+            .prepare(thread, !crate::components::ComponentTheme::get(cx).is_light);
         if self.conversation.is_for(thread) {
             if let Some(thread) = thread {
                 self.conversation.update(thread);

@@ -11,6 +11,7 @@ description = "Zmail's web renderer for HTML mail: a locked-down OS web view beh
 anyhow.workspace = true
 gpui.workspace = true
 url.workspace = true
+zmail-render = { path = "../zmail-render" }
 
 # The macOS backend (ADR 0006: objc2 and its AppKit, Foundation and WebKit
 # bindings are approved for it). All of its `unsafe` is in
