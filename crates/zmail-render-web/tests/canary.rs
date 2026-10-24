@@ -337,7 +337,7 @@ mod macos {
             Appearance::default(),
             RemoteContentDecision::AllowedForMessage,
         )
-        .context("the rebinding page has HTML")?;
+        .map_err(|reason| anyhow::anyhow!("the rebinding page has no HTML: {reason}"))?;
         println!(
             "canary: rebinding page fetches {:?}",
             allowed.remote.iter().flatten().collect::<Vec<_>>()
