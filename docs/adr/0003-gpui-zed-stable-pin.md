@@ -4,6 +4,11 @@
 
 Accepted on October 15, 2026 (issue #113).
 
+Temporarily set aside in October 2026: for the macOS web renderer
+(ADR 0006) GPUI is pinned to the head of Zed PR #62379 until a Zed stable
+release contains it. See "Deviation From ADR 0003" in
+[`docs/upstream/zed.md`](../upstream/zed.md).
+
 ## Context
 
 Zmail's shell is built on GPUI. Until now it used `gpui 0.2.2` from

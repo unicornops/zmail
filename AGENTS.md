@@ -137,6 +137,8 @@ macOS note:
 GPUI pin:
 
 - GPUI is a git dependency pinned to a Zed stable release tag (`tag = "vX.Y.Z"` on the `gpui` and `gpui_platform` lines of `Cargo.toml`), not the crates.io `gpui` crate. Keep both lines on the same tag.
+- Current deviation: for the macOS web renderer (ADR 0006) both lines pin the head of Zed PR #62379 (native window composition) by `rev` on the `huacnlee/zed` fork, until a Zed stable release contains it; see "Deviation From ADR 0003" in `docs/upstream/zed.md`. Keep both lines on the same commit.
+- Current deviation: for the macOS web renderer (ADR 0006) both lines pin the head of Zed PR #62379 (native window composition) by `rev` on the `huacnlee/zed` fork, until a Zed stable release contains it; see "Deviation From ADR 0003" in `docs/upstream/zed.md`. Keep both lines on the same commit.
 - The weekly `zed-upstream` workflow (`scripts/bump-zed-gpui.sh`) opens a `chore(deps): bump Zed GPUI to vX.Y.Z` pull request when Zed ships a newer stable release; see `docs/upstream/zed.md` for manual bumps.
 - Start the app with `gpui_platform::application()`. Do not use `Application::new_inaccessible`, which disables AccessKit screen-reader support.
 
