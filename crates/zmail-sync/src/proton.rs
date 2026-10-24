@@ -265,7 +265,8 @@ impl SyncService {
             let Credentials::Proton(session) = self.connect_proton(target).await? else {
                 anyhow::bail!("Proton accounts need a Proton session");
             };
-            zmail_proton::submit_outgoing_message(&session, message).await
+            let trusted = self.inner.store.trusted_recipient_keys(target.id)?;
+            zmail_proton::submit_outgoing_message(&session, message, &trusted).await
         }
         #[cfg(not(feature = "proton"))]
         {

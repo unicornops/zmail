@@ -25,13 +25,16 @@
 // leaves it. The MIME body for PGP/MIME and clear MIME recipients is
 // written from the composed message (`outgoing.rs`) rather than taken from
 // an SMTP client.
+// Modified by UnicornOps on 2026-10-24: takes the account's key trust
+// decisions for recipients whose contact card pins other keys (see
+// `send_prefs.rs`, ADR 0004).
 
 //! Sending a message through Proton: Bridge's SMTP service.
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow, bail};
-use zmail_core::OutgoingMessage;
+use zmail_core::{OutgoingMessage, key_change::KeyTrust};
 use zmail_proton_api::{
     ATTACHMENT_DISPOSITION, Address, AddressStatus, CardType, Client, ContactSettings,
     CreateAttachmentReq, CreateDraftAction, CreateDraftReq, DraftTemplate, EmailAddress,
@@ -42,7 +45,7 @@ use zmail_proton_api::{
 use crate::{
     ProtonSession,
     outgoing::{MimeSource, OutgoingFile, build_mime_body},
-    send_prefs::build_send_prefs,
+    send_prefs::{Recipient, build_send_prefs},
 };
 
 /// `errCodeAddressDoesNotExist`.
@@ -55,8 +58,13 @@ const MESSAGE_TOO_LARGE: i64 = 2024;
 const INVALID_LIST_OF_RECIPIENTS: i64 = 2002;
 
 /// Sends a composed message from one of the account's addresses
-/// (`smtpSendMail`).
-pub(crate) async fn send_message(session: &ProtonSession, message: &OutgoingMessage) -> Result<()> {
+/// (`smtpSendMail`). `trusted` holds the served keys the user trusted for
+/// recipients whose contact card pins other keys.
+pub(crate) async fn send_message(
+    session: &ProtonSession,
+    message: &OutgoingMessage,
+    trusted: &[KeyTrust],
+) -> Result<()> {
     let client = session.client();
     let mut addresses = client.get_addresses().await?;
     addresses.sort_by_key(|address| address.order);
@@ -131,6 +139,7 @@ pub(crate) async fn send_message(session: &ProtonSession, message: &OutgoingMess
             emails: &emails,
             from,
             to: &to,
+            trusted,
         },
         message,
         &attachments,
@@ -171,6 +180,8 @@ struct SendContext<'a> {
     from: &'a str,
     /// Every recipient (the SMTP envelope).
     to: &'a [String],
+    /// The served keys the user trusted despite a contact card's pins.
+    trusted: &'a [KeyTrust],
 }
 
 /// Sends the message with the given address key (`sendWithKey`).
@@ -187,6 +198,7 @@ async fn send_with_key(
         emails,
         from,
         to,
+        trusted,
     } = *context;
     // A plain-text message: the body is the plain body and the rich body.
     let mime_type = TEXT_PLAIN;
@@ -228,7 +240,7 @@ async fn send_with_key(
         let att_keys = create_attachments(client, addr_key, &draft.metadata.id, attachments)
             .await
             .context("failed to create attachments")?;
-        let recipients = get_recipients(client, user_kr, settings, &draft)
+        let recipients = get_recipients(client, user_kr, settings, &draft, trusted)
             .await
             .context("failed to get recipients")?;
         create_send_req(addr_key, &mime_body, body, body, &recipients, &att_keys)
@@ -386,6 +398,7 @@ async fn get_recipients(
     user_kr: &KeyRing,
     settings: &MailSettings,
     draft: &Message,
+    trusted: &[KeyTrust],
 ) -> Result<Recipients> {
     let meta = &draft.metadata;
     let mut recipients = Recipients::new();
@@ -413,6 +426,10 @@ async fn get_recipients(
             .await
             .with_context(|| format!("failed to get contact settings for {recipient}"))?;
         let prefs = build_send_prefs(
+            &Recipient {
+                address: &recipient,
+                trusted,
+            },
             &contact_settings,
             settings,
             &pub_keys,

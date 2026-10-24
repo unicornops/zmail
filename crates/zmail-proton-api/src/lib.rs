@@ -30,6 +30,7 @@ mod address;
 mod attachment;
 mod auth;
 mod boolean;
+mod cert;
 mod client;
 mod config;
 mod contact;

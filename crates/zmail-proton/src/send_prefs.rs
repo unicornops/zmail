@@ -7,10 +7,17 @@
 // Modified by UnicornOps on 2026-10-21: rewritten in Rust. Contact keys
 // arrive parsed, and an unknown contact scheme is an error where Bridge
 // panics. Bridge's comments are kept with the rules they explain.
+// Modified by UnicornOps on 2026-10-24: `pickSendingKey` only considers
+// served keys the API flags as active that can encrypt now, and when the
+// contact card pins keys and none is served it fails with
+// `PinnedKeyChanged` unless the user trusted the served key for this
+// recipient, where Bridge sends to the first served key (ADR 0004). For
+// WKD keys the key is only picked when the mail is encrypted.
 
 //! Deciding how to send to each recipient: Bridge's send preferences.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
+use zmail_core::key_change::{KeyTrust, PinnedKeyChanged};
 use zmail_proton_api::{
     ContactSettings, EncryptionScheme, MULTIPART_MIXED, MailSettings, PublicKey, RecipientKey,
     SendPreferences, SignatureType, TEXT_PLAIN,
@@ -58,8 +65,18 @@ fn new_contact_settings(settings: &ContactSettings) -> Result<VCardData> {
     Ok(metadata)
 }
 
+/// The recipient a send preference is for, and the served keys the user
+/// trusted although the contact card pins others.
+pub(crate) struct Recipient<'a> {
+    /// The recipient's address.
+    pub(crate) address: &'a str,
+    /// The account's key trust decisions.
+    pub(crate) trusted: &'a [KeyTrust],
+}
+
 /// Works out how to send to one recipient (`buildSendPrefs`).
 pub(crate) fn build_send_prefs(
+    recipient: &Recipient<'_>,
     contact_settings: &ContactSettings,
     mail_settings: &MailSettings,
     pub_keys: &[PublicKey],
@@ -67,13 +84,16 @@ pub(crate) fn build_send_prefs(
     is_internal: bool,
 ) -> Result<SendPreferences> {
     let mut builder = SendPrefsBuilder::default();
+    // `context` rather than Bridge's flattened message, so a
+    // `PinnedKeyChanged` stays findable in the error chain.
     builder
         .set_pgp_settings(
+            recipient,
             new_contact_settings(contact_settings)?,
             pub_keys,
             is_internal,
         )
-        .map_err(|error| anyhow!("failed to set PGP settings: {error:#}"))?;
+        .context("failed to set PGP settings")?;
     builder.set_encryption_preferences(mail_settings);
     builder.set_mime_preferences(mime_type);
     Ok(builder.build())
@@ -173,6 +193,7 @@ impl SendPrefsBuilder {
     /// the API via the GET KEYS route (`setPGPSettings`).
     fn set_pgp_settings(
         &mut self,
+        recipient: &Recipient<'_>,
         vcard: VCardData,
         api_keys: &[PublicKey],
         is_internal: bool,
@@ -180,7 +201,7 @@ impl SendPrefsBuilder {
         // Sending internal. We are guaranteed to always receive API keys.
         if is_internal {
             self.internal = true;
-            return self.set_internal_pgp_settings(&vcard, api_keys);
+            return self.set_internal_pgp_settings(recipient, &vcard, api_keys);
         }
 
         // Sending external but with keys supplied by WKD. Treated pretty
@@ -188,7 +209,7 @@ impl SendPrefsBuilder {
         if !api_keys.is_empty() {
             let usable = filter_usable_wkd_keys(api_keys);
             if !usable.is_empty() {
-                return self.set_external_pgp_settings_with_wkd_keys(&vcard, &usable);
+                return self.set_external_pgp_settings_with_wkd_keys(recipient, &vcard, &usable);
             }
         }
 
@@ -201,6 +222,7 @@ impl SendPrefsBuilder {
     /// registered with Proton (`setInternalPGPSettings`).
     fn set_internal_pgp_settings(
         &mut self,
+        recipient: &Recipient<'_>,
         vcard: &VCardData,
         api_keys: &[PublicKey],
     ) -> Result<()> {
@@ -224,12 +246,13 @@ impl SendPrefsBuilder {
             self.with_mime_type(&vcard.mime_type);
         }
 
-        self.public_key = Some(pick_sending_key(vcard, api_keys)?);
+        self.public_key = Some(pick_sending_key(recipient, vcard, api_keys)?);
         Ok(())
     }
 
     fn set_external_pgp_settings_with_wkd_keys(
         &mut self,
+        recipient: &Recipient<'_>,
         vcard: &VCardData,
         api_keys: &[PublicKey],
     ) -> Result<()> {
@@ -263,7 +286,11 @@ impl SendPrefsBuilder {
             _ => {}
         }
 
-        self.public_key = Some(pick_sending_key(vcard, api_keys)?);
+        // The key is only used to encrypt, and picking it can stop the
+        // send (a pinned key that changed), so Zmail only picks it then.
+        if vcard.encrypt_untrusted {
+            self.public_key = Some(pick_sending_key(recipient, vcard, api_keys)?);
+        }
         Ok(())
     }
 
@@ -388,22 +415,61 @@ fn filter_usable_wkd_keys(raw_api_keys: &[PublicKey]) -> Vec<PublicKey> {
 ///  2. If there are pinned keys in the vCard but no matching keys were
 ///     served by the API, we use one of the API keys but first show a
 ///     modal to the user to ask them to confirm that they trust the API
-///     key. (Bridge does not ask either.)
+///     key. (Bridge does not ask and sends to the first API key; Zmail
+///     fails with [`PinnedKeyChanged`] until the user trusts that key for
+///     this recipient, and then uses it.)
 ///  3. If there are no pinned keys, then the client should encrypt with
 ///     the first valid key served by the API (in principle the server
 ///     already validates the keys and the first one provided should be
 ///     valid).
-fn pick_sending_key(vcard: &VCardData, raw_api_keys: &[PublicKey]) -> Result<RecipientKey> {
-    let api_keys = raw_api_keys
-        .iter()
-        .map(|key| RecipientKey::from_armored(&key.public_key))
-        .collect::<Result<Vec<_>, _>>()?;
-    let matched = match_fingerprints(&vcard.keys, &api_keys);
-    matched
+///
+/// Zmail only takes the served keys the API flags as active
+/// (go-proton-api's `KeyStateActive`: "the key is still in use (i.e. not
+/// obsolete, we can encrypt messages to it)") and that have a key mail
+/// can be encrypted to now, rather than trusting the server to have
+/// filtered them.
+fn pick_sending_key(
+    recipient: &Recipient<'_>,
+    vcard: &VCardData,
+    raw_api_keys: &[PublicKey],
+) -> Result<RecipientKey> {
+    let mut api_keys = Vec::new();
+    for key in raw_api_keys {
+        let parsed = RecipientKey::from_armored(&key.public_key)?;
+        if key.flags.is_active() && parsed.can_encrypt() {
+            api_keys.push(parsed);
+        }
+    }
+    if api_keys.is_empty() {
+        bail!(
+            "no key served for {} can be encrypted to",
+            recipient.address
+        );
+    }
+    if vcard.keys.is_empty() {
+        return Ok(api_keys.swap_remove(0));
+    }
+    if let Some(key) = match_fingerprints(&vcard.keys, &api_keys)
         .into_iter()
         .next()
-        .or_else(|| api_keys.into_iter().next())
-        .ok_or_else(|| anyhow!("an API key is necessary but wasn't provided"))
+    {
+        return Ok(key);
+    }
+    let trusted = api_keys.iter().find(|key| {
+        recipient
+            .trusted
+            .iter()
+            .any(|trust| trust.covers(recipient.address, &key.fingerprint()))
+    });
+    match trusted {
+        Some(key) => Ok(key.clone()),
+        None => Err(PinnedKeyChanged::new(
+            recipient.address,
+            vcard.keys.iter().map(RecipientKey::fingerprint),
+            api_keys.iter().map(RecipientKey::fingerprint),
+        )
+        .into()),
+    }
 }
 
 /// The keys of `b` whose fingerprint is also in `a` (`matchFingerprints`).
@@ -424,14 +490,33 @@ pub(crate) mod tests {
     use super::*;
     use zmail_proton_api::KeyFlags;
 
+    /// A recipient with no key trust decisions.
+    const BOB: Recipient<'static> = Recipient {
+        address: "bob@example.org",
+        trusted: &[],
+    };
+
     pub(crate) const KEY_A: &str = include_str!("testdata/public-key-a.asc");
     const KEY_B: &str = include_str!("testdata/public-key-b.asc");
+    const KEY_C: &str = include_str!("testdata/public-key-c.asc");
+    /// A valid key with nothing to encrypt to: an EdDSA primary key alone.
+    const KEY_SIGN_ONLY: &str = include_str!("testdata/public-key-sign-only.asc");
 
     fn api_key(armored: &str) -> PublicKey {
+        flagged(armored, KeyFlags::TRUSTED | KeyFlags::ACTIVE)
+    }
+
+    fn flagged(armored: &str, flags: u32) -> PublicKey {
         PublicKey {
-            flags: KeyFlags(3),
+            flags: KeyFlags(flags),
             public_key: armored.to_owned(),
         }
+    }
+
+    fn fingerprint(armored: &str) -> String {
+        RecipientKey::from_armored(armored)
+            .expect("key")
+            .fingerprint()
     }
 
     fn settings(sign: i64, pgp_scheme: EncryptionScheme, draft: &str) -> MailSettings {
@@ -469,6 +554,7 @@ pub(crate) mod tests {
     fn internal_recipients_are_encrypted_and_signed() {
         // "internal, no contact" in Bridge's table.
         let prefs = build_send_prefs(
+            &BOB,
             &ContactSettings::default(),
             &settings(0, EncryptionScheme(0), "text/html"),
             &[api_key(KEY_A)],
@@ -494,6 +580,7 @@ pub(crate) mod tests {
             ..ContactSettings::default()
         };
         let prefs = build_send_prefs(
+            &BOB,
             &pinned,
             &settings(0, EncryptionScheme(0), "text/html"),
             &[api_key(KEY_A), api_key(KEY_B)],
@@ -514,6 +601,7 @@ pub(crate) mod tests {
 
         assert!(
             build_send_prefs(
+                &BOB,
                 &ContactSettings::default(),
                 &MailSettings::default(),
                 &[],
@@ -529,6 +617,7 @@ pub(crate) mod tests {
     fn external_recipients_follow_the_sign_setting() {
         // "external, no contact, no sign": clear, in the composer's format.
         let prefs = build_send_prefs(
+            &BOB,
             &ContactSettings::default(),
             &settings(0, EncryptionScheme(0), "text/html"),
             &[],
@@ -549,6 +638,7 @@ pub(crate) mod tests {
 
         // "external, no contact, sign" with the default scheme: clear MIME.
         let prefs = build_send_prefs(
+            &BOB,
             &ContactSettings::default(),
             &settings(1, EncryptionScheme::PGP_MIME, "text/html"),
             &[],
@@ -569,6 +659,7 @@ pub(crate) mod tests {
 
         // Signing with PGP/Inline: clear, plain text.
         let prefs = build_send_prefs(
+            &BOB,
             &ContactSettings::default(),
             &settings(1, EncryptionScheme::PGP_INLINE, "text/html"),
             &[],
@@ -593,6 +684,7 @@ pub(crate) mod tests {
         // WKD keys: encrypted (untrusted keys are used unless the contact
         // says not to), PGP/MIME by default.
         let prefs = build_send_prefs(
+            &BOB,
             &ContactSettings::default(),
             &settings(0, EncryptionScheme(0), "text/html"),
             &[api_key("not a key"), api_key(KEY_A)],
@@ -619,6 +711,7 @@ pub(crate) mod tests {
             ..ContactSettings::default()
         };
         let prefs = build_send_prefs(
+            &BOB,
             &contact,
             &settings(0, EncryptionScheme(0), "text/html"),
             &[],
@@ -641,6 +734,155 @@ pub(crate) mod tests {
             scheme: Some(EncryptionScheme::CLEAR),
             ..ContactSettings::default()
         };
-        assert!(build_send_prefs(&bad, &MailSettings::default(), &[], "text/html", false).is_err());
+        assert!(
+            build_send_prefs(
+                &BOB,
+                &bad,
+                &MailSettings::default(),
+                &[],
+                "text/html",
+                false
+            )
+            .is_err()
+        );
+    }
+
+    /// Bridge trusts the server to serve only keys that can be encrypted
+    /// to; Zmail checks the API flags and the keys themselves.
+    #[test]
+    fn only_active_keys_that_can_encrypt_are_encrypted_to() {
+        let send = |keys: &[PublicKey], internal: bool| {
+            build_send_prefs(
+                &BOB,
+                &ContactSettings::default(),
+                &settings(0, EncryptionScheme(0), "text/html"),
+                keys,
+                "text/html",
+                internal,
+            )
+        };
+        let skipped = [
+            // Obsolete: not compromised, but no longer encrypted to.
+            flagged(KEY_A, KeyFlags::TRUSTED),
+            // No flags at all.
+            flagged(KEY_C, 0),
+            // Flagged active, but it has no key to encrypt to.
+            api_key(KEY_SIGN_ONLY),
+        ];
+        for internal in [true, false] {
+            let mut keys = skipped.to_vec();
+            keys.push(api_key(KEY_B));
+            let prefs = send(&keys, internal).expect("prefs");
+            assert!(prefs.encrypt);
+            assert_eq!(
+                prefs.pub_key.map(|key| key.fingerprint()),
+                Some(fingerprint(KEY_B)),
+                "internal: {internal}"
+            );
+            for key in &skipped {
+                assert!(send(std::slice::from_ref(key), internal).is_err());
+            }
+        }
+
+        // Unencrypted mail to an external contact needs no usable key.
+        let clear = ContactSettings {
+            encrypt_untrusted: Some(false),
+            ..ContactSettings::default()
+        };
+        let prefs = build_send_prefs(
+            &BOB,
+            &clear,
+            &settings(0, EncryptionScheme(0), "text/html"),
+            &skipped,
+            "text/html",
+            false,
+        )
+        .expect("prefs");
+        assert!(!prefs.encrypt && prefs.pub_key.is_none());
+    }
+
+    fn changed(error: &anyhow::Error) -> &PinnedKeyChanged {
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<PinnedKeyChanged>())
+            .unwrap_or_else(|| panic!("not a key change: {error:#}"))
+    }
+
+    #[test]
+    fn a_pin_that_matches_no_served_key_stops_the_send_until_trusted() {
+        let pinned = ContactSettings {
+            keys: vec![RecipientKey::from_armored(KEY_B).expect("key")],
+            ..ContactSettings::default()
+        };
+        let send = |recipient: &Recipient<'_>, keys: &[PublicKey], internal: bool| {
+            build_send_prefs(
+                recipient,
+                &pinned,
+                &settings(0, EncryptionScheme(0), "text/html"),
+                keys,
+                "text/html",
+                internal,
+            )
+        };
+
+        for internal in [true, false] {
+            let error = send(&BOB, &[api_key(KEY_A)], internal).expect_err("aborts");
+            let change = changed(&error);
+            assert_eq!(change.recipient, "bob@example.org");
+            assert_eq!(
+                change.pinned_fingerprints,
+                [fingerprint(KEY_B).to_ascii_uppercase()]
+            );
+            assert_eq!(
+                change.served_fingerprints,
+                [fingerprint(KEY_A).to_ascii_uppercase()]
+            );
+        }
+
+        // Trusting exactly that key for exactly that recipient sends to it.
+        let trusted = [KeyTrust {
+            recipient: "bob@example.org".to_owned(),
+            fingerprint: fingerprint(KEY_A).to_ascii_uppercase(),
+        }];
+        let bob = Recipient {
+            address: "Bob@example.org",
+            trusted: &trusted,
+        };
+        let prefs = send(&bob, &[api_key(KEY_A)], true).expect("trusted");
+        assert_eq!(
+            prefs.pub_key.map(|key| key.fingerprint()),
+            Some(fingerprint(KEY_A))
+        );
+
+        // Another served key still stops the send, and so does the same
+        // key for another recipient.
+        let error = send(&bob, &[api_key(KEY_C)], true).expect_err("aborts");
+        assert_eq!(
+            changed(&error).served_fingerprints,
+            [fingerprint(KEY_C).to_ascii_uppercase()]
+        );
+        let alice = Recipient {
+            address: "alice@example.org",
+            trusted: &trusted,
+        };
+        assert!(send(&alice, &[api_key(KEY_A)], true).is_err());
+
+        // A served pinned key is used, trusted or not.
+        let prefs = send(&bob, &[api_key(KEY_A), api_key(KEY_B)], true).expect("pinned");
+        assert_eq!(
+            prefs.pub_key.map(|key| key.fingerprint()),
+            Some(fingerprint(KEY_B))
+        );
+        // A pinned key the API marks obsolete no longer counts as served.
+        let error = send(
+            &BOB,
+            &[flagged(KEY_B, KeyFlags::TRUSTED), api_key(KEY_A)],
+            true,
+        )
+        .expect_err("aborts");
+        assert_eq!(
+            changed(&error).served_fingerprints,
+            [fingerprint(KEY_A).to_ascii_uppercase()]
+        );
     }
 }

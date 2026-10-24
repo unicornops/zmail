@@ -371,11 +371,19 @@ pub async fn apply_pending_ops(
 /// PGP/Inline and PGP/MIME contacts get key packets, clear recipients the
 /// session keys. Proton files the sent message in Sent; the next sync
 /// brings it in.
+///
+/// Every key is checked before it is used (ADR 0004, "Verifying keys").
+/// When a recipient's contact card pins keys and Proton serves none of
+/// them, the send fails with a
+/// [`PinnedKeyChanged`](zmail_core::key_change::PinnedKeyChanged) error
+/// unless `trusted` holds the user's trust in the served key for that
+/// recipient.
 pub async fn submit_outgoing_message(
     session: &ProtonSession,
     message: &OutgoingMessage,
+    trusted: &[zmail_core::key_change::KeyTrust],
 ) -> Result<()> {
-    send::send_message(session, message).await
+    send::send_message(session, message, trusted).await
 }
 
 #[cfg(test)]

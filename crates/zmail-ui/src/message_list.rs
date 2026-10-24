@@ -29,7 +29,10 @@ use gpui::{
 use std::sync::Arc;
 use zmail_core::{
     AccountColor, DraftSummary, MailboxRole, MailboxSelection, MailboxSummary, OutboxJobSummary,
-    SearchHit, ThreadFilter, ThreadSummary, preferences::Density, time::HourCycle,
+    SearchHit, ThreadFilter, ThreadSummary,
+    key_change::{PinnedKeyChanged, grouped_fingerprint},
+    preferences::Density,
+    time::HourCycle,
 };
 use zmail_store::LocalStore;
 
@@ -40,11 +43,13 @@ use crate::a11y::{A11yFlags, AccessibleExt};
 use crate::actions::{
     AddAccount, OpenSelected, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
-use crate::components::{Button, ButtonSize, HitTargetExt, Menu};
+use crate::components::{Button, ButtonSize, HitTargetExt, Menu, Modal, ModalState};
 use crate::drag::DraggedThreads;
 use crate::mail_actions::MailActions;
 use crate::search::{SearchFilter, SearchHighlighter, SearchScopeState};
-use crate::styles::{DensityTokens, TextScale, UiColors};
+use crate::styles::{
+    DensityTokens, TYPE_BODY_STRONG, TYPE_CAPTION, TextScale, TypeStyleExt, UiColors,
+};
 use crate::widgets::{empty_state, toolbar_button};
 
 use self::row::{MessageRow, RowAccount, outbox_status, row_content, row_shell};
@@ -177,6 +182,9 @@ pub(crate) enum MessageListEvent {
     /// An outbox row's Re-authenticate was clicked: the server refused the
     /// account's sign-in.
     ReauthenticateAccount(i64),
+    /// The user trusted a recipient's new key in an outbox row's key
+    /// change dialog: the job, and the fingerprint the dialog showed.
+    TrustNewKey { job_id: i64, fingerprint: String },
     /// Enter: move on to the detail pane.
     Activate,
     /// A thread, search result or draft row was clicked (after its open
@@ -258,6 +266,9 @@ pub(crate) struct MessageListView {
     move_picker: Option<OpenMovePicker>,
     /// The open row context menu, where it opened, and its subscription.
     context_menu: Option<(Entity<Menu>, Point<Pixels>, Subscription)>,
+    /// The outbox job whose recipient key change the dialog shows.
+    key_change: Option<(i64, PinnedKeyChanged)>,
+    key_change_modal: ModalState,
     /// Test instrumentation: renders and store queries for rows.
     #[cfg(test)]
     pub(crate) counters: crate::pane::RenderCounters,
@@ -298,6 +309,8 @@ impl MessageListView {
             thread_scroll: UniformListScrollHandle::new(),
             selection_anchor: None,
             move_picker: None,
+            key_change: None,
+            key_change_modal: ModalState::new(cx),
             context_menu: None,
             #[cfg(test)]
             counters: Default::default(),
@@ -676,6 +689,7 @@ impl Render for MessageListView {
                 ListMode::Drafts => self.render_drafts(&colors, focused, cx),
                 ListMode::Outbox => self.render_outbox(&colors, focused, cx),
             })
+            .children(self.render_key_change_dialog(cx))
     }
 }
 
@@ -1024,6 +1038,8 @@ impl MessageListView {
                         let status = outbox_status(job, &now);
                         let retry = if status.needs_reauth {
                             Some(self.reauthenticate_button(job.account_id, &row_id, cx))
+                        } else if let Some(change) = status.key_change {
+                            Some(self.trust_key_button(job_id, change, &row_id, cx))
                         } else {
                             status
                                 .can_retry
@@ -1106,6 +1122,128 @@ impl MessageListView {
             )
             .into_any_element()
     }
+}
+
+impl MessageListView {
+    /// The "Trust New Key…" button on an outbox row whose sending stopped
+    /// because a recipient's key no longer matches their contact card.
+    fn trust_key_button(
+        &self,
+        job_id: i64,
+        change: PinnedKeyChanged,
+        row_id: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = format!("{row_id}-trust-key");
+        div()
+            .debug_selector({
+                let id = id.clone();
+                move || id
+            })
+            .child(
+                Button::new(SharedString::from(id), "Trust New Key\u{2026}")
+                    .size(ButtonSize::Small)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        // Not the row's click as well.
+                        cx.stop_propagation();
+                        this.open_key_change(job_id, change.clone(), window, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// Opens the dialog that shows a recipient's pinned and new keys.
+    pub(crate) fn open_key_change(
+        &mut self,
+        job_id: i64,
+        change: PinnedKeyChanged,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.key_change = Some((job_id, change));
+        self.key_change_modal.open(window, cx);
+        cx.notify();
+    }
+
+    fn close_key_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.key_change = None;
+        self.key_change_modal.close(window, cx);
+        cx.notify();
+    }
+
+    /// The dialog's "Trust the new key for …": the shell records the trust
+    /// for exactly this recipient and key, and sends again.
+    fn trust_new_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((job_id, change)) = self.key_change.clone() else {
+            return;
+        };
+        self.close_key_change(window, cx);
+        if let Some(fingerprint) = change.new_fingerprint() {
+            cx.emit(MessageListEvent::TrustNewKey {
+                job_id,
+                fingerprint: fingerprint.to_owned(),
+            });
+        }
+    }
+
+    fn render_key_change_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (_, change) = self
+            .key_change
+            .as_ref()
+            .filter(|_| self.key_change_modal.is_open())?;
+        let new_key = change.new_fingerprint()?;
+        let recipient = change.recipient.clone();
+        let line = |label: &str, fingerprint: &str| {
+            div()
+                .flex()
+                .flex_col()
+                .child(div().type_style(TYPE_CAPTION).child(label.to_owned()))
+                .child(
+                    div()
+                        .type_style(TYPE_BODY_STRONG)
+                        .child(grouped_fingerprint(fingerprint)),
+                )
+                .into_any_element()
+        };
+        Some(
+            Modal::new("key-change-dialog", self.key_change_modal.focus_handle())
+                .title(format!("The key for {recipient} changed"))
+                .description(key_change_description(&recipient))
+                .children(
+                    change
+                        .pinned_fingerprints
+                        .iter()
+                        .map(|fingerprint| line("Pinned in your contact card", fingerprint)),
+                )
+                .child(line("Served by Proton now", new_key))
+                .footer(div().debug_selector(|| "key-change-cancel".into()).child(
+                    Button::new("key-change-cancel", "Cancel").on_click(
+                        cx.listener(|this, _, window, cx| this.close_key_change(window, cx)),
+                    ),
+                ))
+                .footer(
+                    div().debug_selector(|| "key-change-trust".into()).child(
+                        Button::new(
+                            "key-change-trust",
+                            format!("Trust the new key for {recipient}"),
+                        )
+                        .primary()
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.trust_new_key(window, cx)),
+                        ),
+                    ),
+                )
+                .on_dismiss(cx.listener(|this, _, window, cx| this.close_key_change(window, cx)))
+                .into_any_element(),
+        )
+    }
+}
+
+/// What the key change dialog says before the user decides.
+pub(crate) fn key_change_description(recipient: &str) -> String {
+    format!(
+        "Your contact card for {recipient} pins an encryption key, but Proton now serves a different one, so Zmail stopped sending. Trust the new key only if {recipient} told you it changed: compare the fingerprint with them in person or on a call. Zmail remembers your choice on this computer for this address and this key only, and leaves the contact card as it is."
+    )
 }
 
 fn thread_row_id(thread_id: i64) -> SharedString {

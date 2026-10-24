@@ -2372,6 +2372,75 @@ fn the_outbox_row_counts_waiting_mail_and_retries_failures(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn a_changed_recipient_key_offers_to_trust_exactly_the_new_key(cx: &mut TestAppContext) {
+    use zmail_core::key_change::{KeyTrust, PinnedKeyChanged};
+
+    const PINNED: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
+    const SERVED: &str = "89ABCDEF0123456789ABCDEF0123456789ABCDEF";
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let account_id = cx.read_entity(&view, |view, _| view.accounts[0].id);
+    let job = queue_test_message(&harness.store, "Key changed");
+    let change =
+        PinnedKeyChanged::new("kai@example.test", [PINNED.to_owned()], [SERVED.to_owned()]);
+    harness
+        .store
+        .record_outbox_failure(job, change.to_string())
+        .expect("the failure is recorded");
+    cx.dispatch_action(crate::actions::ShowOutbox);
+    view.update(cx, |view, cx| {
+        view.refresh_from_store(cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    // Retrying would stop again: the row offers the key decision instead.
+    assert!(!drawn(format!("outbox-row-{job}-retry"), cx));
+    assert!(!drawn(format!("outbox-row-{job}-reauth"), cx));
+    click_on(format!("outbox-row-{job}-trust-key"), cx);
+    cx.run_until_parked();
+
+    // Cancel trusts nothing.
+    click_on("key-change-cancel".to_owned(), cx);
+    cx.run_until_parked();
+    assert!(!drawn("key-change-trust".to_owned(), cx));
+    assert!(
+        harness
+            .store
+            .trusted_recipient_keys(account_id)
+            .expect("trusts")
+            .is_empty()
+    );
+
+    click_on(format!("outbox-row-{job}-trust-key"), cx);
+    cx.run_until_parked();
+    click_on("key-change-trust".to_owned(), cx);
+    cx.run_until_parked();
+    assert_eq!(
+        harness
+            .store
+            .trusted_recipient_keys(account_id)
+            .expect("trusts"),
+        [KeyTrust {
+            recipient: "kai@example.test".to_owned(),
+            fingerprint: SERVED.to_owned(),
+        }]
+    );
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.status_message.clone()),
+        Some("New key trusted. Sending the message again.".to_owned())
+    );
+    let state = harness
+        .store
+        .list_outbox_jobs(Some(account_id))
+        .expect("jobs")
+        .into_iter()
+        .find(|summary| summary.id == job)
+        .expect("the job is kept")
+        .state;
+    assert_ne!(state, zmail_core::OutboxJobState::Failed, "sent again");
+}
+
+#[gpui::test]
 fn a_send_refused_for_the_sign_in_offers_re_authenticate(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::Mail);
     let account_id = cx.read_entity(&view, |view, _| view.accounts[0].id);

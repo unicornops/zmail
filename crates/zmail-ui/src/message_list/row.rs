@@ -27,6 +27,7 @@ use gpui::{
 use zmail_core::{
     AccountColor, DraftState, DraftSummary, OutboxJobState, OutboxJobSummary, SearchHit,
     ThreadSummary,
+    key_change::PinnedKeyChanged,
     participants::{parse_address_list, participant_names, sender_identity},
     reauth::ReauthReason,
     text::count_noun,
@@ -393,6 +394,9 @@ pub(super) struct OutboxStatus {
     /// The server refused the account's sign-in: offer Re-authenticate
     /// instead of Retry now, which cannot help until then.
     pub(super) needs_reauth: bool,
+    /// A recipient's key no longer matches their contact card: offer to
+    /// trust the new key instead of Retry now, which stops again.
+    pub(super) key_change: Option<PinnedKeyChanged>,
 }
 
 /// "Sending…", "Failed — retrying in 5 min", "Couldn't send" and so on,
@@ -406,16 +410,25 @@ pub(super) fn outbox_status(
         failed,
         can_retry,
         needs_reauth: false,
+        key_change: None,
     };
     let refused = job
         .last_error_message
         .as_deref()
         .and_then(ReauthReason::of_message)
         .is_some();
+    let key_change = job
+        .last_error_message
+        .as_deref()
+        .and_then(PinnedKeyChanged::of_message);
     match job.state {
         OutboxJobState::Failed if refused => OutboxStatus {
             needs_reauth: true,
             ..status("Sign in again to send", true, false)
+        },
+        OutboxJobState::Failed if key_change.is_some() => OutboxStatus {
+            key_change,
+            ..status("A recipient\u{2019}s key changed", true, false)
         },
         OutboxJobState::Queued => status("Waiting to send", false, false),
         OutboxJobState::Sending => status("Sending\u{2026}", false, false),
@@ -438,6 +451,7 @@ pub(super) fn outbox_status(
                 failed: true,
                 can_retry: true,
                 needs_reauth: false,
+                key_change: None,
             }
         }
     }
@@ -1140,6 +1154,25 @@ mod tests {
         assert_eq!(status.text, "Sign in again to send");
         assert!(status.failed && status.needs_reauth);
         assert!(!status.can_retry, "retrying the same sign-in cannot help");
+    }
+
+    #[test]
+    fn a_changed_recipient_key_asks_for_a_decision_instead_of_retrying() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-18T10:00:00Z")
+            .expect("a timestamp")
+            .with_timezone(&chrono::Local);
+        let change =
+            PinnedKeyChanged::new("kai@example.test", ["AB".repeat(20)], ["CD".repeat(20)]);
+        let mut changed = job(OutboxJobState::Failed, None);
+        changed.last_error_message = Some(change.to_string());
+        let status = outbox_status(&changed, &now);
+        assert_eq!(status.text, "A recipient\u{2019}s key changed");
+        assert!(status.failed && !status.needs_reauth);
+        assert!(!status.can_retry, "retrying would stop again");
+        assert_eq!(status.key_change, Some(change));
+        // Only a failed job: a retry in progress is not a decision.
+        changed.state = OutboxJobState::Retrying;
+        assert_eq!(outbox_status(&changed, &now).key_change, None);
     }
 
     #[test]

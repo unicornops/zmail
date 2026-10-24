@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+pub mod key_change;
 pub mod participants;
 pub mod preferences;
 pub mod reauth;

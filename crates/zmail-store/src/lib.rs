@@ -33,6 +33,7 @@ pub use zmail_security::vault::{BlobVault, StoreKey, StoreKeychain};
 mod address_history;
 mod connection;
 mod encryption;
+mod key_trust;
 mod lock;
 mod merge;
 mod rotation;
@@ -179,6 +180,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0021_flagged_threads_index", FLAGGED_THREADS_INDEX_SCHEMA),
     ("0022_message_html_parts", MESSAGE_HTML_PARTS_SCHEMA),
     ("0023_remote_content_senders", REMOTE_CONTENT_SENDERS_SCHEMA),
+    ("0024_recipient_key_trust", key_trust::KEY_TRUST_SCHEMA),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -7661,6 +7663,48 @@ mod tests {
                 .find_remote_thread(work, "INBOX", "gone")
                 .expect("lookup"),
             None
+        );
+    }
+
+    #[test]
+    fn key_trusts_are_per_account_recipient_and_fingerprint() {
+        let (store, work, home) = two_account_store();
+        let fingerprint = "89abcdef0123456789abcdef0123456789abcdef";
+        store
+            .trust_recipient_key(work, " Bob@Example.org ", fingerprint)
+            .expect("trusted");
+        // Again: nothing new.
+        store
+            .trust_recipient_key(work, "bob@example.org", &fingerprint.to_uppercase())
+            .expect("trusted");
+        let trusted = store.trusted_recipient_keys(work).expect("trusts");
+        assert_eq!(
+            trusted,
+            [zmail_core::key_change::KeyTrust {
+                recipient: "bob@example.org".to_owned(),
+                fingerprint: fingerprint.to_uppercase(),
+            }]
+        );
+        assert!(trusted[0].covers("BOB@example.org", fingerprint));
+        assert!(
+            store
+                .trusted_recipient_keys(home)
+                .expect("trusts")
+                .is_empty()
+        );
+        assert!(
+            store
+                .trust_recipient_key(work, "bob@example.org", "not hex")
+                .is_err()
+        );
+        assert!(store.trust_recipient_key(work, " ", fingerprint).is_err());
+
+        store.delete_account(work).expect("removed");
+        assert!(
+            store
+                .trusted_recipient_keys(work)
+                .expect("trusts")
+                .is_empty()
         );
     }
 
