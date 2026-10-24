@@ -2078,12 +2078,12 @@ mod tests {
             "an HTML-only message must not store mail-parser's text conversion"
         );
         let sanitized_html = sanitized_html.expect("the HTML body should be stored sanitized");
-        assert!(sanitized_html.contains("blocked://tracker.example.test/open.gif"));
-        assert!(!sanitized_html.contains("https://"));
+        assert!(sanitized_html.contains("<img src=\"zmail-blocked:0\">"));
+        assert!(!sanitized_html.contains("tracker.example.test"));
         assert!(has_remote_content);
         assert_eq!(
             preview,
-            "Your new dashboard\nFaster exports\nPlan Price\nStarter EUR 9\nTeam EUR 29"
+            "Your new dashboard\n\nFaster exports\n\nPlan  Price\nStarter  EUR 9\nTeam  EUR 29"
         );
     }
 
@@ -2102,7 +2102,7 @@ mod tests {
         assert!(body_text.is_none());
         assert!(sanitized_html.is_some());
         assert!(!has_remote_content);
-        assert_eq!(preview, "Hello\nNo remote images here.");
+        assert_eq!(preview, "Hello\n\nNo remote images here.");
     }
 
     #[test]

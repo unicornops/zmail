@@ -16,18 +16,18 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use zmail_core::{
     AccountColor, AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, BlobStore,
-    CachePolicySummary, DeliveryTarget, DraftAttachment, DraftDetail, DraftState, DraftSummary,
-    DraftUpdate, HydratedBody, IdentitySummary, IndexCandidate, IndexProgress, MailboxRole,
-    MailboxSelection, MailboxSnapshot, MailboxSummary, MessageAttachment, MessageFlagState,
-    MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, OAuth2TargetConfig,
-    OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage,
-    PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit,
-    SearchScope, ServerHitRef, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase,
-    SyncStatusSummary, SyncTarget, ThreadCounts, ThreadFilter, ThreadMarks, ThreadMessage,
-    ThreadSnapshot, ThreadState, ThreadSummary, ThreadView, VirtualMailbox,
+    BodyLink, CachePolicySummary, DeliveryTarget, DraftAttachment, DraftDetail, DraftState,
+    DraftSummary, DraftUpdate, HydratedBody, IdentitySummary, IndexCandidate, IndexProgress,
+    MailboxRole, MailboxSelection, MailboxSnapshot, MailboxSummary, MessageAttachment,
+    MessageFlagState, MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft,
+    OAuth2TargetConfig, OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig,
+    OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment,
+    SearchHit, SearchScope, ServerHitRef, StoreStats, SubmissionKind, SubmissionSecurity,
+    SyncPhase, SyncStatusSummary, SyncTarget, ThreadCounts, ThreadFilter, ThreadMarks,
+    ThreadMessage, ThreadSnapshot, ThreadState, ThreadSummary, ThreadView, VirtualMailbox,
     preferences::UiPreferences,
 };
-use zmail_security::sanitize_html_for_display;
+use zmail_security::html::text_of_stored_html;
 pub use zmail_security::vault::{BlobVault, StoreKey, StoreKeychain};
 
 mod address_history;
@@ -1518,7 +1518,7 @@ impl LocalStore {
         for mailbox in mailboxes {
             for thread in mailbox.threads {
                 for message in thread.messages {
-                    let (body, _mode) = renderable_body(
+                    let (body, _mode, _links) = renderable_body(
                         &message.body_preview,
                         message.body_text.as_deref(),
                         message.sanitized_html.as_deref(),
@@ -2222,7 +2222,7 @@ impl LocalStore {
                 let body_preview = row.get::<_, String>(5)?;
                 let body_text = row.get::<_, Option<String>>(6)?;
                 let sanitized_html = row.get::<_, Option<String>>(7)?;
-                let (rendered_body, render_mode) = renderable_body(
+                let (rendered_body, render_mode, body_links) = renderable_body(
                     &body_preview,
                     body_text.as_deref(),
                     sanitized_html.as_deref(),
@@ -2238,6 +2238,7 @@ impl LocalStore {
                     body_text,
                     sanitized_html,
                     rendered_body,
+                    body_links,
                     render_mode,
                     is_read: row.get::<_, bool>(8)?,
                     is_flagged: row.get::<_, bool>(9)?,
@@ -5174,21 +5175,50 @@ fn move_thread_in_transaction(
     Ok(())
 }
 
+/// The text the reader shows for a message, how it was made, and the
+/// links of text read from HTML.
+///
+/// Stored HTML is read through the sanitiser's text derivation, which is
+/// cheap (a tokenizer pass, no tree), so it runs on every load. Bodies
+/// stored before ADR 0006 hold the old sanitiser's output, whose remote
+/// links read `blocked://`; the derivation reads those as `https:`.
 fn renderable_body(
     preview: &str,
     body_text: Option<&str>,
     sanitized_html: Option<&str>,
-) -> (String, MessageRenderMode) {
+) -> (String, MessageRenderMode, Vec<BodyLink>) {
     if let Some(body_text) = body_text.filter(|value| !value.trim().is_empty()) {
-        return (body_text.to_owned(), MessageRenderMode::PlainText);
+        return (
+            body_text.to_owned(),
+            MessageRenderMode::PlainText,
+            Vec::new(),
+        );
     }
 
     if let Some(sanitized_html) = sanitized_html.filter(|value| !value.trim().is_empty()) {
-        let sanitized = sanitize_html_for_display(sanitized_html);
-        return (sanitized.text, MessageRenderMode::SanitizedHtml);
+        let (text, links) = text_of_stored_html(sanitized_html, true);
+        if text.is_empty() {
+            return (
+                "No body available.".to_owned(),
+                MessageRenderMode::SanitizedHtml,
+                Vec::new(),
+            );
+        }
+        let links = links
+            .into_iter()
+            .map(|link| BodyLink {
+                range: link.range,
+                target: link.target.url,
+            })
+            .collect();
+        return (text, MessageRenderMode::SanitizedHtml, links);
     }
 
-    (preview.to_owned(), MessageRenderMode::PreviewOnly)
+    (
+        preview.to_owned(),
+        MessageRenderMode::PreviewOnly,
+        Vec::new(),
+    )
 }
 
 fn identity_id_map(

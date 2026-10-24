@@ -1329,6 +1329,16 @@ impl fmt::Display for MessageRenderMode {
     }
 }
 
+/// A link in a message's rendered text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyLink {
+    /// The link text, as a byte range of the rendered text.
+    pub range: std::ops::Range<usize>,
+    /// The original target, scheme included (`http`, `https`, `mailto`,
+    /// `tel` or `sms`), checked by the sanitiser.
+    pub target: String,
+}
+
 /// Hydrated message shown in the Phase 3 reader.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadMessage {
@@ -1350,6 +1360,10 @@ pub struct ThreadMessage {
     pub sanitized_html: Option<String>,
     /// Safe text rendered from the best available body representation.
     pub rendered_body: String,
+    /// The links of an HTML body's text: where each run of link text in
+    /// `rendered_body` points. Empty for plain text, whose links are the
+    /// addresses written in it.
+    pub body_links: Vec<BodyLink>,
     /// Chosen rendering mode for the hydrated body.
     pub render_mode: MessageRenderMode,
     /// Whether this message is currently marked as read locally.

@@ -996,7 +996,8 @@ fn hydrates_html_only_mail_through_the_sanitizer() -> Result<()> {
         .sanitized_html
         .as_deref()
         .context("the sanitized HTML should be stored")?;
-    assert!(sanitized_html.contains("blocked://tracker.example.test/open.gif"));
+    assert!(sanitized_html.contains("<img src=\"zmail-blocked:0\">"));
+    assert!(!sanitized_html.contains("tracker.example.test"));
     assert!(
         message.has_remote_content,
         "the remote image must be reported"
@@ -1004,7 +1005,7 @@ fn hydrates_html_only_mail_through_the_sanitizer() -> Result<()> {
     assert!(
         message
             .rendered_body
-            .contains("Your new dashboard\nFaster exports\nPlan Price\nStarter EUR 9"),
+            .contains("Your new dashboard\n\nFaster exports\n\nPlan  Price\nStarter  EUR 9"),
         "block elements and table cells keep their separators: {:?}",
         message.rendered_body
     );

@@ -11,6 +11,7 @@ members = [
     "crates/zmail-notify",
     "crates/zmail-proton",
     "crates/zmail-proton-api",
+    "crates/zmail-render",
     "crates/zmail-security",
     "crates/zmail-smtp",
     "crates/zmail-store",
@@ -32,10 +33,16 @@ version = "0.0.1"
 # AES-256-GCM in STREAM chunks for the store's attachment files (ADR 0005);
 # already in the tree through pgp, which doesn't use `stream`.
 aes-gcm = { version = "0.10.3", features = ["stream"] }
+# The HTML mail sanitiser (ADR 0006): html5ever's tree builder and an
+# allowlist, iterative so deep nesting cannot overflow the stack.
+ammonia = "4.2.4"
 anyhow = "1"
 async-imap = { version = "0.11.2", default-features = false, features = ["runtime-tokio"] }
 base64 = "0.22.1"
 chrono = "0.4"
+# CSS tokenizer for the sanitiser's pass over `style` attributes and
+# `<style>` blocks (ADR 0006); already in the tree through ammonia.
+cssparser = { version = "0.38.0", default-features = false }
 futures-util = "0.3"
 # GPUI is pinned to a Zed stable release tag; see docs/upstream/zed.md. The
 # weekly `zed-upstream` workflow bumps every `tag = "v..."` on these lines
@@ -49,6 +56,9 @@ hickory-resolver = { version = "0.26.3", default-features = false, features = ["
 # HKDF-SHA256 for the store key's subkeys (ADR 0005); already in the tree
 # through pgp.
 hkdf = "0.12.4"
+# The HTML tokenizer the sanitiser's pre-pass and text derivation use
+# (ADR 0006); the same release ammonia parses with.
+html5ever = "0.40.1"
 # HMAC-SHA256 for the store's opaque attachment file names (ADR 0005);
 # already in the tree through pgp.
 hmac = "0.12.1"
