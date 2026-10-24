@@ -187,10 +187,12 @@ subsurfaces) addresses exactly this and is in review. The plan:
 - **Build on #62379 now** (Rob's decision): the web renderer is
   developed and prototyped against GPUI from that PR's head, pinned by
   commit, so its composition support is tested with a real embedder today
-  and problems are reported on the PR. `main` and releases stay on a Zed
-  stable tag (ADR 0003) until a Zed release contains the composition
-  work, or until Rob decides the prototypes justify shipping on the PR's
-  commit.
+  and problems are reported on the PR. `main` and normal releases pin
+  that commit too (Rob, October 24, 2026: Zmail is alpha and may break
+  between releases, so there are no preview builds; pre-releases come at
+  stable). This is a recorded deviation from ADR 0003 until the first Zed
+  release that contains the composition work, and the weekly bump
+  workflow skips while the PR pin is in place.
 - **No interim overlay-swap mode** is built. If #62379 stalls or changes
   shape, the snapshot swap described in the research remains the
   fallback, decided then.
@@ -222,7 +224,7 @@ Each phase ships on its own.
 | 3. Native renderer | The in-house subset renderer replaces text rendering everywhere (tables, inline CSS, images, dark mode) | Same corpus, side by side with the web renderer |
 | 4. Windows | WebView2 renderer | As phase 2 |
 | 5. Linux | WebKitGTK on X11 (child view) and Wayland (snapshot) | As phase 2 |
-| 6. Upstream composition | `main`'s GPUI pin moves to the first Zed release with #62379 (ADR 0003 bump); the web renderer leaves its PR-based pin | Overlays, clipping and scrolling right on all OSes |
+| 6. Upstream composition | `main`'s GPUI pin moves from the #62379 commit to the first Zed release that contains it (back to ADR 0003) | Overlays, clipping and scrolling right on all OSes |
 
 Effort, from the research: about 3-4 engineer-months for the web
 renderer on macOS, Windows and Linux X11, plus about a month for the
@@ -259,7 +261,9 @@ Rob, October 24, 2026:
 1. **Engine**: the OS web engines are the main renderer, with the
    in-house native renderer as the fallback and Simple view.
 2. **GPUI composition**: build and test against Zed PR #62379 now and
-   feed back on the PR, instead of an interim overlay-swap mode.
+   feed back on the PR, instead of an interim overlay-swap mode. `main`
+   and normal releases carry the PR pin; no separate preview builds while
+   Zmail is alpha.
 3. **Wayland**: snapshot rendering, with selection and find from the
    native renderer, until upstream composition supports a live view.
 4. **Remote content**: blocked by default; load per message, with
