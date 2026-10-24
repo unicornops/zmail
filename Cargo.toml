@@ -12,6 +12,7 @@ members = [
     "crates/zmail-proton",
     "crates/zmail-proton-api",
     "crates/zmail-render",
+    "crates/zmail-render-web",
     "crates/zmail-security",
     "crates/zmail-smtp",
     "crates/zmail-store",
@@ -44,11 +45,14 @@ chrono = "0.4"
 # `<style>` blocks (ADR 0006); already in the tree through ammonia.
 cssparser = { version = "0.38.0", default-features = false }
 futures-util = "0.3"
-# GPUI is pinned to a Zed stable release tag; see docs/upstream/zed.md. The
-# weekly `zed-upstream` workflow bumps every `tag = "v..."` on these lines
-# together, so keep them on the same tag.
-gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
+# GPUI is pinned by commit to the head of Zed PR #62379 ("native window
+# composition", from the huacnlee/zed fork) for the macOS web renderer
+# (ADR 0006): a deviation from ADR 0003's stable release tags, recorded in
+# docs/upstream/zed.md. The weekly `zed-upstream` workflow leaves this pin
+# alone until a Zed stable release contains the PR. Keep both lines on the
+# same commit.
+gpui = { git = "https://github.com/huacnlee/zed", rev = "840e095adddab3b7a644b137c22254fb2d111491" }
+gpui_platform = { git = "https://github.com/huacnlee/zed", rev = "840e095adddab3b7a644b137c22254fb2d111491", default-features = false, features = ["font-kit", "wayland", "x11"] }
 # SRV and MX lookups for account autodiscovery, through the system's own
 # resolver configuration (resolv.conf, the macOS dynamic store, the Windows
 # adapters) on the Tokio runtime. No DNS-over-HTTPS/TLS/QUIC transports.
@@ -115,4 +119,6 @@ unwrap_used = "deny"
 # The `zed-upstream` workflow re-syncs these revisions from the pinned tag.
 [patch.crates-io]
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
-calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+# Zed's manifest at the #62379 head names calloop without a revision; this
+# is the commit its Cargo.lock resolves.
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "eb6b4fd17b9af5ecc226546bdd04185391b3e265" }

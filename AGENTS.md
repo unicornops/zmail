@@ -39,6 +39,7 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 - `crates/zmail-smtp`: SMTP submission
 - `crates/zmail-security`: keychain and rendering safety helpers, including the HTML mail sanitiser (`html`: ammonia allowlist, CSS pass, caps, link side table, remote-content policing) and its hostile-corpus tests (`tests/hostile_corpus.rs`, fixtures in `tests/fixtures/hostile`)
 - `crates/zmail-render`: the renderer boundary of ADR 0006: `PreparedMessage` (sanitised HTML or why there is none, text, link table, `cid:` parts, remote content and the user's decision, theme) and `MessageRenderer`
+- `crates/zmail-render-web`: the HTML mail web renderer (ADR 0006): a hardened `WKWebView` per message, embedded through GPUI's native window composition, macOS only (other platforms keep the text view). Its `src/platform/macos.rs` is the only module in the workspace allowed `unsafe` (every block justified); every other crate keeps `unsafe_code = "forbid"`. `tests/canary.rs` (macOS CI job) renders a hostile corpus and fails on any network request
 - `crates/zmail-theme`: Zed theme compatibility layer
 - `crates/zmail-test-support`: synthetic data, the live mail harness and the Proton API harness
 
@@ -120,6 +121,8 @@ xvfb-run -a --server-args="-screen 0 2560x1440x24" \
 
 Each PNG is one UI state (the first-run welcome, inbox, reader, compose, the Add Account window, the onboarding steps) in dark and light, plus the inbox and reader at the layout breakpoints (720, 900 and 1920px), the sidebar overlay at 900px, and three accounts with nested folders on the Unified Inbox, each Settings window section, and the window that unlocks the encrypted store (encrypting an older store, a locked keychain, a lost key); `--list` prints the names and extra arguments capture only those. Each state is a `zmail-app launch-ui-fixture VIEW [dark|light]` launch: an in-memory store seeded with synthetic mail (`crates/zmail-app/src/ui_fixture.rs`), no sync, and the window opened on that view through `zmail_ui::InitialView`. CI runs it on pull requests that touch the UI, theme, assets or the capture script, and uploads the images as the `ui-screenshots` artefact of the CI run. Add new UI states to the fixture and the `MATRIX` list in the script.
 
+On macOS, CI's "Web renderer (macOS)" job also runs `scripts/capture-macos-web-screenshots.sh`: the `reader-html`, `reader-html-menu`, `reader-html-scrolled` and `reader-link-warning` fixture states, with HTML mail in the web renderer, captured with `screencapture`, plus three interactions driven by posted events (`scripts/macos-ui-events.swift`: the wheel over a page, a link click, a selection copied with Command-C, with the clipboard saved as `reader-html-copy.txt`), uploaded as the `macos-web-screenshots` artefact (each PNG with the launch's `ZMAIL_WEB_DEBUG` log).
+
 Dependency policy:
 
 ```bash
@@ -140,6 +143,8 @@ macOS note:
 GPUI pin:
 
 - GPUI is a git dependency pinned to a Zed stable release tag (`tag = "vX.Y.Z"` on the `gpui` and `gpui_platform` lines of `Cargo.toml`), not the crates.io `gpui` crate. Keep both lines on the same tag.
+- Current deviation: for the macOS web renderer (ADR 0006) both lines pin the head of Zed PR #62379 (native window composition) by `rev` on the `huacnlee/zed` fork, until a Zed stable release contains it; see "Deviation From ADR 0003" in `docs/upstream/zed.md`. Keep both lines on the same commit.
+- Current deviation: for the macOS web renderer (ADR 0006) both lines pin the head of Zed PR #62379 (native window composition) by `rev` on the `huacnlee/zed` fork, until a Zed stable release contains it; see "Deviation From ADR 0003" in `docs/upstream/zed.md`. Keep both lines on the same commit.
 - The weekly `zed-upstream` workflow (`scripts/bump-zed-gpui.sh`) opens a `chore(deps): bump Zed GPUI to vX.Y.Z` pull request when Zed ships a newer stable release; see `docs/upstream/zed.md` for manual bumps.
 - Start the app with `gpui_platform::application()`. Do not use `Application::new_inaccessible`, which disables AccessKit screen-reader support.
 

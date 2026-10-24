@@ -79,6 +79,7 @@ pub(super) fn render_message(
     display: MessageDisplay,
     context: &MessageContext<'_>,
     body: &BodyContext<'_>,
+    web: Option<AnyElement>,
     cx: &mut Context<ReaderView>,
 ) -> AnyElement {
     let colors = &context.colors;
@@ -134,7 +135,9 @@ pub(super) fn render_message(
         card.when(first, |this| {
             this.child(render_header(reader, message, display, context, cx))
         })
-        .child(expanded_content(message, display, context, body, cx))
+        .child(expanded_content(
+            reader, message, display, context, body, web, cx,
+        ))
     } else {
         card.child(collapsed_summary(message, display, context, cx))
     };
@@ -241,27 +244,59 @@ pub(super) fn snippet(body: &str) -> String {
 /// An expanded message below its header: banners, body, the fold toggle
 /// and the quoted tail, then attachments. Indented to line up with the
 /// sender's name. A part of a long message has its share of the body: the
-/// first part also has the banners, the last the attachments.
+/// first part also has the banners, the last the attachments. A message
+/// shown formatted (`web`) is one part: its page instead of the text.
 fn expanded_content(
+    reader: &ReaderView,
     message: &ThreadMessage,
     display: MessageDisplay,
     context: &MessageContext<'_>,
     body: &BodyContext<'_>,
+    web: Option<AnyElement>,
     cx: &mut Context<ReaderView>,
 ) -> AnyElement {
     let colors = &context.colors;
     let first = display.part == 0;
     let last = display.part + 1 >= display.parts;
-    let banners = if first {
+    let mut banners = if first {
         banners::message_banners(message, context.sender_warnings)
     } else {
         Vec::new()
     };
+    if first && let Some(failure) = reader.web_failure_banner(message) {
+        banners.push(failure);
+    }
     let attachments = if last {
         message_attachments(message, colors)
     } else {
         Vec::new()
     };
+    if let Some(web) = web {
+        return div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .pl(px(16. + AVATAR_SIZE + 12.))
+            .pr_4()
+            .pb_4()
+            .min_w_0()
+            .when(display.details, |this| {
+                this.child(render_details(message, context))
+            })
+            .when(!banners.is_empty(), |this| {
+                this.child(div().flex().flex_col().gap_2().children(banners))
+            })
+            .child(
+                div()
+                    .debug_selector(move || format!("reader-web-body-{}", display.index))
+                    .w_full()
+                    .child(web),
+            )
+            .when(!attachments.is_empty(), |this| {
+                this.child(div().flex().flex_wrap().gap_2().children(attachments))
+            })
+            .into_any_element();
+    }
     let index = display.index;
     let fold_label = if display.unfolded {
         "Hide quoted text"
