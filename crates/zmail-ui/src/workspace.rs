@@ -15,8 +15,8 @@ use std::{collections::HashSet, time::Duration};
 use anyhow::{Context as _, Result, bail};
 use gpui::{
     AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight,
-    IntoElement, MouseButton, Render, Role, StyleRefinement, Styled, Window, WindowAppearance, div,
-    hsla, prelude::*, px, rgb,
+    IntoElement, MouseButton, Render, Role, StyleRefinement, Styled, Window, WindowAppearance,
+    deferred, div, hsla, prelude::*, px, rgb,
 };
 use std::sync::Arc;
 use zmail_core::{
@@ -117,7 +117,7 @@ impl WorkspaceView {
         let sidebar = cx.new(SidebarView::new);
         let message_list =
             cx.new(|cx| MessageListView::new(store.clone(), mail_actions.clone(), hour_cycle, cx));
-        let reader = cx.new(|cx| ReaderView::new(hour_cycle, cx));
+        let reader = cx.new(|cx| ReaderView::new(hour_cycle, store.clone(), cx));
         let compose = cx.new(|cx| {
             ComposeView::new(
                 store.clone(),
@@ -374,7 +374,9 @@ impl WorkspaceView {
             InitialView::Thread(thread_id)
             | InitialView::ThreadExpanded(thread_id)
             | InitialView::ThreadSelection(thread_id)
-            | InitialView::ThreadLinkPrompt(thread_id) => {
+            | InitialView::ThreadLinkPrompt(thread_id)
+            | InitialView::ThreadMessageMenu(thread_id)
+            | InitialView::ThreadScrolled(thread_id) => {
                 if let Ok(Some(thread)) = view.store.thread_view(thread_id) {
                     view.show_thread(thread_id, thread.mailbox_id, cx);
                     view.refresh_from_store(cx);
@@ -385,6 +387,8 @@ impl WorkspaceView {
                     InitialView::ThreadExpanded(_) => reader.expand_all(cx),
                     InitialView::ThreadSelection(_) => reader.select_paragraph(1, cx),
                     InitialView::ThreadLinkPrompt(_) => reader.open_first_link(window, cx),
+                    InitialView::ThreadMessageMenu(_) => reader.open_message_menu(window, cx),
+                    InitialView::ThreadScrolled(_) => reader.scroll_down_later(window, cx),
                     _ => {}
                 });
             }
@@ -3018,8 +3022,10 @@ impl WorkspaceView {
         } else {
             hsla(0.0, 0.0, 0.0, 0.45)
         };
+        // Deferred, so the overlay draws in GPUI's overlay surface, above a
+        // message's web view (native window composition, ADR 0006).
         panes.when(overlay, |this| {
-            this.child(
+            this.child(deferred(
                 // A click beside the overlay closes it.
                 div()
                     .id("sidebar-scrim")
@@ -3032,8 +3038,8 @@ impl WorkspaceView {
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| this.close_sidebar_overlay(window, cx)),
                     ),
-            )
-            .child(
+            ))
+            .child(deferred(
                 div()
                     .absolute()
                     .top_0()
@@ -3043,7 +3049,7 @@ impl WorkspaceView {
                     .shadow_lg()
                     .occlude()
                     .child(self.sidebar.clone().cached(fill_style())),
-            )
+            ))
         })
     }
 
@@ -3089,6 +3095,14 @@ impl Render for WorkspaceView {
             cx.set_global(colors);
         }
         let layout = self.pane_layout();
+        // A message's web view is a native view: when the reader is not
+        // drawn this frame, it must be hidden explicitly.
+        let reader_drawn = self.onboarding.is_none()
+            && matches!(self.detail_mode, DetailMode::Reader)
+            && (!layout.stacked || matches!(self.single_pane, SinglePane::Detail));
+        if !reader_drawn {
+            self.reader.read(cx).hide_web();
+        }
 
         let root = div()
             .id("workspace")

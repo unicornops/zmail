@@ -1,0 +1,50 @@
+[package]
+name = "zmail-render-web"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Zmail's web renderer for HTML mail: a locked-down OS web view behind GPUI's native composition (ADR 0006)"
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+# Remote images the user allowed are fetched by Zmail, not the engine
+# (src/remote.rs): https only, pinned to checked public addresses.
+reqwest.workspace = true
+url.workspace = true
+zmail-render = { path = "../zmail-render" }
+
+# The macOS backend (ADR 0006: objc2 and its AppKit, Foundation and WebKit
+# bindings are approved for it). All of its `unsafe` is in
+# `src/platform/macos.rs`. raw-window-handle (already in the tree through
+# GPUI) reads the window's AppKit view.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSAppearance", "NSApplication", "NSEvent", "NSGraphics", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSArray", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSObjCRuntime", "NSRunLoop", "NSString", "NSTimer", "NSURL", "NSURLError", "NSURLRequest", "NSURLResponse"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKContentRuleList", "WKContentRuleListStore", "WKContentWorld", "WKFrameInfo", "WKNavigation", "WKNavigationAction", "WKNavigationDelegate", "WKNavigationResponse", "WKOpenPanelParameters", "WKPreferences", "WKUIDelegate", "WKURLSchemeHandler", "WKURLSchemeTask", "WKUserContentController", "WKWebView", "WKWebViewConfiguration", "WKWebpagePreferences", "WKWebsiteDataStore", "WKWindowFeatures"] }
+raw-window-handle = "0.6.2"
+
+[dev-dependencies]
+serde_json.workspace = true
+
+# The canary test runs real web views, which must live on the main thread,
+# so it has its own `main` (no libtest harness). It only does anything on
+# macOS.
+[[test]]
+name = "canary"
+harness = false
+
+# The workspace lints, except that `unsafe_code` is `deny` rather than
+# `forbid`, so the macOS platform module alone can allow it.
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"

@@ -29,6 +29,7 @@
 //! | `selectable` | `SelectableText`: a paragraph the mouse can select |
 //! | `links` | A body's links and the dialog that opens one |
 //! | `banners` | The remote-content notice and the sender-safety banners |
+//! | `web` | HTML mail in a web view (macOS): pages, Simple view, fallbacks |
 
 mod actions;
 mod attachments;
@@ -42,8 +43,13 @@ mod popover;
 mod quoted;
 mod selectable;
 mod source;
+mod web;
 
-use std::{collections::HashMap, ops::Range, rc::Rc};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+    rc::Rc,
+};
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, IntoElement, ListAlignment, ListOffset,
@@ -156,6 +162,8 @@ pub(crate) struct ReaderView {
     /// Re-measures the footer whenever the inline reply changes, since it
     /// grows with its text.
     reply_observation: Option<Subscription>,
+    /// HTML messages shown formatted in web views (macOS).
+    web: web::ReaderWeb,
     /// Test instrumentation: renders.
     #[cfg(test)]
     pub(crate) counters: crate::pane::RenderCounters,
@@ -168,7 +176,11 @@ impl Focusable for ReaderView {
 }
 
 impl ReaderView {
-    pub(crate) fn new(hour_cycle: HourCycle, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        hour_cycle: HourCycle,
+        store: std::sync::Arc<zmail_store::LocalStore>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             hour_cycle,
@@ -187,6 +199,7 @@ impl ReaderView {
             link_prompt: None,
             link_modal: ModalState::new(cx),
             reply_observation: None,
+            web: web::ReaderWeb::new(store),
             #[cfg(test)]
             counters: Default::default(),
         }
@@ -211,6 +224,12 @@ impl ReaderView {
         }
         self.state = state;
         let thread = self.state.thread.as_ref();
+        let message_ids: HashSet<i64> = thread
+            .map(|thread| thread.messages.iter().map(|message| message.id).collect())
+            .unwrap_or_default();
+        self.web.retain(&message_ids);
+        self.web
+            .set_dark(!crate::components::ComponentTheme::get(cx).is_light);
         if self.conversation.is_for(thread) {
             if let Some(thread) = thread {
                 self.conversation.update(thread);
@@ -301,6 +320,27 @@ impl ReaderView {
         }
     }
 
+    /// Opens the current message's More menu (the screenshot fixture's
+    /// menu over a message).
+    pub(crate) fn open_message_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(current) = self.conversation.current() {
+            self.toggle_popover(PopoverAnchor::MessageMore(current), window, cx);
+        }
+    }
+
+    /// Scrolls the conversation down a little once its messages have had
+    /// time to lay out, web views included (the screenshot fixture's
+    /// clipped message).
+    pub(crate) fn scroll_down_later(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |reader, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(2500))
+                .await;
+            let _ = reader.update(cx, |reader, cx| reader.scroll_by(SCROLL_STEP * 5., cx));
+        })
+        .detach();
+    }
+
     /// Expands every message of the open conversation.
     pub(crate) fn expand_all(&mut self, cx: &mut Context<Self>) {
         if let Some(thread) = self.state.thread.as_ref() {
@@ -324,6 +364,11 @@ impl ReaderView {
             .iter()
             .map(|message| {
                 if self.conversation.is_expanded(message.id) {
+                    self.web.prepare_message(message);
+                    if self.shows_web(message) {
+                        // One item, as tall as the page.
+                        return 1;
+                    }
                     let unfolded = self.conversation.is_unfolded(message.id);
                     self.body_model(message).chunks(unfolded).len()
                 } else {
@@ -483,9 +528,16 @@ impl ReaderView {
                 let model = self.body_model(message);
                 let expanded = self.conversation.is_expanded(message.id);
                 let unfolded = self.conversation.is_unfolded(message.id);
+                let web = if expanded {
+                    self.web_body(message, &colors, cx)
+                } else {
+                    None
+                };
                 // This item's chunk of the body, and how many items the
                 // message takes.
-                let (pieces, parts) = if expanded {
+                let (pieces, parts) = if web.is_some() {
+                    (0..0, 1)
+                } else if expanded {
                     let chunks = model.chunks(unfolded);
                     (chunks.get(part).cloned().unwrap_or_default(), chunks.len())
                 } else {
@@ -522,7 +574,7 @@ impl ReaderView {
                             .is_some_and(|selection| selection.message_id == message.id),
                     colors,
                 };
-                render_message(self, message, display, &context, &body, cx)
+                render_message(self, message, display, &context, &body, web, cx)
             }
             // The inline reply, or the buttons that start one.
             ConversationItem::Footer => div()
@@ -590,6 +642,7 @@ impl Render for ReaderView {
         {
             self.counters.renders += 1;
         }
+        self.ensure_web_host(window, cx);
         let colors = *cx.global::<UiColors>();
         let focused = self.focus_handle.contains_focused(window, cx);
         let thread = self.state.thread.as_ref();
@@ -600,6 +653,10 @@ impl Render for ReaderView {
             &colors,
         );
         let has_more = !more_menu_items(thread, &self.state).is_empty();
+        let shows_list = self.state.selected_count <= 1 && thread.is_some();
+        if !shows_list {
+            self.web.hide_all();
+        }
 
         div()
             .id("reader")
@@ -668,13 +725,17 @@ impl Render for ReaderView {
             } else if thread.is_none() {
                 render_no_conversation(&colors)
             } else {
-                list(
+                let list = list(
                     self.list_state.clone(),
                     cx.processor(|reader, index, window, cx| reader.render_item(index, window, cx)),
                 )
                 .flex_1()
-                .w_full()
-                .into_any_element()
+                .w_full();
+                // With web views, the host follows the list's viewport.
+                match self.web.host() {
+                    Some(host) => host.viewport(list).into_any_element(),
+                    None => list.into_any_element(),
+                }
             })
             .children(self.render_source(&colors, cx))
             .children(self.render_link_prompt(&colors, cx))
