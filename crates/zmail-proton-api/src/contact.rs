@@ -12,6 +12,9 @@
 // with Zmail's own vCard decoder (`vcard.rs`) instead of go-vcard. Only
 // reading is ported. A `KEY` value without a comma is an error where Go
 // would panic.
+// Modified by UnicornOps on 2026-10-24: hands rPGP the rand 0.10 thread RNG
+// that the rpgp/rpgp#573 fork (RustCrypto 0.14 stack) takes; no change in
+// behaviour.
 
 //! Contacts, and what a contact card says about sending to an address.
 
@@ -300,7 +303,7 @@ mod tests {
     fn signed(card: &str, kr: &KeyRing) -> Card {
         let key = kr.first().expect("key").secret_key();
         let signature = pgp::composed::DetachedSignature::sign_binary_data(
-            rand::thread_rng(),
+            &mut rand_pgp::rng(),
             &key.primary_key,
             &pgp::types::Password::empty(),
             pgp::crypto::hash::HashAlgorithm::Sha256,

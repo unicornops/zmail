@@ -10,7 +10,9 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use proton_srp::{ModulusSignatureVerifier, ModulusVerifyError, SRPAuth, SrpHashVersion};
-use rand::{CryptoRng, RngCore};
+use std::convert::Infallible;
+
+use rand_pgp::{TryCryptoRng, TryRng};
 
 use crate::srp_modulus::ModulusVerifier;
 
@@ -204,33 +206,33 @@ impl ReplayRng {
     }
 }
 
-impl RngCore for ReplayRng {
-    fn next_u32(&mut self) -> u32 {
+// rand_core 0.10, which the proton-srp fork takes: an infallible `TryRng`
+// is an `Rng`, and an infallible `TryCryptoRng` a `CryptoRng`.
+impl TryRng for ReplayRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
         let mut word = [0; 4];
-        self.fill_bytes(&mut word);
-        u32::from_le_bytes(word)
+        self.try_fill_bytes(&mut word)?;
+        Ok(u32::from_le_bytes(word))
     }
 
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
         let mut word = [0; 8];
-        self.fill_bytes(&mut word);
-        u64::from_le_bytes(word)
+        self.try_fill_bytes(&mut word)?;
+        Ok(u64::from_le_bytes(word))
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Infallible> {
         let end = self.position + dest.len();
         assert!(end <= self.bytes.len(), "the vector's secret was rejected");
         dest.copy_from_slice(&self.bytes[self.position..end]);
         self.position = end;
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.fill_bytes(dest);
         Ok(())
     }
 }
 
-impl CryptoRng for ReplayRng {}
+impl TryCryptoRng for ReplayRng {}
 
 fn check(vector: &Vector) {
     let auth = SRPAuth::new(
