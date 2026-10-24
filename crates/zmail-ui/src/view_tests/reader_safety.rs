@@ -188,6 +188,57 @@ fn remote_content_loads_per_message_or_always_for_the_sender(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn a_suspect_sender_is_never_trusted_for_remote_content(cx: &mut TestAppContext) {
+    // A look-alike domain (Danger): only this message's content can load,
+    // even after Looks safe.
+    let (_view, cx, harness) = open_thread(
+        cx,
+        thread("lookalike", "PayPal <security@paypa1.com>", None, true),
+    );
+    let (_, message_id) = only_thread(&harness);
+    assert!(drawn(format!("sender-safety-{message_id}"), cx));
+    assert!(drawn(format!("remote-content-load-{message_id}"), cx));
+    assert!(!drawn(format!("remote-content-always-{message_id}"), cx));
+    click_on(format!("sender-safety-dismiss-{message_id}"), cx);
+    assert!(!drawn(format!("remote-content-always-{message_id}"), cx));
+    click_on(format!("remote-content-load-{message_id}"), cx);
+    assert!(drawn(format!("remote-content-{message_id}"), cx));
+    assert!(!drawn(format!("remote-content-always-{message_id}"), cx));
+}
+
+#[gpui::test]
+fn a_reply_to_elsewhere_is_not_trusted_for_remote_content(cx: &mut TestAppContext) {
+    // Caution: the same.
+    let (_view, cx, harness) = open_thread(
+        cx,
+        thread(
+            "reply-to",
+            "Billing <billing@example.test>",
+            Some("collect@elsewhere.example"),
+            true,
+        ),
+    );
+    let (_, message_id) = only_thread(&harness);
+    assert!(drawn(format!("remote-content-load-{message_id}"), cx));
+    assert!(!drawn(format!("remote-content-always-{message_id}"), cx));
+}
+
+#[gpui::test]
+fn an_info_warning_still_offers_always_for_this_sender(cx: &mut TestAppContext) {
+    let (_view, cx, harness) = open_thread(
+        cx,
+        thread(
+            "info",
+            "Kai Santos <kai@example.test>",
+            Some("replies@news.example.test"),
+            true,
+        ),
+    );
+    let (_, message_id) = only_thread(&harness);
+    assert!(drawn(format!("remote-content-always-{message_id}"), cx));
+}
+
+#[gpui::test]
 fn a_safe_sender_without_remote_content_shows_no_banners(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_thread(
         cx,

@@ -5,7 +5,10 @@
 //! message that references any shows a neutral notice with "Load remote
 //! content" (for that message, until Zmail quits) and "Always for this
 //! sender" (stored per account and sender address); an always-allowed
-//! sender's messages say so and offer "Block". The text view itself never
+//! sender's messages say so and offer "Block". A message whose sender
+//! warrants a Caution or Danger warning (whether or not the user hid it)
+//! never offers "Always for this sender": only this message's content
+//! can be loaded. The text view itself never
 //! loads anything: the choice is what HTML renderers are given.
 //!
 //! Sender safety comes from `zmail_security::sender_safety` (#108). Each
@@ -80,6 +83,15 @@ pub(crate) fn remote_content_state(
     })
 }
 
+/// Whether `message`'s sender warrants a warning above Info (a look-alike
+/// domain, or a Reply-To elsewhere), whatever the warning level setting
+/// and even after "Looks safe": such a sender is never trusted for good.
+pub(crate) fn sender_is_suspect(message: &ThreadMessage) -> bool {
+    analyze_sender_identity(&message.sender, message.reply_to.as_deref())
+        .tier()
+        .is_some_and(|tier| tier > SafetyTier::Info)
+}
+
 fn remote_content_banner(message: &ThreadMessage, remote_allowed: bool) -> Option<Banner> {
     let state = remote_content_state(message, remote_allowed)?;
     let message_id = message.id;
@@ -99,6 +111,7 @@ fn remote_content_banner(message: &ThreadMessage, remote_allowed: bool) -> Optio
                     }),
             )
     };
+    let offers_always = !sender_is_suspect(message);
     let banner = match state {
         RemoteContentState::Blocked => Banner::new(
             ("remote-content", id),
@@ -119,12 +132,12 @@ fn remote_content_banner(message: &ThreadMessage, remote_allowed: bool) -> Optio
                         }),
                 ),
         )
-        .action(always()),
+        .when(offers_always, |banner| banner.action(always())),
         RemoteContentState::AllowedForMessage => Banner::new(
             ("remote-content", id),
             "Remote content is allowed in this message until Zmail quits.",
         )
-        .action(always()),
+        .when(offers_always, |banner| banner.action(always())),
         RemoteContentState::AllowedForSender => {
             let address = sender_identity(&message.sender)
                 .1

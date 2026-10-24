@@ -413,8 +413,9 @@ Store dependencies are marked **[store]**.
 4. **Banners.**
    - Remote content: a neutral notice on each message that references any, with "Load
      remote content" (that message, until Zmail quits) and "Always for this sender"
-     (stored per account and address); an always-allowed sender's messages say so and
-     offer "Block" (ADR 0006). The text view loads nothing; the choice is what the HTML
+     (stored per account and address), which is never offered when the sender earns a
+     Caution or Danger warning; an always-allowed sender's messages say so and offer
+     "Block" (ADR 0006). The text view loads nothing; the choice is what the HTML
      renderers of ADR 0006 are given.
    - Sender safety (#108): tiered banners (info, caution, danger), each with one plain
      sentence and an action ("Looks safe", "Show details").
