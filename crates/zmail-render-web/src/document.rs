@@ -99,11 +99,12 @@ impl WebDocument {
     }
 
     /// Whether the page is drawn dark: only in a dark theme, and only when
-    /// the mail says it supports a dark colour scheme. Other mail is drawn
-    /// as its author wrote it, on a light page, so dark text never lands on
-    /// a dark background.
+    /// the mail says it supports a dark colour scheme or sets no colours of
+    /// its own (plain HTML, drawn in the theme's colours). Other mail is
+    /// drawn as its author wrote it, on a light page, so dark text never
+    /// lands on a dark background.
     pub fn draws_dark(&self) -> bool {
-        self.appearance.dark && supports_dark(&self.html)
+        self.appearance.dark && (supports_dark(&self.html) || !sets_colours(&self.html))
     }
 
     /// The inline parts by Content-ID, for the scheme handler.
@@ -207,6 +208,16 @@ pub fn supports_dark(html: &str) -> bool {
         rest = after;
     }
     false
+}
+
+/// Whether mail sets any colour or background of its own (CSS `color`,
+/// `background`, or the `bgcolor`/`color`/`background` attributes), or has
+/// images, which are drawn for a light page.
+pub fn sets_colours(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    ["color", "background", "<img", "<svg"]
+        .iter()
+        .any(|needle| lower.contains(needle))
 }
 
 /// A Content-ID as the scheme handler looks it up: without angle brackets
@@ -439,7 +450,11 @@ mod tests {
 
     #[test]
     fn dark_is_drawn_only_for_mail_that_supports_it() {
-        assert!(!document("<p>plain</p>", true).draws_dark());
+        assert!(document("<p>plain</p>", true).draws_dark());
+        assert!(!document("<p style=\"color:#333\">grey</p>", true).draws_dark());
+        assert!(!document("<td bgcolor=\"#fff\">cell</td>", true).draws_dark());
+        assert!(!document("<p>logo <img src=\"cid:x\"></p>", true).draws_dark());
+        assert!(!document("<p>plain</p>", false).draws_dark());
         assert!(
             document("<style>@media (prefers-color-scheme: dark){}</style>", true).draws_dark()
         );

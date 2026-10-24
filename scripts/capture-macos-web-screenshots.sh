@@ -67,4 +67,47 @@ for entry in "${STATES[@]}"; do
   app_pid=""
 done
 
+# Interactions, driven with posted mouse and keyboard events. Each starts
+# the reader-html state again; positions are screen points on the runner's
+# 1024x768 screen with the window where the app opens it.
+EVENTS="${TMPDIR:-/tmp}/macos-ui-events"
+if swiftc -O "${SCRIPT_DIR}/macos-ui-events.swift" -o "$EVENTS"; then
+  interact() {
+    # interact NAME then EVENT ARGS... [-- EVENT ARGS...]
+    local name="$1"
+    shift
+    echo "Capturing ${name}"
+    ZMAIL_WEB_DEBUG=1 "$APP_BINARY" launch-ui-fixture reader-html light \
+      > "${OUTPUT_DIR}/${name}.log" 2>&1 &
+    app_pid=$!
+    sleep 8
+    local step=()
+    for argument in "$@" --; do
+      if [[ "$argument" == "--" ]]; then
+        "$EVENTS" "${step[@]}" || echo "::warning::${step[*]} failed"
+        sleep 1
+        step=()
+      else
+        step+=("$argument")
+      fi
+    done
+    sleep 2
+    screencapture -x "${OUTPUT_DIR}/${name}.png" \
+      || echo "::warning::screencapture failed for ${name}"
+    cleanup
+    app_pid=""
+  }
+  # The wheel over the page scrolls the conversation.
+  interact reader-html-wheel scroll 724 550 300
+  # A link in the page opens Zmail's open-link dialog.
+  interact reader-html-link-click click 724 681
+  # Text selected in the page is copied by Command-C, through Zmail.
+  pbcopy < /dev/null
+  interact reader-html-copy drag 496 485 930 506 -- key-copy
+  pbpaste > "${OUTPUT_DIR}/reader-html-copy.txt" || true
+  echo "Copied: $(cat "${OUTPUT_DIR}/reader-html-copy.txt")"
+else
+  echo "::warning::could not build macos-ui-events; skipping the interaction captures"
+fi
+
 ls -l "$OUTPUT_DIR"
