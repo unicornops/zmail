@@ -57,6 +57,9 @@ unknown-registry = "deny"
 allow-git = [
     # GPUI and its platform crates, pinned to a Zed stable release tag.
     "https://github.com/zed-industries/zed",
+    # GPUI from the fork behind Zed PR #62379 while Zmail pins it
+    # (docs/upstream/zed.md, "Deviation From ADR 0003").
+    "https://github.com/huacnlee/zed",
     # Zed forks GPUI depends on directly (Linux/Windows fonts, X11 input
     # methods, and wasm threads for gpui_web/scheduler on wasm targets).
     "https://github.com/zed-industries/font-kit",
