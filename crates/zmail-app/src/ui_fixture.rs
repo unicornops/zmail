@@ -1505,11 +1505,22 @@ mod tests {
             .sanitized_html
             .as_deref()
             .context("the HTML is stored")?;
-        assert!(html.contains("blocked://bank-example.net/verify"), "{html}");
+        assert!(
+            html.contains("href=\"https://bank-example.net/verify?id=8812\""),
+            "{html}"
+        );
         assert!(
             message
                 .rendered_body
                 .contains("https://bank.example.com/login")
+        );
+        assert_eq!(
+            message
+                .body_links
+                .iter()
+                .map(|link| link.target.as_str())
+                .collect::<Vec<_>>(),
+            ["https://bank-example.net/verify?id=8812"]
         );
         Ok(())
     }

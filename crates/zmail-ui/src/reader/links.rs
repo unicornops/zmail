@@ -1,15 +1,13 @@
 //! Links in a message body, and the dialog that opens one.
 //!
 //! A body's links are the web and `mailto:` addresses written in its text,
-//! plus, for an HTML message, the text of its `<a href>` links. Nothing is
-//! loaded: a link opens only when the user clicks it and then confirms in
-//! a dialog that shows the real target. When the link's text looks like a
-//! web address on a different site from the target (the usual phishing
+//! plus, for an HTML message, the text of its `<a href>` links, which the
+//! store reads with their original targets (scheme included) from the
+//! sanitiser's link table ([`zmail_core::BodyLink`]). Nothing is loaded: a
+//! link opens only when the user clicks it and then confirms in a dialog
+//! that shows the real target. When the link's text looks like a web
+//! address on a different site from the target (the usual phishing
 //! trick), the dialog says so.
-//!
-//! The sanitizer stores remote `href`s as `blocked://…`, without their
-//! original `http` or `https`. Those open over HTTPS: the host and path,
-//! which are what the dialog shows and checks, are unchanged.
 
 use std::ops::Range;
 
@@ -18,7 +16,6 @@ use gpui::{
     prelude::*, px, rgb,
 };
 use url::Url;
-use zmail_security::html_links;
 
 use super::ReaderView;
 use crate::a11y::readable;
@@ -35,32 +32,23 @@ pub(crate) struct BodyLink {
     pub(crate) target: String,
 }
 
-/// The links of a body, in order. `sanitized_html` is the stored HTML the
-/// body was rendered from, when it was.
-pub(super) fn body_links(body: &str, sanitized_html: Option<&str>) -> Vec<BodyLink> {
-    let mut links = Vec::new();
-    if let Some(html) = sanitized_html {
-        // Each link's text is in the body in order; find each after the
-        // one before.
-        let mut cursor = 0;
-        for link in html_links(html) {
-            let text = link.text.trim();
-            let Some(target) = link_target(&link.href) else {
-                continue;
-            };
-            if text.is_empty() {
-                continue;
-            }
-            if let Some(offset) = body[cursor..].find(text) {
-                let start = cursor + offset;
-                links.push(BodyLink {
-                    range: start..start + text.len(),
-                    target,
-                });
-                cursor = start + text.len();
-            }
-        }
-    }
+/// The links of a body, in order: `html_links`, the links the store read
+/// from the message's HTML, then the addresses written in the text.
+pub(super) fn body_links(body: &str, html_links: &[zmail_core::BodyLink]) -> Vec<BodyLink> {
+    let mut links: Vec<BodyLink> = html_links
+        .iter()
+        .filter(|link| {
+            link.range.start < link.range.end
+                && body.is_char_boundary(link.range.start)
+                && body.is_char_boundary(link.range.end)
+        })
+        .filter_map(|link| {
+            Some(BodyLink {
+                range: link.range.clone(),
+                target: link_target(&link.target)?,
+            })
+        })
+        .collect();
     for range in written_urls(body) {
         if links.iter().any(|link| overlaps(&link.range, &range)) {
             continue;
@@ -77,17 +65,10 @@ fn overlaps(left: &Range<usize>, right: &Range<usize>) -> bool {
     left.start < right.end && right.start < left.end
 }
 
-/// The URL to open for an `href` or a written address: `http`, `https`
-/// and `mailto` only. A sanitizer-blocked remote address opens over HTTPS.
+/// The URL to open for a link target or a written address: `http`,
+/// `https` and `mailto` only.
 pub(crate) fn link_target(href: &str) -> Option<String> {
-    let href = href.trim();
-    let candidate = match href.get(..10) {
-        Some(prefix) if prefix.eq_ignore_ascii_case("blocked://") => {
-            format!("https://{}", &href[10..])
-        }
-        _ => href.to_owned(),
-    };
-    let url = Url::parse(&candidate).ok()?;
+    let url = Url::parse(href.trim()).ok()?;
     match url.scheme() {
         "http" | "https" if url.host_str().is_some() => Some(url.to_string()),
         "mailto" if !url.path().is_empty() => Some(url.to_string()),
@@ -391,8 +372,8 @@ impl ReaderView {
 mod tests {
     use super::{BodyLink, LinkPrompt, body_links, link_target};
 
-    fn texts(body: &str, html: Option<&str>) -> Vec<(String, String)> {
-        body_links(body, html)
+    fn texts(body: &str, html_links: &[zmail_core::BodyLink]) -> Vec<(String, String)> {
+        body_links(body, html_links)
             .into_iter()
             .map(|BodyLink { range, target }| (body[range].to_owned(), target))
             .collect()
@@ -403,7 +384,7 @@ mod tests {
         let body = "See https://example.com/changelog. Or (http://example.org/a_(b)), \
                     mailto:help@example.com, and xhttps://no.example.";
         assert_eq!(
-            texts(body, None),
+            texts(body, &[]),
             [
                 (
                     "https://example.com/changelog".to_owned(),
@@ -422,16 +403,29 @@ mod tests {
     }
 
     #[test]
-    fn html_links_point_at_their_target_over_https() {
-        let html = r#"<p>Pay your <a href="blocked://evil.example/pay">https://bank.example</a> bill.
-            <a href="javascript:alert(1)">Run</a> <a href="mailto:x@example.com">Mail</a></p>"#;
-        let body = "Pay your https://bank.example bill.\nRun Mail";
+    fn html_links_point_at_their_real_target() {
+        // As the store reads them from the sanitiser's link table.
+        let body = "Pay your https://bank.example bill.\nCall Mail";
+        let html_link = |text: &str, target: &str| {
+            let start = body.find(text).expect("the link text is in the body");
+            zmail_core::BodyLink {
+                range: start..start + text.len(),
+                target: target.to_owned(),
+            }
+        };
         assert_eq!(
-            texts(body, Some(html)),
+            texts(
+                body,
+                &[
+                    html_link("https://bank.example", "http://evil.example/pay"),
+                    html_link("Call", "tel:+3531234567"),
+                    html_link("Mail", "mailto:x@example.com"),
+                ]
+            ),
             [
                 (
                     "https://bank.example".to_owned(),
-                    "https://evil.example/pay".to_owned()
+                    "http://evil.example/pay".to_owned()
                 ),
                 ("Mail".to_owned(), "mailto:x@example.com".to_owned()),
             ]
@@ -441,10 +435,11 @@ mod tests {
     #[test]
     fn only_web_and_mail_targets_open() {
         assert_eq!(
-            link_target("BLOCKED://example.org/x").as_deref(),
-            Some("https://example.org/x")
+            link_target("http://example.org/x").as_deref(),
+            Some("http://example.org/x")
         );
         for href in [
+            "blocked://example.org/x",
             "javascript:alert(1)",
             "file:///etc/passwd",
             "data:text/html,x",

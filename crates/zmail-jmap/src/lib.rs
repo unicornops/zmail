@@ -1326,8 +1326,8 @@ mod tests {
             "HTML must never be stored as plain text and shown raw"
         );
         let sanitized_html = sanitized_html.expect("the HTML body should be stored sanitized");
-        assert!(sanitized_html.contains("blocked://tracker.example.test/open.gif"));
-        assert!(!sanitized_html.contains("https://"));
+        assert!(sanitized_html.contains("<img src=\"zmail-blocked:0\">"));
+        assert!(!sanitized_html.contains("tracker.example.test"));
         assert!(has_remote_content, "the remote image must be reported");
         assert_eq!(
             preview.as_deref(),

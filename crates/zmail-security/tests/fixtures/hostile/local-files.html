@@ -1,0 +1,18 @@
+<svg width="10" height="10"><image href="file:///etc/passwd" width="10" height="10"/></svg>
+<svg><use xlink:href="file:///C:/Windows/win.ini#x"/></svg>
+<svg><image xlink:href="https://evil.example/svg.png"/></svg>
+<img src="file:///C:/Windows/win.ini">
+<img src="FILE:///etc/hosts">
+<img src="\\attacker.example\share\pixel.png">
+<img src="//attacker.example/share/pixel.png">
+<img src="smb://attacker.example/share/x.png">
+<a href="file://server/share/doc.pdf">file link</a>
+<a href="\\server\share\doc.pdf">unc link</a>
+<div style="background:url(\\attacker.example\share\bg.png)">unc css</div>
+<div style="background:url('file:///etc/passwd')">file css</div>
+<table background="file:///etc/passwd"><tr><td background="\\attacker\x.png">bg</td></tr></table>
+<img src="data:image/svg+xml,%3Csvg onload=alert(1)%3E">
+<img src="data:text/html,<script>alert(1)</script>">
+<img src="data:image/png;base64,iVBORw0KGgo=" alt="ok data">
+<img src="cid:inline-1@example.com" alt="ok cid">
+<img src="cid:&quot;onerror=alert(1)">
