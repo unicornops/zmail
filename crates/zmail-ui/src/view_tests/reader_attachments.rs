@@ -41,6 +41,8 @@ fn seed(store: &LocalStore) {
                 content_type: (*content_type).to_owned(),
                 size_bytes: bytes.len() as u64,
                 storage_path,
+                content_id: None,
+                inline_only: false,
             }
         })
         .collect();
@@ -64,6 +66,7 @@ fn seed(store: &LocalStore) {
             body_preview: "Three files attached".to_owned(),
             body_text: Some("Three files attached".to_owned()),
             sanitized_html: None,
+            raw_html: None,
             has_remote_content: false,
             is_read: false,
             is_flagged: false,

@@ -123,6 +123,7 @@ fn message(
         body_preview: body.unwrap_or("Body not downloaded.").to_owned(),
         body_text: body.map(str::to_owned),
         sanitized_html: None,
+        raw_html: None,
         has_remote_content: false,
         is_read: false,
         is_flagged: false,
@@ -173,6 +174,8 @@ fn mail_never_reaches_the_disk_in_plaintext() {
         content_type: "application/pdf".to_owned(),
         size_bytes: ATTACHMENT_BYTES.len() as u64,
         storage_path,
+        content_id: None,
+        inline_only: false,
     };
     let snapshot = AccountSyncSnapshot {
         checkpoint: "seed".to_owned(),
@@ -242,6 +245,7 @@ fn mail_never_reaches_the_disk_in_plaintext() {
             &HydratedBody {
                 body_text: Some(HYDRATED_BODY.to_owned()),
                 sanitized_html: None,
+                raw_html: None,
                 has_remote_content: false,
                 body_preview: HYDRATED_BODY.to_owned(),
                 attachments: vec![MessageAttachment {
@@ -249,6 +253,8 @@ fn mail_never_reaches_the_disk_in_plaintext() {
                     content_type: "application/pdf".to_owned(),
                     size_bytes: HYDRATED_ATTACHMENT_BYTES.len() as u64,
                     storage_path: hydrated_path,
+                    content_id: None,
+                    inline_only: false,
                 }],
             },
         )

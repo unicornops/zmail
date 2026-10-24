@@ -845,6 +845,58 @@ mod tests {
     }
 
     #[test]
+    fn hydration_keeps_the_html_part_and_inline_parts_by_content_id() {
+        let mut json = base_message();
+        json["MIMEType"] = "text/html".into();
+        json["Attachments"] = serde_json::json!([
+            {"ID": "a2", "Name": "logo.png", "MIMEType": "image/png", "Disposition": "inline", "KeyPackets": "",
+             "Headers": {"Content-Id": "<logo@x>"}},
+        ]);
+        let mut decrypted = DecryptedMessage {
+            msg: message(json),
+            body: Ok(Zeroizing::new(
+                b"<p>Hi <img src=\"cid:logo@x\"></p>".to_vec(),
+            )),
+            attachments: vec![DecryptedAttachment {
+                packet: Vec::new(),
+                encrypted: Vec::new(),
+                data: Ok(Zeroizing::new(vec![0x89, b'P', b'N', b'G'])),
+            }],
+        };
+        let raw = build_rfc822(&mut decrypted);
+        let dir = std::env::temp_dir().join(format!(
+            "zmail-proton-cid-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let vault = zmail_security::vault::BlobVault::new(
+            &dir,
+            &zmail_security::vault::StoreKey::generate(),
+        );
+        let blobs = zmail_core::BlobStore::new(std::sync::Arc::new(vault.clone()));
+        let body = zmail_imap::hydrated_body_from_rfc822(&raw, "Inbox", "msg-1", &blobs)
+            .expect("the rebuilt message parses");
+        assert_eq!(
+            body.raw_html.as_deref(),
+            Some("<p>Hi <img src=\"cid:logo@x\"></p>")
+        );
+        let logo = body
+            .attachments
+            .iter()
+            .find(|part| part.content_id.as_deref() == Some("logo@x"))
+            .expect("the inline logo is kept by its Content-ID");
+        assert_eq!(logo.content_type, "image/png");
+        assert_eq!(
+            vault
+                .read_file(&dir.join(&logo.storage_path))
+                .expect("the logo decrypts"),
+            [0x89, b'P', b'N', b'G']
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn undecryptable_parts_keep_the_ciphertext_with_a_note() {
         let mut json = base_message();
         json["Attachments"] = serde_json::json!([

@@ -26,6 +26,7 @@ fn message(sender: &str, at: &str, is_read: bool, body: &str) -> MessageSnapshot
         body_preview: body.chars().take(80).collect(),
         body_text: Some(body.to_owned()),
         sanitized_html: None,
+        raw_html: None,
         has_remote_content: false,
         is_read,
         is_flagged: false,
@@ -33,6 +34,11 @@ fn message(sender: &str, at: &str, is_read: bool, body: &str) -> MessageSnapshot
         attachments: Vec::new(),
     }
 }
+
+/// The first message of the seeded conversation: HTML only, with a link
+/// whose text shows another site.
+const ROADMAP_HTML: &str = "<p>Attached is the draft roadmap.</p>\
+    <p><a href=\"http://evil.example/login\">https://bank.example/login</a></p>";
 
 /// Replaces the account's mail with one Inbox conversation: two read
 /// messages (an HTML one with a mismatched link, then one ending in a
@@ -42,11 +48,8 @@ fn seed_conversation(store: &LocalStore) {
         MessageSnapshot {
             // HTML only, with a link whose text shows another site.
             body_text: None,
-            sanitized_html: Some(
-                "<p>Attached is the draft roadmap.</p>\
-                 <p><a href=\"http://evil.example/login\">https://bank.example/login</a></p>"
-                    .to_owned(),
-            ),
+            sanitized_html: Some(zmail_security::sanitize_html_for_display(ROADMAP_HTML).html),
+            raw_html: Some(ROADMAP_HTML.to_owned()),
             ..message(
                 "Priya Raman <priya@example.test>",
                 "2026-03-24T09:00:00Z",
@@ -449,20 +452,22 @@ fn html_mail_reads_as_paragraphs_with_cells_apart(cx: &mut TestAppContext) {
         Setup::Account,
         |_| InitialView::Inbox,
         |store| {
+            const ORDER_HTML: &str = concat!(
+                "<div style=\"display:none\">Preheader</div>",
+                "<h1>Your order</h1>",
+                "<table><tr><td>Plan</td><td>Price</td></tr>",
+                "<tr><td>Starter</td><td>EUR&nbsp;9</td></tr></table>",
+                "<p>Line one<br>line two</p>",
+                "<p>Track it at <a href=\"http://shop.example/track\">the shop</a>.</p>",
+            );
             store_conversation(
                 store,
                 vec![MessageSnapshot {
                     body_text: None,
                     sanitized_html: Some(
-                        zmail_security::sanitize_html_for_display(concat!(
-                            "<h1>Your order</h1>",
-                            "<table><tr><td>Plan</td><td>Price</td></tr>",
-                            "<tr><td>Starter</td><td>EUR&nbsp;9</td></tr></table>",
-                            "<p>Line one<br>line two</p>",
-                            "<p>Track it at <a href=\"http://shop.example/track\">the shop</a>.</p>",
-                        ))
-                        .html,
+                        zmail_security::sanitize_html_for_display(ORDER_HTML).html,
                     ),
+                    raw_html: Some(ORDER_HTML.to_owned()),
                     ..message(
                         "Shop <orders@shop.example>",
                         "2026-03-24T09:00:00Z",

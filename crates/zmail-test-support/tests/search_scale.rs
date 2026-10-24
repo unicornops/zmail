@@ -391,6 +391,7 @@ fn large_mailbox_search_timings() -> Result<()> {
             &HydratedBody {
                 body_text: Some("hydrated body with a fresh skua".to_owned()),
                 sanitized_html: None,
+                raw_html: None,
                 has_remote_content: false,
                 body_preview: "hydrated body".to_owned(),
                 attachments: Vec::new(),

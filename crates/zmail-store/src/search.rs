@@ -517,6 +517,7 @@ mod store_tests {
                 body_preview: "Body not downloaded.".to_owned(),
                 body_text: item.body.map(str::to_owned),
                 sanitized_html: None,
+                raw_html: None,
                 has_remote_content: false,
                 is_read: !item.unread,
                 is_flagged: item.flagged,
@@ -527,6 +528,8 @@ mod store_tests {
                         content_type: "application/octet-stream".to_owned(),
                         size_bytes: 10,
                         storage_path: format!("{}.bin", item.id),
+                        content_id: None,
+                        inline_only: false,
                     }]
                 } else {
                     Vec::new()
@@ -1080,6 +1083,7 @@ mod store_tests {
                 &zmail_core::HydratedBody {
                     body_text: Some("x".repeat(bytes)),
                     sanitized_html: None,
+                    raw_html: None,
                     has_remote_content: false,
                     body_preview: "x".to_owned(),
                     attachments: Vec::new(),

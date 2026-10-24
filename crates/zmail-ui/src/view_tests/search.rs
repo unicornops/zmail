@@ -458,6 +458,7 @@ fn a_body_match_shows_an_excerpt_in_place_of_the_snippet(cx: &mut TestAppContext
                             "Numbers for the week, as usual. ".repeat(4)
                         )),
                         sanitized_html: None,
+                        raw_html: None,
                         has_remote_content: false,
                         body_preview: "Numbers attached".to_owned(),
                         attachments: Vec::new(),

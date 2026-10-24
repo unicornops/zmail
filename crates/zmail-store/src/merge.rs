@@ -320,6 +320,7 @@ fn stored_places(
 struct Hydration {
     body_text: Option<String>,
     sanitized_html: Option<String>,
+    raw_html: Option<String>,
     has_remote_content: bool,
     body_preview: String,
     attachments: Vec<MessageAttachment>,
@@ -329,6 +330,7 @@ impl Hydration {
     fn apply_to(&self, message: &mut MessageSnapshot) {
         message.body_text = self.body_text.clone();
         message.sanitized_html = self.sanitized_html.clone();
+        message.raw_html = self.raw_html.clone();
         message.has_remote_content = self.has_remote_content;
         message.body_preview = self.body_preview.clone();
         if message.attachments.is_empty() {
@@ -338,26 +340,30 @@ impl Hydration {
 }
 
 fn load_hydration(transaction: &Transaction<'_>, message_id: i64) -> Result<Hydration> {
-    let (body_text, sanitized_html, has_remote_content, body_preview) = transaction
+    let (body_text, sanitized_html, has_remote_content, body_preview, raw_html) = transaction
         .query_row(
-            "SELECT body_text, sanitized_html, has_remote_content, body_preview \
+            "SELECT body_text, sanitized_html, has_remote_content, body_preview, raw_html \
              FROM messages WHERE id = ?1",
             params![message_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .context("failed to load a message body during the mail delta")?;
     let attachments = load_stored_message_attachments(transaction, message_id)?
         .into_iter()
-        .map(|attachment| MessageAttachment {
-            filename: attachment.filename,
-            content_type: attachment.content_type,
-            size_bytes: attachment.size_bytes,
-            storage_path: attachment.storage_path,
-        })
+        .map(MessageAttachment::from)
         .collect();
     Ok(Hydration {
         body_text,
         sanitized_html,
+        raw_html,
         has_remote_content,
         body_preview,
         attachments,
@@ -554,6 +560,7 @@ mod tests {
             body_preview: String::new(),
             body_text: None,
             sanitized_html: None,
+            raw_html: None,
             has_remote_content: false,
             is_read: read,
             is_flagged: false,
@@ -881,6 +888,8 @@ mod tests {
             content_type: "text/plain".to_owned(),
             size_bytes: 5,
             storage_path: "blob-1".to_owned(),
+            content_id: None,
+            inline_only: false,
         }];
         let mut first = thread("c1", vec![opened]);
         first.has_attachments = true;

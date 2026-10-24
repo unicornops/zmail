@@ -34,6 +34,7 @@ fn thread(id: &str, sender: &str, reply_to: Option<&str>, remote_content: bool) 
             body_preview: "Please confirm your account".to_owned(),
             body_text: Some("Please confirm your account".to_owned()),
             sanitized_html: None,
+            raw_html: None,
             has_remote_content: remote_content,
             is_read: false,
             is_flagged: false,

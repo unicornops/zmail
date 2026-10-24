@@ -128,6 +128,7 @@ fn thread_snapshot(index: usize) -> ThreadSnapshot {
             body_preview: "Numbers attached".to_owned(),
             body_text: Some("Numbers attached".to_owned()),
             sanitized_html: None,
+            raw_html: None,
             has_remote_content: false,
             is_read: false,
             is_flagged: false,
