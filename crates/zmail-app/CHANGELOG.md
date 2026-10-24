@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/unicornops/zmail/compare/v0.19.0...v0.20.0) (2026-10-24)
+
+
+### Features
+
+* **notify:** open the conversation when a new-mail notification is clicked ([#289](https://github.com/unicornops/zmail/issues/289)) ([0b7301b](https://github.com/unicornops/zmail/commit/0b7301b7ea2b49b51af37532e43a75e34b54e100)), closes [#288](https://github.com/unicornops/zmail/issues/288)
+
 ## [0.19.0](https://github.com/unicornops/zmail/compare/v0.18.0...v0.19.0) (2026-10-23)
 
 
