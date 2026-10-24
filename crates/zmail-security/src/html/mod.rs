@@ -43,8 +43,8 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-pub use policy::is_public_remote_url;
 use policy::{ResourceUse, UrlPolicy};
+pub use policy::{is_public_ip, is_public_remote_url};
 use prepass::PrePass;
 
 /// The scheme of the opaque link ids that replace every `href`:
@@ -74,6 +74,9 @@ const MAX_PREPASS_DEPTH: usize = 4 * MAX_DEPTH;
 /// The most CSS, across all `<style>` blocks, a sanitised message may
 /// have. Gmail drops styles past 16 KB.
 pub const MAX_STYLE_BYTES: usize = 256 * 1024;
+
+/// The most characters of a link's text kept in [`LinkTarget::text`].
+pub const MAX_LINK_TEXT_CHARS: usize = 512;
 
 /// The most markup the text derivation reads from mail too complex to
 /// sanitise; the rest is cut.
@@ -253,6 +256,10 @@ pub struct LinkTarget {
     /// The target URL, normalised by the URL parser (punycode hosts,
     /// lowercase scheme and host).
     pub url: String,
+    /// The link's visible text as the text derivation reads it, spaces
+    /// collapsed and cut at [`MAX_LINK_TEXT_CHARS`], for the look-alike
+    /// warning. Empty for a link with no text (an image).
+    pub text: String,
 }
 
 impl LinkTarget {
@@ -445,6 +452,7 @@ fn sanitize(input: &str, mut policy: UrlPolicy) -> SanitizedDocument {
     } else {
         text::derive(&html, text::Markup::Sanitized)
     };
+    fill_link_texts(&mut policy.links, &derived.text, &derived.links);
     let (html, too_complex) = if derived.deepest > MAX_DEPTH {
         (None, Some(Complexity::TooDeep))
     } else {
@@ -466,6 +474,7 @@ fn sanitize(input: &str, mut policy: UrlPolicy) -> SanitizedDocument {
 fn too_complex(input: &str, complexity: Complexity, mut policy: UrlPolicy) -> SanitizedDocument {
     let input = &input[..input.floor_char_boundary(MAX_TEXT_INPUT_BYTES)];
     let derived = text::derive(input, text::Markup::Unsanitized(&mut policy));
+    fill_link_texts(&mut policy.links, &derived.text, &derived.links);
     SanitizedDocument {
         html: None,
         too_complex: Some(complexity),
@@ -474,6 +483,24 @@ fn too_complex(input: &str, complexity: Complexity, mut policy: UrlPolicy) -> Sa
         links: policy.links,
         remote: Vec::new(),
         cid_references: Vec::new(),
+    }
+}
+
+/// Gives each link the text of its runs in the derived text.
+fn fill_link_texts(links: &mut [LinkTarget], text: &str, text_links: &[TextLink]) {
+    for run in text_links {
+        let (Some(link), Some(piece)) = (links.get_mut(run.link), text.get(run.range.clone()))
+        else {
+            continue;
+        };
+        if !link.text.is_empty() {
+            link.text.push(' ');
+        }
+        link.text.push_str(piece);
+    }
+    for link in links {
+        let collapsed = link.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        link.text = collapsed.chars().take(MAX_LINK_TEXT_CHARS).collect();
     }
 }
 

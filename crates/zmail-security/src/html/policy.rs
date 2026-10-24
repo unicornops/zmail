@@ -176,6 +176,7 @@ fn link_target(href: &str, legacy_blocked_links: bool) -> Option<LinkTarget> {
     }
     Some(LinkTarget {
         url: url.to_string(),
+        text: String::new(),
     })
 }
 
@@ -202,6 +203,18 @@ pub fn is_public_remote_url(url: &str) -> bool {
         Some(Host::Ipv4(address)) => is_public_ipv4(address),
         Some(Host::Ipv6(address)) => is_public_ipv6(address),
         None => false,
+    }
+}
+
+/// Whether a resolved address is one remote content may be fetched from:
+/// not loopback, private, link-local, shared (CGNAT), multicast,
+/// documentation or reserved, nor such an IPv4 address mapped into IPv6.
+/// A renderer that fetches allowed remote content checks every address a
+/// public name resolves to with this before connecting.
+pub fn is_public_ip(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(address) => is_public_ipv4(address),
+        std::net::IpAddr::V6(address) => is_public_ipv6(address),
     }
 }
 
@@ -368,6 +381,23 @@ mod tests {
             "not a url",
         ] {
             assert!(!is_public_remote_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn resolved_addresses_are_checked_too() {
+        for (address, public) in [
+            ("93.184.216.34", true),
+            ("2606:4700::1111", true),
+            ("127.0.0.1", false),
+            ("10.1.2.3", false),
+            ("169.254.169.254", false),
+            ("::1", false),
+            ("fe80::1", false),
+            ("::ffff:192.168.1.1", false),
+        ] {
+            let address: std::net::IpAddr = address.parse().expect("an address");
+            assert_eq!(is_public_ip(address), public, "{address}");
         }
     }
 

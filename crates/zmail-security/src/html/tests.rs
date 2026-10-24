@@ -91,6 +91,30 @@ fn links_become_ids_and_keep_their_targets() {
         texts,
         [("Plain", 0), ("Secure", 1), ("Mail", 2), ("Call", 3)]
     );
+    assert_eq!(document.links[1].text, "Secure");
+}
+
+#[test]
+fn links_carry_their_visible_text_for_the_look_alike_warning() {
+    let document = sanitize(concat!(
+        r#"<a href="https://evil.example/"><span>https://bank</span>.example</a>"#,
+        r#"<a href="https://example.com/"><div>Read</div><div>more</div></a>"#,
+        r#"<a href="https://example.com/i"><img src="cid:x" alt="Logo"></a>"#,
+    ));
+    let texts: Vec<&str> = document
+        .links
+        .iter()
+        .map(|link| link.text.as_str())
+        .collect();
+    assert_eq!(texts, ["https://bank.example", "Read more", ""]);
+
+    // Mail too complex to sanitise still has them.
+    let deep = format!(
+        "{}<a href=\"https://evil.example/\">bank.example</a>{}",
+        "<div>".repeat(2_000),
+        "</div>".repeat(2_000)
+    );
+    assert_eq!(sanitize(&deep).links[0].text, "bank.example");
 }
 
 #[test]

@@ -33,7 +33,7 @@
 use std::{fmt, sync::Arc};
 
 pub use zmail_security::html::{
-    BLOCKED_SCHEME, Complexity, LINK_SCHEME, LinkTarget, RemoteResource, TextLink,
+    BLOCKED_SCHEME, Complexity, LINK_SCHEME, LinkTarget, RemoteResource, TextLink, is_public_ip,
     is_public_remote_url,
 };
 use zmail_security::html::{SanitizeOptions, sanitize_html};

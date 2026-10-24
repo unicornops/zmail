@@ -88,6 +88,10 @@ fn links_inline_parts_and_text_come_with_the_html() {
         Some("http://example.com/offer"),
         "the scheme is kept"
     );
+    assert_eq!(
+        prepared.link(0).map(|link| link.text.as_str()),
+        Some("see the offer")
+    );
     assert_eq!(prepared.link_for_url("zmail-link:9"), None);
     assert_eq!(prepared.link_for_url("https://example.com/"), None);
     assert_eq!(prepared.cid_references, ["logo@example.com"]);
@@ -116,6 +120,11 @@ fn plain_text_wins_for_the_text_and_html_still_renders() {
     assert!(prepared.text_is_plain);
     assert!(prepared.text_links.is_empty());
     assert!(prepared.html().is_ok());
+    assert_eq!(
+        prepared.link(0).map(|link| link.text.as_str()),
+        Some("see the offer"),
+        "links keep their text when the text view shows the plain part"
+    );
     assert!(TextRenderer.accepts(&prepared));
 }
 
