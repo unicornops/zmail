@@ -41,7 +41,7 @@ mod macos {
     };
 
     use anyhow::{Context, Result, bail, ensure};
-    use zmail_render::{PrepareOptions, RenderSource, prepare};
+    use zmail_render::{PrepareOptions, RemoteContentDecision, RenderSource, prepare};
     use zmail_render_web::{
         Appearance, InlineResource, WebDocument, WebEvent,
         macos_testing::{Frame, OffscreenWindow, PlatformWebView},
@@ -285,7 +285,11 @@ mod macos {
                 &PrepareOptions::default(),
             );
             let mut documents = vec![("raw", document(&html))];
-            match WebDocument::from_prepared(&prepared, Appearance::default()) {
+            match WebDocument::from_prepared(
+                &prepared,
+                Appearance::default(),
+                RemoteContentDecision::Blocked,
+            ) {
                 Ok(prepared) => documents.push(("prepared", prepared)),
                 Err(reason) => println!("canary: {name}: no prepared HTML ({reason})"),
             }
@@ -311,6 +315,42 @@ mod macos {
                 );
             }
         }
+
+        // Remote content allowed: images come through Zmail's fetcher, which
+        // resolves each host and refuses any that resolves to a private
+        // address. These public names resolve to 127.0.0.1 (the canary), as
+        // a rebinding attack would, so they must still never connect.
+        let rebinding = format!(
+            r#"<img src="https://127.0.0.1.nip.io:{port}/rebind.png"><div style="background:url(https://localtest.me:{port}/rebind-bg.png)">x</div>"#,
+            port = canary.port
+        );
+        let prepared = prepare(
+            &RenderSource {
+                message_id: 2,
+                html: Some(rebinding),
+                ..RenderSource::default()
+            },
+            &PrepareOptions::default(),
+        );
+        let allowed = WebDocument::from_prepared(
+            &prepared,
+            Appearance::default(),
+            RemoteContentDecision::AllowedForMessage,
+        )
+        .context("the rebinding page has HTML")?;
+        println!(
+            "canary: rebinding page fetches {:?}",
+            allowed.remote.iter().flatten().collect::<Vec<_>>()
+        );
+        let rendered = render(&window, &allowed)?;
+        window.pump(Duration::from_secs(3));
+        let hits = canary.hits();
+        if !hits.is_empty() {
+            problems.push(format!(
+                "allowed remote content reached a private address: {hits:?}"
+            ));
+        }
+        drop(rendered);
 
         // Page JavaScript does not run.
         let rendered = render(

@@ -10195,6 +10195,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-web-kit",
  "raw-window-handle",
+ "reqwest",
  "serde_json",
  "url",
  "zmail-render",
