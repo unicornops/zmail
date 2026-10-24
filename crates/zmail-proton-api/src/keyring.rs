@@ -13,6 +13,9 @@
 // overwriting. `Primary` and `ByID` return `Option` instead of panicking.
 // `ExtractSignatures`, `DecodeKeyPacket` and key list signing are not
 // ported.
+// Modified by UnicornOps on 2026-10-24: hands rPGP the rand 0.10 thread RNG
+// that the rpgp/rpgp#573 fork (RustCrypto 0.14 stack) takes; no change in
+// behaviour.
 
 //! User and address keys, and unlocking them into a [`KeyRing`].
 //!
@@ -216,7 +219,7 @@ const PROBE: &[u8] = b"zmail key check";
 
 fn check_signing(secret: &impl SigningKey, public: &impl VerifyingKey) -> Result<(), Error> {
     DetachedSignature::sign_binary_data(
-        rand::thread_rng(),
+        &mut rand_pgp::rng(),
         secret,
         &Password::empty(),
         HashAlgorithm::Sha256,
@@ -227,7 +230,7 @@ fn check_signing(secret: &impl SigningKey, public: &impl VerifyingKey) -> Result
 }
 
 fn check_encryption(key: &SignedSecretKey, public: &impl EncryptionKey) -> Result<(), Error> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand_pgp::rng();
     let mut builder = MessageBuilder::from_bytes("", PROBE.to_vec())
         .seipd_v1(&mut rng, SymmetricKeyAlgorithm::AES256);
     builder
