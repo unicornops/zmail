@@ -22,7 +22,8 @@ use std::{
 use gpui::{AnyElement, AppContext as _, Context, IntoElement, Window, px};
 use zmail_core::ThreadMessage;
 use zmail_render::{
-    MessageRenderer, PrepareOptions, PreparedMessage, ThemeHint, prepare, render_source,
+    MessageRenderer, PrepareOptions, PreparedMessage, RemoteContentDecision, ThemeHint, prepare,
+    render_source,
 };
 use zmail_render_web::{Appearance, WebDocument, WebEvent, WebHost, WebRenderer};
 use zmail_store::LocalStore;
@@ -221,7 +222,16 @@ impl ReaderView {
         let document = match self.web.documents.get(&message.id) {
             Some(document) if document.appearance == appearance => document.clone(),
             _ => {
-                let document = Rc::new(WebDocument::from_prepared(prepared, appearance).ok()?);
+                // Remote content stays blocked until the reader has the
+                // user's decision (ADR 0006 Phase 0, remote policy).
+                let document = Rc::new(
+                    WebDocument::from_prepared(
+                        prepared,
+                        appearance,
+                        RemoteContentDecision::Blocked,
+                    )
+                    .ok()?,
+                );
                 self.web.documents.insert(message.id, document.clone());
                 document
             }

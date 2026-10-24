@@ -15,10 +15,11 @@ use std::{
 
 use crate::document::{CID_SCHEME, MAIL_SCHEME};
 
-/// The rule list for a page that may load images from `allowed_origins`
-/// (already checked with [`crate::document::public_https_origin`]).
-pub fn content_rule_list(allowed_origins: &[String]) -> String {
-    let mut rules = vec![
+/// The rule list for every page: everything is blocked except Zmail's own
+/// schemes (the page, `cid:` parts and remote images Zmail fetched) and
+/// `data:` images.
+pub fn content_rule_list() -> String {
+    let rules = [
         r#"{"trigger":{"url-filter":".*"},"action":{"type":"block"}}"#.to_owned(),
         format!(
             r#"{{"trigger":{{"url-filter":"^{}:"}},"action":{{"type":"ignore-previous-rules"}}}}"#,
@@ -31,12 +32,6 @@ pub fn content_rule_list(allowed_origins: &[String]) -> String {
         r#"{"trigger":{"url-filter":"^data:","resource-type":["image"]},"action":{"type":"ignore-previous-rules"}}"#
             .to_owned(),
     ];
-    for origin in allowed_origins {
-        rules.push(format!(
-            r#"{{"trigger":{{"url-filter":"^{}/","resource-type":["image"]}},"action":{{"type":"ignore-previous-rules"}}}}"#,
-            json_escape(&regex_escape(origin))
-        ));
-    }
     format!("[{}]", rules.join(","))
 }
 
@@ -63,18 +58,13 @@ fn regex_escape(text: &str) -> String {
     escaped
 }
 
-/// Escapes a string for a JSON string literal.
-fn json_escape(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn everything_is_blocked_except_zmail_schemes_and_data_images() {
-        let list = content_rule_list(&[]);
+        let list = content_rule_list();
         let rules: serde_json::Value = serde_json::from_str(&list).expect("valid JSON");
         let rules = rules.as_array().expect("an array");
         assert_eq!(rules.len(), 4);
@@ -89,22 +79,10 @@ mod tests {
     }
 
     #[test]
-    fn allowed_origins_are_exact_and_images_only() {
-        let list = content_rule_list(&["https://img.example.com:8443".to_owned()]);
-        let rules: serde_json::Value = serde_json::from_str(&list).expect("valid JSON");
-        let origin = &rules[4];
+    fn the_identifier_is_stable() {
         assert_eq!(
-            origin["trigger"]["url-filter"],
-            "^https://img\\.example\\.com:8443/"
+            rule_list_identifier(&content_rule_list()),
+            rule_list_identifier(&content_rule_list())
         );
-        assert_eq!(origin["trigger"]["resource-type"][0], "image");
-    }
-
-    #[test]
-    fn identifiers_differ_per_origin_set() {
-        let none = rule_list_identifier(&content_rule_list(&[]));
-        let one = rule_list_identifier(&content_rule_list(&["https://a.example".to_owned()]));
-        assert_ne!(none, one);
-        assert_eq!(none, rule_list_identifier(&content_rule_list(&[])));
     }
 }

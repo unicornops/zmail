@@ -14,9 +14,10 @@
 //!   isolated client world, which page content cannot see.
 //! - The page comes from Zmail's `zmail-mail:` scheme handler with a CSP
 //!   response header (and a `<meta>` copy); `cid:` parts come from the same
-//!   handler. The handler serves nothing else.
-//! - A `WKContentRuleList` blocks every load that is not Zmail's scheme, a
-//!   `data:`/`cid:` image or an image from an origin the user allowed. The
+//!   handler, and so do remote images the user allowed, which Zmail fetches
+//!   itself (`crate::remote`). The handler serves nothing else.
+//! - A `WKContentRuleList` blocks every load that is not Zmail's scheme or
+//!   a `data:`/`cid:` image, so the engine never connects anywhere. The
 //!   view is not created until the list is compiled.
 //! - The navigation delegate allows exactly one navigation: the page load
 //!   Zmail starts. Link clicks are cancelled and reported to Zmail, which
@@ -38,13 +39,14 @@ use std::{
     ffi::c_void,
     ptr::NonNull,
     rc::{Rc, Weak as RcWeak},
+    sync::mpsc::{Receiver, TryRecvError},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result, anyhow};
 use block2::{DynBlock, RcBlock};
 use objc2::{
-    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
     rc::{Retained, Weak},
     runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject},
     sel,
@@ -56,8 +58,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSArray, NSData, NSDate, NSDefaultRunLoopMode, NSDictionary, NSError, NSHTTPURLResponse,
-    NSInteger, NSPoint, NSRect, NSRunLoop, NSSize, NSString, NSUInteger, NSURL, NSURLErrorDomain,
-    NSURLRequest,
+    NSInteger, NSPoint, NSRect, NSRunLoop, NSSize, NSString, NSTimer, NSUInteger, NSURL,
+    NSURLErrorDomain, NSURLRequest,
 };
 use objc2_web_kit::{
     WKAudiovisualMediaTypes, WKContentRuleList, WKContentRuleListStore, WKContentWorld,
@@ -71,6 +73,7 @@ use crate::document::{
     CID_SCHEME, InlineResource, MAIL_SCHEME, SchemeRequest, WebDocument, content_security_policy,
     page_html, page_url, parse_scheme_request,
 };
+use crate::remote::{FetchResult, RemoteFetcher};
 use crate::rules::{content_rule_list, rule_list_identifier};
 use crate::{WebEvent, debug_log};
 
@@ -429,12 +432,26 @@ struct ServedPage {
     html: Vec<u8>,
     policy: String,
     resources: HashMap<String, InlineResource>,
+    /// Remote images Zmail may fetch, by the `n` of
+    /// `zmail-mail://remote/<n>`.
+    remote: Vec<Option<String>>,
+}
+
+/// A remote image being fetched for a scheme task.
+struct PendingFetch {
+    task: Retained<ProtocolObject<dyn WKURLSchemeTask>>,
+    request: Retained<NSURLRequest>,
+    result: Receiver<FetchResult>,
 }
 
 struct DelegateIvars {
     on_event: Rc<dyn Fn(WebEvent)>,
     page: ServedPage,
     view: RefCell<Weak<MailWebView>>,
+    /// Remote image fetches whose scheme tasks are waiting.
+    pending: RefCell<Vec<PendingFetch>>,
+    /// Polls `pending` on the main run loop while it is not empty.
+    poll: RefCell<Option<Retained<NSTimer>>>,
 }
 
 define_class!(
@@ -595,6 +612,19 @@ define_class!(
                     // Inline parts are only ever images.
                     .filter(|resource| resource.mime_type.starts_with("image/"))
                     .map(|resource| (resource.mime_type.clone(), &resource.data[..], None)),
+                SchemeRequest::Remote(index) => {
+                    if let Some(Some(remote)) = page.remote.get(index) {
+                        debug_log(format_args!("fetching remote image {index}"));
+                        self.ivars().pending.borrow_mut().push(PendingFetch {
+                            task: task.retain(),
+                            request: request.clone(),
+                            result: RemoteFetcher::shared().fetch(remote.clone()),
+                        });
+                        self.start_polling();
+                        return;
+                    }
+                    None
+                }
                 _ => None,
             };
             match served {
@@ -608,8 +638,15 @@ define_class!(
             }
         }
 
+        /// WebKit no longer wants a task's answer: a remote image still
+        /// being fetched is dropped, and never answered.
         #[unsafe(method(webView:stopURLSchemeTask:))]
-        fn stop_task(&self, _web_view: &WKWebView, _task: &ProtocolObject<dyn WKURLSchemeTask>) {}
+        fn stop_task(&self, _web_view: &WKWebView, task: &ProtocolObject<dyn WKURLSchemeTask>) {
+            self.ivars()
+                .pending
+                .borrow_mut()
+                .retain(|pending| !std::ptr::eq(&*pending.task, task));
+        }
     }
 );
 
@@ -618,6 +655,78 @@ impl WebDelegate {
         let this = Self::alloc(mtm).set_ivars(ivars);
         // SAFETY: `init` is NSObject's designated initializer.
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// Starts polling the remote image fetches, unless already polling.
+    fn start_polling(&self) {
+        let mut poll = self.ivars().poll.borrow_mut();
+        if poll.as_ref().is_some_and(|timer| timer.isValid()) {
+            return;
+        }
+        let delegate = Weak::new(self);
+        let block = RcBlock::new(move |timer: NonNull<NSTimer>| {
+            let done = match delegate.load() {
+                Some(delegate) => delegate.answer_fetches(),
+                None => true,
+            };
+            if done {
+                // SAFETY: NSTimer passes itself, live for the callback.
+                unsafe { timer.as_ref() }.invalidate();
+            }
+        });
+        // SAFETY: the timer is scheduled on the current (main) run loop, so
+        // the block, which captures main-thread-only objects, only ever runs
+        // on the main thread.
+        let timer =
+            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.03, true, &block) };
+        *poll = Some(timer);
+    }
+
+    /// Answers the scheme tasks whose fetch finished. Returns whether none
+    /// is left.
+    fn answer_fetches(&self) -> bool {
+        let finished: Vec<(PendingFetch, FetchResult)> = {
+            let mut pending = self.ivars().pending.borrow_mut();
+            let mut finished = Vec::new();
+            let mut waiting = Vec::new();
+            for fetch in pending.drain(..) {
+                match fetch.result.try_recv() {
+                    Ok(result) => finished.push((fetch, result)),
+                    Err(TryRecvError::Empty) => waiting.push(fetch),
+                    Err(TryRecvError::Disconnected) => finished.push((
+                        fetch,
+                        Err(crate::remote::RemoteError::Request(
+                            "the fetcher stopped".to_owned(),
+                        )),
+                    )),
+                }
+            }
+            *pending = waiting;
+            finished
+        };
+        for (fetch, result) in finished {
+            match result {
+                Ok(image) => {
+                    debug_log(format_args!(
+                        "remote image fetched: {} bytes of {}",
+                        image.bytes.len(),
+                        image.content_type
+                    ));
+                    respond(
+                        &fetch.task,
+                        &fetch.request,
+                        &image.content_type,
+                        &image.bytes,
+                        None,
+                    );
+                }
+                Err(error) => {
+                    debug_log(format_args!("remote image refused: {error}"));
+                    fail(&fetch.task);
+                }
+            }
+        }
+        self.ivars().pending.borrow().is_empty()
     }
 
     fn report_failure(&self, error: &NSError) {
@@ -684,9 +793,10 @@ fn respond(
         fail(task);
         return;
     };
-    // SAFETY: the task is live (we are inside `webView:startURLSchemeTask:`
-    // and answer before returning), and each call is made once, in the
-    // order WebKit requires: response, data, finish.
+    // SAFETY: the task is live and unanswered: either we are inside
+    // `webView:startURLSchemeTask:`, or it is a retained remote-image task
+    // that `webView:stopURLSchemeTask:` has not removed. Each call is made
+    // once, in the order WebKit requires: response, data, finish.
     unsafe {
         task.didReceiveResponse(&response);
         task.didReceiveData(&NSData::with_bytes(body));
@@ -697,7 +807,7 @@ fn respond(
 /// Fails a scheme task: Zmail serves nothing but its page and inline parts.
 fn fail(task: &ProtocolObject<dyn WKURLSchemeTask>) {
     // SAFETY: `NSURLErrorDomain` is a valid error domain and the user info
-    // may be nil; the task is live and has not been answered.
+    // may be nil; the task is live and unanswered (see `respond`).
     unsafe {
         let error = NSError::errorWithDomain_code_userInfo(NSURLErrorDomain, NOT_FOUND, None);
         task.didFailWithError(&error);
@@ -714,14 +824,13 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
-/// Calls `then` with the compiled rule list for `allowed_origins`,
-/// compiling it first if needed. `then` runs later, on the main thread.
+/// Calls `then` with the compiled rule list, compiling it first if
+/// needed. `then` runs later, on the main thread.
 fn with_rule_list(
     mtm: MainThreadMarker,
-    allowed_origins: &[String],
     then: impl FnOnce(Result<Retained<WKContentRuleList>>) + 'static,
 ) {
-    let json = content_rule_list(allowed_origins);
+    let json = content_rule_list();
     let identifier = rule_list_identifier(&json);
     if let Some(list) = RULE_LISTS.with(|lists| lists.borrow().get(&identifier).cloned()) {
         then(Ok(list));
@@ -911,7 +1020,6 @@ impl PlatformWebView {
         let mtm = main_thread()?;
         let token = next_token();
         let url = page_url(&token);
-        let origins = document.allowed_origins();
         let delegate = WebDelegate::new(
             mtm,
             DelegateIvars {
@@ -919,10 +1027,13 @@ impl PlatformWebView {
                 page: ServedPage {
                     url: url.clone(),
                     html: page_html(document).into_bytes(),
-                    policy: content_security_policy(&origins, true),
+                    policy: content_security_policy(true),
                     resources: document.resources_by_id(),
+                    remote: document.remote.clone(),
                 },
                 view: RefCell::new(Weak::default()),
+                pending: RefCell::new(Vec::new()),
+                poll: RefCell::new(None),
             },
         );
         let state = Rc::new(ViewState {
@@ -947,7 +1058,7 @@ impl PlatformWebView {
             on_event(event);
         });
         let failure = on_view_event.clone();
-        with_rule_list(mtm, &origins, move |rule_list| {
+        with_rule_list(mtm, move |rule_list| {
             let Some(state) = RcWeak::upgrade(&weak_state) else {
                 return;
             };

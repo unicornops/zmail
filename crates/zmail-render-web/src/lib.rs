@@ -14,6 +14,7 @@
 //! |---|---|
 //! | `document` | The prepared message, the page served for it, the CSP and the origin checks |
 //! | `rules` | The content blocker's rule list |
+//! | `remote` | Remote images the user allowed, fetched by Zmail (never by the engine) |
 //! | `host` | GPUI: the per-reader host, the viewport wrapper and the body element |
 //! | `platform::macos` | AppKit and WebKit, the only `unsafe` code in Zmail |
 //!
@@ -22,6 +23,7 @@
 pub mod document;
 mod host;
 mod platform;
+pub mod remote;
 pub mod rules;
 
 use std::sync::OnceLock;

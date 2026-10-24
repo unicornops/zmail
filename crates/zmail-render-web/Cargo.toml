@@ -10,6 +10,9 @@ description = "Zmail's web renderer for HTML mail: a locked-down OS web view beh
 [dependencies]
 anyhow.workspace = true
 gpui.workspace = true
+# Remote images the user allowed are fetched by Zmail, not the engine
+# (src/remote.rs): https only, pinned to checked public addresses.
+reqwest.workspace = true
 url.workspace = true
 zmail-render = { path = "../zmail-render" }
 
@@ -21,7 +24,7 @@ zmail-render = { path = "../zmail-render" }
 block2 = "0.6.2"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSAppearance", "NSApplication", "NSEvent", "NSGraphics", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSObjCRuntime", "NSRunLoop", "NSString", "NSURL", "NSURLError", "NSURLRequest", "NSURLResponse"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSArray", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSObjCRuntime", "NSRunLoop", "NSString", "NSTimer", "NSURL", "NSURLError", "NSURLRequest", "NSURLResponse"] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKContentRuleList", "WKContentRuleListStore", "WKContentWorld", "WKFrameInfo", "WKNavigation", "WKNavigationAction", "WKNavigationDelegate", "WKNavigationResponse", "WKOpenPanelParameters", "WKPreferences", "WKUIDelegate", "WKURLSchemeHandler", "WKURLSchemeTask", "WKUserContentController", "WKWebView", "WKWebViewConfiguration", "WKWebpagePreferences", "WKWebsiteDataStore", "WKWindowFeatures"] }
 raw-window-handle = "0.6.2"
 

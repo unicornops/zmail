@@ -2,17 +2,19 @@
 //!
 //! A [`WebDocument`] is a prepared message: HTML that has already been
 //! through the sanitiser, the inline (`cid:`) parts it may show, the remote
-//! origins the user allowed, and the colours of the app theme. The page
+//! images the user allowed (fetched by Zmail, never by the engine: see
+//! `remote`), and the colours of the app theme. The page
 //! the engine loads ([`page_html`]) wraps that HTML in Zmail's own `<head>`:
 //! a Content Security Policy that repeats the one sent as a response header,
 //! a no-referrer policy, DNS prefetching off, and a small base stylesheet.
 //!
 //! Nothing here is platform specific, so it is tested on every OS.
 
-use std::{collections::HashMap, fmt::Write as _, net::IpAddr, sync::Arc};
+use std::{collections::HashMap, fmt::Write as _, sync::Arc};
 
-use url::{Host, Url};
-use zmail_render::{HtmlUnavailable, PreparedMessage};
+use zmail_render::{
+    BLOCKED_SCHEME, HtmlUnavailable, PreparedMessage, RemoteContentDecision, is_public_remote_url,
+};
 
 /// The scheme Zmail serves message pages from.
 pub const MAIL_SCHEME: &str = "zmail-mail";
@@ -32,10 +34,11 @@ pub struct WebDocument {
     pub html: String,
     /// Inline parts, by Content-ID.
     pub resources: Vec<InlineResource>,
-    /// The remote origins images may load from, when the user allowed
-    /// remote content for this message (`https://host[:port]`). Empty means
-    /// remote content stays blocked.
-    pub remote_origins: Vec<String>,
+    /// The remote resources Zmail may fetch for the page, by the `n` of
+    /// `zmail-mail://remote/<n>` (the index of the prepared message's remote
+    /// resource): `Some(url)` for an allowed public `https` image, `None`
+    /// otherwise. Empty while remote content is blocked.
+    pub remote: Vec<Option<String>>,
     /// The app theme the page is drawn in.
     pub appearance: Appearance,
 }
@@ -78,13 +81,20 @@ impl Default for Appearance {
 impl WebDocument {
     /// The document for a prepared message: its sanitised HTML, its inline
     /// image parts (a part that cannot be read, or is not an image, is
-    /// left out) and the origins its remote content may load from, which
-    /// is none unless the user allowed it.
+    /// left out) and, when `remote` allows it, its remote images.
+    ///
+    /// `prepared` must have been prepared with remote content blocked, so
+    /// its HTML has a `zmail-blocked:<n>` placeholder for every remote
+    /// resource. When the user allowed remote content, each placeholder of
+    /// a public `https` resource becomes `zmail-mail://remote/<n>`, which
+    /// Zmail's scheme handler fetches itself (`crate::remote`): the engine
+    /// never connects anywhere. Other placeholders stay blocked.
     pub fn from_prepared(
         prepared: &PreparedMessage,
         appearance: Appearance,
+        remote: RemoteContentDecision,
     ) -> Result<Self, HtmlUnavailable> {
-        let html = prepared.html()?;
+        let mut html = prepared.html()?.to_owned();
         let resources = prepared
             .inline_parts
             .iter()
@@ -104,20 +114,27 @@ impl WebDocument {
                 }
             })
             .collect();
-        let remote_origins = if prepared.remote.decision.allows() {
-            prepared
+        let remote = if remote.allows() {
+            let fetchable: Vec<Option<String>> = prepared
                 .remote
-                .allowed_origins()
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
+                .resources
+                .iter()
+                .map(|resource| is_public_remote_url(&resource.url).then(|| resource.url.clone()))
+                .collect();
+            html = rewrite_blocked(&html, |index| {
+                fetchable
+                    .get(index)
+                    .is_some_and(Option::is_some)
+                    .then(|| remote_url(index))
+            });
+            fetchable
         } else {
             Vec::new()
         };
         Ok(Self {
-            html: html.to_owned(),
+            html,
             resources,
-            remote_origins,
+            remote,
             appearance,
         })
     }
@@ -127,22 +144,9 @@ impl WebDocument {
         Self {
             html: html.into(),
             resources: Vec::new(),
-            remote_origins: Vec::new(),
+            remote: Vec::new(),
             appearance,
         }
-    }
-
-    /// The remote origins that may actually load: [`Self::remote_origins`]
-    /// with anything that is not a public `https` origin left out.
-    pub fn allowed_origins(&self) -> Vec<String> {
-        let mut origins: Vec<String> = self
-            .remote_origins
-            .iter()
-            .filter_map(|origin| public_https_origin(origin))
-            .collect();
-        origins.sort();
-        origins.dedup();
-        origins
     }
 
     /// Whether the page is drawn dark: only in a dark theme, and only when
@@ -164,15 +168,12 @@ impl WebDocument {
 }
 
 /// The Content Security Policy for a page: the one from ADR 0006 with
-/// `cid:` added (served by Zmail's scheme handler), plus the allowed remote
-/// origins for images. `sandbox` is left out of the copy in the page's
-/// `<meta>`, where browsers ignore it.
-pub fn content_security_policy(allowed_origins: &[String], with_sandbox: bool) -> String {
-    let mut images = format!("{MAIL_SCHEME}: {CID_SCHEME}: data:");
-    for origin in allowed_origins {
-        images.push(' ');
-        images.push_str(origin);
-    }
+/// `cid:` added (served by Zmail's scheme handler). Remote images, when
+/// allowed, also come from Zmail's scheme, so no remote origin is ever
+/// listed. `sandbox` is left out of the copy in the page's `<meta>`, where
+/// browsers ignore it.
+pub fn content_security_policy(with_sandbox: bool) -> String {
+    let images = format!("{MAIL_SCHEME}: {CID_SCHEME}: data:");
     let mut policy = format!(
         "default-src 'none'; img-src {images}; style-src 'unsafe-inline'; \
          form-action 'none'; base-uri 'none'"
@@ -204,7 +205,7 @@ pub fn page_html(document: &WebDocument) -> String {
         (0xffffff, 0x1f2328, 0x0969da)
     };
     let scheme = if dark { "dark" } else { "light" };
-    let policy = content_security_policy(&document.allowed_origins(), false);
+    let policy = content_security_policy(false);
     let mut page = String::with_capacity(document.html.len() + 1024);
     page.push_str("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
     let _ = write!(
@@ -284,6 +285,8 @@ pub enum SchemeRequest {
     Page(String),
     /// An inline part: `cid:<content-id>`.
     Inline(String),
+    /// A remote image Zmail fetches: `zmail-mail://remote/<n>`.
+    Remote(usize),
     /// Anything else, which is refused.
     Other,
 }
@@ -301,6 +304,17 @@ pub fn parse_scheme_request(url: &str) -> SchemeRequest {
         return SchemeRequest::Inline(normalize_content_id(id));
     }
     if scheme.eq_ignore_ascii_case(MAIL_SCHEME)
+        && let Some(path) = rest.strip_prefix("//remote/")
+    {
+        let index = path.split(['?', '#']).next().unwrap_or_default();
+        if !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()) {
+            return index
+                .parse()
+                .map_or(SchemeRequest::Other, SchemeRequest::Remote);
+        }
+        return SchemeRequest::Other;
+    }
+    if scheme.eq_ignore_ascii_case(MAIL_SCHEME)
         && let Some(path) = rest.strip_prefix("//message/")
     {
         let token = path.split(['?', '#']).next().unwrap_or_default();
@@ -316,6 +330,41 @@ pub fn page_url(token: &str) -> String {
     format!("{MAIL_SCHEME}://message/{token}")
 }
 
+/// The address the page loads remote resource `index` from.
+pub fn remote_url(index: usize) -> String {
+    format!("{MAIL_SCHEME}://remote/{index}")
+}
+
+/// Replaces each `zmail-blocked:<n>` placeholder in `html` that `replace`
+/// gives an address for; the others stay blocked.
+fn rewrite_blocked(html: &str, replace: impl Fn(usize) -> Option<String>) -> String {
+    let prefix = format!("{BLOCKED_SCHEME}:");
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(at) = rest.find(&prefix) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + prefix.len()..];
+        let digits = after
+            .find(|ch: char| !ch.is_ascii_digit())
+            .unwrap_or(after.len());
+        let replacement = after[..digits]
+            .parse()
+            .ok()
+            .filter(|_| digits > 0)
+            .and_then(&replace);
+        match replacement {
+            Some(address) => out.push_str(&address),
+            None => {
+                out.push_str(&prefix);
+                out.push_str(&after[..digits]);
+            }
+        }
+        rest = &after[digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The link id in a `zmail-link:<n>` URL.
 pub fn parse_link_id(url: &str) -> Option<usize> {
     let (scheme, rest) = url.split_once(':')?;
@@ -323,76 +372,6 @@ pub fn parse_link_id(url: &str) -> Option<usize> {
         return None;
     }
     rest.trim_start_matches('/').parse().ok()
-}
-
-/// `origin` as `https://host[:port]` when it is an https origin on a
-/// public host: no IP literal in a private, loopback, link-local or
-/// otherwise special range, no single-label or local-only name. Names
-/// that resolve to private addresses cannot be caught here.
-pub fn public_https_origin(origin: &str) -> Option<String> {
-    let url = Url::parse(origin).ok()?;
-    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
-        return None;
-    }
-    let public = match url.host()? {
-        Host::Ipv4(ip) => is_public_ip(IpAddr::V4(ip)),
-        Host::Ipv6(ip) => is_public_ip(IpAddr::V6(ip)),
-        Host::Domain(name) => is_public_name(name),
-    };
-    if !public {
-        return None;
-    }
-    let host = url.host_str()?;
-    Some(match url.port() {
-        Some(port) => format!("https://{host}:{port}"),
-        None => format!("https://{host}"),
-    })
-}
-
-fn is_public_name(name: &str) -> bool {
-    let name = name.trim_end_matches('.').to_ascii_lowercase();
-    const LOCAL_SUFFIXES: [&str; 7] = [
-        ".local",
-        ".localhost",
-        ".internal",
-        ".lan",
-        ".home",
-        ".home.arpa",
-        ".localdomain",
-    ];
-    name.contains('.')
-        && name != "localhost"
-        && !LOCAL_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
-}
-
-fn is_public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => {
-            let [a, b, ..] = ip.octets();
-            !(ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_unspecified()
-                || ip.is_broadcast()
-                || ip.is_documentation()
-                || ip.is_multicast()
-                // Carrier-grade NAT, 100.64.0.0/10.
-                || (a == 100 && (64..128).contains(&b))
-                // 0.0.0.0/8 and 240.0.0.0/4.
-                || a == 0
-                || a >= 240)
-        }
-        IpAddr::V6(ip) => {
-            let first = ip.segments()[0];
-            !(ip.is_loopback()
-                || ip.is_unspecified()
-                || ip.is_multicast()
-                // Unique local fc00::/7 and link-local fe80::/10.
-                || (first & 0xfe00) == 0xfc00
-                || (first & 0xffc0) == 0xfe80
-                || ip.to_ipv4_mapped().is_some_and(|v4| !is_public_ip(IpAddr::V4(v4))))
-        }
-    }
 }
 
 fn percent_decode(text: &str) -> String {
@@ -449,49 +428,24 @@ mod tests {
     }
 
     #[test]
-    fn the_policy_allows_only_zmail_schemes_unless_origins_are_given() {
+    fn the_policy_allows_only_zmail_schemes() {
         assert_eq!(
-            content_security_policy(&[], true),
+            content_security_policy(true),
             "default-src 'none'; img-src zmail-mail: cid: data:; style-src 'unsafe-inline'; \
              form-action 'none'; base-uri 'none'; sandbox"
         );
-        let policy = content_security_policy(&["https://img.example".to_owned()], false);
-        assert!(policy.contains("img-src zmail-mail: cid: data: https://img.example;"));
+        assert!(!content_security_policy(false).contains("sandbox"));
     }
 
     #[test]
-    fn only_public_https_origins_are_allowed() {
-        let mut doc = document("", false);
-        doc.remote_origins = [
-            "https://img.example.com",
-            "https://img.example.com/",
-            "https://cdn.example.com:8443/path",
-            "http://plain.example.com",
-            "https://localhost",
-            "https://printer.local",
-            "https://intranet",
-            "https://10.0.0.1",
-            "https://192.168.1.10",
-            "https://127.0.0.1",
-            "https://169.254.1.1",
-            "https://100.64.0.1",
-            "https://[::1]",
-            "https://[fd00::1]",
-            "https://[fe80::1]",
-            "https://[::ffff:192.168.0.1]",
-            "https://user:pw@img.example.com",
-            "https://93.184.216.34",
-            "file:///etc/passwd",
-        ]
-        .map(str::to_owned)
-        .to_vec();
+    fn only_allowed_placeholders_are_rewritten() {
+        let html = "<img src=\"zmail-blocked:0\"><img src=\"zmail-blocked:12\">\
+                    <p style=\"background:url(zmail-blocked:1)\">zmail-blocked:x zmail-blocked:</p>";
+        let rewritten = rewrite_blocked(html, |index| (index != 1).then(|| remote_url(index)));
         assert_eq!(
-            doc.allowed_origins(),
-            vec![
-                "https://93.184.216.34",
-                "https://cdn.example.com:8443",
-                "https://img.example.com",
-            ]
+            rewritten,
+            "<img src=\"zmail-mail://remote/0\"><img src=\"zmail-mail://remote/12\">\
+             <p style=\"background:url(zmail-blocked:1)\">zmail-blocked:x zmail-blocked:</p>"
         );
     }
 
@@ -544,10 +498,17 @@ mod tests {
             parse_scheme_request("cid:%3Cimg%40x%3E"),
             SchemeRequest::Inline("img@x".to_owned())
         );
+        assert_eq!(
+            parse_scheme_request("zmail-mail://remote/7"),
+            SchemeRequest::Remote(7)
+        );
         for other in [
             "zmail-mail://message/",
             "zmail-mail://message/../etc",
             "zmail-mail://other/a1",
+            "zmail-mail://remote/",
+            "zmail-mail://remote/-1",
+            "zmail-mail://remote/1x",
             "cid:",
             "https://example.com/",
             "file:///etc/passwd",
@@ -574,10 +535,8 @@ mod tests {
     }
 
     #[test]
-    fn a_prepared_message_brings_its_html_images_and_allowed_origins() {
-        use zmail_render::{
-            InlinePart, PrepareOptions, RemoteContentDecision, RenderSource, prepare,
-        };
+    fn a_prepared_message_brings_its_html_images_and_allowed_remote_images() {
+        use zmail_render::{InlinePart, PrepareOptions, RenderSource, prepare};
         let source = RenderSource {
             message_id: 7,
             body_text: None,
@@ -592,29 +551,49 @@ mod tests {
                 InlinePart::new("doc@x", "application/pdf", 3, Arc::new(Bytes(b"pdf"))),
             ],
         };
-        let blocked = prepare(&source, &PrepareOptions::default());
-        let document =
-            WebDocument::from_prepared(&blocked, Appearance::default()).expect("has HTML");
+        let prepared = prepare(&source, &PrepareOptions::default());
+        let document = WebDocument::from_prepared(
+            &prepared,
+            Appearance::default(),
+            RemoteContentDecision::Blocked,
+        )
+        .expect("has HTML");
         assert!(document.html.contains("zmail-link:0"), "{}", document.html);
+        assert!(
+            document.html.contains("zmail-blocked:0"),
+            "{}",
+            document.html
+        );
         assert!(
             !document.html.contains("img.example.com"),
             "{}",
             document.html
         );
-        assert!(document.remote_origins.is_empty());
+        assert!(document.remote.is_empty());
         assert_eq!(document.resources.len(), 1);
         assert_eq!(document.resources[0].mime_type, "image/png");
 
-        let allowed = prepare(
-            &source,
-            &PrepareOptions {
-                remote: RemoteContentDecision::AllowedForMessage,
-                ..PrepareOptions::default()
-            },
+        // Allowed: the image comes from Zmail's scheme, never from its host.
+        let document = WebDocument::from_prepared(
+            &prepared,
+            Appearance::default(),
+            RemoteContentDecision::AllowedForMessage,
+        )
+        .expect("has HTML");
+        assert!(
+            document.html.contains("src=\"zmail-mail://remote/0\""),
+            "{}",
+            document.html
         );
-        let document =
-            WebDocument::from_prepared(&allowed, Appearance::default()).expect("has HTML");
-        assert_eq!(document.allowed_origins(), ["https://img.example.com"]);
+        assert!(
+            !document.html.contains("img.example.com"),
+            "{}",
+            document.html
+        );
+        assert_eq!(
+            document.remote,
+            [Some("https://img.example.com/a.png".to_owned())]
+        );
 
         let plain = prepare(
             &RenderSource {
@@ -624,7 +603,14 @@ mod tests {
             },
             &PrepareOptions::default(),
         );
-        assert!(WebDocument::from_prepared(&plain, Appearance::default()).is_err());
+        assert!(
+            WebDocument::from_prepared(
+                &plain,
+                Appearance::default(),
+                RemoteContentDecision::Blocked
+            )
+            .is_err()
+        );
     }
 
     #[test]
