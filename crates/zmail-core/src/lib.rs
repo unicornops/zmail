@@ -1372,6 +1372,9 @@ pub struct ThreadMessage {
     pub is_flagged: bool,
     /// Whether the source HTML referenced remote content that remains blocked.
     pub has_remote_content: bool,
+    /// Whether the user chose to always load remote content from this
+    /// message's sender (per account; ADR 0006).
+    pub remote_content_sender_allowed: bool,
     /// Whether the user marked this message's sender-safety warning as
     /// "Looks safe", so the reader no longer shows it.
     pub sender_warning_dismissed: bool,

@@ -71,7 +71,7 @@ GPUI (pinned to a Zed stable release, see `docs/upstream/zed.md`) ships AccessKi
 ### Content
 
 - The reader renders message bodies as text, and HTML is converted to text before display.
-- Remote content stays blocked by default, and attachments are only saved on explicit user action.
+- Remote content stays blocked by default (allowed only per message for the session, or always for a sender the user chose, and then only public `https:` addresses; ADR 0006), and attachments are only saved on explicit user action.
 
 ### Manual screen-reader check
 

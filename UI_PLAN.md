@@ -411,8 +411,11 @@ Store dependencies are marked **[store]**.
    Move to… (a searchable folder picker that replaces the "Move: X" buttons), Mark Unread,
    View plain text / source, Save attachments, and Print (later).
 4. **Banners.**
-   - Remote content: a neutral one-line notice. Loading remote content stays out of scope
-     until there is an HTML engine and a security review.
+   - Remote content: a neutral notice on each message that references any, with "Load
+     remote content" (that message, until Zmail quits) and "Always for this sender"
+     (stored per account and address); an always-allowed sender's messages say so and
+     offer "Block" (ADR 0006). The text view loads nothing; the choice is what the HTML
+     renderers of ADR 0006 are given.
    - Sender safety (#108): tiered banners (info, caution, danger), each with one plain
      sentence and an action ("Looks safe", "Show details").
    - The chips go away.
