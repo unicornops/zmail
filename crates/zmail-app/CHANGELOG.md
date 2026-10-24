@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.21.0](https://github.com/unicornops/zmail/compare/v0.20.0...v0.21.0) (2026-10-24)
+
+
+### Features
+
+* **reader:** render HTML mail in a hardened WKWebView on macOS ([#295](https://github.com/unicornops/zmail/issues/295)) ([7e71905](https://github.com/unicornops/zmail/commit/7e719051735288813c254c46a345dad87f04b069))
+* **security:** HTML mail sanitiser and the zmail-render boundary (ADR 0006) ([#298](https://github.com/unicornops/zmail/issues/298)) ([c5fbc2d](https://github.com/unicornops/zmail/commit/c5fbc2d86016216b08c152643e136de2aad31128))
+* **store:** keep the raw HTML part and inline parts by Content-ID (ADR 0006) ([#300](https://github.com/unicornops/zmail/issues/300)) ([10c2d06](https://github.com/unicornops/zmail/commit/10c2d0606782ad38896bb002dd2b62e58f229044))
+
 ## [0.20.0](https://github.com/unicornops/zmail/compare/v0.19.0...v0.20.0) (2026-10-24)
 
 
