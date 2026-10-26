@@ -23,6 +23,16 @@ mod windows_host;
 #[cfg(target_os = "windows")]
 pub(crate) use windows_host::Backend;
 
+// The Linux engine: the FFI module, and safe code for its sandbox checks
+// and network wall. Not wired to the host yet; the canary test drives it.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+pub(crate) mod linux;
+#[cfg(target_os = "linux")]
+mod linux_proxy;
+#[cfg(target_os = "linux")]
+mod linux_sandbox;
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod unsupported;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

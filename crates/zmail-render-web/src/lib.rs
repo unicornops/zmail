@@ -23,8 +23,11 @@
 //! | `platform::macos` | AppKit and WebKit (`unsafe`) |
 //! | `platform::windows_host` | The Windows backend of the host: composition surfaces, web views and the input forwarded to them |
 //! | `platform::windows` | WebView2 and Win32 (`unsafe`) |
+//! | `platform::linux` | WebKitGTK, loaded at runtime, on an engine thread of its own (`unsafe`) |
+//! | `platform::linux_sandbox` | Checks that WebKitGTK's sandbox can start, and did |
+//! | `platform::linux_proxy` | The Linux engine's black-hole network proxy |
 //!
-//! The two `platform` FFI modules are the only `unsafe` code in Zmail.
+//! The `platform` FFI modules are the only `unsafe` code in Zmail.
 //!
 //! Set `ZMAIL_WEB_DEBUG=1` to log each step to stderr.
 
@@ -107,4 +110,14 @@ pub mod macos_testing {
 #[doc(hidden)]
 pub mod windows_testing {
     pub use crate::platform::windows::{PlatformWebView, TestWindow, clipboard_text};
+}
+
+/// The Linux engine without GPUI, for the canary test.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod linux_testing {
+    pub use crate::platform::linux::{
+        DisplayServer, MIN_VERSION, PlatformWebView, ViewEvent, ViewSize, blocked_connections,
+        failure, start, verified_web_processes,
+    };
 }
