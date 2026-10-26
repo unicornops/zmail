@@ -123,7 +123,7 @@ Each PNG is one UI state (the first-run welcome, inbox, reader, compose, the Add
 
 On macOS, CI's "Web renderer (macOS)" job also runs `scripts/capture-macos-web-screenshots.sh`: the `reader-html`, `reader-html-menu`, `reader-html-scrolled` and `reader-link-warning` fixture states, with HTML mail in the web renderer, captured with `screencapture`, plus three interactions driven by posted events (`scripts/macos-ui-events.swift`: the wheel over a page, a link click, a selection copied with Command-C, with the clipboard saved as `reader-html-copy.txt`), uploaded as the `macos-web-screenshots` artefact (each PNG with the launch's `ZMAIL_WEB_DEBUG` log).
 
-On Windows, CI's "Web renderer (Windows)" job runs `scripts/capture-windows-web-screenshots.ps1`: the same fixture states with HTML mail in WebView2, captured from the screen, plus the same three interactions driven by synthesised input relative to the window (the clipboard saved as `reader-html-copy.txt`), uploaded as the `windows-web-screenshots` artefact (each PNG with its `ZMAIL_WEB_DEBUG` log and the window's screen rectangle).
+On Windows, CI's "Web renderer (Windows)" job runs `scripts/capture-windows-web-screenshots.ps1`: the same fixture states with HTML mail in WebView2, captured from the screen, plus the same three interactions and a switch to another conversation, driven by synthesised input relative to the window (the clipboard saved as `reader-html-copy.txt`), uploaded as the `windows-web-screenshots` artefact (each PNG with its `ZMAIL_WEB_DEBUG` log and the window's screen rectangle).
 
 Dependency policy:
 

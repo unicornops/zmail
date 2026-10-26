@@ -214,6 +214,14 @@ Invoke-Interaction 'reader-html-link-click' {
     [ZmailWindows]::Click($x, $y)
 }
 
+# Opening another conversation hides the page: nothing of it may stay on
+# screen over the next one.
+Invoke-Interaction 'reader-html-switch' {
+    param($at)
+    $x, $y = & $at 0.2 0.21
+    [ZmailWindows]::Click($x, $y)
+}
+
 # Text selected in the page is copied by Ctrl+C, through Zmail.
 Set-Clipboard -Value ' '
 Invoke-Interaction 'reader-html-copy' {
