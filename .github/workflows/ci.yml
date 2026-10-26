@@ -601,9 +601,13 @@ jobs:
             - name: Build release binary
               run: cargo build -p zmail-app --release --locked
 
+            # The web renderer has its own jobs and screenshots (Web
+            # renderer (macOS/Linux)); here HTML mail keeps the text view,
+            # as it did before Linux had a web renderer.
             - name: Capture the screenshot matrix
               env:
                   ZMAIL_CAPTURE_LOG_DIR: ${{ runner.temp }}/ui-screenshot-logs
+                  ZMAIL_WEB_RENDERER: "0"
               run: xvfb-run -a --server-args="-screen 0 2560x1440x24" bash scripts/capture-release-screenshot.sh --matrix artifacts/ui-screenshots
 
             - name: Upload screenshots
