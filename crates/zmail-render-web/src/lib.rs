@@ -36,7 +36,7 @@ pub(crate) mod host;
 mod platform;
 pub mod remote;
 pub mod rules;
-#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 mod script;
 
 use std::sync::OnceLock;
@@ -118,6 +118,6 @@ pub mod windows_testing {
 pub mod linux_testing {
     pub use crate::platform::linux::{
         DisplayServer, MIN_VERSION, PlatformWebView, ViewEvent, ViewSize, blocked_connections,
-        failure, start, verified_web_processes,
+        failure, shutdown, start, verified_web_processes,
     };
 }

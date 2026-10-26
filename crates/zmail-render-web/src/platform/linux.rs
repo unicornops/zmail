@@ -231,6 +231,7 @@ api! {
     g_main_context_invoke: fn(Ptr, SourceFunc, Ptr);
     g_main_loop_new: fn(Ptr, c_int) -> Ptr;
     g_main_loop_run: fn(Ptr);
+    g_main_loop_quit: fn(Ptr);
     g_timeout_add: fn(c_uint, SourceFunc, Ptr) -> c_uint;
     g_free: fn(Ptr);
     g_bytes_new: fn(*const c_void, usize) -> Ptr;
@@ -548,10 +549,26 @@ fn fail(reason: String) {
 /// Something the engine thread is asked to do.
 enum Command {
     Create(Box<CreateView>),
-    Resize { id: u64, size: ViewSize },
-    Editing { id: u64, command: &'static CStr },
-    Evaluate { id: u64, script: String, tag: u64 },
-    Destroy { id: u64 },
+    Resize {
+        id: u64,
+        size: ViewSize,
+    },
+    Editing {
+        id: u64,
+        command: &'static CStr,
+    },
+    Evaluate {
+        id: u64,
+        script: String,
+        tag: u64,
+    },
+    Destroy {
+        id: u64,
+    },
+    /// Destroys every view and stops the engine thread's main loop.
+    Shutdown {
+        done: Sender<()>,
+    },
 }
 
 /// A new view.
@@ -590,6 +607,10 @@ struct EngineThread {
     /// Remote image fetches whose scheme requests are waiting.
     pending: Vec<PendingFetch>,
     polling: bool,
+    /// The running main loop, which `Command::Shutdown` quits.
+    main_loop: Ptr,
+    /// Told once the main loop has stopped.
+    stopped: Option<Sender<()>>,
 }
 
 /// A remote image being fetched for a scheme request.
@@ -659,16 +680,24 @@ fn engine_thread(
             queued: Vec::new(),
             pending: Vec::new(),
             polling: false,
+            main_loop: ptr::null_mut(),
+            stopped: None,
         });
     });
     compile_filter(api);
     let _ = started.send(Ok(()));
     debug_log(format_args!("engine thread running ({display:?})"));
     // SAFETY: runs GLib's default main loop on the thread that acquired
-    // the default context; it never returns.
+    // the default context, until `shutdown` quits it.
     unsafe {
         let main_loop = (api.g_main_loop_new)(ptr::null_mut(), FALSE);
+        with_thread(|thread| thread.main_loop = main_loop);
         (api.g_main_loop_run)(main_loop);
+    }
+    debug_log(format_args!("engine thread stopped"));
+    let done = with_thread(|thread| thread.stopped.take()).flatten();
+    if let Some(done) = done {
+        let _ = done.send(());
     }
 }
 
@@ -928,6 +957,32 @@ fn handle(command: Command) {
                         result: Err("the web view does not exist yet".into()),
                     });
                 }
+            }
+        }
+        Command::Shutdown { done } => {
+            let views: Vec<Rc<View>> = with_thread(|thread| {
+                thread.ready = false;
+                thread.queued.clear();
+                thread.views.drain().map(|(_, view)| view).collect()
+            })
+            .unwrap_or_default();
+            for view in views {
+                view.destroy();
+            }
+            FAILED.store(true, Ordering::SeqCst);
+            if let Ok(mut failure) = FAILURE.lock() {
+                failure.get_or_insert_with(|| "the web engine was shut down".to_owned());
+            }
+            let main_loop = with_thread(|thread| {
+                thread.stopped = Some(done);
+                thread.main_loop
+            });
+            if let (Some(api), Some(main_loop)) = (loaded_api(), main_loop)
+                && !main_loop.is_null()
+            {
+                // SAFETY: the loop this thread is running; quitting it makes
+                // `g_main_loop_run` return once this callback is done.
+                unsafe { (api.g_main_loop_quit)(main_loop) };
             }
         }
         Command::Destroy { id } => {
@@ -1919,6 +1974,22 @@ impl PlatformWebView {
 impl Drop for PlatformWebView {
     fn drop(&mut self) {
         send(Command::Destroy { id: self.id });
+    }
+}
+
+/// Stops the engine before the process exits: destroys every view and
+/// stops the engine thread's main loop, waiting (briefly) until it has. A
+/// process that exits while WebKit is busy on its thread can crash in
+/// WebKit's exit handlers (CI saw a SIGSEGV after the canary finished).
+/// Nothing can be shown afterwards.
+pub fn shutdown() {
+    if engine().is_none() {
+        return;
+    }
+    let (done, wait) = mpsc::channel();
+    send(Command::Shutdown { done });
+    if wait.recv_timeout(Duration::from_secs(2)).is_err() {
+        eprintln!("zmail: web renderer: the web engine did not stop in time");
     }
 }
 

@@ -57,7 +57,7 @@ mod linux {
         Appearance, InlineResource, WebDocument, WebEvent,
         linux_testing::{
             DisplayServer, PlatformWebView, ViewEvent, ViewSize, blocked_connections, failure,
-            start, verified_web_processes,
+            shutdown, start, verified_web_processes,
         },
     };
 
@@ -387,6 +387,9 @@ mod linux {
         if let Some(reason) = failure() {
             problems.push(format!("the engine stopped: {reason}"));
         }
+
+        // Stop the engine before the process exits, as the app does.
+        shutdown();
 
         if problems.is_empty() {
             Ok(())
