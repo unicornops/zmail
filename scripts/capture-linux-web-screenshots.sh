@@ -172,16 +172,20 @@ interact() {
   app_pid=""
   sleep 1
 }
+# Under weston's kiosk shell there is no window manager title bar, so the
+# page is this much higher on the screen.
+dy=0
+[[ "$WAYLAND" == 1 ]] && dy=-21
 # The wheel over the page scrolls the conversation.
-interact reader-html-wheel mousemove 1000 600 click --repeat 5 --delay 100 5
+interact reader-html-wheel mousemove 1000 $((600 + dy)) click --repeat 5 --delay 100 5
 # A link in the page ("Read the full issue") opens Zmail's open-link dialog.
-interact reader-html-link-click mousemove 1075 733 click 1
+interact reader-html-link-click mousemove 1075 $((733 + dy)) click 1
 # Text selected in the page (a drag across the first paragraph, in steps
 # as a hand would) is copied by Ctrl-C, through Zmail.
 printf '' | xclip -selection clipboard || true
-interact reader-html-copy mousemove 823 487 mousedown 1 sleep 0.2 \
-  mousemove 900 495 sleep 0.1 mousemove 1100 515 sleep 0.1 mousemove 1300 535 sleep 0.2 \
-  mouseup 1 sleep 0.5 key ctrl+c
+interact reader-html-copy mousemove 823 $((487 + dy)) mousedown 1 sleep 0.2 \
+  mousemove 900 $((495 + dy)) sleep 0.1 mousemove 1100 $((515 + dy)) sleep 0.1 \
+  mousemove 1300 $((535 + dy)) sleep 0.2 mouseup 1 sleep 0.5 key ctrl+c
 mv "${OUTPUT_DIR}/reader-html-copy-clipboard.txt" "${OUTPUT_DIR}/reader-html-copy.txt" 2> /dev/null || true
 rm -f "${OUTPUT_DIR}"/*-clipboard.txt
 echo "Copied: $(cat "${OUTPUT_DIR}/reader-html-copy.txt" 2> /dev/null)"
