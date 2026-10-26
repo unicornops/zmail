@@ -398,20 +398,34 @@ jobs:
             - name: Clippy (Windows)
               run: cargo clippy -p zmail-render-web -p zmail-ui -p zmail-app --all-targets --locked -- -D warnings
 
-            # Output goes through a file: a WebView2 process that outlived
-            # the test would otherwise hold the step's output pipe open and
-            # hang it. Any left over is stopped.
+            - name: Web renderer unit tests
+              run: cargo test -p zmail-render-web --lib --locked
+
+            # The canary runs as its own process with a deadline, its output
+            # in files that are printed whatever happens, so a hang at exit
+            # (or a WebView2 process holding the step's output open) shows
+            # its log instead of a bare timeout. Any WebView2 process left
+            # over is stopped.
             - name: Web renderer canary
-              timeout-minutes: 20
+              timeout-minutes: 25
               shell: pwsh
               env:
                   ZMAIL_WEB_DEBUG: "1"
               run: |
-                  cargo test -p zmail-render-web --locked -- --nocapture *> canary.log
-                  $code = $LASTEXITCODE
-                  Get-Content canary.log
-                  Get-Process msedgewebview2 -ErrorAction SilentlyContinue | Stop-Process -Force
-                  exit $code
+                  cargo test -p zmail-render-web --test canary --locked --no-run
+                  $canary = Start-Process cargo -ArgumentList @('test', '-p', 'zmail-render-web', '--test', 'canary', '--locked', '--', '--nocapture') `
+                      -RedirectStandardOutput canary.out -RedirectStandardError canary.err -NoNewWindow -PassThru
+                  # Reading the handle now keeps the exit code readable later.
+                  $null = $canary.Handle
+                  $finished = $canary.WaitForExit(600000)
+                  Get-Content canary.err, canary.out
+                  Get-Process msedgewebview2, canary-* -ErrorAction SilentlyContinue | Stop-Process -Force
+                  if (-not $finished) {
+                      Write-Host "::error::the canary did not exit within 10 minutes"
+                      Stop-Process -Id $canary.Id -Force -ErrorAction SilentlyContinue
+                      exit 1
+                  }
+                  exit $canary.ExitCode
 
             # The app itself on fixture states with HTML mail, and three
             # interactions. Uploaded as the windows-web-screenshots artefact.
