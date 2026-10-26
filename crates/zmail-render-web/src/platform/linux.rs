@@ -102,6 +102,29 @@ const START_TIMEOUT: Duration = Duration::from_secs(15);
 /// How often remote image fetches are polled while any is waiting, in ms.
 const FETCH_POLL_MS: c_uint = 30;
 
+/// Zmail's repair of inline images, run in the isolated world before a page
+/// is measured. WebKitGTK now and then shows a `cid:` image that Zmail's
+/// scheme handler served as broken (a few percent of loads in CI, with no
+/// error from the engine); asking for it again loads it. The same URL would
+/// come from WebKit's cache, so the retry adds a query, which Zmail's
+/// scheme handler ignores (`parse_scheme_request`). Each broken `cid:`
+/// image is asked for at most twice; the script returns how many images are
+/// being asked for again or are still loading.
+const REPAIR_SCRIPT: &str = "(() => { let waiting = 0; \
+    for (const image of document.images) { \
+        const source = image.getAttribute('src') || ''; \
+        if (!image.complete) { waiting++; continue; } \
+        const tries = Number(image.dataset.zmailTries || 0); \
+        if (image.naturalWidth === 0 && /^cid:/i.test(source) && tries < 2) { \
+            image.dataset.zmailTries = String(tries + 1); \
+            image.src = source.split('?')[0] + '?zmail-retry=' + (tries + 1); waiting++; } } \
+    return String(waiting); })()";
+
+/// How many times [`REPAIR_SCRIPT`] runs before the page is measured
+/// anyway, and how long it waits between runs.
+const REPAIR_ROUNDS: u32 = 5;
+const REPAIR_DELAY_MS: c_uint = 200;
+
 /// The page loaded before any mail, to start (and check) a web process.
 const WARMUP_HTML: &str =
     "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>";
@@ -966,6 +989,9 @@ pub enum ViewEvent {
 #[derive(Debug, Clone, Copy)]
 enum ScriptPurpose {
     Measure,
+    /// Inline images that failed are asked for again; then the page is
+    /// measured. The number is the round.
+    Repair(u32),
     Caller(u64),
 }
 
@@ -1321,6 +1347,16 @@ struct ScriptRequest {
     purpose: ScriptPurpose,
 }
 
+/// Asks for a page's failed inline images again after a pause.
+unsafe extern "C" fn repair_again(data: Ptr) -> c_int {
+    // SAFETY: `data` is the box leaked for this one-shot timeout.
+    let (id, round) = *unsafe { Box::from_raw(data.cast::<(u64, u32)>()) };
+    if let Some(view) = view_by_id(id) {
+        view.evaluate(REPAIR_SCRIPT, ScriptPurpose::Repair(round));
+    }
+    G_SOURCE_REMOVE
+}
+
 unsafe extern "C" fn on_script_finished(web_view: Ptr, result: Ptr, data: Ptr) {
     // SAFETY: `data` is the box `View::evaluate` leaked for this callback,
     // which GIO calls exactly once.
@@ -1354,6 +1390,21 @@ unsafe extern "C" fn on_script_finished(web_view: Ptr, result: Ptr, data: Ptr) {
     };
     match (request.purpose, result) {
         (ScriptPurpose::Measure, Ok(text)) => view.measured(&text),
+        (ScriptPurpose::Repair(round), result) => {
+            let waiting: u32 = result.ok().and_then(|text| text.parse().ok()).unwrap_or(0);
+            if waiting > 0 && round < REPAIR_ROUNDS {
+                debug_log(format_args!(
+                    "view {}: {waiting} inline image(s) asked for again",
+                    view.id
+                ));
+                let data = Box::into_raw(Box::new((view.id, round + 1)));
+                // SAFETY: a static callback on this thread's main context;
+                // it takes back the box once.
+                unsafe { (api.g_timeout_add)(REPAIR_DELAY_MS, repair_again, data.cast()) };
+            } else {
+                view.evaluate(MEASURE_SCRIPT, ScriptPurpose::Measure);
+            }
+        }
         (ScriptPurpose::Measure, Err(message)) => {
             eprintln!("zmail: web renderer: measuring the message failed: {message}");
             view.emit(WebEvent::LoadFailed(format!("measuring failed: {message}")));
@@ -1527,7 +1578,7 @@ unsafe extern "C" fn on_load_changed(_web_view: Ptr, event: c_int, data: Ptr) {
         debug_log(format_args!("view {id}: page loaded"));
         view.loaded.set(true);
         view.fit_pending.set(true);
-        view.evaluate(MEASURE_SCRIPT, ScriptPurpose::Measure);
+        view.evaluate(REPAIR_SCRIPT, ScriptPurpose::Repair(1));
     }
 }
 
