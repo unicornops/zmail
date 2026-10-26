@@ -136,6 +136,8 @@ function Stop-Fixture($Fixture) {
         Stop-Process -Id $Fixture.Process.Id -Force -ErrorAction SilentlyContinue
         $Fixture.Process.WaitForExit(5000) | Out-Null
     }
+    # WebView2's processes go with the app; make sure none is left over.
+    Get-Process msedgewebview2 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
 # name view theme seconds-to-wait

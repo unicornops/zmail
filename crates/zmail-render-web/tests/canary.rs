@@ -230,9 +230,18 @@ mod canary {
                 "scripts",
                 r#"<script src="http://HOST/script.js"></script><script>fetch('http://HOST/fetch');new Image().src='http://HOST/js-image';</script><img src="cid:missing" onerror="this.src='http://HOST/onerror'"><body onload="location='http://HOST/onload'">"#,
             ),
+            ("iframe", r#"<iframe src="http://HOST/iframe"></iframe>"#),
             (
-                "frames and objects",
-                r#"<iframe src="http://HOST/iframe"></iframe><iframe srcdoc="<img src='http://HOST/srcdoc'>"></iframe><object data="http://HOST/object"></object><embed src="http://HOST/embed"><frameset><frame src="http://HOST/frame"></frameset>"#,
+                "iframe srcdoc",
+                r#"<iframe srcdoc="<img src='http://HOST/srcdoc'>"></iframe>"#,
+            ),
+            (
+                "object and embed",
+                r#"<object data="http://HOST/object"></object><embed src="http://HOST/embed">"#,
+            ),
+            (
+                "frameset",
+                r#"<frameset><frame src="http://HOST/frame"></frameset>"#,
             ),
             (
                 "media",
@@ -507,6 +516,27 @@ mod canary {
 
         #[cfg(target_os = "windows")]
         windows_checks(&window, &mut problems)?;
+
+        // Every view is gone: on Windows, wait for WebView2's browser
+        // process to exit, so none of its processes outlives the test.
+        #[cfg(target_os = "windows")]
+        {
+            let started = Instant::now();
+            while zmail_render_web::windows_testing::browser_running()
+                && started.elapsed() < Duration::from_secs(30)
+            {
+                window.pump(Duration::from_millis(100));
+            }
+            println!(
+                "canary: WebView2 browser process {} after {:?}",
+                if zmail_render_web::windows_testing::browser_running() {
+                    "still running"
+                } else {
+                    "exited"
+                },
+                started.elapsed()
+            );
+        }
 
         drop(window);
         if problems.is_empty() {
