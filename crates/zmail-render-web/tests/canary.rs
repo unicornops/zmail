@@ -517,27 +517,6 @@ mod canary {
         #[cfg(target_os = "windows")]
         windows_checks(&window, &mut problems)?;
 
-        // Every view is gone: on Windows, wait for WebView2's browser
-        // process to exit, so none of its processes outlives the test.
-        #[cfg(target_os = "windows")]
-        {
-            let started = Instant::now();
-            while zmail_render_web::windows_testing::browser_running()
-                && started.elapsed() < Duration::from_secs(30)
-            {
-                window.pump(Duration::from_millis(100));
-            }
-            println!(
-                "canary: WebView2 browser process {} after {:?}",
-                if zmail_render_web::windows_testing::browser_running() {
-                    "still running"
-                } else {
-                    "exited"
-                },
-                started.elapsed()
-            );
-        }
-
         drop(window);
         if problems.is_empty() {
             Ok(())
