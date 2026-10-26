@@ -1,0 +1,12 @@
+#!/bin/sh
+# Unloads Zmail's AppArmor profile when the package is removed.
+set -e
+
+if [ "$1" = "remove" ] \
+    && command -v apparmor_parser > /dev/null 2>&1 \
+    && [ -d /sys/kernel/security/apparmor ] \
+    && [ -e /etc/apparmor.d/zmail ]; then
+    apparmor_parser --remove /etc/apparmor.d/zmail > /dev/null 2>&1 || true
+fi
+
+exit 0

@@ -29,7 +29,12 @@ assets = [
     # BSD-3-Clause and Apache-2.0 licences ask for their notices.
     ["../zmail-store/LICENSE-SQLCIPHER", "usr/share/doc/zmail-app/SQLCipher-LICENSE.txt", "644"],
     ["../zmail-store/LICENSE-OPENSSL", "usr/share/doc/zmail-app/OpenSSL-LICENSE.txt", "644"],
+    # Lets the HTML mail renderer's sandbox start on Ubuntu 23.10 and later
+    # (ADR 0006); postinst loads it, postrm unloads it.
+    ["packaging/apparmor/zmail", "etc/apparmor.d/zmail", "644"],
 ]
+conf-files = ["/etc/apparmor.d/zmail"]
+maintainer-scripts = "packaging/debian/"
 extended-description = "Zmail is a fast, standards-compliant desktop email client built with GPUI."
 
 [dependencies]

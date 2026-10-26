@@ -512,6 +512,22 @@ jobs:
                   ZMAIL_WEB_DEBUG: "1"
               run: xvfb-run -a --server-args="-screen 0 1280x1024x24" cargo test -p zmail-render-web --locked --test canary_linux -- --nocapture
 
+            # Ubuntu 24.04 with the AppArmor profile the .deb installs
+            # (crates/zmail-app/packaging/apparmor), attached to the canary
+            # binary instead of /usr/bin/zmail-app: the sandbox must start.
+            - name: Web renderer canary with Zmail's AppArmor profile (X11)
+              if: matrix.expect == 'refused'
+              timeout-minutes: 15
+              env:
+                  ZMAIL_CANARY_EXPECT: running
+                  ZMAIL_WEB_DEBUG: "1"
+              run: |
+                  canary="$(find "$PWD/target/debug/deps" -maxdepth 1 -type f -executable -name 'canary_linux-*' | head -n 1)"
+                  sed "s#/usr/bin/zmail-app#${canary}#; s#profile zmail #profile zmail-canary #" \
+                    crates/zmail-app/packaging/apparmor/zmail | sudo tee /etc/apparmor.d/zmail-canary
+                  sudo apparmor_parser --replace --write-cache --skip-read-cache /etc/apparmor.d/zmail-canary
+                  xvfb-run -a --server-args="-screen 0 1280x1024x24" "$canary"
+
             # The same corpus on Wayland, under a headless weston: views
             # render offscreen and come back as pictures with a link map.
             - name: Web renderer canary (Wayland)

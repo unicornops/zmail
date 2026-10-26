@@ -1,0 +1,19 @@
+# AppArmor profile for Zmail (/usr/bin/zmail-app), installed by the .deb.
+#
+# It confines nothing: it only lets Zmail create unprivileged user
+# namespaces, which Ubuntu 23.10 and later allow only to programs with a
+# profile that says so. The web renderer for HTML mail (WebKitGTK, ADR 0006)
+# runs every web process in a bubblewrap sandbox, and bubblewrap needs
+# them; without this profile Zmail refuses to render HTML on those systems
+# and shows mail as text. Ubuntu ships the same kind of profile for
+# Epiphany and other WebKitGTK and Chromium-based apps.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile zmail /usr/bin/zmail-app flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/zmail>
+}
