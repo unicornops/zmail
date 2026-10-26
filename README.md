@@ -11,7 +11,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 
 - three-pane GPUI shell with local-first mailbox, thread, and preview browsing
 - hydrated thread reader with safe HTML fallback rendering and remote-content blocking
-- on macOS, HTML mail renders formatted in a locked-down `WKWebView` inside the reader ([ADR 0006](./docs/adr/0006-html-email-renderer.md)): JavaScript off, every load blocked except Zmail's own, links confirmed in Zmail's dialog, Zmail's menus and dialogs drawn above it through GPUI's native window composition (Zed PR #62379); remote images load only when you allow them, and then Zmail fetches them itself (https only, never from private addresses) so the web view never connects anywhere; each message's More menu switches to the Simple (text) view, and `ZMAIL_WEB_RENDERER=0` turns it off. Linux and Windows keep the text view for now
+- on macOS and Windows, HTML mail renders formatted in a locked-down web view inside the reader (`WKWebView`, or the system's WebView2 runtime on Windows; [ADR 0006](./docs/adr/0006-html-email-renderer.md)): JavaScript off, every load blocked except Zmail's own, links confirmed in Zmail's dialog, Zmail's menus and dialogs drawn above it through GPUI's native window composition (Zed PR #62379); remote images load only when you allow them, and then Zmail fetches them itself (https only, never from private addresses) so the web view never connects anywhere; each message's More menu switches to the Simple (text) view, and `ZMAIL_WEB_RENDERER=0` turns it off. Linux, and Windows without the WebView2 runtime, keep the text view for now
 - SQLite-backed local mirror with migrations, paging, and persisted sync state
 - local mailbox operations for read or unread, flag, move, archive, delete, and full-text search
 - real IMAP and JMAP account sync behind a dedicated Tokio background runtime
@@ -36,7 +36,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 ## Workspace
 
 - [`PLAN.md`](./PLAN.md): master delivery plan
-- [`docs/upstream/zed.md`](./docs/upstream/zed.md): Zed and GPUI upstream pin record (GPUI is normally pinned to a Zed stable release tag and bumped by a weekly workflow; for now it is pinned to Zed PR #62379 for the macOS web renderer)
+- [`docs/upstream/zed.md`](./docs/upstream/zed.md): Zed and GPUI upstream pin record (GPUI is normally pinned to a Zed stable release tag and bumped by a weekly workflow; for now it is pinned to Zed PR #62379 for the web renderer)
 - [`docs/adr/0001-jmap-client-strategy.md`](./docs/adr/0001-jmap-client-strategy.md): JMAP implementation decision
 - [`docs/adr/0003-gpui-zed-stable-pin.md`](./docs/adr/0003-gpui-zed-stable-pin.md): GPUI pinned to Zed stable release tags
 - [`docs/phase5-hardening.md`](./docs/phase5-hardening.md): accessibility, performance, crash policy, packaging, and release process

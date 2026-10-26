@@ -226,6 +226,44 @@ Each phase ships on its own.
 | 5. Linux | WebKitGTK on X11 (child view) and Wayland (snapshot) | As phase 2 |
 | 6. Upstream composition | `main`'s GPUI pin moves from the #62379 commit to the first Zed release that contains it (back to ADR 0003) | Overlays, clipping and scrolling right on all OSes |
 
+### Status: Phase 4 (Windows)
+
+The WebView2 renderer is `crates/zmail-render-web/src/platform/windows.rs`
+(the only `unsafe` besides the macOS module) behind
+`platform/windows_host.rs`:
+
+- **In the window**: each message is a WebView2 *composition controller*
+  whose root visual is a native composition surface of GPUI's
+  DirectComposition tree, nested in one viewport surface that clips to the
+  conversation list. DirectComposition stays on and Zmail's overlays draw
+  above the page; there is no child window. A hosted visual gets no input,
+  so the page's hitbox in GPUI forwards mouse buttons, moves, leaving and
+  sideways wheel turns (`SendMouseInput`), and its cursor comes back
+  (`CursorChanged`); vertical wheel turns scroll the conversation, as on
+  macOS. Keyboard focus stays with GPUI (focus the page takes is handed
+  back), and Copy and Select All reach the page through Zmail's commands
+  (`ExecuteScript` for the selection, then the clipboard). GPUI's tree
+  rebuild needs a workaround for nested native surfaces, see
+  `docs/upstream/zed.md`.
+- **Hardening** as in section 3: `IsScriptEnabled = false` (Zmail's own
+  measuring script runs through `ExecuteScript`, which that does not
+  stop); `zmail-mail:`, `cid:` and `zmail-link:` registered as custom
+  schemes and served from `WebResourceRequested`, with a `*` filter that
+  answers every other request with an empty 403; navigation cancelled
+  except Zmail's page load, links reported to Zmail; frames never navigate;
+  new windows, external schemes, downloads, permissions and basic
+  authentication denied; no dev tools, context menus, web messages, host
+  objects, status bar, zoom control, accelerator keys, autofill, password
+  saving or SmartScreen lookups. Each page has its own InPrivate profile
+  with strict tracking prevention, in a user data folder under the
+  temporary folder that is deleted when the browser process exits (or on
+  the next start). A failed browser or renderer process falls back to the
+  text view.
+- **Runtime**: the system's evergreen WebView2 (the loader is linked
+  statically; nothing is added to the installer). Without it, or when the
+  environment cannot be created, the reader keeps the text view and says
+  why.
+
 Effort, from the research: about 3-4 engineer-months for the web
 renderer on macOS, Windows and Linux X11, plus about a month for the
 Wayland snapshot path; the native renderer is about 3-4 months to a

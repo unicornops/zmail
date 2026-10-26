@@ -7,22 +7,28 @@
 //! the list: it takes the page's measured height, and in prepaint moves its
 //! web view to where the element is, relative to the viewport.
 //!
-//! Moving web views inside the surface is plain AppKit work; the surface
-//! itself only changes bounds when the viewport does (a resize), because
-//! every surface geometry change makes GPUI re-sync the whole composition
-//! tree. The surface's view clips to its bounds, so a message scrolled
-//! partly out of the list is cut off at the list's edges and never covers
-//! the action bar above it.
+//! On macOS, moving web views inside the surface is plain AppKit work; the
+//! surface itself only changes bounds when the viewport does (a resize),
+//! because every surface geometry change makes GPUI re-sync the whole
+//! composition tree. On Windows each web view has a child surface of its
+//! own (see `platform::windows_host`). Either way the viewport clips to its
+//! bounds, so a message scrolled partly out of the list is cut off at the
+//! list's edges and never covers the action bar above it.
 //!
 //! After the list has prepainted, the viewport hides every web view no
 //! body touched this frame (scrolled out of the list, collapsed, switched
 //! to the simple view), and the whole surface when none is left.
+//!
+//! Where the platform's web view is a hosted visual with no input of its
+//! own (Windows), the body also takes a hitbox and, in paint, hands the
+//! backend the mouse events GPUI routes to it. GPUI's hit testing decides,
+//! so a menu or dialog drawn above the page gets the click, not the page.
 
 use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
 use gpui::{
-    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, Pixels, Style, Window, px, relative,
+    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Style, Window, px, relative,
 };
 
 use crate::{WebDocument, WebEvent, platform::Backend};
@@ -48,9 +54,9 @@ struct HostState {
 }
 
 impl WebHost {
-    /// A host whose web views report to `on_event`. The callback runs
-    /// outside GPUI's update cycle (from AppKit), so it should only
-    /// schedule work, e.g. with `AsyncApp::spawn`.
+    /// A host whose web views report to `on_event`. The callback may run
+    /// outside GPUI's update cycle (from AppKit or WebView2), so it should
+    /// only schedule work, e.g. with `AsyncApp::spawn`.
     pub fn new(on_event: impl Fn(WebKey, WebEvent) + 'static) -> Self {
         Self {
             state: Rc::new(RefCell::new(HostState {
@@ -163,6 +169,13 @@ impl WebHost {
             window.on_next_frame(move |_, _| on_event(key, WebEvent::LoadFailed(reason)));
         }
     }
+
+    fn paint(&self, key: WebKey, bounds: Bounds<Pixels>, hitbox: &Hitbox, window: &mut Window) {
+        let mut state = self.state.borrow_mut();
+        if state.unavailable.is_none() {
+            state.backend.paint(key, bounds, hitbox, window);
+        }
+    }
 }
 
 /// Wraps the conversation list; see [`WebHost::viewport`].
@@ -248,7 +261,7 @@ impl IntoElement for WebBody {
 
 impl Element for WebBody {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = Option<Hitbox>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -282,17 +295,21 @@ impl Element for WebBody {
         _cx: &mut App,
     ) -> Self::PrepaintState {
         self.host.place(self.key, &self.document, bounds, window);
+        Backend::FORWARDS_INPUT.then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal))
     }
 
     fn paint(
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
-        _prepaint: &mut Self::PrepaintState,
-        _window: &mut Window,
+        hitbox: &mut Self::PrepaintState,
+        window: &mut Window,
         _cx: &mut App,
     ) {
+        if let Some(hitbox) = hitbox {
+            self.host.paint(self.key, bounds, hitbox, window);
+        }
     }
 }

@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use gpui::{Bounds, Pixels, Window, WindowCompositionSurface};
+use gpui::{Bounds, Hitbox, Pixels, Window, WindowCompositionSurface};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::host::WebKey;
@@ -37,6 +37,9 @@ struct Slot {
 }
 
 impl Backend {
+    /// The `WKWebView` takes its own mouse input from AppKit.
+    pub(crate) const FORWARDS_INPUT: bool = false;
+
     pub(crate) fn place(
         &mut self,
         key: WebKey,
@@ -115,6 +118,15 @@ impl Backend {
             surface.bounds = Some(viewport);
         }
         Ok(())
+    }
+
+    pub(crate) fn paint(
+        &mut self,
+        _key: WebKey,
+        _bounds: Bounds<Pixels>,
+        _hitbox: &Hitbox,
+        _window: &mut Window,
+    ) {
     }
 
     pub(crate) fn end_frame(&mut self, touched: &HashSet<WebKey>, _window: &mut Window) {

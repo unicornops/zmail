@@ -11,9 +11,10 @@ workflow proposes a bump whenever Zed ships a newer stable release (issue
 Since October 2026 the `gpui` and `gpui_platform` lines pin GPUI by commit
 to the head of [Zed PR #62379](https://github.com/zed-industries/zed/pull/62379)
 ("native window composition"), an unmerged pull request from a fork. Rob
-decided this for ADR 0006: the macOS web renderer for HTML mail needs
-GPUI to place a native `WKWebView` between its base and overlay surfaces,
-which no Zed release can do yet. Zmail is alpha software, so the renderer
+decided this for ADR 0006: the web renderer for HTML mail needs GPUI to
+place a native web view (`WKWebView` on macOS, a WebView2 visual on
+Windows) between its base and overlay surfaces, which no Zed release can
+do yet. Zmail is alpha software, so the renderer
 ships in normal releases built on this pin instead of a preview build.
 
 | | |
@@ -34,8 +35,23 @@ What changes while the pin is on the pull request:
 - Zmail needed no source changes for this pin. Only
   `crates/zmail-render-web` uses the composition API
   (`Window::enable_window_composition`,
-  `WindowComposition::create_native_surface`), on macOS. Linux and Windows
-  build on the same pin and keep the text view.
+  `WindowComposition::create_native_surface`, and on Windows
+  `WindowComposition::reparent` and the surfaces' compositor-recreated
+  callback), on macOS and Windows. Linux builds on the same pin and keeps
+  the text view.
+- Windows: a native surface's platform handle is its DirectComposition
+  visual (an `IUnknown`), from the `windows` 0.62 crate that
+  `zmail-render-web` uses too, so the handle's type matches. The renderer
+  nests one surface per message inside a viewport surface. GPUI's
+  `set_surface_order` (`gpui_windows/src/directx_renderer.rs`) empties the
+  root visual and GPUI's own visuals before adding every surface back to
+  its parent, but never empties a native parent's visual, and
+  DirectComposition refuses to add a visual that already has a parent, so
+  the second rebuild with nested native surfaces fails part-way.
+  `platform::windows_host` works around it by detaching the viewport's
+  children (`IDCompositionVisual::RemoveAllVisuals`) before each rebuild;
+  the canary checks that DirectComposition still refuses the re-add. Drop
+  the workaround when the pull request handles nested native surfaces.
 - The app's diagnostics strip shows the Zed tag as `untagged` (the pin has
   no tag) and the PR commit.
 - The weekly `zed-upstream` workflow does not move the pin back to a
@@ -170,5 +186,5 @@ the same branch.
   The decision, the API churn and the build-time and size deltas are
   recorded in [ADR 0003](../adr/0003-gpui-zed-stable-pin.md).
 - **October 2026 (ADR 0006):** moved off the stable tag to the head of Zed
-  PR #62379 (`huacnlee/zed@840e095`) for the macOS web renderer; see
-  "Deviation From ADR 0003" above.
+  PR #62379 (`huacnlee/zed@840e095`) for the macOS web renderer, which
+  the Windows web renderer uses too; see "Deviation From ADR 0003" above.

@@ -29,7 +29,7 @@
 //! | `selectable` | `SelectableText`: a paragraph the mouse can select |
 //! | `links` | A body's links and the dialog that opens one |
 //! | `banners` | The remote-content notice and the sender-safety banners |
-//! | `web` | HTML mail in a web view (macOS): pages, Simple view, fallbacks |
+//! | `web` | HTML mail in a web view (macOS, Windows): pages, Simple view, fallbacks |
 
 mod actions;
 mod attachments;
@@ -162,7 +162,7 @@ pub(crate) struct ReaderView {
     /// Re-measures the footer whenever the inline reply changes, since it
     /// grows with its text.
     reply_observation: Option<Subscription>,
-    /// HTML messages shown formatted in web views (macOS).
+    /// HTML messages shown formatted in web views (macOS, Windows).
     web: web::ReaderWeb,
     /// Test instrumentation: renders.
     #[cfg(test)]

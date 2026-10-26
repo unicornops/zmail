@@ -325,6 +325,20 @@ pub fn parse_scheme_request(url: &str) -> SchemeRequest {
     SchemeRequest::Other
 }
 
+/// A fresh token for each page load, so no two loads share a URL: a
+/// lowercase letter, digits and lowercase hex, which no engine rewrites.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub(crate) fn page_token() -> String {
+    thread_local! {
+        static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    }
+    let count = NEXT.with(|next| next.replace(next.get() + 1));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    format!("m{count}x{nanos:x}")
+}
+
 /// The page URL for a load token.
 pub fn page_url(token: &str) -> String {
     format!("{MAIL_SCHEME}://message/{token}")
@@ -516,6 +530,22 @@ mod tests {
         ] {
             assert_eq!(parse_scheme_request(other), SchemeRequest::Other, "{other}");
         }
+    }
+
+    #[test]
+    fn page_tokens_are_fresh_and_parse_back() {
+        let first = page_token();
+        let second = page_token();
+        assert_ne!(first, second);
+        assert_eq!(
+            parse_scheme_request(&page_url(&first)),
+            SchemeRequest::Page(first.clone())
+        );
+        assert!(
+            first
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || ch.is_ascii_lowercase())
+        );
     }
 
     #[test]

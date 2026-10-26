@@ -4,7 +4,7 @@
 use std::{collections::HashSet, rc::Rc};
 
 use anyhow::{Result, bail};
-use gpui::{Bounds, Pixels, Window};
+use gpui::{Bounds, Hitbox, Pixels, Window};
 
 use crate::host::WebKey;
 use crate::{WebDocument, WebEvent};
@@ -14,6 +14,8 @@ use crate::{WebDocument, WebEvent};
 pub(crate) struct Backend {}
 
 impl Backend {
+    pub(crate) const FORWARDS_INPUT: bool = false;
+
     pub(crate) fn place(
         &mut self,
         _key: WebKey,
@@ -24,6 +26,15 @@ impl Backend {
         _on_event: Rc<dyn Fn(WebEvent)>,
     ) -> Result<()> {
         bail!("this platform has no web renderer")
+    }
+
+    pub(crate) fn paint(
+        &mut self,
+        _key: WebKey,
+        _bounds: Bounds<Pixels>,
+        _hitbox: &Hitbox,
+        _window: &mut Window,
+    ) {
     }
 
     pub(crate) fn end_frame(&mut self, _touched: &HashSet<WebKey>, _window: &mut Window) {}
