@@ -56,8 +56,8 @@ mod linux {
     use zmail_render_web::{
         Appearance, InlineResource, WebDocument, WebEvent,
         linux_testing::{
-            DisplayServer, PlatformWebView, ViewEvent, ViewSize, blocked_connections, failure,
-            shutdown, start, test_parent_window, verified_web_processes,
+            DisplayServer, PlatformWebView, Snapshot, ViewEvent, ViewSize, blocked_connections,
+            failure, shutdown, start, test_parent_window, verified_web_processes,
         },
     };
 
@@ -96,6 +96,24 @@ mod linux {
                 ViewEvent::Web(WebEvent::Measured { height }) => Some(*height),
                 _ => None,
             })
+        }
+
+        /// Waits for the next picture of an offscreen page.
+        fn wait_for_snapshot(&mut self) -> Result<Snapshot> {
+            let started = Instant::now();
+            loop {
+                self.poll();
+                if let Some(index) = self
+                    .events
+                    .iter()
+                    .position(|event| matches!(event, ViewEvent::Snapshot(_)))
+                    && let ViewEvent::Snapshot(snapshot) = self.events.remove(index)
+                {
+                    return Ok(snapshot);
+                }
+                ensure!(started.elapsed() < LOAD_TIMEOUT, "no snapshot arrived");
+                thread::sleep(Duration::from_millis(20));
+            }
         }
 
         fn failure(&self) -> Option<String> {
@@ -387,6 +405,54 @@ mod linux {
             other => problems.push(format!("a 1200px-wide page was not fitted: {other:?}")),
         }
         drop(rendered);
+
+        // Offscreen (Wayland): the page arrives as pictures of all of it,
+        // with a map of where its links are, and a drag can select text.
+        if parent.is_none() {
+            let mut rendered = render(
+                &document(
+                    r#"<p style="margin:0;height:900px">Top <a href="zmail-link:7">a link</a></p><p>Bottom</p>"#,
+                ),
+                None,
+            )?;
+            let snapshot = rendered.wait_for_snapshot()?;
+            let height: u32 = snapshot.tiles.iter().map(|tile| tile.height).sum();
+            let measured = rendered.measured_height().unwrap_or_default();
+            println!(
+                "canary_linux: snapshot: {} tile(s), {}x{height} px for a page measured {measured}, links {:?}",
+                snapshot.tiles.len(),
+                snapshot.tiles.first().map_or(0, |tile| tile.width),
+                snapshot.links
+            );
+            if snapshot.tiles.is_empty() || (f64::from(height) - f64::from(measured)).abs() > 16. {
+                problems.push(format!(
+                    "the snapshot is {height}px tall for a page measured {measured}"
+                ));
+            }
+            if !snapshot
+                .tiles
+                .iter()
+                .all(|tile| tile.bmp.starts_with(b"BM"))
+            {
+                problems.push("a snapshot tile is not a BMP".to_owned());
+            }
+            match snapshot.links.as_slice() {
+                [link] if link.url == "zmail-link:7" && link.y < 40. && link.width > 10. => {}
+                other => problems.push(format!("the link map is wrong: {other:?}")),
+            }
+            // Select from the first word to the last, as a drag would, and
+            // read the selection back.
+            rendered.evaluate(
+                "(() => { const a = document.caretRangeFromPoint(1, 5); scrollTo(0, 900); \
+                 const b = document.caretRangeFromPoint(40, 910 - scrollY); \
+                 getSelection().setBaseAndExtent(a.startContainer, 0, b.startContainer, 6); return ''; })()",
+            )?;
+            let selected = rendered.evaluate("String(getSelection())")?;
+            println!("canary_linux: selected {selected:?}");
+            if !(selected.starts_with("Top") && selected.ends_with("Bottom")) {
+                problems.push(format!("a selection across the page read {selected:?}"));
+            }
+        }
 
         // The walls behind the filter saw nothing, and the sandbox held.
         let blocked = blocked_connections();

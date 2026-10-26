@@ -96,6 +96,13 @@ const WORLD: &CStr = c"zmail";
 /// surfaces stop at 32767.
 pub const MAX_DEVICE_HEIGHT: f64 = 32_000.;
 
+/// The tallest page an offscreen view snapshots, in device pixels (each
+/// snapshot holds the whole page, 4 bytes a pixel).
+pub const MAX_SNAPSHOT_HEIGHT: f64 = 16_000.;
+
+/// The height of an offscreen view, in device pixels: about a screen.
+const OFFSCREEN_HEIGHT: c_int = 2_048;
+
 /// How long the engine thread may take to start GTK.
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -181,6 +188,10 @@ const WEBKIT_NAVIGATION_TYPE_LINK_CLICKED: c_int = 0;
 const WEBKIT_NAVIGATION_TYPE_OTHER: c_int = 5;
 const WEBKIT_LOAD_FINISHED: c_int = 3;
 const WEBKIT_CONTEXT_MENU_ACTION_COPY: c_int = 14;
+const WEBKIT_SNAPSHOT_REGION_FULL_DOCUMENT: c_int = 1;
+const WEBKIT_SNAPSHOT_OPTIONS_INCLUDE_SELECTION_HIGHLIGHTING: c_int = 1;
+const CAIRO_FORMAT_ARGB32: c_int = 0;
+const CAIRO_FORMAT_RGB24: c_int = 1;
 const WEBKIT_NETWORK_ERROR_CANCELLED: c_int = 302;
 const WEBKIT_POLICY_ERROR_FRAME_LOAD_INTERRUPTED_BY_POLICY_CHANGE: c_int = 102;
 
@@ -305,6 +316,8 @@ api! {
     webkit_web_view_evaluate_javascript: fn(Ptr, *const c_char, isize, *const c_char, *const c_char, Ptr, AsyncReady, Ptr);
     webkit_web_view_evaluate_javascript_finish: fn(Ptr, Ptr, *mut *mut GError) -> Ptr;
     webkit_web_view_execute_editing_command: fn(Ptr, *const c_char);
+    webkit_web_view_get_snapshot: fn(Ptr, c_int, c_int, Ptr, AsyncReady, Ptr);
+    webkit_web_view_get_snapshot_finish: fn(Ptr, Ptr, *mut *mut GError) -> Ptr;
     webkit_policy_decision_use: fn(Ptr);
     webkit_policy_decision_ignore: fn(Ptr);
     webkit_navigation_policy_decision_get_navigation_action: fn(Ptr) -> Ptr;
@@ -330,6 +343,14 @@ api! {
     webkit_uri_scheme_response_new: fn(Ptr, i64) -> Ptr;
     webkit_uri_scheme_response_set_content_type: fn(Ptr, *const c_char);
     webkit_uri_scheme_response_set_http_headers: fn(Ptr, Ptr);
+    // cairo
+    cairo_surface_flush: fn(Ptr);
+    cairo_surface_destroy: fn(Ptr);
+    cairo_image_surface_get_format: fn(Ptr) -> c_int;
+    cairo_image_surface_get_data: fn(Ptr) -> *mut u8;
+    cairo_image_surface_get_width: fn(Ptr) -> c_int;
+    cairo_image_surface_get_height: fn(Ptr) -> c_int;
+    cairo_image_surface_get_stride: fn(Ptr) -> c_int;
     // JavaScriptCore, libsoup
     jsc_value_to_string: fn(Ptr) -> *mut c_char;
     soup_message_headers_new: fn(c_int) -> Ptr;
@@ -631,6 +652,10 @@ enum Command {
         id: u64,
         script: String,
         tag: u64,
+    },
+    /// An offscreen view's page changed (a selection): snapshot it again.
+    Snapshot {
+        id: u64,
     },
     Destroy {
         id: u64,
@@ -1182,6 +1207,11 @@ fn handle(command: Command) {
                 unsafe { (api.g_main_loop_quit)(main_loop) };
             }
         }
+        Command::Snapshot { id } => {
+            if let Some(view) = view_by_id(id) {
+                view.snapshot();
+            }
+        }
         Command::Destroy { id } => {
             with_thread(|thread| thread.queued.retain(|queued| queued.id != id));
             if let Some(view) = with_thread(|thread| thread.views.remove(&id)).flatten() {
@@ -1215,11 +1245,16 @@ impl ViewSize {
         )
     }
 
-    /// The tallest page shown at this scale, in logical pixels.
-    fn max_height(self) -> f64 {
-        MAX_HEIGHT
-            .min(MAX_DEVICE_HEIGHT / self.scale.max(0.5))
-            .floor()
+    /// The tallest page shown at this scale, in logical pixels: below X11's
+    /// window limit for an embedded view, and below what a snapshot of the
+    /// whole page may cost for an offscreen one.
+    fn max_height(self, embedded: bool) -> f64 {
+        let device = if embedded {
+            MAX_DEVICE_HEIGHT
+        } else {
+            MAX_SNAPSHOT_HEIGHT
+        };
+        MAX_HEIGHT.min(device / self.scale.max(0.5)).floor()
     }
 }
 
@@ -1240,6 +1275,9 @@ pub enum ViewEvent {
         /// Control was held (zoom, in some apps).
         control: bool,
     },
+    /// A new picture of an offscreen view's whole page, with where its
+    /// links are.
+    Snapshot(Snapshot),
     /// The result of [`PlatformWebView::evaluate`].
     Script {
         /// The caller's tag.
@@ -1249,6 +1287,110 @@ pub enum ViewEvent {
     },
 }
 
+/// A picture of an offscreen view's page: strips of it, top to bottom,
+/// and its links, all in the view's logical pixels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Snapshot {
+    /// Device pixels per logical pixel in the tiles.
+    pub scale: f64,
+    /// The page's zoom: logical pixels per CSS pixel (below 1 for a page
+    /// zoomed out to fit).
+    pub zoom: f64,
+    /// The page, top to bottom.
+    pub tiles: Vec<Tile>,
+    /// Where the links are.
+    pub links: Vec<LinkArea>,
+}
+
+/// A strip of a [`Snapshot`], as a BMP image (32-bit, top-down).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tile {
+    /// Its top edge, in device pixels from the top of the page.
+    pub top: u32,
+    /// Its width, in device pixels.
+    pub width: u32,
+    /// Its height, in device pixels.
+    pub height: u32,
+    /// The BMP file.
+    pub bmp: Vec<u8>,
+}
+
+/// A link's box in a [`Snapshot`] (a link that wraps has one per line).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkArea {
+    /// The link's URL, as a click on it would report.
+    pub url: String,
+    /// Left edge, logical pixels from the page's left.
+    pub x: f64,
+    /// Top edge, logical pixels from the page's top.
+    pub y: f64,
+    /// Width.
+    pub width: f64,
+    /// Height.
+    pub height: f64,
+}
+
+/// The rows of each snapshot tile, in device pixels.
+const TILE_ROWS: usize = 512;
+
+/// Zmail's link hit map, run in the isolated world: one line per box of
+/// each link, `left top width height url`, in CSS pixels from the page's
+/// top-left corner.
+const LINKS_SCRIPT: &str = "Array.from(document.querySelectorAll('a[href]')).flatMap(a => \
+    Array.from(a.getClientRects()).map(r => [r.left + scrollX, r.top + scrollY, r.width, \
+    r.height, a.href].join(' '))).join('\\n')";
+
+/// Encodes `rows` of 32-bit BGRx pixels (`stride` bytes apart, as cairo
+/// lays them out) as a top-down 32-bit BMP.
+fn bmp(width: usize, height: usize, stride: usize, rows: &[u8]) -> Vec<u8> {
+    const HEADERS: usize = 14 + 40;
+    let row_bytes = width * 4;
+    let size = HEADERS + row_bytes * height;
+    let mut out = Vec::with_capacity(size);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(size as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(HEADERS as u32).to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(width as i32).to_le_bytes());
+    // Negative: rows run top to bottom.
+    out.extend_from_slice(&(-(height as i32)).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&32u16.to_le_bytes());
+    // BI_RGB, then the image size, resolution and palette (none).
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&((row_bytes * height) as u32).to_le_bytes());
+    out.extend_from_slice(&[0; 16]);
+    for row in 0..height {
+        let start = row * stride;
+        match rows.get(start..start + row_bytes) {
+            Some(pixels) => out.extend_from_slice(pixels),
+            None => out.resize(out.len() + row_bytes, 0),
+        }
+    }
+    out
+}
+
+/// Parses [`LINKS_SCRIPT`]'s lines, scaled by `zoom` (CSS pixels to the
+/// view's logical pixels).
+fn parse_links(text: &str, zoom: f64) -> Vec<LinkArea> {
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(5, ' ');
+            let mut number = || parts.next()?.parse::<f64>().ok();
+            let (x, y, width, height) = (number()?, number()?, number()?, number()?);
+            let url = parts.next()?.to_owned();
+            (width > 0. && height > 0. && !url.is_empty()).then_some(LinkArea {
+                url,
+                x: x * zoom,
+                y: y * zoom,
+                width: width * zoom,
+                height: height * zoom,
+            })
+        })
+        .collect()
+}
+
 /// Why a script runs.
 #[derive(Debug, Clone, Copy)]
 enum ScriptPurpose {
@@ -1256,6 +1398,8 @@ enum ScriptPurpose {
     /// Inline images that failed are asked for again; then the page is
     /// measured. The number is the round.
     Repair(u32),
+    /// The link hit map, after a snapshot.
+    Links,
     Caller(u64),
 }
 
@@ -1287,6 +1431,11 @@ struct View {
     /// The zoom fitting the page's width (1 when it fits).
     fit: Cell<f64>,
     destroyed: Cell<bool>,
+    /// A snapshot is being taken; another is wanted after it.
+    snapshotting: Cell<bool>,
+    snapshot_again: Cell<bool>,
+    /// The tiles of the snapshot whose links are being found.
+    tiles: RefCell<Vec<Tile>>,
 }
 
 fn create_view(create: CreateView) {
@@ -1476,6 +1625,9 @@ fn create_view(create: CreateView) {
             fit_pending: Cell::new(true),
             fit: Cell::new(1.),
             destroyed: Cell::new(false),
+            snapshotting: Cell::new(false),
+            snapshot_again: Cell::new(false),
+            tiles: RefCell::new(Vec::new()),
         })
     };
     with_thread(|thread| thread.views.insert(id, view.clone()));
@@ -1561,7 +1713,12 @@ impl View {
     /// CSS pixels are GPUI's logical pixels (times the fitting zoom).
     fn apply_size(&self) {
         let size = self.size.get();
-        let (width, height) = size.device();
+        let (width, mut height) = size.device();
+        if !self.embedded {
+            // The snapshot draws the whole page whatever the view's height;
+            // the view only needs to be a screen tall, for selections.
+            height = height.min(OFFSCREEN_HEIGHT);
+        }
         // SAFETY: live widgets on the engine thread.
         unsafe {
             (self.api.gtk_widget_set_size_request)(self.web_view, width, height);
@@ -1645,7 +1802,7 @@ impl View {
             return;
         }
         let fit = self.fit.get();
-        let max = self.size.get().max_height();
+        let max = self.size.get().max_height(self.embedded);
         let height = measurement.points(fit).min(max);
         if measurement.height * fit > max {
             eprintln!("zmail: web renderer: message cut off at {max} points");
@@ -1660,6 +1817,42 @@ impl View {
         self.emit(WebEvent::Measured {
             height: height as f32,
         });
+        if !self.embedded && self.id != 0 {
+            self.snapshot();
+        }
+    }
+
+    /// Takes a picture of an offscreen view's whole page (selection
+    /// included); [`ViewEvent::Snapshot`] follows once its links are found
+    /// too. Calls while one is under way are folded into one more.
+    fn snapshot(&self) {
+        if self.embedded || self.destroyed.get() {
+            return;
+        }
+        if self.snapshotting.replace(true) {
+            self.snapshot_again.set(true);
+            return;
+        }
+        // SAFETY: a live web view; the callback runs exactly once, on this
+        // thread, with the view id as its data.
+        unsafe {
+            (self.api.webkit_web_view_get_snapshot)(
+                self.web_view,
+                WEBKIT_SNAPSHOT_REGION_FULL_DOCUMENT,
+                WEBKIT_SNAPSHOT_OPTIONS_INCLUDE_SELECTION_HIGHLIGHTING,
+                ptr::null_mut(),
+                on_snapshot,
+                self.id as usize as Ptr,
+            );
+        }
+    }
+
+    /// A snapshot (or its links) is done: take the next one if wanted.
+    fn snapshot_done(&self) {
+        self.snapshotting.set(false);
+        if self.snapshot_again.replace(false) {
+            self.snapshot();
+        }
     }
 
     /// Destroys the window (and the web view in it) and fails its waiting
@@ -1759,12 +1952,99 @@ unsafe extern "C" fn on_script_finished(web_view: Ptr, result: Ptr, data: Ptr) {
             eprintln!("zmail: web renderer: measuring the message failed: {message}");
             view.emit(WebEvent::LoadFailed(format!("measuring failed: {message}")));
         }
+        (ScriptPurpose::Links, result) => {
+            let links = match result {
+                Ok(text) => parse_links(&text, view.fit.get()),
+                Err(message) => {
+                    debug_log(format_args!("view {}: no link map: {message}", view.id));
+                    Vec::new()
+                }
+            };
+            let tiles = std::mem::take(&mut *view.tiles.borrow_mut());
+            debug_log(format_args!(
+                "view {}: snapshot of {} tile(s), {} link box(es)",
+                view.id,
+                tiles.len(),
+                links.len()
+            ));
+            let _ = view.events.unbounded_send(ViewEvent::Snapshot(Snapshot {
+                scale: view.size.get().scale.max(0.5),
+                zoom: view.fit.get(),
+                tiles,
+                links,
+            }));
+            view.snapshot_done();
+        }
         (ScriptPurpose::Caller(tag), result) => {
             let _ = view
                 .events
                 .unbounded_send(ViewEvent::Script { tag, result });
         }
     }
+}
+
+unsafe extern "C" fn on_snapshot(web_view: Ptr, result: Ptr, data: Ptr) {
+    let Some(api) = loaded_api() else {
+        return;
+    };
+    let mut error = ptr::null_mut();
+    // SAFETY: the objects GIO passes to this callback; the surface (if any)
+    // is ours to destroy.
+    let surface =
+        unsafe { (api.webkit_web_view_get_snapshot_finish)(web_view, result, &mut error) };
+    let failure = take_error(api, error);
+    let Some(view) = view_by_id(id_of(data)) else {
+        if !surface.is_null() {
+            // SAFETY: as above.
+            unsafe { (api.cairo_surface_destroy)(surface) };
+        }
+        return;
+    };
+    if surface.is_null() {
+        let message = failure.map_or_else(|| "no picture".to_owned(), |(_, _, message)| message);
+        eprintln!("zmail: web renderer: the page could not be drawn: {message}");
+        view.emit(WebEvent::LoadFailed(format!(
+            "the page could not be drawn: {message}"
+        )));
+        view.snapshot_done();
+        return;
+    }
+    // SAFETY: a cairo image surface WebKit drew; after a flush its data is
+    // `stride * height` bytes of 32-bit pixels for the two formats
+    // accepted, valid until the surface is destroyed (after the copy).
+    let tiles = unsafe {
+        (api.cairo_surface_flush)(surface);
+        let format = (api.cairo_image_surface_get_format)(surface);
+        let width = usize::try_from((api.cairo_image_surface_get_width)(surface)).unwrap_or(0);
+        let height = usize::try_from((api.cairo_image_surface_get_height)(surface)).unwrap_or(0);
+        let stride = usize::try_from((api.cairo_image_surface_get_stride)(surface)).unwrap_or(0);
+        let data = (api.cairo_image_surface_get_data)(surface);
+        let tiles = if (format == CAIRO_FORMAT_ARGB32 || format == CAIRO_FORMAT_RGB24)
+            && !data.is_null()
+            && width > 0
+            && stride >= width * 4
+        {
+            let pixels = std::slice::from_raw_parts(data, stride * height);
+            (0..height)
+                .step_by(TILE_ROWS)
+                .map(|top| {
+                    let rows = TILE_ROWS.min(height - top);
+                    Tile {
+                        top: top as u32,
+                        width: width as u32,
+                        height: rows as u32,
+                        bmp: bmp(width, rows, stride, &pixels[top * stride..]),
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (api.cairo_surface_destroy)(surface);
+        tiles
+    };
+    *view.tiles.borrow_mut() = tiles;
+    view.evaluate(LINKS_SCRIPT, ScriptPurpose::Links);
 }
 
 // ---------------------------------------------------------------------------
@@ -2310,6 +2590,12 @@ impl PlatformWebView {
         });
     }
 
+    /// Asks an offscreen view for a new [`ViewEvent::Snapshot`] (after a
+    /// change to its selection).
+    pub fn request_snapshot(&self) {
+        send(Command::Snapshot { id: self.id });
+    }
+
     /// Runs `script` in Zmail's isolated world; its string result comes
     /// back as [`ViewEvent::Script`] with `tag`.
     pub fn evaluate(&self, script: &str, tag: u64) {
@@ -2397,5 +2683,61 @@ fn start_failed() -> Result<(), String> {
         None => Err("the web engine was not started".into()),
         Some(Err(reason)) => Err(reason.clone()),
         Some(Ok(_)) => stopped().map_or(Ok(()), Err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bmp_is_top_down_bgrx() {
+        // Two rows of two pixels, with two bytes of row padding.
+        let rows = [
+            1, 2, 3, 255, 4, 5, 6, 255, 0, 0, 7, 8, 9, 255, 10, 11, 12, 255, 0, 0,
+        ];
+        let file = bmp(2, 2, 10, &rows);
+        assert_eq!(&file[..2], b"BM");
+        assert_eq!(
+            u32::from_le_bytes(file[2..6].try_into().expect("4 bytes")),
+            54 + 16
+        );
+        assert_eq!(
+            i32::from_le_bytes(file[22..26].try_into().expect("4 bytes")),
+            -2
+        );
+        assert_eq!(
+            u16::from_le_bytes(file[28..30].try_into().expect("2 bytes")),
+            32
+        );
+        assert_eq!(&file[54..62], &rows[..8]);
+        assert_eq!(&file[62..70], &rows[10..18]);
+    }
+
+    #[test]
+    fn link_lines_parse_and_scale() {
+        let links = parse_links(
+            "10 20 30 15 zmail-link:0\n\nbad line\n0 0 0 0 zmail-link:1\n4 8 12 16 https://x.test/a b",
+            0.5,
+        );
+        assert_eq!(
+            links,
+            vec![
+                LinkArea {
+                    url: "zmail-link:0".into(),
+                    x: 5.,
+                    y: 10.,
+                    width: 15.,
+                    height: 7.5,
+                },
+                LinkArea {
+                    url: "https://x.test/a b".into(),
+                    x: 2.,
+                    y: 4.,
+                    width: 6.,
+                    height: 8.,
+                },
+            ]
+        );
     }
 }

@@ -505,6 +505,21 @@ jobs:
                   ZMAIL_WEB_DEBUG: "1"
               run: xvfb-run -a --server-args="-screen 0 1280x1024x24" cargo test -p zmail-render-web --locked --test canary_linux -- --nocapture
 
+            # The same corpus on Wayland, under a headless weston: views
+            # render offscreen and come back as pictures with a link map.
+            - name: Web renderer canary (Wayland)
+              if: matrix.expect == 'running'
+              timeout-minutes: 15
+              env:
+                  ZMAIL_CANARY_EXPECT: running
+                  ZMAIL_WEB_DEBUG: "1"
+              run: |
+                  sudo apt-get install -y weston
+                  export XDG_RUNTIME_DIR="$(mktemp -d)"
+                  weston --backend=headless --socket=wayland-zmail --width=1280 --height=1024 > "$RUNNER_TEMP/weston.log" 2>&1 &
+                  for _ in $(seq 1 50); do [ -S "$XDG_RUNTIME_DIR/wayland-zmail" ] && break; sleep 0.2; done
+                  WAYLAND_DISPLAY=wayland-zmail cargo test -p zmail-render-web --locked --test canary_linux -- --nocapture
+
             # The app itself on fixture states with HTML mail, where the
             # engine runs: the page in the reader, a menu and a dialog over
             # it, the page clipped by the scrolled list, and three
