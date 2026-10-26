@@ -2048,6 +2048,30 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// The key change dialog's "Trust the new key for …": record the
+    /// trust for that recipient and key only, and send the message again.
+    fn trust_new_key(
+        &mut self,
+        job_id: i64,
+        fingerprint: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_outbox_job_id = Some(job_id);
+        match self
+            .sync_service
+            .trust_new_key_and_retry(job_id, fingerprint)
+        {
+            Ok(()) => {
+                self.show_status("New key trusted. Sending the message again.".to_owned(), cx);
+                self.refresh_from_store(cx);
+                self.schedule_refresh(window, cx);
+            }
+            Err(error) => self.show_error(format!("{error:#}"), cx),
+        }
+        cx.notify();
+    }
+
     // -----------------------------------------------------------------------
     // Account setup
     // -----------------------------------------------------------------------
@@ -2844,6 +2868,10 @@ impl WorkspaceView {
             MessageListEvent::ReauthenticateAccount(account_id) => {
                 crate::settings::reauthenticate_account(*account_id, cx);
             }
+            MessageListEvent::TrustNewKey {
+                job_id,
+                fingerprint,
+            } => self.trust_new_key(*job_id, fingerprint, window, cx),
             MessageListEvent::Activate => self.focus_pane(Pane::Detail, window, cx),
             // In a stacked layout a click opens the row's detail;
             // elsewhere the detail is already beside the list.

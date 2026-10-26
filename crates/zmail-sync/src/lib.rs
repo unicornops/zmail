@@ -30,6 +30,7 @@ use wake::{WakeSignal, unless_woken};
 use zmail_core::{
     AuthKind, MailboxSnapshot, OutboxJobState, PendingOutboxJob, ProtocolKind, RuntimeSummary,
     SubmissionKind, SyncPhase, SyncTarget,
+    key_change::PinnedKeyChanged,
     reauth::{ReauthReason, ReauthRequired},
 };
 use zmail_notify::{NewMailArrival, NewMailBatch, Notifier};
@@ -813,6 +814,40 @@ impl SyncService {
         Ok(refused.len())
     }
 
+    /// Trusts the new key of the recipient whose key change stopped an
+    /// outbox message ([`PinnedKeyChanged`]), and sends the message again.
+    ///
+    /// The trust is read from the job's own failure: exactly that
+    /// recipient and the served key the send would use, on the job's
+    /// account. `fingerprint` is the key the user was shown; if the failure
+    /// names another one by now, nothing is trusted.
+    pub fn trust_new_key_and_retry(&self, job_id: i64, fingerprint: &str) -> Result<()> {
+        let job = self
+            .inner
+            .store
+            .list_outbox_jobs(None)?
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .with_context(|| format!("outbox job {job_id} does not exist"))?;
+        let change = job
+            .last_error_message
+            .as_deref()
+            .filter(|_| job.state == OutboxJobState::Failed)
+            .and_then(PinnedKeyChanged::of_message)
+            .with_context(|| format!("outbox job {job_id} is not waiting for a key decision"))?;
+        let Some(new_key) = change
+            .new_fingerprint()
+            .filter(|new_key| new_key.eq_ignore_ascii_case(fingerprint))
+        else {
+            bail!("the key for {} changed again", change.recipient);
+        };
+        self.inner
+            .store
+            .trust_recipient_key(job.account_id, &change.recipient, new_key)?;
+        self.inner.store.retry_outbox_job(job_id)?;
+        self.process_outbox(Some(job.account_id))
+    }
+
     /// Queues a draft and immediately schedules outbox processing for its account.
     pub fn queue_draft_and_send(&self, draft_id: i64) -> Result<i64> {
         self.queue_draft_and_send_after(draft_id, Duration::ZERO)
@@ -1160,11 +1195,17 @@ impl SyncService {
                 Err(error) => {
                     // A refused sign-in fails at once: retrying the same
                     // credentials cannot work, and the stored message
-                    // tells the shell to offer Re-authenticate.
+                    // tells the shell to offer Re-authenticate. So does a
+                    // recipient key that no longer matches the contact
+                    // card: only the user can decide to trust it.
                     if let Some(reauth) = reauth_required(&error) {
                         self.inner
                             .store
                             .record_outbox_failure(job.job_id, reauth.to_string())?;
+                    } else if let Some(changed) = pinned_key_changed(&error) {
+                        self.inner
+                            .store
+                            .record_outbox_failure(job.job_id, changed.to_string())?;
                     } else if job.attempt_count >= MAX_OUTBOX_ATTEMPTS {
                         self.inner
                             .store
@@ -1398,6 +1439,12 @@ fn failure_message(error: &anyhow::Error) -> String {
 /// The [`ReauthRequired`] failure somewhere in `error`'s chain, if any:
 /// the user has to sign in again before the operation can work.
 fn reauth_required(error: &anyhow::Error) -> Option<&ReauthRequired> {
+    error.chain().find_map(|cause| cause.downcast_ref())
+}
+
+/// The [`PinnedKeyChanged`] failure somewhere in `error`'s chain, if any:
+/// the user has to trust a recipient's new key before the message can go.
+fn pinned_key_changed(error: &anyhow::Error) -> Option<&PinnedKeyChanged> {
     error.chain().find_map(|cause| cause.downcast_ref())
 }
 
@@ -2502,5 +2549,100 @@ mod outbox_reauth_tests {
                 .any(|command| command.starts_with("AUTH PLAIN")),
             "the access token is never sent as a password: {commands:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod outbox_key_change_tests {
+    use std::sync::Arc;
+
+    use zmail_core::{AuthKind, OutboxJobState, key_change::PinnedKeyChanged};
+    use zmail_security::{InMemorySecretStore, SecretStore};
+    use zmail_store::LocalStore;
+
+    use super::{SyncService, tests::insert_account};
+
+    const PINNED: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
+    const SERVED: &str = "89ABCDEF0123456789ABCDEF0123456789ABCDEF";
+
+    #[test]
+    fn a_key_change_is_found_through_the_send_error_context() {
+        let error = anyhow::Error::new(PinnedKeyChanged::new(
+            "bob@example.org",
+            [PINNED.to_owned()],
+            [SERVED.to_owned()],
+        ))
+        .context("failed to set PGP settings")
+        .context("failed to send the message through Proton");
+        let change = super::pinned_key_changed(&error).expect("found");
+        assert_eq!(change.recipient, "bob@example.org");
+        assert!(super::pinned_key_changed(&anyhow::anyhow!("other")).is_none());
+    }
+
+    #[test]
+    fn trusting_a_new_key_covers_the_failed_job_recipient_and_key_only() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the runtime starts");
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let account_id = insert_account(&store, AuthKind::Password);
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let queue = |subject: &str| {
+            let draft_id = store
+                .create_draft(&zmail_core::NewDraft {
+                    account_id,
+                    identity_id,
+                    to: vec!["bob@example.org".to_owned()],
+                    cc: Vec::new(),
+                    bcc: Vec::new(),
+                    subject: subject.to_owned(),
+                    body: "Hello".to_owned(),
+                })
+                .expect("draft");
+            store.queue_draft(draft_id).expect("queued")
+        };
+        let changed = queue("Key changed");
+        let change =
+            PinnedKeyChanged::new("bob@example.org", [PINNED.to_owned()], [SERVED.to_owned()]);
+        store
+            .record_outbox_failure(changed, change.to_string())
+            .expect("failed");
+        let other = queue("Other failure");
+        store
+            .record_outbox_failure(other, "Connection refused")
+            .expect("failed");
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        let service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+
+        // Only a job stopped by a key change, and only for the key shown.
+        assert!(service.trust_new_key_and_retry(other, SERVED).is_err());
+        assert!(service.trust_new_key_and_retry(changed, PINNED).is_err());
+        assert!(
+            store
+                .trusted_recipient_keys(account_id)
+                .expect("trusts")
+                .is_empty()
+        );
+
+        service
+            .trust_new_key_and_retry(changed, &SERVED.to_ascii_lowercase())
+            .expect("trusted");
+        let trusts = store.trusted_recipient_keys(account_id).expect("trusts");
+        assert_eq!(trusts.len(), 1);
+        assert!(trusts[0].covers("bob@example.org", SERVED));
+        assert!(!trusts[0].covers("bob@example.org", PINNED));
+        let state = |job_id: i64| {
+            store
+                .list_outbox_jobs(Some(account_id))
+                .expect("jobs")
+                .into_iter()
+                .find(|job| job.id == job_id)
+                .expect("job")
+                .state
+        };
+        assert_ne!(state(changed), OutboxJobState::Failed, "requeued");
+        assert_eq!(state(other), OutboxJobState::Failed);
     }
 }

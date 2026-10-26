@@ -258,6 +258,68 @@ encrypted to every key that can encrypt. A key that fails is treated as
 not unlocked. This check has no upstream counterpart in Bridge; it is
 there because the crypto library changed.
 
+**Verifying keys (October 24, 2026).** go-crypto, under gopenpgp and so
+under Bridge, checks a certificate's self-signatures when it reads one
+(`openpgp/keys.go` `ReadEntity`, `addUserID`, `addSubkey`, and
+`VerifyKeySignature`, which also checks a signing subkey's embedded
+back-signature) and picks keys with `Entity.EncryptionKey(now)` and
+`Entity.SigningKey(now)`. rPGP parses certificates without checking
+anything, so Zmail does both itself (`zmail-proton-api`'s `cert.rs`), in
+one place that every key from the server or a contact card goes through:
+
+- `RecipientKey::from_armored` and `from_bytes` (recipients' keys from
+  `/core/v4/keys`, and keys pinned in contact cards) and `Key::unlock`
+  (the user's own keys) keep only what verifies: user IDs with a valid
+  self-certification, key revocations and direct-key signatures by the
+  primary key, and subkeys with a valid binding (plus a valid
+  back-signature when the binding gives the sign flag). A certificate
+  whose primary key has no valid self-signature left is refused. Where
+  go-crypto refuses the whole certificate over any bad self-signature,
+  Zmail drops just that signature: a dropped signature can neither add a
+  key nor lift a restriction.
+- The public-only subkeys of a secret key are dropped: Zmail never
+  encrypts drafts to a key it holds no secret for.
+- Encrypting, to a recipient or to the sender's own address key, uses the
+  key `EncryptionKey` would: the subkey with the newest binding whose key
+  flags allow encrypting communications, that has not expired and is not
+  revoked, else the primary key if its own self-signature allows it, and
+  nothing if the primary key has expired or is revoked. Signing follows
+  `SigningKey` the same way, and signatures (on address-key tokens and
+  contact cards) are only checked with keys whose self-signature allows
+  signing. `now` is the current time.
+
+**Proton's key flags.** go-proton-api defines a key's API flags
+(`KeyState` in `keys_types.go`): `KeyStateTrusted` (1) means "the key is
+not compromised (i.e. if we can trust signatures coming from it)" and
+`KeyStateActive` (2) "the key is still in use (i.e. not obsolete, we can
+encrypt messages to it)". Neither go-proton-api nor Bridge acts on them;
+Bridge relies on the server sending only usable keys. Zmail encrypts only
+to served recipient keys flagged active that also have a valid key to
+encrypt to (`pickSendingKey` in `send_prefs.rs`), so an obsolete or
+broken key is skipped and a recipient with no usable key fails the send.
+For WKD keys of an external contact the key is only picked when the mail
+is encrypted. Zmail verifies no signature with a recipient's key yet; the
+user's own keys carry the same flags but Zmail does not act on them yet
+(go-proton-api's fake server serves those keys with no flags at all).
+
+**Pinned keys that no longer match: a security deviation from Bridge.**
+A Proton contact card can pin a recipient's keys. When the card pins keys
+and the keys Proton serves include none of them, Bridge sends to the
+first served key (`pickSendingKey`; its comment notes that Proton's own
+clients ask the user first). That lets whoever controls the key directory
+replace a key the user pinned. Zmail stops the send instead, with a
+`PinnedKeyChanged` error naming the recipient, the pinned fingerprints
+and the served ones; the outbox shows the message as needing the user,
+like a refused sign-in. Its "Trust New Key…" action shows both
+fingerprints and asks the user to compare them with the recipient another
+way; "Trust the new key for <recipient>" records a local, account-scoped
+trust for exactly that address and that served fingerprint (the
+`recipient_key_trust` table) and sends again. A later change to yet
+another key stops the send again, and the contact card on the server is
+never changed. This deviates from Bridge for the same reason a send never
+decrypts server data (below): Zmail does not let the server decide what
+the user's own client trusts.
+
 If Proton accounts with post-quantum keys need support later, `pgp`'s
 `pqc` feature adds them. Messages compressed with bzip2 by external
 OpenPGP senders need `pgp`'s `bzip2` feature, which the hydration phase

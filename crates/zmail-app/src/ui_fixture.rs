@@ -670,6 +670,17 @@ fn seed_outbox(store: &LocalStore, account_id: i64) -> Result<()> {
         "Re: Your talk proposal was accepted",
     )?;
     store.record_outbox_failure(failed, "550 5.1.1 Mailbox unavailable")?;
+    // Stopped because the contact card pins another key than Proton serves.
+    let key_changed = queue(
+        "Ines Duarte <ines.duarte@example.org>",
+        "Contract draft for review",
+    )?;
+    let change = zmail_core::key_change::PinnedKeyChanged::new(
+        "ines.duarte@example.org",
+        ["3F2A9C41D07E58B6A1C4E2F09B7D3A5C8E1F4062".to_owned()],
+        ["B81D47E2A6C093F5D2E8417A0C9B6F3E5D2A7C18".to_owned()],
+    );
+    store.record_outbox_failure(key_changed, change.to_string())?;
     Ok(())
 }
 
@@ -1525,7 +1536,7 @@ mod tests {
             .map(|job| job.state.as_str())
             .collect::<Vec<_>>();
         states.sort_unstable();
-        assert_eq!(states, ["failed", "retrying", "sending"]);
+        assert_eq!(states, ["failed", "failed", "retrying", "sending"]);
         Ok(())
     }
 

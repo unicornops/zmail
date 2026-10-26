@@ -16,6 +16,11 @@
 // Modified by UnicornOps on 2026-10-24: hands rPGP the rand 0.10 thread RNG
 // that the rpgp/rpgp#573 fork (RustCrypto 0.14 stack) takes; no change in
 // behaviour.
+// Modified by UnicornOps on 2026-10-24: a key's self-signatures are checked
+// before it is unlocked, as go-crypto does when it reads a key (`cert.rs`):
+// parts that do not verify and public-only subkeys are dropped, and a key
+// without a valid self-signature does not unlock. Detached signatures are
+// only checked with keys whose self-signature allows signing.
 
 //! User and address keys, and unlocking them into a [`KeyRing`].
 //!
@@ -34,7 +39,7 @@ use pgp::{
 use serde::{Deserialize, Deserializer};
 use zeroize::Zeroizing;
 
-use crate::{boolean::api_bool, response::Error};
+use crate::{boolean::api_bool, cert, response::Error};
 
 /// Key flags (go-proton-api's `KeyState`, a bit set).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -159,7 +164,9 @@ impl Key {
             }
             _ => Zeroizing::new(passphrase.to_vec()),
         };
-        let (mut key, _) = SignedSecretKey::from_string(&self.private_key).map_err(key_error)?;
+        let (key, _) = SignedSecretKey::from_string(&self.private_key).map_err(key_error)?;
+        // Only the parts whose self-signatures verify are unlocked or used.
+        let mut key = cert::verify_secret(key)?;
         let password = Password::from(secret.as_slice());
         key.primary_key
             .remove_password(&password)
@@ -323,16 +330,18 @@ impl KeyRing {
     }
 
     /// Verifies an armored detached signature over `data` with any of the
-    /// keys (primary or subkey).
+    /// keys: a primary key or subkey whose self-signature allows signing.
     pub fn verify_detached_armored(&self, data: &[u8], armored: &str) -> Result<(), Error> {
         let (signature, _) = DetachedSignature::from_string(armored).map_err(key_error)?;
         let verified = self.keys.iter().any(|unlocked| {
             let key = &unlocked.key;
-            signature.verify(key.primary_key.public_key(), data).is_ok()
-                || key
-                    .secret_subkeys
-                    .iter()
-                    .any(|subkey| signature.verify(subkey.key.public_key(), data).is_ok())
+            let primary = key.primary_key.public_key();
+            (cert::primary_verifies(&key.details, primary)
+                && signature.verify(primary, data).is_ok())
+                || cert::verifying_subkeys(&key.secret_subkeys, |subkey| {
+                    (subkey.key.public_key(), &subkey.signatures)
+                })
+                .any(|subkey| signature.verify(subkey.key.public_key(), data).is_ok())
         });
         if verified {
             Ok(())
