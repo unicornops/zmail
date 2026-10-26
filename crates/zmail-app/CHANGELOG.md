@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.1](https://github.com/unicornops/zmail/compare/v0.21.0...v0.21.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* **proton:** verify OpenPGP key bindings and refuse unconfirmed key changes ([#303](https://github.com/unicornops/zmail/issues/303)) ([aaa78f5](https://github.com/unicornops/zmail/commit/aaa78f5b2de55d9eaefc50379cdb67a1d08ba1f1))
+
 ## [0.21.0](https://github.com/unicornops/zmail/compare/v0.20.0...v0.21.0) (2026-10-24)
 
 
