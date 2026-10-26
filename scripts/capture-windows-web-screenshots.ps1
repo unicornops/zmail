@@ -160,6 +160,23 @@ foreach ($state in $states) {
     Stop-Fixture $fixture
 }
 
+# Quitting the app with a page open: closing the window must end the
+# process (WebView2 objects released at exit once hung a test process).
+Write-Host "Quitting with a page open"
+$fixture = Start-Fixture 'reader-html-quit' 'reader-html' 'light' 12
+if ($fixture) {
+    $started = Get-Date
+    $fixture.Process.CloseMainWindow() | Out-Null
+    if ($fixture.Process.WaitForExit(20000)) {
+        $seconds = [int]((Get-Date) - $started).TotalSeconds
+        "exited $seconds s after the window was closed" | Tee-Object (Join-Path $OutputDir 'reader-html-quit.txt')
+    } else {
+        "did not exit within 20 s of the window closing" | Tee-Object (Join-Path $OutputDir 'reader-html-quit.txt')
+        Write-Host "::warning::zmail-app did not exit within 20 s of its window closing"
+    }
+}
+Stop-Fixture $fixture
+
 # Interactions on the reader-html state. Positions are fractions of the
 # window's width and height, in the page of the newsletter.
 function Invoke-Interaction([string]$Name, [scriptblock]$Steps) {
