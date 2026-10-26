@@ -106,5 +106,7 @@ pub mod macos_testing {
 #[cfg(target_os = "windows")]
 #[doc(hidden)]
 pub mod windows_testing {
-    pub use crate::platform::windows::{PlatformWebView, TestWindow, clipboard_text};
+    pub use crate::platform::windows::{
+        PlatformWebView, TestWindow, browser_running, clipboard_text,
+    };
 }

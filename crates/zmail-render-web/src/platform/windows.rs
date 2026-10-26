@@ -223,6 +223,18 @@ pub(crate) fn unavailable_reason() -> Option<String> {
     })
 }
 
+/// Whether a WebView2 browser process may still be running for this
+/// process: an environment is being created or has not seen its browser
+/// process exit. For the canary test, which waits for it before exiting.
+pub fn browser_running() -> bool {
+    ENVIRONMENT.with(|environment| {
+        matches!(
+            &*environment.borrow(),
+            Environment::Creating(_) | Environment::Ready { .. }
+        )
+    })
+}
+
 /// Calls `then` with the environment, creating it first if needed. `then`
 /// may run later, from the message loop.
 fn with_environment(then: impl FnOnce(Result<ICoreWebView2Environment10, String>) + 'static) {
