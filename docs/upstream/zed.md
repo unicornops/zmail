@@ -52,6 +52,11 @@ What changes while the pin is on the pull request:
   children (`IDCompositionVisual::RemoveAllVisuals`) before each rebuild;
   the canary checks that DirectComposition still refuses the re-add. Drop
   the workaround when the pull request handles nested native surfaces.
+- Windows: a native surface's `set_visible` casts its visual to
+  `IDCompositionVisual3` for `SetOpacity2`, but GPUI creates its device with
+  `DCompositionCreateDevice`, whose visuals do not implement it, so the call
+  fails with E_NOINTERFACE (0x80004002; seen on CI). The renderer hides
+  each page through WebView2 (`IsVisible`) instead.
 - The app's diagnostics strip shows the Zed tag as `untagged` (the pin has
   no tag) and the PR commit.
 - The weekly `zed-upstream` workflow does not move the pin back to a

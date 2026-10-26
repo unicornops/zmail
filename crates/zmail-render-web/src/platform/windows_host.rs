@@ -88,10 +88,17 @@ struct Slot {
     input: Rc<RefCell<Input>>,
 }
 
-/// Whether a message's surface is drawn: once its page is measured (so no
+/// Whether a message's page is drawn: once it is measured (so no
 /// half-laid-out page flashes), and while a body places it.
+///
+/// The web view's own visibility (WebView2's `IsVisible`) does the work.
+/// GPUI's `set_visible` on the surface is tried too, but at the pinned
+/// commit it casts the surface's visual to `IDCompositionVisual3`, which
+/// visuals of its `DCompositionCreateDevice` device do not implement
+/// (E_NOINTERFACE), so it fails; see `docs/upstream/zed.md`.
 struct Shown {
     surface: WindowCompositionSurface,
+    view: RefCell<Option<PlatformWebView>>,
     hidden: Cell<bool>,
     revealed: Cell<bool>,
     visible: Cell<Option<bool>>,
@@ -100,6 +107,9 @@ struct Shown {
 impl Shown {
     fn apply(&self) {
         let visible = !self.hidden.get() && self.revealed.get();
+        if let Some(view) = &*self.view.borrow() {
+            view.set_hidden(!visible);
+        }
         if self.visible.replace(Some(visible)) == Some(visible) {
             return;
         }
@@ -108,7 +118,9 @@ impl Shown {
             .platform_surface()
             .and_then(|surface| surface.set_visible(visible))
         {
-            eprintln!("zmail: web renderer: could not show or hide a page: {error:#}");
+            debug_log(format_args!(
+                "GPUI could not show or hide a page's surface: {error:#}"
+            ));
         }
     }
 }
@@ -163,9 +175,7 @@ impl Backend {
         slot.view.set_scale(f64::from(scale));
         slot.view
             .set_size(device.size.width.0, device.size.height.0);
-        let hidden = !bounds.intersects(&viewport);
-        slot.view.set_hidden(hidden);
-        slot.shown.hidden.set(hidden);
+        slot.shown.hidden.set(!bounds.intersects(&viewport));
         slot.shown.apply();
         Ok(())
     }
@@ -223,6 +233,7 @@ impl Backend {
         let hwnd = self.viewport.as_ref().context("no surface")?.hwnd;
         let shown = Rc::new(Shown {
             surface: child.surface.clone(),
+            view: RefCell::new(None),
             hidden: Cell::new(true),
             revealed: Cell::new(false),
             visible: Cell::new(None),
@@ -248,6 +259,8 @@ impl Backend {
             }
         };
         *child.occupant.borrow_mut() = Some(view.clone());
+        *shown.view.borrow_mut() = Some(view.clone());
+        shown.apply();
         Ok(Slot {
             view,
             child,
@@ -303,6 +316,7 @@ impl Backend {
     fn release(&mut self, slot: Slot) {
         slot.shown.hidden.set(true);
         slot.shown.apply();
+        slot.shown.view.borrow_mut().take();
         slot.child.occupant.borrow_mut().take();
         drop(slot.view);
         self.spare.push(slot.child);
@@ -418,7 +432,6 @@ impl Backend {
     pub(crate) fn end_frame(&mut self, touched: &HashSet<WebKey>, _window: &mut Window) {
         for (key, slot) in &self.views {
             if !touched.contains(key) {
-                slot.view.set_hidden(true);
                 slot.shown.hidden.set(true);
                 slot.shown.apply();
             }
@@ -442,7 +455,11 @@ impl Backend {
                 .platform_surface()
                 .and_then(|surface| surface.set_visible(visible))
             {
-                eprintln!("zmail: web renderer: could not show or hide the surface: {error:#}");
+                // Fails at the pinned GPUI (see `Shown`); every page is hidden
+                // on its own as well.
+                debug_log(format_args!(
+                    "GPUI could not show or hide the surface: {error:#}"
+                ));
             }
         }
     }
@@ -463,7 +480,6 @@ impl Backend {
 
     pub(crate) fn hide_all(&mut self) {
         for slot in self.views.values() {
-            slot.view.set_hidden(true);
             slot.shown.hidden.set(true);
             slot.shown.apply();
         }
