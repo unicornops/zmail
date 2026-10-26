@@ -254,7 +254,11 @@ The WebView2 renderer is `crates/zmail-render-web/src/platform/windows.rs`
   new windows, external schemes, downloads, permissions and basic
   authentication denied; no dev tools, context menus, web messages, host
   objects, status bar, zoom control, accelerator keys, autofill, password
-  saving or SmartScreen lookups. Each page has its own InPrivate profile
+  saving or SmartScreen lookups. The engine itself has no network: its
+  proxy is a loopback port nothing listens on, because a cross-origin
+  `<iframe>` made it open a connection before the cancelled navigation
+  reached any handler, which disabling Chromium's predictors did not
+  stop. Each page has its own InPrivate profile
   with strict tracking prevention, in a user data folder under the
   temporary folder that is deleted when the browser process exits (or on
   the next start). A failed browser or renderer process falls back to the

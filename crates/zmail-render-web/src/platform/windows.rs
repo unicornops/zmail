@@ -32,6 +32,10 @@
 //! - No dev tools, context menus, web messages, host objects, status bar,
 //!   zoom control, accelerator keys, pinch zoom, swipe navigation,
 //!   autofill, password saving or SmartScreen lookups.
+//! - The engine has no network of its own: its proxy is a loopback port
+//!   nothing listens on, for every host including loopback, so a
+//!   connection it opens anyway (as for a cross-origin `<iframe>`) fails
+//!   locally and no host name is resolved (`BROWSER_ARGUMENTS`).
 //! - Each view has its own InPrivate profile with tracking prevention set
 //!   to strict, in an environment whose user data folder is Zmail's own,
 //!   under the temporary folder, and is deleted when the browser process
@@ -128,8 +132,11 @@ const MAX_RELAYOUT_WAITS: u32 = 20;
 /// engine can open a connection without one: for a cross-origin `<iframe>`
 /// it connected to the frame's host (no request sent) although the frame's
 /// navigation was cancelled and never reached that handler (the Windows
-/// canary, raw corpus); turning off Chromium's predictors and preconnect
-/// features did not stop it. So all of the engine's networking goes to a
+/// canary's raw `iframe` page). Turning off Chromium's speculative network
+/// work did not stop it (tried on CI: `--disable-features=` with
+/// SpeculativePreconnect, NavigationPredictor, LoadingPredictorPrefetch,
+/// LoadingPredictorUseOptimizationGuide, PreconnectToSearch, Prerender2 and
+/// SpeculationRulesPrefetchFuture). So all of the engine's networking goes to a
 /// proxy on a loopback port nothing listens on (loopback included, which
 /// Chromium otherwise sends direct): a connection it opens fails locally,
 /// and with a fixed proxy it resolves no host names either. Zmail's own
@@ -515,8 +522,9 @@ impl VisualTarget {
 /// `gpui_windows/src/directx_renderer.rs`) empties the root visual and
 /// GPUI's own visuals, then adds every surface to its parent's visual, but
 /// a native parent's visual is never emptied, and DirectComposition refuses
-/// to add a visual that already has a parent. The host calls this right
-/// before anything that makes GPUI rebuild its tree.
+/// to add a visual that already has a parent (E_INVALIDARG): bug 1 in
+/// `docs/upstream/zed.md`. The host calls this right before anything that
+/// makes GPUI rebuild its tree.
 pub(crate) fn detach_children(visual: &IUnknown) {
     match visual.cast::<IDCompositionVisual>() {
         // SAFETY: `visual` is a live visual of GPUI's device (the viewport

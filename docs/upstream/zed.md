@@ -39,24 +39,6 @@ What changes while the pin is on the pull request:
   `WindowComposition::reparent` and the surfaces' compositor-recreated
   callback), on macOS and Windows. Linux builds on the same pin and keeps
   the text view.
-- Windows: a native surface's platform handle is its DirectComposition
-  visual (an `IUnknown`), from the `windows` 0.62 crate that
-  `zmail-render-web` uses too, so the handle's type matches. The renderer
-  nests one surface per message inside a viewport surface. GPUI's
-  `set_surface_order` (`gpui_windows/src/directx_renderer.rs`) empties the
-  root visual and GPUI's own visuals before adding every surface back to
-  its parent, but never empties a native parent's visual, and
-  DirectComposition refuses to add a visual that already has a parent, so
-  the second rebuild with nested native surfaces fails part-way.
-  `platform::windows_host` works around it by detaching the viewport's
-  children (`IDCompositionVisual::RemoveAllVisuals`) before each rebuild;
-  the canary checks that DirectComposition still refuses the re-add. Drop
-  the workaround when the pull request handles nested native surfaces.
-- Windows: a native surface's `set_visible` casts its visual to
-  `IDCompositionVisual3` for `SetOpacity2`, but GPUI creates its device with
-  `DCompositionCreateDevice`, whose visuals do not implement it, so the call
-  fails with E_NOINTERFACE (0x80004002; seen on CI). The renderer hides
-  each page through WebView2 (`IsVisible`) instead.
 - The app's diagnostics strip shows the Zed tag as `untagged` (the pin has
   no tag) and the PR commit.
 - The weekly `zed-upstream` workflow does not move the pin back to a
@@ -66,6 +48,50 @@ What changes while the pin is on the pull request:
   a notice. Once a Zed stable release contains the merge commit, it bumps
   to that release as usual, which ends the deviation; then delete this
   section and the `deny.toml` entry for the fork.
+
+### Windows composition issues at this pin
+
+The Windows web renderer (`crates/zmail-render-web/src/platform/windows_host.rs`)
+uses native surfaces on Windows too. A native surface's platform handle is its
+DirectComposition visual, an `IUnknown` from the `windows` 0.62 crate that
+`zmail-render-web` also uses, so the handle downcasts directly. Two bugs in the
+pull request's Windows backend were found on CI (windows-latest) and are worked
+around in Zmail. Rob decided (October 26, 2026) not to report them upstream for
+now; drop the workarounds once the pin moves to code that fixes them.
+
+1. **Nested native surfaces break the second tree rebuild.**
+   `DirectComposition::set_surface_order`
+   (`crates/gpui_windows/src/directx_renderer.rs:1349` at `840e095`) empties the
+   root visual (line 1402) and GPUI's own visuals (line 1408), then adds every
+   surface to its parent's visual (`container.AddVisual(visual, true, previous)`,
+   line 1419). A native parent's visual is never emptied, so a native surface
+   reparented under another native surface (`WindowComposition::reparent`) is
+   still attached at the next rebuild, and DirectComposition refuses to add a
+   visual that already has a parent: `AddVisual` returns E_INVALIDARG
+   (0x80070057, "The parameter is incorrect"). The rebuild stops part-way, with
+   the root emptied and the surfaces after the failing one (GPUI's overlay
+   surface among them) not added back; in `Window::present` the error is only
+   logged. Repro: enable composition, create native surfaces A and B,
+   `reparent(B, Some(A))`, then create another surface or `set_bounds` any
+   surface and present. The canary (`tests/canary.rs`, Windows) checks on every
+   run that DirectComposition still refuses the re-add. A fix upstream would
+   empty a native parent of the surfaces GPUI added (not of everything: an
+   embedder's own visuals, such as WebView2's inside its root visual target,
+   live there too), or `RemoveVisual` from the old parent first.
+   Workaround: `detach_children` removes the viewport surface's children
+   (`IDCompositionVisual::RemoveAllVisuals`) right before anything that makes
+   GPUI rebuild: creating or reparenting a surface, and the end of any frame
+   in which a surface's bounds changed.
+2. **A native surface cannot be hidden.** `DirectCompositionPortal::set_visible`
+   (line 1468) and `rebind_portal` (around line 1338) cast the surface's visual
+   to `IDCompositionVisual3` for `SetOpacity2`, but the device comes from
+   `DCompositionCreateDevice` (`get_comp_device`, line 1812), whose visuals do
+   not implement it, so the call fails with E_NOINTERFACE (0x80004002, "No such
+   interface supported"). Repro: `create_native_surface()`, then
+   `platform_surface()?.set_visible(false)`. `remove_surface` and the rebind
+   after a lost device hit the same cast. Workaround: each page is hidden
+   through WebView2 (`ICoreWebView2Controller::put_IsVisible`); GPUI's
+   `set_visible` is still called.
 
 To follow a new head of the pull request by hand: change the `rev` on both
 lines, run `cargo update -p gpui -p gpui_platform`, compare the PR's root

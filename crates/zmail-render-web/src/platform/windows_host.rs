@@ -21,11 +21,19 @@
 //! through Zmail's commands, as on macOS.
 //!
 //! Message surfaces are kept and reused, because removing a surface needs
-//! the window and dropping a web view does not have it. GPUI does not take
-//! the children of a native surface out of its visual before adding them
-//! back when it rebuilds the visual tree, which DirectComposition refuses;
-//! until it does, the viewport's children are detached first, every time
-//! a rebuild is due (see `detach_children`).
+//! the window and dropping a web view does not have it.
+//!
+//! Two bugs in GPUI's Windows composition at the pinned commit are worked
+//! around here; both are described in `docs/upstream/zed.md` ("Windows
+//! composition issues at this pin"):
+//!
+//! 1. GPUI does not take the children of a native surface out of its
+//!    visual before adding them back when it rebuilds the visual tree,
+//!    which DirectComposition refuses (E_INVALIDARG): the viewport's
+//!    children are detached first, every time a rebuild is due
+//!    (`detach_children`).
+//! 2. GPUI's `set_visible` on a native surface always fails
+//!    (E_NOINTERFACE): pages are hidden through WebView2 (`Shown`).
 
 use std::{
     cell::{Cell, RefCell},
@@ -95,7 +103,7 @@ struct Slot {
 /// GPUI's `set_visible` on the surface is tried too, but at the pinned
 /// commit it casts the surface's visual to `IDCompositionVisual3`, which
 /// visuals of its `DCompositionCreateDevice` device do not implement
-/// (E_NOINTERFACE), so it fails; see `docs/upstream/zed.md`.
+/// (E_NOINTERFACE), so it fails: bug 2 in `docs/upstream/zed.md`.
 struct Shown {
     surface: WindowCompositionSurface,
     view: RefCell<Option<PlatformWebView>>,
@@ -280,7 +288,7 @@ impl Backend {
             .enable_window_composition()
             .context("enabling window composition")?;
         // Both calls rebuild GPUI's visual tree, which re-adds the
-        // viewport's children (see `detach_children`). The first try goes
+        // viewport's children (bug 1 in `docs/upstream/zed.md`). The first try goes
         // without the workaround, so the log shows whether GPUI still needs
         // it.
         let surface = match composition.create_native_surface() {
@@ -440,7 +448,8 @@ impl Backend {
         if std::mem::take(&mut self.geometry_changed)
             && let Some(viewport) = &self.viewport
         {
-            // GPUI rebuilds the tree when it presents this frame.
+            // GPUI rebuilds the tree when it presents this frame (bug 1 in
+            // `docs/upstream/zed.md`).
             detach_children(&viewport.visual.borrow());
         }
     }
