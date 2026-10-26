@@ -123,6 +123,18 @@ const RELAYOUT_WAIT: Duration = Duration::from_millis(50);
 /// as it is.
 const MAX_RELAYOUT_WAITS: u32 = 20;
 
+/// Chromium switches for every WebView2 environment: no speculative
+/// network work of any kind. A cross-origin `<iframe>` made the engine open
+/// a connection (no request) to the frame's host before the navigation was
+/// refused (the Windows canary, raw corpus), which is enough to tell a
+/// sender the mail was opened.
+const BROWSER_ARGUMENTS: &[&str] = &[
+    "--dns-prefetch-disable",
+    "--no-pings",
+    "--disable-features=SpeculativePreconnect,NavigationPredictor,LoadingPredictorPrefetch,\
+     LoadingPredictorUseOptimizationGuide,PreconnectToSearch,Prerender2,SpeculationRulesPrefetchFuture",
+];
+
 /// The folder, under the temporary folder, that holds each Zmail process's
 /// WebView2 user data folder.
 const USER_DATA_DIR: &str = "zmail-webview2";
@@ -231,18 +243,6 @@ pub(crate) fn unavailable_reason() -> Option<String> {
     })
 }
 
-/// Whether a WebView2 browser process may still be running for this
-/// process: an environment is being created or has not seen its browser
-/// process exit. For the canary test, which waits for it before exiting.
-pub fn browser_running() -> bool {
-    ENVIRONMENT.with(|environment| {
-        matches!(
-            &*environment.borrow(),
-            Environment::Creating(_) | Environment::Ready { .. }
-        )
-    })
-}
-
 /// Calls `then` with the environment, creating it first if needed. `then`
 /// may run later, from the message loop.
 fn with_environment(then: impl FnOnce(Result<ICoreWebView2Environment10, String>) + 'static) {
@@ -290,8 +290,9 @@ fn create_environment() -> Result<()> {
     let folder = base.join(format!("{}-{count}", std::process::id()));
     std::fs::create_dir_all(&folder).with_context(|| format!("creating {}", folder.display()))?;
     debug_log(format_args!(
-        "creating the WebView2 environment in {}",
-        folder.display()
+        "creating the WebView2 environment in {} ({})",
+        folder.display(),
+        BROWSER_ARGUMENTS.join(" ")
     ));
 
     let options = CoreWebView2EnvironmentOptions::default();
@@ -323,6 +324,7 @@ fn create_environment() -> Result<()> {
         options.set_enable_tracking_prevention(true);
         options.set_are_browser_extensions_enabled(false);
         options.set_allow_single_sign_on_using_os_primary_account(false);
+        options.set_additional_browser_arguments(BROWSER_ARGUMENTS.join(" "));
     }
     let options: ICoreWebView2EnvironmentOptions = options.into();
     let created_folder = folder.clone();
