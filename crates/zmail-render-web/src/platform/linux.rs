@@ -1273,7 +1273,7 @@ impl View {
         }
         let fit = self.fit.get();
         let max = self.size.get().max_height();
-        let height = (measurement.height * fit).ceil().clamp(1., max);
+        let height = measurement.points(fit).min(max);
         if measurement.height * fit > max {
             eprintln!("zmail: web renderer: message cut off at {max} points");
         }

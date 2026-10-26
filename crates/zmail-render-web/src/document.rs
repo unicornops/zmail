@@ -327,7 +327,7 @@ pub fn parse_scheme_request(url: &str) -> SchemeRequest {
 
 /// A fresh token for each page load, so no two loads share a URL: a
 /// lowercase letter, digits and lowercase hex, which no engine rewrites.
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 pub(crate) fn page_token() -> String {
     thread_local! {
         static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
