@@ -267,6 +267,13 @@ The WebView2 renderer is `crates/zmail-render-web/src/platform/windows.rs`
   statically; nothing is added to the installer). Without it, or when the
   environment cannot be created, the reader keeps the text view and says
   why.
+- **Checked** by CI's "Web renderer (Windows)" job: the canary corpus
+  makes no request, page scripts do not run, `cid:` parts load, pages are
+  measured and zoomed to fit, Select All and Copy reach the clipboard, plus
+  screenshots of the fixture states and three interactions. Not verified:
+  touch and pen input (only the mouse is forwarded), IME, Narrator (the
+  page's UI Automation tree is not connected to AccessKit), and scale
+  factors above 100%.
 
 Effort, from the research: about 3-4 engineer-months for the web
 renderer on macOS, Windows and Linux X11, plus about a month for the

@@ -1,5 +1,6 @@
 //! The zero-network canary (ADR 0006, Phase 1 prototype 4) and checks of
-//! the macOS web view's hardening, run against real `WKWebView`s.
+//! the web view's hardening, run against real `WKWebView`s on macOS and
+//! real WebView2 views on Windows.
 //!
 //! A local HTTP server counts every connection. A corpus of hostile mail
 //! references it in every way HTML and CSS can load something; each page
@@ -8,18 +9,23 @@
 //! parts load through Zmail's scheme handler, and the page is measured
 //! (with page JavaScript off) and zoomed to fit its width.
 //!
+//! On Windows it also checks Select All and Copy (which go through Zmail's
+//! scripts and the clipboard there), and that DirectComposition refuses to
+//! re-add a child visual, the reason the host works around GPUI's tree
+//! rebuild.
+//!
 //! Web views must run on the main thread, so this test has its own `main`
-//! (`harness = false`). It only does anything on macOS; CI runs it on the
-//! macOS runner.
+//! (`harness = false`). It only does anything on macOS and Windows; CI runs
+//! it on both runners.
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn main() {
-    println!("canary: the web renderer exists only on macOS; nothing to check here");
+    println!("canary: the web renderer exists only on macOS and Windows; nothing to check here");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn main() {
-    match macos::run() {
+    match canary::run() {
         Ok(()) => println!("canary: all checks passed"),
         Err(error) => {
             eprintln!("canary: FAILED: {error:#}");
@@ -28,8 +34,87 @@ fn main() {
     }
 }
 
+/// The platform's web views behind one small API.
 #[cfg(target_os = "macos")]
-mod macos {
+mod engine {
+    use std::{rc::Rc, time::Duration};
+
+    use anyhow::Result;
+    use zmail_render_web::{
+        WebDocument, WebEvent,
+        macos_testing::{Frame, OffscreenWindow},
+    };
+
+    pub(crate) use zmail_render_web::macos_testing::PlatformWebView as View;
+
+    pub(crate) struct Window(OffscreenWindow);
+
+    impl Window {
+        pub(crate) fn new() -> Result<Self> {
+            Ok(Self(OffscreenWindow::new(800., 600.)?))
+        }
+
+        /// A web view 600 points wide showing `document`.
+        pub(crate) fn view(
+            &self,
+            document: &WebDocument,
+            on_event: Rc<dyn Fn(WebEvent)>,
+        ) -> Result<View> {
+            let view = View::new(self.0.clip(), document, on_event)?;
+            view.set_frame(Frame {
+                x: 0.,
+                y: 0.,
+                width: 600.,
+                height: 200.,
+            });
+            view.set_hidden(false);
+            Ok(view)
+        }
+
+        pub(crate) fn pump(&self, duration: Duration) {
+            self.0.pump(duration);
+        }
+    }
+}
+
+/// The platform's web views behind one small API.
+#[cfg(target_os = "windows")]
+mod engine {
+    use std::{rc::Rc, time::Duration};
+
+    use anyhow::Result;
+    use zmail_render_web::{WebDocument, WebEvent, windows_testing::TestWindow};
+
+    pub(crate) use zmail_render_web::windows_testing::PlatformWebView as View;
+
+    pub(crate) struct Window(pub(crate) TestWindow);
+
+    impl Window {
+        pub(crate) fn new() -> Result<Self> {
+            Ok(Self(TestWindow::new(800, 600)?))
+        }
+
+        /// A web view 600 pixels wide (at scale 1) showing `document`.
+        pub(crate) fn view(
+            &self,
+            document: &WebDocument,
+            on_event: Rc<dyn Fn(WebEvent)>,
+        ) -> Result<View> {
+            let view = View::new(&self.0.target()?, document, on_event)?;
+            view.set_scale(1.);
+            view.set_size(600, 200);
+            view.set_hidden(false);
+            Ok(view)
+        }
+
+        pub(crate) fn pump(&self, duration: Duration) {
+            self.0.pump(duration);
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod canary {
     use std::{
         cell::RefCell,
         io::{BufRead, BufReader, Write},
@@ -42,10 +127,9 @@ mod macos {
 
     use anyhow::{Context, Result, bail, ensure};
     use zmail_render::{PrepareOptions, RemoteContentDecision, RenderSource, prepare};
-    use zmail_render_web::{
-        Appearance, InlineResource, WebDocument, WebEvent,
-        macos_testing::{Frame, OffscreenWindow, PlatformWebView},
-    };
+    use zmail_render_web::{Appearance, InlineResource, WebDocument, WebEvent};
+
+    use crate::engine::{View, Window};
 
     /// How long a page may take to load and be measured.
     const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
@@ -146,9 +230,18 @@ mod macos {
                 "scripts",
                 r#"<script src="http://HOST/script.js"></script><script>fetch('http://HOST/fetch');new Image().src='http://HOST/js-image';</script><img src="cid:missing" onerror="this.src='http://HOST/onerror'"><body onload="location='http://HOST/onload'">"#,
             ),
+            ("iframe", r#"<iframe src="http://HOST/iframe"></iframe>"#),
             (
-                "frames and objects",
-                r#"<iframe src="http://HOST/iframe"></iframe><iframe srcdoc="<img src='http://HOST/srcdoc'>"></iframe><object data="http://HOST/object"></object><embed src="http://HOST/embed"><frameset><frame src="http://HOST/frame"></frameset>"#,
+                "iframe srcdoc",
+                r#"<iframe srcdoc="<img src='http://HOST/srcdoc'>"></iframe>"#,
+            ),
+            (
+                "object and embed",
+                r#"<object data="http://HOST/object"></object><embed src="http://HOST/embed">"#,
+            ),
+            (
+                "frameset",
+                r#"<frameset><frame src="http://HOST/frame"></frameset>"#,
             ),
             (
                 "media",
@@ -175,7 +268,7 @@ mod macos {
 
     /// What a render produced.
     struct Rendered {
-        view: PlatformWebView,
+        view: View,
         events: Rc<RefCell<Vec<WebEvent>>>,
     }
 
@@ -202,21 +295,13 @@ mod macos {
 
     /// Renders `document` in a 600-point-wide view and waits until it is
     /// measured (or fails), then lets it settle.
-    fn render(window: &OffscreenWindow, document: &WebDocument) -> Result<Rendered> {
+    fn render(window: &Window, document: &WebDocument) -> Result<Rendered> {
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded = events.clone();
-        let view = PlatformWebView::new(
-            window.clip(),
+        let view = window.view(
             document,
             Rc::new(move |event| recorded.borrow_mut().push(event)),
         )?;
-        view.set_frame(Frame {
-            x: 0.,
-            y: 0.,
-            width: 600.,
-            height: 200.,
-        });
-        view.set_hidden(false);
         let rendered = Rendered { view, events };
         let started = Instant::now();
         while rendered.measured_height().is_none() && rendered.failure().is_none() {
@@ -230,7 +315,7 @@ mod macos {
     }
 
     /// Runs `script` in the isolated world and waits for its result.
-    fn evaluate(window: &OffscreenWindow, rendered: &Rendered, script: &str) -> Result<String> {
+    fn evaluate(window: &Window, rendered: &Rendered, script: &str) -> Result<String> {
         let result: Rc<RefCell<Option<Result<String, String>>>> = Rc::new(RefCell::new(None));
         let slot = result.clone();
         rendered
@@ -266,7 +351,7 @@ mod macos {
             canary.hits.lock().map(|mut hits| hits.clear()).ok();
         }
 
-        let window = OffscreenWindow::new(800., 600.)?;
+        let window = Window::new()?;
         let host = format!("127.0.0.1:{}", canary.port);
         let local = format!("localhost:{}", canary.port);
         let mut problems = Vec::new();
@@ -429,6 +514,9 @@ mod macos {
             other => problems.push(format!("a 1200px-wide page was not fitted: {other:?}")),
         }
 
+        #[cfg(target_os = "windows")]
+        windows_checks(&window, &mut problems)?;
+
         drop(window);
         if problems.is_empty() {
             Ok(())
@@ -439,5 +527,37 @@ mod macos {
                 problems.join("\n  ")
             )
         }
+    }
+
+    /// Select All and Copy go through Zmail's scripts and the clipboard on
+    /// Windows; and DirectComposition refuses to re-add a child visual,
+    /// which the host's GPUI workaround relies on.
+    #[cfg(target_os = "windows")]
+    fn windows_checks(window: &Window, problems: &mut Vec<String>) -> Result<()> {
+        use zmail_render_web::windows_testing::clipboard_text;
+
+        let rendered = render(
+            window,
+            &document("<p>Copy <b>this</b> text</p><p>and this</p>"),
+        )?;
+        rendered.view.select_all();
+        window.pump(Duration::from_millis(500));
+        rendered.view.copy();
+        window.pump(Duration::from_millis(500));
+        let copied = clipboard_text().unwrap_or_default();
+        println!("canary: copied {copied:?}");
+        if !(copied.contains("Copy this text") && copied.contains("and this")) {
+            problems.push(format!(
+                "Select All and Copy put {copied:?} on the clipboard"
+            ));
+        }
+        match window.0.readding_a_child_fails() {
+            Ok(true) => {}
+            Ok(false) => println!(
+                "canary: DirectComposition re-added a child visual; the host's detach is no longer needed"
+            ),
+            Err(error) => problems.push(format!("the DirectComposition check failed: {error:#}")),
+        }
+        Ok(())
     }
 }
