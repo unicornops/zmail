@@ -44,9 +44,11 @@ windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_
 # keeps its text view). No gtk-rs or glib crates: they would link the
 # libraries at build time. futures-channel carries the engine thread's
 # events to a GPUI task. All of its `unsafe` is in `src/platform/linux.rs`.
+# raw-window-handle reads the X11 window of GPUI's native surface.
 [target.'cfg(target_os = "linux")'.dependencies]
 futures-channel = "0.3.34"
 libloading = "0.8.9"
+raw-window-handle = "0.6.2"
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -4,7 +4,7 @@
 use std::{collections::HashSet, rc::Rc};
 
 use anyhow::{Result, bail};
-use gpui::{Bounds, Hitbox, Pixels, Window};
+use gpui::{App, Bounds, Hitbox, Pixels, Window};
 
 use crate::host::WebKey;
 use crate::{WebDocument, WebEvent};
@@ -16,6 +16,8 @@ pub(crate) struct Backend {}
 impl Backend {
     pub(crate) const FORWARDS_INPUT: bool = false;
 
+    // The host's arguments, one per thing a backend needs; see `WebHost::place`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn place(
         &mut self,
         _key: WebKey,
@@ -23,6 +25,7 @@ impl Backend {
         _bounds: Bounds<Pixels>,
         _viewport: Bounds<Pixels>,
         _window: &mut Window,
+        _cx: &mut App,
         _on_event: Rc<dyn Fn(WebEvent)>,
     ) -> Result<()> {
         bail!("this platform has no web renderer")
