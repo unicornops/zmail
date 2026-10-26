@@ -28,18 +28,29 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKContentRuleList", "WKContentRuleListStore", "WKContentWorld", "WKFrameInfo", "WKNavigation", "WKNavigationAction", "WKNavigationDelegate", "WKNavigationResponse", "WKOpenPanelParameters", "WKPreferences", "WKUIDelegate", "WKURLSchemeHandler", "WKURLSchemeTask", "WKUserContentController", "WKWebView", "WKWebViewConfiguration", "WKWebpagePreferences", "WKWebsiteDataStore", "WKWindowFeatures"] }
 raw-window-handle = "0.6.2"
 
+# The Windows backend (ADR 0006: webview2-com and the `windows` crate GPUI
+# already uses, 0.62, are approved for it). All of its `unsafe` is in
+# `src/platform/windows.rs`. webview2-com links Microsoft's static WebView2
+# loader, so nothing is added to the installer; the runtime is the
+# system's evergreen WebView2. The `windows` features are a subset of the
+# ones GPUI enables.
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6.2"
+webview2-com = "0.39.1"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_DirectComposition", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 serde_json.workspace = true
 
 # The canary test runs real web views, which must live on the main thread,
 # so it has its own `main` (no libtest harness). It only does anything on
-# macOS.
+# macOS and Windows.
 [[test]]
 name = "canary"
 harness = false
 
 # The workspace lints, except that `unsafe_code` is `deny` rather than
-# `forbid`, so the macOS platform module alone can allow it.
+# `forbid`, so the macOS and Windows platform modules alone can allow it.
 [lints.rust]
 missing_docs = "warn"
 unsafe_code = "deny"

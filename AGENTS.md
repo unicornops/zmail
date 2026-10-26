@@ -39,7 +39,7 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 - `crates/zmail-smtp`: SMTP submission
 - `crates/zmail-security`: keychain and rendering safety helpers, including the HTML mail sanitiser (`html`: ammonia allowlist, CSS pass, caps, link side table, remote-content policing) and its hostile-corpus tests (`tests/hostile_corpus.rs`, fixtures in `tests/fixtures/hostile`)
 - `crates/zmail-render`: the renderer boundary of ADR 0006: `PreparedMessage` (sanitised HTML or why there is none, text, link table, `cid:` parts, remote content and the user's decision, theme) and `MessageRenderer`
-- `crates/zmail-render-web`: the HTML mail web renderer (ADR 0006): a hardened `WKWebView` per message, embedded through GPUI's native window composition, macOS only (other platforms keep the text view). Its `src/platform/macos.rs` is the only module in the workspace allowed `unsafe` (every block justified); every other crate keeps `unsafe_code = "forbid"`. `tests/canary.rs` (macOS CI job) renders a hostile corpus and fails on any network request
+- `crates/zmail-render-web`: the HTML mail web renderer (ADR 0006): a hardened web view per message, embedded through GPUI's native window composition: `WKWebView` on macOS, a WebView2 composition controller (a DirectComposition visual, with mouse input forwarded from GPUI) on Windows. Linux, and Windows without the WebView2 runtime, keep the text view. Its `src/platform/macos.rs` and `src/platform/windows.rs` are the only modules in the workspace allowed `unsafe` (every block justified); every other crate keeps `unsafe_code = "forbid"`. `tests/canary.rs` (macOS CI job) renders a hostile corpus and fails on any network request
 - `crates/zmail-theme`: Zed theme compatibility layer
 - `crates/zmail-test-support`: synthetic data, the live mail harness and the Proton API harness
 
@@ -143,8 +143,8 @@ macOS note:
 GPUI pin:
 
 - GPUI is a git dependency pinned to a Zed stable release tag (`tag = "vX.Y.Z"` on the `gpui` and `gpui_platform` lines of `Cargo.toml`), not the crates.io `gpui` crate. Keep both lines on the same tag.
-- Current deviation: for the macOS web renderer (ADR 0006) both lines pin the head of Zed PR #62379 (native window composition) by `rev` on the `huacnlee/zed` fork, until a Zed stable release contains it; see "Deviation From ADR 0003" in `docs/upstream/zed.md`. Keep both lines on the same commit.
-- Current deviation: for the macOS web renderer (ADR 0006) both lines pin the head of Zed PR #62379 (native window composition) by `rev` on the `huacnlee/zed` fork, until a Zed stable release contains it; see "Deviation From ADR 0003" in `docs/upstream/zed.md`. Keep both lines on the same commit.
+- Current deviation: for the web renderer (ADR 0006) both lines pin the head of Zed PR #62379 (native window composition) by `rev` on the `huacnlee/zed` fork, until a Zed stable release contains it; see "Deviation From ADR 0003" in `docs/upstream/zed.md`. Keep both lines on the same commit.
+- Current deviation: for the web renderer (ADR 0006) both lines pin the head of Zed PR #62379 (native window composition) by `rev` on the `huacnlee/zed` fork, until a Zed stable release contains it; see "Deviation From ADR 0003" in `docs/upstream/zed.md`. Keep both lines on the same commit.
 - The weekly `zed-upstream` workflow (`scripts/bump-zed-gpui.sh`) opens a `chore(deps): bump Zed GPUI to vX.Y.Z` pull request when Zed ships a newer stable release; see `docs/upstream/zed.md` for manual bumps.
 - Start the app with `gpui_platform::application()`. Do not use `Application::new_inaccessible`, which disables AccessKit screen-reader support.
 

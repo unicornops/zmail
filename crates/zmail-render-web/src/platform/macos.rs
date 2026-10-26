@@ -71,31 +71,12 @@ use objc2_web_kit::{
 
 use crate::document::{
     CID_SCHEME, InlineResource, MAIL_SCHEME, SchemeRequest, WebDocument, content_security_policy,
-    page_html, page_url, parse_scheme_request,
+    page_html, page_token, page_url, parse_scheme_request,
 };
 use crate::remote::{FetchResult, RemoteFetcher};
 use crate::rules::{content_rule_list, rule_list_identifier};
+use crate::script::{MAX_HEIGHT, MEASURE_SCRIPT, Measurement};
 use crate::{WebEvent, debug_log};
-
-/// Zmail's height measurement, run in WebKit's isolated client world: the
-/// page's content height and scroll width, and the viewport width, all in
-/// CSS pixels.
-const MEASURE_SCRIPT: &str = "(() => { \
-    const d = document.documentElement, b = document.body; \
-    let h = d.getBoundingClientRect().height; \
-    if (b) { \
-        const s = getComputedStyle(b); \
-        h = Math.max(h, b.getBoundingClientRect().bottom + (parseFloat(s.marginBottom) || 0)); \
-    } \
-    const w = Math.max(d.scrollWidth, b ? b.scrollWidth : 0); \
-    return Math.ceil(h) + ' ' + Math.ceil(w) + ' ' + Math.floor(window.innerWidth); \
-})()";
-
-/// The smallest zoom used to fit a page that is wider than the pane.
-const MIN_FIT_ZOOM: f64 = 0.5;
-
-/// The tallest a page is shown, in points; taller mail is cut off.
-const MAX_HEIGHT: f64 = 40_000.;
 
 /// The error code the scheme handler fails unknown requests with
 /// (`NSURLErrorFileDoesNotExist`).
@@ -372,11 +353,7 @@ impl MailWebView {
 
     /// A measurement came back as "height scrollWidth viewportWidth".
     fn measured(&self, text: &str) {
-        let numbers: Vec<f64> = text
-            .split_whitespace()
-            .filter_map(|part| part.parse().ok())
-            .collect();
-        let [height, scroll_width, viewport_width] = numbers[..] else {
+        let Some(measurement) = Measurement::parse(text) else {
             eprintln!("zmail: web renderer: unexpected measurement {text:?}");
             self.emit(WebEvent::LoadFailed("unexpected measurement".to_owned()));
             return;
@@ -385,26 +362,25 @@ impl MailWebView {
         let zoom = unsafe { self.pageZoom() };
         let ivars = self.ivars();
         if ivars.fit_pending.replace(false)
-            && viewport_width > 0.
-            && scroll_width > viewport_width + 1.
+            && let Some(fit) = measurement.fit_zoom()
         {
             // Wider than the pane: zoom out to fit, then measure again.
-            let fit = (viewport_width / scroll_width).clamp(MIN_FIT_ZOOM, 1.);
             debug_log(format_args!(
-                "page {scroll_width}px wide in a {viewport_width}px pane: zoom {fit:.2}"
+                "page {}px wide in a {}px pane: zoom {fit:.2}",
+                measurement.scroll_width, measurement.viewport_width
             ));
             // SAFETY: as above.
             unsafe { self.setPageZoom(fit) };
             self.measure();
             return;
         }
-        let points = (height * zoom).ceil().clamp(1., MAX_HEIGHT);
+        let height = measurement.height;
         if height * zoom > MAX_HEIGHT {
             eprintln!("zmail: web renderer: message cut off at {MAX_HEIGHT} points");
         }
         debug_log(format_args!("measured {height}px at zoom {zoom:.2}"));
         self.emit(WebEvent::Measured {
-            height: points as f32,
+            height: measurement.points(zoom) as f32,
         });
     }
 
@@ -1018,7 +994,7 @@ impl PlatformWebView {
         on_event: Rc<dyn Fn(WebEvent)>,
     ) -> Result<Self> {
         let mtm = main_thread()?;
-        let token = next_token();
+        let token = page_token();
         let url = page_url(&token);
         let delegate = WebDelegate::new(
             mtm,
@@ -1206,18 +1182,6 @@ impl ViewState {
         self.apply();
         Ok(())
     }
-}
-
-/// A fresh token for each page, so no two loads share a URL.
-fn next_token() -> String {
-    thread_local! {
-        static NEXT: Cell<u64> = const { Cell::new(1) };
-    }
-    let count = NEXT.with(|next| next.replace(next.get() + 1));
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.subsec_nanos());
-    format!("m{count}x{nanos:x}")
 }
 
 // ---------------------------------------------------------------------------

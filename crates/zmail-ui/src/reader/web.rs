@@ -1,14 +1,15 @@
 //! Formatted HTML mail: the web renderer (`zmail-render-web`, ADR 0006).
 //!
-//! On macOS an expanded HTML message shows its body in a locked-down
-//! `WKWebView` placed in the conversation list by GPUI's native window
-//! composition. What the page shows is the message prepared by
+//! On macOS and Windows an expanded HTML message shows its body in a
+//! locked-down web view (`WKWebView`, or WebView2 on Windows) placed in the
+//! conversation list by GPUI's native window composition. What the page shows is the message prepared by
 //! `zmail_render::prepare` (sanitised HTML whose links are `zmail-link:<n>`
 //! ids, blocked remote content); a link click comes back as its id and
 //! opens the same dialog as a link in the text view. The body is one list item as tall as the measured page;
 //! the reader's popovers, dialogs and tooltips draw above it. Other
-//! platforms, and messages the user switched to the Simple view (message
-//! More menu), keep the text view. A page that cannot be shown falls back
+//! platforms (and Windows without the WebView2 runtime), and messages the
+//! user switched to the Simple view (message More menu), keep the text
+//! view. A page that cannot be shown falls back
 //! to the text view with a notice.
 //!
 //! Set `ZMAIL_WEB_RENDERER=0` to turn the web renderer off.
@@ -169,8 +170,8 @@ impl ReaderView {
         let handle = window.window_handle();
         let app = cx.to_async();
         self.web.host = Some(WebHost::new(move |key, event| {
-            // From AppKit, outside GPUI's update cycle: handle it on the
-            // next turn of the foreground executor.
+            // From AppKit or WebView2, possibly outside GPUI's update
+            // cycle: handle it on the next turn of the foreground executor.
             let reader = reader.clone();
             app.spawn(async move |cx| {
                 let _ = cx.update_window(handle, |_, window, cx| {
