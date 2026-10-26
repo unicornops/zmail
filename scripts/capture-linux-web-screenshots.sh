@@ -3,7 +3,7 @@ set -euo pipefail
 
 # capture-linux-web-screenshots.sh - Screenshots of the Linux web renderer.
 #
-# Usage: scripts/capture-linux-web-screenshots.sh OUTPUT_DIR
+# Usage: scripts/capture-linux-web-screenshots.sh [--wayland] OUTPUT_DIR
 #
 # Launches `zmail-app launch-ui-fixture` once per state below (seeded
 # synthetic mail, no network) under an X server and captures the screen,
@@ -15,19 +15,32 @@ set -euo pipefail
 # as reader-html-copy.txt). Each launch's stderr, with ZMAIL_WEB_DEBUG on,
 # is saved next to its PNG.
 #
+# With --wayland the app runs on Wayland instead, under weston's kiosk shell
+# in a weston window on the X server (so xdotool's events still reach it as
+# Wayland input), and the pages are pictures (ADR 0006); the PNGs are named
+# with a -wayland suffix, and the clipboard is not read.
+#
 # Run it inside an X server with WebKitGTK 4.1 installed, for example:
 #
 #   cargo build -p zmail-app --locked
 #   xvfb-run -a --server-args="-screen 0 1440x920x24" \
 #     scripts/capture-linux-web-screenshots.sh artifacts/linux-web-screenshots
 #
-# Requires openbox, xdotool, xclip and ImageMagick's `import`.
+# Requires openbox (or weston, for --wayland), xdotool, xclip and
+# ImageMagick's `import`.
 # ZMAIL_APP_BINARY overrides the binary (default target/debug/zmail-app).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 APP_BINARY="${ZMAIL_APP_BINARY:-${REPO_ROOT}/target/debug/zmail-app}"
-OUTPUT_DIR="${1:?usage: $0 OUTPUT_DIR}"
+WAYLAND=0
+if [[ "${1:-}" == "--wayland" ]]; then
+  WAYLAND=1
+  shift
+fi
+OUTPUT_DIR="${1:?usage: $0 [--wayland] OUTPUT_DIR}"
+SUFFIX=""
+[[ "$WAYLAND" == 1 ]] && SUFFIX="-wayland"
 WIDTH=1440
 HEIGHT=920
 
@@ -53,11 +66,26 @@ mkdir -p "$OUTPUT_DIR"
 
 export NO_AT_BRIDGE=1
 export LIBGL_ALWAYS_SOFTWARE=1
-export XDG_SESSION_TYPE=x11
-unset WAYLAND_DISPLAY
-
-openbox > "${OUTPUT_DIR}/openbox.log" 2>&1 &
-openbox_pid=$!
+if [[ "$WAYLAND" == 1 ]]; then
+  # weston's window on the X server, at 0,0 with the app filling it.
+  export XDG_RUNTIME_DIR
+  XDG_RUNTIME_DIR="$(mktemp -d)"
+  export XDG_SESSION_TYPE=wayland
+  weston --backend=x11 --renderer=pixman --shell=kiosk-shell.so \
+    --socket=wayland-zmail --width="$WIDTH" --height="$HEIGHT" \
+    > "${OUTPUT_DIR}/weston.log" 2>&1 &
+  session_pid=$!
+  for _ in $(seq 1 100); do
+    [[ -S "${XDG_RUNTIME_DIR}/wayland-zmail" ]] && break
+    sleep 0.2
+  done
+  export WAYLAND_DISPLAY=wayland-zmail
+else
+  export XDG_SESSION_TYPE=x11
+  unset WAYLAND_DISPLAY
+  openbox > "${OUTPUT_DIR}/openbox.log" 2>&1 &
+  session_pid=$!
+fi
 app_pid=""
 cleanup() {
   if [[ -n "$app_pid" ]]; then
@@ -65,7 +93,7 @@ cleanup() {
     wait "$app_pid" 2>/dev/null || true
   fi
 }
-trap 'cleanup; kill "$openbox_pid" 2>/dev/null || true' EXIT
+trap 'cleanup; kill "$session_pid" 2>/dev/null || true' EXIT
 
 # launch NAME VIEW THEME: starts the app on a fixture state and puts its
 # window at 0,0 in WIDTH x HEIGHT; fails if no window appears.
@@ -74,6 +102,17 @@ launch() {
   ZMAIL_WEB_DEBUG=1 "$APP_BINARY" launch-ui-fixture "$view" "$theme" \
     > "${OUTPUT_DIR}/${name}.log" 2>&1 &
   app_pid=$!
+  if [[ "$WAYLAND" == 1 ]]; then
+    # The kiosk shell shows the window full size; there is no X window
+    # to wait for.
+    sleep 15
+    if ! kill -0 "$app_pid" 2>/dev/null; then
+      echo "::warning::zmail-app exited before ${name}; see ${name}.log"
+      app_pid=""
+      return 1
+    fi
+    return 0
+  fi
   local window_id=""
   for _ in $(seq 1 90); do
     if ! kill -0 "$app_pid" 2>/dev/null; then
@@ -98,7 +137,7 @@ launch() {
 
 # The whole screen, so the WebKitGTK windows inside GPUI's are included.
 capture() {
-  import -window root -crop "${WIDTH}x${HEIGHT}+0+0" "${OUTPUT_DIR}/$1.png" \
+  import -window root -crop "${WIDTH}x${HEIGHT}+0+0" "${OUTPUT_DIR}/$1${SUFFIX}.png" \
     || echo "::warning::import failed for $1"
 }
 
@@ -124,8 +163,10 @@ interact() {
     xdotool "$@" || echo "::warning::xdotool $* failed"
     sleep 2
     capture "$name"
-    # The app owns the clipboard: read it while the app runs.
-    xclip -o -selection clipboard > "${OUTPUT_DIR}/${name}-clipboard.txt" 2> /dev/null || true
+    # The app owns the clipboard: read it while the app runs (X11 only).
+    if [[ "$WAYLAND" == 0 ]]; then
+      xclip -o -selection clipboard > "${OUTPUT_DIR}/${name}-clipboard.txt" 2> /dev/null || true
+    fi
   fi
   cleanup
   app_pid=""

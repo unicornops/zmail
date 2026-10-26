@@ -533,7 +533,7 @@ jobs:
             # linux-web-screenshots artefact.
             - name: Install capture dependencies
               if: matrix.expect == 'running'
-              run: sudo apt-get install -y libvulkan1 libgl1 libegl1 libgl1-mesa-dri mesa-vulkan-drivers openbox xdotool xclip imagemagick
+              run: sudo apt-get install -y libvulkan1 libgl1 libegl1 libgl1-mesa-dri mesa-vulkan-drivers openbox xdotool xclip imagemagick weston
 
             - name: Build the app
               if: matrix.expect == 'running'
@@ -543,6 +543,13 @@ jobs:
               if: matrix.expect == 'running'
               timeout-minutes: 15
               run: xvfb-run -a --server-args="-screen 0 1440x920x24" scripts/capture-linux-web-screenshots.sh artifacts/linux-web-screenshots
+
+            # The same states on Wayland (weston's kiosk shell in a window on
+            # Xvfb, so xdotool still drives it), where pages are pictures.
+            - name: Capture web renderer screenshots (Wayland)
+              if: matrix.expect == 'running'
+              timeout-minutes: 15
+              run: xvfb-run -a --server-args="-screen 0 1440x920x24" scripts/capture-linux-web-screenshots.sh --wayland artifacts/linux-web-screenshots/wayland
 
             - name: Upload web renderer screenshots
               if: always() && matrix.expect == 'running'

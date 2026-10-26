@@ -223,7 +223,7 @@ Each phase ships on its own.
 | 2. macOS web renderer | Production WKWebView renderer behind the boundary (Rob's platform first), load remote content, dark mode, zoom to fit | Corpus renders compared against Apple Mail; canary test in CI |
 | 3. Native renderer | The in-house subset renderer replaces text rendering everywhere (tables, inline CSS, images, dark mode) | Same corpus, side by side with the web renderer |
 | 4. Windows | WebView2 renderer | As phase 2 |
-| 5. Linux | WebKitGTK on X11 (child view) and Wayland (snapshot) | As phase 2 |
+| 5. Linux | WebKitGTK on X11 (child view) and Wayland (snapshot); see "Status: Phase 5" | As phase 2 |
 | 6. Upstream composition | `main`'s GPUI pin moves from the #62379 commit to the first Zed release that contains it (back to ADR 0003) | Overlays, clipping and scrolling right on all OSes |
 
 ### Status: Phase 4 (Windows)
@@ -285,6 +285,62 @@ anonymous table boxes and SVG resolver fixed; Servo with a sandbox on
 every target and a stable embedding API. Either could replace the OS
 engines behind the same boundary.
 
+### Status: Phase 5 (Linux)
+
+WebKitGTK 4.1 (GTK 3) is the Linux engine; WPE WebKit was considered and
+rejected because no target distribution ships it with security support
+(Debian 13 marks it "no DSA"; Ubuntu 24.04 and 26.04 and current Fedora
+do not package it). The FFI is `crates/zmail-render-web/src/platform/linux.rs`
+behind `platform/linux_host.rs`:
+
+- **Loading**: the library is opened at runtime with `libloading` the
+  first time a message shows formatted, never linked, so Zmail builds and
+  starts without it. Missing, or older than `MIN_VERSION` (2.52.0, raised
+  as WebKitGTK security advisories land), means the text view with the
+  reason. The `.deb` recommends `libwebkit2gtk-4.1-0 (>= 2.52.0)` rather
+  than depending on it.
+- **Sandbox**: always on, and never weakened for development. A
+  bubblewrap sandbox that cannot start makes WebKitGTK abort the whole
+  process, so before any WebKit call that can spawn a process Zmail
+  refuses snaps, Flatpak and the sandbox-disabling environment variables
+  and runs bubblewrap as WebKit's own container check does. A blank page
+  then starts the first web process, and no mail loads until it is seen
+  in its own user and PID namespaces; the check repeats after every
+  load. Ubuntu 24.04's AppArmor restriction of unprivileged user
+  namespaces stops bubblewrap unless an AppArmor profile allows Zmail
+  (Ubuntu ships such profiles for Epiphany and others); without one, mail
+  shows as text with that reason. Ubuntu 26.04 enforces Ubuntu's own
+  `bwrap-userns-restrict` profile and the sandbox starts.
+- **Threads**: GPUI owns the main thread and its event loop, so GTK and
+  WebKit run on a thread of their own that owns GLib's default main
+  context. Commands reach it with `g_main_context_invoke`; events come
+  back to a GPUI task per view.
+- **X11**: each message is a GTK window reparented into a native
+  composition surface of its own (GPUI's X11 child window), kept on the
+  part of the body the list shows. The page is live (selection, link
+  cursor, hover); GPUI cuts its overlays out of the surface. Vertical
+  wheel turns come back from GTK and are dispatched to GPUI's window;
+  keyboard focus stays with GPUI; Copy and Select All are WebKit editing
+  commands (GTK's clipboard).
+- **Wayland**: GTK cannot draw into a `wl_subsurface` of GPUI's own
+  connection, so pages render offscreen and the body paints pictures of
+  them (strips of the whole page, at the window's scale) with a link map
+  from Zmail's isolated script world. A click on a link opens it through
+  Zmail; a drag selects text through the isolated world (DOM ranges) and
+  the page is drawn again; Copy puts the selection on GPUI's clipboard.
+  This replaces "selection from the native renderer" in decision 3 until
+  that renderer exists. Hover effects and keyboard selection are not
+  drawn on Wayland.
+- **Hardening** as in section 3, plus: page JavaScript off with both
+  `enable-javascript` and `enable-javascript-markup` (Zmail's scripts
+  run in an isolated world, which neither stops); the shared content rule
+  list as a user content filter; the engine's only network proxy is a
+  loopback black hole, so even a load past the filter reaches nothing; one
+  ephemeral website data manager; no GPU compositing.
+- **Tests**: `tests/canary_linux.rs` renders the hostile corpus under Xvfb
+  (views embedded as in the app) and under a headless weston (pictures),
+  on Ubuntu 26.04, and checks the refusal on Ubuntu 24.04.
+
 ## Risks
 
 - **GPUI composition**: #62379 is unmerged and may change before it
@@ -294,8 +350,24 @@ engines behind the same boundary.
   production work.
 - **WebKitGTK patch lag**: stable distributions ran about 4 weeks behind
   WebKitGTK's last large security release (WSA-2026-0006, 233 CVEs).
-  JavaScript off and no network narrow the exposure; Zmail shows a notice
-  and uses the native renderer below a minimum version.
+  JavaScript off and no network narrow the exposure; below `MIN_VERSION`
+  (2.52.0 in October 2026, to be raised with each advisory) Zmail shows
+  the text view with the reason. The engine's network process runs
+  outside bubblewrap by WebKitGTK's design; the content filter and the
+  black-hole proxy keep it from connecting anywhere.
+- **GTK 3**: WebKitGTK 4.1 is the GTK 3 build. It is security-supported
+  everywhere today and upstream has no removal date, but WebKitGTK 6.0
+  (GTK 4) is its successor, and GTK 4 has neither the offscreen windows
+  the Wayland path uses nor X11 embedding. A move to 6.0 needs another
+  offscreen and embedding approach.
+- **Ubuntu 24.04**: without an AppArmor profile for Zmail, bubblewrap
+  cannot start there and every message shows as text. Shipping the
+  profile in the `.deb` is a separate decision; tarball installs on
+  Ubuntu 24.04 would still need one.
+- **Memory on Linux**: an embedded X11 view is as tall as its page (up to
+  X11's 32767-pixel window limit; pages are cut off at 32000 device
+  pixels), and a Wayland picture holds the whole page (cut off at 16000
+  device pixels), at 4 bytes a pixel.
 - **Accessibility** of web views through AccessKit is unverified on
   every OS; the native renderer is the fallback.
 - **Wayland** gets a weaker experience (snapshot, native-renderer
