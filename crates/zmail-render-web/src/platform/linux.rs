@@ -1671,7 +1671,14 @@ unsafe extern "C" fn on_scheme_request(request: Ptr, _data: Ptr) {
         _ => None,
     };
     match served {
-        Some((mime_type, body, policy)) => respond(api, request, &mime_type, &body, policy),
+        Some((mime_type, body, policy)) => {
+            debug_log(format_args!(
+                "view {}: served {url} ({} bytes of {mime_type})",
+                view.id,
+                body.len()
+            ));
+            respond(api, request, &mime_type, &body, policy);
+        }
         None => {
             debug_log(format_args!("scheme request refused: {url}"));
             fail_request(api, request);

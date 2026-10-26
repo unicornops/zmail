@@ -307,24 +307,46 @@ mod linux {
         drop(rendered);
 
         // A cid: part loads through the scheme handler; an unknown one
-        // does not.
-        let mut with_part = document(
-            r#"<img id="known" src="cid:logo@example.com"><img id="unknown" src="cid:other@example.com">"#,
-        );
-        with_part.resources.push(InlineResource {
-            content_id: "<Logo@Example.com>".to_owned(),
-            mime_type: "image/png".to_owned(),
-            data: Arc::from(PIXEL_PNG),
-        });
-        let mut rendered = render(&with_part)?;
-        let widths = rendered.evaluate(
-            "document.getElementById('known').naturalWidth + ' ' + document.getElementById('unknown').naturalWidth",
-        )?;
-        println!("canary_linux: cid image widths (known, unknown): {widths}");
-        if widths != "1 0" {
-            problems.push(format!("cid: parts did not resolve as expected: {widths}"));
+        // does not. Three times, as the first CI runs saw it fail once in a
+        // while.
+        for attempt in 1..=3 {
+            let mut with_part = document(
+                r#"<img id="known" src="cid:logo@example.com"><img id="unknown" src="cid:other@example.com">"#,
+            );
+            with_part.resources.push(InlineResource {
+                content_id: "<Logo@Example.com>".to_owned(),
+                mime_type: "image/png".to_owned(),
+                data: Arc::from(PIXEL_PNG),
+            });
+            let mut rendered = render(&with_part)?;
+            // WebKit may still be decoding the image when the page is
+            // measured.
+            let started = Instant::now();
+            let widths = loop {
+                let widths = rendered.evaluate(
+                    "document.getElementById('known').naturalWidth + ' ' + document.getElementById('unknown').naturalWidth",
+                )?;
+                if widths == "1 0" || started.elapsed() > Duration::from_secs(5) {
+                    break widths;
+                }
+                thread::sleep(Duration::from_millis(200));
+            };
+            println!(
+                "canary_linux: cid image widths (known, unknown), attempt {attempt}: {widths}"
+            );
+            if widths != "1 0" {
+                let state = rendered.evaluate(
+                    "(() => { const k = document.getElementById('known'); \
+                     return [k.complete, k.naturalWidth, k.currentSrc, \
+                     performance.getEntriesByType('resource').map(e => e.name).join(',')].join(' | '); })()",
+                )?;
+                println!("canary_linux: the known cid image: {state}");
+                problems.push(format!(
+                    "cid: parts did not resolve as expected (attempt {attempt}): {widths} ({state})"
+                ));
+            }
+            drop(rendered);
         }
-        drop(rendered);
 
         // The page is measured with page JavaScript off.
         let rendered = render(&document(
