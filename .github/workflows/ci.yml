@@ -352,6 +352,76 @@ jobs:
                   path: artifacts/macos-web-screenshots
                   if-no-files-found: ignore
 
+    # The Windows web renderer (ADR 0006): its Windows-only code can only be
+    # compiled and run here. Clippy covers the cfg(windows) code of the
+    # renderer and the reader; the canary test renders a hostile corpus in
+    # real WebView2 views (the runner has the evergreen runtime) and fails on
+    # any network request. Like the macOS job, it does not wait for the
+    # quality job.
+    web_renderer_windows:
+        name: Web renderer (Windows)
+        needs: changes
+        if: github.event_name != 'pull_request' || needs.changes.outputs.app_code == 'true'
+        runs-on: windows-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Read the pinned Rust toolchain
+              id: toolchain
+              shell: bash
+              run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+              with:
+                  toolchain: ${{ steps.toolchain.outputs.channel }}
+                  components: clippy
+
+            - name: Cache Cargo git dependencies
+              uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: ~/.cargo/git/db
+                  key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-git-${{ runner.os }}-
+
+            # As in the build job: SQLCipher's vendored OpenSSL needs NASM and
+            # Strawberry Perl.
+            - name: Install NASM for OpenSSL
+              shell: pwsh
+              run: |
+                  choco install nasm --no-progress -y
+                  Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files\NASM"
+                  Add-Content -Path $env:GITHUB_ENV -Value "OPENSSL_RUST_USE_NASM=1"
+                  Add-Content -Path $env:GITHUB_ENV -Value "OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe"
+
+            - name: Clippy (Windows)
+              run: cargo clippy -p zmail-render-web -p zmail-ui -p zmail-app --all-targets --locked -- -D warnings
+
+            - name: Web renderer canary
+              timeout-minutes: 20
+              env:
+                  ZMAIL_WEB_DEBUG: "1"
+              run: cargo test -p zmail-render-web --locked -- --nocapture
+
+            # The app itself on fixture states with HTML mail, and three
+            # interactions. Uploaded as the windows-web-screenshots artefact.
+            - name: Build the app
+              run: cargo build -p zmail-app --locked
+
+            - name: Capture web renderer screenshots
+              timeout-minutes: 15
+              shell: pwsh
+              run: ./scripts/capture-windows-web-screenshots.ps1 artifacts/windows-web-screenshots
+
+            - name: Upload web renderer screenshots
+              if: always()
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: windows-web-screenshots
+                  path: artifacts/windows-web-screenshots
+                  if-no-files-found: ignore
+
     # The UI screenshot matrix (UI_PLAN.md Phase 1.8): every UI state in
     # light and dark plus 900px and 1920px windows, captured from seeded
     # fixture data (no mail server) and uploaded as the ui-screenshots
