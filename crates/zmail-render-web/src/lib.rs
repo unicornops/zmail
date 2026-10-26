@@ -16,12 +16,13 @@
 //! | `rules` | The content blocker's rule list |
 //! | `remote` | Remote images the user allowed, fetched by Zmail (never by the engine) |
 //! | `host` | GPUI: the per-reader host, the viewport wrapper and the body element |
+//! | `platform::macos_host` | The macOS backend of the host: the composition surface and its web views |
 //! | `platform::macos` | AppKit and WebKit, the only `unsafe` code in Zmail |
 //!
 //! Set `ZMAIL_WEB_DEBUG=1` to log each step to stderr.
 
 pub mod document;
-mod host;
+pub(crate) mod host;
 mod platform;
 pub mod remote;
 pub mod rules;
