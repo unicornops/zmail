@@ -47,6 +47,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     ffi::c_void,
+    mem::ManuallyDrop,
     path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc::{Receiver, TryRecvError},
@@ -130,9 +131,12 @@ const USER_DATA_DIR: &str = "zmail-webview2";
 // Timers
 // ---------------------------------------------------------------------------
 
+/// What each pending one-shot thread timer runs, by timer id.
+type Timers = HashMap<usize, Box<dyn FnOnce()>>;
+
 thread_local! {
-    /// What each pending one-shot thread timer runs, by timer id.
-    static TIMERS: RefCell<HashMap<usize, Box<dyn FnOnce()>>> = RefCell::new(HashMap::new());
+    /// Never dropped, like `ENVIRONMENT`.
+    static TIMERS: ManuallyDrop<RefCell<Timers>> = ManuallyDrop::new(RefCell::new(HashMap::new()));
 }
 
 /// Runs `then` on this (the UI) thread after `delay`, from its message
@@ -179,7 +183,11 @@ enum Environment {
 }
 
 thread_local! {
-    static ENVIRONMENT: RefCell<Environment> = const { RefCell::new(Environment::Idle) };
+    /// Never dropped: releasing WebView2's objects from the thread-local
+    /// destructors that run while the process exits (under the loader
+    /// lock) can hang the exit. The process is going away anyway.
+    static ENVIRONMENT: ManuallyDrop<RefCell<Environment>> =
+        const { ManuallyDrop::new(RefCell::new(Environment::Idle)) };
     /// Whether a WebView2 runtime is installed, checked once.
     static RUNTIME: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
     /// Environments created so far, for a fresh user data folder each.
