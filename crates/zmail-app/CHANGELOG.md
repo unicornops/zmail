@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/unicornops/zmail/compare/v0.21.1...v0.22.0) (2026-10-26)
+
+
+### Features
+
+* **render-web:** WebView2 backend for HTML mail on Windows ([#307](https://github.com/unicornops/zmail/issues/307)) ([7c753b8](https://github.com/unicornops/zmail/commit/7c753b83eb589ea5a2bb5e1d64e5148f8a0c22f1))
+
 ## [0.21.1](https://github.com/unicornops/zmail/compare/v0.21.0...v0.21.1) (2026-10-26)
 
 
