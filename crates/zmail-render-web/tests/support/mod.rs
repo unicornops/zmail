@@ -113,6 +113,12 @@ pub fn hostile_corpus() -> Vec<(&'static str, &'static str)> {
             "scripts",
             r#"<script src="http://HOST/script.js"></script><script>fetch('http://HOST/fetch');new Image().src='http://HOST/js-image';</script><img src="cid:missing" onerror="this.src='http://HOST/onerror'"><body onload="location='http://HOST/onload'">"#,
         ),
+        // A frame on its own: WebView2 opened a bare connection (a
+        // preconnect) for it even with the navigation cancelled.
+        (
+            "iframe alone",
+            r#"<iframe src="http://HOST/iframe-alone"></iframe>"#,
+        ),
         (
             "frames and objects",
             r#"<iframe src="http://HOST/iframe"></iframe><iframe srcdoc="<img src='http://HOST/srcdoc'>"></iframe><object data="http://HOST/object"></object><embed src="http://HOST/embed"><frameset><frame src="http://HOST/frame"></frameset>"#,

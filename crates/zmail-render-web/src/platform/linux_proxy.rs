@@ -5,7 +5,11 @@
 //! same. Behind both, the engine's only network proxy is this listener on
 //! the loopback interface: it accepts a connection, notes it and closes it.
 //! A request that got past the filter therefore never reaches a name
-//! server or another host. Zmail's own remote image fetches
+//! server or another host, and neither does a connection the engine opens
+//! on its own (a preconnect for a cancelled frame, as WebView2 was seen to
+//! make): the proxy covers every scheme and bypasses no host, loopback
+//! included. Zmail's own schemes (`zmail-mail:`, `cid:`) are served
+//! in-process by the scheme handler and never touch it. Zmail's own remote image fetches
 //! (`crate::remote`) do not go through the engine, so they are unaffected.
 //!
 //! Safe code only.
