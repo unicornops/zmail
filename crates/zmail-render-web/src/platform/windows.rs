@@ -123,16 +123,22 @@ const RELAYOUT_WAIT: Duration = Duration::from_millis(50);
 /// as it is.
 const MAX_RELAYOUT_WAITS: u32 = 20;
 
-/// Chromium switches for every WebView2 environment: no speculative
-/// network work of any kind. A cross-origin `<iframe>` made the engine open
-/// a connection (no request) to the frame's host before the navigation was
-/// refused (the Windows canary, raw corpus), which is enough to tell a
-/// sender the mail was opened.
+/// Chromium switches for every WebView2 environment: the engine itself has
+/// no network. Every request is answered by `WebResourceRequested`, but the
+/// engine can open a connection without one: for a cross-origin `<iframe>`
+/// it connected to the frame's host (no request sent) although the frame's
+/// navigation was cancelled and never reached that handler (the Windows
+/// canary, raw corpus); turning off Chromium's predictors and preconnect
+/// features did not stop it. So all of the engine's networking goes to a
+/// proxy on a loopback port nothing listens on (loopback included, which
+/// Chromium otherwise sends direct): a connection it opens fails locally,
+/// and with a fixed proxy it resolves no host names either. Zmail's own
+/// fetches (`crate::remote`) do not go through the engine.
 const BROWSER_ARGUMENTS: &[&str] = &[
+    "--proxy-server=http://127.0.0.1:1",
+    "--proxy-bypass-list=<-loopback>",
     "--dns-prefetch-disable",
     "--no-pings",
-    "--disable-features=SpeculativePreconnect,NavigationPredictor,LoadingPredictorPrefetch,\
-     LoadingPredictorUseOptimizationGuide,PreconnectToSearch,Prerender2,SpeculationRulesPrefetchFuture",
 ];
 
 /// The folder, under the temporary folder, that holds each Zmail process's
