@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/unicornops/zmail/compare/v0.22.0...v0.23.0) (2026-10-28)
+
+
+### Features
+
+* **packaging:** AppArmor profile so HTML mail renders on Ubuntu 24.04 ([#313](https://github.com/unicornops/zmail/issues/313)) ([5f098a9](https://github.com/unicornops/zmail/commit/5f098a948076c5268bbee695dba40dd9f59c0eb2))
+
 ## [0.22.0](https://github.com/unicornops/zmail/compare/v0.21.1...v0.22.0) (2026-10-26)
 
 
