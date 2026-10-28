@@ -134,6 +134,8 @@ cargo deny check licenses advisories bans sources
 cargo audit
 ```
 
+Dependabot (`.github/dependabot.yml`) opens weekly update pull requests for Cargo (`fix(deps)`, minor and patch grouped) and GitHub Actions (`ci(deps)`), plus security updates for Dependabot alerts. It skips the GPUI pin and the `pgp` and `proton-srp` forks; move those by hand.
+
 Linux CI packages:
 
 ```bash
