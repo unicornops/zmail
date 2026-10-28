@@ -1,0 +1,16 @@
+#!/bin/sh
+# Loads Zmail's AppArmor profile (/etc/apparmor.d/zmail), which lets the
+# HTML mail renderer's bubblewrap sandbox start on Ubuntu 23.10 and later.
+# Systems without AppArmor, or with an AppArmor too old for the profile's
+# `userns` rule, are left alone: Zmail then shows mail as text there if
+# the sandbox cannot start.
+set -e
+
+if [ "$1" = "configure" ] \
+    && command -v apparmor_parser > /dev/null 2>&1 \
+    && [ -d /sys/kernel/security/apparmor ]; then
+    apparmor_parser --replace --write-cache --skip-read-cache \
+        /etc/apparmor.d/zmail || true
+fi
+
+exit 0

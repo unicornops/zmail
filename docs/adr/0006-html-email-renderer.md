@@ -308,8 +308,11 @@ behind `platform/linux_host.rs`:
   in its own user and PID namespaces; the check repeats after every
   load. Ubuntu 24.04's AppArmor restriction of unprivileged user
   namespaces stops bubblewrap unless an AppArmor profile allows Zmail
-  (Ubuntu ships such profiles for Epiphany and others); without one, mail
-  shows as text with that reason. Ubuntu 26.04 enforces Ubuntu's own
+  (Ubuntu ships such profiles for Epiphany and others); the `.deb`
+  installs one, `/etc/apparmor.d/zmail` (unconfined, `userns` only, for
+  `/usr/bin/zmail-app`; Rob, October 26, 2026), loads it in `postinst`
+  when AppArmor is present and unloads it in `postrm`. Without it, mail shows as text with that
+  reason. Ubuntu 26.04 enforces Ubuntu's own
   `bwrap-userns-restrict` profile and the sandbox starts.
 - **Threads**: GPUI owns the main thread and its event loop, so GTK and
   WebKit run on a thread of their own that owns GLib's default main
@@ -361,9 +364,10 @@ behind `platform/linux_host.rs`:
   the Wayland path uses nor X11 embedding. A move to 6.0 needs another
   offscreen and embedding approach.
 - **Ubuntu 24.04**: without an AppArmor profile for Zmail, bubblewrap
-  cannot start there and every message shows as text. Shipping the
-  profile in the `.deb` is a separate decision; tarball installs on
-  Ubuntu 24.04 would still need one.
+  cannot start there and every message shows as text. The `.deb` ships
+  one; tarball installs need it loaded by hand. The profile lets Zmail
+  (and the processes it starts) create user namespaces, which Ubuntu's
+  restriction otherwise denies to unconfined programs.
 - **Memory on Linux**: an embedded X11 view is as tall as its page (up to
   X11's 32767-pixel window limit; pages are cut off at 32000 device
   pixels), and a Wayland picture holds the whole page (cut off at 16000

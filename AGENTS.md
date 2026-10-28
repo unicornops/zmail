@@ -140,7 +140,7 @@ Linux CI packages:
 sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
 ```
 
-The Linux web renderer needs only the runtime package `libwebkit2gtk-4.1-0` (it brings `bubblewrap` and `xdg-dbus-proxy`), never `-dev` headers; CI's "Web renderer (Linux)" job adds it with `xvfb` and `weston`, and for its screenshots openbox, xdotool, xclip, ImageMagick and Mesa's Vulkan drivers. Its sandbox needs unprivileged user namespaces, so it cannot run in an unprivileged container (the engine then refuses, by design: there is no unsandboxed mode) and Ubuntu 24.04 refuses it without an AppArmor profile for Zmail.
+The Linux web renderer needs only the runtime package `libwebkit2gtk-4.1-0` (it brings `bubblewrap` and `xdg-dbus-proxy`), never `-dev` headers; CI's "Web renderer (Linux)" job adds it with `xvfb` and `weston`, and for its screenshots openbox, xdotool, xclip, ImageMagick and Mesa's Vulkan drivers. Its sandbox needs unprivileged user namespaces, so it cannot run in an unprivileged container (the engine then refuses, by design: there is no unsandboxed mode) and Ubuntu 24.04 refuses it without an AppArmor profile for Zmail: the `.deb` installs `crates/zmail-app/packaging/apparmor/zmail` as `/etc/apparmor.d/zmail` and loads it in `postinst` (unloads it in `postrm`) (`crates/zmail-app/packaging/debian`), and CI's Ubuntu 24.04 job checks that profile lets the canary's sandbox start.
 
 macOS note:
 
