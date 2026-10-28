@@ -6,6 +6,9 @@
 ### Features
 
 * **packaging:** AppArmor profile so HTML mail renders on Ubuntu 24.04 ([#313](https://github.com/unicornops/zmail/issues/313)) ([5f098a9](https://github.com/unicornops/zmail/commit/5f098a948076c5268bbee695dba40dd9f59c0eb2))
+* **render-web:** show HTML mail as pictures with a link map on Wayland ([#311](https://github.com/unicornops/zmail/issues/311)) ([d2840ea](https://github.com/unicornops/zmail/commit/d2840ea4ac2a3ce8b2c670b54fb3c2a1bcc2f13a))
+* **render-web:** show HTML mail in a live WebKitGTK view on X11 ([#310](https://github.com/unicornops/zmail/issues/310)) ([9902727](https://github.com/unicornops/zmail/commit/99027270ee5d2324daa8944fe5e63312874148b1))
+* **render-web:** load WebKitGTK at runtime behind sandbox checks (Linux) ([#309](https://github.com/unicornops/zmail/issues/309)) ([ea49d7e](https://github.com/unicornops/zmail/commit/ea49d7e0dae14b79bab9aeb0a46926112b5e59ac))
 
 ## [0.22.0](https://github.com/unicornops/zmail/compare/v0.21.1...v0.22.0) (2026-10-26)
 
