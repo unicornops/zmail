@@ -505,6 +505,32 @@ jobs:
                   ZMAIL_WEB_DEBUG: "1"
               run: xvfb-run -a --server-args="-screen 0 1280x1024x24" cargo test -p zmail-render-web --locked --test canary_linux -- --nocapture
 
+            # The app itself on fixture states with HTML mail, where the
+            # engine runs: the page in the reader, a menu and a dialog over
+            # it, the page clipped by the scrolled list, and three
+            # interactions (wheel, link click, copy). Uploaded as the
+            # linux-web-screenshots artefact.
+            - name: Install capture dependencies
+              if: matrix.expect == 'running'
+              run: sudo apt-get install -y libvulkan1 libgl1 libegl1 libgl1-mesa-dri mesa-vulkan-drivers openbox xdotool xclip imagemagick
+
+            - name: Build the app
+              if: matrix.expect == 'running'
+              run: cargo build -p zmail-app --locked
+
+            - name: Capture web renderer screenshots
+              if: matrix.expect == 'running'
+              timeout-minutes: 15
+              run: xvfb-run -a --server-args="-screen 0 1440x920x24" scripts/capture-linux-web-screenshots.sh artifacts/linux-web-screenshots
+
+            - name: Upload web renderer screenshots
+              if: always() && matrix.expect == 'running'
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: linux-web-screenshots
+                  path: artifacts/linux-web-screenshots
+                  if-no-files-found: ignore
+
     # The UI screenshot matrix (UI_PLAN.md Phase 1.8): every UI state in
     # light and dark plus 900px and 1920px windows, captured from seeded
     # fixture data (no mail server) and uploaded as the ui-screenshots

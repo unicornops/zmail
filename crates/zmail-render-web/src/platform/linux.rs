@@ -99,6 +99,10 @@ pub const MAX_DEVICE_HEIGHT: f64 = 32_000.;
 /// How long the engine thread may take to start GTK.
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Where an embedded view waits out of sight: this far left in its
+/// parent, in device pixels (X11 coordinates are 16-bit).
+const HIDDEN_AT: c_int = -30_000;
+
 /// How often remote image fetches are polled while any is waiting, in ms.
 const FETCH_POLL_MS: c_uint = 30;
 
@@ -158,6 +162,11 @@ struct GdkRgba {
 }
 
 const FALSE: c_int = 0;
+const GTK_WINDOW_POPUP: c_int = 1;
+const GDK_SCROLL_UP: c_int = 0;
+const GDK_SCROLL_DOWN: c_int = 1;
+const GDK_SHIFT_MASK: c_uint = 1;
+const GDK_CONTROL_MASK: c_uint = 1 << 2;
 const TRUE: c_int = 1;
 const G_SOURCE_REMOVE: c_int = 0;
 const G_SOURCE_CONTINUE: c_int = 1;
@@ -175,34 +184,37 @@ const WEBKIT_CONTEXT_MENU_ACTION_COPY: c_int = 14;
 const WEBKIT_NETWORK_ERROR_CANCELLED: c_int = 302;
 const WEBKIT_POLICY_ERROR_FRAME_LOAD_INTERRUPTED_BY_POLICY_CHANGE: c_int = 102;
 
-/// Declares [`Api`]: one function pointer per C function, all looked up in
-/// WebKitGTK's library (`dlsym` on it also finds the symbols of the
-/// libraries it links: GTK, GDK, GLib, GObject, GIO, libsoup,
-/// JavaScriptCore).
+/// Declares a table of C functions: one function pointer per function, all
+/// looked up in WebKitGTK's library (`dlsym` on it also finds the symbols
+/// of the libraries it links: GTK, GDK, GLib, GObject, GIO, libsoup,
+/// JavaScriptCore, Xlib). Variadic functions are listed with their whole
+/// type.
 macro_rules! api {
-    ($($name:ident: fn($($arg:ty),*) $(-> $ret:ty)?;)*) => {
-        /// WebKitGTK and the libraries it links, loaded at runtime.
+    (
+        $(#[$meta:meta])* $api:ident {
+            $($name:ident: fn($($arg:ty),*) $(-> $ret:ty)?;)*
+        }
+        $(variadic { $($vname:ident: $vty:ty;)* })?
+    ) => {
+        $(#[$meta])*
         #[allow(non_snake_case)]
-        struct Api {
+        struct $api {
             $($name: unsafe extern "C" fn($($arg),*) $(-> $ret)?,)*
-            g_object_new: unsafe extern "C" fn(GType, *const c_char, ...) -> Ptr,
-            g_object_set: unsafe extern "C" fn(Ptr, *const c_char, ...),
-            /// Keeps the symbols above valid: the library is never unloaded.
-            _library: Library,
+            $($($vname: $vty,)*)?
         }
 
-        impl Api {
+        impl $api {
             /// Looks every function up in `library`.
             ///
             /// # Safety
             ///
             /// `library` must be WebKitGTK 4.1, whose functions (and those
-            /// of the libraries it links) have the signatures declared in
-            /// the `api!` invocation, taken from their C headers.
-            unsafe fn load(library: Library) -> Result<Self, String> {
+            /// of the libraries it links) have the signatures declared
+            /// here, taken from their C headers. It is never unloaded, so
+            /// the pointers stay valid.
+            unsafe fn load(library: &'static Library) -> Result<Self, String> {
                 // SAFETY: the caller guarantees each symbol has the declared
-                // signature; the pointers stay valid because the library is
-                // kept in the struct.
+                // signature and stays loaded.
                 unsafe {
                     Ok(Self {
                         $($name: *library
@@ -210,13 +222,9 @@ macro_rules! api {
                                 concat!(stringify!($name), "\0").as_bytes(),
                             )
                             .map_err(|error| format!("{}: {error}", stringify!($name)))?,)*
-                        g_object_new: *library
-                            .get::<unsafe extern "C" fn(GType, *const c_char, ...) -> Ptr>(b"g_object_new\0")
-                            .map_err(|error| format!("g_object_new: {error}"))?,
-                        g_object_set: *library
-                            .get::<unsafe extern "C" fn(Ptr, *const c_char, ...)>(b"g_object_set\0")
-                            .map_err(|error| format!("g_object_set: {error}"))?,
-                        _library: library,
+                        $($($vname: *library
+                            .get::<$vty>(concat!(stringify!($vname), "\0").as_bytes())
+                            .map_err(|error| format!("{}: {error}", stringify!($vname)))?,)*)?
                     })
                 }
             }
@@ -225,6 +233,8 @@ macro_rules! api {
 }
 
 api! {
+    /// WebKitGTK and the libraries it links, loaded at runtime.
+    Api {
     // GLib, GObject, GIO
     g_main_context_default: fn() -> Ptr;
     g_main_context_acquire: fn(Ptr) -> c_int;
@@ -254,6 +264,18 @@ api! {
     gtk_widget_show_all: fn(Ptr);
     gtk_widget_destroy: fn(Ptr);
     gtk_drag_dest_unset: fn(Ptr);
+    gtk_window_new: fn(c_int) -> Ptr;
+    gtk_window_move: fn(Ptr, c_int, c_int);
+    gtk_widget_realize: fn(Ptr);
+    gtk_widget_get_window: fn(Ptr) -> Ptr;
+    gtk_widget_get_screen: fn(Ptr) -> Ptr;
+    gtk_widget_set_visual: fn(Ptr, Ptr);
+    gdk_screen_get_rgba_visual: fn(Ptr) -> Ptr;
+    gdk_display_get_default: fn() -> Ptr;
+    gdk_event_get_scroll_deltas: fn(Ptr, *mut f64, *mut f64) -> c_int;
+    gdk_event_get_scroll_direction: fn(Ptr, *mut c_int) -> c_int;
+    gdk_event_get_coords: fn(Ptr, *mut f64, *mut f64) -> c_int;
+    gdk_event_get_state: fn(Ptr, *mut c_uint) -> c_int;
     // WebKitGTK
     webkit_get_major_version: fn() -> c_uint;
     webkit_get_minor_version: fn() -> c_uint;
@@ -312,7 +334,42 @@ api! {
     jsc_value_to_string: fn(Ptr) -> *mut c_char;
     soup_message_headers_new: fn(c_int) -> Ptr;
     soup_message_headers_append: fn(Ptr, *const c_char, *const c_char);
+    }
+    variadic {
+        g_object_new: unsafe extern "C" fn(GType, *const c_char, ...) -> Ptr;
+        g_object_set: unsafe extern "C" fn(Ptr, *const c_char, ...);
+    }
 }
+
+api! {
+    /// GDK's X11 backend and Xlib, loaded only when GPUI runs on X11.
+    X11Api {
+        gdk_x11_display_get_xdisplay: fn(Ptr) -> Ptr;
+        gdk_x11_display_set_window_scale: fn(Ptr, c_int);
+        gdk_x11_window_get_xid: fn(Ptr) -> c_ulong;
+        XReparentWindow: fn(Ptr, c_ulong, c_ulong, c_int, c_int) -> c_int;
+        XFlush: fn(Ptr) -> c_int;
+        XSetErrorHandler: fn(Option<XErrorHandler>) -> Option<XErrorHandler>;
+    }
+}
+
+/// Xlib's `XErrorEvent`.
+#[repr(C)]
+struct XErrorEvent {
+    kind: c_int,
+    display: Ptr,
+    resource: c_ulong,
+    serial: c_ulong,
+    error_code: u8,
+    request_code: u8,
+    minor_code: u8,
+}
+
+type XErrorHandler = unsafe extern "C" fn(Ptr, *mut XErrorEvent) -> c_int;
+
+/// Xlib's `BadWindow` and `BadDrawable`.
+const BAD_WINDOW: u8 = 3;
+const BAD_DRAWABLE: u8 = 9;
 
 /// A C string for `text`, with any NUL removed (none of Zmail's strings
 /// have one, and a URL or header must not be cut short).
@@ -381,7 +438,10 @@ struct Engine {
     proxy: BlackHole,
 }
 
+/// WebKitGTK's library, loaded once and never unloaded.
+static LIBRARY_HANDLE: OnceLock<Library> = OnceLock::new();
 static API: OnceLock<Result<Api, String>> = OnceLock::new();
+static X11_API: OnceLock<Result<X11Api, String>> = OnceLock::new();
 static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
 static NEXT_VIEW: AtomicU64 = AtomicU64::new(1);
 /// The engine stopped for good ([`fail`]); [`FAILURE`] says why.
@@ -400,7 +460,9 @@ fn api() -> Result<&'static Api, String> {
             debug_log(format_args!("{LIBRARY}: {error}"));
             format!("WebKitGTK 4.1 is not installed ({LIBRARY} could not be loaded)")
         })?;
-        // SAFETY: the library is WebKitGTK 4.1, which `api!` describes.
+        let library = LIBRARY_HANDLE.get_or_init(|| library);
+        // SAFETY: the library is WebKitGTK 4.1, which `api!` describes, and
+        // it is never unloaded.
         let api = unsafe { Api::load(library) }
             .map_err(|missing| format!("{LIBRARY} lacks a function Zmail needs: {missing}"))?;
         // SAFETY: the version functions take no arguments and only return
@@ -553,6 +615,14 @@ enum Command {
         id: u64,
         size: ViewSize,
     },
+    /// Where an embedded view sits in its parent window, in device pixels,
+    /// and whether it shows.
+    Move {
+        id: u64,
+        x: c_int,
+        y: c_int,
+        visible: bool,
+    },
     Editing {
         id: u64,
         command: &'static CStr,
@@ -569,6 +639,17 @@ enum Command {
     Shutdown {
         done: Sender<()>,
     },
+    /// Destroys views now and says so, for a parent window about to go.
+    DestroyNow {
+        ids: Vec<u64>,
+        done: Sender<()>,
+    },
+    /// Tests: a plain X11 window to embed views in.
+    TestParent {
+        width: c_int,
+        height: c_int,
+        done: Sender<Result<u64, String>>,
+    },
 }
 
 /// A new view.
@@ -577,6 +658,10 @@ struct CreateView {
     page: ServedPage,
     size: ViewSize,
     background: Option<u32>,
+    /// The X11 window to embed the view in; offscreen when `None`.
+    parent: Option<u64>,
+    /// Where it sits in `parent` and whether it shows, once known.
+    position: Option<(c_int, c_int, bool)>,
     events: UnboundedSender<ViewEvent>,
 }
 
@@ -661,6 +746,16 @@ fn engine_thread(
             let _ = started.send(Err("GTK could not open the display".into()));
             return;
         }
+        match display {
+            DisplayServer::X11 => match x11_display(api) {
+                Ok(x11) => X11.with(|cell| cell.set(Some(x11))),
+                Err(reason) => {
+                    let _ = started.send(Err(reason));
+                    return;
+                }
+            },
+            DisplayServer::Wayland => {}
+        }
         match web_context(api, &proxy) {
             Ok(context) => context,
             Err(reason) => {
@@ -698,6 +793,80 @@ fn engine_thread(
     let done = with_thread(|thread| thread.stopped.take()).flatten();
     if let Some(done) = done {
         let _ = done.send(());
+    }
+}
+
+/// GTK's X11 connection on the engine thread.
+#[derive(Clone, Copy)]
+struct X11Display {
+    api: &'static X11Api,
+    /// GDK's Xlib `Display`.
+    display: Ptr,
+}
+
+thread_local! {
+    static X11: Cell<Option<X11Display>> = const { Cell::new(None) };
+}
+
+/// The handler Xlib called for errors before Zmail's (GDK's, which aborts
+/// on any error it did not expect).
+static PREVIOUS_X_ERROR_HANDLER: OnceLock<Option<XErrorHandler>> = OnceLock::new();
+
+/// Loads GDK's X11 functions and sets GTK's X11 connection up for views
+/// embedded in GPUI's window: no GDK window scaling (Zmail zooms pages to
+/// GPUI's scale itself), and errors about windows that are already gone
+/// ignored. GPUI destroys its native surface's window (and so the GTK
+/// windows inside it) when the reader goes away, possibly before GTK
+/// destroys its own, and GDK would abort on the `BadWindow` that follows.
+///
+/// # Safety
+///
+/// Must run on the engine thread, right after GTK opened the X11 display.
+unsafe fn x11_display(api: &Api) -> Result<X11Display, String> {
+    let library = LIBRARY_HANDLE
+        .get()
+        .ok_or_else(|| "WebKitGTK is not loaded".to_owned())?;
+    let x11 = X11_API
+        .get_or_init(|| {
+            // SAFETY: the library is WebKitGTK 4.1 built with GTK's X11
+            // backend, whose functions `X11Api` declares; it is never
+            // unloaded.
+            unsafe { X11Api::load(library) }
+                .map_err(|missing| format!("GTK lacks its X11 backend: {missing}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
+    // SAFETY: GTK is initialised on X11, so the default display is a
+    // GdkX11Display with a live Xlib connection. The error handler is a
+    // static function that never unwinds; it is installed once.
+    unsafe {
+        let gdk_display = (api.gdk_display_get_default)();
+        if gdk_display.is_null() {
+            return Err("GTK has no display".into());
+        }
+        (x11.gdk_x11_display_set_window_scale)(gdk_display, 1);
+        let display = (x11.gdk_x11_display_get_xdisplay)(gdk_display);
+        PREVIOUS_X_ERROR_HANDLER.get_or_init(|| (x11.XSetErrorHandler)(Some(on_x_error)));
+        Ok(X11Display { api: x11, display })
+    }
+}
+
+/// Ignores `BadWindow` and `BadDrawable` (a window GPUI already destroyed);
+/// hands every other error to GDK's handler.
+unsafe extern "C" fn on_x_error(display: Ptr, event: *mut XErrorEvent) -> c_int {
+    // SAFETY: Xlib passes a valid error event for the call.
+    let code = unsafe { (*event).error_code };
+    if code == BAD_WINDOW || code == BAD_DRAWABLE {
+        debug_log(format_args!(
+            "X11 error {code} on a window that is gone, ignored"
+        ));
+        return 0;
+    }
+    match PREVIOUS_X_ERROR_HANDLER.get().copied().flatten() {
+        // SAFETY: the previous handler was installed by GDK for this
+        // display and takes the same arguments.
+        Some(previous) => unsafe { previous(display, event) },
+        None => 0,
     }
 }
 
@@ -857,6 +1026,8 @@ unsafe extern "C" fn on_filter_compiled(store: Ptr, result: Ptr, _data: Ptr) {
             scale: 1.,
         },
         background: None,
+        parent: None,
+        position: None,
         events,
     });
 }
@@ -926,6 +1097,32 @@ fn handle(command: Command) {
                     }
                 });
             }
+        }
+        Command::Move { id, x, y, visible } => {
+            if let Some(view) = view_by_id(id) {
+                view.position.set((x, y));
+                view.visible.set(visible);
+                view.apply_position();
+            } else {
+                with_thread(|thread| {
+                    if let Some(queued) = thread.queued.iter_mut().find(|queued| queued.id == id) {
+                        queued.position = Some((x, y, visible));
+                    }
+                });
+            }
+        }
+        Command::DestroyNow { ids, done } => {
+            for id in ids {
+                handle(Command::Destroy { id });
+            }
+            let _ = done.send(());
+        }
+        Command::TestParent {
+            width,
+            height,
+            done,
+        } => {
+            let _ = done.send(test_parent(width, height));
         }
         Command::Editing { id, command } => {
             if let Some(view) = view_by_id(id) {
@@ -1031,6 +1228,18 @@ impl ViewSize {
 pub enum ViewEvent {
     /// What every platform reports.
     Web(WebEvent),
+    /// The wheel turned over an embedded view, vertically: the page does
+    /// not scroll itself, the conversation should.
+    Scroll {
+        /// Where, in logical pixels from the view's top-left corner.
+        x: f64,
+        /// Where, in logical pixels from the view's top-left corner.
+        y: f64,
+        /// How far, in lines; positive is down.
+        lines: f64,
+        /// Control was held (zoom, in some apps).
+        control: bool,
+    },
     /// The result of [`PlatformWebView::evaluate`].
     Script {
         /// The caller's tag.
@@ -1056,8 +1265,18 @@ struct View {
     id: u64,
     /// The `WebKitWebView`.
     web_view: Ptr,
-    /// The `GtkOffscreenWindow` holding it.
+    /// The window holding it: a `GtkOffscreenWindow`, or a popup window
+    /// reparented into GPUI's native surface on X11.
     window: Ptr,
+    /// The window is embedded in GPUI's window (X11).
+    embedded: bool,
+    /// Where an embedded view sits in its parent, in device pixels.
+    position: Cell<(c_int, c_int)>,
+    /// The host shows it.
+    visible: Cell<bool>,
+    /// The page has been measured once: until then an embedded view stays
+    /// out of sight, so no half-laid-out page flashes.
+    revealed: Cell<bool>,
     page: ServedPage,
     events: UnboundedSender<ViewEvent>,
     size: Cell<ViewSize>,
@@ -1082,8 +1301,21 @@ fn create_view(create: CreateView) {
         page,
         size,
         background,
+        parent,
+        position,
         events,
     } = create;
+    let x11 = X11.with(Cell::get);
+    let parent = match (parent, x11) {
+        (Some(parent), Some(x11)) => Some((parent, x11)),
+        (Some(_), None) => {
+            let _ = events.unbounded_send(ViewEvent::Web(WebEvent::LoadFailed(
+                "the web engine is not on X11".into(),
+            )));
+            return;
+        }
+        (None, _) => None,
+    };
     let url = c_string(&page.url);
     // SAFETY: on the engine thread, with GTK initialised. Every object is
     // created here; `g_object_new` gets property names with values of the
@@ -1110,7 +1342,11 @@ fn create_view(create: CreateView) {
         );
         (api.g_object_unref)(content);
         (api.g_object_unref)(settings);
-        let window = (api.gtk_offscreen_window_new)();
+        let window = if parent.is_some() {
+            (api.gtk_window_new)(GTK_WINDOW_POPUP)
+        } else {
+            (api.gtk_offscreen_window_new)()
+        };
         (api.gtk_container_add)(window, web_view);
         (api.gtk_drag_dest_unset)(web_view);
         if let Some(background) = background {
@@ -1214,11 +1450,25 @@ fn create_view(create: CreateView) {
             on_button_press as unsafe extern "C" fn(Ptr, Ptr, Ptr) -> c_int,
             id,
         );
+        if parent.is_some() {
+            connect(
+                api,
+                web_view,
+                c"scroll-event",
+                on_scroll as unsafe extern "C" fn(Ptr, Ptr, Ptr) -> c_int,
+                id,
+            );
+        }
+        let (x, y, visible) = position.unwrap_or((0, 0, false));
         Rc::new(View {
             api,
             id,
             web_view,
             window,
+            embedded: parent.is_some(),
+            position: Cell::new((x, y)),
+            visible: Cell::new(visible),
+            revealed: Cell::new(false),
             page,
             events,
             size: Cell::new(size),
@@ -1230,6 +1480,30 @@ fn create_view(create: CreateView) {
     };
     with_thread(|thread| thread.views.insert(id, view.clone()));
     view.apply_size();
+    if let Some((parent, x11)) = parent {
+        // SAFETY: the popup window is realised here, so it has an X11
+        // window; GDK's Xlib connection reparents it into GPUI's native
+        // surface window (a window of the same X server, which outlives the
+        // view: the host destroys views before dropping the surface), out
+        // of sight until the page is measured.
+        unsafe {
+            // GPUI's window and its native surface use the 32-bit ARGB
+            // visual; a child of the same depth is drawn and captured
+            // like the rest of the window.
+            let visual = (api.gdk_screen_get_rgba_visual)((api.gtk_widget_get_screen)(view.window));
+            if !visual.is_null() {
+                (api.gtk_widget_set_visual)(view.window, visual);
+            }
+            (api.gtk_widget_realize)(view.window);
+            let xid = (x11.api.gdk_x11_window_get_xid)((api.gtk_widget_get_window)(view.window));
+            (x11.api.XReparentWindow)(x11.display, xid, parent as c_ulong, HIDDEN_AT, 0);
+            (x11.api.XFlush)(x11.display);
+            debug_log(format_args!(
+                "view {id}: X11 window {xid:#x} in surface {parent:#x}"
+            ));
+        }
+        view.apply_position();
+    }
     // SAFETY: shows the new window and loads Zmail's page URL, which the
     // scheme handler serves.
     unsafe {
@@ -1294,6 +1568,24 @@ impl View {
             (self.api.gtk_window_resize)(self.window, width, height);
             (self.api.webkit_web_view_set_zoom_level)(self.web_view, size.scale * self.fit.get());
         }
+    }
+
+    /// Moves an embedded view to its position, or out of sight while it is
+    /// hidden or not measured yet. (It stays mapped, so WebKit keeps laying
+    /// it out at its real size.)
+    fn apply_position(&self) {
+        if !self.embedded {
+            return;
+        }
+        let (x, y) = if self.visible.get() && self.revealed.get() {
+            self.position.get()
+        } else {
+            // Left of the parent: views are at most 16000 pixels wide.
+            (HIDDEN_AT, 0)
+        };
+        // SAFETY: a live popup window; for a window whose parent is GPUI's
+        // surface, GDK moves it within that parent.
+        unsafe { (self.api.gtk_window_move)(self.window, x, y) };
     }
 
     fn resize(&self, size: ViewSize) {
@@ -1362,6 +1654,9 @@ impl View {
             "view {}: measured {}px at zoom {fit:.2}",
             self.id, measurement.height
         ));
+        if !self.revealed.replace(true) {
+            self.apply_position();
+        }
         self.emit(WebEvent::Measured {
             height: height as f32,
         });
@@ -1705,6 +2000,46 @@ unsafe extern "C" fn on_button_press(_widget: Ptr, _event: Ptr, data: Ptr) -> c_
     FALSE
 }
 
+/// `scroll-event` on an embedded view: vertical wheel turns go to GPUI
+/// (the conversation scrolls as one list); sideways ones, and Shift with
+/// the wheel, stay with a page wider than the pane.
+unsafe extern "C" fn on_scroll(_widget: Ptr, event: Ptr, data: Ptr) -> c_int {
+    let (Some(api), Some(view)) = (loaded_api(), view_by_id(id_of(data))) else {
+        return FALSE;
+    };
+    let (mut dx, mut dy, mut direction, mut x, mut y, mut state) = (0., 0., 0, 0., 0., 0);
+    // SAFETY: the signal's live GdkEventScroll; the getters only write to
+    // the locals passed.
+    let (smooth, discrete) = unsafe {
+        (api.gdk_event_get_coords)(event, &mut x, &mut y);
+        (api.gdk_event_get_state)(event, &mut state);
+        (
+            (api.gdk_event_get_scroll_deltas)(event, &mut dx, &mut dy) != FALSE,
+            (api.gdk_event_get_scroll_direction)(event, &mut direction) != FALSE,
+        )
+    };
+    let lines = if smooth {
+        dy
+    } else if discrete && direction == GDK_SCROLL_UP {
+        -1.
+    } else if discrete && direction == GDK_SCROLL_DOWN {
+        1.
+    } else {
+        return FALSE;
+    };
+    if state & GDK_SHIFT_MASK != 0 || dx.abs() > lines.abs() || lines == 0. {
+        return FALSE;
+    }
+    let scale = view.size.get().scale.max(0.5);
+    let _ = view.events.unbounded_send(ViewEvent::Scroll {
+        x: x / scale,
+        y: y / scale,
+        lines,
+        control: state & GDK_CONTROL_MASK != 0,
+    });
+    TRUE
+}
+
 /// The context's `download-started`: every download is cancelled.
 unsafe extern "C" fn on_download_started(_context: Ptr, download: Ptr, _data: Ptr) {
     eprintln!("zmail: web renderer: a download was cancelled");
@@ -1912,12 +2247,14 @@ pub struct PlatformWebView {
 }
 
 impl PlatformWebView {
-    /// Starts showing `document` at `size`; `events` hears about
-    /// measurements, link clicks, failures and script results. The engine
-    /// must have been started ([`start`]).
+    /// Starts showing `document` at `size`, offscreen or (with `parent`,
+    /// on X11) embedded in that X11 window; `events` hears about
+    /// measurements, link clicks, failures, wheel turns and script
+    /// results. The engine must have been started ([`start`]).
     pub fn new(
         document: &WebDocument,
         size: ViewSize,
+        parent: Option<u64>,
         events: UnboundedSender<ViewEvent>,
     ) -> Result<Self, String> {
         start_failed()?;
@@ -1934,9 +2271,22 @@ impl PlatformWebView {
             },
             size,
             background: dark.then_some(document.appearance.background),
+            parent,
+            position: None,
             events,
         })));
         Ok(Self { id })
+    }
+
+    /// Places an embedded view at `(x, y)` device pixels in its parent
+    /// window, shown or hidden. It stays hidden until its page is measured.
+    pub fn move_to(&self, x: i32, y: i32, visible: bool) {
+        send(Command::Move {
+            id: self.id,
+            x,
+            y,
+            visible,
+        });
     }
 
     /// Resizes the view (logical pixels at `size.scale`).
@@ -1990,6 +2340,54 @@ pub fn shutdown() {
     send(Command::Shutdown { done });
     if wait.recv_timeout(Duration::from_secs(2)).is_err() {
         eprintln!("zmail: web renderer: the web engine did not stop in time");
+    }
+}
+
+/// Destroys `views` and waits (briefly) until the engine thread has: for
+/// views embedded in a window that is about to be destroyed.
+pub fn destroy_now(views: Vec<PlatformWebView>) {
+    // A stopped engine has destroyed every view already.
+    if views.is_empty() || stopped().is_some() {
+        return;
+    }
+    let (done, wait) = mpsc::channel();
+    send(Command::DestroyNow {
+        ids: views.iter().map(|view| view.id).collect(),
+        done,
+    });
+    if wait.recv_timeout(Duration::from_secs(1)).is_err() {
+        eprintln!("zmail: web renderer: web views were not destroyed in time");
+    }
+}
+
+/// Tests: a plain, shown X11 window of `width` x `height` pixels, owned by
+/// the engine thread, to embed views in (GPUI's native surface in the
+/// app). Never destroyed.
+pub fn test_parent_window(width: i32, height: i32) -> Result<u64, String> {
+    start_failed()?;
+    let (done, wait) = mpsc::channel();
+    send(Command::TestParent {
+        width,
+        height,
+        done,
+    });
+    wait.recv_timeout(START_TIMEOUT)
+        .map_err(|_| "the engine thread did not answer".to_owned())?
+}
+
+fn test_parent(width: c_int, height: c_int) -> Result<u64, String> {
+    let (Some(api), Some(x11)) = (loaded_api(), X11.with(Cell::get)) else {
+        return Err("the web engine is not on X11".into());
+    };
+    // SAFETY: on the engine thread with GTK initialised on X11; a new
+    // toplevel window, shown and realised, so it has an X11 window.
+    unsafe {
+        let window = (api.gtk_window_new)(0);
+        (api.gtk_window_resize)(window, width, height);
+        (api.gtk_widget_show_all)(window);
+        (api.gtk_widget_realize)(window);
+        let xid: c_ulong = (x11.api.gdk_x11_window_get_xid)((api.gtk_widget_get_window)(window));
+        Ok(xid as u64)
     }
 }
 

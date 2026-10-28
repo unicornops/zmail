@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use gpui::{Bounds, Hitbox, Pixels, Window, WindowCompositionSurface};
+use gpui::{App, Bounds, Hitbox, Pixels, Window, WindowCompositionSurface};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::host::WebKey;
@@ -40,6 +40,8 @@ impl Backend {
     /// The `WKWebView` takes its own mouse input from AppKit.
     pub(crate) const FORWARDS_INPUT: bool = false;
 
+    // The host's arguments, one per thing a backend needs; see `WebHost::place`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn place(
         &mut self,
         key: WebKey,
@@ -47,6 +49,7 @@ impl Backend {
         bounds: Bounds<Pixels>,
         viewport: Bounds<Pixels>,
         window: &mut Window,
+        _cx: &mut App,
         on_event: Rc<dyn Fn(WebEvent)>,
     ) -> Result<()> {
         self.ensure_surface(viewport, window)?;

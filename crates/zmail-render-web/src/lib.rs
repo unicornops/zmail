@@ -7,10 +7,13 @@
 //! surface and its overlay surface, so Zmail's menus, popovers, dialogs and
 //! tooltips draw above it.
 //!
-//! macOS (`WKWebView`) and Windows (WebView2, hosted as DirectComposition
-//! visuals) are implemented. On other platforms [`SUPPORTED`] is false and
+//! macOS (`WKWebView`), Windows (WebView2, hosted as DirectComposition
+//! visuals) and Linux (WebKitGTK 4.1, loaded at runtime; a live view on
+//! X11) are implemented. On other platforms [`SUPPORTED`] is false and
 //! the reader keeps its text view; so does a Windows machine without the
-//! WebView2 runtime ([`WebHost::unavailable_reason`] says why).
+//! WebView2 runtime, and a Linux system without WebKitGTK, with one older
+//! than the minimum version, or where its sandbox cannot start
+//! ([`WebHost::unavailable_reason`] says why).
 //!
 //! | Module | Contents |
 //! |---|---|
@@ -23,6 +26,7 @@
 //! | `platform::macos` | AppKit and WebKit (`unsafe`) |
 //! | `platform::windows_host` | The Windows backend of the host: composition surfaces, web views and the input forwarded to them |
 //! | `platform::windows` | WebView2 and Win32 (`unsafe`) |
+//! | `platform::linux_host` | The Linux backend of the host: the X11 composition surface and its web views |
 //! | `platform::linux` | WebKitGTK, loaded at runtime, on an engine thread of its own (`unsafe`) |
 //! | `platform::linux_sandbox` | Checks that WebKitGTK's sandbox can start, and did |
 //! | `platform::linux_proxy` | The Linux engine's black-hole network proxy |
@@ -46,7 +50,11 @@ pub use host::{WebBody, WebHost, WebKey, WebViewport};
 use zmail_render::{MessageRenderer, PreparedMessage, RendererKind};
 
 /// Whether this platform has a web renderer.
-pub const SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+pub const SUPPORTED: bool = cfg!(any(
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "linux"
+));
 
 /// The web renderer behind ADR 0006's renderer boundary: it takes any
 /// prepared message with sanitised HTML, on a platform that has it.
@@ -118,6 +126,6 @@ pub mod windows_testing {
 pub mod linux_testing {
     pub use crate::platform::linux::{
         DisplayServer, MIN_VERSION, PlatformWebView, ViewEvent, ViewSize, blocked_connections,
-        failure, shutdown, start, verified_web_processes,
+        failure, shutdown, start, test_parent_window, verified_web_processes,
     };
 }

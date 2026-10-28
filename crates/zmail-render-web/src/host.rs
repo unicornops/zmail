@@ -55,8 +55,9 @@ struct HostState {
 
 impl WebHost {
     /// A host whose web views report to `on_event`. The callback may run
-    /// outside GPUI's update cycle (from AppKit or WebView2), so it should
-    /// only schedule work, e.g. with `AsyncApp::spawn`.
+    /// outside GPUI's update cycle (from AppKit, WebView2, or a GPUI task
+    /// fed by the Linux engine thread), so it should only schedule work,
+    /// e.g. with `AsyncApp::spawn`.
     pub fn new(on_event: impl Fn(WebKey, WebEvent) + 'static) -> Self {
         Self {
             state: Rc::new(RefCell::new(HostState {
@@ -141,6 +142,7 @@ impl WebHost {
         document: &Rc<WebDocument>,
         bounds: Bounds<Pixels>,
         window: &mut Window,
+        cx: &mut App,
     ) {
         let mut state = self.state.borrow_mut();
         let state = &mut *state;
@@ -158,6 +160,7 @@ impl WebHost {
             bounds,
             viewport,
             window,
+            cx,
             Rc::new(move |event| on_event(key, event)),
         );
         if let Err(error) = result {
@@ -292,9 +295,10 @@ impl Element for WebBody {
         bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Self::PrepaintState {
-        self.host.place(self.key, &self.document, bounds, window);
+        self.host
+            .place(self.key, &self.document, bounds, window, cx);
         Backend::FORWARDS_INPUT.then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal))
     }
 

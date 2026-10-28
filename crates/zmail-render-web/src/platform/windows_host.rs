@@ -43,7 +43,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use gpui::{
-    Bounds, CursorStyle, DevicePixels, DispatchPhase, Hitbox, MouseButton, MouseDownEvent,
+    App, Bounds, CursorStyle, DevicePixels, DispatchPhase, Hitbox, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, Window,
     WindowCompositionSurface,
 };
@@ -149,6 +149,8 @@ impl Backend {
     /// A hosted visual has no input of its own.
     pub(crate) const FORWARDS_INPUT: bool = true;
 
+    // The host's arguments, one per thing a backend needs; see `WebHost::place`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn place(
         &mut self,
         key: WebKey,
@@ -156,6 +158,7 @@ impl Backend {
         bounds: Bounds<Pixels>,
         viewport: Bounds<Pixels>,
         window: &mut Window,
+        _cx: &mut App,
         on_event: Rc<dyn Fn(WebEvent)>,
     ) -> Result<()> {
         if let Some(reason) = unavailable_reason() {

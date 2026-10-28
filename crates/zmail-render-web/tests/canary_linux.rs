@@ -57,7 +57,7 @@ mod linux {
         Appearance, InlineResource, WebDocument, WebEvent,
         linux_testing::{
             DisplayServer, PlatformWebView, ViewEvent, ViewSize, blocked_connections, failure,
-            shutdown, start, verified_web_processes,
+            shutdown, start, test_parent_window, verified_web_processes,
         },
     };
 
@@ -132,12 +132,14 @@ mod linux {
         }
     }
 
-    /// Renders `document` in a 600-pixel-wide view and waits until it is
+    /// Renders `document` in a 600-pixel-wide view (embedded in `parent`
+    /// on X11, as in the app; offscreen on Wayland) and waits until it is
     /// measured (or fails), then lets it settle.
-    fn render(document: &WebDocument) -> Result<Rendered> {
+    fn render(document: &WebDocument, parent: Option<u64>) -> Result<Rendered> {
         let (sender, receiver) = unbounded();
-        let view = PlatformWebView::new(document, SIZE, sender)
+        let view = PlatformWebView::new(document, SIZE, parent, sender)
             .map_err(|reason| anyhow::anyhow!("no web view: {reason}"))?;
+        view.move_to(0, 0, true);
         let mut rendered = Rendered {
             view,
             receiver,
@@ -219,6 +221,15 @@ mod linux {
             canary.clear();
         }
 
+        // On X11 the views are embedded in a window, as in the app.
+        let parent = match display {
+            DisplayServer::X11 => Some(
+                test_parent_window(800, 600)
+                    .map_err(|reason| anyhow::anyhow!("no parent window: {reason}"))?,
+            ),
+            DisplayServer::Wayland => None,
+        };
+
         let host = format!("127.0.0.1:{}", canary.port);
         let local = format!("localhost:{}", canary.port);
         let mut problems = Vec::new();
@@ -246,7 +257,7 @@ mod linux {
                 Err(reason) => println!("canary_linux: {name}: no prepared HTML ({reason})"),
             }
             for (form, page) in documents {
-                let rendered = render(&page)
+                let rendered = render(&page, parent)
                     .with_context(|| format!("rendering hostile page {name:?} ({form})"))?;
                 if let Some(reason) = rendered.failure() {
                     problems.push(format!(
@@ -285,7 +296,7 @@ mod linux {
                 canary.port
             )),
         ];
-        let rendered = render(&direct)?;
+        let rendered = render(&direct, parent)?;
         thread::sleep(Duration::from_secs(3));
         let hits = canary.hits();
         if !hits.is_empty() {
@@ -296,9 +307,12 @@ mod linux {
         drop(rendered);
 
         // Page JavaScript does not run; Zmail's isolated world does.
-        let mut rendered = render(&document(
-            r#"<title>safe</title><script>document.title='script ran'</script><img src="cid:missing" onerror="document.title='handler ran'"><p>text</p>"#,
-        ))?;
+        let mut rendered = render(
+            &document(
+                r#"<title>safe</title><script>document.title='script ran'</script><img src="cid:missing" onerror="document.title='handler ran'"><p>text</p>"#,
+            ),
+            parent,
+        )?;
         let title = rendered.evaluate("document.title")?;
         println!("canary_linux: title after scripts: {title:?}");
         if title != "safe" {
@@ -318,7 +332,7 @@ mod linux {
                 mime_type: "image/png".to_owned(),
                 data: Arc::from(PIXEL_PNG),
             });
-            let mut rendered = render(&with_part)?;
+            let mut rendered = render(&with_part, parent)?;
             // WebKit may still be decoding the image when the page is
             // measured.
             let started = Instant::now();
@@ -349,9 +363,10 @@ mod linux {
         }
 
         // The page is measured with page JavaScript off.
-        let rendered = render(&document(
-            r#"<div style="height:1234px;background:#eee">tall</div>"#,
-        ))?;
+        let rendered = render(
+            &document(r#"<div style="height:1234px;background:#eee">tall</div>"#),
+            parent,
+        )?;
         match rendered.measured_height() {
             Some(height) if (1234.0..1300.0).contains(&height) => {
                 println!("canary_linux: a 1234px page measured {height}")
@@ -361,9 +376,10 @@ mod linux {
         drop(rendered);
 
         // A page wider than the view is zoomed out to fit.
-        let rendered = render(&document(
-            r#"<div style="width:1200px;height:1000px;background:#eee">wide</div>"#,
-        ))?;
+        let rendered = render(
+            &document(r#"<div style="width:1200px;height:1000px;background:#eee">wide</div>"#),
+            parent,
+        )?;
         match rendered.measured_height() {
             Some(height) if height < 700. => {
                 println!("canary_linux: a 1200px-wide page fitted, height {height}")
