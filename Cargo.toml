@@ -106,7 +106,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 sha2 = "0.10"
 rpassword = "7.4.0"
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
-rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 rustls-native-certs = "0.8.2"
 # SPKI extraction for the Proton API pins (zmail-proton-api); already in the
 # tree through rustls.
