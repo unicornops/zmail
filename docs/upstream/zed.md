@@ -37,8 +37,9 @@ What changes while the pin is on the pull request:
   (`Window::enable_window_composition`,
   `WindowComposition::create_native_surface`, and on Windows
   `WindowComposition::reparent` and the surfaces' compositor-recreated
-  callback), on macOS and Windows. Linux builds on the same pin and keeps
-  the text view.
+  callback), on macOS and Windows, and `create_native_surface` on Linux
+  X11 (an X11 child window holding the WebKitGTK view). On Wayland the
+  page is drawn by GPUI as images, so no native surface is used.
 - The app's diagnostics strip shows the Zed tag as `untagged` (the pin has
   no tag) and the PR commit.
 - The weekly `zed-upstream` workflow does not move the pin back to a
@@ -92,6 +93,24 @@ now; drop the workarounds once the pin moves to code that fixes them.
    after a lost device hit the same cast. Workaround: each page is hidden
    through WebView2 (`ICoreWebView2Controller::put_IsVisible`); GPUI's
    `set_visible` is still called.
+
+### Linux issue at this pin
+
+Not part of #62379's composition code, but present at this pin because the
+pull request is based on Zed `main` of September 26, 2026:
+`crates/gpui_linux/src/linux/wayland/client.rs:948` (at `840e095`) does
+`seat.unwrap()` and panics when the Wayland compositor offers no `wl_seat`.
+Only seatless compositors hit it, such as `weston --backend=headless`
+(repro: `zmail-app launch-ui-fixture reader-html light` with
+`WAYLAND_DISPLAY` set to one); desktop compositors always offer a seat. Zed
+fixed it upstream in
+[zed-industries/zed#64969](https://github.com/zed-industries/zed/pull/64969)
+(merged October 2, 2026): `main` now returns the error "Wayland compositor
+does not provide wl_seat" instead. No issue was filed, since it is already
+fixed. In CI the app itself runs under weston's X11 backend, which has a
+seat (the headless weston of the Wayland canary does not start GPUI).
+When the pin moves past
+#64969, check that the panic is gone and drop this note.
 
 To follow a new head of the pull request by hand: change the `rev` on both
 lines, run `cargo update -p gpui -p gpui_platform`, compare the PR's root
