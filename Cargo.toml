@@ -66,7 +66,7 @@ html5ever = "0.40.1"
 # HMAC-SHA256 for the store's opaque attachment file names (ADR 0005);
 # already in the tree through pgp.
 hmac = "0.12.1"
-jmap-client = { version = "0.4.0", default-features = false, features = ["async", "rustls"] }
+jmap-client = { version = "0.4.3", default-features = false, features = ["async", "rustls"] }
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 # DKIM signing is the sending server's job; leaving out mail-send's default `dkim`
 # feature drops mail-auth and its report-parsing dependencies (zip, hickory DNS).
