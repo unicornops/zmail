@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.1](https://github.com/unicornops/zmail/compare/v0.23.0...v0.23.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **deps:** move off yanked crypto-bigint and drop the webpki-roots 0.26 advisory ([#318](https://github.com/unicornops/zmail/issues/318)) ([3fd30fc](https://github.com/unicornops/zmail/commit/3fd30fc328edb8683aabe58762fad32a533667bc))
+
 ## [0.23.0](https://github.com/unicornops/zmail/compare/v0.22.0...v0.23.0) (2026-10-28)
 
 
