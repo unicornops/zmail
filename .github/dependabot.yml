@@ -1,0 +1,47 @@
+# Dependabot: weekly dependency and GitHub Actions updates. Security
+# updates (for Dependabot alerts) are switched on in the repository
+# settings and follow the same rules below.
+#
+# Commit messages stay Conventional Commits: Cargo updates are
+# `fix(deps): ...` so release-please ships them, Actions updates are
+# `ci(deps): ...`.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: fix
+      include: scope
+    groups:
+      cargo-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # GPUI is pinned to the head of Zed PR #62379 for the web renderer
+      # (docs/upstream/zed.md); the zed-upstream workflow and manual pin
+      # moves own it.
+      - dependency-name: gpui
+      - dependency-name: gpui_platform
+      # Forks carrying the RustCrypto 0.14 / crypto-bigint 0.7 stack for
+      # RUSTSEC-2026-0387 until rpgp/rpgp#573 and upstream proton-srp move
+      # (deny.toml, Cargo.toml).
+      - dependency-name: pgp
+      - dependency-name: proton-srp
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      github-actions:
+        patterns:
+          - "*"
