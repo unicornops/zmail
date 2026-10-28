@@ -39,6 +39,15 @@ raw-window-handle = "0.6.2"
 webview2-com = "0.39.1"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_DirectComposition", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
+# The Linux backend (ADR 0006): WebKitGTK 4.1 is loaded at runtime with
+# libloading, so Zmail builds without it and starts without it (the reader
+# keeps its text view). No gtk-rs or glib crates: they would link the
+# libraries at build time. futures-channel carries the engine thread's
+# events to a GPUI task. All of its `unsafe` is in `src/platform/linux.rs`.
+[target.'cfg(target_os = "linux")'.dependencies]
+futures-channel = "0.3.34"
+libloading = "0.8.9"
+
 [dev-dependencies]
 serde_json.workspace = true
 
@@ -49,8 +58,15 @@ serde_json.workspace = true
 name = "canary"
 harness = false
 
+# The Linux canary: real WebKitGTK views on the engine thread, under a
+# display (CI: Xvfb). Its own `main` too, to wait on the engine.
+[[test]]
+name = "canary_linux"
+harness = false
+
 # The workspace lints, except that `unsafe_code` is `deny` rather than
-# `forbid`, so the macOS and Windows platform modules alone can allow it.
+# `forbid`, so the macOS, Windows and Linux platform FFI modules alone can
+# allow it.
 [lints.rust]
 missing_docs = "warn"
 unsafe_code = "deny"

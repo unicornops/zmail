@@ -445,6 +445,66 @@ jobs:
                   path: artifacts/windows-web-screenshots
                   if-no-files-found: ignore
 
+    # The Linux web renderer (ADR 0006): WebKitGTK 4.1, loaded at runtime.
+    # The canary renders a hostile corpus in real, sandboxed web views under
+    # Xvfb and fails on any network request. Ubuntu 26.04 lets bubblewrap
+    # create its namespaces, so the engine must run; Ubuntu 24.04's
+    # AppArmor restriction stops bubblewrap, so the engine must refuse to
+    # start (and not crash) and the reader keeps its text view.
+    web_renderer_linux:
+        name: Web renderer (Linux, ${{ matrix.os }})
+        needs: changes
+        if: github.event_name != 'pull_request' || needs.changes.outputs.app_code == 'true'
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-26.04
+                      expect: running
+                    - os: ubuntu-24.04
+                      expect: refused
+        steps:
+            - name: Checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            # WebKitGTK is a runtime package only (no -dev): Zmail loads it
+            # with dlopen. It brings bubblewrap and xdg-dbus-proxy.
+            - name: Install Linux build and runtime dependencies
+              run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev libwebkit2gtk-4.1-0 xvfb
+
+            - name: Read the pinned Rust toolchain
+              id: toolchain
+              shell: bash
+              run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+              with:
+                  toolchain: ${{ steps.toolchain.outputs.channel }}
+
+            - name: Cache Cargo git dependencies
+              uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: ~/.cargo/git/db
+                  key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-git-${{ runner.os }}-
+
+            - name: User namespaces on this runner
+              run: |
+                  sysctl kernel.apparmor_restrict_unprivileged_userns || true
+                  dpkg-query -W libwebkit2gtk-4.1-0 bubblewrap
+
+            - name: Build the canary
+              run: cargo test -p zmail-render-web --locked --test canary_linux --no-run
+
+            - name: Web renderer canary (X11)
+              timeout-minutes: 15
+              env:
+                  ZMAIL_CANARY_EXPECT: ${{ matrix.expect }}
+                  ZMAIL_WEB_DEBUG: "1"
+              run: xvfb-run -a --server-args="-screen 0 1280x1024x24" cargo test -p zmail-render-web --locked --test canary_linux -- --nocapture
+
     # The UI screenshot matrix (UI_PLAN.md Phase 1.8): every UI state in
     # light and dark plus 900px and 1920px windows, captured from seeded
     # fixture data (no mail server) and uploaded as the ui-screenshots
