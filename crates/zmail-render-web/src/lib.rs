@@ -125,7 +125,7 @@ pub mod windows_testing {
 #[doc(hidden)]
 pub mod linux_testing {
     pub use crate::platform::linux::{
-        DisplayServer, MIN_VERSION, PlatformWebView, ViewEvent, ViewSize, blocked_connections,
-        failure, shutdown, start, test_parent_window, verified_web_processes,
+        DisplayServer, LinkArea, MIN_VERSION, PlatformWebView, Snapshot, Tile, ViewEvent, ViewSize,
+        blocked_connections, failure, shutdown, start, test_parent_window, verified_web_processes,
     };
 }

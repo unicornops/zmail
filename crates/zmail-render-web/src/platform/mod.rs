@@ -2,8 +2,8 @@
 //! `Backend` for [`crate::host::WebHost`] with the same methods: `place`,
 //! `paint`, `end_frame`, `retain`, `hide_all`, `copy` and `select_all`,
 //! and a `FORWARDS_INPUT` constant: whether GPUI must hand the page its
-//! mouse input (a hosted visual gets none of its own) or the native view
-//! takes it itself. macOS, Windows and Linux have one; elsewhere
+//! mouse input (a hosted visual or a picture gets none of its own) or the
+//! native view takes it itself. macOS, Windows and Linux have one; elsewhere
 //! `unsupported::Backend` does nothing, and [`crate::SUPPORTED`] is false
 //! so the host never places a view.
 
