@@ -74,7 +74,7 @@ jobs:
                           workspace_checks=true
                         fi
                         ;;
-                      Cargo.toml|Cargo.lock|rust-toolchain.toml)
+                      Cargo.toml|Cargo.lock|rust-toolchain.toml|.github/workflows/ci.yml)
                         app_code=true
                         workspace_checks=true
                         ;;
@@ -283,6 +283,15 @@ jobs:
 
             - name: Build release binary
               run: cargo build -p zmail-app --release --locked
+
+            # The quality job runs the workspace tests on Linux only, but
+            # SQLCipher's crypto provider differs per platform (CommonCrypto
+            # on macOS, OpenSSL elsewhere; ADR 0005): the store's tests,
+            # including the SQLCipher 4.14 fixture (tests/sqlcipher_compat.rs),
+            # run here against each platform's build.
+            - name: Store tests (this platform's SQLCipher)
+              if: runner.os != 'Linux'
+              run: cargo test --release --locked -p zmail-store -- --nocapture
 
             - name: Upload release binary
               uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
