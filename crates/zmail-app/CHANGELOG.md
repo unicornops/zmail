@@ -5,6 +5,7 @@
 
 ### Bug Fixes
 
+* **deps:** Bump windows-registry from 0.6.1 to 0.100.0 ([#324](https://github.com/unicornops/zmail/issues/324)) ([8d05ddf](https://github.com/unicornops/zmail/commit/8d05ddf7bbe3cc0761369116ce0bd478394abd6a))
 * **deps:** Bump the cargo-minor-and-patch group across 1 directory with 2 updates ([#323](https://github.com/unicornops/zmail/issues/323)) ([b5d75c9](https://github.com/unicornops/zmail/commit/b5d75c97771e4d17d691e584eb26cf9c5dd5b6a8))
 
 ## [0.23.1](https://github.com/unicornops/zmail/compare/v0.23.0...v0.23.1) (2026-10-28)
