@@ -34,7 +34,7 @@ zmail-proton = { path = "../zmail-proton", optional = true }
 # (`motion.rs`): the platforms' settings, read through safe APIs. Both are
 # already in the tree through GPUI.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-registry = "0.6.1"
+windows-registry = "0.100.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAccessibility", "NSWorkspace"] }
