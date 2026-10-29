@@ -7,7 +7,8 @@
 //! build opens a copy with the SQLCipher it links (OpenSSL on Linux and
 //! Windows, CommonCrypto on macOS), applies the current migrations, reads
 //! everything back, writes, and opens it again. When the bundled SQLCipher
-//! changes, this is what shows existing stores survive the upgrade.
+//! changes, this is what shows existing stores survive the upgrade, and it
+//! checks the crypto provider each platform builds SQLCipher with.
 //!
 //! The fixture is regenerated only when the store's format deliberately
 //! changes, never to make this test pass:
@@ -76,6 +77,21 @@ fn copy_dir(from: &Path, to: &Path) {
             fs::copy(&source, &destination).expect("copied");
         }
     }
+}
+
+/// The SQLCipher release and crypto provider this build links, from a
+/// keyed connection to `path`.
+fn cipher_build(path: &Path) -> (String, String) {
+    let conn = rusqlite::Connection::open(path).expect("opens");
+    conn.execute_batch(&format!("PRAGMA key = {};", *fixture_key().sqlcipher_key()))
+        .expect("keyed");
+    let version = conn
+        .query_row("PRAGMA cipher_version", [], |row| row.get::<_, String>(0))
+        .expect("cipher_version");
+    let provider = conn
+        .query_row("PRAGMA cipher_provider", [], |row| row.get::<_, String>(0))
+        .expect("cipher_provider");
+    (version, provider)
 }
 
 /// The fixture's one account, its inbox thread and its message.
@@ -155,6 +171,17 @@ fn a_store_from_sqlcipher_4_14_opens_upgrades_and_stays_writable() {
             .expect("a new draft");
         (account, thread)
     };
+
+    // The page cipher is the platform's, never the libtomcrypt that
+    // SQLCipher's source also carries (ADR 0005).
+    let (version, provider) = cipher_build(&path);
+    eprintln!("SQLCipher {version}, crypto provider {provider}");
+    let expected = if cfg!(target_os = "macos") {
+        "commoncrypto"
+    } else {
+        "openssl"
+    };
+    assert_eq!(provider, expected);
 
     // And again, from a fresh open.
     let store = LocalStore::open(&path, fixture_key()).expect("reopens");
