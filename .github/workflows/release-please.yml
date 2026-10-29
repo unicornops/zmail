@@ -313,7 +313,7 @@ jobs:
 
       - name: Generate the app icon
         if: runner.os == 'macOS'
-        run: scripts/generate-app-icon.sh target/Zmail.icns
+        run: scripts/generate-app-icon.sh target/Zmail.icns target/Assets.car
 
       - name: Create macOS app bundle
         if: runner.os == 'macOS'
@@ -325,17 +325,23 @@ jobs:
           mkdir -p "${bundle}/Contents/MacOS" "${bundle}/Contents/Resources"
           cp "target/release/${{ matrix.binary_name }}" "${bundle}/Contents/MacOS/Zmail"
           cp target/Zmail.icns "${bundle}/Contents/Resources/Zmail.icns"
+          cp target/Assets.car "${bundle}/Contents/Resources/Assets.car"
           cat > "${bundle}/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
             <key>CFBundleExecutable</key><string>Zmail</string>
             <key>CFBundleIdentifier</key><string>ie.unicornops.zmail</string>
             <key>CFBundleName</key><string>Zmail</string>
+            <key>CFBundleDisplayName</key><string>Zmail</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleIconFile</key><string>Zmail</string>
+            <key>CFBundleIconName</key><string>AppIcon</string>
             <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>NSHighResolutionCapable</key><true/>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>CFBundleDocumentTypes</key>
             <array>
@@ -348,6 +354,17 @@ jobs:
           </dict>
           </plist>
           PLIST
+          # The icon must resolve both ways: CFBundleIconName through the
+          # compiled asset catalog (what recent macOS, notifications
+          # included, uses) and CFBundleIconFile through the icns.
+          plutil -lint "${bundle}/Contents/Info.plist"
+          assetutil --info "${bundle}/Contents/Resources/Assets.car" > assets-info.json
+          if ! grep -Eq '"Name" *: *"AppIcon"' assets-info.json; then
+            cat assets-info.json
+            echo "::error::Assets.car has no AppIcon"
+            exit 1
+          fi
+          rm assets-info.json
           # Developer ID signature with the hardened runtime and a secure
           # timestamp so the bundle can notarize; an ad-hoc signature only
           # when no certificate is configured.

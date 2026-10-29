@@ -1,22 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# generate-app-icon.sh - Builds Zmail.icns from assets/icons/app-icon.svg.
+# generate-app-icon.sh - Builds Zmail.icns, and optionally a compiled asset
+# catalog (Assets.car), from assets/icons/app-icon.svg.
 #
 # The SVG is rasterized with rsvg-convert (brew install librsvg) or, when
 # librsvg is unavailable, macOS's own qlmanage; sips resizes the 1024px
 # source into the Apple iconset sizes and iconutil assembles the icns.
 # This mirrors the Shuffleboard icon pipeline (unicornops/shuffleboard
-# generate-appicon.sh), adapted to a plain icns because Zmail is not an
-# Xcode project.
+# generate-appicon.sh), adapted because Zmail is not an Xcode project.
 #
-# Usage: scripts/generate-app-icon.sh [output.icns]
-# Output defaults to target/Zmail.icns.
+# With a second argument, the same images also go into an asset catalog
+# with an "AppIcon" set (Shuffleboard's AppIcon.appiconset layout), which
+# Xcode's actool compiles to Assets.car. The bundle names it with
+# CFBundleIconName: recent macOS takes the app icon from there, notably for
+# notifications, and keeps CFBundleIconFile (the icns) as the fallback.
+#
+# Usage: scripts/generate-app-icon.sh [output.icns] [output-Assets.car]
+# The icns defaults to target/Zmail.icns; no asset catalog by default.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SOURCE_SVG="${REPO_ROOT}/assets/icons/app-icon.svg"
 OUTPUT="${1:-${REPO_ROOT}/target/Zmail.icns}"
+ASSETS_CAR="${2:-}"
 
 if [ ! -f "$SOURCE_SVG" ]; then
   echo "Error: icon source not found at $SOURCE_SVG" >&2
@@ -66,3 +73,55 @@ done
 
 iconutil -c icns -o "$OUTPUT" "$ICONSET"
 echo "Built $OUTPUT"
+
+if [ -z "$ASSETS_CAR" ]; then
+  exit 0
+fi
+
+# The asset catalog: the iconset's PNGs as AppIcon.appiconset.
+CATALOG="${WORK_DIR}/Assets.xcassets"
+APPICONSET="${CATALOG}/AppIcon.appiconset"
+mkdir -p "$APPICONSET"
+cp "$ICONSET"/*.png "$APPICONSET/"
+cat > "${CATALOG}/Contents.json" <<'JSON'
+{
+  "info" : { "author" : "xcode", "version" : 1 }
+}
+JSON
+{
+  echo '{'
+  echo '  "images" : ['
+  first=1
+  for SIZE in 16 32 128 256 512; do
+    for SCALE in 1 2; do
+      if [ "$SCALE" = 1 ]; then FILE="icon_${SIZE}x${SIZE}.png"; else FILE="icon_${SIZE}x${SIZE}@2x.png"; fi
+      [ "$first" = 1 ] || echo ','
+      first=0
+      printf '    { "filename" : "%s", "idiom" : "mac", "scale" : "%sx", "size" : "%sx%s" }' \
+        "$FILE" "$SCALE" "$SIZE" "$SIZE"
+    done
+  done
+  echo
+  echo '  ],'
+  echo '  "info" : { "author" : "xcode", "version" : 1 }'
+  echo '}'
+} > "${APPICONSET}/Contents.json"
+
+COMPILED="${WORK_DIR}/compiled"
+mkdir -p "$COMPILED"
+xcrun actool "$CATALOG" \
+  --compile "$COMPILED" \
+  --platform macosx \
+  --minimum-deployment-target 12.0 \
+  --app-icon AppIcon \
+  --output-partial-info-plist "${WORK_DIR}/partial-info.plist" \
+  --output-format human-readable-text \
+  --notices --warnings --errors
+
+if [ ! -f "${COMPILED}/Assets.car" ]; then
+  echo "Error: actool did not produce Assets.car" >&2
+  exit 1
+fi
+mkdir -p "$(dirname "$ASSETS_CAR")"
+cp "${COMPILED}/Assets.car" "$ASSETS_CAR"
+echo "Built $ASSETS_CAR"
