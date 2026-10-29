@@ -38,6 +38,15 @@ private = { ignore = true }
 # proton-srp publishes only `license-file` (the MIT licence text, Copyright
 # (c) 2025 Proton AG), so state the expression it carries. The hash pins the
 # licence text; cargo-deny reports a new one if Proton changes the file.
+# sqlcipher-src (rusqlite 0.41's bundled SQLCipher source) ships SQLite
+# under its public-domain blessing and libtomcrypt under WTFPL/public
+# domain alongside SQLCipher's BSD-3-Clause. Only this crate may use them.
+# libtomcrypt is source only here: libsqlite3-sys builds SQLCipher against
+# OpenSSL (Linux, Windows) or CommonCrypto (macOS), never libtomcrypt.
+[[licenses.exceptions]]
+crate = "sqlcipher-src"
+allow = ["blessing", "WTFPL"]
+
 [[licenses.clarify]]
 crate = "proton-srp"
 expression = "MIT"
