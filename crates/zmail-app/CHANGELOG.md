@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.2](https://github.com/unicornops/zmail/compare/v0.23.1...v0.23.2) (2026-10-29)
+
+
+### Bug Fixes
+
+* **deps:** Bump the cargo-minor-and-patch group across 1 directory with 2 updates ([#323](https://github.com/unicornops/zmail/issues/323)) ([b5d75c9](https://github.com/unicornops/zmail/commit/b5d75c97771e4d17d691e584eb26cf9c5dd5b6a8))
+
 ## [0.23.1](https://github.com/unicornops/zmail/compare/v0.23.0...v0.23.1) (2026-10-28)
 
 
