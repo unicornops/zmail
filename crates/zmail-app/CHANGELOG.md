@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.3](https://github.com/unicornops/zmail/compare/v0.23.2...v0.23.3) (2026-10-29)
+
+
+### Bug Fixes
+
+* **deps:** rusqlite 0.41 with SQLCipher 4.19 ([#331](https://github.com/unicornops/zmail/issues/331)) ([03eb807](https://github.com/unicornops/zmail/commit/03eb8070c4d002f3e347846b8754f9153ec5ca5c))
+
 ## [0.23.2](https://github.com/unicornops/zmail/compare/v0.23.1...v0.23.2) (2026-10-29)
 
 
