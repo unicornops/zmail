@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# `StoreKey::from_fixture`, for checked-in test stores. Dev-dependencies only.
+test-fixtures = []
+
 [dependencies]
 aes-gcm.workspace = true
 ammonia.workspace = true

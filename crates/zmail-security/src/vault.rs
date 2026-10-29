@@ -133,6 +133,17 @@ impl StoreKey {
         }
     }
 
+    /// A key with a fixed id and secret, for checked-in test stores (the
+    /// SQLCipher compatibility fixture in `zmail-store`). Never in a build
+    /// that ships: only the `test-fixtures` feature has it.
+    #[cfg(feature = "test-fixtures")]
+    pub fn from_fixture(id: KeyId, secret: [u8; KEY_LEN]) -> Self {
+        Self {
+            id,
+            secret: Arc::new(Zeroizing::new(secret)),
+        }
+    }
+
     /// The key's id.
     pub fn id(&self) -> KeyId {
         self.id

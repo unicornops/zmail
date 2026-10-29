@@ -30,6 +30,8 @@ workspace = true
 
 [dev-dependencies]
 divan = "0.1"
+# Fixed keys for the SQLCipher compatibility fixture (tests/sqlcipher_compat.rs).
+zmail-security = { path = "../zmail-security", features = ["test-fixtures"] }
 # The large-mailbox and reader-stress datasets for the benchmarks.
 zmail-test-support = { path = "../zmail-test-support" }
 
