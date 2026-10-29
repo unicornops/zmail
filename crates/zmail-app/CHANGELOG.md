@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.4](https://github.com/unicornops/zmail/compare/v0.23.3...v0.23.4) (2026-10-29)
+
+
+### Bug Fixes
+
+* **store:** encrypting, rotating and starting over on Windows ([#334](https://github.com/unicornops/zmail/issues/334)) ([a811736](https://github.com/unicornops/zmail/commit/a81173680f0b8ad11d75fce1e919a60728fec634))
+
 ## [0.23.3](https://github.com/unicornops/zmail/compare/v0.23.2...v0.23.3) (2026-10-29)
 
 
