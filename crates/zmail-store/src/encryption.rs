@@ -609,6 +609,8 @@ fn plaintext_backups(path: &Path) -> Vec<PathBuf> {
 /// start there and the old files stay recoverable if the key turns up.
 /// Returns the directory the files went to.
 pub fn move_unreadable_store_aside(path: &Path) -> Result<PathBuf> {
+    // Windows can't move a file a kept connection still has open.
+    crate::connection::close_dropped_store_connections();
     let parent = path
         .parent()
         .context("the store path has no parent directory")?;
@@ -673,7 +675,11 @@ pub(crate) fn remove_with_journals(path: &Path) -> Result<()> {
 }
 
 pub(crate) fn sync_file(path: &Path) -> Result<()> {
-    fs::File::open(path)
+    // Opened for writing (without truncating): Windows' FlushFileBuffers
+    // refuses a read-only handle with "Access is denied".
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
         .and_then(|file| file.sync_all())
         .with_context(|| format!("failed to sync {}", path.display()))
 }
