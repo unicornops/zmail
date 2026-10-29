@@ -285,7 +285,7 @@ jobs:
               run: cargo build -p zmail-app --release --locked
 
             - name: Upload release binary
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
                   name: ${{ matrix.artifact_name }}
                   path: ${{ matrix.binary_path }}
@@ -343,7 +343,7 @@ jobs:
 
             - name: Upload web renderer screenshots
               if: always()
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
                   name: macos-web-screenshots
                   path: artifacts/macos-web-screenshots
@@ -436,7 +436,7 @@ jobs:
 
             - name: Upload web renderer screenshots
               if: always()
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
                   name: windows-web-screenshots
                   path: artifacts/windows-web-screenshots
@@ -566,7 +566,7 @@ jobs:
 
             - name: Upload web renderer screenshots
               if: always() && matrix.expect == 'running'
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
                   name: linux-web-screenshots
                   path: artifacts/linux-web-screenshots
@@ -624,7 +624,7 @@ jobs:
               run: xvfb-run -a --server-args="-screen 0 2560x1440x24" bash scripts/capture-release-screenshot.sh --matrix artifacts/ui-screenshots
 
             - name: Upload screenshots
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
                   name: ui-screenshots
                   path: artifacts/ui-screenshots/*.png
@@ -633,7 +633,7 @@ jobs:
 
             - name: Upload capture logs
               if: failure()
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
                   name: ui-screenshot-logs
                   path: ${{ runner.temp }}/ui-screenshot-logs
@@ -689,7 +689,7 @@ jobs:
 
             - name: Upload the results
               if: always()
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
                   name: performance
                   path: artifacts/performance
