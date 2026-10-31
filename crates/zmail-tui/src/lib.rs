@@ -5,8 +5,9 @@
 //! command bar listing the keys that work, on every screen (Main Menu,
 //! Folder List, Message Index, Message Text, Compose). It reads, triages
 //! (delete, archive, save, flag, read, with undo) and writes mail (compose,
-//! reply, forward, drafts, attachments, send with undo-send, the Outbox);
-//! accounts come later.
+//! reply, forward, drafts, attachments, send with undo-send, the Outbox)
+//! and sets accounts up (Setup → Accounts: add, change, delete, through
+//! `zmail-setup`, as the GUI does).
 //!
 //! - **Local-first.** Screens read the store, which is read again every 5
 //!   seconds; sync writes to it in the background.
@@ -24,6 +25,7 @@
 //!   `copy_command`); Shift-drag leaves the mouse to the terminal; pastes
 //!   only go into text fields.
 
+mod accounts;
 mod app;
 mod clipboard;
 mod compose;
@@ -55,6 +57,7 @@ use zmail_core::time::HourCycle;
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
+pub use accounts::Step as AddStep;
 pub use app::{App, AppOptions, Effect, Environment};
 pub use notifier::TerminalNotifier;
 
@@ -74,6 +77,9 @@ pub struct Launch {
     pub sync: Option<SyncService>,
     /// The background runtime.
     pub runtime: tokio::runtime::Handle,
+    /// The keychain, where Setup → Accounts keeps new accounts' secrets.
+    /// `None` (the fixture) can't add accounts.
+    pub secrets: Option<Arc<dyn zmail_security::SecretStore>>,
     /// Zmail's version, for the title bar.
     pub version: String,
 }
@@ -99,6 +105,8 @@ pub fn run(launch: Launch) -> Result<()> {
         hour_cycle: HourCycle::from_env(),
         version: launch.version,
         arrivals: Some(arrivals),
+        secrets: launch.secrets,
+        network: None,
     });
 
     let guard = terminal::TerminalGuard::enter(app.preferences().mouse)

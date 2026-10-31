@@ -14,6 +14,7 @@ use ratatui::{
 };
 use zmail_core::{preferences::CopyClipboard, time::format_list_date};
 
+mod accounts;
 mod compose;
 
 use crate::{
@@ -157,7 +158,7 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         Screen::Message => draw_message(app, frame, theme, body),
         Screen::Setup => {
             let lines = setup_lines(app, theme, width);
-            let cursor = app.setup_cursor + 2;
+            let cursor = app.setup_cursor + 3;
             draw_pane(app, frame, PaneId::Setup, body, lines, Some(cursor));
         }
         Screen::Help => {
@@ -181,6 +182,9 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
             let cursor = compose::outbox_cursor_line(app);
             draw_pane(app, frame, PaneId::Outbox, body, lines, Some(cursor));
         }
+        Screen::Accounts => accounts::draw_accounts(app, frame, theme, body),
+        Screen::AddAccount => accounts::draw_add(app, frame, theme, body),
+        Screen::EditAccount => accounts::draw_edit(app, frame, theme, body),
     }
     if let Some(Prompt::Save(save)) = app.prompt.clone() {
         draw_save(app, frame, theme, body, &save);
@@ -340,6 +344,9 @@ fn draw_title(app: &App, frame: &mut Frame, theme: Theme, area: Rect) {
         Screen::Compose => "COMPOSE MESSAGE",
         Screen::Postponed => "POSTPONED MESSAGES",
         Screen::Outbox => "OUTBOX",
+        Screen::Accounts => "SETUP ACCOUNTS",
+        Screen::AddAccount => "ADD ACCOUNT",
+        Screen::EditAccount => "CHANGE ACCOUNT",
     };
     let detail = app.title_detail();
     let right = fit_right(
@@ -825,6 +832,14 @@ fn setup_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
             ),
             theme.faint(),
         )),
+        PaneLine::new(Span::styled(
+            fit(
+                "  A: your mail accounts, to add, change or delete one.",
+                width,
+                theme.ellipsis(),
+            ),
+            theme.faint(),
+        )),
         PaneLine::default(),
     ];
     for (index, row) in SETUP_ROWS.iter().enumerate() {
@@ -1005,6 +1020,29 @@ as wl-copy or xclip -selection clipboard, or turn the mouse off.
   Pasting works in text fields such as WhereIs and in Compose, where it \
 goes in as text (a list pasted into To splits into addresses); anywhere \
 else a paste is ignored, so pasted text can never run commands.
+
+Accounts
+  S on the Main Menu, then A: your mail accounts (Alpine's collection \
+list). A adds one, C changes the one under the cursor (a new password, \
+signing in again in the browser, the cache budget), D deletes it from this \
+computer after asking; its mail on the server stays.
+  Adding asks for your email address first. Zmail uses its own settings for \
+Gmail, Outlook.com, Fastmail and iCloud addresses, and otherwise looks the \
+domain up, step by step, asking before it sends the domain to Mozilla's \
+provider database. Then how you sign in: a password, an app password, or \
+OAuth in the browser with a client of your own (Zmail ships none). Zmail \
+tests the sign-in before saving, then asks for the name and address mail \
+goes out with.
+  In the form, Up, Down and Tab move between the fields, Enter goes to the \
+next one or continues from the last, Space changes a choice, ^U clears a \
+field, Esc goes back a step and ^C cancels. Password fields show [hidden], \
+never what you type, and the password goes only to the system keychain.
+  OAuth opens your browser and also shows the address to open by hand. The \
+browser sends the sign-in back to 127.0.0.1 on its own computer, so over SSH \
+it can't reach this Zmail: use an app password, or add the account on the \
+computer you're at.
+  A new account starts syncing here when this Zmail syncs, otherwise in the \
+Zmail window that does.
 
 Sync
   One Zmail syncs your mail at a time. When another Zmail window already \

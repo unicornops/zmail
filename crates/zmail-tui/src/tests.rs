@@ -29,6 +29,7 @@ use crate::{
     text, view,
 };
 
+mod accounts;
 mod compose;
 mod triage;
 
@@ -309,6 +310,8 @@ fn app_with(store: Arc<LocalStore>, env: Environment) -> App {
         hour_cycle: HourCycle::H24,
         version: "0.0.0-test".to_owned(),
         arrivals: None,
+        secrets: None,
+        network: None,
     })
 }
 
@@ -923,6 +926,8 @@ fn new_mail_shows_in_the_status_line_and_rings_the_bell() {
         hour_cycle: HourCycle::H24,
         version: "0.0.0-test".to_owned(),
         arrivals: Some(arrivals),
+        secrets: None,
+        network: None,
     });
     let batch = NewMailBatch {
         account_id: 1,
@@ -973,6 +978,8 @@ fn the_status_line_says_when_another_zmail_syncs() {
         hour_cycle: HourCycle::H24,
         version: "0.0.0-test".to_owned(),
         arrivals: None,
+        secrets: None,
+        network: None,
     });
     let screen = text_of(&draw(&mut app, 80, 24));
     assert!(screen.contains(zmail_sync::SYNCS_ELSEWHERE), "{screen}");

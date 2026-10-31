@@ -30,7 +30,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - Tagged releases also attach a Linux screenshot captured from the live mail harness by the Release Please workflow chain
 - pull requests that change the UI get a `ui-screenshots` CI artefact: every main UI state in light and dark plus narrow and wide windows, captured from seeded fixture data (see `AGENTS.md`)
 - release archives ship platform binaries plus a Linux `.deb`, a macOS DMG (Developer ID signed and notarized when the org-wide Apple credentials are present), and a Windows MSI installer; Windows code signing remains opt-in pending work
-- a terminal UI for reading, triaging and writing mail, `zmail-app tui` ([ADR 0007](./docs/adr/0007-terminal-ui.md); see "Terminal UI" below): Pine/Alpine-style screens on the same encrypted store, every string from mail filtered for escape sequences before it reaches the terminal; delete, archive, save to a folder, flag and mark read with undo, sharing the desktop app's mail actions; Pico-style compose, reply and forward with drafts, attachments, undo-send and an Outbox; accounts come in a later phase
+- a terminal UI for reading, triaging and writing mail, `zmail-app tui` ([ADR 0007](./docs/adr/0007-terminal-ui.md); see "Terminal UI" below): Pine/Alpine-style screens on the same encrypted store, every string from mail filtered for escape sequences before it reaches the terminal; delete, archive, save to a folder, flag and mark read with undo, sharing the desktop app's mail actions; Pico-style compose, reply and forward with drafts, attachments, undo-send and an Outbox; and Setup → Accounts to add (with autodiscovery, a connection test, OAuth through the browser, and Proton sign-in in builds with Proton), change and delete accounts, through the same account setup code as the desktop app (`zmail-setup`)
 - screen-reader roles, names and announcements through AccessKit (VoiceOver, UI Automation, AT-SPI), Windows contrast themes and macOS Increase Contrast, reduced motion, text size up to 200% and 24px pointer targets; not yet checked with a real screen reader (see [`docs/phase5-hardening.md`](./docs/phase5-hardening.md#accessibility))
 - Phase 5 hardening and release policy documentation
 
@@ -145,14 +145,14 @@ The desktop shell no longer creates demo accounts from inside the UI. Configure 
 
 ### Terminal UI
 
-Read, triage and write mail in a terminal, on the same store as the desktop app ([ADR 0007](./docs/adr/0007-terminal-ui.md)):
+Read, triage and write mail, and set accounts up, in a terminal, on the same store as the desktop app ([ADR 0007](./docs/adr/0007-terminal-ui.md)):
 
 ```bash
 cargo run -p zmail-app -- tui
-cargo run -p zmail-app -- launch-tui-fixture   # synthetic mail, no sync, nothing saved
+cargo run -p zmail-app -- launch-tui-fixture   # synthetic mail, no sync, nothing saved, a keychain in memory
 ```
 
-It is in every build (the `tui` feature, on by default) and unlocks the store with its key from the system keychain, like the desktop app; over SSH that needs the keychain service running on that machine (Secret Service on Linux), or it says so and stops. Until a later phase adds accounts in the terminal, add them with the desktop app or `zmail-app add-imap`/`add-jmap`.
+It is in every build (the `tui` feature, on by default) and unlocks the store with its key from the system keychain, like the desktop app; over SSH that needs the keychain service running on that machine (Secret Service on Linux), or it says so and stops. With no account yet, the status line says so and `S` goes straight to adding one.
 
 The screens work like Pine and Alpine: a title bar, the screen, a status line, and a command bar that lists the keys that work there (`O` shows more). Letters work in either case.
 
@@ -170,7 +170,7 @@ The screens work like Pine and Alpine: a title bar, the screen, a status line, a
 | Tab, Enter | in Message Text, move to a numbered link and open it after seeing its real address |
 | `C` | compose (wherever `C` is free); `R` reply and `F` forward in the Message Index and Message Text |
 | `T` | the Outbox (from the Main Menu; also under Local in the Folder List) |
-| `S` | Setup (from the Main Menu) |
+| `S` | Setup (from the Main Menu); `A` there opens Accounts |
 | `Q` | quit, after asking |
 
 **Triage** works in the Message Index on the message under the cursor and in Message Text on the open one. Each command acts on the whole conversation, as in the desktop app (also when the index lists single messages), and the status line says what it did with its undo key ("Conversation moved to Trash. U Undo").
@@ -207,6 +207,20 @@ The external editor is off by default. Setup says what turning it on means: whil
 
 Drafts autosave to the encrypted store a second after typing pauses, as in the desktop app, and attachments are copied into it encrypted, shown by their filtered names and sizes. Send goes through the same path as the desktop app (`SyncService::queue_draft_and_send_after`), so whichever Zmail holds the sync lock sends it from the outbox. The **Outbox** (`T`) lists messages waiting to send and those that couldn't be sent, in the desktop app's words: `R` sends a failed one again, `D` takes back one that hasn't started sending (it returns to the postponed messages); a refused sign-in or a changed recipient key is settled in the desktop app. The postponed messages are listed under Local in the Folder List too, where Enter continues one and `D` deletes it.
 
+**Accounts** (`S`, then `A`) is Alpine's collection list for mail accounts: `A` adds one, `C` changes the one under the cursor (a new password, the browser sign-in again for OAuth accounts, the cache budget), `D` deletes it from this computer after asking (its local data and every keychain secret it has; the mail on the server stays). The steps of adding one are the desktop app's, from the same code (`zmail-setup`):
+
+1. Your email address. Gmail, Outlook.com, Fastmail and iCloud addresses use Zmail's own settings; any other domain is looked up step by step, each step's progress on screen (DNS records, the domain's own setup file, JMAP, Mozilla's database only after asking, since that sends the domain to Mozilla, the domain's mail servers, the usual server names). `E` skips to typing the servers. With Proton built in, a Proton address (or `Ctrl-P`) goes to Proton's sign-in instead.
+2. How you sign in: a password, an app password (with the provider's own hint and help page), or OAuth in the browser with a client of your own. Zmail ships no OAuth client; for Gmail the step lists how to make one in Google Cloud, as the desktop app's guide does.
+3. The servers, found or guessed, all editable: host, port and security for IMAP and SMTP, or the JMAP session URL. TLS is the default; an unencrypted connection needs its own opt-in, with a warning.
+4. For OAuth, the browser opens at the provider's sign-in page, and the address is always shown too, in full, to open by hand. The provider sends the sign-in back to `127.0.0.1` on the computer the browser runs on, so over SSH (`SSH_CONNECTION` or `SSH_TTY` set) it can't reach this Zmail; the terminal says so plainly and opens no browser: use an app password, or add the account on the computer you're at. Esc stops waiting and frees the port.
+5. A connection test: Zmail signs in to the incoming server (IMAP, or the JMAP session) and the outgoing one (SMTP), sends nothing, and says which one failed and why, back on the step where it is fixed.
+6. Your identity: the name and address mail goes out with, prefilled, and a signature.
+7. Saved: the password goes to the system keychain and nowhere else, and the first sync starts here when this Zmail syncs, otherwise in the Zmail window that does (within seconds). The screen follows the first sync.
+
+Proton sign-in (builds with Proton) asks for your Proton username and password, under the desktop app's note on what a third-party Proton client means (Zmail signs in as Proton Mail Bridge), then the two-factor code and the mailbox password when the account has them. When Proton asks for human verification, Zmail opens Proton's page in the browser (and shows its address) and signs in again once you press Enter.
+
+In the forms, Up, Down and Tab move between fields, Enter goes to the next one or continues from the last, Space changes a choice, `Ctrl-U` clears a field, Esc goes back a step and `Ctrl-C` cancels. Password fields show `[hidden]` once typed, never the text or its length. Everything a server, DNS or Proton returns (discovery results and errors, connection errors) is filtered for the terminal before it is drawn.
+
 The mouse works too: a click opens what it is on (a click on the index's first column selects), the wheel scrolls, and the command bar's entries can be clicked.
 
 **Copy and paste** work as in Zellij. Drag to select text inside one pane (the preview pane and the index are separate); it is copied when you let go. Double-click selects a word, triple-click a line, and dragging past the top or bottom scrolls. Wrapped lines are copied as the line they came from. Without a mouse, `Ctrl-Space` sets a mark in Message Text, the arrow keys select, and `y` or `Ctrl-C` copies. Copies go to the clipboard with OSC 52 (iTerm2, kitty, WezTerm, Alacritty, foot, Windows Terminal; tmux needs `set-clipboard on`); on a Mac outside SSH they go through `pbcopy`, since Terminal.app has no OSC 52. Setup can set a copy command instead (`wl-copy`, `xclip -selection clipboard`; run without a shell), send OSC 52 to the primary selection, or turn the mouse off. Hold Shift while dragging to use the terminal's own selection. Pastes (bracketed paste) go only into text fields such as WhereIs and Compose's fields, as text (a list pasted into To, one address per line, becomes a comma list); anywhere else they are ignored, so pasted text never runs commands.
@@ -229,7 +243,7 @@ Phase 2b adds a repo-owned Docker Compose harness at [`docker/mail-harness/docke
 - JMAP login: `jmap@localhost`
 - JMAP password: `jmap-password`
 
-The ignored integration tests start and stop the harness automatically. `live_mail_harness` verifies IMAP/SMTP round-tripping against GreenMail, and `live_jmap_harness` verifies JMAP sync plus SMTP-delivered mail visibility against James.
+The ignored integration tests start and stop the harness automatically. `live_mail_harness` verifies IMAP/SMTP round-tripping against GreenMail, `live_jmap_harness` verifies JMAP sync plus SMTP-delivered mail visibility against James, `live_tui_send` sends from the terminal UI's Compose, and `live_tui_setup` adds an account in the terminal UI's Setup → Accounts (connection test and first sync included).
 
 ## Platform Notes
 

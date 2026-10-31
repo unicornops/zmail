@@ -1,0 +1,48 @@
+  ZMAIL 0.0.0-test                                                       SETUP ACCOUNTS                                                   Folder: Unified Inbox
+  Your mail accounts, kept in the encrypted mail store with their passwords in the system keychain. A adds one; C changes the one under the cursor; D deletes it
+  from this computer.
+
+  Work                    me@work.example           IMAP · Password   Not synced yet
+  Home                    me@home.example           IMAP · Password   Not synced yet
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+? Help              > [Change]          N Next              C Change            M Main Menu
+< Setup             P Prev              A Add               D Delete            Q Quit

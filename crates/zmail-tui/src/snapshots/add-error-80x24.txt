@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                ADD ACCOUNT
+  Your servers
+  Check them, or change them if your provider says otherwise.
+
+  Zmail couldn't connect to the incoming server (127.0.0.1:9): IMAP
+  authentication failed: NO [AUTHENTICATIONFAILED] Invalid credentials
+
+                    Protocol : < IMAP and SMTP >
+                 IMAP server : 127.0.0.1
+                               Check this server.
+                        Port : 9
+                    Security : < None (unencrypted) >
+                   User name : Usually your email address
+                 SMTP server : 127.0.0.1
+                        Port : 9
+                    Security : < TLS >
+                   User name : Usually your email address
+  Connect without encryption : [X]
+
+  Without encryption your password and your mail cross the network as plain
+  text, and anyone on the way can read or change them. Only use this for a
+
+Ret NextFld  ^U Clear     ^C Cancel
+Tab NextFld  Esc Back

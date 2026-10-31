@@ -86,6 +86,8 @@ fn the_terminal_ui_sends_through_the_outbox() -> Result<()> {
         hour_cycle: HourCycle::H24,
         version: "0.0.0-test".to_owned(),
         arrivals: None,
+        secrets: None,
+        network: None,
     });
 
     // C, To, down to Subject, the body, ^X, y.

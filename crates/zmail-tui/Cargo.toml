@@ -19,17 +19,29 @@ unicode-width.workspace = true
 url.workspace = true
 # Triage: the GUI's undoable mail actions (ADR 0007, section 8).
 zmail-actions = { path = "../zmail-actions" }
+# Setup → Accounts: the GUI's account setup, without its drawing.
+zmail-auth = { path = "../zmail-auth" }
+zmail-autodiscover = { path = "../zmail-autodiscover" }
 zmail-core = { path = "../zmail-core" }
 zmail-notify = { path = "../zmail-notify" }
 zmail-render = { path = "../zmail-render" }
 zmail-security = { path = "../zmail-security" }
+zmail-setup = { path = "../zmail-setup" }
 zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }
+# Proton Mail sign-in (docs/adr/0004-proton-native.md); only with the
+# `proton` feature, as in zmail-ui.
+zmail-proton = { path = "../zmail-proton", optional = true }
 
 [dev-dependencies]
 # A fixed store key, so a second test process can open the same store
 # (the sync-lock test).
 zmail-security = { path = "../zmail-security", features = ["test-fixtures"] }
+
+[features]
+# Proton Mail in Setup → Accounts, matching zmail-ui's `proton` feature;
+# zmail-app turns both on together.
+proton = ["dep:zmail-proton", "zmail-setup/proton", "zmail-sync/proton"]
 
 [lints]
 workspace = true

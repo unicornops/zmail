@@ -483,6 +483,8 @@ pub(super) fn app_without_the_sync_lock(
         hour_cycle: HourCycle::H24,
         version: "0.0.0-test".to_owned(),
         arrivals: None,
+        secrets: None,
+        network: None,
     });
     (app, runtime)
 }

@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                ADD ACCOUNT
+  Sign in to Proton Mail
+  Use your Proton address or username and your Proton password.
+
+  A third-party client for Proton
+  Zmail is an independent client, not made or supported by Proton. It talks to
+  Proton's private API the way Proton Mail Bridge does and signs in as Bridge,
+  because Proton doesn't accept other clients, so your Proton sessions list
+  shows it as Proton Mail Bridge. Proton may change or block it at any time, and
+  only allows it on paid plans. Zmail keeps a session token and the key that
+  unlocks your mail in the system keychain, never your password.
+
+  Email address : zmail@proton.me
+       Password : [hidden]
+
+
+
+
+
+
+
+
+Ret Continue ^U Clear     ^C Cancel
+Tab NextFld  Esc Back

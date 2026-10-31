@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                ADD ACCOUNT
+  Sign in in your browser
+
+  This terminal is connected over SSH. Your browser sends the sign-in back to
+  127.0.0.1 on the computer the browser runs on, so it can't reach Zmail on this
+  machine. Use an app password instead, or add the account on the computer
+  you're sitting at.
+
+  If you still want to try (with the port forwarded, say), open this address:
+
+    https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=42
+    -abc.apps.googleusercontent.com&redirect_uri=http%3A%2F%2F127.0.0.1%3A8357%2
+    Fcallback&state=STATE&code_challenge=CHALLENGE&code_challenge_method=S256&sc
+    ope=https%3A%2F%2Fmail.google.com%2F
+
+  Waiting for the browser to send the sign-in back to 127.0.0.1:8357. Esc stops
+  waiting.
+
+
+
+
+
+Esc Stop
+^C Cancel

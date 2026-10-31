@@ -100,6 +100,28 @@ Progress:
   itself instead of printing it. The GUI calls the shared code and
   behaves as before, with one fix: removing an account now also deletes
   a Proton account's session from the keychain.
+- Phase 4: Setup → Accounts in the TUI (`S`, then `A`; `S` goes straight
+  to Add while there is no account): Alpine's collection list with Add,
+  Change (a new password, the browser sign-in again, the cache budget)
+  and Delete (asked, with the unsent mail and drafts that go). Add goes
+  step by step: the address; a preset for consumer domains, else
+  autodiscovery with each step's progress and the ISPDB question; the
+  sign-in method (password, app password with the provider's hint, or
+  OAuth2 with a client of your own); the servers; for OAuth2, the browser
+  with the URL always shown, and over SSH (`SSH_CONNECTION`/`SSH_TTY`) the
+  plain note that the redirect can't reach a remote TUI (no device flow:
+  Google doesn't allow the Gmail scope with it); the connection test; the
+  identity; then saving, with the first sync here when the TUI holds the
+  sync lock, otherwise in the holder. Proton (built with `proton`):
+  username and password under the GUI's risk note, the TOTP code, the
+  mailbox password, and human verification in the browser, on the app's
+  Bridge identity and nothing else. Password fields show `[hidden]`, are
+  kept out of `Debug` and of every prompt, and are overwritten once
+  saved; secrets go only to the keychain; every string from a server,
+  DNS or Proton is filtered before it is drawn. The live harness test
+  (`live_tui_setup`: Add against the harness's IMAP and SMTP, the
+  connection test, the first sync) runs in CI's quality job only. Phase
+  4 is done, and with it the plan of this ADR.
 
 ## Context
 

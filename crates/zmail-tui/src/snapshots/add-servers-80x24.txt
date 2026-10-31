@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                ADD ACCOUNT
+  Your servers
+  Check them, or change them if your provider says otherwise.
+
+  Incoming (IMAP): imap.mail.me.com:993 · TLS
+      Found in zmail's built-in iCloud settings
+  Outgoing (SMTP): smtp.mail.me.com:587 · STARTTLS
+      Found in zmail's built-in iCloud settings
+
+     Protocol : < IMAP and SMTP >
+  IMAP server : imap.mail.me.com
+         Port : 993
+     Security : < TLS >
+    User name : jane@icloud.com
+  SMTP server : smtp.mail.me.com
+         Port : 587
+     Security : < STARTTLS >
+    User name : jane@icloud.com
+
+
+
+
+Ret NextFld  Tab NextFld  Esc Back
+Spc Change   ^U Clear     ^C Cancel

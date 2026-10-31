@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                ADD ACCOUNT
+  Finding your settings
+  Zmail is asking example.test how to connect. Your password isn't sent anywhere
+  until Zmail signs in.
+
+  – Asking example.test for its settings
+    Nothing found
+  … Checking example.test for JMAP
+  · Checking Mozilla's provider database
+  · Trying the usual server names
+
+
+
+
+
+
+
+
+
+
+
+
+E Manual     ^C Cancel
+Esc Back
