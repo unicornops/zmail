@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.0](https://github.com/unicornops/zmail/compare/v0.23.4...v0.24.0) (2026-10-31)
+
+
+### Features
+
+* **sync:** one syncing process per store, through a sync lock ([#338](https://github.com/unicornops/zmail/issues/338)) ([fe73b00](https://github.com/unicornops/zmail/commit/fe73b00576de8871f1a48481aa509d9a05dabb81))
+* **tui:** read mail in the terminal with zmail-app tui ([#339](https://github.com/unicornops/zmail/issues/339)) ([58c96c6](https://github.com/unicornops/zmail/commit/58c96c6dd160055302e924f6ad83e5edb4688166))
+
 ## [0.23.4](https://github.com/unicornops/zmail/compare/v0.23.3...v0.23.4) (2026-10-29)
 
 
