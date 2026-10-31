@@ -36,7 +36,7 @@ use zmail_core::{
 use zmail_notify::{NewMailArrival, NewMailBatch, Notifier};
 use zmail_security::{SecretSlot, SecretStore};
 use zmail_smtp::SubmissionConfig;
-use zmail_store::LocalStore;
+use zmail_store::{LocalStore, SyncLock};
 
 mod indexer;
 pub mod power;
@@ -50,6 +50,18 @@ const OUTBOX_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
 const MAX_OUTBOX_ATTEMPTS: usize = 3;
 const MAIL_WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_PENDING_OP_ATTEMPTS: i64 = 5;
+/// How often a service built with [`SyncService::with_sync_lock`] tries the
+/// sync lock while another process holds it, and, while it syncs, looks
+/// for accounts another process added.
+const SYNC_LOCK_INTERVAL: Duration = if cfg!(test) {
+    Duration::from_millis(50)
+} else {
+    Duration::from_secs(5)
+};
+
+/// What a frontend shows while another Zmail process syncs the store
+/// ([`SyncService::runs_sync`] is `false`).
+pub const SYNCS_ELSEWHERE: &str = "Sync runs in another Zmail window";
 /// Refreshed tokens are recorded as expiring this many seconds early so a
 /// connection attempt never races the true expiry.
 const OAUTH2_REFRESH_MARGIN_SECS: i64 = 60;
@@ -186,6 +198,24 @@ struct SyncServiceInner {
     /// How much of the message listing each Proton sync does.
     #[cfg(feature = "proton")]
     proton_paging: Mutex<zmail_proton::SyncPaging>,
+    /// Whether this service syncs (ADR 0007). Always for [`SyncService::new`];
+    /// for [`SyncService::with_sync_lock`], only while it holds the store's
+    /// sync lock. Changes only with `deferred` locked.
+    syncs: AtomicBool,
+    /// The store's sync lock, while this service holds it.
+    sync_lock: Mutex<Option<SyncLock>>,
+    /// What the frontend started while another process synced, started
+    /// when this service takes the sync lock over.
+    deferred: Mutex<Deferred>,
+}
+
+/// Background work a frontend started while another process held the sync
+/// lock (see [`SyncService::with_sync_lock`]).
+#[derive(Debug, Default, Clone, Copy)]
+struct Deferred {
+    bootstrap: bool,
+    watchers: bool,
+    indexing: bool,
 }
 
 impl std::fmt::Debug for SyncService {
@@ -206,8 +236,66 @@ impl std::fmt::Debug for SyncServiceInner {
 
 impl SyncService {
     /// Creates a new sync service on top of the dedicated Tokio runtime.
+    ///
+    /// It syncs whenever asked, whatever other processes do; the
+    /// command-line tools use it. Frontends that sync in the background use
+    /// [`SyncService::with_sync_lock`].
     pub fn new(handle: Handle, store: Arc<LocalStore>, secrets: Arc<dyn SecretStore>) -> Self {
-        let service = Self {
+        let service = Self::build(handle, store, secrets, true);
+        service.start_outbox_supervisor();
+        service
+    }
+
+    /// Creates a sync service that syncs only while this process holds the
+    /// store's sync lock ([`SyncLock`], ADR 0007), so a GUI and a terminal
+    /// UI open on one store never both sync it.
+    ///
+    /// With the lock it behaves exactly like [`SyncService::new`]. Without
+    /// it ([`SyncService::runs_sync`] is `false`), it leaves syncing to the
+    /// process that holds the lock:
+    ///
+    /// - syncs, mail watchers, background indexing and outbox passes are
+    ///   not started; [`bootstrap_existing_accounts`](Self::bootstrap_existing_accounts),
+    ///   [`start_mail_watcher`](Self::start_mail_watcher) and
+    ///   [`start_background_indexing`](Self::start_background_indexing) are
+    ///   remembered instead;
+    /// - the frontend's changes still go to the store, where the holder
+    ///   picks them up: its outbox poll claims due outbox jobs within
+    ///   seconds, and its next sync writes queued changes (pending
+    ///   operations) back, as it does for its own;
+    /// - fetching a message body on demand and the server search still
+    ///   run here, since they only read from the server.
+    ///
+    /// Every few seconds it tries the lock again, and once the holder has
+    /// quit it takes over: it starts the outbox poll and whatever was
+    /// remembered. While it syncs, it also starts syncing accounts another
+    /// process added.
+    pub fn with_sync_lock(
+        handle: Handle,
+        store: Arc<LocalStore>,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Result<Self> {
+        let lock = store.try_sync_lock()?;
+        let service = Self::build(handle, store, secrets, lock.is_some());
+        if let Some(lock) = lock {
+            *service
+                .inner
+                .sync_lock
+                .lock()
+                .expect("sync lock mutex should not be poisoned") = Some(lock);
+            service.start_outbox_supervisor();
+        }
+        service.start_sync_lock_supervisor();
+        Ok(service)
+    }
+
+    fn build(
+        handle: Handle,
+        store: Arc<LocalStore>,
+        secrets: Arc<dyn SecretStore>,
+        syncs: bool,
+    ) -> Self {
+        Self {
             inner: Arc::new(SyncServiceInner {
                 handle,
                 store,
@@ -229,14 +317,124 @@ impl SyncService {
                 proton: Mutex::new(None),
                 #[cfg(feature = "proton")]
                 proton_paging: Mutex::new(zmail_proton::SyncPaging::default()),
+                syncs: AtomicBool::new(syncs),
+                sync_lock: Mutex::new(None),
+                deferred: Mutex::new(Deferred::default()),
             }),
+        }
+    }
+
+    /// Whether this process syncs: `false` while another Zmail process
+    /// holds the store's sync lock (see [`SyncService::with_sync_lock`]),
+    /// when frontends say so with [`SYNCS_ELSEWHERE`].
+    pub fn runs_sync(&self) -> bool {
+        self.inner.syncs.load(Ordering::SeqCst)
+    }
+
+    /// `true` when this service syncs; otherwise records `defer` for the
+    /// takeover and returns `false`. Checked under the `deferred` lock, so
+    /// a request is either run here or seen by the takeover, never lost.
+    fn syncs_or_defer(&self, defer: impl FnOnce(&mut Deferred)) -> bool {
+        let mut deferred = self
+            .inner
+            .deferred
+            .lock()
+            .expect("deferred work mutex should not be poisoned");
+        if self.runs_sync() {
+            return true;
+        }
+        defer(&mut deferred);
+        false
+    }
+
+    /// For a service built with [`SyncService::with_sync_lock`]: every
+    /// [`SYNC_LOCK_INTERVAL`], tries the sync lock while another process
+    /// holds it, and while this service syncs, starts syncing accounts that
+    /// appeared in the store (added by another process).
+    fn start_sync_lock_supervisor(&self) {
+        let service = self.clone();
+        // The accounts the frontend syncs itself, at startup or after a
+        // takeover; the supervisor syncs only the ones added after.
+        let account_ids = |service: &Self| {
+            service.inner.store.list_sync_targets().ok().map(|targets| {
+                targets
+                    .iter()
+                    .map(|target| target.id)
+                    .collect::<HashSet<_>>()
+            })
         };
-        service.start_outbox_supervisor();
-        service
+        let mut known = account_ids(self);
+        self.inner.handle.spawn(async move {
+            loop {
+                sleep(SYNC_LOCK_INTERVAL).await;
+                if !service.runs_sync() {
+                    if let Ok(Some(lock)) = service.inner.store.try_sync_lock() {
+                        known = account_ids(&service);
+                        service.take_over_sync(lock);
+                    }
+                    continue;
+                }
+                let Ok(targets) = service.inner.store.list_sync_targets() else {
+                    continue;
+                };
+                let current = targets
+                    .iter()
+                    .map(|target| target.id)
+                    .collect::<HashSet<_>>();
+                if let Some(known) = &known
+                    && current.iter().any(|id| !known.contains(id))
+                {
+                    let added = current.difference(known).copied().collect::<Vec<_>>();
+                    let _ = service.sync_accounts(added);
+                    let watching = service
+                        .inner
+                        .watcher_poll_interval
+                        .lock()
+                        .expect("watcher poll interval mutex should not be poisoned")
+                        .is_some();
+                    if watching {
+                        let _ = service.sync_watchers();
+                    }
+                }
+                known = Some(current);
+            }
+        });
+    }
+
+    /// Starts syncing in this process now that it holds the sync lock: the
+    /// outbox poll and whatever the frontend started while it waited.
+    fn take_over_sync(&self, lock: SyncLock) {
+        *self
+            .inner
+            .sync_lock
+            .lock()
+            .expect("sync lock mutex should not be poisoned") = Some(lock);
+        let deferred = {
+            let mut deferred = self
+                .inner
+                .deferred
+                .lock()
+                .expect("deferred work mutex should not be poisoned");
+            self.inner.syncs.store(true, Ordering::SeqCst);
+            std::mem::take(&mut *deferred)
+        };
+        self.start_outbox_supervisor();
+        if deferred.bootstrap {
+            let _ = self.bootstrap_existing_accounts();
+        }
+        if deferred.watchers {
+            let _ = self.sync_watchers();
+        }
+        if deferred.indexing {
+            self.start_background_indexing();
+        }
     }
 
     /// Schedules sync jobs for every configured account and returns the number started.
     pub fn bootstrap_existing_accounts(&self) -> Result<usize> {
+        if !self.syncs_or_defer(|deferred| deferred.bootstrap = true) {
+            return Ok(0);
+        }
         self.sync_accounts(
             self.inner
                 .store
@@ -251,9 +449,10 @@ impl SyncService {
         self.bootstrap_existing_accounts()
     }
 
-    /// Starts a sync for a single account. Returns `false` if one is already running.
+    /// Starts a sync for a single account. Returns `false` if one is
+    /// already running, or another process syncs ([`Self::runs_sync`]).
     pub fn sync_account(&self, account_id: i64) -> Result<bool> {
-        if !self.mark_account_active(account_id) {
+        if !self.runs_sync() || !self.mark_account_active(account_id) {
             return Ok(false);
         }
 
@@ -272,6 +471,9 @@ impl SyncService {
     /// more when it finishes, so a change reported mid-sync always reaches
     /// the store. Requests during one run coalesce into a single rerun.
     pub fn request_sync(&self, account_id: i64) {
+        if !self.runs_sync() {
+            return;
+        }
         let mut active = self
             .inner
             .active_accounts
@@ -294,6 +496,9 @@ impl SyncService {
 
     /// Runs a sync for a single account and blocks the caller until completion.
     pub fn sync_account_and_wait(&self, account_id: i64) -> Result<()> {
+        if !self.runs_sync() {
+            bail!("{SYNCS_ELSEWHERE}");
+        }
         if !self.mark_account_active(account_id) {
             bail!("a sync is already running for account {account_id}");
         }
@@ -584,6 +789,9 @@ impl SyncService {
     /// after startup start watching immediately. Returns the number of
     /// newly started watchers.
     pub fn sync_watchers(&self) -> Result<usize> {
+        if !self.syncs_or_defer(|deferred| deferred.watchers = true) {
+            return Ok(0);
+        }
         let poll_interval = {
             let mut interval = self
                 .inner
@@ -763,8 +971,12 @@ impl SyncService {
         }
     }
 
-    /// Starts processing due outbox jobs in the background.
+    /// Starts processing due outbox jobs in the background. While another
+    /// process syncs ([`Self::runs_sync`]), its outbox poll sends them.
     pub fn process_outbox(&self, account_id: Option<i64>) -> Result<()> {
+        if !self.runs_sync() {
+            return Ok(());
+        }
         let service = self.clone();
         self.inner.handle.spawn(async move {
             let _ = service.process_due_outbox_jobs(account_id).await;
@@ -774,6 +986,9 @@ impl SyncService {
 
     /// Processes due outbox jobs and blocks until the current pass completes.
     pub fn process_outbox_and_wait(&self, account_id: Option<i64>) -> Result<usize> {
+        if !self.runs_sync() {
+            bail!("{SYNCS_ELSEWHERE}");
+        }
         let service = self.clone();
         let (tx, rx) = mpsc::sync_channel(1);
         self.inner.handle.spawn(async move {
@@ -869,7 +1084,9 @@ impl SyncService {
             .draft_detail(draft_id)?
             .with_context(|| format!("draft {draft_id} does not exist"))?;
         let job_id = self.inner.store.queue_draft_after(draft_id, delay)?;
-        if delay.is_zero() {
+        if !self.runs_sync() {
+            // The syncing process's outbox poll sends it once it is due.
+        } else if delay.is_zero() {
             self.process_outbox(Some(draft.account_id))?;
         } else {
             let service = self.clone();
@@ -1503,7 +1720,7 @@ pub fn persist_oauth2_grant(
 mod tests {
     use std::{
         collections::HashSet,
-        sync::Arc,
+        sync::{Arc, atomic::Ordering},
         thread,
         time::{Duration, Instant},
     };
@@ -1577,6 +1794,155 @@ mod tests {
         fn delete_account_secret_in_slot(&self, _account_id: i64, _slot: SecretSlot) -> Result<()> {
             Ok(())
         }
+    }
+
+    /// Waits up to five seconds for `condition`.
+    fn eventually(condition: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        condition()
+    }
+
+    #[test]
+    fn only_the_sync_lock_holder_syncs_and_the_other_takes_over_when_it_quits() {
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        secrets
+            .set_account_secret(account_id, "demo-secret")
+            .expect("secret should be set");
+
+        // Two frontends on one store, each on its own runtime as two
+        // processes would be. The store handles are separate, so the lock
+        // sees two holders.
+        let first_runtime = BackgroundRuntime::start(2).expect("runtime should start");
+        let first = SyncService::with_sync_lock(
+            first_runtime.handle().clone(),
+            store.clone(),
+            secrets.clone(),
+        )
+        .expect("the first service starts");
+        assert!(first.runs_sync(), "the first frontend takes the lock");
+
+        let second_runtime = BackgroundRuntime::start(2).expect("runtime should start");
+        let second = SyncService::with_sync_lock(
+            second_runtime.handle().clone(),
+            store.clone(),
+            secrets.clone(),
+        )
+        .expect("the second service starts");
+        assert!(
+            !second.runs_sync(),
+            "the second frontend leaves sync to the first"
+        );
+
+        // What a frontend starts at launch, and a manual sync, do nothing
+        // in the second one…
+        assert_eq!(second.bootstrap_existing_accounts().expect("bootstrap"), 0);
+        assert_eq!(second.start_mail_watcher().expect("watchers"), 0);
+        second.start_background_indexing();
+        assert!(!second.sync_account(account_id).expect("sync request"));
+        second.request_sync(account_id);
+        assert!(!second.is_syncing(account_id));
+        assert!(second.sync_account_and_wait(account_id).is_err());
+        assert!(second.process_outbox_and_wait(None).is_err());
+        second
+            .process_outbox(None)
+            .expect("an outbox pass is left to the holder");
+        assert!(
+            second
+                .inner
+                .watched_accounts
+                .lock()
+                .expect("watched accounts")
+                .is_empty(),
+            "no watcher runs in the second frontend"
+        );
+        assert!(!second.inner.indexer_started.load(Ordering::SeqCst));
+        assert!(
+            !second
+                .inner
+                .outbox_supervisor_started
+                .load(Ordering::SeqCst)
+        );
+
+        // …until the first quits: its runtime ends, dropping the service
+        // and with it the lock, and the second takes over with the work it
+        // was asked to start.
+        drop(first);
+        drop(first_runtime);
+        assert!(
+            eventually(|| second.runs_sync()),
+            "the second frontend takes the sync over"
+        );
+        assert!(
+            second
+                .inner
+                .outbox_supervisor_started
+                .load(Ordering::SeqCst)
+        );
+        assert!(second.inner.indexer_started.load(Ordering::SeqCst));
+        assert!(
+            second
+                .inner
+                .watched_accounts
+                .lock()
+                .expect("watched accounts")
+                .contains(&account_id),
+            "the deferred watcher started"
+        );
+        // A third frontend now finds the lock taken.
+        let third =
+            SyncService::with_sync_lock(second_runtime.handle().clone(), store.clone(), secrets)
+                .expect("the third service starts");
+        assert!(!third.runs_sync());
+    }
+
+    #[test]
+    fn the_sync_lock_holder_syncs_accounts_another_process_adds() {
+        let runtime = BackgroundRuntime::start(2).expect("runtime should start");
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        let service =
+            SyncService::with_sync_lock(runtime.handle().clone(), store.clone(), secrets.clone())
+                .expect("the service starts");
+        assert!(service.runs_sync());
+        service.start_mail_watcher().expect("watchers");
+
+        // Another process (say the GUI, without the lock) adds an account.
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        secrets
+            .set_account_secret(account_id, "demo-secret")
+            .expect("secret should be set");
+        assert!(
+            eventually(|| service
+                .inner
+                .watched_accounts
+                .lock()
+                .expect("watched accounts")
+                .contains(&account_id)),
+            "the holder starts watching the new account"
+        );
+        // It also synced it: the attempt is recorded (and fails, with no
+        // server behind the demo account).
+        assert!(eventually(|| {
+            store
+                .list_accounts()
+                .expect("accounts")
+                .iter()
+                .any(|account| {
+                    account.id == account_id && account.sync_status.phase != SyncPhase::Idle
+                })
+        }));
     }
 
     #[test]

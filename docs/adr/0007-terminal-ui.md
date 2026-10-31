@@ -9,6 +9,15 @@ Progress:
 
 - Phase 0: `zmail_security::terminal::sanitize` (and `sanitize_line` for
   one-line fields) with its hostile corpus, `tests/terminal_corpus.rs`.
+- Phase 0: the sync lock, `zmail_store::SyncLock` on
+  `<database>.sync.lock`, and `SyncService::with_sync_lock`, which the GUI
+  now starts sync with. Without the lock, a frontend starts no sync,
+  watchers, indexing or outbox passes (it remembers them for a takeover),
+  its changes wait in the store for the holder (the outbox poll within
+  5 seconds, queued changes at the holder's next sync), and it retries the
+  lock every 5 seconds. The holder also starts syncing accounts another
+  process adds. The GUI's Sync commands say "Sync runs in another Zmail
+  window" meanwhile.
 
 ## Context
 

@@ -1409,6 +1409,10 @@ impl WorkspaceView {
             return;
         };
 
+        if !self.sync_service.runs_sync() {
+            self.show_status(zmail_sync::SYNCS_ELSEWHERE, cx);
+            return;
+        }
         let account_name = self
             .selected_account()
             .map(|account| account.display_name.clone())
@@ -1426,6 +1430,10 @@ impl WorkspaceView {
 
     /// Trigger a sync for all configured accounts.
     pub(crate) fn sync_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sync_service.runs_sync() {
+            self.show_status(zmail_sync::SYNCS_ELSEWHERE, cx);
+            return;
+        }
         match self.sync_service.sync_all() {
             Ok(started) => {
                 self.show_status(

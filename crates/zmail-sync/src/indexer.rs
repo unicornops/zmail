@@ -93,7 +93,12 @@ pub fn index_pause_reason(
 impl SyncService {
     /// Starts the background indexer, once. It indexes every IMAP account,
     /// re-runs after each successful sync and otherwise every few minutes.
+    /// While another process syncs ([`SyncService::runs_sync`]), it starts
+    /// only if this one takes the sync over.
     pub fn start_background_indexing(&self) {
+        if !self.syncs_or_defer(|deferred| deferred.indexing = true) {
+            return;
+        }
         if self.inner.indexer_started.swap(true, Ordering::SeqCst) {
             return;
         }
