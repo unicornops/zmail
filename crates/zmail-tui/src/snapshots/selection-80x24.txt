@@ -20,5 +20,5 @@ X   @       Mon  山田 太郎            東京オフィスの会議 📅 next 
 
 
             [2 conversations selected. A applies a command to them]
-? Help       > [ViewMsg]  N NextMsg    Spc NextPage U Undo       S Save
-< FldrList   P PrevMsg    - PrevPage   D Delete     E Archive    O OTHER CMDS
+? Help       > [ViewMsg]  N NextMsg    Spc NextPage U Undo       F Forward
+< FldrList   P PrevMsg    - PrevPage   D Delete     R Reply      O OTHER CMDS

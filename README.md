@@ -30,7 +30,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - Tagged releases also attach a Linux screenshot captured from the live mail harness by the Release Please workflow chain
 - pull requests that change the UI get a `ui-screenshots` CI artefact: every main UI state in light and dark plus narrow and wide windows, captured from seeded fixture data (see `AGENTS.md`)
 - release archives ship platform binaries plus a Linux `.deb`, a macOS DMG (Developer ID signed and notarized when the org-wide Apple credentials are present), and a Windows MSI installer; Windows code signing remains opt-in pending work
-- a terminal UI for reading and triaging mail, `zmail-app tui` ([ADR 0007](./docs/adr/0007-terminal-ui.md); see "Terminal UI" below): Pine/Alpine-style screens on the same encrypted store, every string from mail filtered for escape sequences before it reaches the terminal; delete, archive, save to a folder, flag and mark read with undo, sharing the desktop app's mail actions; compose and accounts come in later phases
+- a terminal UI for reading, triaging and writing mail, `zmail-app tui` ([ADR 0007](./docs/adr/0007-terminal-ui.md); see "Terminal UI" below): Pine/Alpine-style screens on the same encrypted store, every string from mail filtered for escape sequences before it reaches the terminal; delete, archive, save to a folder, flag and mark read with undo, sharing the desktop app's mail actions; Pico-style compose, reply and forward with drafts, attachments, undo-send and an Outbox; accounts come in a later phase
 - screen-reader roles, names and announcements through AccessKit (VoiceOver, UI Automation, AT-SPI), Windows contrast themes and macOS Increase Contrast, reduced motion, text size up to 200% and 24px pointer targets; not yet checked with a real screen reader (see [`docs/phase5-hardening.md`](./docs/phase5-hardening.md#accessibility))
 - Phase 5 hardening and release policy documentation
 
@@ -145,7 +145,7 @@ The desktop shell no longer creates demo accounts from inside the UI. Configure 
 
 ### Terminal UI
 
-Read and triage mail in a terminal, on the same store as the desktop app ([ADR 0007](./docs/adr/0007-terminal-ui.md)):
+Read, triage and write mail in a terminal, on the same store as the desktop app ([ADR 0007](./docs/adr/0007-terminal-ui.md)):
 
 ```bash
 cargo run -p zmail-app -- tui
@@ -168,6 +168,8 @@ The screens work like Pine and Alpine: a title bar, the screen, a status line, a
 | `/` | list conversations or single messages |
 | `V` | preview pane beside the index, in terminals 120 columns or wider |
 | Tab, Enter | in Message Text, move to a numbered link and open it after seeing its real address |
+| `C` | compose (wherever `C` is free); `R` reply and `F` forward in the Message Index and Message Text |
+| `T` | the Outbox (from the Main Menu; also under Local in the Folder List) |
 | `S` | Setup (from the Main Menu) |
 | `Q` | quit, after asking |
 
@@ -186,9 +188,25 @@ The screens work like Pine and Alpine: a title bar, the screen, a status line, a
 
 Opening a message in Message Text marks it read once it has been open for 1.5 seconds, as the desktop app's reader does. The changes go through the same mail actions as the desktop app (`zmail-actions`): each is written to the store at once and sent to the server by whichever Zmail syncs.
 
+**Writing mail** works like Pico: header fields (From when the account has several addresses, To, Cc, Bcc, Attchmnt, Subject), then the message text in an editor (`ratatui-textarea`). Up and Down, Enter and Tab move between the fields; Tab in To, Cc and Bcc completes an address from the ones you have used (the desktop app's suggestions, best first), again to go through the matches. `C` asks "Continue postponed composition?" when there are postponed messages. `R` replies to the message (in Message Text, the newest one that starts on screen), asking "Reply to all recipients?" when others got it too; `F` forwards it. Replies and forwards start exactly as in the desktop app (`zmail_actions::reply`: recipients, `Re:`/`Fwd:`, the quote or the forwarded headers), with the quoted text filtered for the terminal before it enters the editor. Like the desktop app, a forward carries the message's text but not its attachments, and no `In-Reply-To`/`References` are set yet.
+
+| Key | Does |
+| --- | --- |
+| `Ctrl-X` | send, after asking; the message waits for the undo-send delay set in the desktop app, and until then `U` takes it back and opens it again |
+| `Ctrl-O` | postpone: keep the draft for later |
+| `Ctrl-C` | cancel: deletes the draft, after asking if you changed it (an unchanged postponed draft stays) |
+| `Ctrl-K` / `Ctrl-U` | cut the line (a header field's text, or the attachment under the cursor on Attchmnt), put back what was cut |
+| `Ctrl-J` or `Ctrl-A` | attach a file: its path, with Tab completion, or `Ctrl-T` to browse. Windows shows `^A` on the command bar, where `Ctrl-J` may arrive as Enter |
+| `Ctrl-R` | insert a file's text into the message |
+| `Ctrl-W` | find text in the message |
+| `Ctrl-T` | your addresses (most used first) in To, Cc and Bcc; the file browser on Attchmnt |
+| `Ctrl-G` | help |
+
+Drafts autosave to the encrypted store a second after typing pauses, as in the desktop app, and attachments are copied into it encrypted, shown by their filtered names and sizes. Send goes through the same path as the desktop app (`SyncService::queue_draft_and_send_after`), so whichever Zmail holds the sync lock sends it from the outbox. The **Outbox** (`T`) lists messages waiting to send and those that couldn't be sent, in the desktop app's words: `R` sends a failed one again, `D` takes back one that hasn't started sending (it returns to the postponed messages); a refused sign-in or a changed recipient key is settled in the desktop app. The postponed messages are listed under Local in the Folder List too, where Enter continues one and `D` deletes it.
+
 The mouse works too: a click opens what it is on (a click on the index's first column selects), the wheel scrolls, and the command bar's entries can be clicked.
 
-**Copy and paste** work as in Zellij. Drag to select text inside one pane (the preview pane and the index are separate); it is copied when you let go. Double-click selects a word, triple-click a line, and dragging past the top or bottom scrolls. Wrapped lines are copied as the line they came from. Without a mouse, `Ctrl-Space` sets a mark in Message Text, the arrow keys select, and `y` or `Ctrl-C` copies. Copies go to the clipboard with OSC 52 (iTerm2, kitty, WezTerm, Alacritty, foot, Windows Terminal; tmux needs `set-clipboard on`); on a Mac outside SSH they go through `pbcopy`, since Terminal.app has no OSC 52. Setup can set a copy command instead (`wl-copy`, `xclip -selection clipboard`; run without a shell), send OSC 52 to the primary selection, or turn the mouse off. Hold Shift while dragging to use the terminal's own selection. Pastes (bracketed paste) go only into text fields such as WhereIs; anywhere else they are ignored, so pasted text never runs commands.
+**Copy and paste** work as in Zellij. Drag to select text inside one pane (the preview pane and the index are separate); it is copied when you let go. Double-click selects a word, triple-click a line, and dragging past the top or bottom scrolls. Wrapped lines are copied as the line they came from. Without a mouse, `Ctrl-Space` sets a mark in Message Text, the arrow keys select, and `y` or `Ctrl-C` copies. Copies go to the clipboard with OSC 52 (iTerm2, kitty, WezTerm, Alacritty, foot, Windows Terminal; tmux needs `set-clipboard on`); on a Mac outside SSH they go through `pbcopy`, since Terminal.app has no OSC 52. Setup can set a copy command instead (`wl-copy`, `xclip -selection clipboard`; run without a shell), send OSC 52 to the primary selection, or turn the mouse off. Hold Shift while dragging to use the terminal's own selection. Pastes (bracketed paste) go only into text fields such as WhereIs and Compose's fields, as text (a list pasted into To, one address per line, becomes a comma list); anywhere else they are ignored, so pasted text never runs commands.
 
 Only one Zmail process syncs a store at a time, through a lock beside it (`<store>.sync.lock`). When the desktop app is already open, the terminal UI shows what it syncs, says "Sync runs in another Zmail window", and takes sync over if the window closes first; the same holds the other way round. New mail shows in the status line and rings the terminal bell (Setup turns the bell off).
 

@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test              COMPOSE MESSAGE           Folder: Unified Inbox
+To      :
+Cc      :
+Bcc     :
+Attchmnt:
+Subject :
+----- Message Text -----
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^G Get Help  ^X Send      ^R Read File ^K Cut Text  ^O Postpone
+^C Cancel    ^J Attach    Tab Complete ^U UnCut     ^T To AddrBk

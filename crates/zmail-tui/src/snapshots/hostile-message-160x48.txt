@@ -44,5 +44,5 @@
                                                                                │
                                                                                │
                                                           [Folder "INBOX" opened with 4 conversations]
-? Help              > [ViewMsg]         N NextMsg           Spc NextPage        U Undo              S Save              * Flag              ; Select
-< FldrList          P PrevMsg           - PrevPage          D Delete            E Archive           W WhereIs           K MarkUnread        O OTHER CMDS
+? Help              > [ViewMsg]         N NextMsg           Spc NextPage        U Undo              F Forward           S Save              * Flag
+< FldrList          P PrevMsg           - PrevPage          D Delete            R Reply             E Archive           W WhereIs           O OTHER CMDS

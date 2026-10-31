@@ -34,15 +34,15 @@
     Message Text shows the text of each message. Links are numbered, like [3]; Tab and Shift-Tab move between them, and Enter (or a click) shows the real
   address before anything opens it. Remote images and HTML formatting are not shown in the terminal.
 
-  Copy and paste
-    Drag with the mouse to select text in one pane; it is copied when you let go. Double-click selects a word, triple-click a line, and dragging past the top or
-  bottom scrolls. Without a mouse: Ctrl-Space sets a mark in Message Text, the arrow keys select, and y or Ctrl-C copies.
-    Copies go to the clipboard with OSC 52, which works locally and over SSH in most terminals (tmux needs set-clipboard on). On a Mac outside SSH they go
-  through pbcopy. Setup (S on the Main Menu) can set a copy command instead, such as wl-copy or xclip -selection clipboard, or turn the mouse off.
-    Hold Shift while dragging to use the terminal's own selection.
-    Pasting works in text fields such as WhereIs; anywhere else a paste is ignored, so pasted text can never run commands.
-
-  Sync
+  Writing mail
+    C          compose, from anywhere it is free. When messages are postponed, Zmail asks first whether to continue one.
+    R          reply to the message (in Message Text, the one you are reading); when others got it too, Zmail asks whether to reply to all
+    F          forward the message, with its text
+    T          the Outbox, from the Main Menu (or Outbox in the Folder List): messages waiting to send or that couldn't be sent. R sends a failed one again; D
+               takes back one that hasn't started sending.
+    Compose works like Pico. Up and Down, Enter and Tab move between the fields; Tab in To, Cc and Bcc completes an address you have used before, again to go
+  through the matches.
+    ^X         send (Zmail asks first). The message waits for the undo-send delay set in the Zmail window; until then U takes it back and opens it again
 
 < Back              Spc NextPage        Q Quit
 - PrevPage          M Main Menu

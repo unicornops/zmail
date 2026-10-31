@@ -195,6 +195,13 @@ jobs:
                 DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
               run: cargo test -p zmail-test-support --test live_jmap_harness -- --ignored --nocapture
 
+            - name: Live Terminal UI Send Test
+              # ADR 0007 phase 3: Compose sends through the outbox and SMTP.
+              env:
+                DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+              run: cargo test -p zmail-test-support --test live_tui_send -- --ignored --nocapture
+
             # The Proton API test double (docker/proton-harness): built here
             # from the pinned go-proton-api commit, so a build failure shows
             # as its own step instead of a test failure. The script retries

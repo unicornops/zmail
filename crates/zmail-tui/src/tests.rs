@@ -29,6 +29,7 @@ use crate::{
     text, view,
 };
 
+mod compose;
 mod triage;
 
 /// Thursday 15 October 2026, 12:00 UTC.
@@ -350,6 +351,10 @@ fn text_of(buffer: &Buffer) -> String {
 /// Compares the screen with `src/snapshots/<name>.txt`.
 fn assert_snapshot(name: &str, buffer: &Buffer) {
     let actual = text_of(buffer);
+    // Compose's bar shows ^A for attach on Windows, ^J elsewhere
+    // (`compose::ATTACH_KEY`); the snapshots have ^J.
+    #[cfg(windows)]
+    let actual = actual.replace("^A Attach", "^J Attach");
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src/snapshots")
         .join(format!("{name}.txt"));
@@ -556,17 +561,24 @@ fn other_cmds_pages_the_command_bar() {
     open_work_inbox(&mut app, 80, 24);
     let screen = text_of(&draw(&mut app, 80, 24));
     assert!(screen.contains("O OTHER CMDS"), "{screen}");
-    // Alpine's first page: moving, then triage.
+    // Alpine's first page: moving, then triage, reply and forward.
     assert!(
-        screen.contains("D Delete") && screen.contains("U Undo") && !screen.contains("Quit"),
+        screen.contains("D Delete")
+            && screen.contains("U Undo")
+            && screen.contains("R Reply")
+            && screen.contains("F Forward")
+            && !screen.contains("Quit"),
         "{screen}"
     );
     keys(&mut app, "o");
     let screen = text_of(&draw(&mut app, 80, 24));
     assert!(
-        screen.contains("Quit") && screen.contains("WhereIs") && !screen.contains("D Delete"),
+        screen.contains("WhereIs") && !screen.contains("D Delete"),
         "{screen}"
     );
+    keys(&mut app, "o");
+    let screen = text_of(&draw(&mut app, 80, 24));
+    assert!(screen.contains("Quit"), "{screen}");
     // A click on a command runs it.
     let buffer = draw(&mut app, 80, 24);
     let row = row_of(&buffer, "Quit");

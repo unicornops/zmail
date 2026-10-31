@@ -4246,6 +4246,47 @@ impl LocalStore {
         }
     }
 
+    /// Deletes a draft the user gave up on, with its attachments' stored
+    /// copies. A draft that is queued, sending or sent can't be deleted
+    /// (Undo Send takes a queued one back first); a failed draft can, with
+    /// its outbox job.
+    pub fn delete_draft(&self, draft_id: i64) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin the draft deletion transaction")?;
+        let state = transaction
+            .query_row(
+                "SELECT state FROM drafts WHERE id = ?1",
+                params![draft_id],
+                |row| draft_state_from_db(row.get::<_, String>(0)?),
+            )
+            .optional()?;
+        let Some(state) = state else {
+            return Ok(());
+        };
+        ensure_draft_is_editable(state)?;
+        let files = {
+            let mut statement = transaction
+                .prepare("SELECT storage_path FROM draft_attachments WHERE draft_id = ?1")?;
+            let rows = statement.query_map(params![draft_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to list the draft's attachments")?
+        };
+        // The attachments and any failed outbox job go with it (ON DELETE
+        // CASCADE).
+        transaction.execute("DELETE FROM drafts WHERE id = ?1", params![draft_id])?;
+        transaction
+            .commit()
+            .context("failed to commit the draft deletion transaction")?;
+        // The rows are gone; a copy that cannot be removed now is only disk
+        // space, so it does not fail the deletion.
+        for path in files {
+            let _ = fs::remove_file(path);
+        }
+        Ok(())
+    }
+
     /// Queues a draft for background delivery and returns the new outbox job identifier.
     pub fn queue_draft(&self, draft_id: i64) -> Result<i64> {
         self.queue_draft_after(draft_id, Duration::ZERO)
@@ -10352,6 +10393,51 @@ mod tests {
             .expect("draft detail should load")
             .expect("draft should exist");
         assert!(without_attachment.attachments.is_empty());
+    }
+
+    #[test]
+    fn deletes_a_draft_with_its_attachment_copies_but_not_a_queued_one() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let new_draft = |to: Vec<String>| NewDraft {
+            account_id,
+            identity_id,
+            to,
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Gone".to_owned(),
+            body: "Body".to_owned(),
+        };
+        let draft_id = store.create_draft(&new_draft(Vec::new())).expect("draft");
+        let source = std::env::temp_dir().join(format!("zmail-delete-draft-{draft_id}.txt"));
+        fs::write(&source, b"payload").expect("source written");
+        let attachment = store
+            .add_draft_attachment(draft_id, &source)
+            .expect("attachment added");
+        let _ = fs::remove_file(&source);
+        let copy = std::path::PathBuf::from(&attachment.storage_path);
+        assert!(copy.exists(), "the encrypted copy is stored");
+
+        store.delete_draft(draft_id).expect("the draft is deleted");
+        assert_eq!(store.draft_detail(draft_id).expect("loads"), None);
+        assert!(!copy.exists(), "the copy went with it");
+        store
+            .delete_draft(draft_id)
+            .expect("deleting again does nothing");
+
+        let queued = store
+            .create_draft(&new_draft(vec!["a@example.test".to_owned()]))
+            .expect("draft");
+        let job_id = store
+            .queue_draft_after(queued, Duration::from_secs(30))
+            .expect("queued");
+        assert!(store.delete_draft(queued).is_err(), "a queued draft stays");
+        assert!(store.cancel_queued_outbox_job(job_id).expect("cancel runs"));
+        store.delete_draft(queued).expect("taken back, it can go");
+        assert!(store.list_outbox_jobs(None).expect("jobs").is_empty());
     }
 
     #[test]

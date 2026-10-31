@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                 MAIN MENU              Folder: Unified Inbox
+
+
+       ?     HELP               -  Get help using Zmail
+       C     COMPOSE MESSAGE    -  Compose and send a message
+       I     MESSAGE INDEX      -  View messages in current folder
+       L     FOLDER LIST        -  Select a folder to view
+       T     OUTBOX             -  Messages waiting to send, or that failed
+       A     ADDRESS BOOK       -  Address book (not in the terminal yet)
+       S     SETUP              -  Configure Zmail options
+       Q     QUIT               -  Leave Zmail
+
+       Current folder: Unified Inbox
+
+
+
+
+
+
+
+
+Continue postponed composition? (y/n, ^C cancels)
+Y Yes        ^C Cancel
+N No

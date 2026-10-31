@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test              COMPOSE MESSAGE                   Folder: INBOX
+To      : Grace Hopper <grace@work.example>
+Cc      :
+Bcc     :
+Attchmnt:
+Subject : Re: Launch plan for the terminal UI
+----- Message Text -----
+
+
+On Thu 15 Oct 2026, 11:35, Grace Hopper <grace@work.example> wrote:
+> Looks good. The notes are at https://wiki.work.example/tui if anyone wants
+them.
+>
+> Grace
+
+
+
+
+
+
+
+
+^G Get Help  ^X Send      ^R Read File ^K Cut Line  ^O Postpone
+^C Cancel    ^J Attach    ^W Where is  ^U UnCut

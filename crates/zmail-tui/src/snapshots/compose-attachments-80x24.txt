@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test              COMPOSE MESSAGE           Folder: Unified Inbox
+To      : ada@example.com
+Cc      :
+Bcc     :
+Attchmnt: 1. report.pdf (12 KB)
+          2. photo.jpg (3.0 MB)
+Subject : Files
+----- Message Text -----
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^G Get Help  ^X Send      ^R Read File ^U UnCut
+^C Cancel    ^J Attach    ^K Cut Text  ^O Postpone

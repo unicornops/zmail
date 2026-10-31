@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                   OUTBOX               Folder: Unified Inbox
+  Messages not sent yet. R sends a failed one again, D takes one back.
+
+  Waiting to send
+    To ada@example.com  Waiting
+  Sign in again to send (in the Zmail window)
+    To cy@example.com  Refused
+  Couldn’t send: 550 mailbox unavailable
+    To bo@example.com  Failed
+
+
+
+
+
+
+
+
+
+
+
+
+
+? Help       > [Details]  N NextMsg    D TakeBack   M Main Menu
+< Back       P PrevMsg    R Retry      C Compose    Q Quit

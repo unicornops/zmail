@@ -17,7 +17,7 @@ use super::{
 use crate::app::{App, AppOptions, Prompt, Screen};
 
 /// The store's accounts, Work then Home.
-fn accounts(store: &LocalStore) -> (i64, i64) {
+pub(super) fn accounts(store: &LocalStore) -> (i64, i64) {
     let accounts = store.list_accounts().expect("accounts");
     let id = |name: &str| {
         accounts
@@ -463,7 +463,9 @@ fn opening_a_message_marks_it_read_after_the_gui_delay() {
 
 /// An app on `store` whose sync service finds the sync lock held by
 /// another Zmail, as the TUI is while the GUI runs.
-fn app_without_the_sync_lock(store: Arc<LocalStore>) -> (App, zmail_sync::BackgroundRuntime) {
+pub(super) fn app_without_the_sync_lock(
+    store: Arc<LocalStore>,
+) -> (App, zmail_sync::BackgroundRuntime) {
     let runtime = zmail_sync::BackgroundRuntime::start(1).expect("a runtime");
     let sync = zmail_sync::SyncService::with_sync_lock(
         runtime.handle().clone(),
@@ -512,7 +514,7 @@ fn changes_wait_in_the_store_for_the_zmail_that_syncs() {
 const CHILD_STORE: &str = "ZMAIL_TUI_TRIAGE_CHILD_STORE";
 
 /// The fixed key both processes open the store with.
-fn fixture_key() -> zmail_security::vault::StoreKey {
+pub(super) fn fixture_key() -> zmail_security::vault::StoreKey {
     zmail_security::vault::StoreKey::from_fixture(
         zmail_security::vault::KeyId::from_bytes([7; 16]),
         [42; 32],

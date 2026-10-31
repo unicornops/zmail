@@ -5,8 +5,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use zmail_core::{
-    AccountSummary, MailboxRole, MailboxSelection, MailboxSummary, MessageSummary, SearchHit,
-    ThreadSummary, VirtualMailbox, participants::sender_display_name,
+    AccountSummary, DraftState, MailboxRole, MailboxSelection, MailboxSummary, MessageSummary,
+    OutboxJobState, SearchHit, ThreadSummary, VirtualMailbox, participants::sender_display_name,
 };
 use zmail_security::terminal::sanitize_line;
 use zmail_store::LocalStore;
@@ -36,12 +36,40 @@ pub enum FolderRow {
     Collection(String),
     /// A folder.
     Folder(Folder),
+    /// The postponed messages or the Outbox, in the Local collection.
+    Local(LocalFolder),
     /// Space between collections.
     Gap,
 }
 
+impl FolderRow {
+    /// Whether the cursor can rest on it and Enter opens it.
+    pub fn selectable(&self) -> bool {
+        matches!(self, Self::Folder(_) | Self::Local(_))
+    }
+}
+
+/// A folder of mail that is Zmail's, not a server's, as Alpine lists its
+/// local folders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalFolder {
+    /// Drafts being written.
+    Postponed {
+        /// How many.
+        count: usize,
+    },
+    /// Messages not sent yet.
+    Outbox {
+        /// How many.
+        count: usize,
+        /// How many of them couldn't be sent.
+        failed: usize,
+    },
+}
+
 /// The Folder List: the unified folders when there are several accounts,
-/// then each account's mailboxes.
+/// then each account's mailboxes, then the postponed messages and the
+/// Outbox.
 pub fn folder_rows(store: &LocalStore, accounts: &[AccountSummary]) -> Result<Vec<FolderRow>> {
     let mut rows = Vec::new();
     if accounts.len() > 1 {
@@ -85,6 +113,31 @@ pub fn folder_rows(store: &LocalStore, accounts: &[AccountSummary]) -> Result<Ve
                 total: mailbox.total_threads,
             }));
         }
+    }
+    if !accounts.is_empty() {
+        let postponed = store
+            .list_drafts(None)?
+            .iter()
+            .filter(|draft| draft.state == DraftState::Editing)
+            .count();
+        let jobs = store.list_outbox_jobs(None)?;
+        let waiting = jobs
+            .iter()
+            .filter(|job| job.state != OutboxJobState::Sent)
+            .count();
+        let failed = jobs
+            .iter()
+            .filter(|job| job.state == OutboxJobState::Failed)
+            .count();
+        rows.extend([
+            FolderRow::Gap,
+            FolderRow::Collection("Local".to_owned()),
+            FolderRow::Local(LocalFolder::Postponed { count: postponed }),
+            FolderRow::Local(LocalFolder::Outbox {
+                count: waiting,
+                failed,
+            }),
+        ]);
     }
     Ok(rows)
 }

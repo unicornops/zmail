@@ -332,6 +332,10 @@ impl App {
 
     /// U or z: reverses the last change, made on whichever screen.
     pub(crate) fn undo(&mut self) {
+        // While its delay lasts, the message just sent is the last change.
+        if self.can_undo_send() {
+            return self.undo_send();
+        }
         let row = self.index.cursor;
         let under_cursor = self.index.entries.get(row).map(|entry| entry.thread_id);
         let result = self.actions.undo(&mut |_| {});

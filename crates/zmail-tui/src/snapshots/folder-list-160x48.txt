@@ -12,6 +12,9 @@ Work <me@work.example>
 Home <me@home.example>
     INBOX                                                                                                                                          1 new       1
 
+Local
+    Postponed                                                                                                                                                  0
+    Outbox                                                                                                                                                     0
 
 
 
@@ -41,8 +44,5 @@ Home <me@home.example>
 
 
 
-
-
-
-? Help              > [ViewFldr]        N NextFldr          Spc NextPage        M Main Menu         Q Quit
-< Main Menu         P PrevFldr          - PrevPage          W WhereIs           I Index
+? Help              > [ViewFldr]        N NextFldr          Spc NextPage        M Main Menu         C Compose
+< Main Menu         P PrevFldr          - PrevPage          W WhereIs           I Index             Q Quit

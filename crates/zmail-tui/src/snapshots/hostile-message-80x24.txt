@@ -20,5 +20,5 @@ Your account    is fine. Bye
 
 
                   [Folder "INBOX" opened with 4 conversations]
-? Help       P PrevMsg    - PrevPage   D Delete     E Archive    * Flag
-< MsgIndex   N NextMsg    Spc NextPage U Undo       S Save       O OTHER CMDS
+? Help       P PrevMsg    - PrevPage   D Delete     R Reply      E Archive
+< MsgIndex   N NextMsg    Spc NextPage U Undo       F Forward    O OTHER CMDS
