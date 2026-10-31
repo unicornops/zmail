@@ -60,7 +60,7 @@ pub fn sanitize_filename(name: &str) -> String {
 
 /// Bidirectional overrides, isolates and marks, and zero-width characters:
 /// they change how a name looks without being visible themselves.
-fn is_invisible_format_char(ch: char) -> bool {
+pub(crate) fn is_invisible_format_char(ch: char) -> bool {
     matches!(
         ch,
         '\u{200B}'..='\u{200F}'
