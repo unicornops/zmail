@@ -121,10 +121,6 @@ pub fn over_ssh() -> bool {
 mod tests {
     use std::io::{Read as _, Write as _};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
     use std::time::Duration;
 
     use zmail_auth::OAuth2Client;
