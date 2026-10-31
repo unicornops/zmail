@@ -10766,6 +10766,7 @@ dependencies = [
  "tokio",
  "unicode-width",
  "url",
+ "zmail-actions",
  "zmail-core",
  "zmail-notify",
  "zmail-render",

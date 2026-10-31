@@ -39,6 +39,21 @@ Progress:
   (section 8). Events go to a plain callback; the GUI wraps it in a GPUI
   entity that emits them, so its behaviour is unchanged. The delay before
   an open conversation is marked read (`MARK_READ_DELAY`) moved with it.
+- Phase 2: triage in the TUI through `zmail-actions`, in the Message
+  Index and Message Text: `D` delete to the Trash, `E` archive, `S` save
+  with Tab completion over the account's folders and a `^T` folder list,
+  `*` flag, `K` mark read or unread (Alpine has no single key for it; `K`
+  is free in both), and `U`/`z` undo across screens, each confirmed on the
+  status line with its undo key. Selection: `;` toggles the message under
+  the cursor (Alpine's SelectCur, which Alpine puts on `:`, kept for the
+  command palette) and moves on, `A` applies the next command to the
+  selection, `;` inside Apply unselects all; an `X` column marks it, and a
+  click there toggles. A command acts on the whole conversation, as in
+  the GUI, also on a single-message row. Message Text marks a message read
+  after `MARK_READ_DELAY`. Changes are store writes with queued
+  write-backs, so they work whichever process holds the sync lock (tested
+  with a second process). Phase 2 is done. Not done: the command palette
+  (`:`) and saving attachments, still to come from phase 1.
 
 ## Context
 

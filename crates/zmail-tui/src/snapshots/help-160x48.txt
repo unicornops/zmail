@@ -17,6 +17,19 @@
     V          the preview pane, beside the index in terminals 120 columns or wider
     Q          quit (Zmail asks first)
 
+  Triage
+    These work in the Message Index on the message under the cursor, and in Message Text on the open one. A command acts on the whole conversation, as in the
+  Zmail window, also when the index lists single messages.
+    D          delete: to the Trash (for good when the account has none)
+    E          archive
+    S          save to a folder. Tab completes the folder's name, again to go through the matches; Ctrl-T lists the folders to pick from.
+    *          flag, or unflag
+    K          mark read, or unread
+    U or Z     undo the last of these, wherever it was done; the status line says what each did
+    ;          select the message under the cursor, or not (X in the first column; a click there does it too)
+    A          apply the next command (D, E, S, * or K) to every selected message; ; there unselects them all
+    A message stays unread in Message Text until it has been open for a moment.
+
   Reading
     Message Text shows the text of each message. Links are numbered, like [3]; Tab and Shift-Tab move between them, and Enter (or a click) shows the real
   address before anything opens it. Remote images and HTML formatting are not shown in the terminal.
@@ -30,19 +43,6 @@
     Pasting works in text fields such as WhereIs; anywhere else a paste is ignored, so pasted text can never run commands.
 
   Sync
-    One Zmail syncs your mail at a time. When another Zmail window already does, this one shows the mail it syncs, and the status line says so.
-
-
-
-
-
-
-
-
-
-
-
-
 
 < Back              Spc NextPage        Q Quit
 - PrevPage          M Main Menu

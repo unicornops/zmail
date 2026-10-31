@@ -3,8 +3,9 @@
 //! A second frontend on the same encrypted store as the GUI, in the style
 //! of Pine and Alpine: a title bar, the screen, a status line and a
 //! command bar listing the keys that work, on every screen (Main Menu,
-//! Folder List, Message Index, Message Text). Phase 1 reads mail; triage,
-//! compose and accounts come later.
+//! Folder List, Message Index, Message Text). It reads and triages mail
+//! (delete, archive, save, flag, read, with undo); compose and accounts
+//! come later.
 //!
 //! - **Local-first.** Screens read the store, which is read again every 5
 //!   seconds; sync writes to it in the background.
@@ -15,6 +16,8 @@
 //!   [`zmail_security::terminal::sanitize`] before it is drawn. The only
 //!   escape sequences written are ratatui's drawing and OSC 52 for a copy
 //!   the user made.
+//! - **The GUI's mail actions.** Triage goes through `zmail-actions`, as
+//!   the GUI's does: store writes with their server write-back queued.
 //! - **Copy and paste as in Zellij.** Selection stays inside a pane and
 //!   copies on release (OSC 52, `pbcopy` on a local Mac, or a
 //!   `copy_command`); Shift-drag leaves the mouse to the terminal; pastes
@@ -29,6 +32,7 @@ mod notifier;
 mod pane;
 mod terminal;
 mod text;
+mod triage;
 mod view;
 
 #[cfg(test)]

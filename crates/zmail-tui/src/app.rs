@@ -7,7 +7,7 @@
 //! on ratatui's `TestBackend`.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
@@ -16,6 +16,7 @@ use chrono::{DateTime, FixedOffset};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use zmail_actions::MailActions;
 use zmail_core::{
     AccountSummary, MailboxRole, MailboxSelection, SearchScope, SyncPhase, ThreadSummary,
     VirtualMailbox,
@@ -34,6 +35,7 @@ use crate::{
     message::{self, Conversation},
     pane::{DrawnPane, PaneId, Point, Selection, logical_line, selected_text, word_at},
     text,
+    triage::{SavePrompt, Triage},
 };
 
 /// How often the store is read again, as the GUI does.
@@ -169,6 +171,24 @@ pub enum Cmd {
     Home,
     /// To the last line or item.
     End,
+    /// Delete to the Trash.
+    Delete,
+    /// Undo the last triage command.
+    Undo,
+    /// Archive.
+    Archive,
+    /// Save (move) to a folder.
+    Save,
+    /// Flag or unflag.
+    Flag,
+    /// Mark read or unread.
+    ReadState,
+    /// Select the message under the cursor, or not.
+    ToggleSelected,
+    /// Apply the next command to the selected messages.
+    Apply,
+    /// Complete the folder name.
+    Complete,
 }
 
 /// A command bar entry.
@@ -200,6 +220,10 @@ pub enum Prompt {
         /// What has been typed or pasted.
         input: String,
     },
+    /// Which command to apply to the selected messages.
+    Apply,
+    /// The folder to save to.
+    Save(SavePrompt),
 }
 
 /// What a text field on the status line is for.
@@ -384,6 +408,14 @@ pub struct App {
     /// Threads whose bodies have been asked for.
     hydrating: HashSet<i64>,
     quit: bool,
+
+    /// The mail actions, the GUI's own: kept for the session, so Undo
+    /// reaches a change made on any screen.
+    pub(crate) actions: MailActions,
+    /// The conversations selected with `;`, for Apply.
+    pub(crate) selected: BTreeSet<i64>,
+    /// The conversation open in Message Text and when it is marked read.
+    pub(crate) mark_read: Option<(i64, Instant)>,
 }
 
 /// News from work running elsewhere.
@@ -428,6 +460,7 @@ impl App {
             .ui_preferences()
             .map(|preferences| preferences.terminal)
             .unwrap_or_default();
+        let actions = MailActions::new(options.store.clone());
         let mut app = Self {
             store: options.store,
             sync: options.sync,
@@ -464,6 +497,9 @@ impl App {
             notices: mpsc::channel(),
             hydrating: HashSet::new(),
             quit: false,
+            actions,
+            selected: BTreeSet::new(),
+            mark_read: None,
         };
         app.load_folders();
         app.open_default_folder();
@@ -561,7 +597,7 @@ impl App {
 
     /// Reads the index again, keeping the cursor on the row it was on
     /// (`keep`, else the same thread).
-    fn load_index(&mut self, keep: Option<(i64, Option<i64>)>) {
+    pub(crate) fn load_index(&mut self, keep: Option<(i64, Option<i64>)>) {
         let Some(folder) = self.folder.clone() else {
             self.index = IndexState::default();
             return;
@@ -772,7 +808,7 @@ impl App {
 
     /// Shows what went wrong on the status line, filtered (it may quote a
     /// server).
-    fn report(&mut self, error: anyhow::Error) {
+    pub(crate) fn report(&mut self, error: anyhow::Error) {
         self.status = Some(sanitize_line(&format!("{error:#}")));
     }
 
@@ -835,6 +871,7 @@ impl App {
         if refresh {
             self.refresh();
         }
+        self.mark_read_if_due();
         self.drag_past_edge();
     }
 
@@ -881,6 +918,10 @@ impl App {
                 let purpose = *purpose;
                 self.text_changed(purpose);
             }
+            Some(Prompt::Save(save)) if save.picker.is_none() => {
+                save.input.push_str(&sanitize_line(pasted));
+                save.edited();
+            }
             _ => self.status = Some("Pasting works in text fields only".to_owned()),
         }
     }
@@ -917,6 +958,7 @@ impl App {
     fn command_for(&self, key: KeyEvent) -> Option<Cmd> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let in_message = self.screen == Screen::Message;
+        let triage = matches!(self.screen, Screen::Index | Screen::Message);
         if control {
             return match key.code {
                 KeyCode::Char(' ' | '@') if in_message => Some(Cmd::Mark),
@@ -945,6 +987,15 @@ impl App {
                 's' if self.screen == Screen::MainMenu => Cmd::Setup,
                 'c' if self.screen == Screen::MainMenu => Cmd::Compose,
                 'a' if self.screen == Screen::MainMenu => Cmd::AddressBook,
+                // Triage, in the Message Index and Message Text.
+                'd' if triage => Cmd::Delete,
+                'u' | 'z' if triage => Cmd::Undo,
+                'e' if triage => Cmd::Archive,
+                's' if triage => Cmd::Save,
+                '*' if triage => Cmd::Flag,
+                'k' if triage => Cmd::ReadState,
+                ';' if self.screen == Screen::Index => Cmd::ToggleSelected,
+                'a' if self.screen == Screen::Index => Cmd::Apply,
                 _ => return None,
             },
             KeyCode::Enter | KeyCode::Right => Cmd::Select,
@@ -979,8 +1030,48 @@ impl App {
             Some(Prompt::Text { .. }) => {
                 return vec![entry("Ret", "Accept", Select), entry("Esc", "Cancel", Back)];
             }
+            Some(Prompt::Apply) => {
+                return vec![
+                    entry("D", "Delete", Delete),
+                    entry("E", "Archive", Archive),
+                    entry("S", "Save", Save),
+                    entry("*", "Flag", Flag),
+                    entry("K", "Read/Unread", ReadState),
+                    entry(";", "UnselectAll", ToggleSelected),
+                    entry("^C", "Cancel", Back),
+                ];
+            }
+            Some(Prompt::Save(SavePrompt {
+                picker: Some(_), ..
+            })) => {
+                return vec![
+                    entry("Ret", "[Select]", Select),
+                    entry("P", "Prev", Prev),
+                    entry("N", "Next", Next),
+                    entry("Esc", "Back", Back),
+                ];
+            }
+            Some(Prompt::Save(_)) => {
+                return vec![
+                    entry("Ret", "Save", Select),
+                    entry("Tab", "Complete", Complete),
+                    entry("^T", "To Fldrs", FolderList),
+                    entry("Esc", "Cancel", Back),
+                ];
+            }
             None => {}
         }
+        let current = self.index.entries.get(self.index.cursor);
+        let flag = if current.is_some_and(|entry| entry.flagged) {
+            "Unflag"
+        } else {
+            "Flag"
+        };
+        let read = if current.is_some_and(|entry| entry.unread) {
+            "MarkRead"
+        } else {
+            "MarkUnread"
+        };
         match self.screen {
             Screen::MainMenu => vec![
                 entry("?", "Help", Help),
@@ -1013,7 +1104,15 @@ impl App {
                 entry("N", "NextMsg", Next),
                 entry("-", "PrevPage", PageUp),
                 entry("Spc", "NextPage", PageDown),
+                entry("D", "Delete", Delete),
+                entry("U", "Undo", Undo),
+                entry("E", "Archive", Archive),
+                entry("S", "Save", Save),
                 entry("W", "WhereIs", WhereIs),
+                entry("*", flag, Flag),
+                entry("K", read, ReadState),
+                entry(";", "Select", ToggleSelected),
+                entry("A", "Apply", Apply),
                 entry(
                     "/",
                     if self.prefs.group_threads {
@@ -1035,6 +1134,12 @@ impl App {
                 entry("N", "NextMsg", Next),
                 entry("-", "PrevPage", PageUp),
                 entry("Spc", "NextPage", PageDown),
+                entry("D", "Delete", Delete),
+                entry("U", "Undo", Undo),
+                entry("E", "Archive", Archive),
+                entry("S", "Save", Save),
+                entry("*", flag, Flag),
+                entry("K", read, ReadState),
                 entry("W", "WhereIs", WhereIs),
                 entry("Tab", "NextLink", NextLink),
                 entry("Ret", "OpenLink", Select),
@@ -1129,6 +1234,20 @@ impl App {
             Cmd::PrevLink => self.move_link(-1),
             Cmd::Mark => self.set_mark(),
             Cmd::Copy => self.copy_selection(),
+            Cmd::Delete => self.triage(Triage::Delete),
+            Cmd::Archive => self.triage(Triage::Archive),
+            Cmd::Save => self.triage(Triage::Save),
+            Cmd::Flag => self.triage(Triage::Flag),
+            Cmd::ReadState => self.triage(Triage::ReadState),
+            Cmd::Undo => self.undo(),
+            Cmd::ToggleSelected => {
+                let row = self.index.cursor;
+                self.toggle_selected(row);
+                // On to the next message, as Alpine's select does.
+                self.move_index(1);
+            }
+            Cmd::Apply => self.apply(),
+            Cmd::Complete => {}
             Cmd::Home | Cmd::End => {
                 let by = if cmd == Cmd::Home {
                     -(isize::MAX / 2)
@@ -1262,7 +1381,7 @@ impl App {
         }
     }
 
-    fn move_index(&mut self, by: isize) {
+    pub(crate) fn move_index(&mut self, by: isize) {
         self.index.cursor = offset(self.index.cursor, by, self.index.entries.len());
         self.reveal.insert(PaneId::Index);
         self.load_more_if_needed();
@@ -1306,6 +1425,8 @@ impl App {
         if changed {
             self.index = IndexState::default();
             self.preview = None;
+            // A selection belongs to its folder, as in Alpine.
+            self.selected.clear();
             self.scroll.insert(PaneId::Index, 0);
             self.load_index(None);
         }
@@ -1317,7 +1438,7 @@ impl App {
         self.goto(Screen::Index);
     }
 
-    fn open_entry(&mut self, position: usize) {
+    pub(crate) fn open_entry(&mut self, position: usize) {
         let Some(entry) = self.index.entries.get(position).cloned() else {
             self.status = Some("No messages here".to_owned());
             return;
@@ -1337,6 +1458,11 @@ impl App {
         });
         self.scroll.insert(PaneId::Message, 0);
         self.goto(Screen::Message);
+        // Read once it has stayed open as long as the GUI waits.
+        self.mark_read = Some((
+            entry.thread_id,
+            Instant::now() + zmail_actions::MARK_READ_DELAY,
+        ));
     }
 
     fn toggle_threads(&mut self) {
@@ -1493,6 +1619,24 @@ impl App {
                     _ => self.status = None,
                 }
             }
+            Prompt::Apply => {
+                self.prompt = None;
+                let command = match key.code {
+                    KeyCode::Char(ch) => match ch.to_ascii_lowercase() {
+                        'd' => Triage::Delete,
+                        'e' => Triage::Archive,
+                        's' => Triage::Save,
+                        '*' => Triage::Flag,
+                        'k' => Triage::ReadState,
+                        ';' => return self.unselect_all(),
+                        _ => return,
+                    },
+                    _ => return,
+                };
+                let thread_ids = self.selected.iter().copied().collect();
+                self.triage_threads(command, thread_ids);
+            }
+            Prompt::Save(save) => self.save_key(save, key),
             Prompt::Text { purpose, mut input } => {
                 match key.code {
                     KeyCode::Esc => return self.cancel_text(purpose),
@@ -1759,14 +1903,31 @@ impl App {
         // While a question is asked, only its answers on the command bar
         // can be clicked.
         if self.prompt.is_some() {
+            if self.picker_mouse(mouse) {
+                return;
+            }
             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind
                 && let Some(cmd) = self.command_at(mouse.column, mouse.row)
             {
-                let answer = match (cmd, &self.prompt) {
-                    (Cmd::Select, Some(Prompt::Text { .. })) => KeyCode::Enter,
-                    (Cmd::Select, _) => KeyCode::Char('y'),
-                    (Cmd::Copy, _) => KeyCode::Char('c'),
-                    (_, Some(Prompt::Text { .. })) => KeyCode::Esc,
+                let field = matches!(self.prompt, Some(Prompt::Text { .. } | Prompt::Save(_)));
+                let answer = match cmd {
+                    Cmd::Select if field => KeyCode::Enter,
+                    Cmd::Select => KeyCode::Char('y'),
+                    Cmd::Copy => KeyCode::Char('c'),
+                    Cmd::Complete => KeyCode::Tab,
+                    Cmd::FolderList => {
+                        return self
+                            .prompt_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+                    }
+                    Cmd::Prev => KeyCode::Up,
+                    Cmd::Next => KeyCode::Down,
+                    Cmd::Delete => KeyCode::Char('d'),
+                    Cmd::Archive => KeyCode::Char('e'),
+                    Cmd::Save => KeyCode::Char('s'),
+                    Cmd::Flag => KeyCode::Char('*'),
+                    Cmd::ReadState => KeyCode::Char('k'),
+                    Cmd::ToggleSelected => KeyCode::Char(';'),
+                    _ if field || self.prompt == Some(Prompt::Apply) => KeyCode::Esc,
                     _ => KeyCode::Char('n'),
                 };
                 self.prompt_key(KeyEvent::new(answer, KeyModifiers::NONE));
@@ -1804,9 +1965,14 @@ impl App {
         };
         let (id, point) = (pane.id, pane.point_at(x, y));
         let now = Instant::now();
+        // Clicks on the index's marker column each select or unselect,
+        // however quick.
+        let marker = id == PaneId::Index && point.column < crate::view::MARKER_WIDTH;
         let clicks = match self.mouse.last_press {
             Some((at, last_x, last_y, clicks))
-                if now.duration_since(at) < MULTI_CLICK && (last_x, last_y) == (x, y) =>
+                if !marker
+                    && now.duration_since(at) < MULTI_CLICK
+                    && (last_x, last_y) == (x, y) =>
             {
                 clicks % 3 + 1
             }
@@ -1955,7 +2121,10 @@ impl App {
             PaneId::Index => {
                 if let Some(row) = target {
                     let width = self.size.0;
-                    if self.preview_shown(width) && self.index.cursor != row {
+                    if point.column < crate::view::MARKER_WIDTH {
+                        // The marker column selects, as `;` does.
+                        self.toggle_selected(row);
+                    } else if self.preview_shown(width) && self.index.cursor != row {
                         self.index.cursor = row;
                     } else {
                         self.open_entry(row);
@@ -1982,7 +2151,7 @@ impl App {
                     self.change_setting(row);
                 }
             }
-            PaneId::Help => {}
+            PaneId::Help | PaneId::Picker => {}
         }
     }
 
@@ -2004,6 +2173,7 @@ impl App {
                 self.setup_cursor = offset(self.setup_cursor, direction, SETUP_ROWS.len())
             }
             PaneId::Message | PaneId::Preview | PaneId::Help => self.scroll_pane(id, by),
+            PaneId::Picker => {}
         }
     }
 
@@ -2022,6 +2192,11 @@ impl App {
                 )
             }
             Prompt::Text { purpose, input } => format!("{}: {input}", purpose.label()),
+            Prompt::Apply => format!(
+                "Apply to {}: D delete, E archive, S save, * flag, K read or unread, ; unselect",
+                count_noun(self.selected.len(), "conversation", "conversations")
+            ),
+            Prompt::Save(save) => save.label(),
         })
     }
 

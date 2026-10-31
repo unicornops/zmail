@@ -44,5 +44,5 @@ Read the full issue[1] or www.bank.example[2].
 
 
 
-? Help              P PrevMsg           - PrevPage          W WhereIs           Ret OpenLink        Y Copy              L FldrList
-< MsgIndex          N NextMsg           Spc NextPage        Tab NextLink        ^Spc Mark           M Main Menu         Q Quit
+? Help              P PrevMsg           - PrevPage          D Delete            E Archive           * Flag              W WhereIs           Ret OpenLink
+< MsgIndex          N NextMsg           Spc NextPage        U Undo              S Save              K MarkRead          Tab NextLink        O OTHER CMDS

@@ -1,8 +1,8 @@
   ZMAIL 0.0.0-test                                                       MESSAGE INDEX                                               Folder: INBOX  Conv 1 of 4
-N*      11:35  Grace Hopper        (2) Launch plan for the terminal UI         │ ── Message 1 of 2 ─────────────────────────────────────────────────────────────
-N   Yesterday  Harbour News        Harbour newsletter, issue 42                │ Date: Thu 15 Oct 2026, 09:00
-  @       Mon  山田 太郎           東京オフィスの会議 📅 next week             │ From: Ada Lovelace <ada@work.example>
-       25 Sep  Billing             Invoice fdp.exe                             │ To: Me <me@work.example>
+  N*      11:35  Grace Hopper        (2) Launch plan for the terminal UI       │ ── Message 1 of 2 ─────────────────────────────────────────────────────────────
+  N   Yesterday  Harbour News        Harbour newsletter, issue 42              │ Date: Thu 15 Oct 2026, 09:00
+    @       Mon  山田 太郎           東京オフィスの会議 📅 next week           │ From: Ada Lovelace <ada@work.example>
+         25 Sep  Billing             Invoice fdp.exe                           │ To: Me <me@work.example>
                                                                                │ Subject: Launch plan for the terminal UI
                                                                                │
                                                                                │ Here is the plan. The terminal UI reads mail first, then triage, compose and
@@ -44,5 +44,5 @@ N   Yesterday  Harbour News        Harbour newsletter, issue 42                �
                                                                                │
                                                                                │
                                                           [Folder "INBOX" opened with 4 conversations]
-? Help              > [ViewMsg]         N NextMsg           Spc NextPage        / Ungroup           M Main Menu         Q Quit
-< FldrList          P PrevMsg           - PrevPage          W WhereIs           V Preview           Y Copy
+? Help              > [ViewMsg]         N NextMsg           Spc NextPage        U Undo              S Save              * Unflag            ; Select
+< FldrList          P PrevMsg           - PrevPage          D Delete            E Archive           W WhereIs           K MarkRead          O OTHER CMDS

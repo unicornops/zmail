@@ -29,6 +29,8 @@ use crate::{
     text, view,
 };
 
+mod triage;
+
 /// Thursday 15 October 2026, 12:00 UTC.
 const NOW: &str = "2026-10-15T12:00:00+00:00";
 
@@ -152,11 +154,18 @@ const NEWSLETTER: &str = "<p>Hello from the <b>harbour</b> newsletter.</p>\
     <a href=\"https://evil.example/login\">www.bank.example</a>.</p>";
 
 /// Two accounts: Work, with a conversation, an HTML newsletter, mail with
-/// wide characters and hostile mail full of escape sequences; and Home.
+/// wide characters and hostile mail full of escape sequences, and an empty
+/// Trash; and Home, which has no Trash.
 fn seeded_store() -> Arc<LocalStore> {
     let store = Arc::new(LocalStore::open_ephemeral().expect("the store opens"));
-    let work = account(&store, "Work", "me@work.example");
-    let home = account(&store, "Home", "me@home.example");
+    seed(&store);
+    store
+}
+
+/// Writes [`seeded_store`]'s accounts and mail into `store`.
+fn seed(store: &LocalStore) {
+    let work = account(store, "Work", "me@work.example");
+    let home = account(store, "Home", "me@home.example");
     store
         .replace_account_snapshot(
             work,
@@ -240,6 +249,7 @@ fn seeded_store() -> Arc<LocalStore> {
                             &[text_mail("Shop <shop@example.com>", 400 * 24 * 60, true, "Thanks.")],
                         )],
                     ),
+                    mailbox("Trash", Some("trash"), Vec::new()),
                     MailboxSnapshot {
                         name: "Projects/Website".to_owned(),
                         delimiter: Some("/".to_owned()),
@@ -277,7 +287,6 @@ fn seeded_store() -> Arc<LocalStore> {
             },
         )
         .expect("the Home mail is stored");
-    store
 }
 
 fn environment() -> Environment {
@@ -547,14 +556,15 @@ fn other_cmds_pages_the_command_bar() {
     open_work_inbox(&mut app, 80, 24);
     let screen = text_of(&draw(&mut app, 80, 24));
     assert!(screen.contains("O OTHER CMDS"), "{screen}");
+    // Alpine's first page: moving, then triage.
     assert!(
-        screen.contains("WhereIs") && !screen.contains("Quit"),
+        screen.contains("D Delete") && screen.contains("U Undo") && !screen.contains("Quit"),
         "{screen}"
     );
     keys(&mut app, "o");
     let screen = text_of(&draw(&mut app, 80, 24));
     assert!(
-        screen.contains("Quit") && !screen.contains("WhereIs"),
+        screen.contains("Quit") && screen.contains("WhereIs") && !screen.contains("D Delete"),
         "{screen}"
     );
     // A click on a command runs it.

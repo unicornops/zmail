@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test               MESSAGE INDEX       Folder: INBOX  Conv 1 of 4
+  SAVE TO FOLDER
+
+    Archive
+    Trash
+    Projects/Website
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Save to which folder? Enter saves, Esc goes back to typing
+Ret [Select] N Next
+P Prev       Esc Back

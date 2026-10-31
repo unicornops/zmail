@@ -16,12 +16,19 @@ ratatui.workspace = true
 tokio.workspace = true
 unicode-width.workspace = true
 url.workspace = true
+# Triage: the GUI's undoable mail actions (ADR 0007, section 8).
+zmail-actions = { path = "../zmail-actions" }
 zmail-core = { path = "../zmail-core" }
 zmail-notify = { path = "../zmail-notify" }
 zmail-render = { path = "../zmail-render" }
 zmail-security = { path = "../zmail-security" }
 zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }
+
+[dev-dependencies]
+# A fixed store key, so a second test process can open the same store
+# (the sync-lock test).
+zmail-security = { path = "../zmail-security", features = ["test-fixtures"] }
 
 [lints]
 workspace = true

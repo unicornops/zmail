@@ -28,6 +28,8 @@ pub enum PaneId {
     Setup,
     /// Help.
     Help,
+    /// The save prompt's folder list (`^T`).
+    Picker,
 }
 
 /// A line a pane draws.
