@@ -435,7 +435,12 @@ impl Compose {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let body = sanitize(&draft.body);
+        let mut body = sanitize(&draft.body);
+        // A new message starts with the signature alone: room to write
+        // above it, as a reply has above its quote.
+        if created && !body.is_empty() && !body.starts_with('\n') {
+            body.insert_str(0, "\n\n");
+        }
         let mut body = TextArea::new(body.split('\n').map(str::to_owned).collect());
         body.set_cursor_line_style(Style::default());
         body.set_wrap_mode(WrapMode::WordOrGlyph);

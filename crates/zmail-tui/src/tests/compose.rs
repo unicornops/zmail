@@ -915,3 +915,34 @@ fn from_offers_the_accounts_identities() {
     let drafts = app.store.list_drafts(None).expect("drafts");
     assert_ne!(drafts[0].identity_id, before);
 }
+
+#[test]
+fn a_new_message_leaves_room_above_the_signature() {
+    let store = seeded_store();
+    let (work, _) = accounts(&store);
+    store
+        .replace_account_snapshot(
+            work,
+            &AccountSyncSnapshot {
+                checkpoint: "test:4".to_owned(),
+                detail: "Up to date".to_owned(),
+                identities: Some(vec![zmail_core::NewIdentity {
+                    display_name: "Work".to_owned(),
+                    email_address: "me@work.example".to_owned(),
+                    signature: "Ada\nWork".to_owned(),
+                    is_primary: true,
+                }]),
+                mailboxes: vec![mailbox("INBOX", Some("inbox"), Vec::new())],
+            },
+        )
+        .expect("the signature is stored");
+    let mut app = app_with(store, environment());
+    open_work_inbox(&mut app, 80, 24);
+    keys(&mut app, "c");
+    assert_eq!(compose(&app).text(Field::Body), "\n\nAda\nWork");
+    assert!(!compose(&app).changed());
+    // Untouched, it is cancelled without asking.
+    let draft_id = compose(&app).draft_id;
+    control(&mut app, 'c');
+    assert_eq!(app.store.draft_detail(draft_id).expect("loads"), None);
+}
