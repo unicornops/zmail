@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.0](https://github.com/unicornops/zmail/compare/v0.24.1...v0.25.0) (2026-10-31)
+
+
+### Features
+
+* **tui:** triage mail in the terminal with undo ([#343](https://github.com/unicornops/zmail/issues/343)) ([13df804](https://github.com/unicornops/zmail/commit/13df804304a033ce6c4fc20680162591cd93a072))
+
 ## [0.24.1](https://github.com/unicornops/zmail/compare/v0.24.0...v0.24.1) (2026-10-31)
 
 
