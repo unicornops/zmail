@@ -409,31 +409,43 @@ jobs:
             - name: Web renderer unit tests
               run: cargo test -p zmail-render-web --lib --locked
 
-            # The canary runs as its own process with a deadline, its output
-            # in files that are printed whatever happens, so a hang at exit
-            # (or a WebView2 process holding the step's output open) shows
-            # its log instead of a bare timeout. Any WebView2 process left
-            # over is stopped.
-            - name: Web renderer canary
-              timeout-minutes: 25
+            # The canary runs on the runner image's WebView2 runtime, then on
+            # the latest one, which users get with Edge updates (Microsoft's
+            # Evergreen bootstrapper, scripts/update-webview2-runtime.ps1),
+            # each as its own process with a deadline
+            # (scripts/run-windows-canary.ps1). The latest must pass. The
+            # runner's runtime only warns: runners pick up WebView2 updates
+            # on their own, partway through Microsoft's rollouts, and on
+            # 156.0.4314.50 the first view of a fresh runner sometimes took
+            # over 20 seconds to create.
+            - name: Build the web renderer canary
+              run: cargo test -p zmail-render-web --test canary --locked --no-run
+
+            - name: Web renderer canary (the runner's WebView2)
+              id: canary_runner
+              timeout-minutes: 12
+              continue-on-error: true
               shell: pwsh
               env:
                   ZMAIL_WEB_DEBUG: "1"
-              run: |
-                  cargo test -p zmail-render-web --test canary --locked --no-run
-                  $canary = Start-Process cargo -ArgumentList @('test', '-p', 'zmail-render-web', '--test', 'canary', '--locked', '--', '--nocapture') `
-                      -RedirectStandardOutput canary.out -RedirectStandardError canary.err -NoNewWindow -PassThru
-                  # Reading the handle now keeps the exit code readable later.
-                  $null = $canary.Handle
-                  $finished = $canary.WaitForExit(600000)
-                  Get-Content canary.err, canary.out
-                  Get-Process msedgewebview2, canary-* -ErrorAction SilentlyContinue | Stop-Process -Force
-                  if (-not $finished) {
-                      Write-Host "::error::the canary did not exit within 10 minutes"
-                      Stop-Process -Id $canary.Id -Force -ErrorAction SilentlyContinue
-                      exit 1
-                  }
-                  exit $canary.ExitCode
+              run: ./scripts/run-windows-canary.ps1 -Label runner
+
+            - name: Report the runner's WebView2 canary
+              if: steps.canary_runner.outcome == 'failure'
+              shell: bash
+              run: echo "::warning::the canary failed on the runner's WebView2 runtime (see that step); the latest runtime is checked next"
+
+            - name: Update the WebView2 runtime to the latest
+              timeout-minutes: 10
+              shell: pwsh
+              run: ./scripts/update-webview2-runtime.ps1
+
+            - name: Web renderer canary (the latest WebView2)
+              timeout-minutes: 12
+              shell: pwsh
+              env:
+                  ZMAIL_WEB_DEBUG: "1"
+              run: ./scripts/run-windows-canary.ps1 -Label latest
 
             # The app itself on fixture states with HTML mail, and three
             # interactions. Uploaded as the windows-web-screenshots artefact.

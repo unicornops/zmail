@@ -9,10 +9,11 @@
 //! parts load through Zmail's scheme handler, and the page is measured
 //! (with page JavaScript off) and zoomed to fit its width.
 //!
-//! On Windows it also checks Select All and Copy (which go through Zmail's
-//! scripts and the clipboard there), and that DirectComposition refuses to
-//! re-add a child visual, the reason the host works around GPUI's tree
-//! rebuild.
+//! On Windows it also checks that a view WebView2 never finishes creating
+//! is reported failed (the reader then shows the text view), Select All and
+//! Copy (which go through Zmail's scripts and the clipboard there), and that
+//! DirectComposition refuses to re-add a child visual, the reason the host
+//! works around GPUI's tree rebuild.
 //!
 //! Web views must run on the main thread, so this test has its own `main`
 //! (`harness = false`). It only does anything on macOS and Windows; CI runs
@@ -131,8 +132,10 @@ mod canary {
 
     use crate::engine::{View, Window};
 
-    /// How long a page may take to load and be measured.
-    const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
+    /// How long a page may take to load and be measured; longer than the
+    /// renderer's own deadline, so a page it gives up on is reported with
+    /// its reason.
+    const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
     /// How long to keep listening after a page is measured, for loads that
     /// start late (lazy images, refreshes).
@@ -534,7 +537,23 @@ mod canary {
     /// which the host's GPUI workaround relies on.
     #[cfg(target_os = "windows")]
     fn windows_checks(window: &Window, problems: &mut Vec<String>) -> Result<()> {
-        use zmail_render_web::windows_testing::clipboard_text;
+        use zmail_render_web::windows_testing::{clipboard_text, stall_view_creation};
+
+        // A view WebView2 never finishes creating (as runtime 156.0.4314.50
+        // did on CI) is reported failed, so the reader shows the message as
+        // text with a notice instead of an empty space.
+        stall_view_creation(true);
+        let stalled = render(window, &document("<p>never shown</p>"));
+        stall_view_creation(false);
+        match stalled.map(|rendered| rendered.failure()) {
+            Ok(Some(reason)) if reason.contains("did not create the web view") => {
+                println!("canary: a stalled view failed: {reason}")
+            }
+            other => problems.push(format!(
+                "a stalled view was not reported failed: {:?}",
+                other.map_err(|error| format!("{error:#}"))
+            )),
+        }
 
         let rendered = render(
             window,
