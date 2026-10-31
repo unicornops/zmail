@@ -64,7 +64,7 @@ const FIELD_LABEL_WIDTH: f32 = 56.0;
 /// Width of an attachment card.
 const ATTACHMENT_CARD_WIDTH: f32 = 240.0;
 /// How long typing must pause before the draft autosaves.
-pub(crate) const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
+pub(crate) use zmail_actions::AUTOSAVE_DELAY;
 
 // ---------------------------------------------------------------------------
 // ComposeState

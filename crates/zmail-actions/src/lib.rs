@@ -24,6 +24,9 @@
 //! The service knows nothing of a UI toolkit. The GUI wraps it in a GPUI
 //! entity whose callback is `cx.emit`; the terminal UI keeps one for the
 //! session and shows the recorded label on its status line.
+//!
+//! [`reply`] works out what a reply or forward draft starts with, for both
+//! frontends.
 
 use std::{collections::VecDeque, path::Path, sync::Arc, time::Duration};
 
@@ -33,6 +36,8 @@ use zmail_core::{
 };
 use zmail_store::LocalStore;
 
+pub mod reply;
+
 /// How many undo entries are kept; older ones are dropped.
 pub const UNDO_LIMIT: usize = 50;
 
@@ -40,6 +45,10 @@ pub const UNDO_LIMIT: usize = 50;
 /// skimming past a message does not mark it read. The GUI's reader and the
 /// terminal's Message Text both wait this long.
 pub const MARK_READ_DELAY: Duration = Duration::from_millis(1500);
+
+/// How long typing must pause before an open draft autosaves. The GUI's
+/// compose and the terminal's both wait this long.
+pub const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// Identifies one recorded change, so the undo offer for it (the GUI's
 /// toast) can undo exactly that change.
