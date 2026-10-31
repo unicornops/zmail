@@ -17,6 +17,10 @@
 //! Zmail ships no OAuth client ID or secret of its own: the user brings
 //! their own client (`crate::google` has the guide for Gmail).
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -35,6 +39,19 @@ pub const REMOTE_LOOPBACK_NOTE: &str = "This terminal is connected over SSH. You
 pub struct BrowserSignIn {
     client: OAuth2Client,
     request: AuthorizationRequest,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// Stops a [`BrowserSignIn::wait`] from another thread, freeing the
+/// loopback port at once rather than when the wait times out.
+#[derive(Debug, Clone, Default)]
+pub struct CancelSignIn(Arc<AtomicBool>);
+
+impl CancelSignIn {
+    /// Stops the wait; it returns an error within a moment.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 impl std::fmt::Debug for BrowserSignIn {
@@ -49,7 +66,16 @@ impl BrowserSignIn {
     /// Starts a sign-in for `client`: a fresh state and PKCE pair.
     pub fn new(client: OAuth2Client) -> Self {
         let request = client.authorization_request();
-        Self { client, request }
+        Self {
+            client,
+            request,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// A handle that stops [`Self::wait`] from another thread.
+    pub fn canceller(&self) -> CancelSignIn {
+        CancelSignIn(self.cancelled.clone())
     }
 
     /// The URL the user opens in a browser. It carries the client ID, the
@@ -64,12 +90,16 @@ impl BrowserSignIn {
         self.client.redirect_uri()
     }
 
-    /// Waits for the redirect (up to `timeout`), checks its state and
-    /// exchanges the code for tokens. Blocks; run it off the UI thread.
+    /// Waits for the redirect (up to `timeout`, or until cancelled), checks
+    /// its state and exchanges the code for tokens. Blocks; run it off the
+    /// UI thread.
     pub fn wait(self, timeout: Duration) -> Result<(OAuth2Client, TokenSet)> {
+        let cancelled = self.cancelled.clone();
         let code = self
             .client
-            .listen_for_redirect(&self.request.state, timeout)
+            .listen_for_redirect_until(&self.request.state, timeout, || {
+                cancelled.load(Ordering::Relaxed)
+            })
             .context("the browser sign-in didn't finish")?;
         let tokens = self
             .client
@@ -91,6 +121,10 @@ pub fn over_ssh() -> bool {
 mod tests {
     use std::io::{Read as _, Write as _};
     use std::net::{TcpListener, TcpStream};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::time::Duration;
 
     use zmail_auth::OAuth2Client;
@@ -153,5 +187,24 @@ mod tests {
             .expect("the wait ends")
             .expect_err("a forged state is refused");
         assert!(format!("{error:#}").contains("state"), "{error:#}");
+    }
+
+    #[test]
+    fn a_cancelled_wait_frees_the_port() {
+        let port = free_port();
+        let sign_in = BrowserSignIn::new(client(port));
+        let cancel = sign_in.canceller();
+        let waiting = std::thread::spawn(move || sign_in.wait(Duration::from_secs(60)));
+        std::thread::sleep(Duration::from_millis(200));
+        cancel.cancel();
+        let error = waiting
+            .join()
+            .expect("the wait ends")
+            .expect_err("cancelled");
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+        assert!(
+            TcpListener::bind(("127.0.0.1", port)).is_ok(),
+            "the port is free again"
+        );
     }
 }

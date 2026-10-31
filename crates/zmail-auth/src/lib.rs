@@ -289,6 +289,18 @@ impl OAuth2Client {
     /// Waits for the provider redirect on the loopback port and returns the
     /// authorization code after validating the echoed state.
     pub fn listen_for_redirect(&self, expected_state: &str, timeout: Duration) -> Result<String> {
+        self.listen_for_redirect_until(expected_state, timeout, || false)
+    }
+
+    /// [`Self::listen_for_redirect`], giving up (and freeing the port) as
+    /// soon as `cancelled` returns true, so a UI can stop waiting when the
+    /// user leaves the sign-in.
+    pub fn listen_for_redirect_until(
+        &self,
+        expected_state: &str,
+        timeout: Duration,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<String> {
         let listener = TcpListener::bind(("127.0.0.1", self.redirect_port))
             .with_context(|| format!("failed to bind the redirect port {}", self.redirect_port))?;
         listener
@@ -304,6 +316,9 @@ impl OAuth2Client {
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if cancelled() {
+                        bail!("the sign-in was cancelled");
+                    }
                     if std::time::Instant::now() > deadline {
                         bail!("timed out waiting for the OAuth2 redirect");
                     }
