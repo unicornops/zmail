@@ -5,6 +5,11 @@
 Accepted on October 31, 2026, with Rob's decisions recorded under
 "Decisions" at the end. Proposed the same day.
 
+Progress:
+
+- Phase 0: `zmail_security::terminal::sanitize` (and `sanitize_line` for
+  one-line fields) with its hostile corpus, `tests/terminal_corpus.rs`.
+
 ## Context
 
 Rob asked whether Zmail can gain a terminal UI (TUI) as an extra option,
