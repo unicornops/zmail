@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test               MESSAGE INDEX       Folder: INBOX  Conv 2 of 2
+  N @     11:10  Harbour Ferries      Ferry tickets for August
+          10:30  Ada Lovelace         Team dinner
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Reply to all recipients? (y/n, ^C cancels)
+Y Yes        ^C Cancel
+N No

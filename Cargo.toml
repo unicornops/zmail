@@ -104,6 +104,10 @@ rand = "0.8"
 # The terminal UI's drawing (ADR 0007), on its crossterm backend; no
 # optional widgets or macros.
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
+# The terminal UI's compose editor (ADR 0007, section 6): the ratatui
+# organisation's maintained successor to tui-textarea, on the same
+# crossterm backend; no search (regex) or serde.
+ratatui-textarea = { version = "0.9.4", default-features = false, features = ["crossterm"] }
 # The RNG traits (rand_core 0.10) that `pgp` (since rpgp/rpgp#573) and the
 # proton-srp fork take, used only where Zmail hands an RNG to either; already
 # in the tree through pgp.

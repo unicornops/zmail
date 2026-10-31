@@ -3,9 +3,10 @@
 //! A second frontend on the same encrypted store as the GUI, in the style
 //! of Pine and Alpine: a title bar, the screen, a status line and a
 //! command bar listing the keys that work, on every screen (Main Menu,
-//! Folder List, Message Index, Message Text). It reads and triages mail
-//! (delete, archive, save, flag, read, with undo); compose and accounts
-//! come later.
+//! Folder List, Message Index, Message Text, Compose). It reads, triages
+//! (delete, archive, save, flag, read, with undo) and writes mail (compose,
+//! reply, forward, drafts, attachments, send with undo-send, the Outbox);
+//! accounts come later.
 //!
 //! - **Local-first.** Screens read the store, which is read again every 5
 //!   seconds; sync writes to it in the background.
@@ -25,11 +26,14 @@
 
 mod app;
 mod clipboard;
+mod compose;
 mod data;
 mod links;
 mod message;
 mod notifier;
+mod outbox;
 mod pane;
+mod paths;
 mod terminal;
 mod text;
 mod triage;

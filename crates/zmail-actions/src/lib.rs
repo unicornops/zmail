@@ -108,6 +108,11 @@ pub enum MailEvent {
         /// The draft.
         draft_id: i64,
     },
+    /// A draft was deleted (the terminal's Cancel).
+    DraftDeleted {
+        /// The draft.
+        draft_id: i64,
+    },
     /// An outbox job was requeued for another delivery attempt.
     OutboxJobRetried {
         /// The job.
@@ -571,6 +576,18 @@ impl MailActions {
     ) -> Result<()> {
         self.store.remove_draft_attachment(attachment_id)?;
         events(MailEvent::DraftAttachmentsChanged { draft_id });
+        Ok(())
+    }
+
+    /// Deletes a draft the user gave up on, with its attachments. Fails
+    /// for a draft that is queued, sending or sent.
+    pub fn delete_draft(
+        &mut self,
+        draft_id: i64,
+        events: &mut impl FnMut(MailEvent),
+    ) -> Result<()> {
+        self.store.delete_draft(draft_id)?;
+        events(MailEvent::DraftDeleted { draft_id });
         Ok(())
     }
 

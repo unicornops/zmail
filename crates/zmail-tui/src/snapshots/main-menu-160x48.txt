@@ -2,9 +2,10 @@
 
 
                                                ?     HELP               -  Get help using Zmail
-                                               C     COMPOSE MESSAGE    -  Compose a message (not in the terminal yet)
+                                               C     COMPOSE MESSAGE    -  Compose and send a message
                                                I     MESSAGE INDEX      -  View messages in current folder
                                                L     FOLDER LIST        -  Select a folder to view
+                                               T     OUTBOX             -  Messages waiting to send, or that failed
                                                A     ADDRESS BOOK       -  Address book (not in the terminal yet)
                                                S     SETUP              -  Configure Zmail options
                                                Q     QUIT               -  Leave Zmail
@@ -43,6 +44,5 @@
 
 
 
-
-? Help              > [Select]          L FldrList          S Setup
-P PrevCmd           N NextCmd           I Index             Q Quit
+? Help              > [Select]          L FldrList          S Setup             T Outbox
+P PrevCmd           N NextCmd           I Index             C Compose           Q Quit

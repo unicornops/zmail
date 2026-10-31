@@ -28,8 +28,13 @@ pub enum PaneId {
     Setup,
     /// Help.
     Help,
-    /// The save prompt's folder list (`^T`).
+    /// The save prompt's folder list, or Compose's address book or file
+    /// browser (`^T`).
     Picker,
+    /// The postponed messages.
+    Postponed,
+    /// The Outbox.
+    Outbox,
 }
 
 /// A line a pane draws.

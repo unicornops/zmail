@@ -54,6 +54,29 @@ Progress:
   write-backs, so they work whichever process holds the sync lock (tested
   with a second process). Phase 2 is done. Not done: the command palette
   (`:`) and saving attachments, still to come from phase 1.
+- Phase 3: writing mail. Compose (`C` wherever it is free) is Pico's:
+  From when the account has several identities, To, Cc, Bcc, Attchmnt
+  and Subject, then the body in `ratatui-textarea` 0.9; `^X` send
+  (asked), `^O` postpone, `^C` cancel (deleting the draft, asked when it
+  changed, with the new `LocalStore::delete_draft`), `^K`/`^U` cut and
+  uncut, `^J` attach (also `^A`, which the bar shows on Windows), `^R`
+  read a file in, `^W` where is, `^T` the address history or a file
+  browser, `^G` help; Tab completes addresses from the address history
+  and file paths. `R` (with Alpine's "Reply to all recipients?") and `F`
+  start from `zmail_actions::reply`, the GUI's logic moved out of
+  `workspace.rs`, on a copy of the message filtered for the terminal.
+  Drafts autosave after `AUTOSAVE_DELAY`, as the GUI's do; `C` offers
+  "Continue postponed composition?". Send is
+  `SyncService::queue_draft_and_send_after` with the undo-send delay, `U`
+  taking it back on the status line; it works whichever process holds
+  the sync lock (tested with a second process). The Outbox (`T`, and
+  Local in the Folder List) lists queued, failed and refused messages
+  with retry and take-back. Bracketed paste goes into the focused field,
+  a multi-line paste into an address field becoming a comma list. Not
+  done: `In-Reply-To`/`References` and forwarding the original's
+  attachments (the GUI does neither: a draft has no field for them). The
+  live harness send test (`live_tui_send`: Compose, `^X`, the outbox,
+  SMTP, the next sync) runs in CI's quality job only.
 
 ## Context
 

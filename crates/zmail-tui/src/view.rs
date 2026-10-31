@@ -14,10 +14,12 @@ use ratatui::{
 };
 use zmail_core::{preferences::CopyClipboard, time::format_list_date};
 
+mod compose;
+
 use crate::{
     app::{App, MENU_ITEMS, Prompt, SETUP_ROWS, Screen, SetupRow},
     clipboard::{CopyTarget, copy_target},
-    data::FolderRow,
+    data::{FolderRow, LocalFolder},
     message::{Conversation, DocLine},
     pane::{DrawnPane, PaneId, PaneLine},
     text::{self, column_of, fit, fit_right, wrap},
@@ -160,7 +162,24 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         }
         Screen::Help => {
             let lines = help_lines(width);
+            // Compose's ^G opens on its section.
+            if let Some(topic) = app.help_topic.take()
+                && let Some(line) = lines.iter().position(|line| line.text().trim() == topic)
+            {
+                app.scroll.insert(PaneId::Help, line);
+            }
             draw_pane(app, frame, PaneId::Help, body, lines, None);
+        }
+        Screen::Compose => compose::draw_compose(app, frame, theme, body),
+        Screen::Postponed => {
+            let lines = compose::postponed_lines(app, theme, width);
+            let cursor = app.postponed_cursor + 2;
+            draw_pane(app, frame, PaneId::Postponed, body, lines, Some(cursor));
+        }
+        Screen::Outbox => {
+            let lines = compose::outbox_lines(app, theme, width);
+            let cursor = compose::outbox_cursor_line(app);
+            draw_pane(app, frame, PaneId::Outbox, body, lines, Some(cursor));
         }
     }
     if let Some(Prompt::Save(save)) = app.prompt.clone() {
@@ -318,6 +337,9 @@ fn draw_title(app: &App, frame: &mut Frame, theme: Theme, area: Rect) {
         Screen::Message => "MESSAGE TEXT",
         Screen::Setup => "SETUP",
         Screen::Help => "HELP",
+        Screen::Compose => "COMPOSE MESSAGE",
+        Screen::Postponed => "POSTPONED MESSAGES",
+        Screen::Outbox => "OUTBOX",
     };
     let detail = app.title_detail();
     let right = fit_right(
@@ -346,14 +368,24 @@ fn draw_title(app: &App, frame: &mut Frame, theme: Theme, area: Rect) {
 fn draw_status(app: &App, frame: &mut Frame, theme: Theme, area: Rect) {
     let width = usize::from(area.width);
     if let Some(prompt) = app.prompt_text() {
-        let shown = text::truncate(&prompt, width.saturating_sub(1), theme.ellipsis());
+        let field = matches!(
+            app.prompt,
+            Some(
+                Prompt::Text { .. }
+                    | Prompt::Save(SavePrompt { picker: None, .. })
+                    | Prompt::Path(_)
+            )
+        );
+        // A field shows its end, where the typing is.
+        let shown = if field {
+            text::truncate_start(&prompt, width.saturating_sub(1), theme.ellipsis())
+        } else {
+            text::truncate(&prompt, width.saturating_sub(1), theme.ellipsis())
+        };
         frame
             .buffer_mut()
             .set_stringn(area.x, area.y, &shown, width, theme.bold());
-        if matches!(
-            app.prompt,
-            Some(Prompt::Text { .. } | Prompt::Save(SavePrompt { picker: None, .. }))
-        ) {
+        if field {
             let x = text::width(&shown).min(width.saturating_sub(1));
             frame.set_cursor_position(Position::new(area.x + x as u16, area.y));
         }
@@ -458,6 +490,34 @@ fn folder_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
                 theme.bold().add_modifier(Modifier::UNDERLINED),
             )),
             FolderRow::Gap => PaneLine::default(),
+            FolderRow::Local(local) => {
+                let (name, counts) = match *local {
+                    LocalFolder::Postponed { count } => ("Postponed", format!("{count:>6}")),
+                    LocalFolder::Outbox { count, failed: 0 } => ("Outbox", format!("{count:>6}")),
+                    LocalFolder::Outbox { count, failed } => {
+                        ("Outbox", format!("{failed} failed  {count:>6}"))
+                    }
+                };
+                let counts_width = 16.min(width / 3);
+                let row = format!(
+                    "{}{}",
+                    fit(
+                        &format!("    {name}"),
+                        width - counts_width,
+                        theme.ellipsis()
+                    ),
+                    fit_right(&counts, counts_width, theme.ellipsis())
+                );
+                let style = if index == app.folder_cursor {
+                    theme.reversed()
+                } else {
+                    Style::new()
+                };
+                PaneLine {
+                    target: Some(index),
+                    ..PaneLine::new(Span::styled(row, style))
+                }
+            }
             FolderRow::Folder(folder) => {
                 let counts = if folder.unread > 0 {
                     format!("{} new  {:>6}", folder.unread, folder.total)
@@ -585,6 +645,12 @@ fn draw_message(app: &mut App, frame: &mut Frame, theme: Theme, area: Rect) {
         state.selected_link,
         state.find.as_deref(),
     );
+    state.drawn_starts = state
+        .conversation
+        .message_starts
+        .iter()
+        .filter_map(|(id, doc_line)| Some((*id, *starts.get(*doc_line)?)))
+        .collect();
     // A single message opened from the index starts at its headers.
     if !state.focused {
         state.focused = true;
@@ -870,6 +936,33 @@ Tab and Shift-Tab move between them, and Enter (or a click) shows the real \
 address before anything opens it. Remote images and HTML formatting are not \
 shown in the terminal.
 
+Writing mail
+  C          compose, from anywhere it is free. When messages are postponed, \
+Zmail asks first whether to continue one.
+  R          reply to the message (in Message Text, the one you are reading); \
+when others got it too, Zmail asks whether to reply to all
+  F          forward the message, with its text
+  T          the Outbox, from the Main Menu (or Outbox in the Folder List): \
+messages waiting to send or that couldn't be sent. R sends a failed one \
+again; D takes back one that hasn't started sending.
+  Compose works like Pico. Up and Down, Enter and Tab move between the \
+fields; Tab in To, Cc and Bcc completes an address you have used before, \
+again to go through the matches.
+  ^X         send (Zmail asks first). The message waits for the undo-send \
+delay set in the Zmail window; until then U takes it back and opens it again
+  ^O         postpone: keep the draft for later
+  ^C         cancel: deletes the draft, after asking if you changed it
+  ^K ^U      cut the line (the field in a header, an attachment on \
+Attchmnt), and put back what was cut
+  ^J or ^A   attach a file: type its path, with Tab completion, or ^T to \
+browse
+  ^R         insert a file's text into the message
+  ^W         find text in the message
+  ^T         your addresses on To, Cc and Bcc; the file browser on Attchmnt
+  ^G         this help
+  Drafts are saved in the encrypted mail store as you write, and sent by \
+whichever Zmail syncs.
+
 Copy and paste
   Drag with the mouse to select text in one pane; it is copied when you let \
 go. Double-click selects a word, triple-click a line, and dragging past the \
@@ -880,8 +973,9 @@ most terminals (tmux needs set-clipboard on). On a Mac outside SSH they go \
 through pbcopy. Setup (S on the Main Menu) can set a copy command instead, such \
 as wl-copy or xclip -selection clipboard, or turn the mouse off.
   Hold Shift while dragging to use the terminal's own selection.
-  Pasting works in text fields such as WhereIs; anywhere else a paste is \
-ignored, so pasted text can never run commands.
+  Pasting works in text fields such as WhereIs and in Compose, where it \
+goes in as text (a list pasted into To splits into addresses); anywhere \
+else a paste is ignored, so pasted text can never run commands.
 
 Sync
   One Zmail syncs your mail at a time. When another Zmail window already \

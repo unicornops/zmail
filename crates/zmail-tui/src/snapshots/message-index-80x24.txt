@@ -20,5 +20,5 @@
 
 
                   [Folder "INBOX" opened with 4 conversations]
-? Help       > [ViewMsg]  N NextMsg    Spc NextPage U Undo       S Save
-< FldrList   P PrevMsg    - PrevPage   D Delete     E Archive    O OTHER CMDS
+? Help       > [ViewMsg]  N NextMsg    Spc NextPage U Undo       F Forward
+< FldrList   P PrevMsg    - PrevPage   D Delete     R Reply      O OTHER CMDS

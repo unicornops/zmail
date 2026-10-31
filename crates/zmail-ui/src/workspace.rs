@@ -2745,6 +2745,7 @@ impl WorkspaceView {
             | MailEvent::ThreadReadChanged { .. }
             | MailEvent::DraftCreated { .. }
             | MailEvent::DraftAttachmentsChanged { .. }
+            | MailEvent::DraftDeleted { .. }
             | MailEvent::OutboxJobRetried { .. }
             | MailEvent::SendCancelled { .. } => {
                 // A change to many threads emits an event for each; the

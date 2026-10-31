@@ -56,6 +56,26 @@ pub fn fit_right(text: &str, cells: usize, ellipsis: &str) -> String {
     out
 }
 
+/// `text` cut to at most `max` cells by dropping its start, with
+/// `ellipsis` in front when anything was dropped: a text field longer than
+/// the screen shows its end, where the typing is.
+pub fn truncate_start(text: &str, max: usize, ellipsis: &str) -> String {
+    if width(text) <= max {
+        return text.to_owned();
+    }
+    let room = max.saturating_sub(width(ellipsis));
+    let mut used = 0;
+    let mut start = text.len();
+    for (index, ch) in text.char_indices().rev() {
+        used += char_width(ch);
+        if used > room {
+            break;
+        }
+        start = index;
+    }
+    format!("{ellipsis}{}", &text[start..])
+}
+
 /// One row of wrapped text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WrappedRow {
@@ -178,7 +198,7 @@ pub fn column_of(text: &str, byte: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{WrappedRow, cell_range, fit, fit_right, truncate, width, wrap};
+    use super::{WrappedRow, cell_range, fit, fit_right, truncate, truncate_start, width, wrap};
 
     #[test]
     fn widths_count_wide_characters_twice() {
@@ -198,6 +218,9 @@ mod tests {
         assert_eq!(fit("ab", 4, "…"), "ab  ");
         assert_eq!(fit("日本語", 5, "…"), "日本…");
         assert_eq!(fit_right("10:42", 9, "…"), "    10:42");
+        assert_eq!(truncate_start("File: /a/long/path", 10, "…"), "…long/path");
+        assert_eq!(truncate_start("short", 10, "…"), "short");
+        assert_eq!(truncate_start("x日本語", 5, "…"), "…本語");
     }
 
     fn rows(rows: &[(&str, Option<&'static str>, usize)]) -> Vec<WrappedRow> {

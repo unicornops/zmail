@@ -30,9 +30,11 @@ use zmail_store::LocalStore;
 use zmail_sync::{SYNCS_ELSEWHERE, SyncService};
 
 use crate::{
-    data::{Folder, FolderRow, IndexEntry, folder_rows, index_entries},
+    compose::{Compose, Confirm, PathPrompt, PendingSend, Pico},
+    data::{Folder, FolderRow, IndexEntry, LocalFolder, folder_rows, index_entries},
     links::misleading_host,
     message::{self, Conversation},
+    outbox::OutboxRow,
     pane::{DrawnPane, PaneId, Point, Selection, logical_line, selected_text, word_at},
     text,
     triage::{SavePrompt, Triage},
@@ -118,6 +120,12 @@ pub enum Screen {
     Setup,
     /// Help.
     Help,
+    /// Compose, Pico-style.
+    Compose,
+    /// The postponed messages.
+    Postponed,
+    /// The Outbox.
+    Outbox,
 }
 
 /// A command: what a key or a click on the command bar does.
@@ -151,8 +159,22 @@ pub enum Cmd {
     Index,
     /// To Setup.
     Setup,
-    /// Compose (a later phase).
+    /// Compose a message (or continue a postponed one).
     Compose,
+    /// Reply (asking whether to reply to all).
+    Reply,
+    /// Forward.
+    Forward,
+    /// To the Outbox.
+    Outbox,
+    /// Send a failed message again (the Outbox).
+    Retry,
+    /// Take a queued message back (the Outbox).
+    CancelSend,
+    /// Delete a postponed message.
+    DeleteDraft,
+    /// A Pico command on the Compose screen.
+    Pico(Pico),
     /// The address book (a later phase).
     AddressBook,
     /// Quit, after asking.
@@ -202,7 +224,7 @@ pub struct CommandEntry {
     pub cmd: Cmd,
 }
 
-const fn entry(key: &'static str, label: &'static str, cmd: Cmd) -> CommandEntry {
+pub(crate) const fn entry(key: &'static str, label: &'static str, cmd: Cmd) -> CommandEntry {
     CommandEntry { key, label, cmd }
 }
 
@@ -224,6 +246,21 @@ pub enum Prompt {
     Apply,
     /// The folder to save to.
     Save(SavePrompt),
+    /// "Reply to all recipients?"
+    ReplyAll {
+        /// The conversation.
+        thread_id: i64,
+        /// Its account.
+        account_id: i64,
+        /// The message replied to, or the newest.
+        message_id: Option<i64>,
+    },
+    /// "Continue postponed composition?"
+    Postponed,
+    /// A question about the draft being written.
+    Confirm(Confirm),
+    /// A file to attach or read in, with Tab completion.
+    Path(PathPrompt),
 }
 
 /// What a text field on the status line is for.
@@ -237,6 +274,8 @@ pub enum TextPurpose {
     FindFolder,
     /// Setup's copy command.
     CopyCommand,
+    /// Finding text in the body of a message being written.
+    FindInBody,
 }
 
 impl TextPurpose {
@@ -247,6 +286,7 @@ impl TextPurpose {
             Self::FindInMessage => "Find in message",
             Self::FindFolder => "Folder name",
             Self::CopyCommand => "Copy command (empty for the default)",
+            Self::FindInBody => "Where is",
         }
     }
 }
@@ -282,12 +322,12 @@ pub const SETUP_ROWS: [SetupRow; 7] = [
 ];
 
 /// The Main Menu's items: key, name, description, command.
-pub const MENU_ITEMS: [(&str, &str, &str, Cmd); 7] = [
+pub const MENU_ITEMS: [(&str, &str, &str, Cmd); 8] = [
     ("?", "HELP", "Get help using Zmail", Cmd::Help),
     (
         "C",
         "COMPOSE MESSAGE",
-        "Compose a message (not in the terminal yet)",
+        "Compose and send a message",
         Cmd::Compose,
     ),
     (
@@ -301,6 +341,12 @@ pub const MENU_ITEMS: [(&str, &str, &str, Cmd); 7] = [
         "FOLDER LIST",
         "Select a folder to view",
         Cmd::FolderList,
+    ),
+    (
+        "T",
+        "OUTBOX",
+        "Messages waiting to send, or that failed",
+        Cmd::Outbox,
     ),
     (
         "A",
@@ -342,6 +388,9 @@ pub struct MessageState {
     pub find: Option<String>,
     /// The keyboard selection's caret, while the mark is set.
     pub caret: Option<Point>,
+    /// Where each message starts on screen, as last drawn: a reply goes to
+    /// the one being read.
+    pub drawn_starts: Vec<(i64, usize)>,
 }
 
 /// The mouse button's state.
@@ -416,6 +465,28 @@ pub struct App {
     pub(crate) selected: BTreeSet<i64>,
     /// The conversation open in Message Text and when it is marked read.
     pub(crate) mark_read: Option<(i64, Instant)>,
+
+    /// The message being written.
+    pub(crate) compose: Option<Compose>,
+    /// Where Compose returns to.
+    pub(crate) compose_from: Screen,
+    /// Where the Outbox and the postponed messages return to.
+    pub(crate) list_from: Screen,
+    /// The message just sent, while `U` can take it back.
+    pub(crate) pending_send: Option<PendingSend>,
+    /// The section Help opens on.
+    pub(crate) help_topic: Option<&'static str>,
+    /// The postponed messages listed.
+    pub(crate) postponed: Vec<zmail_core::DraftSummary>,
+    pub(crate) postponed_cursor: usize,
+    /// The Outbox's rows.
+    pub(crate) outbox: Vec<OutboxRow>,
+    pub(crate) outbox_cursor: usize,
+    /// The folder the file browser last showed.
+    pub(crate) browse_folder: Option<std::path::PathBuf>,
+    /// The Compose screen's fields on screen, for clicks: the field, and
+    /// the attachment for an Attchmnt row.
+    pub(crate) compose_targets: Vec<(ratatui::layout::Rect, crate::compose::Field, Option<usize>)>,
 }
 
 /// News from work running elsewhere.
@@ -500,6 +571,17 @@ impl App {
             actions,
             selected: BTreeSet::new(),
             mark_read: None,
+            compose: None,
+            compose_from: Screen::MainMenu,
+            list_from: Screen::MainMenu,
+            pending_send: None,
+            help_topic: None,
+            postponed: Vec::new(),
+            postponed_cursor: 0,
+            outbox: Vec::new(),
+            outbox_cursor: 0,
+            browse_folder: None,
+            compose_targets: Vec::new(),
         };
         app.load_folders();
         app.open_default_folder();
@@ -706,10 +788,11 @@ impl App {
                     if let Some(FolderRow::Folder(folder)) = self.folders.get(position) {
                         self.folder = Some(folder.clone());
                     }
-                    if !matches!(
-                        self.folders.get(self.folder_cursor),
-                        Some(FolderRow::Folder(_))
-                    ) {
+                    if !self
+                        .folders
+                        .get(self.folder_cursor)
+                        .is_some_and(FolderRow::selectable)
+                    {
                         self.folder_cursor = position;
                     }
                 }
@@ -748,6 +831,11 @@ impl App {
         }
         // Read the preview again too: its conversation may have grown.
         self.preview = None;
+        match self.screen {
+            Screen::Outbox => self.load_outbox(),
+            Screen::Postponed => self.load_postponed(),
+            _ => {}
+        }
     }
 
     fn load_conversation(&mut self, thread_id: i64, account_id: i64) -> Option<Conversation> {
@@ -872,6 +960,8 @@ impl App {
             self.refresh();
         }
         self.mark_read_if_due();
+        self.autosave_if_due();
+        self.expire_pending_send();
         self.drag_past_edge();
     }
 
@@ -922,6 +1012,11 @@ impl App {
                 save.input.push_str(&sanitize_line(pasted));
                 save.edited();
             }
+            Some(Prompt::Path(path)) => {
+                path.field.input.push_str(&sanitize_line(pasted));
+                path.field.edited();
+            }
+            None if self.screen == Screen::Compose => self.compose_paste(pasted),
             _ => self.status = Some("Pasting works in text fields only".to_owned()),
         }
     }
@@ -935,6 +1030,11 @@ impl App {
         self.status = None;
         if control && key.code == KeyCode::Char('l') {
             self.effects.push(Effect::Redraw);
+            return;
+        }
+        // Compose takes every key: letters are text there.
+        if self.screen == Screen::Compose {
+            self.compose_key(key);
             return;
         }
         // The keyboard selection in Message Text takes the arrow keys.
@@ -985,11 +1085,19 @@ impl App {
                 'o' => Cmd::OtherCmds,
                 'y' => Cmd::Copy,
                 's' if self.screen == Screen::MainMenu => Cmd::Setup,
-                'c' if self.screen == Screen::MainMenu => Cmd::Compose,
                 'a' if self.screen == Screen::MainMenu => Cmd::AddressBook,
+                't' if self.screen == Screen::MainMenu => Cmd::Outbox,
+                // Compose wherever C is free.
+                'c' if !matches!(self.screen, Screen::Setup | Screen::Help) => Cmd::Compose,
+                'r' if triage => Cmd::Reply,
+                'f' if triage => Cmd::Forward,
+                'r' if self.screen == Screen::Outbox => Cmd::Retry,
+                'd' if self.screen == Screen::Outbox => Cmd::CancelSend,
+                'd' if self.screen == Screen::Postponed => Cmd::DeleteDraft,
+                // Undo, and Undo Send while its delay lasts.
+                'u' | 'z' if triage || self.can_undo_send() => Cmd::Undo,
                 // Triage, in the Message Index and Message Text.
                 'd' if triage => Cmd::Delete,
-                'u' | 'z' if triage => Cmd::Undo,
                 'e' if triage => Cmd::Archive,
                 's' if triage => Cmd::Save,
                 '*' if triage => Cmd::Flag,
@@ -1059,7 +1167,35 @@ impl App {
                     entry("Esc", "Cancel", Back),
                 ];
             }
+            Some(Prompt::ReplyAll { .. } | Prompt::Postponed) => {
+                return vec![
+                    entry("Y", "Yes", Select),
+                    entry("N", "No", Back),
+                    entry("^C", "Cancel", Pico(crate::compose::Pico::Cancel)),
+                ];
+            }
+            Some(Prompt::Confirm(_)) => {
+                return vec![entry("Y", "Yes", Select), entry("N", "No", Back)];
+            }
+            Some(Prompt::Path(ref path)) => {
+                return vec![
+                    entry(
+                        "Ret",
+                        match path.purpose {
+                            crate::compose::PathPurpose::Attach => "Attach",
+                            crate::compose::PathPurpose::ReadFile => "Insert",
+                        },
+                        Select,
+                    ),
+                    entry("Tab", "Complete", Complete),
+                    entry("^T", "Browse", Pico(crate::compose::Pico::Browse)),
+                    entry("Esc", "Cancel", Back),
+                ];
+            }
             None => {}
+        }
+        if self.screen == Screen::Compose {
+            return self.compose_commands();
         }
         let current = self.index.entries.get(self.index.cursor);
         let flag = if current.is_some_and(|entry| entry.flagged) {
@@ -1081,6 +1217,8 @@ impl App {
                 entry("L", "FldrList", FolderList),
                 entry("I", "Index", Index),
                 entry("S", "Setup", Setup),
+                entry("C", "Compose", Compose),
+                entry("T", "Outbox", Outbox),
                 entry("Q", "Quit", Quit),
             ],
             Screen::FolderList => vec![
@@ -1094,6 +1232,7 @@ impl App {
                 entry("W", "WhereIs", WhereIs),
                 entry("M", "Main Menu", MainMenu),
                 entry("I", "Index", Index),
+                entry("C", "Compose", Compose),
                 entry("Q", "Quit", Quit),
             ],
             Screen::Index => vec![
@@ -1106,6 +1245,8 @@ impl App {
                 entry("Spc", "NextPage", PageDown),
                 entry("D", "Delete", Delete),
                 entry("U", "Undo", Undo),
+                entry("R", "Reply", Reply),
+                entry("F", "Forward", Forward),
                 entry("E", "Archive", Archive),
                 entry("S", "Save", Save),
                 entry("W", "WhereIs", WhereIs),
@@ -1123,6 +1264,7 @@ impl App {
                     Threads,
                 ),
                 entry("V", "Preview", Preview),
+                entry("C", "Compose", Compose),
                 entry("M", "Main Menu", MainMenu),
                 entry("Y", "Copy", Copy),
                 entry("Q", "Quit", Quit),
@@ -1136,6 +1278,8 @@ impl App {
                 entry("Spc", "NextPage", PageDown),
                 entry("D", "Delete", Delete),
                 entry("U", "Undo", Undo),
+                entry("R", "Reply", Reply),
+                entry("F", "Forward", Forward),
                 entry("E", "Archive", Archive),
                 entry("S", "Save", Save),
                 entry("*", flag, Flag),
@@ -1145,6 +1289,7 @@ impl App {
                 entry("Ret", "OpenLink", Select),
                 entry("^Spc", "Mark", Mark),
                 entry("Y", "Copy", Copy),
+                entry("C", "Compose", Compose),
                 entry("M", "Main Menu", MainMenu),
                 entry("L", "FldrList", FolderList),
                 entry("Q", "Quit", Quit),
@@ -1164,6 +1309,30 @@ impl App {
                 entry("M", "Main Menu", MainMenu),
                 entry("Q", "Quit", Quit),
             ],
+            Screen::Postponed => vec![
+                entry("?", "Help", Help),
+                entry("<", "Back", Back),
+                entry(">", "[Continue]", Select),
+                entry("P", "PrevMsg", Prev),
+                entry("N", "NextMsg", Next),
+                entry("D", "Delete", DeleteDraft),
+                entry("M", "Main Menu", MainMenu),
+                entry("Q", "Quit", Quit),
+            ],
+            Screen::Outbox => vec![
+                entry("?", "Help", Help),
+                entry("<", "Back", Back),
+                entry(">", "[Details]", Select),
+                entry("P", "PrevMsg", Prev),
+                entry("N", "NextMsg", Next),
+                entry("R", "Retry", Retry),
+                entry("D", "TakeBack", CancelSend),
+                entry("C", "Compose", Compose),
+                entry("M", "Main Menu", MainMenu),
+                entry("Q", "Quit", Quit),
+            ],
+            // Answered above.
+            Screen::Compose => Vec::new(),
         }
     }
 
@@ -1218,13 +1387,14 @@ impl App {
                 }
             }
             Cmd::Setup => self.goto(Screen::Setup),
-            Cmd::Compose => {
-                self.status = Some(
-                    "Compose isn't in the terminal yet: use the Zmail window, or zmail-app \
-                     compose"
-                        .to_owned(),
-                );
-            }
+            Cmd::Compose => self.compose(),
+            Cmd::Reply => self.reply(),
+            Cmd::Forward => self.forward(),
+            Cmd::Outbox => self.open_outbox(),
+            Cmd::Retry => self.retry_outbox(),
+            Cmd::CancelSend => self.cancel_outbox(),
+            Cmd::DeleteDraft => self.delete_postponed(),
+            Cmd::Pico(pico) => self.pico(pico),
             Cmd::AddressBook => {
                 self.status = Some("The address book isn't in the terminal yet".to_owned());
             }
@@ -1263,7 +1433,7 @@ impl App {
         }
     }
 
-    fn goto(&mut self, screen: Screen) {
+    pub(crate) fn goto(&mut self, screen: Screen) {
         if self.screen != screen {
             self.selection = None;
             self.command_page = 0;
@@ -1278,6 +1448,12 @@ impl App {
             }
             Screen::Help => {
                 self.scroll.insert(PaneId::Help, 0);
+            }
+            Screen::Outbox => {
+                self.reveal.insert(PaneId::Outbox);
+            }
+            Screen::Postponed => {
+                self.reveal.insert(PaneId::Postponed);
             }
             _ => {}
         }
@@ -1300,6 +1476,17 @@ impl App {
                 self.goto(Screen::Index);
             }
             Screen::Help => self.goto(self.help_from),
+            Screen::Postponed | Screen::Outbox => {
+                let back = match self.list_from {
+                    Screen::Postponed | Screen::Outbox | Screen::Help | Screen::Compose => {
+                        Screen::MainMenu
+                    }
+                    screen => screen,
+                };
+                self.goto(back);
+            }
+            // Compose is left with ^O, ^C or ^X.
+            Screen::Compose => {}
         }
     }
 
@@ -1318,7 +1505,9 @@ impl App {
                 }
             }
             Screen::Setup => self.change_setting(self.setup_cursor),
-            Screen::Help => {}
+            Screen::Postponed => self.continue_postponed(),
+            Screen::Outbox => self.outbox_details(),
+            Screen::Help | Screen::Compose => {}
         }
     }
 
@@ -1335,7 +1524,7 @@ impl App {
                         .folders
                         .iter()
                         .enumerate()
-                        .filter(|(_, row)| matches!(row, FolderRow::Folder(_)))
+                        .filter(|(_, row)| row.selectable())
                         .map(|(index, _)| index);
                     let end = if by < 0 { folders.min() } else { folders.max() };
                     if let Some(end) = end {
@@ -1352,7 +1541,7 @@ impl App {
                         break;
                     }
                     cursor = next;
-                    if matches!(self.folders.get(cursor), Some(FolderRow::Folder(_))) {
+                    if self.folders.get(cursor).is_some_and(FolderRow::selectable) {
                         self.folder_cursor = cursor;
                         break;
                     }
@@ -1378,6 +1567,15 @@ impl App {
             }
             Screen::Setup => self.setup_cursor = offset(self.setup_cursor, by, SETUP_ROWS.len()),
             Screen::Help => self.scroll_pane(PaneId::Help, by),
+            Screen::Postponed => {
+                self.postponed_cursor = offset(self.postponed_cursor, by, self.postponed.len());
+                self.reveal.insert(PaneId::Postponed);
+            }
+            Screen::Outbox => {
+                self.outbox_cursor = offset(self.outbox_cursor, by, self.outbox.len());
+                self.reveal.insert(PaneId::Outbox);
+            }
+            Screen::Compose => {}
         }
     }
 
@@ -1416,6 +1614,13 @@ impl App {
     }
 
     fn open_folder(&mut self, position: usize) {
+        if let Some(FolderRow::Local(local)) = self.folders.get(position) {
+            self.folder_cursor = position;
+            return match local {
+                LocalFolder::Postponed { .. } => self.open_postponed(),
+                LocalFolder::Outbox { .. } => self.open_outbox(),
+            };
+        }
         let Some(FolderRow::Folder(folder)) = self.folders.get(position).cloned() else {
             return;
         };
@@ -1455,6 +1660,7 @@ impl App {
             selected_link: None,
             find: None,
             caret: None,
+            drawn_starts: Vec::new(),
         });
         self.scroll.insert(PaneId::Message, 0);
         self.goto(Screen::Message);
@@ -1588,7 +1794,13 @@ impl App {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match prompt {
             Prompt::Quit => match key.code {
-                KeyCode::Char('y' | 'Y') => self.quit = true,
+                KeyCode::Char('y' | 'Y') => {
+                    // A message being written keeps its last keystrokes.
+                    if let Err(error) = self.save_compose() {
+                        self.report(error);
+                    }
+                    self.quit = true;
+                }
                 _ => {
                     self.prompt = None;
                     self.status = None;
@@ -1637,6 +1849,50 @@ impl App {
                 self.triage_threads(command, thread_ids);
             }
             Prompt::Save(save) => self.save_key(save, key),
+            Prompt::Path(path) => self.path_key(path, key),
+            Prompt::ReplyAll {
+                thread_id,
+                account_id,
+                message_id,
+            } => {
+                self.prompt = None;
+                match key.code {
+                    KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                        self.start_reply(thread_id, account_id, message_id, true);
+                    }
+                    KeyCode::Char('n' | 'N') => {
+                        self.start_reply(thread_id, account_id, message_id, false);
+                    }
+                    _ => self.status = Some("Reply cancelled".to_owned()),
+                }
+            }
+            Prompt::Postponed => {
+                self.prompt = None;
+                match key.code {
+                    KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                        let drafts = self.postponed_drafts();
+                        match drafts.as_slice() {
+                            [only] => {
+                                self.open_compose(only.id, false, crate::compose::Field::Body)
+                            }
+                            _ => self.open_postponed(),
+                        }
+                    }
+                    KeyCode::Char('n' | 'N') => self.new_message(),
+                    _ => {}
+                }
+            }
+            Prompt::Confirm(confirm) => {
+                self.prompt = None;
+                let yes = matches!(key.code, KeyCode::Char('y' | 'Y'));
+                match confirm {
+                    Confirm::Send if yes => self.send(),
+                    Confirm::Cancel if yes => self.abandon(),
+                    Confirm::DeleteDraft(draft_id) if yes => self.delete_draft(draft_id),
+                    Confirm::Send => self.status = Some("Not sent".to_owned()),
+                    Confirm::Cancel | Confirm::DeleteDraft(_) => {}
+                }
+            }
             Prompt::Text { purpose, mut input } => {
                 match key.code {
                     KeyCode::Esc => return self.cancel_text(purpose),
@@ -1700,6 +1956,14 @@ impl App {
             TextPurpose::CopyCommand => {
                 self.prefs.copy_command = (!query.is_empty()).then_some(query);
                 self.save_preferences();
+            }
+            TextPurpose::FindInBody => {
+                if let Some(compose) = self.compose.as_mut()
+                    && !query.is_empty()
+                    && !compose.find(&query)
+                {
+                    self.status = Some(format!("\"{query}\" isn't in the text"));
+                }
             }
         }
     }
@@ -1909,7 +2173,13 @@ impl App {
             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind
                 && let Some(cmd) = self.command_at(mouse.column, mouse.row)
             {
-                let field = matches!(self.prompt, Some(Prompt::Text { .. } | Prompt::Save(_)));
+                if let Cmd::Pico(pico) = cmd {
+                    return self.prompt_key(pico.key());
+                }
+                let field = matches!(
+                    self.prompt,
+                    Some(Prompt::Text { .. } | Prompt::Save(_) | Prompt::Path(_))
+                );
                 let answer = match cmd {
                     Cmd::Select if field => KeyCode::Enter,
                     Cmd::Select => KeyCode::Char('y'),
@@ -1935,6 +2205,9 @@ impl App {
             return;
         }
         let (x, y) = (mouse.column, mouse.row);
+        if self.screen == Screen::Compose {
+            return self.compose_mouse(mouse);
+        }
         self.mouse.position = (x, y);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => self.mouse_down(x, y),
@@ -2151,6 +2424,18 @@ impl App {
                     self.change_setting(row);
                 }
             }
+            PaneId::Postponed => {
+                if let Some(row) = target {
+                    self.postponed_cursor = row;
+                    self.continue_postponed();
+                }
+            }
+            PaneId::Outbox => {
+                if let Some(row) = target {
+                    self.outbox_cursor = row;
+                    self.outbox_details();
+                }
+            }
             PaneId::Help | PaneId::Picker => {}
         }
     }
@@ -2173,6 +2458,7 @@ impl App {
                 self.setup_cursor = offset(self.setup_cursor, direction, SETUP_ROWS.len())
             }
             PaneId::Message | PaneId::Preview | PaneId::Help => self.scroll_pane(id, by),
+            PaneId::Postponed | PaneId::Outbox => self.step(direction),
             PaneId::Picker => {}
         }
     }
@@ -2197,6 +2483,16 @@ impl App {
                 count_noun(self.selected.len(), "conversation", "conversations")
             ),
             Prompt::Save(save) => save.label(),
+            Prompt::ReplyAll { .. } => "Reply to all recipients? (y/n, ^C cancels)".to_owned(),
+            Prompt::Postponed => "Continue postponed composition? (y/n, ^C cancels)".to_owned(),
+            Prompt::Confirm(Confirm::Send) => "Send message? (y/n)".to_owned(),
+            Prompt::Confirm(Confirm::Cancel) => {
+                "Cancel message? y deletes it, n keeps writing (^O postpones it)".to_owned()
+            }
+            Prompt::Confirm(Confirm::DeleteDraft(_)) => {
+                "Delete this postponed message? (y/n)".to_owned()
+            }
+            Prompt::Path(path) => path.label(),
         })
     }
 

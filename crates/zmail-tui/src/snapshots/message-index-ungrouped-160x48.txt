@@ -44,5 +44,5 @@
                                                                                │
                                                                                │
                                                                    [Listing single messages]
-? Help              > [ViewMsg]         N NextMsg           Spc NextPage        U Undo              S Save              * Unflag            ; Select
-< FldrList          P PrevMsg           - PrevPage          D Delete            E Archive           W WhereIs           K MarkRead          O OTHER CMDS
+? Help              > [ViewMsg]         N NextMsg           Spc NextPage        U Undo              F Forward           S Save              * Unflag
+< FldrList          P PrevMsg           - PrevPage          D Delete            R Reply             E Archive           W WhereIs           O OTHER CMDS
