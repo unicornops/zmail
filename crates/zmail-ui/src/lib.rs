@@ -15,7 +15,7 @@
 //! | `compose` | `ComposeView`: the draft editor; `ComposeWindow`, one window per draft; `RecipientField` chips |
 //! | `account_setup` | `AccountSetupView`: first-run onboarding and the add-account flow, with autodiscovery; `AddAccountWindow` |
 //! | `google_oauth` | the bring-your-own Google OAuth client guide's steps and checks, and the expired sign-in advice |
-//! | `mail_actions` | `MailActions`: store writes, `MailEvent`s and undo |
+//! | `mail_actions` | `MailActions`: the GPUI entity over `zmail-actions` (store writes, `MailEvent`s and undo) |
 //! | `attachments` | opening and saving received attachments (Open, Save As, Save All) |
 //! | `drag` | `DraggedThreads`: conversations dragged from the list onto sidebar folders |
 //! | `move_picker` | `MovePicker`: the searchable Move to… folder picker |

@@ -10471,6 +10471,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zmail-actions"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "zmail-core",
+ "zmail-store",
+]
+
+[[package]]
 name = "zmail-app"
 version = "0.24.1"
 dependencies = [
@@ -10779,6 +10788,7 @@ dependencies = [
  "unicode-segmentation",
  "url",
  "windows-registry 0.100.0",
+ "zmail-actions",
  "zmail-auth",
  "zmail-autodiscover",
  "zmail-core",
