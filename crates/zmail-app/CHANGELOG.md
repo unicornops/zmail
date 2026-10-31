@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.0](https://github.com/unicornops/zmail/compare/v0.25.0...v0.26.0) (2026-10-31)
+
+
+### Features
+
+* **tui:** hand the message text to an external editor, opt-in ([#349](https://github.com/unicornops/zmail/issues/349)) ([d437364](https://github.com/unicornops/zmail/commit/d437364935f612ae332ac192c926ce829a9a2e57))
+* **tui:** write mail in the terminal ([#348](https://github.com/unicornops/zmail/issues/348)) ([3c067ad](https://github.com/unicornops/zmail/commit/3c067adc59d9bbb5d745965c630c1a334d267e68))
+
 ## [0.25.0](https://github.com/unicornops/zmail/compare/v0.24.1...v0.25.0) (2026-10-31)
 
 
