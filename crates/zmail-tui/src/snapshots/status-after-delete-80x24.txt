@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test               MESSAGE INDEX       Folder: INBOX  Conv 1 of 3
+  N   Yesterday  Harbour News         Harbour newsletter, issue 42
+    @       Mon  山田 太郎            東京オフィスの会議 📅 next week
+         25 Sep  Billing              Invoice fdp.exe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                     [Conversation moved to Trash. U Undo]
+? Help       > [ViewMsg]  N NextMsg    Spc NextPage U Undo       S Save
+< FldrList   P PrevMsg    - PrevPage   D Delete     E Archive    O OTHER CMDS

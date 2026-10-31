@@ -30,7 +30,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - Tagged releases also attach a Linux screenshot captured from the live mail harness by the Release Please workflow chain
 - pull requests that change the UI get a `ui-screenshots` CI artefact: every main UI state in light and dark plus narrow and wide windows, captured from seeded fixture data (see `AGENTS.md`)
 - release archives ship platform binaries plus a Linux `.deb`, a macOS DMG (Developer ID signed and notarized when the org-wide Apple credentials are present), and a Windows MSI installer; Windows code signing remains opt-in pending work
-- a terminal UI for reading mail, `zmail-app tui` ([ADR 0007](./docs/adr/0007-terminal-ui.md); see "Terminal UI" below): Pine/Alpine-style screens on the same encrypted store, every string from mail filtered for escape sequences before it reaches the terminal; triage, compose and accounts come in later phases
+- a terminal UI for reading and triaging mail, `zmail-app tui` ([ADR 0007](./docs/adr/0007-terminal-ui.md); see "Terminal UI" below): Pine/Alpine-style screens on the same encrypted store, every string from mail filtered for escape sequences before it reaches the terminal; delete, archive, save to a folder, flag and mark read with undo, sharing the desktop app's mail actions; compose and accounts come in later phases
 - screen-reader roles, names and announcements through AccessKit (VoiceOver, UI Automation, AT-SPI), Windows contrast themes and macOS Increase Contrast, reduced motion, text size up to 200% and 24px pointer targets; not yet checked with a real screen reader (see [`docs/phase5-hardening.md`](./docs/phase5-hardening.md#accessibility))
 - Phase 5 hardening and release policy documentation
 
@@ -145,7 +145,7 @@ The desktop shell no longer creates demo accounts from inside the UI. Configure 
 
 ### Terminal UI
 
-Read mail in a terminal, on the same store as the desktop app ([ADR 0007](./docs/adr/0007-terminal-ui.md)):
+Read and triage mail in a terminal, on the same store as the desktop app ([ADR 0007](./docs/adr/0007-terminal-ui.md)):
 
 ```bash
 cargo run -p zmail-app -- tui
@@ -171,7 +171,22 @@ The screens work like Pine and Alpine: a title bar, the screen, a status line, a
 | `S` | Setup (from the Main Menu) |
 | `Q` | quit, after asking |
 
-The mouse works too: a click opens what it is on, the wheel scrolls, and the command bar's entries can be clicked.
+**Triage** works in the Message Index on the message under the cursor and in Message Text on the open one. Each command acts on the whole conversation, as in the desktop app (also when the index lists single messages), and the status line says what it did with its undo key ("Conversation moved to Trash. U Undo").
+
+| Key | Does |
+| --- | --- |
+| `D` | delete: to the Trash at once (for good, with no undo, when the account has no Trash); in Message Text, the next message opens |
+| `E` | archive |
+| `S` | save to a folder of the same account: Tab completes the name and then goes through the matches, `Ctrl-T` lists the folders to pick from |
+| `*` | flag, or unflag |
+| `K` | mark read, or unread |
+| `U` or `Z` | undo the last of these, whichever screen it was done on |
+| `;` | select the message under the cursor, or not (an `X` in the first column) |
+| `A` | apply the next command (`D`, `E`, `S`, `*` or `K`) to every selected message; `;` there unselects them all |
+
+Opening a message in Message Text marks it read once it has been open for 1.5 seconds, as the desktop app's reader does. The changes go through the same mail actions as the desktop app (`zmail-actions`): each is written to the store at once and sent to the server by whichever Zmail syncs.
+
+The mouse works too: a click opens what it is on (a click on the index's first column selects), the wheel scrolls, and the command bar's entries can be clicked.
 
 **Copy and paste** work as in Zellij. Drag to select text inside one pane (the preview pane and the index are separate); it is copied when you let go. Double-click selects a word, triple-click a line, and dragging past the top or bottom scrolls. Wrapped lines are copied as the line they came from. Without a mouse, `Ctrl-Space` sets a mark in Message Text, the arrow keys select, and `y` or `Ctrl-C` copies. Copies go to the clipboard with OSC 52 (iTerm2, kitty, WezTerm, Alacritty, foot, Windows Terminal; tmux needs `set-clipboard on`); on a Mac outside SSH they go through `pbcopy`, since Terminal.app has no OSC 52. Setup can set a copy command instead (`wl-copy`, `xclip -selection clipboard`; run without a shell), send OSC 52 to the primary selection, or turn the mouse off. Hold Shift while dragging to use the terminal's own selection. Pastes (bracketed paste) go only into text fields such as WhereIs; anywhere else they are ignored, so pasted text never runs commands.
 

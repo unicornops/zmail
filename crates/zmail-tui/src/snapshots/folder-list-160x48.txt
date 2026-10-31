@@ -6,11 +6,11 @@ All accounts
 Work <me@work.example>
     INBOX                                                                                                                                          2 new       4
     Archive                                                                                                                                                    1
+    Trash                                                                                                                                                      0
       Website                                                                                                                                                  0
 
 Home <me@home.example>
     INBOX                                                                                                                                          1 new       1
-
 
 
 

@@ -15,13 +15,18 @@ use ratatui::{
 use zmail_core::{preferences::CopyClipboard, time::format_list_date};
 
 use crate::{
-    app::{App, MENU_ITEMS, SETUP_ROWS, Screen, SetupRow},
+    app::{App, MENU_ITEMS, Prompt, SETUP_ROWS, Screen, SetupRow},
     clipboard::{CopyTarget, copy_target},
     data::FolderRow,
     message::{Conversation, DocLine},
     pane::{DrawnPane, PaneId, PaneLine},
     text::{self, column_of, fit, fit_right, wrap},
+    triage::SavePrompt,
 };
+
+/// The Message Index's first column, which marks the conversations
+/// selected with `;` (Alpine's `X`); a click on it selects.
+pub(crate) const MARKER_WIDTH: usize = 2;
 
 /// Styles and characters for this terminal: colours unless `NO_COLOR`,
 /// box drawing unless ASCII.
@@ -158,8 +163,95 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
             draw_pane(app, frame, PaneId::Help, body, lines, None);
         }
     }
+    if let Some(Prompt::Save(save)) = app.prompt.clone() {
+        draw_save(app, frame, theme, body, &save);
+    }
     draw_status(app, frame, theme, Rect::new(0, area.height - 3, width, 1));
     draw_commands(app, frame, theme, Rect::new(0, area.height - 2, width, 2));
+}
+
+/// The save prompt over the body: the folder list on `^T`, or what Tab
+/// found on the body's last row.
+fn draw_save(app: &mut App, frame: &mut Frame, theme: Theme, body: Rect, save: &SavePrompt) {
+    let width = usize::from(body.width);
+    if let Some(cursor) = save.picker {
+        clear(frame, body);
+        let mut lines = vec![
+            PaneLine::new(Span::styled(
+                fit("  SAVE TO FOLDER", width, theme.ellipsis()),
+                theme.bold().add_modifier(Modifier::UNDERLINED),
+            )),
+            PaneLine::default(),
+        ];
+        for (index, folder) in save.folders.iter().enumerate() {
+            let style = if index == cursor {
+                theme.reversed()
+            } else {
+                Style::new()
+            };
+            lines.push(PaneLine {
+                target: Some(index),
+                ..PaneLine::new(Span::styled(
+                    fit(&format!("    {}", folder.name), width, theme.ellipsis()),
+                    style,
+                ))
+            });
+        }
+        app.reveal.insert(PaneId::Picker);
+        draw_pane(app, frame, PaneId::Picker, body, lines, Some(cursor + 2));
+        return;
+    }
+    let Some(matches) = &save.matches else {
+        return;
+    };
+    let row = Rect::new(
+        body.x,
+        body.y + body.height.saturating_sub(1),
+        body.width,
+        1,
+    );
+    clear(frame, row);
+    let mut spans = vec![Span::styled(" Folders: ", theme.faint())];
+    if matches.is_empty() {
+        spans.push(Span::raw(format!(
+            "none match \"{}\"",
+            text::truncate(&save.input, width / 2, theme.ellipsis())
+        )));
+    }
+    let mut used = text::width(" Folders: ");
+    for (position, &index) in matches.iter().enumerate() {
+        let name = &save.folders[index].name;
+        let more = matches.len() - position;
+        // Room for this name and, if more follow, a count of them.
+        let tail = if more > 1 { 8 } else { 0 };
+        if used + text::width(name) + 2 + tail > width && position > 0 {
+            spans.push(Span::styled(format!("+{more} more"), theme.faint()));
+            break;
+        }
+        let style = if save.cycle == Some(position) {
+            theme.reversed()
+        } else {
+            theme.bold()
+        };
+        spans.push(Span::styled(name.clone(), style));
+        spans.push(Span::raw("  "));
+        used += text::width(name) + 2;
+    }
+    frame
+        .buffer_mut()
+        .set_line(row.x, row.y, &Line::from(spans), row.width);
+}
+
+/// Blanks `area`, for what is drawn over the body.
+fn clear(frame: &mut Frame, area: Rect) {
+    let buffer = frame.buffer_mut();
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            if let Some(cell) = buffer.cell_mut(Position::new(x, y)) {
+                cell.reset();
+            }
+        }
+    }
 }
 
 /// Draws `lines` in `area` from the pane's scroll position, keeping
@@ -258,7 +350,10 @@ fn draw_status(app: &App, frame: &mut Frame, theme: Theme, area: Rect) {
         frame
             .buffer_mut()
             .set_stringn(area.x, area.y, &shown, width, theme.bold());
-        if matches!(app.prompt, Some(crate::app::Prompt::Text { .. })) {
+        if matches!(
+            app.prompt,
+            Some(Prompt::Text { .. } | Prompt::Save(SavePrompt { picker: None, .. }))
+        ) {
             let x = text::width(&shown).min(width.saturating_sub(1));
             frame.set_cursor_position(Position::new(area.x + x as u16, area.y));
         }
@@ -419,13 +514,18 @@ fn index_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
     }
     let now = app.now();
     let sender_width = (width / 4).clamp(8, 24);
-    let fixed = 3 + 1 + 9 + 2 + sender_width + 1;
+    let fixed = MARKER_WIDTH + 3 + 1 + 9 + 2 + sender_width + 1;
     let subject_width = width.saturating_sub(fixed);
     app.index
         .entries
         .iter()
         .enumerate()
         .map(|(index, entry)| {
+            let selected = if app.selected.contains(&entry.thread_id) {
+                "X "
+            } else {
+                "  "
+            };
             let marks = format!(
                 "{}{}{}",
                 if entry.unread { 'N' } else { ' ' },
@@ -450,16 +550,22 @@ fn index_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
                 Style::new()
             };
             let mut flag = if entry.flagged { theme.flag() } else { base };
+            let mut marker = theme.bold();
             if index == app.index.cursor {
                 base = base.patch(theme.reversed());
                 flag = flag.patch(theme.reversed());
+                marker = marker.patch(theme.reversed());
             }
             PaneLine {
                 spans: vec![
+                    Span::styled(selected.to_owned(), marker),
                     Span::styled(marks[..1].to_owned(), base),
                     Span::styled(marks[1..2].to_owned(), flag),
                     Span::styled(marks[2..].to_owned(), base),
-                    Span::styled(text::truncate(&rest, width - 3, ""), base),
+                    Span::styled(
+                        text::truncate(&rest, width.saturating_sub(MARKER_WIDTH + 3), ""),
+                        base,
+                    ),
                 ],
                 target: Some(index),
                 ..PaneLine::default()
@@ -739,6 +845,24 @@ asks the server for mail not downloaded yet.
   /          list conversations or single messages
   V          the preview pane, beside the index in terminals 120 columns or wider
   Q          quit (Zmail asks first)
+
+Triage
+  These work in the Message Index on the message under the cursor, and in \
+Message Text on the open one. A command acts on the whole conversation, as \
+in the Zmail window, also when the index lists single messages.
+  D          delete: to the Trash (for good when the account has none)
+  E          archive
+  S          save to a folder. Tab completes the folder's name, again to go \
+through the matches; Ctrl-T lists the folders to pick from.
+  *          flag, or unflag
+  K          mark read, or unread
+  U or Z     undo the last of these, wherever it was done; the status line \
+says what each did
+  ;          select the message under the cursor, or not (X in the first \
+column; a click there does it too)
+  A          apply the next command (D, E, S, * or K) to every selected \
+message; ; there unselects them all
+  A message stays unread in Message Text until it has been open for a moment.
 
 Reading
   Message Text shows the text of each message. Links are numbered, like [3]; \

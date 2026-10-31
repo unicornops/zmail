@@ -1,9 +1,9 @@
   ZMAIL 0.0.0-test               MESSAGE INDEX        Folder: INBOX  Msg 1 of 5
-N*      11:35  Grace Hopper         Launch plan for the terminal UI
- *      09:00  Ada Lovelace         Launch plan for the terminal UI
-N   Yesterday  Harbour News         Harbour newsletter, issue 42
-  @       Mon  山田 太郎            東京オフィスの会議 📅 next week
-       25 Sep  Billing              Invoice fdp.exe
+  N*      11:35  Grace Hopper         Launch plan for the terminal UI
+   *      09:00  Ada Lovelace         Launch plan for the terminal UI
+  N   Yesterday  Harbour News         Harbour newsletter, issue 42
+    @       Mon  山田 太郎            東京オフィスの会議 📅 next week
+         25 Sep  Billing              Invoice fdp.exe
 
 
 
@@ -20,5 +20,5 @@ N   Yesterday  Harbour News         Harbour newsletter, issue 42
 
 
                            [Listing single messages]
-? Help       > [ViewMsg]  N NextMsg    Spc NextPage / Group      M Main Menu
-< FldrList   P PrevMsg    - PrevPage   W WhereIs    V Preview    O OTHER CMDS
+? Help       > [ViewMsg]  N NextMsg    Spc NextPage U Undo       S Save
+< FldrList   P PrevMsg    - PrevPage   D Delete     E Archive    O OTHER CMDS
