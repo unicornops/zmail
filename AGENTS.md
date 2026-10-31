@@ -30,8 +30,8 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 
 - `crates/zmail-app`: app entry point and CLI
 - `crates/zmail-ui`: GPUI shell and views
-- `crates/zmail-store`: local SQLite-backed store
-- `crates/zmail-sync`: background runtime and account sync orchestration
+- `crates/zmail-store`: local SQLite-backed store, with its advisory locks (`lock.rs`): `<database>.lock` (shared by every open store, exclusive for encrypting and key rotation) and `<database>.sync.lock` (`SyncLock`, ADR 0007: only its holder syncs)
+- `crates/zmail-sync`: background runtime and account sync orchestration. Frontends build `SyncService::with_sync_lock`, which syncs only while it holds the store's sync lock, otherwise leaves sync to the holder (`runs_sync()` is false) and takes over when the holder quits; the CLI's `SyncService::new` always syncs
 - `crates/zmail-imap`: IMAP adapter
 - `crates/zmail-jmap`: JMAP adapter and submission support
 - `crates/zmail-proton-api`: Proton Mail API client (go-proton-api port; not reachable from the UI until #139)

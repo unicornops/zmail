@@ -585,7 +585,10 @@ fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
         Arc::new(KeyringSecretStore),
         move |store| {
             let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-            let sync_service = SyncService::new(handle.clone(), store, secrets.clone());
+            // Only one process syncs a store (ADR 0007): when a terminal UI
+            // already does, this window reads the store and leaves sync to
+            // it, and takes sync over if it quits first.
+            let sync_service = SyncService::with_sync_lock(handle.clone(), store, secrets.clone())?;
             // Proton accounts talk to Proton's production API with Bridge's
             // pins and app version, and a User-Agent naming Zmail (ADR 0004).
             #[cfg(feature = "proton")]

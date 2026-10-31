@@ -324,11 +324,15 @@ fn open_workspace_with(
         add_home_account(&store, &mut harness);
     }
     let secrets: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::default());
-    let sync_service = SyncService::new(
+    prepare(&store);
+    // As the app builds it: syncing only while it holds the store's sync
+    // lock, which it does unless `prepare` took it (ADR 0007).
+    let sync_service = SyncService::with_sync_lock(
         harness._runtime.handle().clone(),
         store.clone(),
         secrets.clone(),
-    );
+    )
+    .expect("the sync service starts");
     let bootstrap = AppBootstrap {
         app_version: "0.0.0-test".to_owned(),
         runtime: RuntimeSummary {
@@ -342,7 +346,6 @@ fn open_workspace_with(
             gpui_version: String::new(),
         },
     };
-    prepare(&store);
     // The keymap the saved preferences pick, as `run()` binds it.
     let saved_keymap = store.ui_preferences().expect("the preferences load").keymap;
     let notifier = cx.update(|cx| {
@@ -760,6 +763,32 @@ fn escape_closes_overlays(cx: &mut TestAppContext) {
         cx.read_entity(&view, |view, _| view.list_mode),
         ListMode::Mail
     );
+}
+
+#[gpui::test]
+fn sync_commands_say_so_while_another_window_syncs(cx: &mut TestAppContext) {
+    // Another Zmail process (a terminal UI, say) holds the sync lock.
+    let mut other = None;
+    let (view, cx, _harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Inbox,
+        |store| other = store.try_sync_lock().expect("the lock file opens"),
+    );
+    assert!(other.is_some(), "the other process holds the sync lock");
+    assert!(cx.read_entity(&view, |view, _| !view.sync_service.runs_sync()));
+    let status = |cx: &mut VisualTestContext| {
+        cx.read_entity(&view, |view, _| {
+            view.status_message.clone().unwrap_or_default()
+        })
+    };
+    keys("shift-f5", cx);
+    assert_eq!(status(cx), zmail_sync::SYNCS_ELSEWHERE);
+    keys("escape", cx);
+    keys("f5", cx);
+    assert_eq!(status(cx), zmail_sync::SYNCS_ELSEWHERE);
+    // The window still shows the store's mail.
+    assert!(cx.read_entity(&view, |view, _| view.selected_thread_id.is_some()));
 }
 
 #[gpui::test]

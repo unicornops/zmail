@@ -44,6 +44,7 @@ pub use encryption::{
     MigrationProgress, MigrationReport, StoreFileState, StoreOpenError, encrypt_plaintext_store,
     move_unreadable_store_aside, store_file_state,
 };
+pub use lock::SyncLock;
 
 /// A received attachment's encrypted blob (ADR 0005), from
 /// [`LocalStore::attachment_blob`]. Its contents are only ever written out
@@ -702,6 +703,13 @@ impl LocalStore {
     /// Returns the on-disk path of the store database.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Takes the lock that lets this process sync the store
+    /// ([`SyncLock::try_acquire`] on its database), or `None` when another
+    /// process syncs it.
+    pub fn try_sync_lock(&self) -> Result<Option<SyncLock>> {
+        SyncLock::try_acquire(&self.path)
     }
 
     /// The key the store is encrypted with.
