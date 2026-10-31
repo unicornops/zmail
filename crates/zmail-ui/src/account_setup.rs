@@ -741,7 +741,7 @@ impl AccountSetupView {
         match zmail_setup::accounts::store_account(
             &services.store,
             &services.secrets,
-            &services.sync_service,
+            Some(&services.sync_service),
             &values,
         ) {
             Ok((account_id, message)) => {

@@ -68,6 +68,11 @@ pub enum AccountField {
     ProtonTotp,
     /// Proton sign-in: the mailbox password (two-password accounts).
     ProtonMailboxPassword,
+    /// The address the primary identity sends from (the terminal UI's
+    /// identity step; not in [`AccountField::TEXT`], which the GUI shows).
+    IdentityEmail,
+    /// The primary identity's signature (the terminal UI's identity step).
+    Signature,
 }
 
 impl AccountField {
@@ -125,6 +130,8 @@ impl AccountField {
             AccountField::AllowCleartext => "Connect without encryption",
             AccountField::ProtonTotp => "Two-factor code",
             AccountField::ProtonMailboxPassword => "Mailbox password",
+            AccountField::IdentityEmail => "Send as",
+            AccountField::Signature => "Signature",
         }
     }
 
@@ -147,6 +154,8 @@ impl AccountField {
             AccountField::SmtpPort => "465",
             AccountField::ProtonTotp => "6-digit code from your authenticator app",
             AccountField::ProtonMailboxPassword => "Your Proton mailbox password",
+            AccountField::IdentityEmail => "Your email address",
+            AccountField::Signature => "Optional",
             AccountField::ImapSecurity
             | AccountField::SmtpSecurity
             | AccountField::AllowCleartext => "",
@@ -360,6 +369,8 @@ impl AccountFormValues {
             AccountField::SmtpHost => &self.smtp_host,
             AccountField::SmtpPort => &self.smtp_port,
             AccountField::SmtpUsername => &self.smtp_username,
+            AccountField::IdentityEmail => &self.identity_email,
+            AccountField::Signature => &self.signature,
             // Proton sign-in fields are read when submitted, not stored.
             AccountField::ProtonTotp | AccountField::ProtonMailboxPassword => "",
             AccountField::ImapSecurity
@@ -399,6 +410,8 @@ impl AccountFormValues {
             AccountField::SmtpHost => &mut self.smtp_host,
             AccountField::SmtpPort => &mut self.smtp_port,
             AccountField::SmtpUsername => &mut self.smtp_username,
+            AccountField::IdentityEmail => &mut self.identity_email,
+            AccountField::Signature => &mut self.signature,
             AccountField::ProtonTotp
             | AccountField::ProtonMailboxPassword
             | AccountField::ImapSecurity

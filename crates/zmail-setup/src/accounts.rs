@@ -38,11 +38,12 @@ pub struct SetupServices {
 
 /// Stores a validated form and returns the new account id and the status
 /// message for the user. Then starts the first sync, or the OAuth2 browser
-/// flow that ends in it.
+/// flow that ends in it, when there is a sync service (a frontend reading
+/// a fixture store has none).
 pub fn store_account(
     store: &Arc<LocalStore>,
     secrets: &Arc<dyn SecretStore>,
-    sync_service: &SyncService,
+    sync_service: Option<&SyncService>,
     form: &AccountFormValues,
 ) -> Result<(i64, String)> {
     let (account, secret) = build_account_from_form(form)?;
@@ -50,7 +51,9 @@ pub fn store_account(
     let message = match secret {
         AccountSetupSecret::Password(secret) => {
             secrets.set_account_secret(account_id, &secret)?;
-            let _ = sync_service.sync_account(account_id);
+            if let Some(sync_service) = sync_service {
+                let _ = sync_service.sync_account(account_id);
+            }
             format!("{} added.", account.display_name)
         }
         AccountSetupSecret::OAuth2(client) => {
@@ -64,7 +67,7 @@ pub fn store_account(
                 SyncPhase::Connecting,
                 "Waiting for browser authorization",
             );
-            spawn_oauth2_authorization(store, secrets, sync_service, account_id, client);
+            spawn_oauth2_authorization(store, secrets, sync_service.cloned(), account_id, client);
             format!(
                 "{} added. Finish signing in in your browser; the account syncs once you approve access.",
                 account.display_name
@@ -73,7 +76,9 @@ pub fn store_account(
     };
     // Start the new account's background watcher immediately instead of
     // waiting for the next app launch.
-    let _ = sync_service.sync_watchers();
+    if let Some(sync_service) = sync_service {
+        let _ = sync_service.sync_watchers();
+    }
     Ok((account_id, message))
 }
 
@@ -84,7 +89,7 @@ pub fn store_account(
 pub fn store_authorized_account(
     store: &LocalStore,
     secrets: &dyn SecretStore,
-    sync_service: &SyncService,
+    sync_service: Option<&SyncService>,
     form: &AccountFormValues,
     tokens: &zmail_auth::TokenSet,
 ) -> Result<(i64, String)> {
@@ -99,8 +104,10 @@ pub fn store_authorized_account(
         let _ = remove_account(store, secrets, account_id);
         return Err(error.context("Zmail could not keep the sign-in in the keychain"));
     }
-    let _ = sync_service.sync_account(account_id);
-    let _ = sync_service.sync_watchers();
+    if let Some(sync_service) = sync_service {
+        let _ = sync_service.sync_account(account_id);
+        let _ = sync_service.sync_watchers();
+    }
     Ok((account_id, format!("{} added.", account.display_name)))
 }
 
@@ -109,13 +116,12 @@ pub fn store_authorized_account(
 fn spawn_oauth2_authorization(
     store: &Arc<LocalStore>,
     secrets: &Arc<dyn SecretStore>,
-    sync_service: &SyncService,
+    sync_service: Option<SyncService>,
     account_id: i64,
     client: zmail_auth::OAuth2Client,
 ) {
     let store_for_thread = store.clone();
     let secrets = secrets.clone();
-    let sync_service = sync_service.clone();
     let spawn = std::thread::Builder::new()
         .name("zmail-oauth2-setup".to_owned())
         .spawn(move || {
@@ -145,8 +151,10 @@ fn spawn_oauth2_authorization(
                 );
                 return;
             }
-            let _ = sync_service.sync_account(account_id);
-            let _ = sync_service.sync_watchers();
+            if let Some(sync_service) = sync_service {
+                let _ = sync_service.sync_account(account_id);
+                let _ = sync_service.sync_watchers();
+            }
         });
     if let Err(error) = spawn {
         let _ = store.record_sync_failure(
@@ -488,5 +496,67 @@ mod tests {
             );
         }
         assert!(read_sync_progress(&store, account_id).is_none());
+    }
+    #[test]
+    fn a_stored_account_keeps_its_password_in_the_keychain_only() {
+        let store = Arc::new(LocalStore::open_ephemeral().expect("a store"));
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        let form = crate::form::AccountFormValues {
+            name: "Jane".to_owned(),
+            email: "jane@example.test".to_owned(),
+            password: "app-password".to_owned(),
+            imap_host: "imap.example.test".to_owned(),
+            smtp_host: "smtp.example.test".to_owned(),
+            ..crate::form::AccountFormValues::default()
+        };
+        let (account_id, message) =
+            super::store_account(&store, &secrets, None, &form).expect("stored");
+        assert_eq!(message, "jane@example.test added.");
+        assert_eq!(
+            secrets.get_account_secret(account_id).expect("kept"),
+            "app-password"
+        );
+        let account = &store.list_accounts().expect("accounts")[0];
+        assert_eq!(account.username, "jane@example.test");
+    }
+
+    #[test]
+    fn an_authorized_account_keeps_its_grant() {
+        let store = LocalStore::open_ephemeral().expect("a store");
+        let secrets = InMemorySecretStore::shared();
+        let form = crate::form::AccountFormValues {
+            email: "jane@gmail.com".to_owned(),
+            provider: Some(zmail_autodiscover::Provider::Google),
+            use_oauth: true,
+            oauth_client_id: "42-abc.apps.googleusercontent.com".to_owned(),
+            oauth_client_secret: "GOCSPX-x".to_owned(),
+            imap_host: "imap.gmail.com".to_owned(),
+            smtp_host: "smtp.gmail.com".to_owned(),
+            ..crate::form::AccountFormValues::default()
+        };
+        let tokens = zmail_auth::TokenSet {
+            access_token: "access".to_owned(),
+            refresh_token: Some("refresh".to_owned()),
+            expires_in: Some(3600),
+        };
+        let (account_id, _) =
+            super::store_authorized_account(&store, secrets.as_ref(), None, &form, &tokens)
+                .expect("stored");
+        assert_eq!(
+            secrets
+                .get_account_secret_from_slot(account_id, SecretSlot::RefreshToken)
+                .expect("kept"),
+            "refresh"
+        );
+        // A password form can't be stored this way.
+        let password = crate::form::AccountFormValues {
+            use_oauth: false,
+            password: "x".to_owned(),
+            ..form
+        };
+        assert!(
+            super::store_authorized_account(&store, secrets.as_ref(), None, &password, &tokens)
+                .is_err()
+        );
     }
 }
