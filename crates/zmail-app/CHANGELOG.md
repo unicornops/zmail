@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.1](https://github.com/unicornops/zmail/compare/v0.24.0...v0.24.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **render-web:** fall back to text when WebView2 leaves a page unfinished ([#341](https://github.com/unicornops/zmail/issues/341)) ([9d1445c](https://github.com/unicornops/zmail/commit/9d1445cdc71ba91bc7f90f7c113a04036e27c10f))
+
 ## [0.24.0](https://github.com/unicornops/zmail/compare/v0.23.4...v0.24.0) (2026-10-31)
 
 
