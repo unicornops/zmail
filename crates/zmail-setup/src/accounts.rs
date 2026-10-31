@@ -248,7 +248,8 @@ pub enum RemoveError {
 }
 
 /// Removes an account from this computer: its local data, then every
-/// keychain secret it has. The mail on the server is untouched.
+/// keychain secret it has, a Proton account's session too. The mail on
+/// the server is untouched.
 pub fn remove_account(
     store: &LocalStore,
     secrets: &dyn SecretStore,
@@ -263,6 +264,9 @@ pub fn remove_account(
         SecretSlot::ClientSecret,
         SecretSlot::AccessToken,
         SecretSlot::RefreshToken,
+        SecretSlot::ProtonUid,
+        SecretSlot::ProtonRefreshToken,
+        SecretSlot::ProtonKeyPass,
     ] {
         forgot = forgot.and(secrets.delete_account_secret_in_slot(account_id, slot));
     }
@@ -465,19 +469,24 @@ mod tests {
         secrets
             .set_account_secret(account_id, "app-password")
             .expect("kept");
-        secrets
-            .set_account_secret_in_slot(account_id, SecretSlot::RefreshToken, "token")
-            .expect("kept");
+        for slot in [SecretSlot::RefreshToken, SecretSlot::ProtonKeyPass] {
+            secrets
+                .set_account_secret_in_slot(account_id, slot, "token")
+                .expect("kept");
+        }
         assert!(read_sync_progress(&store, account_id).is_some());
 
         assert!(remove_account(&store, secrets.as_ref(), account_id).is_ok());
         assert!(store.list_accounts().expect("accounts").is_empty());
         assert!(secrets.get_account_secret(account_id).is_err());
-        assert!(
-            secrets
-                .get_account_secret_from_slot(account_id, SecretSlot::RefreshToken)
-                .is_err()
-        );
+        for slot in [SecretSlot::RefreshToken, SecretSlot::ProtonKeyPass] {
+            assert!(
+                secrets
+                    .get_account_secret_from_slot(account_id, slot)
+                    .is_err(),
+                "{slot:?} is forgotten"
+            );
+        }
         assert!(read_sync_progress(&store, account_id).is_none());
     }
 }
