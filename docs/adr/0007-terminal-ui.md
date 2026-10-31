@@ -2,8 +2,8 @@
 
 ## Status
 
-Proposed on October 31, 2026. The questions for Rob are under
-"Decisions needed" at the end.
+Accepted on October 31, 2026, with Rob's decisions recorded under
+"Decisions" at the end. Proposed the same day.
 
 ## Context
 
@@ -61,12 +61,12 @@ terminal.
 
 | Option | Notes | Verdict |
 | --- | --- | --- |
-| **ratatui + crossterm** | The standard Rust TUI stack, maintained. crossterm covers Linux, macOS and Windows terminals. Immediate-mode drawing, with `TestBackend` for snapshot tests. | **Recommended** |
+| **ratatui + crossterm** | The standard Rust TUI stack, maintained: ratatui 0.30.2 (June 2026), crossterm 0.29 (its default backend, commits in October 2026). crossterm covers Linux, macOS and Windows terminals. Immediate-mode drawing, with `TestBackend` for snapshot tests. | **Chosen** |
 | cursive | Retained-mode widgets, more batteries included. Smaller community, and its default backend is ncurses (C) on Unix. | No |
 | Extend the CLI only | No new dependencies, but no interactive browsing, so it doesn't meet the request. | No |
 | A separate binary | Keeps the GUI out of the TUI build, but means a second artefact in every installer and two places to unlock and configure the store. | Not now; a feature flag gives the same benefit |
 
-## Decision (proposed)
+## Decision
 
 ### 1. Shape
 
@@ -74,26 +74,112 @@ terminal.
   `zmail-sync`, `zmail-render`, `zmail-security` and `zmail-notify`. It
   never depends on GPUI, `zmail-ui` or `zmail-render-web`.
 - It is started with **`zmail-app tui`**, behind a `tui` Cargo feature of
-  `zmail-app`. Store path, keychain, store lock and preferences are shared
+  `zmail-app` that is **on by default**, so every release has it. Store path, keychain, store lock and preferences are shared
   with the GUI and the CLI.
 - **`unsafe_code = "forbid"`**, like every crate except the renderer's
   platform modules.
 
-### 2. Layout and interaction
+### 2. Layout and interaction: Pine/Alpine, with modern touches
 
-- Three panes as in the GUI: accounts and mailboxes, the conversation
-  list, and the reader. Below about 100 columns they collapse to one pane
-  at a time.
-- Keys follow common terminal mail clients and Zmail's Gmail keymap:
-  `j`/`k`, `Enter`, `e` archive, `#` delete, `s` flag, `u` unread, `/`
-  search, `c` compose, `r`/`a`/`f` reply, reply-all and forward, `z` undo,
-  and `?` for help. The keymap is data, so it can be remapped later.
-- Search uses the store's search (the same syntax as the GUI), including
-  the server search fallback.
-- The status line shows sync progress and failures from the store's sync
-  records, as the sidebar tooltip does.
+Rob chose the Pine/Alpine model over mutt's: a menu-driven app whose
+commands are always on screen, a hierarchy of full-screen views, and
+single-letter commands, with modern touches on top.
 
-### 3. Reading mail
+**The Alpine structure, kept:**
+
+- **Three fixed bands on every screen:**
+  - a title bar: app name, the screen's name, the current folder and the
+    position ("Msg 3 of 120");
+  - the screen's body;
+  - a status line, then a two-line **command bar** listing the keys that
+    work on this screen (`? Help  < FldrList  P PrevMsg  N NextMsg  D Delete
+    R Reply  F Forward  S Save  W WhereIs  O OTHER CMDS`). `O` pages through
+    more commands, as in Alpine. Nobody has to remember a key.
+- **Screens as a hierarchy:**
+  - Main Menu (`C` Compose, `I` Message Index, `L` Folder List,
+    `A` Address Book, `S` Setup, `Q` Quit);
+  - Folder List, where accounts are collections, as Alpine shows them;
+  - Message Index;
+  - Message Text;
+  - Compose.
+  - `<` goes up a level, `>` and Enter go down, and `M` always returns to
+    the Main Menu.
+- **Alpine's mnemonics where Zmail has the same action:**
+  - `N`/`P` next and previous, `-`/Space page up and down;
+  - `R` reply, with the reply-all question asked inline as Alpine does;
+  - `F` forward, `S` save (move to a folder, with the folder prompt and
+    Tab completion), `W` WhereIs (search), `*` flag;
+  - `D` delete and `U` undelete.
+  - Zmail deletes to Trash at once rather than marking for expunge, so `U`
+    is the undo of that delete, and `X` (expunge) is not needed. `E`
+    archives.
+- **Compose is Pico-style:**
+  - header fields (To, Cc, Bcc, Attchmnt, Subject), then the body;
+  - Pico's control keys: `^X` send, `^O` postpone (save the draft), `^C`
+    cancel, `^K`/`^U` cut and uncut line, `^J` attach, `^G` help, `^R` read
+    a file into the body, `^W` where is, `^T` address book or file browser;
+  - the command bar shows them.
+  - `^J` needs the terminal's keyboard enhancement to tell it apart from
+    Enter. Where a terminal can't, attach is also on `^A` and is shown in
+    the bar.
+
+**Modern touches:**
+
+- Colour themes that follow the terminal's palette, with a monochrome
+  fallback (`NO_COLOR`), and Unicode box drawing with an ASCII fallback.
+- Mouse support: click a line to open it, scroll with the wheel, click
+  command-bar entries.
+- **A preview pane** at 120 columns and wider (`V` toggles it): the
+  Message Index on the left and the selected message on the right. This
+  is the one departure from Alpine's strictly full-screen views.
+- Conversations: the index can group a thread (`/` toggles), with the
+  message count and the newest date.
+- Incremental WhereIs with the store's search syntax (`from:`, `has:`,
+  `before:`), and the server-search fallback.
+- Undo for every triage action (`U`, or `z` as an alias), not only delete.
+- Relative dates ("10:42", "Yesterday", "Mon") and width-aware truncation
+  of wide characters.
+- Non-blocking feedback: sync progress, failures and "N new" go in the
+  status line and never stop input.
+- A command palette on `:` that lists every command with fuzzy matching,
+  for people who don't know the letters.
+- The keymap is data, so a user keymap file can rebind it.
+
+### 3. Copy and paste, the way Zellij does it
+
+Rob asked for Zellij's model: the app owns the mouse, selection stays
+inside a pane, and copying goes to the system clipboard.
+
+- **Selection.** With mouse capture on, a left-button drag selects text
+  in the pane under the pointer, and only that pane, even when the
+  preview pane is open beside it. Dragging past the top or bottom edge
+  scrolls the pane. Double-click selects a word, triple-click a line.
+  The selection is drawn in reverse video.
+- **Copy on select.** Releasing the button copies the selection, as
+  Zellij's `copy_on_select` does, and the status line says "Copied N
+  characters". The copied text is taken from what the TUI drew, so it's
+  already filtered (section 5). Wrapped lines rejoin as their original
+  line and trailing padding is dropped.
+- **Where it goes:**
+  - **OSC 52** by default, as in Zellij. It works locally and over SSH in
+    terminals that support it: iTerm2, kitty, WezTerm, Alacritty, foot,
+    Windows Terminal, and tmux with `set-clipboard on`.
+  - A `copy_command` setting, as in Zellij (e.g. `pbcopy`, `wl-copy`,
+    `xclip -selection clipboard`). macOS Terminal.app has no OSC 52, so on
+    macOS, when not over SSH, the default is `pbcopy`.
+  - `copy_clipboard = "system" | "primary"` picks between the clipboard and
+    the X11/Wayland primary selection.
+- **The terminal's own selection.** Holding Shift while dragging bypasses
+  the TUI and uses the terminal's own selection, as in Zellij. A setting
+  turns mouse capture off completely.
+- **Keyboard selection.** In Message Text, `Ctrl-Space` sets a mark, the
+  arrow keys extend the selection, and `Ctrl-C`/`y` copies it. This is for
+  people who don't use a mouse.
+- **Paste.** Bracketed paste is on. A paste arrives as one block of text
+  and goes into the focused field or the compose body literally; it
+  never runs as commands. Outside a text field, a paste is ignored.
+
+### 4. Reading mail
 
 - The reader shows `PreparedMessage`'s text form: the Simple view. The
   formatted HTML view, remote images and inline images don't exist in the
@@ -104,7 +190,7 @@ terminal.
 - Attachments are listed and saved through `AttachmentBlob::save_to`,
   with the sanitised file name (`attachment_safety`).
 
-### 4. Terminal safety (required before any mail text is shown)
+### 5. Terminal safety (required before any mail text is shown)
 
 - A single function, **`zmail_security::terminal::sanitize`**, filters
   every string from mail before it reaches the terminal: subjects,
@@ -117,26 +203,29 @@ terminal.
   - the bidirectional overrides and zero-width characters that
     `attachment_safety` already strips.
 - Tabs become spaces.
-- The TUI itself emits no OSC 8 hyperlinks and no OSC 52 clipboard
-  writes. Copy goes through the OS clipboard.
+- The only escape sequences the TUI writes are its own drawing (through
+  crossterm) and OSC 52 for a copy the user made (section 3). The OSC 52
+  payload is the user's selection of already filtered text, base64-encoded.
+  The TUI never emits OSC 8 hyperlinks.
 - A hostile corpus test sits next to the HTML one. It covers CSI cursor
   moves, OSC 0/2 titles, OSC 52, OSC 8, DCS, 8-bit C1 introducers and
   bidi tricks, and asserts that no byte below 0x20 (except `\n`) and no
   ESC or C1 survives.
 
-### 5. Writing mail
+### 6. Writing mail
 
-- The compose pane has a built-in editor (`tui-textarea`), with
-  To/Cc/Bcc/Subject fields and the draft saved to the encrypted store as
-  the GUI does. Send uses `SyncService::queue_draft_and_send(_after)`,
+- Compose has a built-in Pico-style editor (section 2) on
+  `ratatui-textarea`, the ratatui organisation's maintained successor to
+  `tui-textarea`, which has had no release since October 2024. The draft is
+  saved to the encrypted store as the GUI does. Send uses `SyncService::queue_draft_and_send(_after)`,
   so undo-send works the same way.
-- `$EDITOR` is **off by default**. Handing the draft to an external
+- `$EDITOR` is **opt-in** (Rob's decision). Handing the draft to an external
   editor means writing it as a plaintext temporary file, which ADR 0005
   otherwise rules out. If enabled, the file goes in a 0700 directory and
   is overwritten and deleted after the editor exits, and the setting
   says so.
 
-### 6. Sync and notifications
+### 7. Sync and notifications
 
 - Only one process runs sync. A second advisory lock beside the store
   (`<database>.sync.lock`, held exclusively) is taken by whichever
@@ -151,7 +240,7 @@ terminal.
 - New mail shows in the status line and rings the terminal bell
   (configurable). No OS notifications from the TUI in v1.
 
-### 7. What moves out of `zmail-ui`
+### 8. What moves out of `zmail-ui`
 
 Only what the TUI actually needs, each in its own small PR:
 
@@ -170,7 +259,7 @@ Each phase ships on its own, in normal releases (alpha; no previews).
 | Phase | Work | Gate |
 | --- | --- | --- |
 | 0. Foundations | `zmail_security::terminal::sanitize` and its hostile corpus; the sync lock in `zmail-store`, used by the GUI | Corpus tests; GUI behaviour unchanged |
-| 1. Read | `zmail-tui`: unlock, accounts and mailboxes, conversation list, reader, search, status line, refresh; `zmail-app tui` behind the `tui` feature | `TestBackend` snapshot tests for each view; manual check in a real terminal on each OS |
+| 1. Read | `zmail-tui`: unlock; Main Menu, Folder List, Message Index and Message Text with the command bar; preview pane; WhereIs; status line; refresh; mouse, Zellij-style copy and bracketed paste; `zmail-app tui` behind the `tui` feature | `TestBackend` snapshot tests for each view; manual check in a real terminal on each OS |
 | 2. Triage | Extract `zmail-actions`; archive, move, delete, flag and read with undo | Shared tests pass for GUI and TUI |
 | 3. Write | Compose, reply, reply-all and forward, drafts, attachments, send with undo-send, the outbox | A draft round-trips through the store; live harness send test |
 | 4. Accounts | Add IMAP, JMAP and SMTP accounts in the TUI; OAuth (Google, Microsoft) through the browser and loopback; Proton sign-in, opening the browser for human verification | As phase 3 |
@@ -188,20 +277,30 @@ add-imap` and `add-jmap`; with no account, the TUI says so.
   (Windows Terminal, the macOS Terminal and iTerm2, Linux consoles).
   crossterm hides most of this. Wide characters and emoji in subjects
   need width-aware truncation (`unicode-width`, already in the tree).
+- **Clipboard support varies.** OSC 52 is missing in macOS Terminal.app,
+  off by default in some terminals, and capped in size by others. Hence
+  the `pbcopy` default on a local Mac, the `copy_command` setting, and the
+  Shift-drag escape to the terminal's own selection.
 - **Two frontends to keep in step.** New store features need TUI work
   too. Keeping the shared logic in `zmail-actions` limits that.
 - **Accessibility.** Terminals depend on the screen reader's terminal
   support. The TUI keeps a linear, plain layout available.
 
-## Decisions needed
+## Decisions
 
-1. **Go ahead with the TUI as proposed**: a new `zmail-tui` crate, run as
-   `zmail-app tui`.
-2. **New dependencies**: `ratatui`, `crossterm` and `tui-textarea`.
-3. **The `tui` feature on by default** in release builds, so every
-   download has it. Recommended: yes, since it adds well under a
-   megabyte.
-4. **`$EDITOR` support** off by default and opt-in, with the plaintext
-   temporary file explained.
-5. **The sync lock**: one process syncs. This is the one change to the
-   GUI's behaviour.
+Rob, October 31, 2026:
+
+1. **Go ahead** with the TUI as proposed.
+2. **Dependencies:** `ratatui`, `crossterm` and the textarea crate, "as long
+   as they are currently maintained". Checked on October 31, 2026:
+   - ratatui 0.30.2 (June 2026) and crossterm 0.29, both with commits in
+     the last week;
+   - `tui-textarea` has had no release since October 2024 and fails the
+     condition, so its maintained successor `ratatui-textarea` (0.9.3,
+     October 2026) is used instead.
+3. **The TUI ships in every release:** the `tui` feature is on by default.
+4. **External editor:** opt-in.
+5. **One syncing process:** the sync lock is approved.
+6. **Design:** Pine/Alpine rather than mutt, with cues from modern TUI
+   apps (section 2), and copy and paste the way Zellij does it
+   (section 3).

@@ -24,7 +24,7 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 - `docs/adr/0004-proton-native.md` and `docs/upstream/proton.md`: native Proton Mail decision, upstream pins and ported files
 - `docs/adr/0005-store-encryption.md`: encryption of the local store at rest (SQLCipher, encrypted attachment files, the store key in the OS keychain)
 - `docs/adr/0006-html-email-renderer.md`: rendering HTML mail (OS web engines behind a renderer boundary, the shared sanitiser and remote-content policy); tracked in #294
-- `docs/adr/0007-terminal-ui.md`: a terminal UI as a second frontend (`zmail-tui`, `zmail-app tui`), terminal escape-sequence filtering, one syncing process (proposed)
+- `docs/adr/0007-terminal-ui.md`: a terminal UI as a second frontend (`zmail-tui`, `zmail-app tui`), terminal escape-sequence filtering, one syncing process; Pine/Alpine-style screens, Zellij-style copy and paste
 
 ## Workspace Overview
 
