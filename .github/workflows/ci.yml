@@ -288,10 +288,12 @@ jobs:
             # SQLCipher's crypto provider differs per platform (CommonCrypto
             # on macOS, OpenSSL elsewhere; ADR 0005): the store's tests,
             # including the SQLCipher 4.14 fixture (tests/sqlcipher_compat.rs),
-            # run here against each platform's build.
+            # run here against each platform's build. The terminal UI's
+            # tests (ADR 0007: screens on ratatui's TestBackend, copy, links)
+            # run here too, as its terminal code differs per platform.
             - name: Store tests (this platform's SQLCipher)
               if: runner.os != 'Linux'
-              run: cargo test --release --locked -p zmail-store -- --nocapture
+              run: cargo test --release --locked -p zmail-store -p zmail-tui -- --nocapture
 
             - name: Upload release binary
               uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -332,7 +334,7 @@ jobs:
                   restore-keys: cargo-git-${{ runner.os }}-
 
             - name: Clippy (macOS)
-              run: cargo clippy -p zmail-render-web -p zmail-ui -p zmail-app --all-targets --locked -- -D warnings
+              run: cargo clippy -p zmail-render-web -p zmail-ui -p zmail-app -p zmail-tui --all-targets --locked -- -D warnings
 
             - name: Web renderer canary
               timeout-minutes: 15
@@ -402,7 +404,7 @@ jobs:
                   Add-Content -Path $env:GITHUB_ENV -Value "OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe"
 
             - name: Clippy (Windows)
-              run: cargo clippy -p zmail-render-web -p zmail-ui -p zmail-app --all-targets --locked -- -D warnings
+              run: cargo clippy -p zmail-render-web -p zmail-ui -p zmail-app -p zmail-tui --all-targets --locked -- -D warnings
 
             - name: Web renderer unit tests
               run: cargo test -p zmail-render-web --lib --locked

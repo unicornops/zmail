@@ -30,6 +30,10 @@ const GPUI_VERSION: &str = env!("ZMAIL_ZED_TAG");
 fn main() -> Result<()> {
     match Command::from_env()? {
         Command::Gui => launch_gui(),
+        #[cfg(feature = "tui")]
+        Command::Tui => launch_tui(),
+        #[cfg(feature = "tui")]
+        Command::LaunchTuiFixture(view) => launch_tui_fixture(view),
         Command::Mailto(url) => launch_gui_with_mailto(&url),
         Command::LaunchImapFixture {
             endpoint,
@@ -94,6 +98,10 @@ fn main() -> Result<()> {
 
 enum Command {
     Gui,
+    #[cfg(feature = "tui")]
+    Tui,
+    #[cfg(feature = "tui")]
+    LaunchTuiFixture(ui_fixture::FixtureView),
     Mailto(String),
     LaunchImapFixture {
         endpoint: String,
@@ -193,8 +201,14 @@ impl Command {
                     text_size,
                 })
             }
+            #[cfg(feature = "tui")]
+            "launch-tui-fixture" => Ok(Self::LaunchTuiFixture(ui_fixture::FixtureView::parse(
+                args.next().as_deref().unwrap_or("accounts"),
+            )?)),
             "add-imap" => Ok(Self::AddImap),
             "add-jmap" => Ok(Self::AddJmap),
+            #[cfg(feature = "tui")]
+            "tui" => Ok(Self::Tui),
             "list-accounts" => Ok(Self::ListAccounts),
             "sync" => {
                 let next = args.next();
@@ -607,6 +621,54 @@ fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
     );
     drop(runtime);
     Ok(())
+}
+
+/// `tui`: the terminal UI (ADR 0007) on the same store as the GUI,
+/// unlocked as the CLI unlocks it.
+#[cfg(feature = "tui")]
+fn launch_tui() -> Result<()> {
+    install_panic_log();
+    // Over SSH there is often no keychain service to ask (ADR 0007,
+    // "Headless machines"); say so plainly.
+    let store = Arc::new(open_store_explaining(
+        "the terminal UI unlocks the mail store with its key from the system keychain, as \
+         the Zmail window does, and the keychain didn't answer. Over SSH, start or unlock \
+         the keychain service on that machine (Secret Service on Linux) and try again; the \
+         store never opens without its key",
+    )?);
+    let runtime = BackgroundRuntime::start(4)?;
+    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+    let sync = SyncService::with_sync_lock(runtime.handle().clone(), store.clone(), secrets)?;
+    #[cfg(feature = "proton")]
+    sync.configure_proton(zmail_sync::proton_production_config(env!(
+        "CARGO_PKG_VERSION"
+    ))?)?;
+    let result = zmail_tui::run(zmail_tui::Launch {
+        store,
+        sync: Some(sync),
+        runtime: runtime.handle().clone(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    });
+    drop(runtime);
+    result
+}
+
+/// `launch-tui-fixture`: the terminal UI on an in-memory store seeded with
+/// the GUI fixture's synthetic mail (`ui_fixture`), with no sync, for
+/// trying it out and for checks in a real terminal.
+#[cfg(feature = "tui")]
+fn launch_tui_fixture(view: ui_fixture::FixtureView) -> Result<()> {
+    let runtime = BackgroundRuntime::start(1)?;
+    let store = Arc::new(LocalStore::open_ephemeral().context("failed to open the fixture store")?);
+    ui_fixture::seed(&store, view, ui_fixture::anchor_time())?;
+    let result = zmail_tui::run(zmail_tui::Launch {
+        store,
+        sync: None,
+        runtime: runtime.handle().clone(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    });
+    drop(runtime);
+    result
 }
 
 fn launch_imap_fixture(endpoint: &str, username: &str, secret: &str, email: &str) -> Result<()> {
@@ -1788,8 +1850,12 @@ fn join_or_placeholder(values: &[String]) -> String {
 fn print_help() {
     println!("Zmail commands:");
     println!("  zmail-app                 Launch the desktop app");
+    #[cfg(feature = "tui")]
+    println!("  zmail-app tui             Read mail in the terminal");
     println!("  zmail-app launch-imap-fixture ENDPOINT USERNAME SECRET EMAIL");
     println!("  zmail-app launch-ui-fixture VIEW [dark|light|system] [TEXT_SIZE]");
+    #[cfg(feature = "tui")]
+    println!("  zmail-app launch-tui-fixture [VIEW]");
     println!("                            Open a seeded UI state for screenshots: empty,");
     println!("                            inbox, reader, compose, account-setup or onboarding-*,");
     println!("                            optionally at a text size in percent (100 to 200)");
@@ -1833,6 +1899,14 @@ fn print_help() {
 /// Opens the encrypted store with its key from the OS keychain (ADR 0005),
 /// encrypting a plaintext store first and printing its progress.
 fn open_store() -> Result<LocalStore> {
+    open_store_explaining(
+        "Zmail needs the system keychain to unlock its mail store; unlock it and try again",
+    )
+}
+
+/// [`open_store`], explaining a keychain that didn't answer with
+/// `keychain_help`.
+fn open_store_explaining(keychain_help: &'static str) -> Result<LocalStore> {
     let path = store_path()?;
     match LocalStore::unlock(&path, &KeyringSecretStore, &print_progress) {
         Ok((store, report)) => {
@@ -1855,9 +1929,7 @@ fn open_store() -> Result<LocalStore> {
              changes that exist only in this store are lost. `zmail-app reset-store` moves \
              the unreadable store aside and starts a new one",
         )),
-        Err(StoreOpenError::Keychain(error)) => Err(error.context(
-            "Zmail needs the system keychain to unlock its mail store; unlock it and try again",
-        )),
+        Err(StoreOpenError::Keychain(error)) => Err(error.context(keychain_help)),
         Err(StoreOpenError::Other(error)) => Err(error.context("failed to open the local store")),
     }
 }

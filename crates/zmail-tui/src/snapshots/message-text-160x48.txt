@@ -1,0 +1,48 @@
+  ZMAIL 0.0.0-test                                                        MESSAGE TEXT                                               Folder: INBOX  Conv 2 of 4
+Date: Wed 14 Oct 2026, 10:00
+From: Harbour News <news@harbour.example>
+To: Me <me@work.example>
+Subject: Harbour newsletter, issue 42
+
+Hello from the harbour newsletter.
+
+Read the full issue[1] or www.bank.example[2].
+
+── Links ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[1] https://news.example/issue/42
+[2] https://evil.example/login
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+? Help              P PrevMsg           - PrevPage          W WhereIs           Ret OpenLink        Y Copy              L FldrList
+< MsgIndex          N NextMsg           Spc NextPage        Tab NextLink        ^Spc Mark           M Main Menu         Q Quit

@@ -1,0 +1,48 @@
+  ZMAIL 0.0.0-test                                                       MESSAGE INDEX                                               Folder: INBOX  Conv 4 of 4
+N*      11:35  Grace Hopper        (2) Launch plan for the terminal UI         │ Date: Fri 25 Sep 2026, 12:00
+N   Yesterday  Harbour News        Harbour newsletter, issue 42                │ From: Billing <billing@evil.example>
+  @       Mon  山田 太郎           東京オフィスの会議 📅 next week             │ To: Me <me@work.example>
+       25 Sep  Billing             Invoice fdp.exe                             │ Subject: Invoice fdp.exe
+                                                                               │
+                                                                               │ Pay now!
+                                                                               │ Your account    is fine. Bye
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                          [Folder "INBOX" opened with 4 conversations]
+? Help              > [ViewMsg]         N NextMsg           Spc NextPage        / Ungroup           M Main Menu         Q Quit
+< FldrList          P PrevMsg           - PrevPage          W WhereIs           V Preview           Y Copy

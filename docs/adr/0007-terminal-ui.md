@@ -18,6 +18,21 @@ Progress:
   lock every 5 seconds. The holder also starts syncing accounts another
   process adds. The GUI's Sync commands say "Sync runs in another Zmail
   window" meanwhile.
+- Phase 1: `zmail-tui` and `zmail-app tui` (the `tui` feature, on by
+  default), reading only: unlock as the CLI does; Main Menu, Folder List,
+  Message Index and Message Text with the title bar, status line and
+  two-line command bar (`O` pages it); Alpine's mnemonics; the preview
+  pane at 120 columns (`V`); conversation grouping (`/`); WhereIs on the
+  store's search with the server fallback; relative dates and width-aware
+  truncation; `NO_COLOR` and ASCII drawing; mouse and Zellij-style copy and
+  paste (OSC 52, `pbcopy` on a local Mac, `copy_command`,
+  `copy_clipboard`); numbered links opened after confirming; the store
+  read every 5 seconds; sync through the sync lock; new mail in the status
+  line with the bell. Settings live in `UiPreferences::terminal` in the
+  store, changed on the Setup screen. Not done in phase 1: the command
+  palette (`:`), a user keymap file, attachments (listed, not saved),
+  sender-safety warnings, and the manual check in a real terminal on macOS
+  and Windows.
 
 ## Context
 

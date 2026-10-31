@@ -19,13 +19,13 @@ use zmail_core::{
     BodyLink, CachePolicySummary, DeliveryTarget, DraftAttachment, DraftDetail, DraftState,
     DraftSummary, DraftUpdate, HydratedBody, IdentitySummary, IndexCandidate, IndexProgress,
     MailboxRole, MailboxSelection, MailboxSnapshot, MailboxSummary, MessageAttachment,
-    MessageFlagState, MessagePreview, MessageRenderMode, MessageSnapshot, NewAccount, NewDraft,
-    OAuth2TargetConfig, OutboxJobState, OutboxJobSummary, OutgoingAttachment, OutgoingConfig,
-    OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment,
-    SearchHit, SearchScope, ServerHitRef, StoreStats, SubmissionKind, SubmissionSecurity,
-    SyncPhase, SyncStatusSummary, SyncTarget, ThreadCounts, ThreadFilter, ThreadMarks,
-    ThreadMessage, ThreadSnapshot, ThreadState, ThreadSummary, ThreadView, VirtualMailbox,
-    preferences::UiPreferences,
+    MessageFlagState, MessagePreview, MessageRenderMode, MessageSnapshot, MessageSummary,
+    NewAccount, NewDraft, OAuth2TargetConfig, OutboxJobState, OutboxJobSummary, OutgoingAttachment,
+    OutgoingConfig, OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind,
+    ReceivedAttachment, SearchHit, SearchScope, ServerHitRef, StoreStats, SubmissionKind,
+    SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget, ThreadCounts, ThreadFilter,
+    ThreadMarks, ThreadMessage, ThreadSnapshot, ThreadState, ThreadSummary, ThreadView,
+    VirtualMailbox, preferences::UiPreferences,
 };
 use zmail_security::html::text_of_stored_html;
 pub use zmail_security::vault::{BlobVault, StoreKey, StoreKeychain};
@@ -1867,6 +1867,49 @@ impl LocalStore {
 
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to load a thread range")
+    }
+
+    /// The messages of `thread_ids`, newest first, without their bodies.
+    pub fn thread_message_summaries(&self, thread_ids: &[i64]) -> Result<Vec<MessageSummary>> {
+        if thread_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.connection()?;
+        let placeholders = vec!["?"; thread_ids.len()].join(", ");
+        let mut statement = conn.prepare(&format!(
+            r#"
+            SELECT
+                messages.id,
+                messages.thread_id,
+                messages.sender,
+                messages.subject,
+                messages.received_at,
+                messages.is_read,
+                messages.is_flagged,
+                EXISTS(
+                    SELECT 1 FROM message_attachments
+                    WHERE message_attachments.message_id = messages.id
+                      AND inline_only = 0
+                )
+            FROM messages
+            WHERE messages.thread_id IN ({placeholders})
+            ORDER BY messages.received_at DESC, messages.id DESC
+            "#
+        ))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(thread_ids), |row| {
+            Ok(MessageSummary {
+                id: row.get(0)?,
+                thread_id: row.get(1)?,
+                sender: row.get(2)?,
+                subject: row.get(3)?,
+                received_at: row.get(4)?,
+                is_read: row.get(5)?,
+                is_flagged: row.get(6)?,
+                has_attachments: row.get(7)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load the threads' messages")
     }
 
     /// Returns the first thread identifier for a mailbox, if one exists.
@@ -10543,6 +10586,106 @@ mod tests {
     }
 
     #[test]
+    fn thread_message_summaries_list_messages_newest_first_without_bodies() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let message = |id: &str, minute: u32, read: bool, attachment: bool| MessageSnapshot {
+            remote_id: id.to_owned(),
+            identity_email: "ops1@zmail.dev".to_owned(),
+            sender: format!("{id} <{id}@example.com>"),
+            reply_to: None,
+            recipients: "ops1@zmail.dev".to_owned(),
+            subject: "Subject".to_owned(),
+            body_preview: "Preview".to_owned(),
+            body_text: Some("Body".to_owned()),
+            sanitized_html: None,
+            raw_html: None,
+            has_remote_content: false,
+            is_read: read,
+            is_flagged: false,
+            received_at: format!("2026-10-15T10:{minute:02}:00Z"),
+            attachments: attachment
+                .then(|| MessageAttachment {
+                    filename: "a.pdf".to_owned(),
+                    content_type: "application/pdf".to_owned(),
+                    size_bytes: 1,
+                    storage_path: "x/a.pdf".to_owned(),
+                    content_id: None,
+                    inline_only: false,
+                })
+                .into_iter()
+                .collect(),
+        };
+        store
+            .replace_account_snapshot(
+                account_id,
+                &AccountSyncSnapshot {
+                    checkpoint: "1".to_owned(),
+                    detail: String::new(),
+                    identities: None,
+                    mailboxes: vec![MailboxSnapshot {
+                        name: "INBOX".to_owned(),
+                        role: Some("inbox".to_owned()),
+                        threads: vec![ThreadSnapshot {
+                            remote_thread_id: "t".to_owned(),
+                            subject: "Subject".to_owned(),
+                            participants: String::new(),
+                            preview: String::new(),
+                            is_flagged: false,
+                            has_attachments: true,
+                            unread_count: 1,
+                            latest_message_at: "2026-10-15T10:05:00Z".to_owned(),
+                            messages: vec![
+                                message("old", 1, true, true),
+                                message("new", 5, false, false),
+                            ],
+                        }],
+                        ..MailboxSnapshot::default()
+                    }],
+                },
+            )
+            .expect("snapshot should apply");
+        let mailbox_id = store
+            .mailbox_id_by_role(account_id, "inbox")
+            .expect("lookup")
+            .expect("inbox");
+        let thread_id = store.list_threads(mailbox_id, 0..1).expect("threads")[0].id;
+        let messages = store
+            .thread_message_summaries(&[thread_id])
+            .expect("messages should load");
+        let summary: Vec<(&str, bool, bool)> = messages
+            .iter()
+            .map(|message| {
+                (
+                    message.sender.as_str(),
+                    message.is_read,
+                    message.has_attachments,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("new <new@example.com>", false, false),
+                ("old <old@example.com>", true, true)
+            ]
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.thread_id == thread_id)
+        );
+        assert!(
+            store
+                .thread_message_summaries(&[])
+                .expect("empty")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn ui_preferences_default_until_saved() {
         let store = LocalStore::open_ephemeral().expect("store should open");
         assert_eq!(
@@ -10578,6 +10721,11 @@ mod tests {
             sender_warnings: SenderWarnings::Fewer,
             motion: MotionMode::Full,
             text_size_percent: 125,
+            terminal: zmail_core::preferences::TerminalPreferences {
+                copy_command: Some("wl-copy".to_owned()),
+                bell: false,
+                ..Default::default()
+            },
         };
         store
             .save_ui_preferences(&preferences)

@@ -50,6 +50,7 @@ zmail-security = { path = "../zmail-security" }
 zmail-sync = { path = "../zmail-sync" }
 zmail-store = { path = "../zmail-store" }
 zmail-theme = { path = "../zmail-theme" }
+zmail-tui = { path = "../zmail-tui", optional = true }
 zmail-ui = { path = "../zmail-ui" }
 
 [features]
@@ -57,8 +58,11 @@ zmail-ui = { path = "../zmail-ui" }
 # add-account flow and Proton sync. On by default since the local store is
 # encrypted at rest (#139); labelled experimental in onboarding while it is
 # tested against real accounts. `--no-default-features` builds without it.
-default = ["proton"]
+default = ["proton", "tui"]
 proton = ["zmail-ui/proton", "zmail-sync/proton"]
+# The terminal UI, `zmail-app tui` (docs/adr/0007-terminal-ui.md). On by
+# default, so every release has it.
+tui = ["dep:zmail-tui"]
 
 [build-dependencies]
 winresource = "0.1"

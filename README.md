@@ -30,6 +30,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - Tagged releases also attach a Linux screenshot captured from the live mail harness by the Release Please workflow chain
 - pull requests that change the UI get a `ui-screenshots` CI artefact: every main UI state in light and dark plus narrow and wide windows, captured from seeded fixture data (see `AGENTS.md`)
 - release archives ship platform binaries plus a Linux `.deb`, a macOS DMG (Developer ID signed and notarized when the org-wide Apple credentials are present), and a Windows MSI installer; Windows code signing remains opt-in pending work
+- a terminal UI for reading mail, `zmail-app tui` ([ADR 0007](./docs/adr/0007-terminal-ui.md); see "Terminal UI" below): Pine/Alpine-style screens on the same encrypted store, every string from mail filtered for escape sequences before it reaches the terminal; triage, compose and accounts come in later phases
 - screen-reader roles, names and announcements through AccessKit (VoiceOver, UI Automation, AT-SPI), Windows contrast themes and macOS Increase Contrast, reduced motion, text size up to 200% and 24px pointer targets; not yet checked with a real screen reader (see [`docs/phase5-hardening.md`](./docs/phase5-hardening.md#accessibility))
 - Phase 5 hardening and release policy documentation
 
@@ -141,6 +142,40 @@ The local store lives in a platform data directory so user data is independent o
 Set the `ZMAIL_DATA_DIR` environment variable to override the store directory for development. A legacy `.zmail-dev/zmail.sqlite3` store in the current directory is migrated to the platform data directory on first run; if the migration fails, the app keeps using the legacy store so no data is lost.
 
 The desktop shell no longer creates demo accounts from inside the UI. Configure accounts through the CLI commands above, then use the app to browse and refresh the local mirror.
+
+### Terminal UI
+
+Read mail in a terminal, on the same store as the desktop app ([ADR 0007](./docs/adr/0007-terminal-ui.md)):
+
+```bash
+cargo run -p zmail-app -- tui
+cargo run -p zmail-app -- launch-tui-fixture   # synthetic mail, no sync, nothing saved
+```
+
+It is in every build (the `tui` feature, on by default) and unlocks the store with its key from the system keychain, like the desktop app; over SSH that needs the keychain service running on that machine (Secret Service on Linux), or it says so and stops. Until a later phase adds accounts in the terminal, add them with the desktop app or `zmail-app add-imap`/`add-jmap`.
+
+The screens work like Pine and Alpine: a title bar, the screen, a status line, and a command bar that lists the keys that work there (`O` shows more). Letters work in either case.
+
+| Key | Does |
+| --- | --- |
+| `M` | Main Menu |
+| `L` | Folder List (each account is a collection) |
+| `I` | Message Index of the current folder |
+| `<` / `>`, Enter | up a level, open |
+| `P` / `N` | previous and next item (or message, in Message Text) |
+| `-` / Space | previous and next page |
+| `W` | WhereIs: search the index as you type (the search language above; Enter also asks the server), find a folder, or find text in a message |
+| `/` | list conversations or single messages |
+| `V` | preview pane beside the index, in terminals 120 columns or wider |
+| Tab, Enter | in Message Text, move to a numbered link and open it after seeing its real address |
+| `S` | Setup (from the Main Menu) |
+| `Q` | quit, after asking |
+
+The mouse works too: a click opens what it is on, the wheel scrolls, and the command bar's entries can be clicked.
+
+**Copy and paste** work as in Zellij. Drag to select text inside one pane (the preview pane and the index are separate); it is copied when you let go. Double-click selects a word, triple-click a line, and dragging past the top or bottom scrolls. Wrapped lines are copied as the line they came from. Without a mouse, `Ctrl-Space` sets a mark in Message Text, the arrow keys select, and `y` or `Ctrl-C` copies. Copies go to the clipboard with OSC 52 (iTerm2, kitty, WezTerm, Alacritty, foot, Windows Terminal; tmux needs `set-clipboard on`); on a Mac outside SSH they go through `pbcopy`, since Terminal.app has no OSC 52. Setup can set a copy command instead (`wl-copy`, `xclip -selection clipboard`; run without a shell), send OSC 52 to the primary selection, or turn the mouse off. Hold Shift while dragging to use the terminal's own selection. Pastes (bracketed paste) go only into text fields such as WhereIs; anywhere else they are ignored, so pasted text never runs commands.
+
+Only one Zmail process syncs a store at a time, through a lock beside it (`<store>.sync.lock`). When the desktop app is already open, the terminal UI shows what it syncs, says "Sync runs in another Zmail window", and takes sync over if the window closes first; the same holds the other way round. New mail shows in the status line and rings the terminal bell (Setup turns the bell off).
 
 ## Mail Harness
 

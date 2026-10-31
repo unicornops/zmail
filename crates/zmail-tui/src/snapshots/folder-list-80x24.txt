@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                FOLDER LIST             Folder: Unified Inbox
+All accounts
+*   Unified Inbox                                                  3 new       5
+    Flagged                                                        1 new       1
+
+Work <me@work.example>
+    INBOX                                                          2 new       4
+    Archive                                                                    1
+      Website                                                                  0
+
+Home <me@home.example>
+    INBOX                                                          1 new       1
+
+
+
+
+
+
+
+
+
+
+? Help       > [ViewFldr] N NextFldr   Spc NextPage M Main Menu  Q Quit
+< Main Menu  P PrevFldr   - PrevPage   W WhereIs    I Index

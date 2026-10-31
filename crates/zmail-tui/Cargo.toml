@@ -1,0 +1,27 @@
+[package]
+name = "zmail-tui"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Zmail's terminal UI (ADR 0007)"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+tokio.workspace = true
+unicode-width.workspace = true
+url.workspace = true
+zmail-core = { path = "../zmail-core" }
+zmail-notify = { path = "../zmail-notify" }
+zmail-render = { path = "../zmail-render" }
+zmail-security = { path = "../zmail-security" }
+zmail-store = { path = "../zmail-store" }
+zmail-sync = { path = "../zmail-sync" }
+
+[lints]
+workspace = true
