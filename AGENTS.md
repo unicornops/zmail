@@ -29,6 +29,7 @@ The app is organized as a Rust workspace with separate crates for UI, store, syn
 ## Workspace Overview
 
 - `crates/zmail-app`: app entry point and CLI
+- `crates/zmail-actions`: the undoable mail actions, out of the GUI so the terminal UI can share them (ADR 0007, section 8): archive, move, delete, flag and read with an undo stack, plus draft and outbox changes, each a store write with its queued write-back, reporting `MailEvent`s to a plain callback. No GPUI: `zmail-ui`'s `mail_actions.rs` wraps it in an entity whose callback is `cx.emit`
 - `crates/zmail-ui`: GPUI shell and views
 - `crates/zmail-store`: local SQLite-backed store, with its advisory locks (`lock.rs`): `<database>.lock` (shared by every open store, exclusive for encrypting and key rotation) and `<database>.sync.lock` (`SyncLock`, ADR 0007: only its holder syncs)
 - `crates/zmail-sync`: background runtime and account sync orchestration. Frontends build `SyncService::with_sync_lock`, which syncs only while it holds the store's sync lock, otherwise leaves sync to the holder (`runs_sync()` is false) and takes over when the holder quits; the CLI's `SyncService::new` always syncs

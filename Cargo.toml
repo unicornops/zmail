@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/zmail-actions",
     "crates/zmail-app",
     "crates/zmail-assets",
     "crates/zmail-auth",

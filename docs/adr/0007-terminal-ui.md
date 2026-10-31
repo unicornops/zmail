@@ -33,6 +33,12 @@ Progress:
   palette (`:`), a user keymap file, attachments (listed, not saved),
   sender-safety warnings, and the manual check in a real terminal on macOS
   and Windows.
+- Phase 2: `zmail-actions`, the GPUI-free crate with the undoable mail
+  actions (archive, move, delete, flag, read, the undo stack, and the
+  draft and outbox changes), moved out of `zmail-ui`'s `mail_actions.rs`
+  (section 8). Events go to a plain callback; the GUI wraps it in a GPUI
+  entity that emits them, so its behaviour is unchanged. The delay before
+  an open conversation is marked read (`MARK_READ_DELAY`) moved with it.
 
 ## Context
 

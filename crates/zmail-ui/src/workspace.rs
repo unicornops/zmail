@@ -53,7 +53,7 @@ use crate::components::{
 };
 use crate::compose::{ComposeEvent, ComposeView, ComposeWindow, Presentation};
 use crate::layout::{LayoutMode, PaneLayout, SinglePane};
-use crate::mail_actions::{MailActions, MailEvent, UndoEntry, UndoId};
+use crate::mail_actions::{MARK_READ_DELAY, MailActions, MailEvent, UndoEntry, UndoId};
 use crate::message_list::{
     AccountLabel, ListMailbox, ListSelection, MessageListEvent, MessageListState, MessageListView,
 };
@@ -3284,10 +3284,6 @@ const PANE_WIDTHS_SAVE_DELAY: Duration = Duration::from_millis(300);
 
 /// How long a status message stays before it dismisses itself.
 const STATUS_TOAST_DURATION: Duration = Duration::from_secs(4);
-
-/// How long a thread stays open before it is marked read, so skimming
-/// past a message with the mouse does not mark it read.
-const MARK_READ_DELAY: Duration = Duration::from_millis(1500);
 
 fn prefixed_subject(prefix: &str, subject: &str) -> String {
     let trimmed = subject.trim();

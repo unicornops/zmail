@@ -1,0 +1,16 @@
+[package]
+name = "zmail-actions"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Undoable mail actions shared by Zmail's frontends (ADR 0007)"
+
+[dependencies]
+anyhow.workspace = true
+zmail-core = { path = "../zmail-core" }
+zmail-store = { path = "../zmail-store" }
+
+[lints]
+workspace = true
