@@ -1,7 +1,7 @@
 //! The Gmail sign-in step's alternative to an app password: a checklist
 //! for creating a Google OAuth client of your own, with links into the
 //! Google Cloud console, ending in the fields to paste it into. The steps
-//! themselves are in [`crate::google_oauth`].
+//! themselves are in `zmail_setup::google`, shared with the terminal UI.
 
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, FontWeight, IntoElement, Role, SharedString, div,
@@ -12,8 +12,8 @@ use super::render::{caption, field, heading};
 use super::{AccountField, AccountSetupView};
 use crate::a11y::AccessibleExt;
 use crate::components::{Banner, BannerTone, Button, ButtonSize};
-use crate::google_oauth::{self, GUIDE_STEPS, GuideStep};
 use crate::styles::{SPACE_1, SPACE_2, SPACE_3, SPACE_4, TYPE_BODY_STRONG, TypeStyleExt, UiColors};
+use zmail_setup::google::{self as google_oauth, GUIDE_STEPS, GuideStep};
 
 /// The diameter of a step's number.
 const STEP_NUMBER_SIZE: f32 = 24.0;

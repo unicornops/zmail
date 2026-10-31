@@ -420,6 +420,18 @@ pub(crate) async fn connect_client(
         .with_context(|| format!("failed to connect to the JMAP endpoint {endpoint}"))
 }
 
+/// Fetches the JMAP session at `endpoint` with the credentials: the
+/// add-account flow's connection test, before anything is stored.
+pub async fn check_sign_in(
+    endpoint: &str,
+    username: &str,
+    secret: &str,
+    auth: AuthKind,
+) -> Result<()> {
+    connect_client(endpoint, username, secret, auth).await?;
+    Ok(())
+}
+
 async fn fetch_identities(client: &Client) -> Result<Vec<NewIdentity>> {
     let request = client.build();
     let mut response: IdentityGetResponse = request

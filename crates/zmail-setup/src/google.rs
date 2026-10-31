@@ -1,11 +1,12 @@
 //! Bringing your own Google OAuth client: the guide's steps, its links,
 //! and what zmail says when the client's sign-in expires.
 //!
-//! zmail has no Google client of its own (a verified one is #268), so
-//! Gmail users either use an app password (the default) or create a
-//! Desktop client in their own Google Cloud project. The onboarding guide
-//! (`account_setup/google_guide.rs`) and `docs/gmail-oauth.md` walk
-//! through the same steps; keep them in step with each other.
+//! zmail has no Google client of its own (a verified one is #268), and
+//! never ships one: Gmail users either use an app password (the default)
+//! or create a Desktop client in their own Google Cloud project. The GUI's
+//! onboarding guide (`zmail-ui`'s `account_setup/google_guide.rs`), the
+//! terminal UI's sign-in step and `docs/gmail-oauth.md` walk through the
+//! same steps, from [`GUIDE_STEPS`]; keep them in step with each other.
 //!
 //! The trap: while the project's app is in **Testing**, Google ends its
 //! sign-ins after 7 days and every refresh answers `invalid_grant`.
@@ -14,37 +15,38 @@
 //! ([`EXPIRED_ADVICE`]).
 
 /// The guide in the repository, linked from the app.
-pub(crate) const GUIDE_URL: &str =
-    "https://github.com/unicornops/zmail/blob/main/docs/gmail-oauth.md";
+pub const GUIDE_URL: &str = "https://github.com/unicornops/zmail/blob/main/docs/gmail-oauth.md";
 
 /// Where Google account holders create an app password.
-pub(crate) const APP_PASSWORDS_URL: &str = "https://myaccount.google.com/apppasswords";
+pub const APP_PASSWORDS_URL: &str = "https://myaccount.google.com/apppasswords";
 
 /// Google's help on app passwords and 2-Step Verification.
-pub(crate) const APP_PASSWORDS_HELP_URL: &str = "https://support.google.com/accounts/answer/185833";
+pub const APP_PASSWORDS_HELP_URL: &str = "https://support.google.com/accounts/answer/185833";
 
 /// The one scope IMAP and SMTP accept for XOAUTH2.
-pub(crate) const MAIL_SCOPE: &str = "https://mail.google.com/";
+pub const MAIL_SCOPE: &str = "https://mail.google.com/";
 
 /// The end of every Google OAuth client ID.
-pub(crate) const CLIENT_ID_SUFFIX: &str = ".apps.googleusercontent.com";
+pub const CLIENT_ID_SUFFIX: &str = ".apps.googleusercontent.com";
 
 /// The start of the client secrets Google issues today.
 const CLIENT_SECRET_PREFIX: &str = "GOCSPX-";
 
 /// One step of the guide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct GuideStep {
+pub struct GuideStep {
     /// A stable id for selectors.
-    pub(crate) id: &'static str,
-    pub(crate) title: &'static str,
-    pub(crate) body: &'static str,
+    pub id: &'static str,
+    /// What the step does.
+    pub title: &'static str,
+    /// How to do it.
+    pub body: &'static str,
     /// The Google Cloud console page the step happens on, if any.
-    pub(crate) link: Option<(&'static str, &'static str)>,
+    pub link: Option<(&'static str, &'static str)>,
 }
 
 /// The guide's steps in order. The last one happens in zmail.
-pub(crate) const GUIDE_STEPS: [GuideStep; 6] = [
+pub const GUIDE_STEPS: [GuideStep; 6] = [
     GuideStep {
         id: "project",
         title: "Create a Google Cloud project",
@@ -99,13 +101,13 @@ pub(crate) const GUIDE_STEPS: [GuideStep; 6] = [
 ];
 
 /// The guide's warning about Testing apps.
-pub(crate) const TESTING_EXPIRY: &str = "While the app's publishing status is Testing, Google ends zmail's sign-in after 7 days and you have to sign in again. To avoid that, publish the app under Audience (Google then warns that it is unverified, which you can accept for your own app), or on Google Workspace choose Internal.";
+pub const TESTING_EXPIRY: &str = "While the app's publishing status is Testing, Google ends zmail's sign-in after 7 days and you have to sign in again. To avoid that, publish the app under Audience (Google then warns that it is unverified, which you can accept for your own app), or on Google Workspace choose Internal.";
 
 /// What Settings says when a Google account's saved sign-in stops working.
-pub(crate) const EXPIRED_ADVICE: &str = "Google no longer accepts zmail's saved sign-in. If your Google Cloud app is still in Testing, Google ends its sign-ins after 7 days. Publish the app under Audience, or on Google Workspace make it Internal, then sign in again so it lasts.";
+pub const EXPIRED_ADVICE: &str = "Google no longer accepts zmail's saved sign-in. If your Google Cloud app is still in Testing, Google ends its sign-ins after 7 days. Publish the app under Audience, or on Google Workspace make it Internal, then sign in again so it lasts.";
 
 /// Checks a pasted client ID, returning what is wrong with it.
-pub(crate) fn check_client_id(client_id: &str) -> Option<&'static str> {
+pub fn check_client_id(client_id: &str) -> Option<&'static str> {
     let client_id = client_id.trim();
     if client_id.starts_with(CLIENT_SECRET_PREFIX) {
         return Some(
@@ -126,7 +128,7 @@ pub(crate) fn check_client_id(client_id: &str) -> Option<&'static str> {
 }
 
 /// Checks a pasted client secret, returning what is wrong with it.
-pub(crate) fn check_client_secret(client_secret: &str) -> Option<&'static str> {
+pub fn check_client_secret(client_secret: &str) -> Option<&'static str> {
     let client_secret = client_secret.trim();
     if client_secret.is_empty() {
         return Some(

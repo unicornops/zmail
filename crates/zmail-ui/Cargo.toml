@@ -25,6 +25,8 @@ zmail-notify = { path = "../zmail-notify" }
 zmail-render = { path = "../zmail-render" }
 zmail-render-web = { path = "../zmail-render-web" }
 zmail-security = { path = "../zmail-security" }
+# Account setup's non-visual half, shared with the terminal UI (ADR 0007).
+zmail-setup = { path = "../zmail-setup" }
 zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }
 zmail-theme = { path = "../zmail-theme" }
@@ -44,7 +46,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 [features]
 # The Proton Mail provider in the add-account flow. Off by default, and not
 # enabled by zmail-app, until the local store is encrypted at rest (#139).
-proton = ["dep:zmail-proton", "zmail-sync/proton"]
+proton = ["dep:zmail-proton", "zmail-setup/proton", "zmail-sync/proton"]
 
 [dev-dependencies]
 # `#[gpui::test]`, `TestAppContext` and `VisualTestContext` for view tests.

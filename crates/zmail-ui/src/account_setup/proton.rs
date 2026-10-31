@@ -17,35 +17,30 @@
 //! The account is stored once signed in, with the session (never the
 //! password) in the keychain, and the flow carries on with the colour and
 //! first-sync steps. Every step runs on the sync runtime; the view shows a
-//! spinner and keeps the user on the step until it answers.
+//! spinner and keeps the user on the step until it answers. The steps
+//! themselves are `zmail_setup::proton`'s, shared with the terminal UI;
+//! this file draws them.
 
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, IntoElement, ParentElement as _,
     SharedString, Styled as _, Task, Window, div, px,
 };
-use zmail_core::{
-    AccountColor, AuthKind, CachePolicySummary, NewAccount, NewIdentity, ProtocolKind,
+use zmail_core::{AccountColor, ProtocolKind};
+use zmail_proton::SignInStep;
+use zmail_setup::proton::{
+    self as shared, ProtonAction, RISK_NOTE, RISK_TITLE, VERIFICATION_CAPTION, VERIFICATION_DETAIL,
 };
-use zmail_proton::{ProtonSignIn, SignInStep, SignedInAccount};
 
 use super::render::{caption, field, heading, spinner};
 use super::{AccountField, AccountSetupEvent, AccountSetupServices, AccountSetupView, Stage};
 use crate::components::{Banner, BannerTone, Button};
 use crate::styles::{SPACE_2, SPACE_4, UiColors};
 
-/// What a third-party Proton client means, shown on the sign-in step.
-pub(crate) const RISK_NOTE: &str = "Zmail is an independent client, not made or supported by Proton. It talks to Proton's private API the way Proton Mail Bridge does and signs in as Bridge, because Proton doesn't accept other clients, so your Proton sessions list shows it as Proton Mail Bridge. Proton may change or block it at any time, and only allows it on paid plans. Zmail keeps a session token and the key that unlocks your mail in the system keychain, never your password.";
-
-/// The Proton sign-in in progress.
+/// The Proton sign-in in progress: the shared state machine and the task
+/// running its current step.
 #[derive(Default)]
 pub(crate) struct ProtonFlow {
-    sign_in: Option<ProtonSignIn>,
-    /// The verification page Proton asked the user to visit.
-    pub(crate) verify_url: Option<String>,
-    /// A step is running.
-    pub(crate) busy: bool,
-    /// Why the last step failed.
-    pub(crate) error: Option<String>,
+    pub(crate) core: shared::ProtonFlow,
     task: Option<Task<()>>,
 }
 
@@ -56,99 +51,43 @@ impl AccountSetupView {
         self.form.use_oauth = false;
         self.form.protocol = ProtocolKind::Proton;
         self.form.errors.clear();
-        self.proton.error = None;
+        self.proton.core.error = None;
         self.go(Stage::ProtonSignIn, window, cx);
     }
 
     /// The current Proton step's Continue.
     pub(crate) fn proton_advance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.proton.busy {
+        if self.proton.core.busy {
             return;
         }
-        match self.stage {
-            Stage::ProtonSignIn => self.proton_start(window, cx),
-            Stage::ProtonVerification => {
-                if let Some(sign_in) = self.proton.sign_in.clone() {
-                    self.proton_run(async move { sign_in.login().await }, window, cx);
-                }
+        let input = match self.stage {
+            Stage::ProtonSignIn => {
+                self.proton_start(window, cx);
+                return;
             }
-            Stage::ProtonTotp => {
-                let code = self.form.text(AccountField::ProtonTotp, cx);
-                if code.trim().is_empty() {
-                    self.show_proton_field_error(
-                        AccountField::ProtonTotp,
-                        "Enter the code from your authenticator app.",
-                        window,
-                        cx,
-                    );
-                    return;
-                }
-                if let Some(sign_in) = self.proton.sign_in.clone() {
-                    self.proton_run(async move { sign_in.submit_totp(&code).await }, window, cx);
-                }
+            Stage::ProtonTotp => self.form.text(AccountField::ProtonTotp, cx),
+            Stage::ProtonMailboxPassword => self.form.text(AccountField::ProtonMailboxPassword, cx),
+            _ => String::new(),
+        };
+        match self.proton.core.submit(&input) {
+            Ok(Some(step)) => self.proton_run(step, window, cx),
+            Ok(None) => {}
+            Err((field, message)) => {
+                self.show_errors(vec![(field, message)], window, cx);
             }
-            Stage::ProtonMailboxPassword => {
-                let password = self.form.text(AccountField::ProtonMailboxPassword, cx);
-                if password.is_empty() {
-                    self.show_proton_field_error(
-                        AccountField::ProtonMailboxPassword,
-                        "Enter your mailbox password.",
-                        window,
-                        cx,
-                    );
-                    return;
-                }
-                if let Some(sign_in) = self.proton.sign_in.clone() {
-                    self.proton_run(
-                        async move { sign_in.submit_mailbox_password(&password).await },
-                        window,
-                        cx,
-                    );
-                }
-            }
-            _ => {}
         }
-    }
-
-    fn show_proton_field_error(
-        &mut self,
-        field: AccountField,
-        message: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.show_errors(vec![(field, message.to_owned())], window, cx);
     }
 
     /// Checks the address and password, then signs in.
     fn proton_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let email = self.form.text(AccountField::Email, cx).trim().to_owned();
         let password = self.form.text(AccountField::Password, cx);
-        let mut errors = Vec::new();
-        if email.is_empty() {
-            errors.push((
-                AccountField::Email,
-                "Enter your Proton address or username.".to_owned(),
-            ));
-        }
-        if password.is_empty() {
-            errors.push((
-                AccountField::Password,
-                "Enter your Proton password.".to_owned(),
-            ));
-        }
-        if self.show_errors(errors, window, cx) {
+        if self.show_errors(shared::check_sign_in(&email, &password), window, cx) {
             return;
         }
         let services = cx.global::<AccountSetupServices>().clone();
-        let duplicate = services.store.list_accounts().ok().is_some_and(|accounts| {
-            accounts.iter().any(|account| {
-                account.protocol == ProtocolKind::Proton
-                    && account.username.eq_ignore_ascii_case(&email)
-            })
-        });
-        if duplicate {
-            self.proton.error = Some(format!("{email} is already in Zmail."));
+        if let Some(duplicate) = shared::duplicate(&services.store, &email) {
+            self.proton.core.error = Some(duplicate);
             cx.notify();
             return;
         }
@@ -159,13 +98,13 @@ impl AccountSetupView {
         {
             Ok(sign_in) => sign_in,
             Err(error) => {
-                self.proton.error = Some(format!("{error:#}"));
+                self.proton.core.error = Some(format!("{error:#}"));
                 cx.notify();
                 return;
             }
         };
-        self.proton.sign_in = Some(sign_in.clone());
-        self.proton_run(async move { sign_in.login().await }, window, cx);
+        let step = self.proton.core.start(sign_in);
+        self.proton_run(step, window, cx);
     }
 
     /// Runs a sign-in step on the sync runtime and moves on with its
@@ -178,15 +117,11 @@ impl AccountSetupView {
     ) {
         let services = cx.global::<AccountSetupServices>().clone();
         let run = services.sync_service.run_proton(step);
-        self.proton.busy = true;
-        self.proton.error = None;
         self.proton.task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = run.await.and_then(|step| step);
             let _ = this.update_in(cx, |this, window, cx| {
-                this.proton.busy = false;
-                match result {
-                    Ok(step) => this.proton_handle_step(step, window, cx),
-                    Err(error) => this.proton.error = Some(format!("{error:#}")),
+                if let Some(action) = this.proton.core.finish(result) {
+                    this.proton_handle(action, window, cx);
                 }
                 cx.notify();
             });
@@ -195,28 +130,22 @@ impl AccountSetupView {
     }
 
     /// Shows what the sign-in needs next.
-    fn proton_handle_step(
-        &mut self,
-        step: SignInStep,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match step {
-            SignInStep::HumanVerification { url } => {
+    fn proton_handle(&mut self, action: ProtonAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            ProtonAction::Verify { url } => {
                 cx.open_url(&url);
-                self.proton.verify_url = Some(url);
                 self.go(Stage::ProtonVerification, window, cx);
             }
-            SignInStep::Totp => {
+            ProtonAction::AskTotp => {
                 self.form.set_text(AccountField::ProtonTotp, "", cx);
                 self.go(Stage::ProtonTotp, window, cx);
             }
-            SignInStep::MailboxPassword => {
+            ProtonAction::AskMailboxPassword => {
                 self.form
                     .set_text(AccountField::ProtonMailboxPassword, "", cx);
                 self.go(Stage::ProtonMailboxPassword, window, cx);
             }
-            SignInStep::SignedIn(account) => self.proton_store(account, window, cx),
+            ProtonAction::SignedIn(account) => self.proton_store(account, window, cx),
         }
     }
 
@@ -224,36 +153,37 @@ impl AccountSetupView {
     /// the colour step and the first sync.
     fn proton_store(
         &mut self,
-        account: SignedInAccount,
+        account: zmail_proton::SignedInAccount,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(sign_in) = self.proton.sign_in.clone() else {
+        let Some(sign_in) = self.proton.core.sign_in().cloned() else {
             return;
         };
         let services = cx.global::<AccountSetupServices>().clone();
-        let username = self.form.text(AccountField::Email, cx).trim().to_owned();
-        let new_account = proton_account(&username, &account);
-        let account_id = match services.store.insert_account(&new_account) {
-            Ok(account_id) => account_id,
+        let username = self.form.text(AccountField::Email, cx);
+        let (new_account, account_id, store_session) = match shared::store_signed_in(
+            &services.store,
+            &services.secrets,
+            &sign_in,
+            &username,
+            &account,
+        ) {
+            Ok(stored) => stored,
             Err(error) => {
                 cx.emit(AccountSetupEvent::Error(error.to_string()));
                 return;
             }
         };
-        let secrets = services.secrets.clone();
-        let store_session = async move { sign_in.store(secrets.as_ref(), account_id).await };
         let run = services.sync_service.run_proton(store_session);
-        self.proton.busy = true;
+        self.proton.core.busy = true;
         self.proton.task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = run.await.and_then(|stored| stored);
             let _ = this.update_in(cx, |this, window, cx| {
-                this.proton.busy = false;
+                this.proton.core.busy = false;
                 let services = cx.global::<AccountSetupServices>().clone();
                 if let Err(error) = result {
-                    let _ = services.store.delete_account(account_id);
-                    this.proton.error =
-                        Some(format!("Could not keep the Proton session: {error:#}"));
+                    this.proton.core.error = Some(format!("{error:#}"));
                     cx.notify();
                     return;
                 }
@@ -261,7 +191,7 @@ impl AccountSetupView {
                 this.form.set_text(AccountField::Password, "", cx);
                 this.form
                     .set_text(AccountField::ProtonMailboxPassword, "", cx);
-                this.proton.sign_in = None;
+                this.proton.core.done();
                 let _ = services.sync_service.sync_account(account_id);
                 let _ = services.sync_service.sync_watchers();
                 this.account_id = Some(account_id);
@@ -280,13 +210,9 @@ impl AccountSetupView {
     /// Leaves a sign-in that did not finish: signs its session out.
     pub(crate) fn proton_abort(&mut self, cx: &mut Context<Self>) {
         self.proton.task = None;
-        self.proton.busy = false;
-        self.proton.verify_url = None;
-        if let Some(sign_in) = self.proton.sign_in.take() {
+        if let Some(abort) = self.proton.core.abort() {
             let services = cx.global::<AccountSetupServices>().clone();
-            let abort = services
-                .sync_service
-                .run_proton(async move { sign_in.abort().await });
+            let abort = services.sync_service.run_proton(abort);
             cx.background_spawn(abort).detach();
         }
     }
@@ -305,7 +231,7 @@ impl AccountSetupView {
             .child(
                 Banner::new("account-setup-proton-risk", RISK_NOTE)
                     .tone(BannerTone::Caution)
-                    .title("A third-party client for Proton"),
+                    .title(RISK_TITLE),
             )
             .child(field(self, AccountField::Email, colors))
             .child(field(self, AccountField::Password, colors))
@@ -315,16 +241,12 @@ impl AccountSetupView {
 
     /// The human verification step.
     pub(crate) fn render_proton_verification(&self, colors: &UiColors) -> AnyElement {
-        let url = self.proton.verify_url.clone().unwrap_or_default();
+        let url = self.proton.core.verify_url.clone().unwrap_or_default();
         div()
             .flex()
             .flex_col()
             .gap(px(SPACE_4))
-            .child(heading(
-                "Verify it's you",
-                "Proton wants to check that a person is signing in. Finish the check on Proton's page in your browser, then continue here.",
-                colors,
-            ))
+            .child(heading("Verify it's you", VERIFICATION_DETAIL, colors))
             .child(
                 div().flex().child(
                     Button::new("account-setup-proton-verify", "Open the verification page")
@@ -332,10 +254,7 @@ impl AccountSetupView {
                         .on_click(move |_: &ClickEvent, _, cx: &mut App| cx.open_url(&url)),
                 ),
             )
-            .child(caption(
-                "Zmail doesn't see or solve the check; it only signs in again once you've finished.",
-                colors,
-            ))
+            .child(caption(VERIFICATION_CAPTION, colors))
             .children(self.proton_status(colors))
             .into_any_element()
     }
@@ -374,7 +293,7 @@ impl AccountSetupView {
 
     /// A spinner while a step runs, or why the last one failed.
     fn proton_status(&self, colors: &UiColors) -> Option<AnyElement> {
-        if self.proton.busy {
+        if self.proton.core.busy {
             return Some(
                 div()
                     .flex()
@@ -385,59 +304,11 @@ impl AccountSetupView {
                     .into_any_element(),
             );
         }
-        self.proton.error.clone().map(|error| {
+        self.proton.core.error.clone().map(|error| {
             Banner::new("account-setup-proton-error", SharedString::from(error))
                 .tone(BannerTone::Danger)
                 .title("Couldn't sign in")
                 .into_any_element()
         })
-    }
-}
-
-/// The account a Proton sign-in adds: the identities come from Proton with
-/// the first sync.
-fn proton_account(username: &str, account: &SignedInAccount) -> NewAccount {
-    let display_name = if account.display_name.is_empty() {
-        account.email.clone()
-    } else {
-        account.display_name.clone()
-    };
-    NewAccount {
-        display_name: account.email.clone(),
-        protocol: ProtocolKind::Proton,
-        auth: AuthKind::ProtonSession,
-        endpoint: zmail_proton::API_HOST_URL.to_owned(),
-        username: username.to_owned(),
-        cache_policy: CachePolicySummary::performance_first(),
-        outgoing: None,
-        identities: vec![NewIdentity {
-            display_name,
-            email_address: account.email.clone(),
-            signature: String::new(),
-            is_primary: true,
-        }],
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_signed_in_account_becomes_a_proton_account() {
-        let account = proton_account(
-            "zmail",
-            &SignedInAccount {
-                email: "zmail@proton.me".to_owned(),
-                display_name: String::new(),
-            },
-        );
-        assert_eq!(account.protocol, ProtocolKind::Proton);
-        assert_eq!(account.auth, AuthKind::ProtonSession);
-        assert_eq!(account.username, "zmail");
-        assert_eq!(account.display_name, "zmail@proton.me");
-        assert_eq!(account.identities[0].display_name, "zmail@proton.me");
-        assert!(account.outgoing.is_none());
-        assert!(RISK_NOTE.contains("paid plans") && RISK_NOTE.contains("block"));
     }
 }

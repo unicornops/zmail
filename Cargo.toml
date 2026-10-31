@@ -15,6 +15,7 @@ members = [
     "crates/zmail-render",
     "crates/zmail-render-web",
     "crates/zmail-security",
+    "crates/zmail-setup",
     "crates/zmail-smtp",
     "crates/zmail-store",
     "crates/zmail-sync",

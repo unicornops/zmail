@@ -417,6 +417,21 @@ pub struct IndexedBodies {
     pub oversized: Vec<u32>,
 }
 
+/// Connects and signs in to `endpoint` (`imaps://host:port` or
+/// `imap://host:port`), then logs out: the add-account flow's connection
+/// test, before anything is stored.
+pub async fn check_sign_in(
+    endpoint: &str,
+    username: &str,
+    secret: &str,
+    auth: AuthKind,
+) -> Result<()> {
+    let endpoint = parse_endpoint(endpoint)?;
+    let mut session = connect_session(&endpoint, username, secret, auth).await?;
+    let _ = session.logout().await;
+    Ok(())
+}
+
 /// One IMAP connection reused across the batches of a background indexing
 /// pass, so indexing a large mailbox does not log in once per batch.
 pub struct BodyIndexSession {

@@ -29,14 +29,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Global,
     SharedString, Subscription, Task, Window,
 };
 use zmail_autodiscover::{Discovery, EmailAddress, MailSettings, Provider, Step};
-use zmail_core::{AccountColor, ProtocolKind, SyncPhase};
+use zmail_core::{AccountColor, ProtocolKind};
 use zmail_security::SecretStore;
+use zmail_setup::discovery::{self, Next, Outcome};
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
@@ -51,14 +51,12 @@ mod proton;
 mod render;
 mod window;
 
-pub(crate) use form::{AccountField, AccountFormValues, Check, validate_account_form};
+pub(crate) use form::{AccountField, Check, validate_account_form};
 #[cfg(test)]
 pub(crate) use window::open_window;
+pub(crate) use zmail_setup::SyncProgress;
 
-use form::{
-    AccountForm, AccountSetupSecret, IMAP_SECURITY, SMTP_SECURITY, build_account_from_form,
-    security_label,
-};
+use form::{AccountForm, IMAP_SECURITY, SMTP_SECURITY, security_label};
 
 /// The key context the view sets.
 pub(crate) const KEY_CONTEXT: &str = "AccountSetup";
@@ -195,18 +193,6 @@ pub(crate) enum AccountSetupEvent {
     Finished { account_id: Option<i64> },
     /// Storing the account failed.
     Error(String),
-}
-
-/// The first sync's progress, read from the store.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SyncProgress {
-    pub(crate) phase: Option<SyncPhase>,
-    pub(crate) detail: String,
-    pub(crate) error: Option<String>,
-    pub(crate) folders: usize,
-    pub(crate) conversations: usize,
-    /// The sync has finished at least once.
-    pub(crate) done: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -622,13 +608,16 @@ impl AccountSetupView {
         let Some(discovery) = &self.discovery else {
             return;
         };
-        if discovery.needs_consent() {
-            self.go(Stage::Consent, window, cx);
-            return;
-        }
-        let Some(step) = discovery.next_step() else {
-            self.finish_discovery(window, cx);
-            return;
+        let step = match discovery::next(discovery) {
+            Next::AskConsent => {
+                self.go(Stage::Consent, window, cx);
+                return;
+            }
+            Next::Finished => {
+                self.finish_discovery(window, cx);
+                return;
+            }
+            Next::Run(step) => step,
         };
         let email = discovery.email().clone();
         let network = cx.global::<AccountSetupServices>().network.clone();
@@ -668,30 +657,19 @@ impl AccountSetupView {
 
     /// Discovery is over: show what it found, or the manual form.
     fn finish_discovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(discovery) = &self.discovery else {
+        let Some(discovery) = self.discovery.clone() else {
             return;
         };
-        match discovery.result() {
-            Some(settings) => {
-                self.form.apply_settings(&settings, cx);
-                self.sync_selects(cx);
+        let mut outcome = Outcome::Manual;
+        self.form
+            .update(cx, |values| outcome = discovery::finish(&discovery, values));
+        self.sync_selects(cx);
+        match outcome {
+            Outcome::Found(settings) => {
                 self.found = Some(settings);
                 self.go(Stage::Result, window, cx);
             }
-            None => {
-                let email = discovery.email().clone();
-                let (imap, smtp) = discovery.partial();
-                let (imap, smtp) = (imap.cloned(), smtp.cloned());
-                if let Some(imap) = imap {
-                    self.form.apply_imap(&imap.value, cx);
-                }
-                if let Some(smtp) = smtp {
-                    self.form.apply_smtp(&smtp.value, cx);
-                }
-                self.form.prefill_guesses(&email, cx);
-                self.sync_selects(cx);
-                self.go(Stage::Manual, window, cx);
-            }
+            Outcome::Manual => self.go(Stage::Manual, window, cx),
         }
     }
 
@@ -760,7 +738,12 @@ impl AccountSetupView {
             return;
         }
         let services = cx.global::<AccountSetupServices>().clone();
-        match store_account(&services, &values) {
+        match zmail_setup::accounts::store_account(
+            &services.store,
+            &services.secrets,
+            &services.sync_service,
+            &values,
+        ) {
             Ok((account_id, message)) => {
                 self.account_id = Some(account_id);
                 self.color = AccountColor::derived(account_id);
@@ -828,23 +811,8 @@ impl AccountSetupView {
             return;
         };
         let store = cx.global::<AccountSetupServices>().store.clone();
-        let Some(account) = store.list_accounts().ok().and_then(|accounts| {
-            accounts
-                .into_iter()
-                .find(|account| account.id == account_id)
-        }) else {
+        let Some(progress) = zmail_setup::accounts::read_sync_progress(&store, account_id) else {
             return;
-        };
-        let mailboxes = store.list_mailboxes(account_id).unwrap_or_default();
-        let status = account.sync_status;
-        let progress = SyncProgress {
-            phase: Some(status.phase),
-            detail: status.detail,
-            error: (status.phase == SyncPhase::Failed)
-                .then(|| status.last_error_message.unwrap_or_default()),
-            folders: mailboxes.len(),
-            conversations: mailboxes.iter().map(|mailbox| mailbox.total_threads).sum(),
-            done: status.phase == SyncPhase::Idle && status.last_success_at.is_some(),
         };
         if progress != self.sync {
             self.sync = progress;
@@ -858,94 +826,5 @@ impl AccountSetupView {
         cx.emit(AccountSetupEvent::Finished {
             account_id: self.account_id,
         });
-    }
-}
-
-/// Stores a validated form and returns the new account id and the status
-/// message for the user. Then starts the first sync, or the OAuth2 browser
-/// flow that ends in it.
-fn store_account(
-    services: &AccountSetupServices,
-    form: &AccountFormValues,
-) -> Result<(i64, String)> {
-    let (account, secret) = build_account_from_form(form)?;
-    let account_id = services.store.insert_account(&account)?;
-    let message = match secret {
-        AccountSetupSecret::Password(secret) => {
-            services.secrets.set_account_secret(account_id, &secret)?;
-            let _ = services.sync_service.sync_account(account_id);
-            format!("{} added.", account.display_name)
-        }
-        AccountSetupSecret::OAuth2(client) => {
-            // The browser flow blocks for up to its redirect timeout, so it
-            // runs off the GUI thread; the account's sync status marks the
-            // wait, and the grant (tokens, client config, expiry) is
-            // persisted before the first sync starts. Syncing here would
-            // only record a missing-credentials failure.
-            let _ = services.store.begin_sync_attempt(
-                account_id,
-                SyncPhase::Connecting,
-                "Waiting for browser authorization",
-            );
-            spawn_oauth2_authorization(services, account_id, client);
-            format!(
-                "{} added. Finish signing in in your browser; the account syncs once you approve access.",
-                account.display_name
-            )
-        }
-    };
-    // Start the new account's background watcher immediately instead of
-    // waiting for the next app launch.
-    let _ = services.sync_service.sync_watchers();
-    Ok((account_id, message))
-}
-
-/// Runs the OAuth2 browser flow on a background thread and stores the
-/// resulting grant, so the GUI never blocks on the redirect wait.
-fn spawn_oauth2_authorization(
-    services: &AccountSetupServices,
-    account_id: i64,
-    client: zmail_auth::OAuth2Client,
-) {
-    let store = services.store.clone();
-    let secrets = services.secrets.clone();
-    let sync_service = services.sync_service.clone();
-    let spawn = std::thread::Builder::new()
-        .name("zmail-oauth2-setup".to_owned())
-        .spawn(move || {
-            let tokens = match client.authorize_interactively() {
-                Ok(tokens) => tokens,
-                Err(error) => {
-                    let _ = store.record_sync_failure(
-                        account_id,
-                        "Browser authorization failed",
-                        error.to_string(),
-                    );
-                    return;
-                }
-            };
-            if let Err(error) = zmail_sync::persist_oauth2_grant(
-                &store,
-                secrets.as_ref(),
-                account_id,
-                &client,
-                &tokens,
-            ) {
-                let _ = store.record_sync_failure(
-                    account_id,
-                    "Storing the authorization failed",
-                    error.to_string(),
-                );
-                return;
-            }
-            let _ = sync_service.sync_account(account_id);
-            let _ = sync_service.sync_watchers();
-        });
-    if let Err(error) = spawn {
-        let _ = services.store.record_sync_failure(
-            account_id,
-            "Browser authorization failed",
-            error.to_string(),
-        );
     }
 }

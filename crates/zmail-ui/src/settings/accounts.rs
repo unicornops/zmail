@@ -26,9 +26,10 @@ use gpui::{
 };
 use zmail_core::{
     AccountColor, AccountSummary, AuthKind, OutboxJobState, SyncPhase, reauth::ReauthReason,
-    text::count_noun,
 };
-use zmail_security::SecretSlot;
+use zmail_setup::accounts::{
+    RemoveError, budget_label, budget_options, removal_blocker, removal_description, removal_lines,
+};
 use zmail_store::AccountRemovalImpact;
 
 use super::{
@@ -40,7 +41,6 @@ use crate::components::{
     Banner, BannerTone, Button, ButtonSize, ComponentTheme, Modal, ModalState, Select, SelectEvent,
     TextInput, TextInputEvent,
 };
-use crate::google_oauth;
 use crate::styles::{
     ICON_SIZE_SM, RADIUS_LG, SPACE_1, SPACE_2, SPACE_3, SPACE_4, TYPE_BODY_STRONG, TYPE_CAPTION,
     TypeStyleExt, UiColors,
@@ -51,7 +51,7 @@ use crate::widgets::{EllipsisExt, format_size, icon, sync_badge};
 /// `google` is a Gmail account signed in with the user's own client.
 fn reauth_advice(reason: ReauthReason, auth: AuthKind, google: bool) -> &'static str {
     match (reason, auth) {
-        (ReauthReason::GrantExpired, _) if google => google_oauth::EXPIRED_ADVICE,
+        (ReauthReason::GrantExpired, _) if google => zmail_setup::google::EXPIRED_ADVICE,
         (ReauthReason::GrantExpired, _) => {
             "Your provider no longer accepts zmail's saved sign-in: it expired, or access was revoked. Sign in again to carry on."
         }
@@ -63,17 +63,6 @@ fn reauth_advice(reason: ReauthReason, auth: AuthKind, google: bool) -> &'static
         }
     }
 }
-
-/// The cache budgets offered, in MiB; `None` is no limit.
-const CACHE_BUDGETS: [Option<u64>; 7] = [
-    None,
-    Some(250),
-    Some(500),
-    Some(1024),
-    Some(2 * 1024),
-    Some(5 * 1024),
-    Some(10 * 1024),
-];
 
 /// Width of the cards' pickers.
 const SELECT_WIDTH: f32 = 200.0;
@@ -416,15 +405,15 @@ impl AccountsSettings {
             return;
         }
         let host = SettingsHost::get(cx);
-        match host.secrets.set_account_secret(account_id, &password) {
-            Ok(()) => {
-                let _ = host.sync_service.sync_account(account_id);
-                let _ = host.sync_service.sync_watchers();
-                let _ = host.sync_service.retry_refused_sends(account_id);
-                cx.emit(SettingsEvent::Status(format!(
-                    "Password saved. {name} is syncing."
-                )));
-            }
+        match zmail_setup::accounts::save_password(
+            host.secrets.as_ref(),
+            &host.sync_service,
+            account_id,
+            &password,
+        ) {
+            Ok(()) => cx.emit(SettingsEvent::Status(format!(
+                "Password saved. {name} is syncing."
+            ))),
             Err(error) => cx.emit(SettingsEvent::Error(format!(
                 "Could not save the password in the keychain: {error:#}"
             ))),
@@ -442,29 +431,17 @@ impl AccountsSettings {
             host.secrets.clone(),
             host.sync_service.clone(),
         );
-        let config = store
-            .sync_target(account_id)
-            .ok()
-            .flatten()
-            .and_then(|target| target.oauth2);
-        let Some((preset, config)) = config.and_then(|config| {
-            zmail_auth::OAuth2Preset::for_token_endpoint(&config.token_endpoint)
-                .map(|preset| (preset, config))
-        }) else {
-            cx.emit(SettingsEvent::Error(
-                "This account signs in through a custom OAuth service, so Zmail cannot start its sign-in again. Remove the account and add it again."
-                    .to_owned(),
-            ));
-            return;
+        let (preset, client) = match zmail_setup::accounts::reauthorization_client(
+            &store,
+            secrets.as_ref(),
+            account_id,
+        ) {
+            Ok(found) => found,
+            Err(message) => {
+                cx.emit(SettingsEvent::Error(message.to_owned()));
+                return;
+            }
         };
-        let client_secret = secrets
-            .get_account_secret_from_slot(account_id, SecretSlot::ClientSecret)
-            .ok();
-        let client = preset.client(
-            config.client_id,
-            client_secret,
-            zmail_auth::DEFAULT_REDIRECT_PORT,
-        );
         let _ = store.begin_sync_attempt(
             account_id,
             SyncPhase::Connecting,
@@ -473,30 +450,15 @@ impl AccountsSettings {
         let spawned = std::thread::Builder::new()
             .name("zmail-oauth2-reauth".to_owned())
             .spawn(move || {
-                let result = client.authorize_interactively().and_then(|tokens| {
-                    zmail_sync::persist_oauth2_grant(
-                        &store,
-                        secrets.as_ref(),
-                        account_id,
-                        &client,
-                        &tokens,
-                    )
-                });
-                match result {
-                    Ok(()) => {
-                        let _ = sync_service.sync_account(account_id);
-                        let _ = sync_service.sync_watchers();
-                        // Messages refused for the old sign-in go now.
-                        let _ = sync_service.retry_refused_sends(account_id);
-                    }
-                    Err(error) => {
-                        let _ = store.record_sync_failure(
-                            account_id,
-                            "Browser authorization failed",
-                            error.to_string(),
-                        );
-                    }
-                }
+                let tokens = client.authorize_interactively();
+                zmail_setup::accounts::finish_reauthorization(
+                    &store,
+                    secrets.as_ref(),
+                    &sync_service,
+                    account_id,
+                    &client,
+                    tokens,
+                );
             });
         match spawned {
             Ok(_) => cx.emit(SettingsEvent::Status(format!(
@@ -554,23 +516,21 @@ impl AccountsSettings {
             return;
         }
         let host = SettingsHost::get(cx);
-        if let Err(error) = host.store.delete_account(removal.account_id) {
-            cx.emit(SettingsEvent::Error(format!(
-                "Could not remove {}: {error:#}",
-                removal.name
-            )));
-            return;
-        }
-        let secrets = host.secrets.clone();
-        let mut forgot = secrets.delete_account_secret(removal.account_id);
-        for slot in [
-            SecretSlot::Password,
-            SecretSlot::ClientSecret,
-            SecretSlot::AccessToken,
-            SecretSlot::RefreshToken,
-        ] {
-            forgot = forgot.and(secrets.delete_account_secret_in_slot(removal.account_id, slot));
-        }
+        let forgot = match zmail_setup::accounts::remove_account(
+            &host.store,
+            host.secrets.as_ref(),
+            removal.account_id,
+        ) {
+            Ok(()) => Ok(()),
+            Err(RemoveError::LocalData(error)) => {
+                cx.emit(SettingsEvent::Error(format!(
+                    "Could not remove {}: {error:#}",
+                    removal.name
+                )));
+                return;
+            }
+            Err(RemoveError::Keychain(error)) => Err(error),
+        };
         if self.focused_account == Some(removal.account_id) {
             self.focused_account = None;
         }
@@ -802,7 +762,7 @@ impl AccountsSettings {
                     Button::new("account-fix-guide", "How to stop this")
                         .size(ButtonSize::Small)
                         .icon("external-link")
-                        .on_click(|_, _, cx: &mut App| cx.open_url(google_oauth::GUIDE_URL)),
+                        .on_click(|_, _, cx: &mut App| cx.open_url(zmail_setup::google::GUIDE_URL)),
                 ),
             )
         } else {
@@ -889,54 +849,9 @@ impl AccountsSettings {
     }
 }
 
-/// What the Remove confirmation says goes, and what stays.
-pub(crate) fn removal_description(name: &str) -> String {
-    format!(
-        "This deletes {name}'s local data from this computer: its downloaded mail, attachments and search index, and its password and sign-in tokens in the system keychain. Mail on the server is not touched, and adding the account again downloads it again."
-    )
-}
-
-/// The unsent mail and drafts that go with the account, which exist only
-/// on this computer.
-pub(crate) fn removal_lines(impact: &AccountRemovalImpact) -> Vec<String> {
-    let mut lines = Vec::new();
-    if impact.unsent_messages > 0 {
-        lines.push(format!(
-            "{} in the Outbox will be deleted without being sent.",
-            count_noun(impact.unsent_messages, "unsent message", "unsent messages")
-        ));
-    }
-    if impact.drafts > 0 {
-        lines.push(format!(
-            "{} will be deleted.",
-            count_noun(impact.drafts, "draft", "drafts")
-        ));
-    }
-    lines
-}
-
-/// Why the account cannot be removed right now, if it cannot.
-pub(crate) fn removal_blocker(impact: &AccountRemovalImpact) -> Option<String> {
-    if impact.sending_messages > 0 {
-        return Some(
-            "A message from this account is being sent. Try again once it has gone.".to_owned(),
-        );
-    }
-    None
-}
-
 /// The colour picker's index for a saved colour: 0 is Automatic.
 fn color_index(color: Option<AccountColor>) -> usize {
     color.map_or(0, |color| color.index() + 1)
-}
-
-fn budget_options(saved_mb: Option<u64>) -> Vec<Option<u64>> {
-    let mut options = CACHE_BUDGETS.to_vec();
-    if !options.contains(&saved_mb) {
-        options.push(saved_mb);
-        options.sort_by_key(|budget| budget.unwrap_or(0));
-    }
-    options
 }
 
 fn budget_select(options: &[Option<u64>], cx: &mut Context<AccountsSettings>) -> Entity<Select> {
@@ -946,15 +861,6 @@ fn budget_select(options: &[Option<u64>], cx: &mut Context<AccountsSettings>) ->
             .label("Cache budget")
             .width(px(SELECT_WIDTH))
     })
-}
-
-/// How a cache budget reads in the picker.
-pub(crate) fn budget_label(budget_mb: Option<u64>) -> String {
-    match budget_mb {
-        None => "No limit".to_owned(),
-        Some(mb) if mb >= 1024 && mb % 1024 == 0 => format!("{} GB", mb / 1024),
-        Some(mb) => format!("{mb} MB"),
-    }
 }
 
 /// Re-read the store in the main window, so a colour or a removal shows
@@ -1008,50 +914,5 @@ impl Render for AccountsSettings {
             .children(cards)
             .children(self.render_reauth_dialog(cx))
             .children(self.render_remove_dialog(&colors, cx))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use zmail_store::AccountRemovalImpact;
-
-    use super::*;
-
-    #[test]
-    fn budgets_read_in_megabytes_and_gigabytes() {
-        assert_eq!(budget_label(None), "No limit");
-        assert_eq!(budget_label(Some(250)), "250 MB");
-        assert_eq!(budget_label(Some(2048)), "2 GB");
-        assert_eq!(budget_label(Some(1500)), "1500 MB");
-        assert_eq!(budget_options(Some(300)).len(), CACHE_BUDGETS.len() + 1);
-        assert_eq!(budget_options(Some(500)).len(), CACHE_BUDGETS.len());
-    }
-
-    #[test]
-    fn the_confirmation_lists_unsent_mail_and_drafts() {
-        let impact = AccountRemovalImpact {
-            unsent_messages: 2,
-            sending_messages: 0,
-            drafts: 1,
-        };
-        assert_eq!(
-            removal_lines(&impact),
-            [
-                "2 unsent messages in the Outbox will be deleted without being sent.",
-                "1 draft will be deleted.",
-            ]
-        );
-        assert_eq!(removal_blocker(&impact), None);
-        assert!(
-            removal_blocker(&AccountRemovalImpact {
-                sending_messages: 1,
-                ..impact
-            })
-            .is_some()
-        );
-        assert!(removal_lines(&AccountRemovalImpact::default()).is_empty());
-        let description = removal_description("Work");
-        assert!(description.contains("Mail on the server is not touched"));
-        assert!(description.contains("keychain"));
     }
 }

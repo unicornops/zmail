@@ -86,6 +86,20 @@ Progress:
   folder is overwritten with zeros and removed, then the folder. Setup
   says plainly that the draft is unencrypted in that file while the
   editor is open. Phase 3 is done.
+- Phase 4: `zmail-setup`, the GPUI-free crate with account setup's
+  non-visual half (section 8), moved out of `zmail-ui`'s
+  `account_setup` and Settings → Accounts: the form's fields, validation
+  and building the account, provider presets and their app password help,
+  autodiscovery driven step by step, storing an account (its secret only
+  in the keychain) and its first sync, removing and signing in again, the
+  bring-your-own Google client guide as data, and the Proton sign-in's
+  state machine (`proton` feature). New for the terminal: a connection
+  test before saving (`check_sign_in` in `zmail-imap`, `zmail-smtp` and
+  `zmail-jmap`: sign in and out, nothing sent) and the OAuth2 browser
+  sign-in step by step (`oauth::BrowserSignIn`), which shows the URL
+  itself instead of printing it. The GUI calls the shared code and
+  behaves as before, with one fix: removing an account now also deletes
+  a Proton account's session from the keychain.
 
 ## Context
 
@@ -332,7 +346,11 @@ Only what the TUI actually needs, each in its own small PR:
    `EventEmitter`, and `zmail-ui` wraps it.
 2. Later, account setup's non-visual parts (validation, discovery, the
    OAuth loopback flow) move to the same crate, so the TUI can add
-   accounts.
+   accounts. Done in phase 4, in a crate of its own, `zmail-setup`, not
+   `zmail-actions`: setup needs the network (autodiscovery, OAuth, the
+   protocol adapters for the connection test, Proton's sign-in), and
+   `zmail-actions` depends only on the store, so every user of the mail
+   actions would otherwise link all of that.
 
 ## Plan
 

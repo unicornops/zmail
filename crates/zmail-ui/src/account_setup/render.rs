@@ -7,15 +7,14 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, Context, FontWeight, IntoElement,
     Render, Role, SharedString, Transformation, Window, div, percentage, prelude::*, px, rgb,
 };
-use zmail_autodiscover::{
-    AuthMethod, MailSettings, Provider, ServerSettings, Source, Step, StepOutcome,
-};
+use zmail_autodiscover::{AuthMethod, MailSettings, Provider, ServerSettings, Source, StepOutcome};
 use zmail_core::{AccountColor, ProtocolKind, SyncPhase};
+use zmail_setup::discovery::{self, describe_server, describe_source, short_error, step_label};
+use zmail_setup::providers::{AppPasswordHelp, app_password_help};
 
 use super::{AccountField, AccountSetupView, KEY_CONTEXT, Stage};
 use crate::a11y::{A11yFlags, AccessibleExt, Politeness, readable};
 use crate::components::{Banner, BannerTone, Button, ButtonSize, ComponentTheme, HitTargetExt};
-use crate::google_oauth;
 use crate::styles::{
     EMPTY_STATE_ICON_FRAME_SIZE, ICON_SIZE_LG, ICON_SIZE_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4,
     SPACE_6, SPACE_8, TYPE_BODY, TYPE_BODY_STRONG, TYPE_CAPTION, TYPE_HEADLINE, TypeStyleExt,
@@ -29,26 +28,6 @@ const COLUMN_WIDTH: f32 = 560.0;
 const SWATCH_SIZE: f32 = 36.0;
 /// How long the spinner takes to turn once.
 const SPIN_PERIOD: Duration = Duration::from_millis(1200);
-
-/// Where to learn how to make an app password, for the providers that need
-/// one.
-fn app_password_help(provider: Provider) -> Option<(&'static str, &'static str)> {
-    match provider {
-        Provider::Google => Some((
-            "Google needs an app password, not your Google password. App passwords need 2-Step Verification turned on for your Google account; then create one for zmail.",
-            google_oauth::APP_PASSWORDS_HELP_URL,
-        )),
-        Provider::ICloud => Some((
-            "iCloud needs an app-specific password, not your Apple Account password. Create one for zmail in your Apple Account settings.",
-            "https://support.apple.com/en-us/102654",
-        )),
-        Provider::Fastmail => Some((
-            "Fastmail needs an app password, not your Fastmail password. Create one with mail access in Fastmail's settings.",
-            "https://www.fastmail.help/hc/en-us/articles/360058752854",
-        )),
-        Provider::Microsoft365 => None,
-    }
-}
 
 impl Render for AccountSetupView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -248,24 +227,6 @@ pub(super) fn spinner(id: &'static str, color: u32) -> AnyElement {
         .into_any_element()
 }
 
-/// How a server is described: `imap.example.com:993 · TLS`.
-fn describe_server(server: &ServerSettings) -> String {
-    format!(
-        "{}:{} · {}",
-        server.host,
-        server.port,
-        server.security.label()
-    )
-}
-
-/// Where settings came from, as a sentence ending.
-fn describe_source(source: &Source) -> String {
-    match source {
-        Source::Provider(provider) => format!("zmail's built-in {provider} settings"),
-        other => other.to_string(),
-    }
-}
-
 impl AccountSetupView {
     fn render_welcome(&self, colors: &UiColors, cx: &mut Context<Self>) -> AnyElement {
         div()
@@ -413,34 +374,39 @@ impl AccountSetupView {
             Some(provider) => format!("Sign in to {provider}"),
             None => "Sign in".to_owned(),
         };
-        let note = provider.and_then(app_password_help).map(|(message, url)| {
-            let banner = Banner::new("account-setup-app-password", message)
-                .tone(BannerTone::Info)
-                .title("Use an app password");
-            // Google's app password page creates one directly.
-            let banner = match provider {
-                Some(Provider::Google) => banner.action(
-                    div()
-                        .debug_selector(|| "account-setup-app-password-create".into())
-                        .child(
-                            Button::new(
-                                "account-setup-app-password-create",
-                                "Create an app password",
-                            )
-                            .icon("external-link")
-                            .on_click(|_, _, cx: &mut App| {
-                                cx.open_url(google_oauth::APP_PASSWORDS_URL)
-                            }),
+        let note =
+            provider
+                .and_then(app_password_help)
+                .map(|AppPasswordHelp { text: message, url }| {
+                    let banner = Banner::new("account-setup-app-password", message)
+                        .tone(BannerTone::Info)
+                        .title("Use an app password");
+                    // Google's app password page creates one directly.
+                    let banner = match provider {
+                        Some(Provider::Google) => banner.action(
+                            div()
+                                .debug_selector(|| "account-setup-app-password-create".into())
+                                .child(
+                                    Button::new(
+                                        "account-setup-app-password-create",
+                                        "Create an app password",
+                                    )
+                                    .icon("external-link")
+                                    .on_click(
+                                        |_, _, cx: &mut App| {
+                                            cx.open_url(zmail_setup::google::APP_PASSWORDS_URL)
+                                        },
+                                    ),
+                                ),
                         ),
-                ),
-                _ => banner,
-            };
-            banner.action(
-                Button::new("account-setup-app-password-help", "How to create one")
-                    .icon("external-link")
-                    .on_click(move |_, _, cx: &mut App| cx.open_url(url)),
-            )
-        });
+                        _ => banner,
+                    };
+                    banner.action(
+                        Button::new("account-setup-app-password-help", "How to create one")
+                            .icon("external-link")
+                            .on_click(move |_, _, cx: &mut App| cx.open_url(url)),
+                    )
+                });
         // Gmail's alternative to an app password: a Google OAuth client of
         // the user's own, set up with the guide.
         let own_client = (provider == Some(Provider::Google) && !self.form.use_oauth).then(|| {
@@ -589,7 +555,7 @@ impl AccountSetupView {
                     ),
                     Some(StepOutcome::Skipped) => (
                         icon("minus", ICON_SIZE_SM, colors.muted).into_any_element(),
-                        Some("Skipped: you chose not to ask Mozilla".to_owned()),
+                        Some(discovery::SKIPPED_NOTE.to_owned()),
                     ),
                     None => (
                         icon("clock", ICON_SIZE_SM, colors.muted).into_any_element(),
@@ -670,9 +636,7 @@ impl AccountSetupView {
                     .child(div().type_style(TYPE_BODY).child(
                         "Thunderbird's provider database (ISPDB) has the settings of many mail providers.",
                     ))
-                    .child(div().type_style(TYPE_BODY).child(format!(
-                        "To look them up, zmail sends your mail domain, {domain}, to Mozilla at autoconfig.thunderbird.net. It doesn't send your address or your password."
-                    )))
+                    .child(div().type_style(TYPE_BODY).child(discovery::consent_explanation(&domain)))
                     .child(
                         div()
                             .flex()
@@ -1032,7 +996,8 @@ impl AccountSetupView {
                             this.running_step = None;
                             if let Some(email) = this.discovery.as_ref().map(|d| d.email().clone())
                             {
-                                this.form.prefill_guesses(&email, cx);
+                                this.form
+                                    .update(cx, |values| values.prefill_guesses(&email));
                             }
                             this.edit_manually(window, cx);
                         })),
@@ -1109,45 +1074,5 @@ impl AccountSetupView {
             .child(div().flex_1())
             .children(actions);
         Some(footer)
-    }
-}
-
-/// The progress list's line for a step.
-fn step_label(step: Step, domain: &str) -> String {
-    match step {
-        Step::DnsSrv => format!("Checking DNS records for {domain}"),
-        Step::DomainAutoconfig => format!("Asking {domain} for its settings"),
-        Step::WellKnownJmap => format!("Checking {domain} for JMAP"),
-        Step::Ispdb => "Checking Mozilla's provider database".to_owned(),
-        Step::MxGuess => format!("Checking where mail for {domain} goes"),
-        Step::HostnameGuess => "Trying the usual server names".to_owned(),
-    }
-}
-
-/// The last, most specific part of a network error, which is the part a
-/// person can act on ("connection refused", "certificate not valid").
-fn short_error(error: &str) -> String {
-    let first = error.split("; ").next().unwrap_or(error);
-    let last = first.rsplit(": ").next().unwrap_or(first).trim();
-    let mut short = last.to_owned();
-    if let Some(first) = short.get_mut(..1) {
-        first.make_ascii_uppercase();
-    }
-    short
-}
-
-#[cfg(test)]
-mod tests {
-    use super::short_error;
-
-    #[test]
-    fn network_errors_are_shortened_to_their_cause() {
-        assert_eq!(
-            short_error(
-                "error sending request for url (https://autoconfig.example.com/mail/config-v1.1.xml): client error (Connect): dns error: no record found; other"
-            ),
-            "No record found"
-        );
-        assert_eq!(short_error("timed out"), "Timed out");
     }
 }
