@@ -77,6 +77,15 @@ Progress:
   attachments (the GUI does neither: a draft has no field for them). The
   live harness send test (`live_tui_send`: Compose, `^X`, the outbox,
   SMTP, the next sync) runs in CI's quality job only.
+- Phase 3: the external editor, opt-in (`external_editor` in
+  `TerminalPreferences`, off by default). With Setup's option on, `^_`
+  (Ctrl-7 or Ctrl-/ in most terminals) hands the body to `$VISUAL` or
+  `$EDITOR`, run without a shell. The file is made in a fresh folder,
+  0700 with the file 0600 on Unix (the user's temporary folder on
+  Windows); when the editor exits, however it exits, every file in the
+  folder is overwritten with zeros and removed, then the folder. Setup
+  says plainly that the draft is unencrypted in that file while the
+  editor is open. Phase 3 is done.
 
 ## Context
 

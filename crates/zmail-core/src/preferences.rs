@@ -207,6 +207,11 @@ pub struct TerminalPreferences {
     /// Draw with ASCII only, for terminals and fonts without box drawing.
     #[serde(deserialize_with = "lenient")]
     pub ascii: bool,
+    /// Let Compose hand the message text to `$VISUAL` or `$EDITOR` (`^_`).
+    /// Off by default (ADR 0007, section 6): the draft is written
+    /// unencrypted to a temporary file while the editor has it open.
+    #[serde(deserialize_with = "lenient")]
+    pub external_editor: bool,
 }
 
 impl Default for TerminalPreferences {
@@ -219,6 +224,7 @@ impl Default for TerminalPreferences {
             preview_pane: true,
             group_threads: true,
             ascii: false,
+            external_editor: false,
         }
     }
 }
@@ -439,6 +445,7 @@ mod tests {
                 preview_pane: false,
                 group_threads: false,
                 ascii: true,
+                external_editor: true,
             },
         }
     }

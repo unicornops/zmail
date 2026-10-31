@@ -28,6 +28,7 @@ mod app;
 mod clipboard;
 mod compose;
 mod data;
+mod editor;
 mod links;
 mod message;
 mod notifier;
@@ -167,6 +168,15 @@ fn run_effects(app: &mut App, terminal: &mut Terminal<CrosstermBackend<io::Stdou
                 }
             }
             Effect::Redraw => terminal.clear()?,
+            Effect::Edit { command, text } => {
+                // The editor gets the terminal to itself, then the TUI
+                // takes it back and draws everything again.
+                terminal::restore();
+                let result = editor::edit(&std::env::temp_dir(), &text, &command);
+                terminal::resume(app.preferences().mouse)?;
+                terminal.clear()?;
+                app.external_edit_done(result);
+            }
         }
     }
     Ok(())

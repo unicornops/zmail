@@ -8,13 +8,13 @@
   [ ] ASCII only, no box drawing
       OSC 52 copies to the system clipboard
       Copy command: none
+  [ ] Edit the message text in $VISUAL or $EDITOR (^_ in Compose)
 
   Copies go to OSC 52, to the system clipboard (your terminal must allow it).
   Hold Shift while dragging to use the terminal's own selection instead.
 
-
-
-
+  Note: The external editor writes the draft unencrypted to a temporary file while the editor is open. The file is in a new folder only you can open, and Zmail
+        overwrites and removes it when the editor exits. Leave this off to keep drafts only in the encrypted store.
 
 
 

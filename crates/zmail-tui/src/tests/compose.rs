@@ -946,3 +946,69 @@ fn a_new_message_leaves_room_above_the_signature() {
     control(&mut app, 'c');
     assert_eq!(app.store.draft_detail(draft_id).expect("loads"), None);
 }
+
+#[test]
+fn the_external_editor_is_off_until_setup_turns_it_on_and_says_what_it_does() {
+    let store = seeded_store();
+    let mut app = app_with(store.clone(), environment());
+    // Off by default: ^_ explains instead of writing anything out.
+    keys(&mut app, "c");
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+    type_text(&mut app, "Draft text");
+    control(&mut app, '_');
+    assert!(status(&app).starts_with("The external editor is off"));
+    assert!(app.take_effects().is_empty());
+    assert!(!text_of(&draw(&mut app, 80, 24)).contains("Alt Edit"));
+    control(&mut app, 'o');
+
+    // Setup's last row turns it on, with the warning in plain words.
+    keys(&mut app, "ms");
+    key(&mut app, KeyCode::End);
+    for _ in 0..7 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Enter);
+    assert!(app.prefs.external_editor);
+    assert!(
+        store
+            .ui_preferences()
+            .expect("saved")
+            .terminal
+            .external_editor
+    );
+    app.status = None;
+    let buffer = draw(&mut app, 80, 24);
+    assert_snapshot("setup-external-editor-80x24", &buffer);
+    let screen = text_of(&buffer);
+    assert!(
+        screen.contains("[X] Edit the message text in $VISUAL or $EDITOR")
+            && screen.contains("unencrypted to a temporary file"),
+        "{screen}"
+    );
+
+    // On, ^_ (Ctrl-7 from most terminals) hands the text over, when an
+    // editor is set.
+    keys(&mut app, "mcy");
+    assert_eq!(app.screen, Screen::Compose);
+    app.handle_event(Event::Key(KeyEvent::new(
+        KeyCode::Char('7'),
+        KeyModifiers::CONTROL,
+    )));
+    match app.take_effects().as_slice() {
+        [crate::app::Effect::Edit { text, .. }] => assert_eq!(text, "Draft text"),
+        [] => assert_eq!(status(&app), "Set VISUAL or EDITOR to the editor to use"),
+        other => panic!("{other:?}"),
+    }
+    // What the editor saved replaces the text.
+    app.external_edit_done(Ok("Edited elsewhere".to_owned()));
+    assert_eq!(compose(&app).text(Field::Body), "Edited elsewhere");
+    assert!(compose(&app).dirty);
+    assert!(text_of(&draw(&mut app, 80, 24)).contains("^_ Alt Edit"));
+    app.external_edit_done(Err(anyhow::anyhow!("vi exited with exit status: 1")));
+    assert_eq!(status(&app), "vi exited with exit status: 1");
+    assert_eq!(compose(&app).text(Field::Body), "Edited elsewhere");
+}

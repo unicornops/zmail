@@ -854,6 +854,10 @@ fn setup_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
                 "    Copy command: {}",
                 prefs.copy_command.as_deref().unwrap_or("none")
             ),
+            SetupRow::ExternalEditor => format!(
+                "{} Edit the message text in $VISUAL or $EDITOR (^_ in Compose)",
+                check(prefs.external_editor)
+            ),
         };
         let style = if index == app.setup_cursor {
             theme.reversed()
@@ -886,6 +890,27 @@ fn setup_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
             fit(&note, width, theme.ellipsis()),
             theme.faint(),
         )));
+    }
+    // Said plainly, wrapped rather than cut off (ADR 0007, section 6).
+    lines.push(PaneLine::default());
+    let warning = "The external editor writes the draft unencrypted to a temporary file \
+        while the editor is open. The file is in a new folder only you can open, and Zmail \
+        overwrites and removes it when the editor exits. Leave this off to keep drafts only \
+        in the encrypted store.";
+    let style = if prefs.external_editor {
+        theme.bold()
+    } else {
+        theme.faint()
+    };
+    for (index, row) in wrap(warning, width.saturating_sub(8).max(10))
+        .into_iter()
+        .enumerate()
+    {
+        let prefix = if index == 0 { "  Note: " } else { "        " };
+        lines.push(PaneLine {
+            joiner: row.joiner,
+            ..PaneLine::new(Span::styled(format!("{prefix}{}", row.text), style))
+        });
     }
     lines
 }
@@ -960,6 +985,10 @@ browse
   ^W         find text in the message
   ^T         your addresses on To, Cc and Bcc; the file browser on Attchmnt
   ^G         this help
+  ^_         the message text in your own editor ($VISUAL or $EDITOR; \
+many terminals send ^_ for Ctrl-7 or Ctrl-/ too), only once Setup turns it \
+on: the draft is then unencrypted in a temporary file while the editor is \
+open, and removed when it exits
   Drafts are saved in the encrypted mail store as you write, and sent by \
 whichever Zmail syncs.
 

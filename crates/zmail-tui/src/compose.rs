@@ -123,6 +123,8 @@ pub enum Pico {
     Complete,
     /// Change the identity sent from.
     NextFrom,
+    /// `^_`: the message text in the external editor (opt-in).
+    Editor,
 }
 
 impl Pico {
@@ -142,6 +144,7 @@ impl Pico {
             Self::Browse => control('t'),
             Self::Complete => KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
             Self::NextFrom => KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            Self::Editor => control('_'),
         }
     }
 }
@@ -285,6 +288,15 @@ fn line_editor(text: &str) -> TextArea<'static> {
     let mut editor = TextArea::new(vec![text.to_owned()]);
     editor.set_cursor_line_style(Style::default());
     editor.move_cursor(CursorMove::End);
+    editor
+}
+
+/// The message text's editor, holding `text`, with the cursor at the
+/// top.
+fn body_editor(text: &str) -> TextArea<'static> {
+    let mut editor = TextArea::new(text.split('\n').map(str::to_owned).collect());
+    editor.set_cursor_line_style(Style::default());
+    editor.set_wrap_mode(WrapMode::WordOrGlyph);
     editor
 }
 
@@ -441,9 +453,7 @@ impl Compose {
         if created && !body.is_empty() && !body.starts_with('\n') {
             body.insert_str(0, "\n\n");
         }
-        let mut body = TextArea::new(body.split('\n').map(str::to_owned).collect());
-        body.set_cursor_line_style(Style::default());
-        body.set_wrap_mode(WrapMode::WordOrGlyph);
+        let body = body_editor(&body);
         let mut compose = Self {
             draft_id: draft.id,
             identities,
@@ -1047,6 +1057,9 @@ impl App {
                 KeyCode::Char('r') => Pico::ReadFile,
                 KeyCode::Char('w') => Pico::WhereIs,
                 KeyCode::Char('t') => Pico::Browse,
+                // ^_ arrives as Ctrl-7 from most terminals (0x1F), or as
+                // Ctrl-_ or Ctrl-/ with keyboard enhancement.
+                KeyCode::Char('_' | '7' | '/') => Pico::Editor,
                 _ => return self.compose_motion(key),
             };
             return self.pico(pico);
@@ -1217,6 +1230,52 @@ impl App {
             Pico::Complete if focus.is_address() => self.complete_address(true),
             Pico::Complete => {}
             Pico::NextFrom => compose.cycle_identity(1),
+            Pico::Editor => self.external_edit(),
+        }
+    }
+
+    /// `^_`: hands the message text to `$VISUAL` or `$EDITOR`, when Setup
+    /// allows it (off by default).
+    fn external_edit(&mut self) {
+        if !self.prefs.external_editor {
+            self.status = Some(
+                "The external editor is off. Setup turns it on (the draft is then written \
+                 unencrypted to a temporary file while the editor is open)"
+                    .to_owned(),
+            );
+            return;
+        }
+        let Some(command) = crate::editor::editor_command() else {
+            self.status = Some("Set VISUAL or EDITOR to the editor to use".to_owned());
+            return;
+        };
+        let Some(compose) = self.compose.as_mut() else {
+            return;
+        };
+        compose.focus = Field::Body;
+        let text = compose.text(Field::Body);
+        self.effects
+            .push(crate::app::Effect::Edit { command, text });
+    }
+
+    /// The external editor exited: its text replaces the body, or what
+    /// went wrong shows on the status line.
+    pub fn external_edit_done(&mut self, result: anyhow::Result<String>) {
+        match result {
+            Ok(text) => {
+                if let Some(compose) = self.compose.as_mut() {
+                    if compose.text(Field::Body) != text {
+                        compose.body = body_editor(&text);
+                        compose.edited();
+                    }
+                    compose.focus = Field::Body;
+                }
+                self.status = Some(
+                    "Text from the editor. Its temporary file was overwritten and removed"
+                        .to_owned(),
+                );
+            }
+            Err(error) => self.report(error),
         }
     }
 
@@ -1844,13 +1903,18 @@ impl App {
             pico(ATTACH_KEY, "Attach", Pico::Attach),
         ];
         match compose.focus {
-            Field::Body => entries.extend([
-                pico("^R", "Read File", Pico::ReadFile),
-                pico("^W", "Where is", Pico::WhereIs),
-                pico("^K", "Cut Line", Pico::Cut),
-                pico("^U", "UnCut", Pico::Uncut),
-                pico("^O", "Postpone", Pico::Postpone),
-            ]),
+            Field::Body => {
+                entries.extend([
+                    pico("^R", "Read File", Pico::ReadFile),
+                    pico("^W", "Where is", Pico::WhereIs),
+                    pico("^K", "Cut Line", Pico::Cut),
+                    pico("^U", "UnCut", Pico::Uncut),
+                    pico("^O", "Postpone", Pico::Postpone),
+                ]);
+                if self.prefs.external_editor {
+                    entries.push(pico("^_", "Alt Edit", Pico::Editor));
+                }
+            }
             Field::Attachments => entries.extend([
                 pico("^R", "Read File", Pico::ReadFile),
                 pico("^T", "Browse", Pico::Browse),
