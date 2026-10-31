@@ -1340,6 +1340,28 @@ pub struct BodyLink {
     pub target: String,
 }
 
+/// One message of a thread without its body: a row of a list of single
+/// messages (the terminal UI's ungrouped Message Index).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageSummary {
+    /// Local message identifier.
+    pub id: i64,
+    /// The thread the message belongs to.
+    pub thread_id: i64,
+    /// Sender display string.
+    pub sender: String,
+    /// Subject line.
+    pub subject: String,
+    /// Received timestamp in ISO-8601 form.
+    pub received_at: String,
+    /// Whether the message is read.
+    pub is_read: bool,
+    /// Whether the message is flagged.
+    pub is_flagged: bool,
+    /// Whether the message has an attachment (not counting inline parts).
+    pub has_attachments: bool,
+}
+
 /// Hydrated message shown in the Phase 3 reader.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadMessage {

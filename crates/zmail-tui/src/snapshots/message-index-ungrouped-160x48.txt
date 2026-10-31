@@ -1,0 +1,48 @@
+  ZMAIL 0.0.0-test                                                       MESSAGE INDEX                                                Folder: INBOX  Msg 1 of 5
+N*      11:35  Grace Hopper        Launch plan for the terminal UI             │ ── Message 1 of 2 ─────────────────────────────────────────────────────────────
+ *      09:00  Ada Lovelace        Launch plan for the terminal UI             │ Date: Thu 15 Oct 2026, 09:00
+N   Yesterday  Harbour News        Harbour newsletter, issue 42                │ From: Ada Lovelace <ada@work.example>
+  @       Mon  山田 太郎           東京オフィスの会議 📅 next week             │ To: Me <me@work.example>
+       25 Sep  Billing             Invoice fdp.exe                             │ Subject: Launch plan for the terminal UI
+                                                                               │
+                                                                               │ Here is the plan. The terminal UI reads mail first, then triage, compose and
+                                                                               │ accounts.
+                                                                               │
+                                                                               │ Ada
+                                                                               │
+                                                                               │ ── Message 2 of 2 ─────────────────────────────────────────────────────────────
+                                                                               │ Date: Thu 15 Oct 2026, 11:35
+                                                                               │ From: Grace Hopper <grace@work.example>
+                                                                               │ To: Me <me@work.example>
+                                                                               │ Subject: Launch plan for the terminal UI
+                                                                               │
+                                                                               │ Looks good. The notes are at https://wiki.work.example/tui[1] if anyone wants
+                                                                               │ them.
+                                                                               │
+                                                                               │ Grace
+                                                                               │
+                                                                               │ ── Links ──────────────────────────────────────────────────────────────────────
+                                                                               │ [1] https://wiki.work.example/tui
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                               │
+                                                                   [Listing single messages]
+? Help              > [ViewMsg]         N NextMsg           Spc NextPage        / Group             M Main Menu         Q Quit
+< FldrList          P PrevMsg           - PrevPage          W WhereIs           V Preview           Y Copy

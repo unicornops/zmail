@@ -1,0 +1,48 @@
+  ZMAIL 0.0.0-test                                                           SETUP                                                                Folder: INBOX
+  The terminal's settings, kept in the encrypted mail store. Enter changes one.
+
+  [X] Use the mouse: click, wheel, drag to select and copy
+  [X] Ring the bell when new mail arrives
+  [X] Preview pane beside the Message Index (120 columns or wider)
+  [X] Group the Message Index by conversation
+  [ ] ASCII only, no box drawing
+      OSC 52 copies to the system clipboard
+      Copy command: none
+
+  Copies go to OSC 52, to the system clipboard (your terminal must allow it).
+  Hold Shift while dragging to use the terminal's own selection instead.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+? Help              > [Change]          N Next
+< Main Menu         P Prev              Q Quit

@@ -3,7 +3,8 @@
 //! [`UiPreferences`] is the one place the desktop shell keeps choices that
 //! should survive a restart: theme mode, list density, reading-pane
 //! position, pane widths, sidebar state, the last open mailbox, the keymap,
-//! the undo-send delay, motion and the text size. `zmail-store` persists it
+//! the undo-send delay, motion and the text size. The terminal UI keeps its
+//! own settings in it too ([`TerminalPreferences`]). `zmail-store` persists it
 //! as JSON in the local store's `app_settings` table, next to the rest of
 //! the app's state.
 //!
@@ -165,6 +166,63 @@ impl Default for IndexingPreferences {
     }
 }
 
+/// Which clipboard the terminal UI's OSC 52 copy writes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyClipboard {
+    /// The system clipboard.
+    #[default]
+    System,
+    /// The X11 or Wayland primary selection.
+    Primary,
+}
+
+/// The terminal UI's settings (ADR 0007), changed on its Setup screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalPreferences {
+    /// Whether the terminal UI takes the mouse: clicks, the wheel, and
+    /// drag to select and copy. Off leaves the mouse to the terminal.
+    #[serde(deserialize_with = "lenient_true")]
+    pub mouse: bool,
+    /// A program the copied text is piped to (`wl-copy`, `xclip -selection
+    /// clipboard`), run without a shell. `None` copies with OSC 52, or
+    /// with `pbcopy` on a Mac when not over SSH.
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub copy_command: Option<String>,
+    /// Which clipboard an OSC 52 copy writes.
+    #[serde(deserialize_with = "lenient")]
+    pub copy_clipboard: CopyClipboard,
+    /// Ring the terminal bell when new mail arrives.
+    #[serde(deserialize_with = "lenient_true")]
+    pub bell: bool,
+    /// Show the selected message beside the Message Index when the
+    /// terminal is wide enough.
+    #[serde(deserialize_with = "lenient_true")]
+    pub preview_pane: bool,
+    /// List conversations rather than single messages in the Message
+    /// Index.
+    #[serde(deserialize_with = "lenient_true")]
+    pub group_threads: bool,
+    /// Draw with ASCII only, for terminals and fonts without box drawing.
+    #[serde(deserialize_with = "lenient")]
+    pub ascii: bool,
+}
+
+impl Default for TerminalPreferences {
+    fn default() -> Self {
+        Self {
+            mouse: true,
+            copy_command: None,
+            copy_clipboard: CopyClipboard::default(),
+            bell: true,
+            preview_pane: true,
+            group_threads: true,
+            ascii: false,
+        }
+    }
+}
+
 /// Default undo-send delay, in seconds.
 pub const DEFAULT_UNDO_SEND_DELAY_SECS: u32 = 10;
 
@@ -232,6 +290,9 @@ pub struct UiPreferences {
     /// it through [`UiPreferences::text_size`], which keeps it to them.
     #[serde(rename = "text_size", deserialize_with = "lenient_text_size")]
     pub text_size_percent: u16,
+    /// The terminal UI's settings.
+    #[serde(deserialize_with = "lenient")]
+    pub terminal: TerminalPreferences,
 }
 
 impl Default for UiPreferences {
@@ -251,6 +312,7 @@ impl Default for UiPreferences {
             sender_warnings: SenderWarnings::default(),
             motion: MotionMode::default(),
             text_size_percent: DEFAULT_TEXT_SIZE,
+            terminal: TerminalPreferences::default(),
         }
     }
 }
@@ -369,6 +431,15 @@ mod tests {
             sender_warnings: SenderWarnings::Fewer,
             motion: MotionMode::Reduce,
             text_size_percent: 150,
+            terminal: TerminalPreferences {
+                mouse: false,
+                copy_command: Some("wl-copy".to_owned()),
+                copy_clipboard: CopyClipboard::Primary,
+                bell: false,
+                preview_pane: false,
+                group_threads: false,
+                ascii: true,
+            },
         }
     }
 
@@ -402,6 +473,23 @@ mod tests {
         assert!(prefs.indexing.enabled);
         assert!(!prefs.indexing.on_battery);
         assert!(!prefs.indexing.on_metered);
+    }
+
+    #[test]
+    fn terminal_settings_default_on_and_fall_back_one_by_one() {
+        let prefs = UiPreferences::default().terminal;
+        assert!(prefs.mouse && prefs.bell && prefs.preview_pane && prefs.group_threads);
+        assert!(!prefs.ascii);
+        assert_eq!(prefs.copy_command, None);
+        assert_eq!(prefs.copy_clipboard, CopyClipboard::System);
+        let prefs = UiPreferences::from_json(
+            r#"{"terminal":{"mouse":"no","copy_clipboard":"primary","bell":false,"copy_command":7}}"#,
+        )
+        .terminal;
+        assert!(prefs.mouse, "a bad value keeps the mouse on");
+        assert_eq!(prefs.copy_clipboard, CopyClipboard::Primary);
+        assert!(!prefs.bell);
+        assert_eq!(prefs.copy_command, None);
     }
 
     #[test]

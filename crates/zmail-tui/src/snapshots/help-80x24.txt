@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                    HELP                        Folder: INBOX
+  ZMAIL IN THE TERMINAL
+
+  Zmail's terminal screens work like Pine and Alpine: the keys that work on a
+  screen are always listed at the bottom, and O shows more of them. Letters work
+  in either case.
+
+  Moving around
+    M          Main Menu, from anywhere
+    L          Folder List: each account is a collection of folders
+    I          Message Index of the current folder
+    < or Left  up a level;  > Enter or Right  open what the cursor is on
+    P N        previous and next item (Up and Down work too)
+    - Space    previous and next page;  Home End  first and last
+    W          WhereIs: search the Message Index with the search language
+               (from:, to:, subject:, has:attachment, is:unread, before:,
+               after:), find a folder, or find text in a message. The index
+               follows as you type; Enter also asks the server for mail not
+               downloaded yet.
+    /          list conversations or single messages
+    V          the preview pane, beside the index in terminals 120 columns or
+
+< Back       Spc NextPage Q Quit
+- PrevPage   M Main Menu

@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                 MAIN MENU              Folder: Unified Inbox
+
+
+       ?     HELP               -  Get help using Zmail
+       C     COMPOSE MESSAGE    -  Compose a message (not in the terminal yet)
+       I     MESSAGE INDEX      -  View messages in current folder
+       L     FOLDER LIST        -  Select a folder to view
+       A     ADDRESS BOOK       -  Address book (not in the terminal yet)
+       S     SETUP              -  Configure Zmail options
+       Q     QUIT               -  Leave Zmail
+
+       Current folder: Unified Inbox
+
+
+
+
+
+
+
+
+
+
+? Help       > [Select]   L FldrList   S Setup
+P PrevCmd    N NextCmd    I Index      Q Quit

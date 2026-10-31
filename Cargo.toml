@@ -19,6 +19,7 @@ members = [
     "crates/zmail-sync",
     "crates/zmail-test-support",
     "crates/zmail-theme",
+    "crates/zmail-tui",
     "crates/zmail-ui",
 ]
 resolver = "3"
@@ -41,6 +42,10 @@ anyhow = "1"
 async-imap = { version = "0.11.2", default-features = false, features = ["runtime-tokio"] }
 base64 = "0.22.1"
 chrono = "0.4"
+# The terminal UI's terminal layer (ADR 0007): raw mode, the alternate
+# screen, key, mouse and bracketed-paste events on Linux, macOS and Windows
+# terminals. The version ratatui's backend uses.
+crossterm = { version = "0.29", default-features = false, features = ["bracketed-paste", "events", "windows"] }
 # CSS tokenizer for the sanitiser's pass over `style` attributes and
 # `<style>` blocks (ADR 0006); already in the tree through ammonia.
 cssparser = { version = "0.38.0", default-features = false }
@@ -95,6 +100,9 @@ pgp = { git = "https://github.com/lazzurs/rpgp", rev = "696fe2f437e401f21cac8a1f
 # moves off crypto-bigint 0.5; see docs/upstream/proton.md.
 proton-srp = { git = "https://github.com/lazzurs/proton-crypto-rs", rev = "95455e84a43b12124dfd6febac3875d212797038", default-features = false }
 rand = "0.8"
+# The terminal UI's drawing (ADR 0007), on its crossterm backend; no
+# optional widgets or macros.
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 # The RNG traits (rand_core 0.10) that `pgp` (since rpgp/rpgp#573) and the
 # proton-srp fork take, used only where Zmail hands an RNG to either; already
 # in the tree through pgp.
@@ -117,6 +125,9 @@ thiserror = "2.0.21"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = "0.26.4"
 unicode-segmentation = "1.13"
+# Display widths for the terminal UI's truncation and wrapping (ADR 0007);
+# already in the tree through ratatui and GPUI.
+unicode-width = "0.2.2"
 url = "2.5"
 zeroize = "1.8"
 

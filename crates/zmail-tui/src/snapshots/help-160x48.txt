@@ -1,0 +1,48 @@
+  ZMAIL 0.0.0-test                                                            HELP                                                                Folder: INBOX
+  ZMAIL IN THE TERMINAL
+
+  Zmail's terminal screens work like Pine and Alpine: the keys that work on a screen are always listed at the bottom, and O shows more of them. Letters work in
+  either case.
+
+  Moving around
+    M          Main Menu, from anywhere
+    L          Folder List: each account is a collection of folders
+    I          Message Index of the current folder
+    < or Left  up a level;  > Enter or Right  open what the cursor is on
+    P N        previous and next item (Up and Down work too)
+    - Space    previous and next page;  Home End  first and last
+    W          WhereIs: search the Message Index with the search language (from:, to:, subject:, has:attachment, is:unread, before:, after:), find a folder, or
+               find text in a message. The index follows as you type; Enter also asks the server for mail not downloaded yet.
+    /          list conversations or single messages
+    V          the preview pane, beside the index in terminals 120 columns or wider
+    Q          quit (Zmail asks first)
+
+  Reading
+    Message Text shows the text of each message. Links are numbered, like [3]; Tab and Shift-Tab move between them, and Enter (or a click) shows the real
+  address before anything opens it. Remote images and HTML formatting are not shown in the terminal.
+
+  Copy and paste
+    Drag with the mouse to select text in one pane; it is copied when you let go. Double-click selects a word, triple-click a line, and dragging past the top or
+  bottom scrolls. Without a mouse: Ctrl-Space sets a mark in Message Text, the arrow keys select, and y or Ctrl-C copies.
+    Copies go to the clipboard with OSC 52, which works locally and over SSH in most terminals (tmux needs set-clipboard on). On a Mac outside SSH they go
+  through pbcopy. Setup (S on the Main Menu) can set a copy command instead, such as wl-copy or xclip -selection clipboard, or turn the mouse off.
+    Hold Shift while dragging to use the terminal's own selection.
+    Pasting works in text fields such as WhereIs; anywhere else a paste is ignored, so pasted text can never run commands.
+
+  Sync
+    One Zmail syncs your mail at a time. When another Zmail window already does, this one shows the mail it syncs, and the status line says so.
+
+
+
+
+
+
+
+
+
+
+
+
+
+< Back              Spc NextPage        Q Quit
+- PrevPage          M Main Menu
