@@ -59,6 +59,7 @@ impl TempDraft {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -165,7 +166,9 @@ pub fn edit(base: &Path, text: &str, command: &[String]) -> Result<String> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{TempDraft, edit};
+    use super::TempDraft;
+    #[cfg(unix)]
+    use super::edit;
 
     fn base(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
