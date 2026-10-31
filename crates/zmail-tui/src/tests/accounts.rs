@@ -630,6 +630,15 @@ fn proton_steps_show_the_risk_note_and_ask_for_the_code() {
     key(&mut app, KeyCode::Enter);
     assert!(add(&app).proton.error.is_some());
 
+    // Back to the address: a server account again.
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(add(&app).step, Step::Address);
+    let email = &mut add_mut(&mut app).form.email;
+    email.clear();
+    email.push_str("jane@example.test");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(add(&app).form.protocol, ProtocolKind::Imap);
+
     add_mut(&mut app).step = Step::ProtonTotp;
     add_mut(&mut app).focus = 0;
     add_mut(&mut app).proton.error = None;

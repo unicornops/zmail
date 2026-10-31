@@ -950,6 +950,8 @@ impl App {
             return self.start_proton();
         }
         add.form.email = email.to_string();
+        // Back from Proton's sign-in, the account is a server account again.
+        add.form.protocol = ProtocolKind::Imap;
         add.found = None;
         add.discovery = None;
         match providers::provider_for_address(&email) {
