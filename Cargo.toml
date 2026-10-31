@@ -116,7 +116,7 @@ rand_pgp = { package = "rand", version = "0.10", default-features = false, featu
 # external entities, and zmail-autodiscover also turns DTDs off.
 roxmltree = "0.21.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-sha2 = "0.10"
+sha2 = "0.11"
 rpassword = "7.4.0"
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
