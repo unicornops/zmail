@@ -10,19 +10,19 @@
 //! [`MailActions`], whose [`MailEvent`]s make the shell refresh from the
 //! store. Private utility functions live at the bottom of this file.
 
-use std::{collections::HashSet, time::Duration};
+use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use gpui::{
     AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight,
     IntoElement, MouseButton, Render, Role, StyleRefinement, Styled, Window, WindowAppearance,
     deferred, div, hsla, prelude::*, px, rgb,
 };
 use std::sync::Arc;
+use zmail_actions::reply;
 use zmail_core::{
     AccountSummary, AppBootstrap, IdentitySummary, MailboxRole, MailboxSelection, MailboxSummary,
-    NewDraft, OutboxJobState, SyncPhase, ThemeAppearance, ThreadMessage, ThreadView,
-    VirtualMailbox,
+    NewDraft, OutboxJobState, SyncPhase, ThemeAppearance, ThreadView, VirtualMailbox,
     preferences::ReadingPanePosition,
     text::count_noun,
     time::{HourCycle, format_full_date, next_local_midnight},
@@ -1881,53 +1881,14 @@ impl WorkspaceView {
                 .last()
                 .context("selected thread has no messages to reply to")?,
         };
-        let own_addresses: HashSet<String> = self
-            .identities
-            .iter()
-            .map(|identity| normalize_contact(&identity.email_address))
-            .filter(|value| !value.is_empty())
-            .collect();
-        let sender = latest_message.sender.trim().to_owned();
-        let sender_key = normalize_contact(&sender);
-
-        let mut to =
-            if sender.is_empty() || sender_key.is_empty() || own_addresses.contains(&sender_key) {
-                Vec::new()
-            } else {
-                vec![sender]
-            };
-
-        let mut cc = if reply_all {
-            dedupe_contacts(
-                split_contact_summary(&latest_message.recipients)
-                    .into_iter()
-                    .filter(|recipient| {
-                        let normalized = normalize_contact(recipient);
-                        !normalized.is_empty()
-                            && normalized != sender_key
-                            && !own_addresses.contains(&normalized)
-                    })
-                    .collect(),
-            )
-        } else {
-            Vec::new()
-        };
-
-        if to.is_empty() && !cc.is_empty() {
-            to.push(cc.remove(0));
-        }
-
-        if to.is_empty() {
-            bail!("the selected message does not expose reply recipients");
-        }
-
-        self.create_thread_draft(
-            to,
-            cc,
-            prefixed_subject("Re", &thread.subject),
-            quoted_reply_body(latest_message, self.hour_cycle),
-            cx,
-        )
+        let start = reply::reply(
+            &thread.subject,
+            latest_message,
+            &reply::own_addresses(&self.identities),
+            reply_all,
+            &format_full_date(&latest_message.received_at, &chrono::Local, self.hour_cycle),
+        )?;
+        self.create_thread_draft(start.to, start.cc, start.subject, start.body, cx)
     }
 
     fn create_forward_draft(&self, thread: &ThreadView, cx: &mut Context<Self>) -> Result<i64> {
@@ -1935,14 +1896,12 @@ impl WorkspaceView {
             .messages
             .last()
             .context("selected thread has no messages to forward")?;
-
-        self.create_thread_draft(
-            Vec::new(),
-            Vec::new(),
-            prefixed_subject("Fwd", &thread.subject),
-            forwarded_body(latest_message, self.hour_cycle),
-            cx,
-        )
+        let start = reply::forward(
+            &thread.subject,
+            latest_message,
+            &format_full_date(&latest_message.received_at, &chrono::Local, self.hour_cycle),
+        );
+        self.create_thread_draft(start.to, start.cc, start.subject, start.body, cx)
     }
 
     fn create_thread_draft(
@@ -3284,121 +3243,3 @@ const PANE_WIDTHS_SAVE_DELAY: Duration = Duration::from_millis(300);
 
 /// How long a status message stays before it dismisses itself.
 const STATUS_TOAST_DURATION: Duration = Duration::from_secs(4);
-
-fn prefixed_subject(prefix: &str, subject: &str) -> String {
-    let trimmed = subject.trim();
-    let normalized_prefix = format!("{}:", prefix.to_ascii_lowercase());
-
-    if trimmed.to_ascii_lowercase().starts_with(&normalized_prefix) {
-        trimmed.to_owned()
-    } else if trimmed.is_empty() {
-        format!("{prefix}:")
-    } else {
-        format!("{prefix}: {trimmed}")
-    }
-}
-
-fn quoted_reply_body(message: &ThreadMessage, hour_cycle: HourCycle) -> String {
-    format!(
-        "\n\nOn {}, {} wrote:\n{}",
-        format_full_date(&message.received_at, &chrono::Local, hour_cycle),
-        message.sender,
-        quote_text(&message.rendered_body)
-    )
-}
-
-fn forwarded_body(message: &ThreadMessage, hour_cycle: HourCycle) -> String {
-    format!(
-        "\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {}\nTo: {}\nSubject: {}\n\n{}",
-        message.sender,
-        format_full_date(&message.received_at, &chrono::Local, hour_cycle),
-        if message.recipients.trim().is_empty() {
-            "(unknown)"
-        } else {
-            message.recipients.trim()
-        },
-        message.subject,
-        message.rendered_body
-    )
-}
-
-fn quote_text(body: &str) -> String {
-    body.lines()
-        .map(|line| {
-            if line.is_empty() {
-                ">".to_owned()
-            } else {
-                format!("> {line}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn split_contact_summary(value: &str) -> Vec<String> {
-    value
-        .split([',', ';'])
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-fn dedupe_contacts(values: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut deduped = Vec::new();
-
-    for value in values {
-        let normalized = normalize_contact(&value);
-        if normalized.is_empty() || !seen.insert(normalized) {
-            continue;
-        }
-        deduped.push(value);
-    }
-
-    deduped
-}
-
-fn normalize_contact(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    if let Some(start) = trimmed.rfind('<')
-        && let Some(end) = trimmed.rfind('>')
-        && start < end
-    {
-        return trimmed[start + 1..end].trim().to_ascii_lowercase();
-    }
-
-    trimmed.to_ascii_lowercase()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{normalize_contact, prefixed_subject, split_contact_summary};
-
-    #[test]
-    fn prefixed_subject_avoids_duplicate_reply_prefix() {
-        assert_eq!(prefixed_subject("Re", "Re: Existing"), "Re: Existing");
-        assert_eq!(prefixed_subject("Fwd", "Subject"), "Fwd: Subject");
-    }
-
-    #[test]
-    fn normalize_contact_extracts_bracketed_email() {
-        assert_eq!(
-            normalize_contact("Alice Example <alice@example.com>"),
-            "alice@example.com"
-        );
-        assert_eq!(normalize_contact("bob@example.com"), "bob@example.com");
-    }
-
-    #[test]
-    fn split_contact_summary_supports_commas_and_semicolons() {
-        assert_eq!(
-            split_contact_summary("alice@example.com, bob@example.com; carol@example.com"),
-            vec!["alice@example.com", "bob@example.com", "carol@example.com",]
-        );
-    }
-}
