@@ -103,6 +103,14 @@ pub enum Effect {
     Open(String),
     /// Clear and redraw the whole screen.
     Redraw,
+    /// Hand the message text to the external editor (opt-in), and give
+    /// what it saved to [`App::external_edit_done`].
+    Edit {
+        /// The editor and its arguments.
+        command: Vec<String>,
+        /// The text.
+        text: String,
+    },
 }
 
 /// The screens, Alpine's hierarchy.
@@ -308,10 +316,12 @@ pub enum SetupRow {
     Clipboard,
     /// The copy command.
     CopyCommand,
+    /// The external editor (opt-in).
+    ExternalEditor,
 }
 
 /// Setup's rows, in order.
-pub const SETUP_ROWS: [SetupRow; 7] = [
+pub const SETUP_ROWS: [SetupRow; 8] = [
     SetupRow::Mouse,
     SetupRow::Bell,
     SetupRow::Preview,
@@ -319,6 +329,7 @@ pub const SETUP_ROWS: [SetupRow; 7] = [
     SetupRow::Ascii,
     SetupRow::Clipboard,
     SetupRow::CopyCommand,
+    SetupRow::ExternalEditor,
 ];
 
 /// The Main Menu's items: key, name, description, command.
@@ -448,7 +459,7 @@ pub struct App {
     /// The terminal size at the last frame.
     pub(crate) size: (u16, u16),
 
-    effects: Vec<Effect>,
+    pub(crate) effects: Vec<Effect>,
     last_refresh: Instant,
     arrivals: Option<mpsc::Receiver<NewMailBatch>>,
     /// Messages from work running elsewhere (a copy command, the server
@@ -1724,6 +1735,16 @@ impl App {
                 self.load_index(None);
             }
             SetupRow::Ascii => self.prefs.ascii = !self.prefs.ascii,
+            SetupRow::ExternalEditor => {
+                self.prefs.external_editor = !self.prefs.external_editor;
+                self.status = Some(if self.prefs.external_editor {
+                    "External editor on: ^_ in Compose. The draft is unencrypted in a temporary \
+                     file while the editor is open"
+                        .to_owned()
+                } else {
+                    "External editor off".to_owned()
+                });
+            }
             SetupRow::Clipboard => {
                 self.prefs.copy_clipboard = match self.prefs.copy_clipboard {
                     CopyClipboard::System => CopyClipboard::Primary,

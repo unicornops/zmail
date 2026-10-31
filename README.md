@@ -201,6 +201,9 @@ Opening a message in Message Text marks it read once it has been open for 1.5 se
 | `Ctrl-W` | find text in the message |
 | `Ctrl-T` | your addresses (most used first) in To, Cc and Bcc; the file browser on Attchmnt |
 | `Ctrl-G` | help |
+| `Ctrl-_` | edit the message text in `$VISUAL` or `$EDITOR` (most terminals send the same key for `Ctrl-7` and `Ctrl-/`), only when Setup turns it on |
+
+The external editor is off by default. Setup says what turning it on means: while the editor is open, the draft is unencrypted in a temporary file, in a new folder only you can open (0700 on Unix, the file 0600; on Windows your own temporary folder), and Zmail overwrites every file in that folder and removes it when the editor exits, also when it fails or never starts.
 
 Drafts autosave to the encrypted store a second after typing pauses, as in the desktop app, and attachments are copied into it encrypted, shown by their filtered names and sizes. Send goes through the same path as the desktop app (`SyncService::queue_draft_and_send_after`), so whichever Zmail holds the sync lock sends it from the outbox. The **Outbox** (`T`) lists messages waiting to send and those that couldn't be sent, in the desktop app's words: `R` sends a failed one again, `D` takes back one that hasn't started sending (it returns to the postponed messages); a refused sign-in or a changed recipient key is settled in the desktop app. The postponed messages are listed under Local in the Folder List too, where Enter continues one and `D` deletes it.
 
