@@ -262,12 +262,18 @@ The WebView2 renderer is `crates/zmail-render-web/src/platform/windows.rs`
   with strict tracking prevention, in a user data folder under the
   temporary folder that is deleted when the browser process exits (or on
   the next start). A failed browser or renderer process falls back to the
-  text view.
+  text view, and so does a page WebView2 leaves unfinished: a view that
+  is not created, a page not asked for or not loaded within 20 seconds
+  (time spent on allowed remote images aside), or a measuring script that
+  does not finish within 10 seconds, each with the stage in the notice.
 - **Runtime**: the system's evergreen WebView2 (the loader is linked
   statically; nothing is added to the installer). Without it, or when the
   environment cannot be created, the reader keeps the text view and says
   why.
-- **Checked** by CI's "Web renderer (Windows)" job: the canary corpus
+- **Checked** by CI's "Web renderer (Windows)" job, on the runner
+  image's WebView2 runtime and again after updating it to the latest with
+  Microsoft's Evergreen bootstrapper (users get WebView2 updates with
+  Edge, so CI tests the runtime they are getting): the canary corpus
   makes no request, page scripts do not run, `cid:` parts load, pages are
   measured and zoomed to fit, Select All and Copy reach the clipboard, plus
   screenshots of the fixture states and three interactions. Not verified:

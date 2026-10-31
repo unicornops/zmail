@@ -43,7 +43,11 @@
 //!
 //! The runtime is the system's evergreen WebView2. When it is missing or
 //! the environment cannot be created, [`unavailable_reason`] says why and
-//! the reader keeps its text view.
+//! the reader keeps its text view. A page WebView2 leaves unfinished (no
+//! view, no request for the page, no end to its load, a measuring script
+//! that never answers) is reported failed after a deadline
+//! ([`LOAD_TIMEOUT`], [`MEASURE_TIMEOUT`]), so the reader shows that message
+//! as text with a notice rather than an empty space.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -126,6 +130,15 @@ const RELAYOUT_WAIT: Duration = Duration::from_millis(50);
 /// How many times a page is measured again before its measurement is taken
 /// as it is.
 const MAX_RELAYOUT_WAITS: u32 = 20;
+
+/// How long a page may take to load, from its view being created (and the
+/// environment, for the first) until WebView2 reports it loaded, not
+/// counting time spent on remote images Zmail is fetching for it. A page
+/// that takes longer shows as text with a notice instead of an empty space.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long one of Zmail's measuring scripts may take.
+const MEASURE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Chromium switches for every WebView2 environment: the engine itself has
 /// no network. Every request is answered by `WebResourceRequested`, but the
@@ -217,6 +230,16 @@ thread_local! {
     static RUNTIME: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
     /// Environments created so far, for a fresh user data folder each.
     static FOLDERS: Cell<u32> = const { Cell::new(0) };
+    /// Views are not created, as if WebView2 never finished creating them:
+    /// for the canary's check of the fallback (`stall_view_creation`).
+    static STALL_CREATION: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Stops (or resumes) creating web views, so the next ones wait forever as
+/// a stuck WebView2 would. For the canary test (`tests/canary.rs`), which
+/// checks that such a page is reported failed instead of left empty.
+pub fn stall_view_creation(stall: bool) {
+    STALL_CREATION.with(|stalled| stalled.set(stall));
 }
 
 /// Why the web renderer cannot run on this machine, if it cannot: no
@@ -715,6 +738,12 @@ struct ViewState {
     cursor: Cell<u32>,
     pending: RefCell<Vec<PendingFetch>>,
     polling: Cell<bool>,
+    /// WebView2 asked for the page.
+    served: Cell<bool>,
+    /// Measuring scripts started, and finished.
+    measures: Cell<(u64, u64)>,
+    /// The page was reported as failed: nothing more is reported.
+    failed: Cell<bool>,
 }
 
 /// One message's web view. Clones share the view, which closes when the
@@ -762,7 +791,11 @@ impl PlatformWebView {
             cursor: Cell::new(0),
             pending: RefCell::new(Vec::new()),
             polling: Cell::new(false),
+            served: Cell::new(false),
+            measures: Cell::new((0, 0)),
+            failed: Cell::new(false),
         });
+        ViewState::watch_load(&state, LOAD_TIMEOUT);
         let weak = Rc::downgrade(&state);
         with_environment(move |environment| {
             let Some(state) = weak.upgrade() else {
@@ -772,8 +805,7 @@ impl PlatformWebView {
                 .map_err(|reason| anyhow!(reason))
                 .and_then(|environment| ViewState::create(&state, environment));
             if let Err(error) = result {
-                eprintln!("zmail: web renderer: the web view was not created: {error:#}");
-                (state.on_event)(WebEvent::LoadFailed(format!("{error:#}")));
+                state.fail(format!("the web view was not created: {error:#}"));
             }
         });
         Ok(Self { state })
@@ -900,6 +932,12 @@ impl PlatformWebView {
 impl ViewState {
     /// Creates the composition controller in its own InPrivate profile.
     fn create(state: &Rc<Self>, environment: ICoreWebView2Environment10) -> Result<()> {
+        if STALL_CREATION.with(Cell::get) {
+            debug_log(format_args!(
+                "not creating the web view (stalled for a test)"
+            ));
+            return Ok(());
+        }
         // SAFETY: plain calls on a live environment and the options object
         // it creates.
         let options = unsafe {
@@ -910,10 +948,20 @@ impl ViewState {
             options.SetIsInPrivateModeEnabled(true)?;
             options
         };
+        let started = Instant::now();
         let weak = Rc::downgrade(state);
         let attach_environment = environment.clone();
         let handler = CreateCoreWebView2CompositionControllerCompletedHandler::create(Box::new(
             move |result, composition| {
+                debug_log(format_args!(
+                    "composition controller callback after {:?}: {result:?}, {}",
+                    started.elapsed(),
+                    if composition.is_some() {
+                        "a controller"
+                    } else {
+                        "no controller"
+                    }
+                ));
                 let composition = result.and_then(|()| {
                     composition.ok_or_else(|| windows::core::Error::from(E_POINTER))
                 });
@@ -933,13 +981,16 @@ impl ViewState {
                         ViewState::attach(&state, attach_environment.clone(), composition)
                     });
                 if let Err(error) = result {
-                    eprintln!("zmail: web renderer: {error:#}");
-                    (state.on_event)(WebEvent::LoadFailed(format!("{error:#}")));
+                    state.fail(format!("{error:#}"));
                 }
                 Ok(())
             },
         ));
         let window = state.target.borrow().window;
+        debug_log(format_args!(
+            "creating the composition controller (profile zmail{}, window {window:?})",
+            state.page.token
+        ));
         // SAFETY: `window` is the live GPUI (or test) window that hosts the
         // view; the options and handler are COM objects we hold. WebView2
         // calls the handler once, on this thread.
@@ -1207,6 +1258,7 @@ impl ViewState {
         let ours = self.navigation.get().is_none()
             && parse_scheme_request(&uri) == SchemeRequest::Page(self.page.token.clone());
         if ours {
+            debug_log(format_args!("navigation {id} starting: {uri}"));
             self.navigation.set(Some(id));
             return Ok(());
         }
@@ -1236,6 +1288,11 @@ impl ViewState {
             args.IsSuccess(&mut success)?;
             args.WebErrorStatus(&mut status)?;
         }
+        debug_log(format_args!(
+            "navigation {id} completed: success {}, status {}",
+            success.as_bool(),
+            status.0
+        ));
         if self.navigation.get() != Some(id) {
             return Ok(());
         }
@@ -1246,9 +1303,10 @@ impl ViewState {
             self.fitted_width.set(self.size.get().0);
             self.measure();
         } else if status != COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED {
-            let message = format!("the message did not load (WebView2 error {})", status.0);
-            eprintln!("zmail: web renderer: {message}");
-            (self.on_event)(WebEvent::LoadFailed(message));
+            self.fail(format!(
+                "the message did not load (WebView2 error {})",
+                status.0
+            ));
         }
         Ok(())
     }
@@ -1269,11 +1327,15 @@ impl ViewState {
         };
         let page = &self.page;
         let served = match parse_scheme_request(&uri) {
-            SchemeRequest::Page(token) if token == page.token => Some((
-                "text/html; charset=utf-8".to_owned(),
-                page.html.as_slice(),
-                Some(page.policy.as_str()),
-            )),
+            SchemeRequest::Page(token) if token == page.token => {
+                debug_log(format_args!("serving the page {uri}"));
+                self.served.set(true);
+                Some((
+                    "text/html; charset=utf-8".to_owned(),
+                    page.html.as_slice(),
+                    Some(page.policy.as_str()),
+                ))
+            }
             SchemeRequest::Inline(content_id) => page
                 .resources
                 .get(&content_id)
@@ -1437,18 +1499,72 @@ impl ViewState {
     /// Measures the page and reports its height.
     fn measure(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
+        let (started, finished) = self.measures.get();
+        let run = started + 1;
+        self.measures.set((run, finished));
+        debug_log(format_args!("measuring"));
         self.run_script(MEASURE_SCRIPT, move |result| {
+            debug_log(format_args!("measure script finished: {result:?}"));
             let Some(state) = weak.upgrade() else {
                 return;
             };
+            let (started, finished) = state.measures.get();
+            state.measures.set((started, finished.max(run)));
             match result {
                 Ok(json) => state.measured(&json),
-                Err(error) => {
-                    eprintln!("zmail: web renderer: measuring the message failed: {error}");
-                    (state.on_event)(WebEvent::LoadFailed(format!("measuring failed: {error}")));
-                }
+                Err(error) => state.fail(format!("measuring failed: {error}")),
             }
         });
+        let weak = Rc::downgrade(self);
+        after(MEASURE_TIMEOUT, move || {
+            if let Some(state) = weak.upgrade()
+                && state.measures.get().1 < run
+            {
+                state.fail(format!(
+                    "measuring the page did not finish within {}s",
+                    MEASURE_TIMEOUT.as_secs()
+                ));
+            }
+        });
+    }
+
+    /// Fails the page if it has not loaded after `wait`: WebView2 can stop
+    /// partway (no view, no request for the page, no end to its load)
+    /// without saying so, which would leave an empty space in the reader.
+    /// Remote image fetches in progress extend the wait (each has its own
+    /// timeout).
+    fn watch_load(state: &Rc<Self>, wait: Duration) {
+        let weak = Rc::downgrade(state);
+        after(wait, move || {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            if state.loaded.get() || state.failed.get() {
+                return;
+            }
+            if !state.pending.borrow().is_empty() {
+                ViewState::watch_load(&state, FETCH_POLL * 10);
+                return;
+            }
+            let stage = if state.web.borrow().is_none() {
+                "WebView2 did not create the web view"
+            } else if !state.served.get() {
+                "WebView2 did not ask for the page"
+            } else {
+                "the page did not finish loading"
+            };
+            state.fail(format!("{stage} within {}s", LOAD_TIMEOUT.as_secs()));
+        });
+    }
+
+    /// Reports that the page cannot be shown, once: the reader then shows
+    /// the message as text with a notice.
+    fn fail(&self, reason: String) {
+        if self.failed.replace(true) {
+            return;
+        }
+        eprintln!("zmail: web renderer: {reason}");
+        (self.on_event)(WebEvent::LoadFailed(reason));
     }
 
     fn measured(self: &Rc<Self>, json: &str) {
@@ -1456,8 +1572,7 @@ impl ViewState {
             .as_deref()
             .and_then(Measurement::parse)
         else {
-            eprintln!("zmail: web renderer: unexpected measurement {json:?}");
-            (self.on_event)(WebEvent::LoadFailed("unexpected measurement".to_owned()));
+            self.fail(format!("unexpected measurement {json:?}"));
             return;
         };
         let zoom = self.zoom.get();
