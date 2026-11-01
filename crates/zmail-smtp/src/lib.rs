@@ -177,6 +177,51 @@ pub async fn submit_outgoing_message(
     Ok(())
 }
 
+/// Connects, signs in (`AUTH`, when the config has credentials) and says
+/// goodbye, sending nothing: the add-account flow's connection test. A
+/// refused sign-in is a [`ReauthRequired`] error, as when sending.
+pub async fn check_sign_in(config: &SubmissionConfig) -> Result<()> {
+    ensure_rustls_provider();
+    let mut builder = SmtpClientBuilder::new(config.host.clone(), config.port)
+        .map_err(anyhow::Error::msg)?
+        .helo_host(config.hello_name.clone());
+    if let Some(credentials) = config.sasl_credentials()? {
+        builder = builder.credentials(credentials);
+    }
+    // QUIT is a courtesy: the sign-in has already succeeded.
+    match config.security {
+        SubmissionSecurity::Plain => {
+            let client = builder.connect_plain().await.map_err(|error| {
+                connect_error(
+                    error,
+                    "failed to connect to the SMTP server over plain text",
+                )
+            })?;
+            let _ = client.quit().await;
+        }
+        SubmissionSecurity::StartTls => {
+            let client = builder
+                .implicit_tls(false)
+                .connect()
+                .await
+                .map_err(|error| {
+                    connect_error(error, "failed to connect to the SMTP server using STARTTLS")
+                })?;
+            let _ = client.quit().await;
+        }
+        SubmissionSecurity::ImplicitTls => {
+            let client = builder.connect().await.map_err(|error| {
+                connect_error(
+                    error,
+                    "failed to connect to the SMTP server using implicit TLS",
+                )
+            })?;
+            let _ = client.quit().await;
+        }
+    }
+    Ok(())
+}
+
 /// Wraps a connection failure. A refused sign-in (`AUTH` answered with
 /// 535 or another failure) is a [`ReauthRequired`] error, since retrying
 /// the same credentials cannot work; the user has to sign in again.

@@ -13,8 +13,7 @@
 //! | `message_list` | `MessageListView`: threads, search results, drafts, outbox; its multi-row selection and bulk bar |
 //! | `reader` | `ReaderView`: the open conversation and its actions |
 //! | `compose` | `ComposeView`: the draft editor; `ComposeWindow`, one window per draft; `RecipientField` chips |
-//! | `account_setup` | `AccountSetupView`: first-run onboarding and the add-account flow, with autodiscovery; `AddAccountWindow` |
-//! | `google_oauth` | the bring-your-own Google OAuth client guide's steps and checks, and the expired sign-in advice |
+//! | `account_setup` | `AccountSetupView`: first-run onboarding and the add-account flow, with autodiscovery; `AddAccountWindow`. What isn't drawing (validation, discovery, storing, Proton's steps) is `zmail-setup`, shared with the terminal UI |
 //! | `mail_actions` | `MailActions`: the GPUI entity over `zmail-actions` (store writes, `MailEvent`s and undo) |
 //! | `attachments` | opening and saving received attachments (Open, Save As, Save All) |
 //! | `drag` | `DraggedThreads`: conversations dragged from the list onto sidebar folders |
@@ -77,7 +76,6 @@ mod compose;
 mod drag;
 mod fonts;
 mod fuzzy;
-mod google_oauth;
 mod keymap;
 mod layout;
 mod mail_actions;

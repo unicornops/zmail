@@ -1,0 +1,35 @@
+[package]
+name = "zmail-setup"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Adding mail accounts, shared by Zmail's frontends (ADR 0007)"
+
+[dependencies]
+anyhow.workspace = true
+url.workspace = true
+zmail-auth = { path = "../zmail-auth" }
+zmail-autodiscover = { path = "../zmail-autodiscover" }
+zmail-core = { path = "../zmail-core" }
+# The connection test signs in without storing anything.
+zmail-imap = { path = "../zmail-imap" }
+zmail-jmap = { path = "../zmail-jmap" }
+zmail-security = { path = "../zmail-security" }
+zmail-smtp = { path = "../zmail-smtp" }
+zmail-store = { path = "../zmail-store" }
+zmail-sync = { path = "../zmail-sync" }
+# Proton Mail sign-in (docs/adr/0004-proton-native.md); only with the
+# `proton` feature.
+zmail-proton = { path = "../zmail-proton", optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+
+[features]
+# The Proton Mail sign-in steps, for frontends built with Proton.
+proton = ["dep:zmail-proton", "zmail-sync/proton"]
+
+[lints]
+workspace = true
