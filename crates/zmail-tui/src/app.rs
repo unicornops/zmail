@@ -297,13 +297,26 @@ pub enum Prompt {
         /// The unsent mail and drafts that go with it.
         lines: Vec<String>,
     },
-    /// "Remove this identity from Zmail?" (one the server no longer
-    /// lists).
+    /// "Remove this identity from Zmail?"
     RemoveIdentity {
         /// The identity.
         identity_id: i64,
         /// Its address, filtered.
         email: String,
+        /// What goes and what stays (`identity_editor::removal_text`).
+        note: String,
+        /// `S` removes it from the server too.
+        everywhere: bool,
+    },
+    /// "Update the server too?" after saving an identity, or "Create it
+    /// on the server too?" after adding one.
+    IdentityToServer {
+        /// The identity.
+        identity_id: i64,
+        /// Its address, filtered.
+        email: String,
+        /// It was added, so it is created there.
+        create: bool,
     },
 }
 
@@ -1258,8 +1271,24 @@ impl App {
                     entry("^C", "Cancel", Pico(crate::compose::Pico::Cancel)),
                 ];
             }
+            Some(Prompt::RemoveIdentity {
+                everywhere: true, ..
+            }) => {
+                return vec![
+                    entry("Y", "FromZmail", Select),
+                    entry(
+                        "S",
+                        "AndServer",
+                        Press(crossterm::event::KeyCode::Char('s'), false),
+                    ),
+                    entry("N", "No", Back),
+                ];
+            }
             Some(
-                Prompt::Confirm(_) | Prompt::RemoveAccount { .. } | Prompt::RemoveIdentity { .. },
+                Prompt::Confirm(_)
+                | Prompt::RemoveAccount { .. }
+                | Prompt::RemoveIdentity { .. }
+                | Prompt::IdentityToServer { .. },
             ) => {
                 return vec![entry("Y", "Yes", Select), entry("N", "No", Back)];
             }
@@ -2032,13 +2061,28 @@ impl App {
                     self.status = Some("Nothing removed".to_owned());
                 }
             }
-            Prompt::RemoveIdentity { identity_id, email } => {
+            Prompt::RemoveIdentity {
+                identity_id,
+                email,
+                everywhere,
+                ..
+            } => {
                 self.prompt = None;
-                if matches!(key.code, KeyCode::Char('y' | 'Y')) {
-                    self.remove_identity_now(identity_id, &email);
-                } else {
-                    self.status = Some("Nothing removed".to_owned());
+                match key.code {
+                    KeyCode::Char('y' | 'Y') => self.remove_identity_now(identity_id, &email),
+                    KeyCode::Char('s' | 'S') if everywhere => self
+                        .identity_on_server(identity_id, crate::identities::ServerChange::Remove),
+                    _ => self.status = Some("Nothing removed".to_owned()),
                 }
+            }
+            Prompt::IdentityToServer {
+                identity_id,
+                email,
+                create,
+            } => {
+                self.prompt = None;
+                let yes = matches!(key.code, KeyCode::Char('y' | 'Y'));
+                self.identity_to_server_answer(identity_id, &email, create, yes);
             }
             Prompt::Text { purpose, mut input } => {
                 match key.code {
@@ -2661,9 +2705,23 @@ impl App {
             }
             Prompt::Path(path) => path.label(),
             Prompt::RemoveAccount { account_id, lines } => self.remove_question(*account_id, lines),
-            Prompt::RemoveIdentity { email, .. } => format!(
-                "Remove {email} from Zmail? It stays off the server; its mail is kept. (y/n)"
+            Prompt::RemoveIdentity {
+                email,
+                note,
+                everywhere: false,
+                ..
+            } => format!("Remove {email}? {note} (y/n)"),
+            Prompt::RemoveIdentity { email, note, .. } => format!(
+                "Remove {email}? {note} (y from Zmail, s from Zmail and the server, n keeps it)"
             ),
+            Prompt::IdentityToServer {
+                email,
+                create: false,
+                ..
+            } => format!("Saved {email}. Update the server too? (y/n)"),
+            Prompt::IdentityToServer { email, .. } => {
+                format!("Added {email}. Create it on the server too? (y/n)")
+            }
         })
     }
 

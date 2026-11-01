@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tokio::runtime::Builder;
 use zmail_core::{
     AuthKind, CachePolicySummary, NewAccount, NewDraft, NewIdentity, OutboxJobState,
@@ -1020,13 +1021,7 @@ fn jmap_identities_import_keep_local_edits_and_push_back() -> Result<()> {
     // made on the server as another client would.
     let stamp = chrono::Utc::now().timestamp_millis();
     let alias = format!("identity-{stamp}@localhost");
-    reqwest::blocking::Client::new()
-        .put(format!(
-            "{MAIL_HARNESS_JMAP_ADMIN_ENDPOINT}/address/aliases/{MAIL_HARNESS_JMAP_ACCOUNT}/sources/{alias}"
-        ))
-        .send()?
-        .error_for_status()
-        .context("James adds the alias")?;
+    add_james_alias(&alias)?;
     let created = jmap_call(
         "Identity/set",
         serde_json::json!({"create": {"n1": {
@@ -1122,6 +1117,223 @@ fn jmap_identities_import_keep_local_edits_and_push_back() -> Result<()> {
             "relinked to a server identity for {alias}: {listed}"
         );
     }
+    Ok(())
+}
+
+/// Lets the JMAP account send from `alias` (James's admin API).
+fn add_james_alias(alias: &str) -> Result<()> {
+    reqwest::blocking::Client::new()
+        .put(format!(
+            "{MAIL_HARNESS_JMAP_ADMIN_ENDPOINT}/address/aliases/{MAIL_HARNESS_JMAP_ACCOUNT}/sources/{alias}"
+        ))
+        .send()?
+        .error_for_status()
+        .context("James adds the alias")?;
+    Ok(())
+}
+
+/// The server identities James lists for the JMAP account.
+fn james_identities() -> Result<Vec<serde_json::Value>> {
+    let listed = jmap_call("Identity/get", serde_json::json!({}))?;
+    listed[1]["list"]
+        .as_array()
+        .cloned()
+        .with_context(|| format!("James lists the identities: {listed}"))
+}
+
+fn tui_key(app: &mut zmail_tui::App, code: KeyCode, modifiers: KeyModifiers) {
+    app.handle_event(Event::Key(KeyEvent::new(code, modifiers)));
+}
+
+fn tui_type(app: &mut zmail_tui::App, text: &str) {
+    for ch in text.chars() {
+        tui_key(app, KeyCode::Char(ch), KeyModifiers::NONE);
+    }
+}
+
+/// Ticks the terminal UI until `done`, so its background requests report
+/// back, or fails after `seconds`.
+fn tick_until(
+    app: &mut zmail_tui::App,
+    what: &str,
+    seconds: u64,
+    mut done: impl FnMut() -> Result<bool>,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while !done()? {
+        if Instant::now() > deadline {
+            bail!("timed out waiting for {what}");
+        }
+        thread::sleep(Duration::from_millis(100));
+        app.tick();
+    }
+    Ok(())
+}
+
+/// Lets the terminal UI take in what its background request reported
+/// (the store changes before the report arrives), so the next request
+/// isn't refused as still busy.
+fn settle(app: &mut zmail_tui::App) {
+    for _ in 0..10 {
+        thread::sleep(Duration::from_millis(100));
+        app.tick();
+    }
+}
+
+/// The identity editor of #366, driven through the terminal UI against
+/// James: an edit to a server identity, sent up with "Update the server
+/// too?", read back from James; an identity added and created on the
+/// server; and that identity removed from Zmail and the server.
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn the_identity_editor_edits_adds_and_removes_identities_on_james() -> Result<()> {
+    use zmail_core::identity_sync::IdentitySyncStatus;
+    use zmail_tui::{App, AppOptions, Environment};
+
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_JMAP_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
+
+    // A server identity for an alias, made as another client would, and
+    // imported by a sync.
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let alias = format!("editor-{stamp}@localhost");
+    add_james_alias(&alias)?;
+    let created = jmap_call(
+        "Identity/set",
+        serde_json::json!({"create": {"n1": {
+            "email": alias, "name": "Help desk", "textSignature": "-- Help desk"
+        }}}),
+    )?;
+    let server_id = created[1]["created"]["n1"]["id"]
+        .as_str()
+        .with_context(|| format!("James creates the identity: {created}"))?
+        .to_owned();
+    sync_service.sync_account_and_wait(account_id)?;
+    let identities = store.list_synced_identities(account_id)?;
+    let index = identities
+        .iter()
+        .position(|identity| identity.identity.email_address == alias)
+        .context("the sync imports the alias's identity")?;
+    let identity_id = identities[index].identity.id;
+
+    let mut app = App::new(AppOptions {
+        store: store.clone(),
+        sync: Some(sync_service.clone()),
+        runtime: Some(runtime.handle().clone()),
+        env: Environment {
+            color: false,
+            unicode: true,
+            over_ssh: false,
+            macos: false,
+        },
+        clock: Arc::new(|| chrono::Local::now().fixed_offset()),
+        hour_cycle: zmail_core::time::HourCycle::H24,
+        version: "0.0.0-test".to_owned(),
+        arrivals: None,
+        secrets: Some(secrets.clone()),
+        network: None,
+    });
+
+    // Setup → Accounts → Change, down past the sign-in and the cache
+    // budget to the alias's identity, and edit it.
+    tui_type(&mut app, "sa");
+    tui_type(&mut app, "c");
+    for _ in 0..2 + index {
+        tui_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    }
+    tui_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    tui_key(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+    tui_type(&mut app, "Support");
+    // The address is the server's: Tab goes from Name to Reply-To.
+    tui_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    tui_type(&mut app, "Tickets <tickets@localhost>");
+    tui_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    tui_key(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+    tui_type(&mut app, "-- Support, from the terminal");
+    tui_key(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+    let saved = synced_identity(&store, account_id, &alias)?;
+    assert_eq!(saved.local.name, "Support");
+    assert_eq!(saved.status, IdentitySyncStatus::ChangedHere);
+    // "Update the server too?" Yes.
+    tui_type(&mut app, "y");
+    tick_until(&mut app, "the update on James", 60, || {
+        Ok(synced_identity(&store, account_id, &alias)?.status == IdentitySyncStatus::InSync)
+    })?;
+    settle(&mut app);
+    let listed = jmap_call("Identity/get", serde_json::json!({"ids": [server_id]}))?;
+    let on_server = &listed[1]["list"][0];
+    assert_eq!(on_server["name"], "Support", "{listed}");
+    assert_eq!(
+        on_server["textSignature"], "-- Support, from the terminal",
+        "{listed}"
+    );
+    assert_eq!(
+        on_server["replyTo"][0]["email"], "tickets@localhost",
+        "{listed}"
+    );
+    // The next sync agrees.
+    sync_service.sync_account_and_wait(account_id)?;
+    assert_eq!(
+        synced_identity(&store, account_id, &alias)?.status,
+        IdentitySyncStatus::InSync
+    );
+    assert_eq!(
+        store
+            .identity_link(identity_id)?
+            .context("kept")?
+            .server_id
+            .as_deref(),
+        Some(server_id.as_str())
+    );
+
+    // Add an identity for a second alias, and create it on James.
+    let added = format!("added-{stamp}@localhost");
+    add_james_alias(&added)?;
+    tui_type(&mut app, "a");
+    tui_type(&mut app, "Added in Zmail");
+    tui_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    tui_type(&mut app, &added);
+    tui_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    tui_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    tui_type(&mut app, "-- Added");
+    tui_key(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+    synced_identity(&store, account_id, &added).context("added in Zmail")?;
+    // "Create it on the server too?" Yes.
+    tui_type(&mut app, "y");
+    tick_until(&mut app, "the identity created on James", 60, || {
+        Ok(synced_identity(&store, account_id, &added)?.status == IdentitySyncStatus::InSync)
+    })?;
+    settle(&mut app);
+    let added_server_id = store
+        .identity_link(synced_identity(&store, account_id, &added)?.identity.id)?
+        .and_then(|link| link.server_id)
+        .context("linked to the created identity")?;
+    let made = james_identities()?
+        .into_iter()
+        .find(|identity| identity["id"].as_str() == Some(added_server_id.as_str()))
+        .context("James lists the created identity")?;
+    assert_eq!(made["email"], added.as_str());
+    assert_eq!(made["name"], "Added in Zmail");
+    assert_eq!(made["textSignature"], "-- Added");
+
+    // Remove it from Zmail and the server: the cursor is still on it.
+    tui_type(&mut app, "d");
+    tui_type(&mut app, "s");
+    tick_until(&mut app, "the identity removed from James", 60, || {
+        Ok(synced_identity(&store, account_id, &added).is_err())
+    })?;
+    assert!(
+        james_identities()?
+            .iter()
+            .all(|identity| identity["id"].as_str() != Some(added_server_id.as_str())),
+        "James no longer lists {added_server_id}"
+    );
     Ok(())
 }
 

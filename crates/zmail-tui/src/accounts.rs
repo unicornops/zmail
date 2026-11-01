@@ -19,7 +19,8 @@
 //! (`zmail_setup::identities`). On one that differs, `U` updates the
 //! server with Zmail's name, reply-to and signature and `S` takes the
 //! server's instead; on one the server no longer lists, `R` creates it
-//! there again and `D` removes it from Zmail, after asking.
+//! there again. On any, `Ret` or `E` edits it, `D` removes it after
+//! asking and `*` makes it primary; `A` adds one (`crate::identities`).
 //!
 //! Safety:
 //!
@@ -59,6 +60,7 @@ use zmail_setup::{
 };
 
 use crate::app::{App, CommandEntry, Effect, Notice, Prompt, Screen, entry};
+use crate::identities::{IdentityEditor, ServerChange};
 
 /// How to sign in, as the method step offers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,13 +229,13 @@ pub enum SetupEvent {
         /// Why it failed, if it did.
         error: Option<String>,
     },
-    /// Updating an identity on the server, or creating it there, finished
-    /// (Change).
+    /// Updating an identity on the server, creating it there, or
+    /// removing it there and from Zmail, finished (Change).
     IdentityOnServer {
         /// The identity's address.
         email: String,
-        /// It was created, not updated.
-        create: bool,
+        /// What was asked of the server.
+        change: ServerChange,
         /// Why it failed, if it did.
         error: Option<String>,
     },
@@ -566,6 +568,8 @@ pub struct EditAccount {
     pub identities: Vec<SyncedIdentity>,
     /// An identity is being sent to the server.
     pub identity_busy: bool,
+    /// The identity form, while it is open.
+    pub form: Option<IdentityEditor>,
 }
 
 /// The fixed rows of Change, before the identities.
@@ -672,6 +676,7 @@ impl App {
             browser: None,
             identities,
             identity_busy: false,
+            form: None,
         });
         self.goto(Screen::EditAccount);
     }
@@ -874,8 +879,12 @@ impl App {
         }
     }
 
-    /// A paste on Change: the new password, when its row is focused.
+    /// A paste on Change: the new password, when its row is focused, or
+    /// text for the identity form's field.
     pub(crate) fn edit_paste(&mut self, pasted: &str) {
+        if self.edit.as_ref().is_some_and(|edit| edit.form.is_some()) {
+            return self.identity_form_paste(pasted);
+        }
         if let Some(edit) = self.edit.as_mut()
             && edit.cursor == 0
             && edit.auth == AuthKind::Password
@@ -1324,11 +1333,11 @@ impl App {
         }
         if let SetupEvent::IdentityOnServer {
             email,
-            create,
+            change,
             error,
         } = event
         {
-            return self.identity_on_server_done(&email, create, error);
+            return self.identity_on_server_done(&email, change, error);
         }
         let Some(add) = self.add.as_mut() else {
             return;
@@ -1425,6 +1434,9 @@ impl App {
         let Some(edit) = self.edit.as_mut() else {
             return;
         };
+        if edit.form.is_some() {
+            return self.identity_form_key(key);
+        }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let typing = edit.cursor == 0 && edit.auth == AuthKind::Password;
         match key.code {
@@ -1445,7 +1457,9 @@ impl App {
                 edit.password.pop();
             }
             KeyCode::Char(ch) if typing && !ch.is_control() => edit.password.push(ch),
+            KeyCode::Char('a' | 'A') => self.open_identity_form(None),
             KeyCode::Char(ch) if edit.identity_at_cursor().is_some() => self.identity_key(ch),
+            KeyCode::Enter if edit.identity_at_cursor().is_some() => self.identity_key('e'),
             KeyCode::Char('<' | ',') => {
                 if let Some(cancel) = self.edit.take().and_then(|mut edit| edit.browser.take()) {
                     cancel.cancel();
@@ -1463,8 +1477,9 @@ impl App {
         }
     }
 
-    /// A letter on one of Change's identities: `U` and `S` on one that
-    /// differs from the server, `R` and `D` on one it no longer lists.
+    /// A letter on one of Change's identities: `E` edits it, `D` removes
+    /// it after asking, `*` makes it primary; `U` and `S` on one that
+    /// differs from the server, `R` on one it no longer lists.
     fn identity_key(&mut self, key: char) {
         let Some(identity) = self.edit.as_ref().and_then(EditAccount::identity_at_cursor) else {
             return;
@@ -1472,7 +1487,12 @@ impl App {
         let (identity_id, status) = (identity.identity.id, identity.status);
         let email = sanitize_line(&identity.identity.email_address);
         match (key.to_ascii_lowercase(), status) {
-            ('u', status) if status.differs() => self.identity_on_server(identity_id, false),
+            ('e', _) => self.open_identity_form(Some(identity_id)),
+            ('d', _) => self.ask_remove_identity(),
+            ('*', _) => self.make_primary_identity(),
+            ('u', status) if status.differs() => {
+                self.identity_on_server(identity_id, ServerChange::Update);
+            }
             ('s', status) if status.differs() => {
                 match self.store.use_server_identity(identity_id) {
                     Ok(()) => self.status = Some(format!("{email} now has the server's details")),
@@ -1480,17 +1500,17 @@ impl App {
                 }
                 self.refresh_identities();
             }
-            ('r', IdentitySyncStatus::NotOnServer) => self.identity_on_server(identity_id, true),
-            ('d', IdentitySyncStatus::NotOnServer) => {
-                self.prompt = Some(Prompt::RemoveIdentity { identity_id, email });
+            ('r', IdentitySyncStatus::NotOnServer) => {
+                self.identity_on_server(identity_id, ServerChange::Create);
             }
             _ => {}
         }
     }
 
-    /// Updates an identity on the server, or creates it there, in the
-    /// background; the result comes back as a [`SetupEvent`].
-    fn identity_on_server(&mut self, identity_id: i64, create: bool) {
+    /// Updates an identity on the server, creates it there, or removes it
+    /// there and from Zmail, in the background; the result comes back as
+    /// a [`SetupEvent`].
+    pub(crate) fn identity_on_server(&mut self, identity_id: i64, change: ServerChange) {
         let (Some(sync), Some(runtime), Some(edit)) =
             (self.sync.clone(), self.runtime.clone(), self.edit.as_mut())
         else {
@@ -1511,41 +1531,50 @@ impl App {
         edit.identity_busy = true;
         self.status = Some(format!(
             "{} {} on the server…",
-            if create { "Creating" } else { "Updating" },
+            match change {
+                ServerChange::Update => "Updating",
+                ServerChange::Create => "Creating",
+                ServerChange::Remove => "Removing",
+            },
             sanitize_line(&email)
         ));
         let sender = self.notice_sender();
         runtime.spawn(async move {
-            let result = if create {
-                sync.recreate_identity_and_wait(identity_id).await
-            } else {
-                sync.push_identity_and_wait(identity_id).await
+            let result = match change {
+                ServerChange::Update => sync.push_identity_and_wait(identity_id).await,
+                ServerChange::Create => sync.create_identity_on_server_and_wait(identity_id).await,
+                ServerChange::Remove => sync.destroy_identity_and_wait(identity_id).await,
             };
             let _ = sender.send(Notice::Setup(Box::new(SetupEvent::IdentityOnServer {
                 email,
-                create,
+                change,
                 error: result.err().map(|error| format!("{error:#}")),
             })));
         });
     }
 
-    fn identity_on_server_done(&mut self, email: &str, create: bool, error: Option<String>) {
+    fn identity_on_server_done(
+        &mut self,
+        email: &str,
+        change: ServerChange,
+        error: Option<String>,
+    ) {
         if let Some(edit) = self.edit.as_mut() {
             edit.identity_busy = false;
         }
         let email = sanitize_line(email);
-        self.status = Some(match (error, create) {
-            (None, false) => format!("Updated {email} on the server"),
-            (None, true) => format!("Created {email} on the server"),
-            (Some(error), false) => {
+        self.status = Some(match (error, change) {
+            (None, ServerChange::Update) => format!("Updated {email} on the server"),
+            (None, ServerChange::Create) => format!("Created {email} on the server"),
+            (None, ServerChange::Remove) => format!("Removed {email} from Zmail and the server"),
+            (Some(error), change) => {
                 format!(
-                    "Could not update {email} on the server: {}",
-                    sanitize_line(&error)
-                )
-            }
-            (Some(error), true) => {
-                format!(
-                    "Could not create {email} on the server: {}",
+                    "Could not {} {email} on the server: {}",
+                    match change {
+                        ServerChange::Update => "update",
+                        ServerChange::Create => "create",
+                        ServerChange::Remove => "remove",
+                    },
                     sanitize_line(&error)
                 )
             }
@@ -1568,7 +1597,7 @@ impl App {
     }
 
     /// Reads Change's identities again, keeping the cursor in range.
-    fn refresh_identities(&mut self) {
+    pub(crate) fn refresh_identities(&mut self) {
         let Some(edit) = self.edit.as_mut() else {
             return;
         };
@@ -1745,6 +1774,14 @@ impl App {
             ],
             Screen::EditAccount => {
                 let key = |ch| Press(KeyCode::Char(ch), false);
+                if self.edit.as_ref().is_some_and(|edit| edit.form.is_some()) {
+                    return vec![
+                        entry("^X", "Save", Press(KeyCode::Char('x'), true)),
+                        entry("^C", "Cancel", Press(KeyCode::Char('c'), true)),
+                        entry("Tab", "NextFld", Press(KeyCode::Tab, false)),
+                        entry("^U", "Clear", Press(KeyCode::Char('u'), true)),
+                    ];
+                }
                 let identity = self
                     .edit
                     .as_ref()
@@ -1756,15 +1793,23 @@ impl App {
                         entry("Tab", "NextRow", Press(KeyCode::Tab, false)),
                         entry("^U", "Clear", Press(KeyCode::Char('u'), true)),
                     ],
-                    Some(status) if status.differs() => vec![
-                        entry("U", "UpdServer", key('u')),
-                        entry("S", "UseServer", key('s')),
-                    ],
-                    Some(IdentitySyncStatus::NotOnServer) => vec![
-                        entry("R", "Recreate", key('r')),
-                        entry("D", "Remove", key('d')),
-                    ],
-                    Some(_) => Vec::new(),
+                    Some(status) => {
+                        let mut entries = vec![
+                            entry("Ret", "[Edit]", Press(KeyCode::Enter, false)),
+                            entry("A", "Add", key('a')),
+                            entry("D", "Remove", key('d')),
+                            entry("*", "MkPrimary", key('*')),
+                        ];
+                        if status.differs() {
+                            entries.extend([
+                                entry("U", "UpdServer", key('u')),
+                                entry("S", "UseServer", key('s')),
+                            ]);
+                        } else if status == IdentitySyncStatus::NotOnServer {
+                            entries.push(entry("R", "Recreate", key('r')));
+                        }
+                        entries
+                    }
                 };
                 if identity.is_some() {
                     entries.extend([

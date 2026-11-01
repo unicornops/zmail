@@ -9,9 +9,9 @@
   account; the oldest go first and download again when opened.
 
   Identities
-  Work <me@work.example>
+  Work <me@work.example>  (primary)
 
-
+  Ret/E: Edit   D: Remove   *: Make primary   A: Add Identity
 
 
 

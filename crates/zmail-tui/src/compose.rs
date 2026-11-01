@@ -284,7 +284,7 @@ pub struct Compose {
 }
 
 /// A one-line field holding `text`, with the cursor at its end.
-fn line_editor(text: &str) -> TextArea<'static> {
+pub(crate) fn line_editor(text: &str) -> TextArea<'static> {
     let mut editor = TextArea::new(vec![text.to_owned()]);
     editor.set_cursor_line_style(Style::default());
     editor.move_cursor(CursorMove::End);
@@ -293,7 +293,7 @@ fn line_editor(text: &str) -> TextArea<'static> {
 
 /// The message text's editor, holding `text`, with the cursor at the
 /// top.
-fn body_editor(text: &str) -> TextArea<'static> {
+pub(crate) fn body_editor(text: &str) -> TextArea<'static> {
     let mut editor = TextArea::new(text.split('\n').map(str::to_owned).collect());
     editor.set_cursor_line_style(Style::default());
     editor.set_wrap_mode(WrapMode::WordOrGlyph);
@@ -301,7 +301,7 @@ fn body_editor(text: &str) -> TextArea<'static> {
 }
 
 /// The text of a one-line field.
-fn line_text(editor: &TextArea<'_>) -> String {
+pub(crate) fn line_text(editor: &TextArea<'_>) -> String {
     editor.lines().join(" ")
 }
 
@@ -412,7 +412,7 @@ fn filtered(message: &ThreadMessage) -> ThreadMessage {
 
 /// Crossterm's key as the editor's input, for the keys Compose leaves to
 /// it (no control or Alt chords: those are Pico's, or nothing).
-fn editor_input(key: KeyEvent) -> Option<Input> {
+pub(crate) fn editor_input(key: KeyEvent) -> Option<Input> {
     let modifiers = key.modifiers;
     if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
         return None;

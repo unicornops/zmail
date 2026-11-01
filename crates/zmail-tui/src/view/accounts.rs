@@ -265,6 +265,7 @@ pub(super) fn draw_edit(app: &mut App, frame: &mut Frame, theme: Theme, body: Re
         0,
     );
     let identity_lines = identity_lines(&mut out, edit);
+    identity_keys(&mut out, edit);
     if let Some(url) = &edit.sign_in_url {
         out.blank();
         browser_lines(&mut out, url, over_ssh);
@@ -302,11 +303,24 @@ fn identity_lines(out: &mut Lines, edit: &EditAccount) -> usize {
     out.line("Identities", theme.bold());
     let first = out.lines.len();
     for (index, identity) in edit.identities.iter().enumerate() {
-        let status = status_label(identity.status);
-        let text = if status.is_empty() {
+        let marks = [
+            identity
+                .identity
+                .is_primary
+                .then_some(zmail_setup::identity_editor::PRIMARY),
+            Some(status_label(identity.status)).filter(|status| !status.is_empty()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        let text = if marks.is_empty() {
             sanitize_line(&identity_line(identity))
         } else {
-            format!("{}  ({status})", sanitize_line(&identity_line(identity)))
+            format!(
+                "{}  ({})",
+                sanitize_line(&identity_line(identity)),
+                marks.join(", ")
+            )
         };
         let row = EDIT_ROWS + index;
         let style = if row == edit.cursor {
@@ -351,6 +365,22 @@ fn identity_lines(out: &mut Lines, edit: &EditAccount) -> usize {
     };
     out.para(&keys, theme.faint(), 0);
     first
+}
+
+/// What the identities' keys do, under the list.
+fn identity_keys(out: &mut Lines, edit: &EditAccount) {
+    use zmail_setup::identity_editor::{ADD, EDIT, MAKE_PRIMARY};
+    let account = edit.account_identities();
+    let theme = out.theme;
+    let mut keys = format!("Ret/E: {EDIT}   D: Remove   *: {MAKE_PRIMARY}");
+    if account.can_add() {
+        keys.push_str(&format!("   A: {ADD}"));
+    }
+    out.blank();
+    out.para(&keys, theme.faint(), 0);
+    if let Some(note) = account.add_note() {
+        out.para(note, theme.faint(), 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
