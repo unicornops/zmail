@@ -17,6 +17,8 @@ ratatui-textarea.workspace = true
 tokio.workspace = true
 unicode-width.workspace = true
 url.workspace = true
+# Wiping typed passwords (Setup → Accounts) so the optimiser keeps the write.
+zeroize.workspace = true
 # Triage: the GUI's undoable mail actions (ADR 0007, section 8).
 zmail-actions = { path = "../zmail-actions" }
 # Setup → Accounts: the GUI's account setup, without its drawing.

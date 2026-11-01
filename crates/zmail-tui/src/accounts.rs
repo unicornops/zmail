@@ -31,6 +31,7 @@
 use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use zeroize::Zeroize;
 use zmail_auth::{OAuth2Client, TokenSet};
 use zmail_autodiscover::{Discovery, EmailAddress, MailSettings, Provider, Security, Source};
 use zmail_core::{AccountSummary, AuthKind, ProtocolKind};
@@ -504,12 +505,11 @@ fn sentence(text: &str) -> String {
     }
 }
 
-/// Overwrites a secret's bytes before dropping them, as far as safe Rust
-/// can (the allocator may have kept earlier copies).
+/// Zeroes a secret's whole buffer (spare capacity included) with
+/// `zeroize`, which the optimiser can't drop, and empties it. Copies the
+/// allocator kept from earlier growth are out of reach.
 fn wipe(secret: &mut String) {
-    let len = secret.len();
-    secret.replace_range(.., &"\0".repeat(len));
-    secret.clear();
+    secret.zeroize();
 }
 
 /// Whether the form's provider has an OAuth2 preset (Gmail, Microsoft 365
