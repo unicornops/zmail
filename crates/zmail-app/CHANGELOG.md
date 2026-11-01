@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.29.0](https://github.com/unicornops/zmail/compare/v0.28.0...v0.29.0) (2026-11-01)
+
+
+### Features
+
+* **ui:** offer to update the server or use the server's identity ([#364](https://github.com/unicornops/zmail/issues/364)) ([64421e2](https://github.com/unicornops/zmail/commit/64421e27a242195efbd2921377a7d6a46667eb51))
+* **jmap:** import server identities and keep local edits ([#363](https://github.com/unicornops/zmail/issues/363)) ([ce98f02](https://github.com/unicornops/zmail/commit/ce98f02b296496313266f54ccda40e6b979b4614))
+
+### Bug Fixes
+
+* **compose:** reply to your own message goes to its recipients ([#362](https://github.com/unicornops/zmail/issues/362)) ([f0b6605](https://github.com/unicornops/zmail/commit/f0b6605ce29dc9383a0be6e4e45b3db3c0d820d4))
+
 ## [0.28.0](https://github.com/unicornops/zmail/compare/v0.27.1...v0.28.0) (2026-11-01)
 
 
