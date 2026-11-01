@@ -761,7 +761,7 @@ fn a_reply_from_zmail_threads_over_jmap() -> Result<()> {
         &sender_store,
         sender_account,
         &start.subject,
-        24,
+        60,
     )?;
     let delivered = sender_store
         .thread_view(delivered)?
