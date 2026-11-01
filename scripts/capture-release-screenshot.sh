@@ -144,6 +144,8 @@ MATRIX=(
   "settings-accounts-light settings-accounts light 820 900"
   "settings-accounts-expired-dark settings-accounts-expired dark 820 900"
   "settings-accounts-expired-light settings-accounts-expired light 820 900"
+  "settings-accounts-identities-dark settings-accounts-identities dark 820 900"
+  "settings-accounts-identities-light settings-accounts-identities light 820 900"
   "settings-appearance-dark settings-appearance dark 820 600"
   "settings-appearance-light settings-appearance light 820 600"
   "settings-keyboard-dark settings-keyboard dark 820 900"

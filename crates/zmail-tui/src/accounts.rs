@@ -14,6 +14,13 @@
 //! identity; then the account is saved and its first sync starts, here when
 //! this Zmail holds the sync lock, otherwise in the Zmail that does.
 //!
+//! **Change** has the account's sign-in and cache budget, then its
+//! identities, each with how it stands against a JMAP server
+//! (`zmail_setup::identities`). On one that differs, `U` updates the
+//! server with Zmail's name, reply-to and signature and `S` takes the
+//! server's instead; on one the server no longer lists, `R` creates it
+//! there again and `D` removes it from Zmail, after asking.
+//!
 //! Safety:
 //!
 //! - Password fields never echo: they show `[hidden]` once typed, and
@@ -21,7 +28,8 @@
 //!   in a [`crate::app::Prompt`] (which derives `Debug`), and are cleared
 //!   once the account is saved. Secrets go only to the keychain.
 //! - Every string from a server, DNS or Proton (discovery notes and
-//!   errors, hosts, URLs, connection errors, sync progress) goes through
+//!   errors, hosts, URLs, connection errors, sync progress, identities'
+//!   names, addresses, reply-tos and signatures) goes through
 //!   [`sanitize_line`] before it is drawn or put on the status line.
 //! - Over SSH (`SSH_CONNECTION`/`SSH_TTY`) the OAuth2 step says plainly
 //!   that the browser's redirect to 127.0.0.1 can't reach this machine.
@@ -34,7 +42,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use zeroize::Zeroize;
 use zmail_auth::{OAuth2Client, TokenSet};
 use zmail_autodiscover::{Discovery, EmailAddress, MailSettings, Provider, Security, Source};
-use zmail_core::{AccountSummary, AuthKind, ProtocolKind};
+use zmail_core::{
+    AccountSummary, AuthKind, ProtocolKind,
+    identity_sync::{IdentitySyncStatus, SyncedIdentity},
+};
 use zmail_security::terminal::sanitize_line;
 use zmail_setup::{
     AccountField, AccountFormValues, AccountSetupSecret, Check, SyncProgress,
@@ -216,6 +227,16 @@ pub enum SetupEvent {
         /// Why it failed, if it did.
         error: Option<String>,
     },
+    /// Updating an identity on the server, or creating it there, finished
+    /// (Change).
+    IdentityOnServer {
+        /// The identity's address.
+        email: String,
+        /// It was created, not updated.
+        create: bool,
+        /// Why it failed, if it did.
+        error: Option<String>,
+    },
     /// A Proton step answered.
     #[cfg(feature = "proton")]
     Proton {
@@ -247,6 +268,7 @@ impl std::fmt::Debug for SetupEvent {
             Self::Checked { .. } => "Checked",
             Self::Authorized { .. } => "Authorized",
             Self::Reauthorized { .. } => "Reauthorized",
+            Self::IdentityOnServer { .. } => "IdentityOnServer",
             #[cfg(feature = "proton")]
             Self::Proton { .. } => "Proton",
             #[cfg(feature = "proton")]
@@ -540,10 +562,28 @@ pub struct EditAccount {
     pub sign_in_url: Option<String>,
     /// Stops that sign-in's wait.
     browser: Option<CancelSignIn>,
+    /// The account's identities, after the fixed rows.
+    pub identities: Vec<SyncedIdentity>,
+    /// An identity is being sent to the server.
+    pub identity_busy: bool,
 }
 
-/// The rows of Change.
+/// The fixed rows of Change, before the identities.
 pub const EDIT_ROWS: usize = 2;
+
+impl EditAccount {
+    /// How many rows Change has.
+    pub fn rows(&self) -> usize {
+        EDIT_ROWS + self.identities.len()
+    }
+
+    /// The identity the cursor is on, if any.
+    pub fn identity_at_cursor(&self) -> Option<&SyncedIdentity> {
+        self.cursor
+            .checked_sub(EDIT_ROWS)
+            .and_then(|index| self.identities.get(index))
+    }
+}
 
 impl App {
     /// The step Add is on, if an account is being added (for tests that
@@ -618,6 +658,10 @@ impl App {
             .flatten()
             .map(|bytes| bytes / (1024 * 1024));
         let auth = self.account_auth(account.id);
+        let identities = self
+            .store
+            .list_synced_identities(account.id)
+            .unwrap_or_default();
         self.edit = Some(EditAccount {
             account,
             auth,
@@ -626,6 +670,8 @@ impl App {
             budget,
             sign_in_url: None,
             browser: None,
+            identities,
+            identity_busy: false,
         });
         self.goto(Screen::EditAccount);
     }
@@ -1276,6 +1322,14 @@ impl App {
         if let SetupEvent::Reauthorized { account_id, error } = event {
             return self.reauthorized(account_id, error);
         }
+        if let SetupEvent::IdentityOnServer {
+            email,
+            create,
+            error,
+        } = event
+        {
+            return self.identity_on_server_done(&email, create, error);
+        }
         let Some(add) = self.add.as_mut() else {
             return;
         };
@@ -1288,7 +1342,7 @@ impl App {
             SetupEvent::Proton { generation, .. } | SetupEvent::ProtonStored { generation, .. } => {
                 *generation
             }
-            SetupEvent::Reauthorized { .. } => return,
+            SetupEvent::Reauthorized { .. } | SetupEvent::IdentityOnServer { .. } => return,
         };
         if generation != add.generation {
             return;
@@ -1358,7 +1412,7 @@ impl App {
                 result,
                 ..
             } => self.proton_stored(account_id, name, result),
-            SetupEvent::Reauthorized { .. } => {}
+            SetupEvent::Reauthorized { .. } | SetupEvent::IdentityOnServer { .. } => {}
         }
     }
 
@@ -1386,11 +1440,12 @@ impl App {
             KeyCode::Char('u') if control && typing => wipe(&mut edit.password),
             _ if control => {}
             KeyCode::Up | KeyCode::BackTab => edit.cursor = edit.cursor.saturating_sub(1),
-            KeyCode::Down | KeyCode::Tab => edit.cursor = (edit.cursor + 1).min(EDIT_ROWS - 1),
+            KeyCode::Down | KeyCode::Tab => edit.cursor = (edit.cursor + 1).min(edit.rows() - 1),
             KeyCode::Backspace if typing => {
                 edit.password.pop();
             }
             KeyCode::Char(ch) if typing && !ch.is_control() => edit.password.push(ch),
+            KeyCode::Char(ch) if edit.identity_at_cursor().is_some() => self.identity_key(ch),
             KeyCode::Char('<' | ',') => {
                 if let Some(cancel) = self.edit.take().and_then(|mut edit| edit.browser.take()) {
                     cancel.cancel();
@@ -1406,6 +1461,122 @@ impl App {
             KeyCode::Left if edit.cursor == 1 => self.change_budget(-1),
             _ => {}
         }
+    }
+
+    /// A letter on one of Change's identities: `U` and `S` on one that
+    /// differs from the server, `R` and `D` on one it no longer lists.
+    fn identity_key(&mut self, key: char) {
+        let Some(identity) = self.edit.as_ref().and_then(EditAccount::identity_at_cursor) else {
+            return;
+        };
+        let (identity_id, status) = (identity.identity.id, identity.status);
+        let email = sanitize_line(&identity.identity.email_address);
+        match (key.to_ascii_lowercase(), status) {
+            ('u', status) if status.differs() => self.identity_on_server(identity_id, false),
+            ('s', status) if status.differs() => {
+                match self.store.use_server_identity(identity_id) {
+                    Ok(()) => self.status = Some(format!("{email} now has the server's details")),
+                    Err(error) => self.report(error),
+                }
+                self.refresh_identities();
+            }
+            ('r', IdentitySyncStatus::NotOnServer) => self.identity_on_server(identity_id, true),
+            ('d', IdentitySyncStatus::NotOnServer) => {
+                self.prompt = Some(Prompt::RemoveIdentity { identity_id, email });
+            }
+            _ => {}
+        }
+    }
+
+    /// Updates an identity on the server, or creates it there, in the
+    /// background; the result comes back as a [`SetupEvent`].
+    fn identity_on_server(&mut self, identity_id: i64, create: bool) {
+        let (Some(sync), Some(runtime), Some(edit)) =
+            (self.sync.clone(), self.runtime.clone(), self.edit.as_mut())
+        else {
+            self.status = Some("This Zmail can't reach the server right now".to_owned());
+            return;
+        };
+        if edit.identity_busy {
+            return;
+        }
+        let Some(email) = edit
+            .identities
+            .iter()
+            .find(|identity| identity.identity.id == identity_id)
+            .map(|identity| identity.identity.email_address.clone())
+        else {
+            return;
+        };
+        edit.identity_busy = true;
+        self.status = Some(format!(
+            "{} {} on the server…",
+            if create { "Creating" } else { "Updating" },
+            sanitize_line(&email)
+        ));
+        let sender = self.notice_sender();
+        runtime.spawn(async move {
+            let result = if create {
+                sync.recreate_identity_and_wait(identity_id).await
+            } else {
+                sync.push_identity_and_wait(identity_id).await
+            };
+            let _ = sender.send(Notice::Setup(Box::new(SetupEvent::IdentityOnServer {
+                email,
+                create,
+                error: result.err().map(|error| format!("{error:#}")),
+            })));
+        });
+    }
+
+    fn identity_on_server_done(&mut self, email: &str, create: bool, error: Option<String>) {
+        if let Some(edit) = self.edit.as_mut() {
+            edit.identity_busy = false;
+        }
+        let email = sanitize_line(email);
+        self.status = Some(match (error, create) {
+            (None, false) => format!("Updated {email} on the server"),
+            (None, true) => format!("Created {email} on the server"),
+            (Some(error), false) => {
+                format!(
+                    "Could not update {email} on the server: {}",
+                    sanitize_line(&error)
+                )
+            }
+            (Some(error), true) => {
+                format!(
+                    "Could not create {email} on the server: {}",
+                    sanitize_line(&error)
+                )
+            }
+        });
+        self.refresh_identities();
+    }
+
+    /// Removes the identity the question was about from Zmail.
+    pub(crate) fn remove_identity_now(&mut self, identity_id: i64, email: &str) {
+        match self.store.remove_identity(identity_id) {
+            Ok(()) => self.status = Some(format!("Removed {email} from Zmail")),
+            Err(error) => {
+                self.status = Some(format!(
+                    "Could not remove {email}: {}",
+                    sanitize_line(&format!("{error:#}"))
+                ));
+            }
+        }
+        self.refresh_identities();
+    }
+
+    /// Reads Change's identities again, keeping the cursor in range.
+    fn refresh_identities(&mut self) {
+        let Some(edit) = self.edit.as_mut() else {
+            return;
+        };
+        edit.identities = self
+            .store
+            .list_synced_identities(edit.account.id)
+            .unwrap_or_default();
+        edit.cursor = edit.cursor.min(edit.rows() - 1);
     }
 
     /// Change's first row: a new password, or the browser sign-in again.
@@ -1572,12 +1743,38 @@ impl App {
                 entry("M", "Main Menu", MainMenu),
                 entry("Q", "Quit", Quit),
             ],
-            Screen::EditAccount => vec![
-                entry("Ret", "[Change]", Press(KeyCode::Enter, false)),
-                entry("Tab", "NextRow", Press(KeyCode::Tab, false)),
-                entry("^U", "Clear", Press(KeyCode::Char('u'), true)),
-                entry("Esc", "Accounts", Press(KeyCode::Esc, false)),
-            ],
+            Screen::EditAccount => {
+                let key = |ch| Press(KeyCode::Char(ch), false);
+                let identity = self
+                    .edit
+                    .as_ref()
+                    .and_then(EditAccount::identity_at_cursor)
+                    .map(|identity| identity.status);
+                let mut entries = match identity {
+                    None => vec![
+                        entry("Ret", "[Change]", Press(KeyCode::Enter, false)),
+                        entry("Tab", "NextRow", Press(KeyCode::Tab, false)),
+                        entry("^U", "Clear", Press(KeyCode::Char('u'), true)),
+                    ],
+                    Some(status) if status.differs() => vec![
+                        entry("U", "UpdServer", key('u')),
+                        entry("S", "UseServer", key('s')),
+                    ],
+                    Some(IdentitySyncStatus::NotOnServer) => vec![
+                        entry("R", "Recreate", key('r')),
+                        entry("D", "Remove", key('d')),
+                    ],
+                    Some(_) => Vec::new(),
+                };
+                if identity.is_some() {
+                    entries.extend([
+                        entry("P", "PrevRow", Press(KeyCode::Up, false)),
+                        entry("N", "NextRow", Press(KeyCode::Down, false)),
+                    ]);
+                }
+                entries.push(entry("Esc", "Accounts", Press(KeyCode::Esc, false)));
+                entries
+            }
             _ => self.add_commands(),
         }
     }

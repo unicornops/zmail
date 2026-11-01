@@ -1,0 +1,48 @@
+  ZMAIL 0.0.0-test                                                       CHANGE ACCOUNT                                                   Folder: Unified Inbox
+  Change Work
+  Up and Down choose a row; Enter changes it.
+
+  New password :    (Enter saves it)
+  Cache budget : < No limit >
+
+  The cache budget caps the downloaded bodies and attachments kept for this account; the oldest go first and download again when opened.
+
+  Identities
+  Work <me@work.example>  (changed in Zmail and on the server)
+  Help desk <help@work.example>  (no longer on the server)
+
+  me@work.example differs from the server
+  Its name differs in Zmail and on the server, and Zmail can't tell which is newer. Update the server to keep Zmail's, or use the server's to replace it here.
+    name: Zmail has “Work”, the server “Work Server”
+  U: Update the server   S: Use the server's
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+U UpdServer         P PrevRow           Esc Accounts
+S UseServer         N NextRow

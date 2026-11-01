@@ -118,6 +118,10 @@ pub(crate) enum FixtureView {
     /// OAuth client, whose sign-in Google stopped accepting
     /// (`invalid_grant`, as a Testing app's does after 7 days).
     SettingsAccountsExpired,
+    /// Settings → Accounts on a JMAP account whose identity differs from
+    /// the server's (changed on both sides) and with an identity the
+    /// server no longer lists.
+    SettingsAccountsIdentities,
     /// The Settings window on Appearance.
     SettingsAppearance,
     /// The Settings window on Keyboard, with the Gmail keymap on.
@@ -192,6 +196,7 @@ impl FixtureView {
             "cheat-sheet" => Self::CheatSheet,
             "settings-accounts" => Self::SettingsAccounts,
             "settings-accounts-expired" => Self::SettingsAccountsExpired,
+            "settings-accounts-identities" => Self::SettingsAccountsIdentities,
             "settings-appearance" => Self::SettingsAppearance,
             "settings-keyboard" => Self::SettingsKeyboard,
             "settings-privacy" => Self::SettingsPrivacy,
@@ -201,7 +206,7 @@ impl FixtureView {
             "unlock-keychain" => Self::Unlock(UnlockFixture::Keychain),
             "unlock-unreadable" => Self::Unlock(UnlockFixture::Unreadable),
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-accounts-identities, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
             ),
         })
     }
@@ -360,6 +365,9 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         }
         FixtureView::SettingsAccountsExpired => {
             InitialView::SettingsAccount(seed_expired_google_account(store, now)?)
+        }
+        FixtureView::SettingsAccountsIdentities => {
+            InitialView::SettingsAccount(seed_jmap_identities(store)?)
         }
         FixtureView::SettingsAppearance => InitialView::Settings(SettingsSection::Appearance),
         FixtureView::SettingsKeyboard => {
@@ -736,6 +744,52 @@ fn seed_expired_google_account(store: &LocalStore, now: u64) -> Result<i64> {
         "invalid_grant: Token has been expired or revoked.",
     );
     store.record_sync_failure(account_id, "Sync failed after retry", expired.to_string())?;
+    Ok(account_id)
+}
+
+/// A JMAP account whose identity was renamed in Zmail and given another
+/// signature on the server, and whose help-desk identity the server no
+/// longer lists. Returns its id.
+fn seed_jmap_identities(store: &LocalStore) -> Result<i64> {
+    use zmail_core::identity_sync::{IdentityValues, ServerIdentity};
+    let account_id = store.insert_account(&NewAccount {
+        display_name: "Fastmail".to_owned(),
+        protocol: ProtocolKind::Jmap,
+        endpoint: "https://api.fastmail.example/jmap/session".to_owned(),
+        outgoing: Some(OutgoingConfig::jmap_default()),
+        ..fixture_account()
+    })?;
+    let server = |id: &str, email: &str, name: &str, signature: &str| ServerIdentity {
+        id: id.to_owned(),
+        email: email.to_owned(),
+        values: IdentityValues {
+            name: name.to_owned(),
+            reply_to: String::new(),
+            signature: signature.to_owned(),
+        },
+        may_delete: true,
+    };
+    let regards = format!("Regards,\n{OWN_NAME}");
+    store.merge_server_identities(
+        account_id,
+        &[
+            server("i1", OWN_EMAIL, OWN_NAME, &regards),
+            server("i2", "help@example.com", "Help desk", "The help desk"),
+        ],
+    )?;
+    let primary = store.list_identities(account_id)?[0].id;
+    store.update_identity(
+        primary,
+        &IdentityValues {
+            name: format!("{OWN_NAME} (Work)"),
+            reply_to: String::new(),
+            signature: regards,
+        },
+    )?;
+    store.merge_server_identities(
+        account_id,
+        &[server("i1", OWN_EMAIL, OWN_NAME, "Sent from the web")],
+    )?;
     Ok(account_id)
 }
 
@@ -1394,6 +1448,7 @@ mod tests {
             "cheat-sheet",
             "settings-accounts",
             "settings-accounts-expired",
+            "settings-accounts-identities",
             "onboarding-google-guide",
             "onboarding-google-guide-invalid",
             "settings-appearance",
@@ -1414,6 +1469,28 @@ mod tests {
         assert_eq!(parse_text_size(Some("200"))?, Some(200));
         assert!(parse_text_size(Some("120")).is_err());
         assert!(parse_text_size(Some("big")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn settings_accounts_identities_has_a_conflict_and_a_removed_identity() -> Result<()> {
+        use zmail_core::identity_sync::IdentitySyncStatus;
+        let (store, initial_view) = seeded(FixtureView::SettingsAccountsIdentities)?;
+        let InitialView::SettingsAccount(account_id) = initial_view else {
+            bail!("expected Settings on an account, got {initial_view:?}");
+        };
+        let statuses = store
+            .list_synced_identities(account_id)?
+            .into_iter()
+            .map(|identity| identity.status)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statuses,
+            [
+                IdentitySyncStatus::Conflict,
+                IdentitySyncStatus::NotOnServer
+            ]
+        );
         Ok(())
     }
 
