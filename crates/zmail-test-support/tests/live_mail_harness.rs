@@ -473,17 +473,29 @@ fn a_reply_from_zmail_threads_on_the_server() -> Result<()> {
         MAIL_HARNESS_SENDER_LOGIN,
         MAIL_HARNESS_SENDER_PASSWORD,
     )?;
-    let uid = loop {
+    // Every message's threading headers, read without SEARCH, so a miss
+    // shows what the mailbox does hold.
+    let wanted = format!("Subject: {}", start.subject);
+    let mut seen = String::new();
+    let headers = loop {
         sender.command("SELECT INBOX")?;
-        match sender.uid_for_subject(&start.subject) {
-            Ok(uid) => break uid,
-            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(500)),
-            Err(error) => return Err(error.context("the reply never reached the sender")),
+        if let Ok(transcript) = sender.command(
+            "FETCH 1:* (BODY.PEEK[HEADER.FIELDS (SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)])",
+        ) {
+            let transcript = unfolded(&transcript);
+            if let Some(found) = transcript
+                .split("\r\n* ")
+                .find(|block| block.contains(&wanted))
+            {
+                break found.to_owned();
+            }
+            seen = transcript;
         }
+        if Instant::now() > deadline {
+            bail!("the reply never reached the sender; the INBOX holds:\n{seen}");
+        }
+        thread::sleep(Duration::from_millis(500));
     };
-    let headers = unfolded(&sender.command(&format!(
-        "UID FETCH {uid} (BODY.PEEK[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)])"
-    ))?);
     assert!(
         headers.contains("In-Reply-To: <plan-2@sender.test>"),
         "In-Reply-To names the message answered: {headers}"
