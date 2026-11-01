@@ -221,6 +221,12 @@ impl LocalStore {
         let before: HashMap<i64, IdentitySyncStatus> =
             rows.iter().map(|row| (row.id, row.status())).collect();
         let listed: HashSet<&str> = server.iter().map(|identity| identity.id.as_str()).collect();
+        // Zmail keeps one identity per address. When a server lists
+        // several for one (Apache James lists the one it derives from an
+        // alias beside the user's own), the ones the user may delete, the
+        // user's own, come first.
+        let mut server: Vec<&ServerIdentity> = server.iter().collect();
+        server.sort_by_key(|identity| !identity.may_delete);
         let mut report = IdentityMergeReport::default();
 
         // Each server identity's local row: by server id first, then by
@@ -699,5 +705,31 @@ mod tests {
             .expect("the merge runs");
         assert_eq!(report.skipped, ["rob@example.com"]);
         assert_eq!(store.list_identities(account).expect("identities").len(), 1);
+
+        // Of a server-made identity and the user's own for one address,
+        // listed in either order, the user's own is imported.
+        for reversed in [false, true] {
+            let store = LocalStore::open_ephemeral().expect("the store opens");
+            let account = jmap_account(&store);
+            let mut derived = server("d1", "alias@example.com", values("alias@example.com", ""));
+            derived.may_delete = false;
+            let mut listed = vec![
+                derived,
+                server("u1", "alias@example.com", values("Alias", "")),
+            ];
+            if reversed {
+                listed.reverse();
+            }
+            let report = store
+                .merge_server_identities(account, &listed)
+                .expect("the merge runs");
+            assert_eq!(report.imported, ["alias@example.com"]);
+            let link = store
+                .identity_link(store.list_identities(account).expect("identities")[1].id)
+                .expect("loads")
+                .expect("exists");
+            assert_eq!(link.server_id.as_deref(), Some("u1"));
+            assert_eq!(link.local.name, "Alias");
+        }
     }
 }

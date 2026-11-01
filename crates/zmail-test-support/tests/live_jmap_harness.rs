@@ -1085,21 +1085,43 @@ fn jmap_identities_import_keep_local_edits_and_push_back() -> Result<()> {
     assert_eq!(after.local, edited);
     assert_eq!(after.status, IdentitySyncStatus::InSync);
 
-    // Deleted on the server: kept and marked, then created there again.
+    // Deleted on the server. James then lists the identity it derives
+    // from the alias (another id, no name): Zmail relinks to it by address
+    // and keeps the local values, differing. A server with nothing else
+    // for the address leaves it marked as gone, to create again.
     let destroyed = jmap_call("Identity/set", serde_json::json!({"destroy": [server_id]}))?;
     ensure_destroyed(&destroyed, &server_id)?;
     sync_service.sync_account_and_wait(account_id)?;
-    assert_eq!(
-        synced_identity(&store, account_id, &alias)?.status,
-        IdentitySyncStatus::NotOnServer
-    );
-    runtime
-        .handle()
-        .block_on(sync_service.recreate_identity_and_wait(imported.identity.id))?;
-    sync_service.sync_account_and_wait(account_id)?;
-    let recreated = synced_identity(&store, account_id, &alias)?;
-    assert_eq!(recreated.status, IdentitySyncStatus::InSync);
-    assert_eq!(recreated.local, edited);
+    let after_destroy = synced_identity(&store, account_id, &alias)?;
+    let link = store
+        .identity_link(imported.identity.id)?
+        .context("the identity is kept")?;
+    assert_eq!(after_destroy.local, edited, "the local values survive");
+    if after_destroy.status == IdentitySyncStatus::NotOnServer {
+        eprintln!("the server lists nothing else for {alias}: creating it again");
+        runtime
+            .handle()
+            .block_on(sync_service.recreate_identity_and_wait(imported.identity.id))?;
+        sync_service.sync_account_and_wait(account_id)?;
+        let recreated = synced_identity(&store, account_id, &alias)?;
+        assert_eq!(recreated.status, IdentitySyncStatus::InSync);
+        assert_eq!(recreated.local, edited);
+    } else {
+        let listed = jmap_call("Identity/get", serde_json::json!({}))?;
+        eprintln!(
+            "relinked {alias} to {:?} ({:?}); the server lists {listed}",
+            link.server_id, after_destroy.status
+        );
+        assert_ne!(link.server_id.as_deref(), Some(server_id.as_str()));
+        assert!(
+            listed[1]["list"]
+                .as_array()
+                .is_some_and(|list| list.iter().any(|identity| identity["id"].as_str()
+                    == link.server_id.as_deref()
+                    && identity["email"] == alias.as_str())),
+            "relinked to a server identity for {alias}: {listed}"
+        );
+    }
     Ok(())
 }
 
