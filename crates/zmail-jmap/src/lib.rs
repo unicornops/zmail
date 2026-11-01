@@ -434,10 +434,8 @@ pub async fn check_sign_in(
     Ok(())
 }
 
-/// An `Identity/get` of every identity. `jmap-client` neither adds the
-/// method call when the request is sent nor the submission capability it
-/// needs (RFC 8621 section 6), so a bare request asks the server nothing
-/// and submission found no identity.
+/// An `Identity/get` of every identity, with the submission capability it
+/// needs (RFC 8621 section 6), which `jmap-client` does not add.
 fn identity_get_request(client: &Client) -> jmap_client::core::request::Request<'_> {
     let mut request = client.build();
     request.get_identity();
@@ -469,17 +467,45 @@ async fn fetch_identities(client: &Client) -> Result<Vec<NewIdentity>> {
 }
 
 async fn fetch_submission_identities(client: &Client) -> Result<Vec<SubmissionIdentity>> {
-    let mut response: IdentityGetResponse = identity_get_request(client)
-        .send_get_identity()
+    // Read as plain JSON: the identities' ids and addresses are all a
+    // submission needs, and `jmap-client`'s typed response refuses what
+    // some servers send (Apache James's, for one), failing every send.
+    let response = client
+        .send::<serde_json::Value>(&identity_get_request(client))
         .await
         .map_err(|error| anyhow!("failed to fetch JMAP identities for submission: {error}"))?;
-    Ok(response
-        .take_list()
-        .into_iter()
+    submission_identities(response.method_responses().first())
+}
+
+/// The identities in an `Identity/get` method response
+/// (`[name, arguments, call id]`), or why the server gave none.
+fn submission_identities(
+    method_response: Option<&serde_json::Value>,
+) -> Result<Vec<SubmissionIdentity>> {
+    let [name, arguments, _] = method_response
+        .and_then(serde_json::Value::as_array)
+        .and_then(|call| <&[serde_json::Value; 3]>::try_from(call.as_slice()).ok())
+        .context("the JMAP server answered Identity/get with no method response")?;
+    if name.as_str() != Some("Identity/get") {
+        bail!(
+            "the JMAP server refused Identity/get: {}",
+            arguments
+                .get("description")
+                .or_else(|| arguments.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("no reason given")
+        );
+    }
+    Ok(arguments
+        .get("list")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
         .filter_map(|identity| {
             Some(SubmissionIdentity {
-                id: identity.id()?.to_owned(),
-                email: identity.email()?.to_owned(),
+                id: identity.get("id")?.as_str()?.to_owned(),
+                email: identity.get("email")?.as_str()?.to_owned(),
             })
         })
         .collect())
@@ -1453,6 +1479,32 @@ mod tests {
             "bodyValues": body_values,
         }))
         .expect("the Email/get fixture should deserialize")
+    }
+
+    #[test]
+    fn submission_identities_are_read_from_plain_json() {
+        // Shaped like Apache James's answer, whose extra and null members
+        // jmap-client's typed response refused.
+        let response = json!(["Identity/get", {
+            "accountId": "a1",
+            "state": null,
+            "notFound": null,
+            "list": [
+                {"id": "i1", "name": "", "email": "jmap@localhost", "replyTo": null,
+                 "bcc": null, "textSignature": "", "htmlSignature": "", "mayDelete": false,
+                 "sortOrder": 100},
+                {"id": "i2"}
+            ]
+        }, "s0"]);
+        let identities = super::submission_identities(Some(&response)).expect("identities");
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].id, "i1");
+        assert_eq!(identities[0].email, "jmap@localhost");
+
+        let refused = json!(["error", {"type": "unknownMethod"}, "s0"]);
+        let error = super::submission_identities(Some(&refused)).expect_err("refused");
+        assert!(error.to_string().contains("unknownMethod"), "{error}");
+        assert!(super::submission_identities(None).is_err());
     }
 
     #[test]
