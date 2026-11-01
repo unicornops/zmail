@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.1](https://github.com/unicornops/zmail/compare/v0.27.0...v0.27.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **tui:** wipe typed passwords with zeroize ([#355](https://github.com/unicornops/zmail/issues/355)) ([670d2f9](https://github.com/unicornops/zmail/commit/670d2f9bd2c2c9eaca585862d4447cdc96799feb))
+
 ## [0.27.0](https://github.com/unicornops/zmail/compare/v0.26.0...v0.27.0) (2026-11-01)
 
 
