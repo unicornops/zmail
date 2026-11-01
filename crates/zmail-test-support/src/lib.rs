@@ -127,6 +127,10 @@ impl SyntheticMailboxSpec {
                                     is_flagged: random.below(100) < 5,
                                     received_at,
                                     attachments,
+                                    headers: zmail_core::MessageHeaders {
+                                        captured: true,
+                                        ..Default::default()
+                                    },
                                 }
                             })
                             .collect::<Vec<_>>();
@@ -344,6 +348,10 @@ fn stress_message(id: &str, subject: &str, minute: usize, body: Option<String>) 
         is_flagged: false,
         received_at: format!("2026-10-02T{:02}:{:02}:00+00:00", minute / 60, minute % 60),
         attachments: Vec::new(),
+        headers: zmail_core::MessageHeaders {
+            captured: true,
+            ..Default::default()
+        },
     }
 }
 

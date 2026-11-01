@@ -36,6 +36,10 @@ fn message(sender: &str, at: &str, is_read: bool) -> MessageSnapshot {
         is_flagged: false,
         received_at: at.to_owned(),
         attachments: Vec::new(),
+        headers: zmail_core::MessageHeaders {
+            captured: true,
+            ..Default::default()
+        },
     }
 }
 

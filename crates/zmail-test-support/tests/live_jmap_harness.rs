@@ -82,6 +82,33 @@ fn syncs_mail_from_a_live_jmap_server() -> Result<()> {
         .context("JMAP roundtrip thread should have a preview")?;
     assert!(preview.body_preview.contains("incremental JMAP sync"));
 
+    // The sync reads the headers a reply needs, and the header-only fetch
+    // for mail stored before Zmail kept them reads the same ones.
+    let synced = store
+        .thread_view(roundtrip_thread_id)?
+        .context("the JMAP round-trip thread should load")?;
+    let message = &synced.messages[0];
+    assert!(message.headers.captured, "the sync reads the reply headers");
+    assert!(
+        message.headers.message_id.is_some(),
+        "the JMAP message's Message-ID is stored: {:?}",
+        message.headers
+    );
+    let target = store
+        .sync_target(account_id)?
+        .context("the JMAP account should have a sync target")?;
+    let fetched = runtime
+        .handle()
+        .block_on(zmail_jmap::fetch_message_headers(
+            &target,
+            MAIL_HARNESS_JMAP_PASSWORD,
+            std::slice::from_ref(&message.remote_id),
+        ))?;
+    assert_eq!(
+        fetched,
+        [(message.remote_id.clone(), message.headers.clone())]
+    );
+
     // Local mailbox operations queue server write-back and the next sync
     // applies them through JMAP Email/set.
     store.set_thread_read(roundtrip_thread_id, true)?;

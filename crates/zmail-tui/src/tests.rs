@@ -103,6 +103,10 @@ fn thread(id: &str, subject: &str, flagged: bool, mails: &[Mail]) -> ThreadSnaps
                     inline_only: false,
                 })
                 .collect(),
+            headers: zmail_core::MessageHeaders {
+                captured: true,
+                ..Default::default()
+            },
         })
         .collect();
     let latest = messages

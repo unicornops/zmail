@@ -53,6 +53,10 @@ fn seed(store: &LocalStore) {
         is_flagged: false,
         received_at: "2026-03-24T11:00:00Z".to_owned(),
         attachments: Vec::new(),
+        headers: zmail_core::MessageHeaders {
+            captured: true,
+            ..Default::default()
+        },
     };
     store
         .replace_account_snapshot(

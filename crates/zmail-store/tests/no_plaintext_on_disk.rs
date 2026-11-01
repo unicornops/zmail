@@ -129,6 +129,7 @@ fn message(
         is_flagged: false,
         received_at: format!("2026-10-01T09:0{}:00Z", remote_id.len() % 10),
         attachments,
+        headers: Default::default(),
     }
 }
 
@@ -256,6 +257,7 @@ fn mail_never_reaches_the_disk_in_plaintext() {
                     content_id: None,
                     inline_only: false,
                 }],
+                headers: Default::default(),
             },
         )
         .expect("hydrates");

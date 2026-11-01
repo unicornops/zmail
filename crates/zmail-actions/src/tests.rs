@@ -45,6 +45,10 @@ fn message(remote_id: &str, is_read: bool, at: &str) -> MessageSnapshot {
         is_flagged: false,
         received_at: at.to_owned(),
         attachments: Vec::new(),
+        headers: zmail_core::MessageHeaders {
+            captured: true,
+            ..Default::default()
+        },
     }
 }
 

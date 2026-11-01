@@ -12,8 +12,9 @@
 use anyhow::{Context, Result, bail};
 use zmail_core::{
     AccountColor, AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxRole, MailboxSelection,
-    MailboxSnapshot, MessageAttachment, MessageSnapshot, NewAccount, NewDraft, NewIdentity,
-    OutgoingConfig, ProtocolKind, SyncPhase, ThemeAppearance, ThreadSnapshot, VirtualMailbox,
+    MailboxSnapshot, MessageAttachment, MessageHeaders, MessageSnapshot, NewAccount, NewDraft,
+    NewIdentity, OutgoingConfig, ProtocolKind, SyncPhase, ThemeAppearance, ThreadSnapshot,
+    VirtualMailbox,
     participants::thread_participants,
     preferences::{Density, KeymapName, TEXT_SIZES},
     time::utc_timestamp,
@@ -1244,6 +1245,11 @@ fn seed_more_accounts(store: &LocalStore, work_id: i64, now: u64) -> Result<()> 
     Ok(())
 }
 
+/// The Message-ID of a fixture thread's `index`th message.
+fn fixture_message_id(thread_id: &str, index: usize) -> String {
+    format!("{thread_id}-{index}@fixture.zmail.invalid")
+}
+
 fn thread_snapshot(thread: &Thread, now: u64) -> ThreadSnapshot {
     let messages = thread
         .messages
@@ -1289,6 +1295,21 @@ fn thread_snapshot(thread: &Thread, now: u64) -> ThreadSnapshot {
                         inline_only: false,
                     })
                     .collect(),
+                // Each message answers the one before it, as a real
+                // conversation's headers say.
+                headers: MessageHeaders {
+                    captured: true,
+                    message_id: Some(fixture_message_id(thread.id, index)),
+                    in_reply_to: index
+                        .checked_sub(1)
+                        .map(|parent| fixture_message_id(thread.id, parent))
+                        .into_iter()
+                        .collect(),
+                    references: (0..index)
+                        .map(|earlier| fixture_message_id(thread.id, earlier))
+                        .collect(),
+                    ..MessageHeaders::default()
+                },
             }
         })
         .collect::<Vec<_>>();

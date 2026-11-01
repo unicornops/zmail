@@ -443,6 +443,7 @@ mod tests {
                             content_id: None,
                             inline_only: false,
                         }],
+                        headers: Default::default(),
                     }],
                 }],
                 ..Default::default()

@@ -658,6 +658,11 @@ fn sends_through_the_outbox_with_internal_and_clear_packages() -> Result<()> {
         .iter()
         .find(|message| message.attachments.len() == 1)
         .context("no message with the attachment")?;
+    ensure!(
+        message.headers.captured && message.headers.message_id.is_some(),
+        "hydration reads the reply headers: {:?}",
+        message.headers
+    );
     let body = message.body_text.clone().unwrap_or_default();
     ensure!(
         body.contains("Hello from Zmail over Proton.") && body.contains("Second line."),

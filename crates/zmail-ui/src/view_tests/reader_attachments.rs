@@ -72,6 +72,10 @@ fn seed(store: &LocalStore) {
             is_flagged: false,
             received_at: at,
             attachments,
+            headers: zmail_core::MessageHeaders {
+                captured: true,
+                ..Default::default()
+            },
         }],
     };
     store

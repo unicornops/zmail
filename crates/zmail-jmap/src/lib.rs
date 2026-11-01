@@ -18,10 +18,11 @@ use jmap_client::{
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
+use zmail_core::threading::bare_message_id;
 use zmail_core::{
-    AccountSyncSnapshot, AuthKind, BlobStore, MailboxSnapshot, MessageAttachment, MessageSnapshot,
-    NewIdentity, OpApplyReport, OutgoingMessage, PendingOp, PendingOpKind, ProtocolKind,
-    SyncTarget, ThreadSnapshot,
+    AccountSyncSnapshot, AuthKind, BlobStore, MailboxSnapshot, MessageAttachment, MessageHeaders,
+    MessageSnapshot, NewIdentity, OpApplyReport, OutgoingMessage, PendingOp, PendingOpKind,
+    ProtocolKind, SyncTarget, ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
 use zmail_smtp::render_rfc822_message;
@@ -359,6 +360,7 @@ pub(crate) struct JmapEmail {
     has_remote_content: bool,
     identity_email: String,
     attachments: Vec<MessageAttachment>,
+    headers: MessageHeaders,
 }
 
 #[derive(Debug)]
@@ -697,7 +699,7 @@ pub(crate) async fn fetch_emails(
     blobs: &BlobStore,
 ) -> Result<Vec<JmapEmail>> {
     let mut emails = Vec::with_capacity(ids.len());
-    let properties = vec![
+    let mut properties = vec![
         Property::Id,
         Property::ThreadId,
         Property::MailboxIds,
@@ -714,6 +716,7 @@ pub(crate) async fn fetch_emails(
         Property::HtmlBody,
         Property::ReceivedAt,
     ];
+    properties.extend(header_properties());
 
     for chunk in ids.chunks(QUERY_PAGE_SIZE) {
         let mut request = client.build();
@@ -769,11 +772,108 @@ pub(crate) async fn fetch_emails(
                 has_remote_content,
                 identity_email,
                 attachments,
+                headers: email_headers(&email),
             });
         }
     }
 
     Ok(emails)
+}
+
+/// The `Email/get` properties [`email_headers`] reads: the threading ids,
+/// Cc, and the raw `Delivered-To` and `X-Original-To` header fields.
+fn header_properties() -> Vec<Property> {
+    vec![
+        Property::MessageId,
+        Property::InReplyTo,
+        Property::References,
+        Property::Cc,
+        Property::Header(email::Header::as_raw(DELIVERED_TO, true)),
+        Property::Header(email::Header::as_raw(ORIGINAL_TO, true)),
+    ]
+}
+
+const DELIVERED_TO: &str = "Delivered-To";
+const ORIGINAL_TO: &str = "X-Original-To";
+
+/// The headers a reply is worked out from, from an email fetched with
+/// [`header_properties`].
+fn email_headers(email: &jmap_client::email::Email) -> MessageHeaders {
+    let ids = |values: Option<&[String]>| -> Vec<String> {
+        values
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|id| bare_message_id(id))
+            .collect()
+    };
+    let mut delivered_to: Vec<String> = Vec::new();
+    for name in [DELIVERED_TO, ORIGINAL_TO] {
+        let raw = match email.header(&email::Header::as_raw(name, true)) {
+            Some(email::HeaderValue::AsTextAll(values)) => values.clone(),
+            Some(email::HeaderValue::AsText(value)) => vec![value.clone()],
+            _ => Vec::new(),
+        };
+        for value in raw {
+            let address = value.trim().trim_start_matches('<').trim_end_matches('>');
+            if address.contains('@')
+                && !address.contains(char::is_whitespace)
+                && !delivered_to
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(address))
+            {
+                delivered_to.push(address.to_owned());
+            }
+        }
+    }
+    MessageHeaders {
+        captured: true,
+        message_id: ids(email.message_id()).into_iter().next(),
+        in_reply_to: ids(email.in_reply_to()),
+        references: ids(email.references()),
+        cc: match format_jmap_addresses(email.cc()) {
+            value if value == "Unknown" => String::new(),
+            value => value,
+        },
+        delivered_to,
+    }
+}
+
+/// Fetches the reply headers of emails stored before Zmail kept them
+/// (see `LocalStore::messages_missing_bodies`): one `Email/get` of
+/// [`header_properties`] per page of ids. Emails the server no longer has
+/// are left out.
+pub async fn fetch_message_headers(
+    target: &SyncTarget,
+    secret: &str,
+    ids: &[String],
+) -> Result<Vec<(String, MessageHeaders)>> {
+    if target.protocol != ProtocolKind::Jmap {
+        bail!("JMAP adapter received a non-JMAP sync target");
+    }
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = connect_client(&target.endpoint, &target.username, secret, target.auth).await?;
+    let mut properties = vec![Property::Id];
+    properties.extend(header_properties());
+    let mut headers = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(QUERY_PAGE_SIZE) {
+        let mut request = client.build();
+        request
+            .get_email()
+            .ids(chunk.iter())
+            .properties(properties.clone());
+        let mut response: EmailGetResponse = request
+            .send_get_email()
+            .await
+            .context("failed to fetch JMAP email headers")?;
+        for email in response.take_list() {
+            if let Some(id) = email.id() {
+                headers.push((id.to_owned(), email_headers(&email)));
+            }
+        }
+    }
+    Ok(headers)
 }
 
 /// Downloads one email's attachment parts into the blob directory.
@@ -998,6 +1098,7 @@ pub(crate) fn message_snapshot(email: &JmapEmail, primary_identity: &str) -> Mes
         is_flagged: email.flagged,
         received_at: email.received_at.clone(),
         attachments: email.attachments.clone(),
+        headers: email.headers.clone(),
     }
 }
 
@@ -1341,6 +1442,62 @@ mod tests {
             "bodyValues": body_values,
         }))
         .expect("the Email/get fixture should deserialize")
+    }
+
+    #[test]
+    fn reply_headers_come_from_the_email_properties() {
+        let email: jmap_client::email::Email = serde_json::from_value(json!({
+            "id": "M2",
+            "messageId": ["reply-2@example.test"],
+            "inReplyTo": ["reply-1@example.test"],
+            "references": ["root@example.test", "reply-1@example.test"],
+            "cc": [
+                {"name": "Ada", "email": "ada@example.test"},
+                {"name": null, "email": "bo@example.test"}
+            ],
+            "header:Delivered-To:all": ["me+lists@work.example", " <ME+lists@work.example>"],
+            "header:X-Original-To:all": ["alias@work.example"],
+        }))
+        .expect("the Email/get fixture should deserialize");
+        let headers = super::email_headers(&email);
+        assert!(headers.captured);
+        assert_eq!(headers.message_id.as_deref(), Some("reply-2@example.test"));
+        assert_eq!(headers.in_reply_to, ["reply-1@example.test"]);
+        assert_eq!(
+            headers.references,
+            ["root@example.test", "reply-1@example.test"]
+        );
+        assert_eq!(headers.cc, "Ada <ada@example.test>, bo@example.test");
+        assert_eq!(
+            headers.delivered_to,
+            ["me+lists@work.example", "alias@work.example"]
+        );
+
+        // An email with none of them: read, and empty.
+        let bare = super::email_headers(
+            &serde_json::from_value(json!({"id": "M3", "messageId": null, "cc": null}))
+                .expect("deserializes"),
+        );
+        assert!(bare.captured);
+        assert_eq!(bare.message_id, None);
+        assert!(bare.cc.is_empty() && bare.delivered_to.is_empty());
+
+        // The property names sent to the server.
+        let names = super::header_properties()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "messageId",
+                "inReplyTo",
+                "references",
+                "cc",
+                "header:Delivered-To:all",
+                "header:X-Original-To:all"
+            ]
+        );
     }
 
     fn part(part_id: &str, content_type: &str) -> serde_json::Value {

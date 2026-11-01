@@ -8,7 +8,10 @@ pub mod preferences;
 pub mod reauth;
 pub mod search;
 pub mod text;
+pub mod threading;
 pub mod time;
+
+pub use threading::MessageHeaders;
 
 /// Static application metadata.
 pub const APP_NAME: &str = "Zmail";
@@ -1367,6 +1370,9 @@ pub struct MessageSummary {
 pub struct ThreadMessage {
     /// Local message identifier.
     pub id: i64,
+    /// Stable server-side message identifier, unique within its mailbox
+    /// (see [`MessageSnapshot::remote_id`]); empty for local-only rows.
+    pub remote_id: String,
     /// Sender display string.
     pub sender: String,
     /// Reply-To header value, when the message carries one.
@@ -1405,6 +1411,8 @@ pub struct ThreadMessage {
     pub received_at: String,
     /// Attachments persisted with this message.
     pub attachments: Vec<ReceivedAttachment>,
+    /// The headers a reply is worked out from.
+    pub headers: MessageHeaders,
 }
 
 /// Full conversation state shown in the Phase 3 reader pane.
@@ -1726,6 +1734,9 @@ pub struct HydratedBody {
     pub body_preview: String,
     /// Attachments persisted alongside the fetched body.
     pub attachments: Vec<MessageAttachment>,
+    /// The message's headers, read from the fetched message
+    /// (`captured` is set when they were).
+    pub headers: MessageHeaders,
 }
 
 /// A stored message whose body the background indexer should fetch.
@@ -1811,6 +1822,8 @@ pub struct MessageSnapshot {
     pub received_at: String,
     /// Attachments persisted with this message.
     pub attachments: Vec<MessageAttachment>,
+    /// The headers a reply is worked out from.
+    pub headers: MessageHeaders,
 }
 
 /// Upstream inputs recorded for this bootstrap.

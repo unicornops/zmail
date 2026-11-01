@@ -734,6 +734,7 @@ mod tests {
             is_flagged: false,
             received_at: "2026-10-01T09:00:00Z".to_owned(),
             attachments: Vec::new(),
+            headers: Default::default(),
         };
         let snapshot = AccountSyncSnapshot {
             checkpoint: "seed".to_owned(),
@@ -1144,6 +1145,7 @@ mod tests {
                             content_id: None,
                             inline_only: false,
                         }],
+                        headers: Default::default(),
                     }],
                 }],
                 ..Default::default()

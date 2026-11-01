@@ -15,14 +15,15 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result};
 use rusqlite::{Transaction, TransactionBehavior, params};
 use zmail_core::{
-    AccountSyncSnapshot, MailDelta, MailboxSnapshot, MessageAttachment, MessageSnapshot,
-    ThreadSnapshot,
+    AccountSyncSnapshot, MailDelta, MailboxSnapshot, MessageAttachment, MessageHeaders,
+    MessageSnapshot, ThreadSnapshot,
 };
 
 use crate::{
-    ExistingMailbox, LocalStore, address_history, flush_search_index, identity_id_map,
-    load_account_mailbox_ids, load_pending_op_remote_ids, load_stored_message_attachments,
-    load_stored_thread, merge_mailbox_threads, primary_identity_id, thread_message_snapshots,
+    ExistingMailbox, HEADER_COLUMNS, LocalStore, address_history, flush_search_index,
+    headers_from_row, identity_id_map, load_account_mailbox_ids, load_pending_op_remote_ids,
+    load_stored_message_attachments, load_stored_thread, merge_mailbox_threads,
+    primary_identity_id, thread_message_snapshots,
 };
 
 impl LocalStore {
@@ -115,7 +116,7 @@ impl LocalStore {
             }
             let keep = places.get(remote_id);
             for row in rows {
-                if row.has_body && !hydration.contains_key(remote_id) {
+                if (row.has_body || row.headers_captured) && !hydration.contains_key(remote_id) {
                     hydration.insert(remote_id, load_hydration(&transaction, row.message_id)?);
                 }
                 let stays = keep.is_some_and(|keep| {
@@ -143,10 +144,7 @@ impl LocalStore {
             .flat_map(|mailbox| mailbox.threads.iter_mut())
             .flat_map(|thread| thread.messages.iter_mut())
         {
-            if message.body_text.is_none()
-                && message.sanitized_html.is_none()
-                && let Some(stored) = hydration.get(message.remote_id.as_str())
-            {
+            if let Some(stored) = hydration.get(message.remote_id.as_str()) {
                 stored.apply_to(message);
             }
         }
@@ -281,6 +279,7 @@ struct StoredPlace {
     mailbox_id: i64,
     mailbox_name: String,
     has_body: bool,
+    headers_captured: bool,
 }
 
 /// Every stored copy of a message in the account's mailboxes.
@@ -294,7 +293,8 @@ fn stored_places(
             r#"
             SELECT messages.id, threads.id, COALESCE(threads.remote_thread_id, ''),
                    mailboxes.id, mailboxes.name,
-                   messages.body_text IS NOT NULL OR messages.sanitized_html IS NOT NULL
+                   messages.body_text IS NOT NULL OR messages.sanitized_html IS NOT NULL,
+                   messages.headers_captured
             FROM messages
             JOIN threads ON threads.id = messages.thread_id
             JOIN mailboxes ON mailboxes.id = threads.mailbox_id
@@ -310,6 +310,7 @@ fn stored_places(
                 mailbox_id: row.get(3)?,
                 mailbox_name: row.get(4)?,
                 has_body: row.get(5)?,
+                headers_captured: row.get(6)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -324,38 +325,51 @@ struct Hydration {
     has_remote_content: bool,
     body_preview: String,
     attachments: Vec<MessageAttachment>,
+    headers: MessageHeaders,
 }
 
 impl Hydration {
+    /// Gives `message`, which arrived without them, the stored body and
+    /// attachments and the headers read from the message.
     fn apply_to(&self, message: &mut MessageSnapshot) {
-        message.body_text = self.body_text.clone();
-        message.sanitized_html = self.sanitized_html.clone();
-        message.raw_html = self.raw_html.clone();
-        message.has_remote_content = self.has_remote_content;
-        message.body_preview = self.body_preview.clone();
-        if message.attachments.is_empty() {
-            message.attachments = self.attachments.clone();
+        let has_body = self.body_text.is_some() || self.sanitized_html.is_some();
+        if has_body && message.body_text.is_none() && message.sanitized_html.is_none() {
+            message.body_text = self.body_text.clone();
+            message.sanitized_html = self.sanitized_html.clone();
+            message.raw_html = self.raw_html.clone();
+            message.has_remote_content = self.has_remote_content;
+            message.body_preview = self.body_preview.clone();
+            if message.attachments.is_empty() {
+                message.attachments = self.attachments.clone();
+            }
+        }
+        if self.headers.captured && !message.headers.captured {
+            message.headers = self.headers.clone();
         }
     }
 }
 
 fn load_hydration(transaction: &Transaction<'_>, message_id: i64) -> Result<Hydration> {
-    let (body_text, sanitized_html, has_remote_content, body_preview, raw_html) = transaction
-        .query_row(
-            "SELECT body_text, sanitized_html, has_remote_content, body_preview, raw_html \
-             FROM messages WHERE id = ?1",
-            params![message_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
-        .context("failed to load a message body during the mail delta")?;
+    let (body_text, sanitized_html, has_remote_content, body_preview, raw_html, headers) =
+        transaction
+            .query_row(
+                &format!(
+                    "SELECT body_text, sanitized_html, has_remote_content, body_preview, \
+                     raw_html, {HEADER_COLUMNS} FROM messages WHERE id = ?1"
+                ),
+                params![message_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        headers_from_row(row, 5)?,
+                    ))
+                },
+            )
+            .context("failed to load a message body during the mail delta")?;
     let attachments = load_stored_message_attachments(transaction, message_id)?
         .into_iter()
         .map(MessageAttachment::from)
@@ -367,6 +381,7 @@ fn load_hydration(transaction: &Transaction<'_>, message_id: i64) -> Result<Hydr
         has_remote_content,
         body_preview,
         attachments,
+        headers,
     })
 }
 
@@ -566,6 +581,7 @@ mod tests {
             is_flagged: false,
             received_at: at.to_owned(),
             attachments: Vec::new(),
+            headers: Default::default(),
         }
     }
 

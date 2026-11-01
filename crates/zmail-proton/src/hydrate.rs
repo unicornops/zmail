@@ -14,12 +14,12 @@
 //!    with a note), so it counts as hydrated and stays as it is.
 
 use anyhow::{Context, Result, bail};
-use zmail_core::{HydratedBody, ProtocolKind, SyncTarget};
+use zmail_core::{HydratedBody, MessageHeaders, ProtocolKind, SyncTarget};
 use zmail_proton_api::Message;
 
 use crate::{
     ProtonSession,
-    message::{build_rfc822, decrypt_message},
+    message::{INTERNAL_ID_DOMAIN, build_rfc822, decrypt_message},
 };
 
 /// Fetches, decrypts and parses the bodies of the given messages, in the
@@ -68,19 +68,29 @@ pub async fn fetch_message_bodies(
                 let keyring = keys.addresses.get(&message.metadata.address_id);
                 let mut decrypted = decrypt_message(keyring, message, attachments);
                 let raw = build_rfc822(&mut decrypted);
-                let body = zmail_imap::hydrated_body_from_rfc822(
+                let mut body = zmail_imap::hydrated_body_from_rfc822(
                     &raw,
                     &mailbox_name,
                     &storage_id(&id),
                     &blobs,
                 )
                 .unwrap_or_else(undecryptable_body);
+                drop_own_reference(&mut body.headers, &id);
                 (id, body)
             })
             .collect()
     })
     .await
     .context("the decryption task stopped")
+}
+
+/// Bridge adds the message's own internal ID to the References it builds
+/// (`AddMessageIDReference`), for its IMAP clients. A message's own id is
+/// not one of the messages it refers to, and a reply would carry it to
+/// outside recipients, so it is left out of the stored References.
+fn drop_own_reference(headers: &mut MessageHeaders, message_id: &str) {
+    let own = format!("{message_id}@{INTERNAL_ID_DOMAIN}");
+    headers.references.retain(|reference| *reference != own);
 }
 
 /// Proton IDs are base64; keep attachment file names to safe characters.
@@ -106,12 +116,37 @@ fn undecryptable_body() -> HydratedBody {
         has_remote_content: false,
         body_preview: "This message could not be decrypted.".to_owned(),
         attachments: Vec::new(),
+        // Read as far as they go: nothing is fetched again because a
+        // message did not decrypt (rule 3).
+        headers: MessageHeaders {
+            captured: true,
+            ..MessageHeaders::default()
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_messages_own_internal_id_is_not_one_of_its_references() {
+        let mut headers = MessageHeaders {
+            captured: true,
+            message_id: Some("ext@example.com".to_owned()),
+            references: vec![
+                "root@example.com".to_owned(),
+                "other@protonmail.internalid".to_owned(),
+                "msg-1@protonmail.internalid".to_owned(),
+            ],
+            ..MessageHeaders::default()
+        };
+        drop_own_reference(&mut headers, "msg-1");
+        assert_eq!(
+            headers.references,
+            ["root@example.com", "other@protonmail.internalid"]
+        );
+    }
 
     #[test]
     fn storage_ids_are_file_name_safe() {
