@@ -5,7 +5,7 @@ mod push;
 
 use std::collections::{BTreeMap, HashMap};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use jmap_client::{
     client::Client,
@@ -472,7 +472,7 @@ async fn fetch_submission_identities(client: &Client) -> Result<Vec<SubmissionId
     let mut response: IdentityGetResponse = identity_get_request(client)
         .send_get_identity()
         .await
-        .context("failed to fetch JMAP identities for submission")?;
+        .map_err(|error| anyhow!("failed to fetch JMAP identities for submission: {error}"))?;
     Ok(response
         .take_list()
         .into_iter()
