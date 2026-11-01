@@ -132,6 +132,9 @@ pub(crate) enum FixtureView {
     /// Settings → Accounts asking to remove a JMAP identity the server
     /// lets the user delete (from Zmail, or from the server too).
     SettingsIdentityRemove,
+    /// Settings → Accounts on a JMAP account with a server identity
+    /// removed from Zmail only, in the Hidden identities list.
+    SettingsIdentityHidden,
     /// The Settings window on Appearance.
     SettingsAppearance,
     /// The Settings window on Keyboard, with the Gmail keymap on.
@@ -210,6 +213,7 @@ impl FixtureView {
             "settings-identity-edit" => Self::SettingsIdentityEdit,
             "settings-identity-add" => Self::SettingsIdentityAdd,
             "settings-identity-remove" => Self::SettingsIdentityRemove,
+            "settings-identity-hidden" => Self::SettingsIdentityHidden,
             "settings-appearance" => Self::SettingsAppearance,
             "settings-keyboard" => Self::SettingsKeyboard,
             "settings-privacy" => Self::SettingsPrivacy,
@@ -219,7 +223,7 @@ impl FixtureView {
             "unlock-keychain" => Self::Unlock(UnlockFixture::Keychain),
             "unlock-unreadable" => Self::Unlock(UnlockFixture::Unreadable),
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-accounts-identities, settings-identity-edit, settings-identity-add, settings-identity-remove, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-accounts-identities, settings-identity-edit, settings-identity-add, settings-identity-remove, settings-identity-hidden, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
             ),
         })
     }
@@ -381,6 +385,11 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         }
         FixtureView::SettingsAccountsIdentities => {
             InitialView::SettingsAccount(seed_jmap_identities(store)?)
+        }
+        FixtureView::SettingsIdentityHidden => {
+            let (account_id, help) = seed_identity_editor(store)?;
+            store.remove_identity(help)?;
+            InitialView::SettingsAccount(account_id)
         }
         FixtureView::SettingsIdentityEdit
         | FixtureView::SettingsIdentityAdd
@@ -1534,6 +1543,7 @@ mod tests {
             "settings-identity-edit",
             "settings-identity-add",
             "settings-identity-remove",
+            "settings-identity-hidden",
             "onboarding-google-guide",
             "onboarding-google-guide-invalid",
             "settings-appearance",
@@ -1612,6 +1622,19 @@ mod tests {
                 assert!(help.may_delete_on_server);
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn settings_identity_hidden_has_a_hidden_server_identity() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::SettingsIdentityHidden)?;
+        let InitialView::SettingsAccount(account_id) = initial_view else {
+            bail!("expected Settings on an account, got {initial_view:?}");
+        };
+        let hidden = store.list_hidden_identities(account_id)?;
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].email, "help@example.com");
+        assert_eq!(store.list_identities(account_id)?.len(), 2);
         Ok(())
     }
 

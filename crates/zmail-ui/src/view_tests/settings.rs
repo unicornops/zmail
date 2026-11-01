@@ -979,6 +979,36 @@ fn identities_are_added_made_primary_and_removed_after_asking(cx: &mut TestAppCo
             .len(),
         1
     );
+    // Removed from Zmail only while the server lists it: hidden, under
+    // the account's identities, with Bring back.
+    let hidden = harness.store.list_hidden_identities(jmap).expect("hidden");
+    assert_eq!(hidden.len(), 1);
+    assert_eq!(hidden[0].email, "help@fast.test");
+    assert!(drawn(format!("hidden-identities-{jmap}"), &mut window_cx));
+    click_selector(
+        &format!("identity-bring-back-{}", hidden[0].id),
+        &mut window_cx,
+    );
+    assert_eq!(
+        harness
+            .store
+            .list_identities(jmap)
+            .expect("identities")
+            .len(),
+        2
+    );
+    assert!(
+        harness
+            .store
+            .list_hidden_identities(jmap)
+            .expect("hidden")
+            .is_empty()
+    );
+    assert!(!drawn(format!("hidden-identities-{jmap}"), &mut window_cx));
+    assert!(
+        root.read_with(&window_cx, |root, cx| root.toast_messages(cx))
+            .contains(&"Brought back help@fast.test.".to_owned())
+    );
 }
 
 #[gpui::test]

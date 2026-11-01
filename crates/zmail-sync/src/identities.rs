@@ -109,7 +109,7 @@ impl SyncService {
         }
         let secret = self.connect_secret(&target).await?;
         zmail_jmap::destroy_server_identity(&target, &secret, &server_id).await?;
-        self.inner.store.remove_identity(identity_id)
+        self.inner.store.remove_destroyed_identity(identity_id)
     }
 
     /// The identity and its JMAP account.

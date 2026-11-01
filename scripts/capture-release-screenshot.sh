@@ -152,6 +152,8 @@ MATRIX=(
   "settings-identity-add-light settings-identity-add light 820 900"
   "settings-identity-remove-dark settings-identity-remove dark 820 900"
   "settings-identity-remove-light settings-identity-remove light 820 900"
+  "settings-identity-hidden-dark settings-identity-hidden dark 820 1100"
+  "settings-identity-hidden-light settings-identity-hidden light 820 1100"
   "settings-appearance-dark settings-appearance dark 820 600"
   "settings-appearance-light settings-appearance light 820 600"
   "settings-keyboard-dark settings-keyboard dark 820 900"

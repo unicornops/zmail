@@ -46,7 +46,7 @@ pub use encryption::{
     MigrationProgress, MigrationReport, StoreFileState, StoreOpenError, encrypt_plaintext_store,
     move_unreadable_store_aside, store_file_state,
 };
-pub use identities::{IdentityLink, IdentityMergeReport};
+pub use identities::{HiddenIdentity, IdentityLink, IdentityMergeReport};
 pub use lock::SyncLock;
 
 /// A received attachment's encrypted blob (ADR 0005), from
@@ -194,6 +194,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0028_identity_server_may_delete",
         identities::IDENTITY_SERVER_MAY_DELETE_SCHEMA,
+    ),
+    (
+        "0029_hidden_identities",
+        identities::HIDDEN_IDENTITIES_SCHEMA,
     ),
 ];
 

@@ -22,6 +22,10 @@
 //!   its mail is filed under the primary identity. A linked JMAP identity
 //!   the server lets the user delete (`mayDelete`) can go from the server
 //!   too ([`REMOVE_EVERYWHERE`], `SyncService::destroy_identity_and_wait`).
+//!   Removed from Zmail only while the server still lists it, it is hidden
+//!   (Rob's decision of 1 November 2026): syncs leave it out, and the
+//!   account's [`HIDDEN_HEADING`] list offers [`BRING_BACK`]
+//!   (`LocalStore::bring_back_identity`).
 //! - **Make primary**: the identity new mail starts from.
 //!
 //! IMAP and Proton edits stay in Zmail. Reply-to is stored and synced but
@@ -39,7 +43,7 @@ use zmail_core::{
     identity_sync::{IdentitySyncStatus, IdentityValues, SyncedIdentity},
     participants::parse_address_list,
 };
-use zmail_store::LocalStore;
+use zmail_store::{HiddenIdentity, LocalStore};
 
 use crate::identities::REMOVE;
 
@@ -61,6 +65,13 @@ pub const MAKE_PRIMARY: &str = "Make primary";
 pub const REMOVE_HERE: &str = REMOVE;
 /// The button that removes an identity from Zmail and the server.
 pub const REMOVE_EVERYWHERE: &str = "Remove from Zmail and the server";
+/// The heading of an account's hidden server identities.
+pub const HIDDEN_HEADING: &str = "Hidden identities";
+/// What the hidden list says about them.
+pub const HIDDEN_NOTE: &str =
+    "Removed from Zmail only: the server still has them, and syncs leave them out.";
+/// The button that un-hides a server identity.
+pub const BRING_BACK: &str = "Bring back";
 /// The mark beside the primary identity.
 pub const PRIMARY: &str = "primary";
 /// Why a Proton account can't add identities.
@@ -188,6 +199,9 @@ pub struct AccountIdentities {
     pub protocol: ProtocolKind,
     /// Its identities, primary first.
     pub identities: Vec<SyncedIdentity>,
+    /// Its server identities removed from Zmail only, which syncs leave
+    /// out.
+    pub hidden: Vec<HiddenIdentity>,
 }
 
 impl AccountIdentities {
@@ -197,6 +211,7 @@ impl AccountIdentities {
             account_id,
             protocol,
             identities: store.list_synced_identities(account_id)?,
+            hidden: store.list_hidden_identities(account_id)?,
         })
     }
 
@@ -388,11 +403,11 @@ pub fn removal_text(account: &AccountIdentities, identity: &SyncedIdentity) -> S
         && identity.status != IdentitySyncStatus::NotOnServer;
     if on_server {
         text.push_str(if account.offers_remove_everywhere(identity) {
-            " The server still lists it: remove it from the server too, or the next sync adds \
-             it back."
+            " The server still lists it, so Zmail hides it from later syncs (Bring back \
+             undoes that), or you can remove it from the server too."
         } else {
-            " The server still lists it and doesn't let Zmail delete it, so the next sync adds \
-             it back."
+            " The server still lists it and doesn't let Zmail delete it, so Zmail hides it from \
+             later syncs; Bring back undoes that."
         });
     }
     text
@@ -477,6 +492,11 @@ pub mod messages {
         }
     }
 
+    /// After bringing a hidden identity back.
+    pub fn brought_back(email: &str) -> String {
+        format!("Brought back {email}.")
+    }
+
     /// When the server refused, after the local change was kept.
     pub fn server_refused(email: &str, error: &str) -> String {
         format!("Kept {email} in Zmail, but the server refused: {error}")
@@ -526,6 +546,7 @@ mod tests {
             account_id: 1,
             protocol,
             identities,
+            hidden: Vec::new(),
         }
     }
 
@@ -639,6 +660,7 @@ mod tests {
         assert!(!jmap.offers_remove_everywhere(&added));
         assert!(!jmap.can_remove(&primary) && jmap.can_remove(&alias));
         assert!(!jmap.can_make_primary(&primary) && jmap.can_make_primary(&alias));
+        assert!(removal_text(&jmap, &alias).contains("hides it from later syncs"));
         assert!(removal_text(&jmap, &alias).contains("remove it from the server too"));
         let mut derived = alias.clone();
         derived.may_delete_on_server = false;

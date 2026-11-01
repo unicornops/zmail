@@ -14,6 +14,20 @@
 //! for the linked identity, so removing one can offer to delete it on the
 //! server too without asking the server first.
 //!
+//! Removing a linked identity from Zmail only, while the server still
+//! lists it, leaves a marker in `hidden_identities` (migration 0029; Rob's
+//! decision of 1 November 2026, #366): the server identity's id, address
+//! and values as last seen. A sync leaves a hidden server identity out
+//! instead of importing it again. It matches a marker by server id, else
+//! by address: a server that re-creates the identity under a new id (or,
+//! like Apache James, lists the identity it derives from the alias once
+//! the user's own is gone) is still the address the user hid, and the
+//! marker follows the new id. A marker the server no longer lists at all
+//! was deleted on the server, so it goes. Bring back
+//! ([`LocalStore::bring_back_identity`]) puts the identity back at once,
+//! linked, with the server's values as last seen; the next sync confirms
+//! them. Adding an identity for a hidden address brings it back too.
+//!
 //! IMAP and Proton accounts never link their identities, so all of this
 //! leaves them alone. The editor's writes ([`LocalStore::add_identity`],
 //! [`LocalStore::set_identity_address`], [`LocalStore::set_primary_identity`]
@@ -50,6 +64,23 @@ pub(crate) const IDENTITY_SERVER_MAY_DELETE_SCHEMA: &str = r#"
 ALTER TABLE identities ADD COLUMN server_may_delete INTEGER NOT NULL DEFAULT 0;
 "#;
 
+/// Server identities removed from Zmail only (migration 0029).
+pub(crate) const HIDDEN_IDENTITIES_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS hidden_identities (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    server_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    reply_to TEXT NOT NULL DEFAULT '',
+    signature TEXT NOT NULL DEFAULT '',
+    may_delete INTEGER NOT NULL DEFAULT 0,
+    hidden_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_hidden_identities_account ON hidden_identities(account_id);
+"#;
+
 const CONFLICT: &str = "conflict";
 const REMOVED: &str = "removed";
 
@@ -65,6 +96,69 @@ pub struct IdentityMergeReport {
     /// Server identities left out because the account already has an
     /// identity with their address (Zmail keeps one per address).
     pub skipped: Vec<String>,
+    /// Server identities left out because the user hid them.
+    pub hidden: Vec<String>,
+}
+
+/// A server identity the user removed from Zmail only, which syncs leave
+/// out until the user brings it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenIdentity {
+    /// The marker's id, for [`LocalStore::bring_back_identity`].
+    pub id: i64,
+    /// The account.
+    pub account_id: i64,
+    /// The server identity's id, as last seen.
+    pub server_id: String,
+    /// Its address.
+    pub email: String,
+    /// Its name, reply-to and signature on the server, as last seen.
+    pub values: IdentityValues,
+    /// Whether the server lets the user delete it.
+    pub may_delete: bool,
+}
+
+const HIDDEN_COLUMNS: &str =
+    "id, account_id, server_id, email, name, reply_to, signature, may_delete";
+
+fn read_hidden(row: &rusqlite::Row<'_>) -> rusqlite::Result<HiddenIdentity> {
+    Ok(HiddenIdentity {
+        id: row.get(0)?,
+        account_id: row.get(1)?,
+        server_id: row.get(2)?,
+        email: row.get(3)?,
+        values: IdentityValues {
+            name: row.get(4)?,
+            reply_to: row.get(5)?,
+            signature: row.get(6)?,
+        },
+        may_delete: row.get(7)?,
+    })
+}
+
+fn load_hidden(conn: &rusqlite::Connection, account_id: i64) -> Result<Vec<HiddenIdentity>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {HIDDEN_COLUMNS} FROM hidden_identities WHERE account_id = ?1 ORDER BY email, id"
+    ))?;
+    let rows = statement.query_map(params![account_id], read_hidden)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to list the hidden identities")
+}
+
+/// The hidden marker `server` matches, if any: by server id, else by
+/// address (the module's matching rule).
+fn hidden_match<'a>(
+    hidden: &'a [HiddenIdentity],
+    server: &ServerIdentity,
+) -> Option<&'a HiddenIdentity> {
+    hidden
+        .iter()
+        .find(|marker| marker.server_id == server.id)
+        .or_else(|| {
+            hidden
+                .iter()
+                .find(|marker| marker.email.eq_ignore_ascii_case(&server.email))
+        })
 }
 
 /// What pushing an identity to the server needs.
@@ -246,6 +340,53 @@ impl LocalStore {
         let mut server: Vec<&ServerIdentity> = server.iter().collect();
         server.sort_by_key(|identity| !identity.may_delete);
         let mut report = IdentityMergeReport::default();
+
+        // Hidden server identities stay out. Each marker follows the server
+        // identity it matches (its id, address and latest values); a marker
+        // matching nothing was deleted on the server, so it goes.
+        let hidden = load_hidden(&transaction, account_id)?;
+        let mut followed: HashMap<i64, &ServerIdentity> = HashMap::new();
+        for identity in &server {
+            if let Some(marker) = hidden_match(&hidden, identity)
+                && !followed.contains_key(&marker.id)
+            {
+                followed.insert(marker.id, identity);
+            }
+        }
+        for marker in &hidden {
+            match followed.get(&marker.id) {
+                Some(identity) => transaction
+                    .execute(
+                        "UPDATE hidden_identities SET server_id = ?2, email = ?3, name = ?4, \
+                         reply_to = ?5, signature = ?6, may_delete = ?7 WHERE id = ?1",
+                        params![
+                            marker.id,
+                            identity.id,
+                            identity.email,
+                            identity.values.name,
+                            identity.values.reply_to,
+                            identity.values.signature,
+                            identity.may_delete,
+                        ],
+                    )
+                    .context("failed to update a hidden identity")?,
+                None => transaction
+                    .execute(
+                        "DELETE FROM hidden_identities WHERE id = ?1",
+                        params![marker.id],
+                    )
+                    .context("failed to forget a hidden identity the server deleted")?,
+            };
+        }
+        // Every server identity a marker matches stays out, not just the
+        // one it follows (a server may list two for the address).
+        server.retain(|identity| {
+            let hide = hidden_match(&hidden, identity).is_some();
+            if hide {
+                report.hidden.push(identity.email.clone());
+            }
+            !hide
+        });
 
         // Each server identity's local row: by server id first, then by
         // address among the rows not linked to anything the server lists.
@@ -496,6 +637,14 @@ impl LocalStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin adding the identity")?;
         ensure_address_is_new(&transaction, account_id, email, None)?;
+        // Adding a hidden address back brings it back: the next sync links
+        // the new identity to the server's.
+        transaction
+            .execute(
+                "DELETE FROM hidden_identities WHERE account_id = ?1 AND email = ?2 COLLATE NOCASE",
+                params![account_id, email],
+            )
+            .context("failed to bring the hidden identity back")?;
         let has_primary = primary_identity_id(&transaction, account_id)?.is_some();
         transaction
             .execute(
@@ -584,8 +733,21 @@ impl LocalStore {
     /// Removes an identity from Zmail (not from the server). Its mail is
     /// filed under the account's primary identity. The primary identity,
     /// the last one and one a draft is written from are kept
-    /// ([`Self::identity_removal_blocker`]).
+    /// ([`Self::identity_removal_blocker`]). A linked identity the server
+    /// still lists is hidden, so later syncs leave it out
+    /// ([`HiddenIdentity`]).
     pub fn remove_identity(&self, identity_id: i64) -> Result<()> {
+        self.remove_identity_hiding(identity_id, true)
+    }
+
+    /// Removes an identity whose server identity was just deleted on the
+    /// server: like [`Self::remove_identity`], but nothing is left to hide,
+    /// and a marker for it goes too.
+    pub fn remove_destroyed_identity(&self, identity_id: i64) -> Result<()> {
+        self.remove_identity_hiding(identity_id, false)
+    }
+
+    fn remove_identity_hiding(&self, identity_id: i64, hide: bool) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -608,9 +770,99 @@ impl LocalStore {
         transaction
             .execute("DELETE FROM identities WHERE id = ?1", params![identity_id])
             .context("failed to remove the identity")?;
+        if let Some(server_id) = &row.server_id {
+            transaction
+                .execute(
+                    "DELETE FROM hidden_identities WHERE account_id = ?1 AND server_id = ?2",
+                    params![account_id, server_id],
+                )
+                .context("failed to update the hidden identities")?;
+            if hide && row.status() != IdentitySyncStatus::NotOnServer {
+                let seen = row.seen.clone().unwrap_or_default();
+                transaction
+                    .execute(
+                        "INSERT INTO hidden_identities(account_id, server_id, email, name, \
+                         reply_to, signature, may_delete) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            account_id,
+                            server_id,
+                            row.email,
+                            seen.name,
+                            seen.reply_to,
+                            seen.signature,
+                            row.may_delete,
+                        ],
+                    )
+                    .context("failed to hide the identity from later syncs")?;
+            }
+        }
         transaction
             .commit()
             .context("failed to commit removing the identity")
+    }
+
+    /// The account's hidden server identities, by address.
+    pub fn list_hidden_identities(&self, account_id: i64) -> Result<Vec<HiddenIdentity>> {
+        let conn = self.connection()?;
+        load_hidden(&conn, account_id)
+    }
+
+    /// Bring back: un-hides a server identity and puts it back at once,
+    /// linked, with the server's values as last seen (the next sync
+    /// confirms or updates them). Returns the identity's id. When the
+    /// account has an identity for the address again, only the marker
+    /// goes.
+    pub fn bring_back_identity(&self, hidden_id: i64) -> Result<Option<i64>> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin bringing the identity back")?;
+        let marker = transaction
+            .query_row(
+                &format!("SELECT {HIDDEN_COLUMNS} FROM hidden_identities WHERE id = ?1"),
+                params![hidden_id],
+                read_hidden,
+            )
+            .optional()
+            .context("failed to load the hidden identity")?
+            .context("that identity is no longer hidden")?;
+        transaction
+            .execute(
+                "DELETE FROM hidden_identities WHERE id = ?1",
+                params![hidden_id],
+            )
+            .context("failed to un-hide the identity")?;
+        if ensure_address_is_new(&transaction, marker.account_id, &marker.email, None).is_err() {
+            transaction
+                .commit()
+                .context("failed to commit bringing the identity back")?;
+            return Ok(None);
+        }
+        let has_primary = primary_identity_id(&transaction, marker.account_id)?.is_some();
+        let values = &marker.values;
+        transaction
+            .execute(
+                "INSERT INTO identities(account_id, display_name, email_address, signature, \
+                 is_primary, reply_to, server_id, server_name, server_reply_to, \
+                 server_signature, server_state, server_may_delete) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?2, ?6, ?4, '', ?8)",
+                params![
+                    marker.account_id,
+                    values.name,
+                    marker.email,
+                    values.signature,
+                    !has_primary,
+                    values.reply_to,
+                    marker.server_id,
+                    marker.may_delete,
+                ],
+            )
+            .context("failed to bring the identity back")?;
+        let identity_id = transaction.last_insert_rowid();
+        transaction
+            .commit()
+            .context("failed to commit bringing the identity back")?;
+        Ok(Some(identity_id))
     }
 }
 
@@ -820,6 +1072,13 @@ mod tests {
         assert!(store.remove_identity(primary).is_err(), "the primary stays");
         store.remove_identity(help).expect("removed");
         assert_eq!(store.list_identities(account).expect("identities").len(), 1);
+        assert!(
+            store
+                .list_hidden_identities(account)
+                .expect("hidden")
+                .is_empty(),
+            "one the server no longer lists has nothing to hide"
+        );
     }
 
     #[test]
@@ -968,6 +1227,121 @@ mod tests {
         assert_eq!(
             store.identity_removal_blocker(help).expect("checked"),
             Some("desk@example.com is the account's primary identity, so it stays".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_identity_removed_from_zmail_only_stays_out_of_syncs_until_brought_back() {
+        let store = LocalStore::open_ephemeral().expect("the store opens");
+        let account = jmap_account(&store);
+        let mut listed = vec![
+            server("i1", "rob@example.com", values("Rob", "")),
+            server("i2", "help@example.com", values("Help desk", "-- Help")),
+        ];
+        store
+            .merge_server_identities(account, &listed)
+            .expect("the merge runs");
+        let help = store.list_identities(account).expect("identities")[1].id;
+
+        // Removed from Zmail only: hidden, and the next sync leaves it out.
+        store.remove_identity(help).expect("removed");
+        let hidden = store.list_hidden_identities(account).expect("hidden");
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].server_id, "i2");
+        assert_eq!(hidden[0].values, values("Help desk", "-- Help"));
+        assert!(hidden[0].may_delete);
+        let report = store
+            .merge_server_identities(account, &listed)
+            .expect("the merge runs");
+        assert!(report.imported.is_empty(), "{report:?}");
+        assert_eq!(report.hidden, ["help@example.com"]);
+        assert_eq!(store.list_identities(account).expect("identities").len(), 1);
+
+        // Re-created on the server under a new id: still the hidden
+        // address, and the marker follows it with the server's values.
+        listed[1] = server("i3", "help@example.com", values("Help", "-- new"));
+        let report = store
+            .merge_server_identities(account, &listed)
+            .expect("the merge runs");
+        assert!(report.imported.is_empty());
+        let hidden = store.list_hidden_identities(account).expect("hidden");
+        assert_eq!(hidden[0].server_id, "i3");
+        assert_eq!(hidden[0].values.name, "Help");
+
+        // Bring back: at once, linked and in step with the server.
+        let back = store
+            .bring_back_identity(hidden[0].id)
+            .expect("brought back")
+            .expect("added");
+        assert!(
+            store
+                .list_hidden_identities(account)
+                .expect("hidden")
+                .is_empty()
+        );
+        assert_eq!(
+            status_of(&store, account, "help@example.com"),
+            IdentitySyncStatus::InSync
+        );
+        let report = store
+            .merge_server_identities(account, &listed)
+            .expect("the merge runs");
+        assert_eq!(report, Default::default(), "the next sync agrees");
+        assert_eq!(
+            store
+                .identity_link(back)
+                .expect("loads")
+                .expect("exists")
+                .server_id
+                .as_deref(),
+            Some("i3")
+        );
+
+        // Hidden, then deleted on the server: the marker goes.
+        store.remove_identity(back).expect("removed");
+        store
+            .merge_server_identities(account, &listed[..1])
+            .expect("the merge runs");
+        assert!(
+            store
+                .list_hidden_identities(account)
+                .expect("hidden")
+                .is_empty()
+        );
+
+        // Hidden, then added again in Zmail: no longer hidden, and the
+        // next sync links it.
+        store
+            .merge_server_identities(account, &listed)
+            .expect("the merge runs");
+        let again = store.list_identities(account).expect("identities")[1].id;
+        store.remove_identity(again).expect("removed");
+        assert_eq!(
+            store.list_hidden_identities(account).expect("hidden").len(),
+            1
+        );
+        let added = store
+            .add_identity(account, "help@example.com", &values("Mine", ""))
+            .expect("added");
+        assert!(
+            store
+                .list_hidden_identities(account)
+                .expect("hidden")
+                .is_empty()
+        );
+        store
+            .merge_server_identities(account, &listed)
+            .expect("the merge runs");
+        let link = store.identity_link(added).expect("loads").expect("exists");
+        assert_eq!(link.server_id.as_deref(), Some("i3"));
+
+        // Removed after deleting it on the server: nothing to hide.
+        store.remove_destroyed_identity(added).expect("removed");
+        assert!(
+            store
+                .list_hidden_identities(account)
+                .expect("hidden")
+                .is_empty()
         );
     }
 

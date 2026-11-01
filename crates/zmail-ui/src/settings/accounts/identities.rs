@@ -14,6 +14,9 @@
 //! - **Remove…** asks first, in a modal, and offers to remove a linked
 //!   JMAP identity from the server too when the server allows it.
 //! - **Make primary** picks the identity new mail starts from.
+//! - **Hidden identities** lists the server identities removed from Zmail
+//!   only, which syncs leave out, each with **Bring back**: it is back at
+//!   once, and a sync starts to confirm it.
 //!
 //! Server requests run on the sync runtime and report with a toast, like
 //! the identity notices'.
@@ -24,10 +27,11 @@ use gpui::{
 };
 use zmail_core::identity_sync::SyncedIdentity;
 use zmail_setup::identity_editor::{
-    self, ADD, ADD_AND_CREATE, ADD_IN_ZMAIL, AccountIdentities, EDIT, FormMode, IdentityField,
-    IdentityForm, MAKE_PRIMARY, PRIMARY, REMOVE_EVERYWHERE, REMOVE_HERE, SAVE, SAVE_AND_UPDATE,
-    messages,
+    self, ADD, ADD_AND_CREATE, ADD_IN_ZMAIL, AccountIdentities, BRING_BACK, EDIT, FormMode,
+    HIDDEN_HEADING, HIDDEN_NOTE, IdentityField, IdentityForm, MAKE_PRIMARY, PRIMARY,
+    REMOVE_EVERYWHERE, REMOVE_HERE, SAVE, SAVE_AND_UPDATE, messages,
 };
+use zmail_store::HiddenIdentity;
 
 use super::{AccountCard, AccountsSettings, refresh_workspace};
 use crate::a11y::AccessibleExt;
@@ -373,6 +377,42 @@ impl AccountsSettings {
         cx.notify();
     }
 
+    /// Bring back: un-hides a server identity, back in Zmail at once, and
+    /// syncs the account to confirm it.
+    pub(crate) fn bring_back_identity(
+        &mut self,
+        account_id: i64,
+        hidden_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(email) = self
+            .cards
+            .iter()
+            .find(|card| card.account.id == account_id)
+            .and_then(|card| {
+                card.all_identities
+                    .hidden
+                    .iter()
+                    .find(|hidden| hidden.id == hidden_id)
+            })
+            .map(|hidden| hidden.email.clone())
+        else {
+            return;
+        };
+        let host = SettingsHost::get(cx);
+        match host.store.bring_back_identity(hidden_id) {
+            Ok(_) => {
+                let _ = host.sync_service.sync_account(account_id);
+                refresh_workspace(cx);
+                cx.emit(SettingsEvent::Status(messages::brought_back(&email)));
+            }
+            Err(error) => cx.emit(SettingsEvent::Error(format!(
+                "Could not bring {email} back: {error:#}"
+            ))),
+        }
+        self.refresh(cx);
+    }
+
     /// Make primary: new mail on the account starts from this identity.
     pub(crate) fn make_primary_identity(&mut self, identity_id: i64, cx: &mut Context<Self>) {
         let Some(email) = self.any_identity_email(identity_id) else {
@@ -494,6 +534,80 @@ impl AccountsSettings {
                         .child(note),
                 )
             })
+            .children(rows)
+            .when(!account.hidden.is_empty(), |this| {
+                this.child(self.render_hidden_identities(account, busy, colors, cx))
+            })
+            .into_any_element()
+    }
+
+    /// The account's hidden server identities, each with Bring back.
+    fn render_hidden_identities(
+        &self,
+        account: &AccountIdentities,
+        busy: bool,
+        colors: &UiColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let account_id = account.account_id;
+        let row = |hidden: &HiddenIdentity, cx: &mut Context<Self>| {
+            let hidden_id = hidden.id;
+            let name = hidden.values.name.trim();
+            let line = if name.is_empty() {
+                hidden.email.clone()
+            } else {
+                format!("{name} <{}>", hidden.email)
+            };
+            div()
+                .id(("hidden-identity", hidden_id as u64))
+                .accessible(Role::Group, line.clone())
+                .flex()
+                .items_center()
+                .gap(px(SPACE_2))
+                .pt(px(SPACE_2))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .type_style(TYPE_BODY)
+                        .text_color(rgb(colors.muted))
+                        .ellipsis()
+                        .child(line),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .debug_selector(move || format!("identity-bring-back-{hidden_id}"))
+                        .child(
+                            Button::new(("identity-bring-back", hidden_id as u64), BRING_BACK)
+                                .size(ButtonSize::Small)
+                                .disabled(busy)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.bring_back_identity(account_id, hidden_id, cx)
+                                })),
+                        ),
+                )
+                .into_any_element()
+        };
+        let rows = account
+            .hidden
+            .iter()
+            .map(|hidden| row(hidden, cx))
+            .collect::<Vec<_>>();
+        div()
+            .id(("hidden-identities", account_id as u64))
+            .debug_selector(move || format!("hidden-identities-{account_id}"))
+            .accessible(Role::Group, HIDDEN_HEADING.to_owned())
+            .flex()
+            .flex_col()
+            .pt(px(SPACE_3))
+            .child(div().type_style(TYPE_BODY_STRONG).child(HIDDEN_HEADING))
+            .child(
+                div()
+                    .type_style(TYPE_CAPTION)
+                    .text_color(rgb(colors.muted))
+                    .child(HIDDEN_NOTE),
+            )
             .children(rows)
             .into_any_element()
     }

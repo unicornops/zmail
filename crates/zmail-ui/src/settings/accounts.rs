@@ -252,6 +252,7 @@ impl AccountsSettings {
                 account_id: account.id,
                 protocol: account.protocol,
                 identities: store.list_synced_identities(account.id).unwrap_or_default(),
+                hidden: store.list_hidden_identities(account.id).unwrap_or_default(),
             };
             card.identities = card
                 .all_identities
@@ -304,6 +305,7 @@ impl AccountsSettings {
                 account_id: account.id,
                 protocol: account.protocol,
                 identities: Vec::new(),
+                hidden: Vec::new(),
             },
             _subscriptions: [color_subscription, budget_subscription],
         }
