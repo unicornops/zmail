@@ -34,6 +34,7 @@ pub use zmail_security::vault::{BlobVault, StoreKey, StoreKeychain};
 mod address_history;
 mod connection;
 mod encryption;
+mod identities;
 mod key_trust;
 mod lock;
 mod merge;
@@ -45,6 +46,7 @@ pub use encryption::{
     MigrationProgress, MigrationReport, StoreFileState, StoreOpenError, encrypt_plaintext_store,
     move_unreadable_store_aside, store_file_state,
 };
+pub use identities::{IdentityLink, IdentityMergeReport};
 pub use lock::SyncLock;
 
 /// A received attachment's encrypted blob (ADR 0005), from
@@ -185,6 +187,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0024_recipient_key_trust", key_trust::KEY_TRUST_SCHEMA),
     ("0025_message_reply_headers", MESSAGE_REPLY_HEADERS_SCHEMA),
     ("0026_draft_threading", DRAFT_THREADING_SCHEMA),
+    (
+        "0027_identity_server_sync",
+        identities::IDENTITY_SERVER_SYNC_SCHEMA,
+    ),
 ];
 
 /// Failed background body fetches after which a message is skipped by the

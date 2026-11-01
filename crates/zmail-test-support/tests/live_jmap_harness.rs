@@ -23,9 +23,10 @@ use zmail_smtp::{
 use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
 use zmail_test_support::{
-    DockerMailHarness, MAIL_HARNESS_HOST, MAIL_HARNESS_JMAP_ACCOUNT, MAIL_HARNESS_JMAP_ENDPOINT,
-    MAIL_HARNESS_JMAP_PASSWORD, MAIL_HARNESS_JMAP_SMTP_PORT, MAIL_HARNESS_SENDER,
-    MAIL_HARNESS_SENDER_PASSWORD, live_harness_lock,
+    DockerMailHarness, MAIL_HARNESS_HOST, MAIL_HARNESS_JMAP_ACCOUNT,
+    MAIL_HARNESS_JMAP_ADMIN_ENDPOINT, MAIL_HARNESS_JMAP_ENDPOINT, MAIL_HARNESS_JMAP_PASSWORD,
+    MAIL_HARNESS_JMAP_SMTP_PORT, MAIL_HARNESS_SENDER, MAIL_HARNESS_SENDER_PASSWORD,
+    live_harness_lock,
 };
 
 #[test]
@@ -954,6 +955,184 @@ fn sync_until_subject(
     }
 
     bail!("subject {subject:?} was not visible after repeated JMAP sync attempts")
+}
+
+/// One JMAP method call against the harness's James as the JMAP account,
+/// with the submission capability identities need; returns the method's
+/// answer (`[name, arguments, call id]`).
+fn jmap_call(method: &str, arguments: serde_json::Value) -> Result<serde_json::Value> {
+    let client = reqwest::blocking::Client::new();
+    let session: serde_json::Value = client
+        .get(format!("{MAIL_HARNESS_JMAP_ENDPOINT}/.well-known/jmap"))
+        .basic_auth(MAIL_HARNESS_JMAP_ACCOUNT, Some(MAIL_HARNESS_JMAP_PASSWORD))
+        .send()?
+        .error_for_status()?
+        .json()?;
+    let api_url = session["apiUrl"]
+        .as_str()
+        .context("the session names its API URL")?;
+    let account_id = session["primaryAccounts"]["urn:ietf:params:jmap:mail"]
+        .as_str()
+        .context("the session names the mail account")?;
+    let mut arguments = arguments;
+    arguments["accountId"] = serde_json::json!(account_id);
+    let answer: serde_json::Value = client
+        .post(api_url)
+        .basic_auth(MAIL_HARNESS_JMAP_ACCOUNT, Some(MAIL_HARNESS_JMAP_PASSWORD))
+        .json(&serde_json::json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:submission"],
+            "methodCalls": [[method, arguments, "c1"]],
+        }))
+        .send()?
+        .error_for_status()?
+        .json()?;
+    Ok(answer["methodResponses"][0].clone())
+}
+
+/// The identity with `email` in the store, and how it stands.
+fn synced_identity(
+    store: &LocalStore,
+    account_id: i64,
+    email: &str,
+) -> Result<zmail_core::identity_sync::SyncedIdentity> {
+    store
+        .list_synced_identities(account_id)?
+        .into_iter()
+        .find(|identity| identity.identity.email_address == email)
+        .with_context(|| format!("the store has no identity for {email}"))
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn jmap_identities_import_keep_local_edits_and_push_back() -> Result<()> {
+    use zmail_core::identity_sync::{IdentitySyncStatus, IdentityValues};
+
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_JMAP_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+
+    // An alias the account may send from, and a server identity for it,
+    // made on the server as another client would.
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let alias = format!("identity-{stamp}@localhost");
+    reqwest::blocking::Client::new()
+        .put(format!(
+            "{MAIL_HARNESS_JMAP_ADMIN_ENDPOINT}/address/aliases/{MAIL_HARNESS_JMAP_ACCOUNT}/sources/{alias}"
+        ))
+        .send()?
+        .error_for_status()
+        .context("James adds the alias")?;
+    let created = jmap_call(
+        "Identity/set",
+        serde_json::json!({"create": {"n1": {
+            "email": alias, "name": "Help desk", "textSignature": "-- Help desk"
+        }}}),
+    )?;
+    let server_id = created[1]["created"]["n1"]["id"]
+        .as_str()
+        .with_context(|| format!("James creates the identity: {created}"))?
+        .to_owned();
+
+    // The sync imports it.
+    sync_service.sync_account_and_wait(account_id)?;
+    let imported = synced_identity(&store, account_id, &alias)?;
+    assert_eq!(imported.local.name, "Help desk");
+    assert_eq!(imported.local.signature, "-- Help desk");
+    assert_eq!(imported.status, IdentitySyncStatus::InSync);
+    eprintln!(
+        "the server-set identity of {MAIL_HARNESS_JMAP_ACCOUNT}: {:?}",
+        synced_identity(&store, account_id, MAIL_HARNESS_JMAP_ACCOUNT)?.status
+    );
+
+    // A local edit survives the next sync, marked as differing.
+    let edited = IdentityValues {
+        name: "Support".to_owned(),
+        reply_to: "Tickets <tickets@localhost>".to_owned(),
+        signature: "-- Support, from Zmail".to_owned(),
+    };
+    store.update_identity(imported.identity.id, &edited)?;
+    sync_service.sync_account_and_wait(account_id)?;
+    let kept = synced_identity(&store, account_id, &alias)?;
+    assert_eq!(kept.local, edited, "the sync keeps the local edit");
+    assert_eq!(kept.status, IdentitySyncStatus::ChangedHere);
+
+    // "Update the server", then read it back from James and sync again.
+    runtime
+        .handle()
+        .block_on(sync_service.push_identity_and_wait(imported.identity.id))?;
+    assert_eq!(
+        synced_identity(&store, account_id, &alias)?.status,
+        IdentitySyncStatus::InSync
+    );
+    let listed = jmap_call("Identity/get", serde_json::json!({"ids": [server_id]}))?;
+    let on_server = &listed[1]["list"][0];
+    assert_eq!(on_server["name"], "Support", "{listed}");
+    assert_eq!(
+        on_server["textSignature"], "-- Support, from Zmail",
+        "{listed}"
+    );
+    assert_eq!(
+        on_server["replyTo"][0]["email"], "tickets@localhost",
+        "{listed}"
+    );
+    sync_service.sync_account_and_wait(account_id)?;
+    let after = synced_identity(&store, account_id, &alias)?;
+    assert_eq!(after.local, edited);
+    assert_eq!(after.status, IdentitySyncStatus::InSync);
+
+    // Deleted on the server. James then lists the identity it derives
+    // from the alias (another id, no name): Zmail relinks to it by address
+    // and keeps the local values, differing. A server with nothing else
+    // for the address leaves it marked as gone, to create again.
+    let destroyed = jmap_call("Identity/set", serde_json::json!({"destroy": [server_id]}))?;
+    ensure_destroyed(&destroyed, &server_id)?;
+    sync_service.sync_account_and_wait(account_id)?;
+    let after_destroy = synced_identity(&store, account_id, &alias)?;
+    let link = store
+        .identity_link(imported.identity.id)?
+        .context("the identity is kept")?;
+    assert_eq!(after_destroy.local, edited, "the local values survive");
+    if after_destroy.status == IdentitySyncStatus::NotOnServer {
+        eprintln!("the server lists nothing else for {alias}: creating it again");
+        runtime
+            .handle()
+            .block_on(sync_service.recreate_identity_and_wait(imported.identity.id))?;
+        sync_service.sync_account_and_wait(account_id)?;
+        let recreated = synced_identity(&store, account_id, &alias)?;
+        assert_eq!(recreated.status, IdentitySyncStatus::InSync);
+        assert_eq!(recreated.local, edited);
+    } else {
+        let listed = jmap_call("Identity/get", serde_json::json!({}))?;
+        eprintln!(
+            "relinked {alias} to {:?} ({:?}); the server lists {listed}",
+            link.server_id, after_destroy.status
+        );
+        assert_ne!(link.server_id.as_deref(), Some(server_id.as_str()));
+        assert!(
+            listed[1]["list"]
+                .as_array()
+                .is_some_and(|list| list.iter().any(|identity| identity["id"].as_str()
+                    == link.server_id.as_deref()
+                    && identity["email"] == alias.as_str())),
+            "relinked to a server identity for {alias}: {listed}"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_destroyed(answer: &serde_json::Value, server_id: &str) -> Result<()> {
+    let destroyed = answer[1]["destroyed"]
+        .as_array()
+        .is_some_and(|ids| ids.iter().any(|id| id == server_id));
+    if !destroyed {
+        bail!("James did not destroy the identity: {answer}");
+    }
+    Ok(())
 }
 
 fn jmap_account() -> NewAccount {
