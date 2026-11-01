@@ -434,6 +434,17 @@ pub async fn check_sign_in(
     Ok(())
 }
 
+/// An `Identity/get` of every identity. `jmap-client` neither adds the
+/// method call when the request is sent nor the submission capability it
+/// needs (RFC 8621 section 6), so a bare request asks the server nothing
+/// and submission found no identity.
+fn identity_get_request(client: &Client) -> jmap_client::core::request::Request<'_> {
+    let mut request = client.build();
+    request.get_identity();
+    request.add_capability(jmap_client::URI::Submission);
+    request
+}
+
 async fn fetch_identities(client: &Client) -> Result<Vec<NewIdentity>> {
     let request = client.build();
     let mut response: IdentityGetResponse = request
@@ -458,8 +469,7 @@ async fn fetch_identities(client: &Client) -> Result<Vec<NewIdentity>> {
 }
 
 async fn fetch_submission_identities(client: &Client) -> Result<Vec<SubmissionIdentity>> {
-    let request = client.build();
-    let mut response: IdentityGetResponse = request
+    let mut response: IdentityGetResponse = identity_get_request(client)
         .send_get_identity()
         .await
         .context("failed to fetch JMAP identities for submission")?;
