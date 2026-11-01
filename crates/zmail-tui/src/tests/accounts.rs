@@ -237,6 +237,111 @@ fn change_saves_a_new_password_hidden_and_cycles_the_cache_budget() {
     assert_eq!(app.screen, Screen::Accounts);
 }
 
+/// Links Work's identity to a server identity whose name differs and
+/// whose strings are hostile (a conflict), and leaves a second identity
+/// the server stopped listing.
+fn seed_identities_needing_attention(store: &LocalStore) {
+    use zmail_core::identity_sync::{IdentityValues, ServerIdentity};
+    let work = store.list_accounts().expect("accounts")[0].id;
+    let server = |id: &str, email: &str, name: &str, signature: &str| ServerIdentity {
+        id: id.to_owned(),
+        email: email.to_owned(),
+        values: IdentityValues {
+            name: name.to_owned(),
+            reply_to: String::new(),
+            signature: signature.to_owned(),
+        },
+        may_delete: true,
+    };
+    let both = [
+        server(
+            "i1",
+            "me@work.example",
+            "Work\x1b[2J \u{202E}Server",
+            "-- sent\x1b]0;pwned\x07 from\nthe web",
+        ),
+        server("i2", "help@work.example", "Help desk", ""),
+    ];
+    store.merge_server_identities(work, &both).expect("merged");
+    store
+        .merge_server_identities(work, &both[..1])
+        .expect("merged");
+}
+
+#[test]
+fn change_lists_identities_and_offers_both_directions_for_a_differing_one() {
+    use zmail_core::identity_sync::IdentitySyncStatus;
+
+    let store = seeded_store();
+    seed_identities_needing_attention(&store);
+    let (mut app, _) = setup_app(store, environment(), true);
+    let work = app.accounts[0].id;
+    keys(&mut app, "sa");
+    keys(&mut app, "c");
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+    for (width, height) in [(80, 24), (160, 48)] {
+        let text = screen(&mut app, width, height);
+        assert!(
+            text.contains("changed in Zmail and on the server"),
+            "{text}"
+        );
+        assert!(
+            text.contains("UpdServer") && text.contains("UseServer"),
+            "{text}"
+        );
+        assert!(!text.contains("pwned\u{7}"), "{text}");
+        assert_snapshot(
+            &format!("account-identities-{width}x{height}"),
+            &draw(&mut app, width, height),
+        );
+    }
+
+    // Updating the server needs the sync service, which tests lack.
+    keys(&mut app, "u");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("This Zmail can't reach the server right now")
+    );
+
+    // S takes the server's values, filtered only when drawn.
+    keys(&mut app, "s");
+    let identities = app.store.list_synced_identities(work).expect("identities");
+    assert_eq!(identities[0].status, IdentitySyncStatus::InSync);
+    assert_eq!(identities[0].local.name, "Work\x1b[2J \u{202E}Server");
+    screen(&mut app, 80, 24);
+
+    // The one the server no longer lists: R or D, and D asks first.
+    key(&mut app, KeyCode::Down);
+    let text = screen(&mut app, 160, 48);
+    assert!(
+        text.contains("help@work.example is no longer on the server"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Recreate") && text.contains("Remove"),
+        "{text}"
+    );
+    keys(&mut app, "d");
+    assert!(matches!(app.prompt, Some(Prompt::RemoveIdentity { .. })));
+    keys(&mut app, "n");
+    assert_eq!(
+        app.store.list_identities(work).expect("identities").len(),
+        2
+    );
+    keys(&mut app, "d");
+    keys(&mut app, "y");
+    assert_eq!(
+        app.store.list_identities(work).expect("identities").len(),
+        1
+    );
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Removed help@work.example from Zmail")
+    );
+    assert_eq!(app.edit.as_ref().expect("still changing").cursor, 2);
+}
+
 #[test]
 fn a_preset_address_skips_discovery_and_the_password_never_shows() {
     let (mut app, secrets) = empty_app();

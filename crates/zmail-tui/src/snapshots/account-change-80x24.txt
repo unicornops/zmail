@@ -8,8 +8,8 @@
   The cache budget caps the downloaded bodies and attachments kept for this
   account; the oldest go first and download again when opened.
 
-
-
+  Identities
+  Work <me@work.example>
 
 
 

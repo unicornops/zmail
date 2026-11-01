@@ -297,6 +297,14 @@ pub enum Prompt {
         /// The unsent mail and drafts that go with it.
         lines: Vec<String>,
     },
+    /// "Remove this identity from Zmail?" (one the server no longer
+    /// lists).
+    RemoveIdentity {
+        /// The identity.
+        identity_id: i64,
+        /// Its address, filtered.
+        email: String,
+    },
 }
 
 /// What a text field on the status line is for.
@@ -1250,7 +1258,9 @@ impl App {
                     entry("^C", "Cancel", Pico(crate::compose::Pico::Cancel)),
                 ];
             }
-            Some(Prompt::Confirm(_) | Prompt::RemoveAccount { .. }) => {
+            Some(
+                Prompt::Confirm(_) | Prompt::RemoveAccount { .. } | Prompt::RemoveIdentity { .. },
+            ) => {
                 return vec![entry("Y", "Yes", Select), entry("N", "No", Back)];
             }
             Some(Prompt::Path(ref path)) => {
@@ -2022,6 +2032,14 @@ impl App {
                     self.status = Some("Nothing removed".to_owned());
                 }
             }
+            Prompt::RemoveIdentity { identity_id, email } => {
+                self.prompt = None;
+                if matches!(key.code, KeyCode::Char('y' | 'Y')) {
+                    self.remove_identity_now(identity_id, &email);
+                } else {
+                    self.status = Some("Nothing removed".to_owned());
+                }
+            }
             Prompt::Text { purpose, mut input } => {
                 match key.code {
                     KeyCode::Esc => return self.cancel_text(purpose),
@@ -2643,6 +2661,9 @@ impl App {
             }
             Prompt::Path(path) => path.label(),
             Prompt::RemoveAccount { account_id, lines } => self.remove_question(*account_id, lines),
+            Prompt::RemoveIdentity { email, .. } => format!(
+                "Remove {email} from Zmail? It stays off the server; its mail is kept. (y/n)"
+            ),
         })
     }
 

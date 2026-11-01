@@ -27,7 +27,7 @@ use zmail_sync::SYNCS_ELSEWHERE;
 
 use super::{Theme, draw_pane};
 use crate::{
-    accounts::{AddAccount, EDIT_ROWS, Method, Row, Step, methods},
+    accounts::{AddAccount, EDIT_ROWS, EditAccount, Method, Row, Step, methods},
     app::App,
     pane::{PaneId, PaneLine},
     text::{self, fit, wrap},
@@ -264,11 +264,15 @@ pub(super) fn draw_edit(app: &mut App, frame: &mut Frame, theme: Theme, body: Re
         theme.faint(),
         0,
     );
+    let identity_lines = identity_lines(&mut out, edit);
     if let Some(url) = &edit.sign_in_url {
         out.blank();
         browser_lines(&mut out, url, over_ssh);
     }
-    let cursor = first + edit.cursor;
+    let cursor = match edit.cursor.checked_sub(EDIT_ROWS) {
+        Some(index) => identity_lines + index,
+        None => first + edit.cursor,
+    };
     let password_row = edit.cursor == 0 && edit.auth == AuthKind::Password;
     draw_pane(
         app,
@@ -282,6 +286,71 @@ pub(super) fn draw_edit(app: &mut App, frame: &mut Frame, theme: Theme, body: Re
         let x = MARGIN.len() + text::width("New password : ");
         place_cursor(app, frame, PaneId::EditAccount, body, cursor, x);
     }
+}
+
+/// Change's identities, each a row with how it stands against the
+/// server, then what the one under the cursor needs, if anything. Names,
+/// addresses, reply-tos and signatures come from the server, so all are
+/// filtered. Returns the line the first identity's row is on.
+fn identity_lines(out: &mut Lines, edit: &EditAccount) -> usize {
+    use zmail_setup::identities::{
+        RECREATE, REMOVE, UPDATE_SERVER, USE_SERVER, differences, identity_line, notice_text,
+        notice_title, status_label,
+    };
+    let theme = out.theme;
+    out.blank();
+    out.line("Identities", theme.bold());
+    let first = out.lines.len();
+    for (index, identity) in edit.identities.iter().enumerate() {
+        let status = status_label(identity.status);
+        let text = if status.is_empty() {
+            sanitize_line(&identity_line(identity))
+        } else {
+            format!("{}  ({status})", sanitize_line(&identity_line(identity)))
+        };
+        let row = EDIT_ROWS + index;
+        let style = if row == edit.cursor {
+            theme.reversed()
+        } else if identity.status.needs_attention() {
+            theme.flag()
+        } else {
+            Style::new()
+        };
+        out.lines.push(PaneLine {
+            target: Some(row),
+            ..PaneLine::new(Span::styled(
+                fit(&format!("{MARGIN}{text}"), out.width, theme.ellipsis()),
+                style,
+            ))
+        });
+    }
+    let Some(identity) = edit.identity_at_cursor() else {
+        return first;
+    };
+    let Some(title) = notice_title(identity) else {
+        return first;
+    };
+    out.blank();
+    out.para(&sanitize_line(&title), theme.bold(), 0);
+    out.para(&sanitize_line(&notice_text(identity)), Style::new(), 0);
+    for (field, ours, theirs) in differences(identity) {
+        out.para(
+            &format!(
+                "{field}: Zmail has \u{201c}{}\u{201d}, the server \u{201c}{}\u{201d}",
+                sanitize_line(&ours),
+                sanitize_line(&theirs)
+            ),
+            theme.faint(),
+            2,
+        );
+    }
+    let keys = if identity.status.differs() {
+        format!("U: {UPDATE_SERVER}   S: {USE_SERVER}")
+    } else {
+        format!("R: {RECREATE}   D: {REMOVE}")
+    };
+    out.para(&keys, theme.faint(), 0);
+    first
 }
 
 // ---------------------------------------------------------------------------

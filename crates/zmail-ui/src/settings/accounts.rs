@@ -16,6 +16,12 @@
 //!   on this computer and go with the account. A message being sent at
 //!   that moment blocks removal until it has gone.
 //!
+//! - **Identities** that differ from their JMAP server get a notice on
+//!   the card, worded by `zmail_setup::identities`, with Update the
+//!   server and Use the server's; one the server no longer lists offers
+//!   to create it there again or to remove it from Zmail. Updating and
+//!   creating run on the sync runtime and report back with a toast.
+//!
 //! The sidebar's Fix… on a failing account opens this section on that
 //! account ([`AccountsSettings::focus_account`]), as does Re-authenticate
 //! on an Outbox message the server refused for the account's sign-in.
@@ -25,7 +31,9 @@ use gpui::{
     SharedString, Subscription, Window, div, prelude::*, px, rgb,
 };
 use zmail_core::{
-    AccountColor, AccountSummary, AuthKind, OutboxJobState, SyncPhase, reauth::ReauthReason,
+    AccountColor, AccountSummary, AuthKind, OutboxJobState, SyncPhase,
+    identity_sync::{IdentitySyncStatus, SyncedIdentity},
+    reauth::ReauthReason,
 };
 use zmail_setup::accounts::{
     RemoveError, budget_label, budget_options, removal_blocker, removal_description, removal_lines,
@@ -85,6 +93,9 @@ struct AccountCard {
     /// A Gmail account signed in with the user's own OAuth client, whose
     /// sign-ins expire after 7 days while its app is in Testing.
     google_oauth: bool,
+    /// The account's identities that differ from the server, or that the
+    /// server no longer lists.
+    identities: Vec<SyncedIdentity>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -108,6 +119,8 @@ pub(crate) struct AccountsSettings {
     remove: ModalState,
     removal: Option<PendingRemoval>,
     remove_cancel: FocusHandle,
+    /// The identity being sent to the server, whose buttons wait.
+    identity_busy: Option<i64>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -137,6 +150,7 @@ impl AccountsSettings {
             remove: ModalState::new(cx),
             removal: None,
             remove_cancel: cx.focus_handle(),
+            identity_busy: None,
             _subscriptions: subscriptions,
         };
         this.refresh(cx);
@@ -219,6 +233,12 @@ impl AccountsSettings {
                 .filter(|job| job.state == OutboxJobState::Failed)
                 .filter_map(|job| job.last_error_message)
                 .find(|message| ReauthReason::of_message(message).is_some());
+            card.identities = store
+                .list_synced_identities(account.id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|identity| identity.status.needs_attention())
+                .collect();
             card.account = account;
             card.auth = auth;
             card.google_oauth = google_oauth;
@@ -258,6 +278,7 @@ impl AccountsSettings {
             budget_options: options,
             refused_send: None,
             google_oauth: false,
+            identities: Vec::new(),
             _subscriptions: [color_subscription, budget_subscription],
         }
     }
@@ -306,6 +327,16 @@ impl AccountsSettings {
     #[cfg(test)]
     pub(crate) fn password_input(&self) -> &Entity<TextInput> {
         &self.password
+    }
+
+    /// The titles of the identity notices, card by card.
+    #[cfg(test)]
+    pub(crate) fn identity_notice_titles(&self) -> Vec<String> {
+        self.cards
+            .iter()
+            .flat_map(|card| &card.identities)
+            .filter_map(zmail_setup::identities::notice_title)
+            .collect()
     }
 
     /// Whether the Remove confirmation is open.
@@ -470,6 +501,158 @@ impl AccountsSettings {
             ))),
         }
         self.refresh(cx);
+    }
+
+    /// Update the server: sends the identity's values in Zmail to its
+    /// server identity, on the sync runtime.
+    pub(crate) fn update_server_identity(&mut self, identity_id: i64, cx: &mut Context<Self>) {
+        self.identity_on_server(identity_id, false, cx);
+    }
+
+    /// Creates an identity the server no longer lists there again.
+    pub(crate) fn recreate_identity(&mut self, identity_id: i64, cx: &mut Context<Self>) {
+        self.identity_on_server(identity_id, true, cx);
+    }
+
+    fn identity_on_server(&mut self, identity_id: i64, create: bool, cx: &mut Context<Self>) {
+        if self.identity_busy.is_some() {
+            return;
+        }
+        let Some(email) = self.identity_email(identity_id) else {
+            return;
+        };
+        self.identity_busy = Some(identity_id);
+        let sync = SettingsHost::get(cx).sync_service.clone();
+        cx.spawn(async move |this, cx| {
+            let result = if create {
+                sync.recreate_identity_and_wait(identity_id).await
+            } else {
+                sync.push_identity_and_wait(identity_id).await
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.identity_busy = None;
+                cx.emit(match (result, create) {
+                    (Ok(()), false) => {
+                        SettingsEvent::Status(format!("Updated {email} on the server."))
+                    }
+                    (Ok(()), true) => {
+                        SettingsEvent::Status(format!("Created {email} on the server."))
+                    }
+                    (Err(error), false) => SettingsEvent::Error(format!(
+                        "Could not update {email} on the server: {error:#}"
+                    )),
+                    (Err(error), true) => SettingsEvent::Error(format!(
+                        "Could not create {email} on the server: {error:#}"
+                    )),
+                });
+                this.refresh(cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Use the server's: replaces the identity's values in Zmail with the
+    /// server's.
+    pub(crate) fn use_server_identity(&mut self, identity_id: i64, cx: &mut Context<Self>) {
+        let Some(email) = self.identity_email(identity_id) else {
+            return;
+        };
+        match SettingsHost::get(cx).store.use_server_identity(identity_id) {
+            Ok(()) => cx.emit(SettingsEvent::Status(format!(
+                "{email} now has the server's details."
+            ))),
+            Err(error) => cx.emit(SettingsEvent::Error(format!(
+                "Could not take the server's details for {email}: {error:#}"
+            ))),
+        }
+        self.refresh(cx);
+    }
+
+    /// Removes an identity the server no longer lists from Zmail.
+    pub(crate) fn remove_identity(&mut self, identity_id: i64, cx: &mut Context<Self>) {
+        let Some(email) = self.identity_email(identity_id) else {
+            return;
+        };
+        match SettingsHost::get(cx).store.remove_identity(identity_id) {
+            Ok(()) => {
+                refresh_workspace(cx);
+                cx.emit(SettingsEvent::Status(format!(
+                    "Removed {email} from Zmail."
+                )));
+            }
+            Err(error) => cx.emit(SettingsEvent::Error(format!(
+                "Could not remove {email}: {error:#}"
+            ))),
+        }
+        self.refresh(cx);
+    }
+
+    fn identity_email(&self, identity_id: i64) -> Option<String> {
+        self.cards
+            .iter()
+            .flat_map(|card| &card.identities)
+            .find(|identity| identity.identity.id == identity_id)
+            .map(|identity| identity.identity.email_address.clone())
+    }
+
+    /// The notice for an identity that differs from the server, or that
+    /// the server no longer lists, with its two choices.
+    fn render_identity_notice(
+        &self,
+        identity: &SyncedIdentity,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use zmail_setup::identities::{
+            RECREATE, REMOVE, UPDATE_SERVER, USE_SERVER, differences, notice_text, notice_title,
+        };
+        let identity_id = identity.identity.id;
+        let busy = self.identity_busy.is_some();
+        let mut banner = Banner::new(
+            ("identity-notice", identity_id as u64),
+            notice_text(identity),
+        )
+        .tone(BannerTone::Caution)
+        .title(notice_title(identity).unwrap_or_default());
+        for (field, ours, theirs) in differences(identity) {
+            banner = banner
+                .detail(format!("In Zmail, {field}"), ours)
+                .detail(format!("On the server, {field}"), theirs);
+        }
+        let button = |name: &'static str,
+                      label: &'static str,
+                      action: fn(&mut Self, i64, &mut Context<Self>)| {
+            div()
+                .debug_selector(move || format!("{name}-{identity_id}"))
+                .child(
+                    Button::new((name, identity_id as u64), label)
+                        .size(ButtonSize::Small)
+                        .disabled(busy)
+                        .on_click(cx.listener(move |this, _, _, cx| action(this, identity_id, cx))),
+                )
+        };
+        let banner = if identity.status == IdentitySyncStatus::NotOnServer {
+            banner
+                .action(button(
+                    "identity-recreate",
+                    RECREATE,
+                    Self::recreate_identity,
+                ))
+                .action(button("identity-remove", REMOVE, Self::remove_identity))
+        } else {
+            banner
+                .action(button(
+                    "identity-update-server",
+                    UPDATE_SERVER,
+                    Self::update_server_identity,
+                ))
+                .action(button(
+                    "identity-use-server",
+                    USE_SERVER,
+                    Self::use_server_identity,
+                ))
+        };
+        div().pt(px(SPACE_3)).child(banner).into_any_element()
     }
 
     /// Open the Remove confirmation for `account_id`.
@@ -687,6 +870,12 @@ impl AccountsSettings {
                                     ),
                             ),
                     ),
+            )
+            .children(
+                card.identities
+                    .iter()
+                    .map(|identity| self.render_identity_notice(identity, cx))
+                    .collect::<Vec<_>>(),
             )
             .child(setting_row(
                 "Colour",

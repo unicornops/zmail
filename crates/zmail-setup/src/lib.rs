@@ -12,6 +12,7 @@
 //! | [`oauth`] | the OAuth2 browser sign-in (PKCE, loopback) step by step, and the SSH note |
 //! | [`google`] | the guide to a Google OAuth client of your own, as data, and its checks |
 //! | [`accounts`] | storing an account and its secret, the first sync, removing, signing in again |
+//! | [`identities`] | how a JMAP identity that differs from the server is worded, and its choices |
 //! | `proton` | the Proton sign-in's state machine (`proton` feature) |
 //!
 //! Rules both frontends rely on:
@@ -29,6 +30,7 @@ pub mod check;
 pub mod discovery;
 pub mod form;
 pub mod google;
+pub mod identities;
 pub mod oauth;
 #[cfg(feature = "proton")]
 pub mod proton;

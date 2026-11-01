@@ -9,7 +9,7 @@ use zmail_core::{
 };
 use zmail_store::LocalStore;
 
-use super::{Harness, Setup, click, focus, keys, open_workspace, open_workspace_with};
+use super::{Harness, Setup, click, drawn, focus, keys, open_workspace, open_workspace_with};
 use crate::InitialView;
 use crate::actions::ToggleDensity;
 use crate::components::{ComponentTheme, Select};
@@ -566,6 +566,116 @@ fn remove_confirms_then_deletes_local_data_and_secrets(cx: &mut TestAppContext) 
         toasts,
         ["Removed Work from this computer. Its mail on the server is untouched."]
     );
+}
+
+/// Links the account's identity to a server identity with another name
+/// (a conflict), and leaves a second identity the server stopped
+/// listing; returns their ids.
+fn seed_identities_needing_attention(store: &LocalStore) -> (i64, i64) {
+    use zmail_core::identity_sync::{IdentityValues, ServerIdentity};
+    let account_id = store.list_accounts().expect("accounts")[0].id;
+    let primary = store.list_identities(account_id).expect("identities")[0].clone();
+    let server = |id: &str, email: &str, name: &str| ServerIdentity {
+        id: id.to_owned(),
+        email: email.to_owned(),
+        values: IdentityValues {
+            name: name.to_owned(),
+            reply_to: String::new(),
+            signature: "-- from the server".to_owned(),
+        },
+        may_delete: true,
+    };
+    let both = [
+        server("i1", &primary.email_address, "Name on the server"),
+        server("i2", "help@example.test", "Help desk"),
+    ];
+    store
+        .merge_server_identities(account_id, &both)
+        .expect("merged");
+    store
+        .merge_server_identities(account_id, &both[..1])
+        .expect("merged");
+    let help = store.list_identities(account_id).expect("identities")[1].id;
+    (primary.id, help)
+}
+
+#[gpui::test]
+fn identities_that_differ_from_the_server_offer_both_directions(cx: &mut TestAppContext) {
+    let (_view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Settings(SettingsSection::Accounts),
+        |store| {
+            seed_identities_needing_attention(store);
+        },
+    );
+    let account_id = harness.store.list_accounts().expect("accounts")[0].id;
+    let identities = harness
+        .store
+        .list_identities(account_id)
+        .expect("identities");
+    let (primary, help) = (identities[0].id, identities[1].id);
+    let (root, mut window_cx) = settings_window(cx);
+    window_cx.simulate_resize(size(px(820.0), px(1400.0)));
+    window_cx.run_until_parked();
+
+    // The differing identity: both choices; the removed one: its two.
+    for selector in [
+        format!("identity-update-server-{primary}"),
+        format!("identity-use-server-{primary}"),
+        format!("identity-recreate-{help}"),
+        format!("identity-remove-{help}"),
+    ] {
+        assert!(
+            drawn(selector.clone(), &mut window_cx),
+            "{selector} is drawn"
+        );
+    }
+    assert!(!drawn(
+        format!("identity-use-server-{help}"),
+        &mut window_cx
+    ));
+
+    // (Update the server runs on the sync runtime, which GPUI's test
+    // scheduler can't wait for; zmail-jmap and the live James test cover
+    // it.)
+    let notice = root.read_with(&window_cx, |root, cx| {
+        root.accounts().read(cx).identity_notice_titles()
+    });
+    assert_eq!(
+        notice,
+        [
+            "me@example.test differs from the server",
+            "help@example.test is no longer on the server"
+        ]
+    );
+
+    // Use the server's: the name changes and the notice goes.
+    click_selector(&format!("identity-use-server-{primary}"), &mut window_cx);
+    assert_eq!(
+        harness
+            .store
+            .list_identities(account_id)
+            .expect("identities")[0]
+            .display_name,
+        "Name on the server"
+    );
+    assert!(!drawn(
+        format!("identity-use-server-{primary}"),
+        &mut window_cx
+    ));
+
+    // Remove from Zmail.
+    click_selector(&format!("identity-remove-{help}"), &mut window_cx);
+    assert_eq!(
+        harness
+            .store
+            .list_identities(account_id)
+            .expect("identities")
+            .len(),
+        1
+    );
+    assert!(!drawn(format!("identity-remove-{help}"), &mut window_cx));
 }
 
 #[gpui::test]
