@@ -1004,6 +1004,88 @@ fn a_reply_goes_to_reply_to_from_the_alias_the_message_was_sent_to(cx: &mut Test
     );
 }
 
+/// Replaces the account's mail with one message the user sent from
+/// `me@example.test` to Ada and Bo, with Cy in Cc; returns the
+/// conversation.
+fn seed_own_message(harness: &Harness) -> i64 {
+    let account_id = harness.store.list_accounts().expect("accounts load")[0].id;
+    let mut thread = super::thread_snapshot(0);
+    thread.subject = "Picnic".to_owned();
+    let message = &mut thread.messages[0];
+    message.subject = "Picnic".to_owned();
+    message.sender = "Me <me@example.test>".to_owned();
+    message.recipients = "Ada <ada@example.test>, bo@example.test".to_owned();
+    message.headers.cc = "Cy <cy@example.test>, me@example.test".to_owned();
+    message.headers.message_id = Some("picnic-1@example.test".to_owned());
+    harness
+        .store
+        .replace_account_snapshot(
+            account_id,
+            &AccountSyncSnapshot {
+                checkpoint: "test".to_owned(),
+                detail: "test".to_owned(),
+                identities: Some(vec![NewIdentity {
+                    display_name: "Me".to_owned(),
+                    email_address: "me@example.test".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }]),
+                mailboxes: vec![zmail_core::MailboxSnapshot {
+                    name: "Sent".to_owned(),
+                    role: Some("sent".to_owned()),
+                    threads: vec![thread],
+                    ..Default::default()
+                }],
+            },
+        )
+        .expect("the mail is stored");
+    let sent = harness
+        .store
+        .mailbox_id_by_role(account_id, "sent")
+        .expect("lookup")
+        .expect("a Sent folder");
+    harness.store.list_threads(sent, 0..1).expect("threads")[0].id
+}
+
+#[gpui::test]
+fn a_reply_to_my_own_message_goes_to_its_recipients(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let thread_id = seed_own_message(&harness);
+    view.update(cx, |view, cx| {
+        view.selected_thread_id = Some(thread_id);
+        view.refresh_from_store(cx);
+    });
+    cx.run_until_parked();
+    let reply = |reply_all: bool, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.reply_to_selected_thread(reply_all, None, window, cx)
+            })
+        });
+        cx.run_until_parked();
+        let compose = inline_reply(&view, cx).expect("an inline reply");
+        let (draft_id, _, _) = inputs(&compose, cx);
+        harness
+            .store
+            .draft_detail(draft_id)
+            .expect("the draft loads")
+            .expect("the draft exists")
+    };
+
+    let draft = reply(false, cx);
+    assert_eq!(draft.to, ["Ada <ada@example.test>", "bo@example.test"]);
+    assert!(draft.cc.is_empty());
+    assert_eq!(draft.identity_email, "me@example.test");
+    assert_eq!(
+        draft.threading.in_reply_to.as_deref(),
+        Some("picnic-1@example.test")
+    );
+
+    let draft = reply(true, cx);
+    assert_eq!(draft.to, ["Ada <ada@example.test>", "bo@example.test"]);
+    assert_eq!(draft.cc, ["Cy <cy@example.test>"]);
+}
+
 #[gpui::test]
 fn a_forward_opens_with_the_messages_attachments(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::Mail);
