@@ -229,7 +229,7 @@ impl AccountIdentities {
         if self.protocol == ProtocolKind::Proton {
             Some("Proton sets this address.")
         } else if identity.is_linked() {
-            Some("The server sets this address, so it can't change.")
+            Some("The server sets this address.")
         } else {
             None
         }
@@ -271,9 +271,20 @@ impl AccountIdentities {
     }
 
     /// The form's problems, field by field; empty when it can be saved.
-    /// The address is checked only when it is new or can change.
+    /// The address is checked only when it is new or can change, and an
+    /// edited identity's other fields only when they changed: a value the
+    /// server set is not the user's to fix before saving another field.
     pub fn validate(&self, mode: FormMode, form: &IdentityForm) -> Vec<(IdentityField, String)> {
         let mut errors = Vec::new();
+        let stored = match mode {
+            FormMode::Edit(identity_id) => self.find(identity_id).map(IdentityForm::from_identity),
+            FormMode::Add => None,
+        };
+        let changed = |field: IdentityField| {
+            stored
+                .as_ref()
+                .is_none_or(|stored| stored.value(field) != form.value(field))
+        };
         let checks_address = match mode {
             FormMode::Add => true,
             FormMode::Edit(identity_id) => self
@@ -302,14 +313,14 @@ impl AccountIdentities {
                 ));
             }
         }
-        if form.name.chars().any(char::is_control) {
+        if changed(IdentityField::Name) && form.name.chars().any(char::is_control) {
             errors.push((
                 IdentityField::Name,
                 "The name can't contain line breaks or control characters.".to_owned(),
             ));
         }
         let reply_to = form.reply_to.trim();
-        if !reply_to.is_empty() {
+        if changed(IdentityField::ReplyTo) && !reply_to.is_empty() {
             let addresses = parse_address_list(reply_to);
             let valid = !reply_to.chars().any(char::is_control)
                 && !addresses.is_empty()
@@ -326,10 +337,11 @@ impl AccountIdentities {
                 ));
             }
         }
-        if form
-            .signature
-            .chars()
-            .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+        if changed(IdentityField::Signature)
+            && form
+                .signature
+                .chars()
+                .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
         {
             errors.push((
                 IdentityField::Signature,
@@ -636,10 +648,23 @@ mod tests {
         gone.status = IdentitySyncStatus::NotOnServer;
         assert!(!jmap.offers_update_server(&gone) && !jmap.offers_remove_everywhere(&gone));
         assert!(!removal_text(&jmap, &gone).contains("server"));
-        // A linked identity's address isn't checked (it can't change).
+        // A linked identity's address isn't checked (it can't change), nor
+        // a value the server set that the user left alone.
         assert!(
             jmap.validate(FormMode::Edit(2), &form("Help", "", "", ""))
                 .is_empty()
+        );
+        let mut hostile = alias.clone();
+        hostile.local.name = "Help\x1b[2J".to_owned();
+        let served = account(ProtocolKind::Jmap, vec![primary.clone(), hostile]);
+        assert!(
+            served
+                .validate(FormMode::Edit(2), &form("Help\x1b[2J", "", "", "-- new"))
+                .is_empty()
+        );
+        assert_eq!(
+            fields(&served.validate(FormMode::Edit(2), &form("Help\x1b[3J", "", "", ""))),
+            [IdentityField::Name]
         );
 
         let imap = account(ProtocolKind::Imap, vec![identity(1, "a@b.c", true, false)]);
