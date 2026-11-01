@@ -1493,6 +1493,7 @@ impl WorkspaceView {
             bcc: Vec::new(),
             subject: String::new(),
             body: String::new(),
+            threading: Default::default(),
         };
         match self
             .mail_actions
@@ -1529,6 +1530,7 @@ impl WorkspaceView {
                         bcc: Vec::new(),
                         subject: String::new(),
                         body: String::new(),
+                        threading: Default::default(),
                     },
                     cx,
                 )
@@ -1883,12 +1885,13 @@ impl WorkspaceView {
         };
         let start = reply::reply(
             &thread.subject,
+            &thread.mailbox_name,
             latest_message,
             &reply::own_addresses(&self.identities),
             reply_all,
             &format_full_date(&latest_message.received_at, &chrono::Local, self.hour_cycle),
         )?;
-        self.create_thread_draft(start.to, start.cc, start.subject, start.body, cx)
+        self.create_thread_draft(start, cx)
     }
 
     fn create_forward_draft(&self, thread: &ThreadView, cx: &mut Context<Self>) -> Result<i64> {
@@ -1898,20 +1901,14 @@ impl WorkspaceView {
             .context("selected thread has no messages to forward")?;
         let start = reply::forward(
             &thread.subject,
+            &thread.mailbox_name,
             latest_message,
             &format_full_date(&latest_message.received_at, &chrono::Local, self.hour_cycle),
         );
-        self.create_thread_draft(start.to, start.cc, start.subject, start.body, cx)
+        self.create_thread_draft(start, cx)
     }
 
-    fn create_thread_draft(
-        &self,
-        to: Vec<String>,
-        cc: Vec<String>,
-        subject: String,
-        body: String,
-        cx: &mut Context<Self>,
-    ) -> Result<i64> {
+    fn create_thread_draft(&self, start: reply::DraftStart, cx: &mut Context<Self>) -> Result<i64> {
         let account_id = self
             .selected_account_id
             .context("select an account before composing")?;
@@ -1919,11 +1916,12 @@ impl WorkspaceView {
         let draft = NewDraft {
             account_id,
             identity_id: identity.id,
-            to,
-            cc,
+            to: start.to,
+            cc: start.cc,
             bcc: Vec::new(),
-            subject,
-            body,
+            subject: start.subject,
+            body: start.body,
+            threading: start.threading,
         };
         self.mail_actions
             .update(cx, |actions, cx| actions.create_draft(&draft, cx))

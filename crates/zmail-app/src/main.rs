@@ -481,6 +481,7 @@ fn launch_gui_with_mailto(url: &str) -> Result<()> {
                 bcc: mailto.bcc,
                 subject: mailto.subject,
                 body: mailto.body,
+                threading: Default::default(),
             })?;
             launch_gui_with_initial_draft(Some(draft_id))
         }
@@ -1046,6 +1047,7 @@ fn compose_draft(account_id: i64, identity_id: Option<i64>) -> Result<()> {
         bcc: Vec::new(),
         subject: String::new(),
         body: String::new(),
+        threading: Default::default(),
     })?;
     let mut draft = store
         .draft_detail(draft_id)?

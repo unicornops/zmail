@@ -825,6 +825,7 @@ impl App {
                     bcc: Vec::new(),
                     subject: String::new(),
                     body: String::new(),
+                    threading: Default::default(),
                 },
                 &mut |_| {},
             )
@@ -905,12 +906,13 @@ impl App {
         }
     }
 
-    /// The conversation and message of a reply or forward, filtered.
+    /// The conversation's subject, its mailbox and the message of a reply
+    /// or forward, filtered.
     fn reply_message(
         &self,
         thread_id: i64,
         message_id: Option<i64>,
-    ) -> anyhow::Result<(String, ThreadMessage)> {
+    ) -> anyhow::Result<(String, String, ThreadMessage)> {
         let view = self
             .store
             .thread_view(thread_id)?
@@ -921,7 +923,11 @@ impl App {
         }
         .or_else(|| view.messages.last())
         .ok_or_else(|| anyhow::anyhow!("That conversation has no messages"))?;
-        Ok((sanitize_line(&view.subject), filtered(message)))
+        Ok((
+            sanitize_line(&view.subject),
+            view.mailbox_name.clone(),
+            filtered(message),
+        ))
     }
 
     /// `R`: replies, asking first whether to reply to all when that adds
@@ -934,7 +940,7 @@ impl App {
         let asks = self
             .reply_message(thread_id, message_id)
             .ok()
-            .and_then(|(_, message)| {
+            .and_then(|(_, _, message)| {
                 let own = self.own_addresses(account_id);
                 let one = reply::reply_recipients(&message, &own, false).ok()?;
                 let all = reply::reply_recipients(&message, &own, true).ok()?;
@@ -968,10 +974,11 @@ impl App {
         let zone = *self.now().offset();
         let result = self
             .reply_message(thread_id, message_id)
-            .and_then(|(subject, message)| {
+            .and_then(|(subject, mailbox, message)| {
                 let date = format_full_date(&message.received_at, &zone, self.hour_cycle);
                 reply::reply(
                     &subject,
+                    &mailbox,
                     &message,
                     &self.own_addresses(account_id),
                     reply_all,
@@ -994,9 +1001,9 @@ impl App {
         let zone = *self.now().offset();
         let result = self
             .reply_message(thread_id, message_id)
-            .map(|(subject, message)| {
+            .map(|(subject, mailbox, message)| {
                 let date = format_full_date(&message.received_at, &zone, self.hour_cycle);
-                reply::forward(&subject, &message, &date)
+                reply::forward(&subject, &mailbox, &message, &date)
             })
             .and_then(|start| self.create_started_draft(account_id, start));
         match result {
@@ -1020,6 +1027,7 @@ impl App {
                 bcc: Vec::new(),
                 subject: start.subject,
                 body: start.body,
+                threading: start.threading,
             },
             &mut |_| {},
         )

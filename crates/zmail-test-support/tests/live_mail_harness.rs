@@ -11,8 +11,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use tokio::runtime::Builder;
 use zmail_core::{
-    AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutgoingAttachment, OutgoingConfig,
-    OutgoingMessage, ProtocolKind,
+    AuthKind, CachePolicySummary, NewAccount, NewDraft, NewIdentity, OutboxJobState,
+    OutgoingAttachment, OutgoingConfig, OutgoingMessage, ProtocolKind, SubmissionKind,
 };
 use zmail_imap::{WatchEvent, WatchPlan};
 use zmail_security::{InMemorySecretStore, SecretStore};
@@ -211,6 +211,10 @@ fn syncs_attachments_and_saves_the_original_bytes() -> Result<()> {
                     content_type: "text/plain".to_owned(),
                     bytes: attachment_bytes.clone(),
                 }],
+                message_id: None,
+                in_reply_to: None,
+                references: Vec::new(),
+                reply_action: None,
             },
         )
         .await
@@ -382,6 +386,157 @@ fn hydrates_bodies_lazily_and_survives_offline_opens() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn a_reply_from_zmail_threads_on_the_server() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&sending_imap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_RECIPIENT_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+
+    // The sender's message, itself a reply in a conversation.
+    let subject = "Threading: the plan";
+    Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(submit_outgoing_message(
+            &harness_submission(),
+            &OutgoingMessage {
+                from_email: MAIL_HARNESS_SENDER.to_owned(),
+                from_name: Some("Harness Sender".to_owned()),
+                to: vec![MAIL_HARNESS_RECIPIENT.to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: subject.to_owned(),
+                text_body: "Shall we ship on Friday?".to_owned(),
+                attachments: Vec::new(),
+                message_id: Some("plan-2@sender.test".to_owned()),
+                in_reply_to: Some("plan-1@sender.test".to_owned()),
+                references: vec!["plan-1@sender.test".to_owned()],
+                reply_action: None,
+            },
+        ))?;
+
+    sync_service.sync_account_and_wait(account_id)?;
+    let thread = store
+        .list_threads(inbox_id(&store, account_id)?, 0..50)?
+        .into_iter()
+        .find(|thread| thread.subject == subject)
+        .context("the sender's message should sync")?;
+    let view = store
+        .thread_view(thread.id)?
+        .context("the thread should load")?;
+    let original = &view.messages[0];
+    assert_eq!(
+        original.headers.message_id.as_deref(),
+        Some("plan-2@sender.test")
+    );
+
+    // Reply as both frontends do, and send through the outbox.
+    let identities = store.list_identities(account_id)?;
+    let start = zmail_actions::reply::reply(
+        &view.subject,
+        &view.mailbox_name,
+        original,
+        &zmail_actions::reply::own_addresses(&identities),
+        false,
+        "today",
+    )?;
+    let draft_id = store.create_draft(&NewDraft {
+        account_id,
+        identity_id: identities[0].id,
+        to: start.to,
+        cc: start.cc,
+        bcc: Vec::new(),
+        subject: start.subject.clone(),
+        body: format!("Friday works.{}", start.body),
+        threading: start.threading,
+    })?;
+    sync_service.queue_draft_and_send(draft_id)?;
+    wait_until_sent(&store, &sync_service, account_id)?;
+    let sent_id = store
+        .draft_detail(draft_id)?
+        .context("the draft should still exist")?
+        .message_id
+        .context("the sent draft should keep its Message-ID")?;
+
+    // The delivered message, read from the sender's mailbox on the server.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut sender = RawImap::connect(
+        3143,
+        MAIL_HARNESS_SENDER_LOGIN,
+        MAIL_HARNESS_SENDER_PASSWORD,
+    )?;
+    // Every message's threading headers, read without SEARCH, so a miss
+    // shows what the mailbox does hold.
+    let wanted = format!("Subject: {}", start.subject);
+    let mut seen = String::new();
+    let headers = loop {
+        sender.command("SELECT INBOX")?;
+        if let Ok(transcript) = sender.command(
+            "FETCH 1:* (BODY.PEEK[HEADER.FIELDS (SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)])",
+        ) {
+            let transcript = unfolded(&transcript);
+            if let Some(found) = transcript
+                .split("\r\n* ")
+                .find(|block| block.contains(&wanted))
+            {
+                break found.to_owned();
+            }
+            seen = transcript;
+        }
+        if Instant::now() > deadline {
+            bail!("the reply never reached the sender; the INBOX holds:\n{seen}");
+        }
+        thread::sleep(Duration::from_millis(500));
+    };
+    assert!(
+        headers.contains("In-Reply-To: <plan-2@sender.test>"),
+        "In-Reply-To names the message answered: {headers}"
+    );
+    assert!(
+        headers.contains("References: <plan-1@sender.test> <plan-2@sender.test>"),
+        "References extends the conversation: {headers}"
+    );
+    assert!(
+        headers.contains(&format!("Message-ID: <{sent_id}>")),
+        "the Message-ID is the one the draft keeps: {headers}"
+    );
+    Ok(())
+}
+
+/// Waits until the account's outbox has sent everything, running passes.
+fn wait_until_sent(store: &LocalStore, sync_service: &SyncService, account_id: i64) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let _ = sync_service.process_outbox_and_wait(Some(account_id));
+        let jobs = store.list_outbox_jobs(Some(account_id))?;
+        if let Some(failed) = jobs.iter().find(|job| job.state == OutboxJobState::Failed) {
+            bail!("delivery failed: {:?}", failed.last_error_message);
+        }
+        if !jobs.is_empty() && jobs.iter().all(|job| job.state == OutboxJobState::Sent) {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            bail!("not sent in time: {jobs:?}");
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// A header block with folded lines joined, as RFC 5322 reads it.
+fn unfolded(headers: &str) -> String {
+    headers
+        .replace("\r\n ", " ")
+        .replace("\r\n\t", " ")
+        .replace("\n ", " ")
+        .replace("\n\t", " ")
 }
 
 /// A minimal blocking IMAP client used for harness-side setup against the
@@ -1226,6 +1381,21 @@ fn imap_account() -> NewAccount {
             signature: "Regards,\nPhase 2b Recipient".to_owned(),
             is_primary: true,
         }],
+    }
+}
+
+/// The recipient's account, sending through the harness's SMTP server.
+fn sending_imap_account() -> NewAccount {
+    NewAccount {
+        outgoing: Some(OutgoingConfig {
+            kind: SubmissionKind::Smtp,
+            host: Some(MAIL_HARNESS_HOST.to_owned()),
+            port: Some(MAIL_HARNESS_SMTP_PORT),
+            username: Some(MAIL_HARNESS_RECIPIENT_LOGIN.to_owned()),
+            security: Some(SubmissionSecurity::Plain),
+            hello_name: "localhost".to_owned(),
+        }),
+        ..imap_account()
     }
 }
 

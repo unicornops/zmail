@@ -35,6 +35,8 @@ crossterm.workspace = true
 url.workspace = true
 zmail-autodiscover = { path = "../zmail-autodiscover" }
 zmail-tui = { path = "../zmail-tui" }
+# The reply tests start their drafts as both frontends do.
+zmail-actions = { path = "../zmail-actions" }
 
 [lints]
 workspace = true

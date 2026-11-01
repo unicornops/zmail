@@ -465,6 +465,7 @@ mod tests {
                 bcc: Vec::new(),
                 subject: "Draft".to_owned(),
                 body: "Draft".to_owned(),
+                threading: Default::default(),
             })
             .expect("draft");
         store.add_draft_attachment(draft, &source).expect("added");

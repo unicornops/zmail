@@ -449,6 +449,7 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
                        redesign after it so we can reuse the new components.\n\n\
                        I'll bring the estimates to Thursday's review.\n\nSam"
                     .to_owned(),
+                threading: Default::default(),
             })?;
             InitialView::Draft(draft_id)
         }
@@ -466,6 +467,7 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
                 bcc: Vec::new(),
                 subject: "Re: Q4 roadmap review".to_owned(),
                 body: "Thanks Priya, see you Thursday.\n\nSam".to_owned(),
+                threading: Default::default(),
             })?;
             InitialView::Sending(draft_id)
         }
@@ -487,6 +489,7 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
                 bcc: Vec::new(),
                 subject: "Offline search demo".to_owned(),
                 body: "Hi all,\n\nThe offline search build is ready to try.\n\nSam".to_owned(),
+                threading: Default::default(),
             })?;
             InitialView::Draft(draft_id)
         }
@@ -646,6 +649,7 @@ fn seed_outbox(store: &LocalStore, account_id: i64) -> Result<()> {
             bcc: Vec::new(),
             subject: subject.to_owned(),
             body: "Thanks, see you there.\n\nSam".to_owned(),
+            threading: Default::default(),
         })?;
         store.queue_draft(draft_id)
     };
@@ -1231,6 +1235,7 @@ fn seed_more_accounts(store: &LocalStore, work_id: i64, now: u64) -> Result<()> 
         bcc: Vec::new(),
         subject: "Estimates for the settings redesign".to_owned(),
         body: "Hi Priya,\n\nEstimates attached.\n\nSam".to_owned(),
+        threading: Default::default(),
     })?;
     let job = store.queue_draft(draft_id)?;
     store.record_outbox_failure(job, "connection refused")?;

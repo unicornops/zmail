@@ -10767,6 +10767,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "url",
+ "zmail-actions",
  "zmail-autodiscover",
  "zmail-core",
  "zmail-imap",

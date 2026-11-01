@@ -736,6 +736,7 @@ fn the_outbox_shows_queued_failed_and_refused_messages() {
                 bcc: Vec::new(),
                 subject: subject.to_owned(),
                 body: "Body".to_owned(),
+                threading: Default::default(),
             })
             .expect("draft");
         store.queue_draft(draft_id).expect("queued")

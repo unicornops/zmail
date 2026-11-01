@@ -4,12 +4,14 @@
 //! Bridge sends those recipients the MIME message its SMTP client handed
 //! over (`MIMEBody`). Zmail's outbox holds a composed message instead, so
 //! this writes the MIME an SMTP client would send: the From, To, Cc,
-//! Subject and Date headers (never Bcc), the text as quoted-printable
+//! Subject, Date, Message-ID, In-Reply-To and References headers (never
+//! Bcc), the text as quoted-printable
 //! UTF-8, and the attachments as base64 parts of a `multipart/mixed`
 //! message. Zmail's own code, written with the MIME helpers of the
 //! `message.rs` port.
 
 use chrono::Utc;
+use zmail_core::threading::format_message_ids;
 use zmail_proton_api::EmailAddress;
 
 use crate::message::{
@@ -34,6 +36,12 @@ pub(crate) struct MimeSource<'a> {
     pub(crate) cc: &'a [EmailAddress],
     pub(crate) subject: &'a str,
     pub(crate) text: &'a str,
+    /// The Message-ID, without angle brackets.
+    pub(crate) message_id: Option<&'a str>,
+    /// The In-Reply-To id, without angle brackets.
+    pub(crate) in_reply_to: Option<&'a str>,
+    /// The References ids, oldest first.
+    pub(crate) references: &'a [String],
 }
 
 /// Writes the message as MIME with CRLF line ends.
@@ -48,6 +56,15 @@ pub(crate) fn build_mime_body(source: &MimeSource<'_>, attachments: &[OutgoingFi
     }
     header.set("Subject", &q_encode(source.subject));
     header.set("Date", &rfc1123z(Utc::now()));
+    if let Some(message_id) = source.message_id {
+        header.set("Message-ID", &format_message_ids(&[message_id]));
+    }
+    if let Some(in_reply_to) = source.in_reply_to {
+        header.set("In-Reply-To", &format_message_ids(&[in_reply_to]));
+    }
+    if !source.references.is_empty() {
+        header.set("References", &format_message_ids(source.references));
+    }
     header.set("MIME-Version", "1.0");
 
     let mut out = Vec::new();
@@ -117,6 +134,12 @@ mod tests {
                 cc: &[],
                 subject: "Grüße",
                 text: "Hello\nsecond line",
+                message_id: Some("m1@proton.me"),
+                in_reply_to: Some("parent@example.com"),
+                references: &[
+                    "root@example.com".to_owned(),
+                    "parent@example.com".to_owned(),
+                ],
             },
             &[OutgoingFile {
                 name: "notes.txt".to_owned(),
@@ -141,6 +164,14 @@ mod tests {
             message.body_text(0).as_deref(),
             Some("Hello\r\nsecond line")
         );
+        assert_eq!(message.message_id(), Some("m1@proton.me"));
+        assert_eq!(message.in_reply_to().as_text(), Some("parent@example.com"));
+        assert_eq!(
+            message.references().as_text_list().map(<[_]>::len),
+            Some(2),
+            "References: {:?}",
+            message.references()
+        );
         let attachment = message.attachment(0).expect("attachment");
         assert_eq!(attachment.attachment_name(), Some("notes.txt"));
         assert_eq!(attachment.contents(), b"a,b\n1,2\n");
@@ -156,12 +187,16 @@ mod tests {
                 cc: &[address("", "carol@example.com")],
                 subject: "Hi",
                 text: "Plain",
+                message_id: None,
+                in_reply_to: None,
+                references: &[],
             },
             &[],
         );
         assert!(body.contains("Content-Type: text/plain; charset=\"utf-8\"\r\n"));
         assert!(body.contains("Cc: <carol@example.com>\r\n"));
         assert!(!body.contains("To:"));
+        assert!(!body.contains("Message-ID") && !body.contains("In-Reply-To"));
         assert!(body.ends_with("\r\n\r\nPlain"));
     }
 }

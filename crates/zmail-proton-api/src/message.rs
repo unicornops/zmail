@@ -1,5 +1,5 @@
-// Ported from go-proton-api `message.go` (`GetMessageMetadataPage`,
-// `countMessages`) and `message_types.go` (`MessageMetadata`,
+// Ported from go-proton-api `message.go` (`GetMessageMetadata`,
+// `GetMessageMetadataPage`, `countMessages`) and `message_types.go` (`MessageMetadata`,
 // `MessageFilter`, `MessageFlag`) at
 // 8a62023d3e38cb29749bcfc01bf44eafda6cec82
 // (https://github.com/ProtonMail/go-proton-api).
@@ -26,6 +26,7 @@ use crate::{
     header_types::Headers,
     label::STARRED_LABEL,
     manager::{METHOD_OVERRIDE_HEADER, Request},
+    paging::{MAX_PAGE_SIZE, fetch_paged},
     response::Error,
 };
 
@@ -178,6 +179,10 @@ pub struct MessageFilter {
     /// Only messages of this address.
     #[serde(rename = "AddressID", skip_serializing_if = "String::is_empty")]
     pub address_id: String,
+    /// Only messages with this external ID (their `Message-ID`, without
+    /// angle brackets).
+    #[serde(rename = "ExternalID", skip_serializing_if = "String::is_empty")]
+    pub external_id: String,
     /// Stop at (and include) this message ID; used as a cursor.
     #[serde(rename = "EndID", skip_serializing_if = "String::is_empty")]
     pub end_id: String,
@@ -360,6 +365,19 @@ impl Client {
         Ok(res.message)
     }
 
+    /// Returns the metadata of every message matching `filter`
+    /// (`GetMessageMetadata`): counts them, then fetches them in pages.
+    pub async fn get_message_metadata(
+        &self,
+        filter: &MessageFilter,
+    ) -> Result<Vec<MessageMetadata>, Error> {
+        let count = self.count_messages(filter).await?;
+        fetch_paged(count, MAX_PAGE_SIZE, |page, page_size| {
+            self.get_message_metadata_page(page, page_size, filter)
+        })
+        .await
+    }
+
     /// Returns one page of message metadata (`GetMessageMetadataPage`),
     /// asking again while the server reports the result as stale.
     pub async fn get_message_metadata_page(
@@ -466,6 +484,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&filter).expect("json"),
             serde_json::json!({"EndID": "m9", "Desc": 1})
+        );
+        let filter = MessageFilter {
+            external_id: "parent@example.com".to_owned(),
+            ..MessageFilter::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&filter).expect("json"),
+            serde_json::json!({"ExternalID": "parent@example.com", "Desc": 0})
         );
     }
 }

@@ -1190,6 +1190,7 @@ mod tests {
                 bcc: Vec::new(),
                 subject: "Draft".to_owned(),
                 body: "Draft".to_owned(),
+                threading: Default::default(),
             })
             .expect("draft");
         let draft_copy = directory.join("draft-1-1-ledger.txt");
@@ -1333,6 +1334,7 @@ mod tests {
                 bcc: Vec::new(),
                 subject: "Draft".to_owned(),
                 body: "Draft".to_owned(),
+                threading: Default::default(),
             })
             .expect("draft");
         let attachment = store.add_draft_attachment(draft, &source).expect("added");

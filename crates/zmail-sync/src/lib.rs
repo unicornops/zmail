@@ -1471,7 +1471,36 @@ impl SyncService {
         Ok(processed)
     }
 
+    /// Reads the headers of the message a draft answers when they had not
+    /// been read when the draft was made (mail stored before Zmail kept
+    /// them, in a conversation not opened since), by fetching that
+    /// conversation as opening it would, and works the In-Reply-To and
+    /// References out again. Failing that, the message goes with what the
+    /// draft had: threading never holds a send back.
+    async fn complete_threading(&self, job: &PendingOutboxJob) -> PendingOutboxJob {
+        let mut job = job.clone();
+        let draft_id = job.target.draft_id;
+        if let Ok(Some(thread_id)) = self.inner.store.pending_threading_parent(draft_id) {
+            let _ = self
+                .hydrate_thread_body_job(job.target.account_id, thread_id)
+                .await;
+        }
+        if let Ok(threading) = self.inner.store.complete_draft_threading(draft_id) {
+            job.message.in_reply_to = threading.in_reply_to;
+            job.message.references = threading.references;
+        }
+        job.threading_pending = false;
+        job
+    }
+
     async fn deliver_outbox_job(&self, job: &PendingOutboxJob) -> Result<()> {
+        let completed;
+        let job = if job.threading_pending {
+            completed = self.complete_threading(job).await;
+            &completed
+        } else {
+            job
+        };
         // The full sync target carries the auth kind and OAuth2 client
         // config, so OAuth2 accounts deliver with a freshly refreshed access
         // token (`connect_secret`) instead of the empty password slot.
@@ -2183,6 +2212,7 @@ mod tests {
                 bcc: Vec::new(),
                 subject: "Phase 5".to_owned(),
                 body: "background send".to_owned(),
+                threading: Default::default(),
             })
             .expect("draft should be created");
         store.queue_draft(draft_id).expect("draft should queue");
@@ -2214,6 +2244,7 @@ mod tests {
                 bcc: Vec::new(),
                 subject: "Undo send".to_owned(),
                 body: "Held back".to_owned(),
+                threading: Default::default(),
             })
             .expect("draft should be created");
         (store, account_id, draft_id)
@@ -2857,6 +2888,7 @@ mod outbox_reauth_tests {
                 bcc: Vec::new(),
                 subject: "Refused".to_owned(),
                 body: "Never sent".to_owned(),
+                threading: Default::default(),
             })
             .expect("draft should be created");
         store.queue_draft(draft_id).expect("draft should queue");
@@ -2994,6 +3026,7 @@ mod outbox_key_change_tests {
                     bcc: Vec::new(),
                     subject: subject.to_owned(),
                     body: "Hello".to_owned(),
+                    threading: Default::default(),
                 })
                 .expect("draft");
             store.queue_draft(draft_id).expect("queued")

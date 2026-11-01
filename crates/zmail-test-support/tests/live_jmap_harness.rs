@@ -11,17 +11,21 @@ use std::{
 use anyhow::{Context, Result, bail};
 use tokio::runtime::Builder;
 use zmail_core::{
-    AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutgoingAttachment, OutgoingConfig,
-    OutgoingMessage, PendingOp, PendingOpKind, ProtocolKind,
+    AuthKind, CachePolicySummary, NewAccount, NewDraft, NewIdentity, OutboxJobState,
+    OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp, PendingOpKind, ProtocolKind,
 };
 use zmail_jmap::{PUSH_PING_INTERVAL, PushEvent, PushPreference, PushTransport};
 use zmail_security::{InMemorySecretStore, SecretStore};
-use zmail_smtp::{SubmissionConfig, SubmissionSecurity, SubmittedMessage, submit_text_message};
+use zmail_smtp::{
+    SubmissionConfig, SubmissionSecurity, SubmittedMessage, submit_outgoing_message,
+    submit_text_message,
+};
 use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
 use zmail_test_support::{
     DockerMailHarness, MAIL_HARNESS_HOST, MAIL_HARNESS_JMAP_ACCOUNT, MAIL_HARNESS_JMAP_ENDPOINT,
-    MAIL_HARNESS_JMAP_PASSWORD, MAIL_HARNESS_JMAP_SMTP_PORT, live_harness_lock,
+    MAIL_HARNESS_JMAP_PASSWORD, MAIL_HARNESS_JMAP_SMTP_PORT, MAIL_HARNESS_SENDER,
+    MAIL_HARNESS_SENDER_PASSWORD, live_harness_lock,
 };
 
 #[test]
@@ -238,6 +242,10 @@ fn submit_harness_attachment_message(
                     content_type: "text/plain".to_owned(),
                     bytes,
                 }],
+                message_id: None,
+                in_reply_to: None,
+                references: Vec::new(),
+                reply_action: None,
             },
         )
         .await
@@ -624,6 +632,158 @@ fn server_search_until_found(
         thread::sleep(Duration::from_secs(1));
     }
     bail!("the server search never found {query:?}")
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn a_reply_from_zmail_threads_over_jmap() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_JMAP_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+
+    // A message to the account and the harness sender, itself a reply.
+    let subject = "Threading over JMAP";
+    Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(submit_outgoing_message(
+            &SubmissionConfig {
+                host: MAIL_HARNESS_HOST.to_owned(),
+                port: MAIL_HARNESS_JMAP_SMTP_PORT,
+                username: None,
+                secret: None,
+                auth: AuthKind::Password,
+                security: SubmissionSecurity::Plain,
+                hello_name: "localhost".to_owned(),
+            },
+            &OutgoingMessage {
+                from_email: "external-sender@phase2b.test".to_owned(),
+                from_name: Some("External Sender".to_owned()),
+                to: vec![
+                    MAIL_HARNESS_JMAP_ACCOUNT.to_owned(),
+                    MAIL_HARNESS_SENDER.to_owned(),
+                ],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: subject.to_owned(),
+                text_body: "Launch on Monday?".to_owned(),
+                attachments: Vec::new(),
+                message_id: Some("launch-2@phase2b.test".to_owned()),
+                in_reply_to: Some("launch-1@phase2b.test".to_owned()),
+                references: vec!["launch-1@phase2b.test".to_owned()],
+                reply_action: None,
+            },
+        ))?;
+    let thread_id = sync_until_subject(&sync_service, &store, account_id, subject, 12)?;
+    let view = store
+        .thread_view(thread_id)?
+        .context("the thread should load")?;
+    let original = &view.messages[0];
+    assert_eq!(
+        original.headers.message_id.as_deref(),
+        Some("launch-2@phase2b.test")
+    );
+
+    // Reply to all, as both frontends start it: the harness sender, a
+    // local James user, gets a copy.
+    let identities = store.list_identities(account_id)?;
+    let start = zmail_actions::reply::reply(
+        &view.subject,
+        &view.mailbox_name,
+        original,
+        &zmail_actions::reply::own_addresses(&identities),
+        true,
+        "today",
+    )?;
+    assert!(
+        start
+            .to
+            .iter()
+            .chain(&start.cc)
+            .any(|address| address.contains(MAIL_HARNESS_SENDER)),
+        "the harness sender is on the reply: {start:?}"
+    );
+    let draft_id = store.create_draft(&NewDraft {
+        account_id,
+        identity_id: identities[0].id,
+        to: start.to,
+        cc: start.cc,
+        bcc: Vec::new(),
+        subject: start.subject.clone(),
+        body: format!("Monday it is.{}", start.body),
+        threading: start.threading,
+    })?;
+    sync_service.queue_draft_and_send(draft_id)?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let _ = sync_service.process_outbox_and_wait(Some(account_id));
+        let jobs = store.list_outbox_jobs(Some(account_id))?;
+        let job = jobs.first().context("the reply was queued")?;
+        match job.state {
+            OutboxJobState::Sent => break,
+            OutboxJobState::Failed => bail!("delivery failed: {:?}", job.last_error_message),
+            _ if Instant::now() > deadline => bail!("not sent in time: {job:?}"),
+            _ => thread::sleep(Duration::from_millis(250)),
+        }
+    }
+    let sent_id = store
+        .draft_detail(draft_id)?
+        .context("the draft should still exist")?
+        .message_id
+        .context("the sent draft should keep its Message-ID")?;
+
+    // The delivered copy, read from the harness sender's account over JMAP.
+    let sender_store = Arc::new(LocalStore::open_ephemeral()?);
+    let sender_account = sender_store.insert_account(&NewAccount {
+        username: MAIL_HARNESS_SENDER.to_owned(),
+        identities: vec![NewIdentity {
+            display_name: "Harness Sender".to_owned(),
+            email_address: MAIL_HARNESS_SENDER.to_owned(),
+            signature: String::new(),
+            is_primary: true,
+        }],
+        ..jmap_account()
+    })?;
+    let sender_secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sender_secrets.set_account_secret(sender_account, MAIL_HARNESS_SENDER_PASSWORD)?;
+    let sender_sync = SyncService::new(
+        runtime.handle().clone(),
+        sender_store.clone(),
+        sender_secrets,
+    );
+    let delivered = sync_until_subject(
+        &sender_sync,
+        &sender_store,
+        sender_account,
+        &start.subject,
+        60,
+    )?;
+    let delivered = sender_store
+        .thread_view(delivered)?
+        .context("the delivered reply should load")?;
+    let headers = &delivered
+        .messages
+        .iter()
+        .find(|message| message.subject == start.subject)
+        .context("the reply is in the thread")?
+        .headers;
+    assert_eq!(
+        headers.in_reply_to,
+        ["launch-2@phase2b.test"],
+        "In-Reply-To names the message answered: {headers:?}"
+    );
+    assert_eq!(
+        headers.references,
+        ["launch-1@phase2b.test", "launch-2@phase2b.test"],
+        "References extends the conversation: {headers:?}"
+    );
+    assert_eq!(headers.message_id.as_deref(), Some(sent_id.as_str()));
+    Ok(())
 }
 
 fn submit_harness_message(subject: &str, body: &str) -> Result<()> {
