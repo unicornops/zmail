@@ -276,6 +276,7 @@ fn mail_never_reaches_the_disk_in_plaintext() {
             bcc: Vec::new(),
             subject: SUBJECT.to_owned(),
             body: DRAFT_BODY.to_owned(),
+            threading: Default::default(),
         })
         .expect("draft");
     store

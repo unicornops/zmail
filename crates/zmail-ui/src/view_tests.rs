@@ -2318,6 +2318,7 @@ fn queue_test_message(store: &LocalStore, subject: &str) -> i64 {
             bcc: Vec::new(),
             subject: subject.to_owned(),
             body: "Hello".to_owned(),
+            threading: Default::default(),
         })
         .expect("the draft is stored");
     store
@@ -2384,6 +2385,7 @@ fn the_outbox_row_counts_waiting_mail_and_retries_failures(cx: &mut TestAppConte
             bcc: Vec::new(),
             subject: "Report".to_owned(),
             body: "Attached".to_owned(),
+            threading: Default::default(),
         })
         .expect("the draft is stored");
     let job = harness.store.queue_draft(draft_id).expect("queued");

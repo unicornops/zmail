@@ -139,6 +139,12 @@ fn read_back(store: &LocalStore) -> (i64, i64) {
         .expect("reads")
         .expect("the draft");
     assert_eq!(detail.body, DRAFT_BODY);
+    assert_eq!(
+        detail.threading,
+        Default::default(),
+        "a draft from before migration 0026 answers nothing"
+    );
+    assert_eq!(detail.message_id, None);
     assert_eq!(detail.attachments.len(), 1);
     assert_eq!(detail.attachments[0].filename, DRAFT_ATTACHMENT_NAME);
 
@@ -185,6 +191,7 @@ fn a_store_from_sqlcipher_4_14_opens_upgrades_and_stays_writable() {
                 bcc: Vec::new(),
                 subject: "Written after the upgrade".to_owned(),
                 body: "Still writable".to_owned(),
+                threading: Default::default(),
             })
             .expect("a new draft");
         (account, thread)
@@ -325,6 +332,7 @@ fn write_fixture() {
                 bcc: Vec::new(),
                 subject: DRAFT_SUBJECT.to_owned(),
                 body: DRAFT_BODY.to_owned(),
+                threading: Default::default(),
             })
             .expect("draft");
         store

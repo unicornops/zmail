@@ -12,7 +12,7 @@ use zmail_core::{
     AuthKind, CachePolicySummary, NewAccount, NewDraft, NewIdentity, OutboxJobState, ProtocolKind,
 };
 use zmail_proton::{ClientConfig, SignInStep, store_new_session};
-use zmail_proton_api::{AppVersion, CardType, EncryptionScheme, Manager};
+use zmail_proton_api::{AppVersion, CardType, EncryptionScheme, Manager, MessageFilter};
 use zmail_security::{InMemorySecretStore, SecretSlot, SecretStore};
 use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
@@ -596,6 +596,7 @@ fn sends_through_the_outbox_with_internal_and_clear_packages() -> Result<()> {
         bcc: vec!["someone@example.com".to_owned()],
         subject: subject.to_owned(),
         body: "Hello from Zmail over Proton.\nSecond line.".to_owned(),
+        threading: Default::default(),
     };
 
     // Undo send: a job inside its undo window is not sent, and cancelling
@@ -757,6 +758,7 @@ fn sends_to_outside_recipients_by_their_contact_settings() -> Result<()> {
         bcc: vec!["pgp-inline@example.com".to_owned()],
         subject: "To the outside".to_owned(),
         body: "Encrypted where the contact asks for it.".to_owned(),
+        threading: Default::default(),
     })?;
     store.queue_draft(draft_id)?;
     sync_service.process_outbox_and_wait(Some(account_id))?;
@@ -776,6 +778,158 @@ fn sends_to_outside_recipients_by_their_contact_settings() -> Result<()> {
         .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
     ensure!(subjects(&store, account_id, "Sent")?.contains(&"To the outside".to_owned()));
     ensure!(subjects(&store, account_id, "INBOX")?.contains(&"To the outside".to_owned()));
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn a_reply_is_created_with_its_parent_and_threads() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, secrets.as_ref(), account_id)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.configure_proton(harness_config(&harness)?)?;
+    let sync = || {
+        sync_service
+            .sync_account_and_wait(account_id)
+            .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))
+    };
+    sync()?;
+    let identity_id = store
+        .list_identities(account_id)?
+        .into_iter()
+        .find(|identity| identity.email_address == PROTON_HARNESS_PRIMARY_ADDRESS)
+        .context("no identity for the primary address")?
+        .id;
+
+    // Opens (hydrates) the conversation called `subject` in `mailbox`, as
+    // the reader does, and returns it with its message called `subject`.
+    let open = |mailbox: &str, subject: &str| -> Result<(zmail_core::ThreadView, usize)> {
+        let mailbox = store
+            .list_mailboxes(account_id)?
+            .into_iter()
+            .find(|candidate| candidate.name == mailbox)
+            .with_context(|| format!("no {mailbox}"))?;
+        let thread = store
+            .list_threads(mailbox.id, 0..100)?
+            .into_iter()
+            .find(|thread| thread.subject == subject)
+            .with_context(|| format!("no {subject:?} in {}", mailbox.name))?;
+        runtime
+            .handle()
+            .block_on(sync_service.hydrate_thread_body_and_wait(account_id, thread.id))?;
+        let view = store.thread_view(thread.id)?.context("thread")?;
+        let index = view
+            .messages
+            .iter()
+            .position(|message| message.subject == subject)
+            .context("no message with the subject")?;
+        anyhow::Ok((view, index))
+    };
+    // Replies (to all, with `all`) to message `index` of `view` through
+    // the outbox and returns the reply's subject and Message-ID.
+    let reply =
+        |view: &zmail_core::ThreadView, index: usize, all: bool| -> Result<(String, String)> {
+            let start = zmail_actions::reply::reply(
+                &view.subject,
+                &view.mailbox_name,
+                &view.messages[index],
+                &zmail_actions::reply::own_addresses(&store.list_identities(account_id)?),
+                all,
+                "today",
+            )?;
+            let draft_id = store.create_draft(&NewDraft {
+                account_id,
+                identity_id,
+                to: start.to,
+                cc: start.cc,
+                bcc: Vec::new(),
+                subject: start.subject.clone(),
+                body: format!("Thanks.{}", start.body),
+                threading: start.threading,
+            })?;
+            store.queue_draft(draft_id)?;
+            sync_service.process_outbox_and_wait(Some(account_id))?;
+            let job = store
+                .list_outbox_jobs(Some(account_id))?
+                .into_iter()
+                .find(|job| job.draft_id == draft_id)
+                .context("no outbox job")?;
+            ensure!(
+                job.state == OutboxJobState::Sent,
+                "job {job:?}; server log:\n{}",
+                harness.logs()
+            );
+            let message_id = store
+                .draft_detail(draft_id)?
+                .context("the draft")?
+                .message_id
+                .context("the sent draft keeps its Message-ID")?;
+            anyhow::Ok((start.subject, message_id))
+        };
+    let manager = Manager::new(harness_config(&harness)?)?;
+    let metadata = |filter: MessageFilter| -> Result<Vec<zmail_proton_api::MessageMetadata>> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async {
+                let (client, _) = manager
+                    .login(harness.username(), harness.password())
+                    .await?;
+                anyhow::Ok(client.get_message_metadata(&filter).await?)
+            })
+    };
+
+    // The seeded report has no external ID, so its Message-ID is Bridge's
+    // internal one, and the parent is found by ID.
+    let (report, index) = open("Folders/Work", "Quarterly report")?;
+    let report_id = report.messages[index]
+        .headers
+        .message_id
+        .clone()
+        .context("the report's Message-ID")?;
+    ensure!(report_id.ends_with("@protonmail.internalid"), "{report_id}");
+    let (subject, first_id) = reply(&report, index, false)?;
+    let parent = metadata(MessageFilter {
+        id: vec![report.messages[index].remote_id.clone()],
+        ..MessageFilter::default()
+    })?;
+    ensure!(
+        parent.len() == 1 && parent[0].is_replied && !parent[0].is_replied_all,
+        "the report is the reply's parent, answered with the reply action: {parent:?}"
+    );
+
+    // The sent reply carries Zmail's Message-ID as its external ID, so a
+    // reply to it is found by that, and names it in In-Reply-To.
+    sync()?;
+    let (sent, index) = open("Sent", &subject)?;
+    ensure!(
+        sent.messages[index].headers.message_id.as_deref() == Some(first_id.as_str()),
+        "{:?}",
+        sent.messages[index].headers
+    );
+    // (A reply to one's own message goes to its recipients: reply all.)
+    let (second_subject, second_id) = reply(&sent, index, true)?;
+    let parent = metadata(MessageFilter {
+        external_id: first_id.clone(),
+        ..MessageFilter::default()
+    })?;
+    ensure!(
+        parent.len() == 1 && parent[0].is_replied_all,
+        "Zmail's own reply is the parent, answered with the reply-all action: {parent:?}"
+    );
+    sync()?;
+    let (second, index) = open("Sent", &second_subject)?;
+    let headers = &second.messages[index].headers;
+    ensure!(
+        headers.message_id.as_deref() == Some(second_id.as_str())
+            && headers.in_reply_to == [first_id.clone()],
+        "{headers:?}"
+    );
     Ok(())
 }
 
@@ -1140,6 +1294,7 @@ fn applies_events_to_just_the_changed_messages() -> Result<()> {
         bcc: Vec::new(),
         subject: "Fresh news".to_owned(),
         body: "Something new.".to_owned(),
+        threading: Default::default(),
     })?;
     store.queue_draft(draft_id)?;
     ensure!(sync_service.process_outbox_and_wait(Some(account_id))? == 1);

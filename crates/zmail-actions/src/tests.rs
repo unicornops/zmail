@@ -639,6 +639,7 @@ fn draft_changes_write_the_store_and_emit() {
                 bcc: Vec::new(),
                 subject: String::new(),
                 body: String::new(),
+                threading: Default::default(),
             },
             &mut log(&mut events),
         )

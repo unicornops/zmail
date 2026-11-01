@@ -493,6 +493,7 @@ mod tests {
                         bcc: Vec::new(),
                         subject: String::new(),
                         body: String::new(),
+                        threading: Default::default(),
                     },
                     cx,
                 )

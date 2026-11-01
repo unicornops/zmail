@@ -11,7 +11,7 @@ pub mod text;
 pub mod threading;
 pub mod time;
 
-pub use threading::MessageHeaders;
+pub use threading::{DraftParent, DraftThreading, MessageHeaders, ReplyAction};
 
 /// Static application metadata.
 pub const APP_NAME: &str = "Zmail";
@@ -899,6 +899,11 @@ pub struct DraftDetail {
     pub sent_at: Option<String>,
     /// Latest send error, if any.
     pub last_error_message: Option<String>,
+    /// What the draft answers.
+    pub threading: DraftThreading,
+    /// The Message-ID it is sent with, given when it is first sent, without
+    /// angle brackets.
+    pub message_id: Option<String>,
 }
 
 /// Draft payload used when creating a new local draft.
@@ -918,6 +923,8 @@ pub struct NewDraft {
     pub subject: String,
     /// Plain-text body.
     pub body: String,
+    /// What the draft answers; empty for a new message.
+    pub threading: DraftThreading,
 }
 
 /// Full autosave payload for an existing draft.
@@ -986,6 +993,16 @@ pub struct OutgoingMessage {
     pub text_body: String,
     /// Attachment payloads.
     pub attachments: Vec<OutgoingAttachment>,
+    /// The `Message-ID` to send with, without angle brackets. The outbox
+    /// gives each draft one and keeps it, so a retry sends the same id and
+    /// a reply to the sent copy threads.
+    pub message_id: Option<String>,
+    /// The `In-Reply-To` id.
+    pub in_reply_to: Option<String>,
+    /// The `References` ids, oldest first.
+    pub references: Vec<String>,
+    /// The reply action the message came from (Proton's draft action).
+    pub reply_action: Option<ReplyAction>,
 }
 
 /// Resolved account and identity used by an outbox delivery attempt.
@@ -1025,6 +1042,11 @@ pub struct PendingOutboxJob {
     pub target: DeliveryTarget,
     /// Fully composed outgoing message.
     pub message: OutgoingMessage,
+    /// The answered message's headers were still to be read when the
+    /// draft was made: the sender fetches them and works the message's
+    /// In-Reply-To and References out again first
+    /// (`LocalStore::complete_draft_threading`).
+    pub threading_pending: bool,
 }
 
 /// Mailbox metadata shown in the left pane.

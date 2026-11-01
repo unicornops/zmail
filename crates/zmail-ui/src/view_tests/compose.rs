@@ -193,6 +193,7 @@ fn opening_another_draft_saves_the_last_keystrokes(cx: &mut TestAppContext) {
             bcc: Vec::new(),
             subject: "Other".to_owned(),
             body: String::new(),
+            threading: Default::default(),
         })
         .expect("the draft is created");
     cx.update(|window, cx| view.update(cx, |view, cx| view.open_draft(other, window, cx)));
@@ -424,6 +425,7 @@ fn a_draft_with_cc_opens_with_the_field_shown(cx: &mut TestAppContext) {
             bcc: Vec::new(),
             subject: String::new(),
             body: String::new(),
+            threading: Default::default(),
         })
         .expect("the draft is created");
     cx.update(|window, cx| view.update(cx, |view, cx| view.open_draft(draft_id, window, cx)));

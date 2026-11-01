@@ -16,16 +16,17 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use zmail_core::{
     AccountColor, AccountOverview, AccountSummary, AccountSyncSnapshot, AuthKind, BlobStore,
-    BodyLink, CachePolicySummary, DeliveryTarget, DraftAttachment, DraftDetail, DraftState,
-    DraftSummary, DraftUpdate, HydratedBody, IdentitySummary, IndexCandidate, IndexProgress,
-    MailboxRole, MailboxSelection, MailboxSnapshot, MailboxSummary, MessageAttachment,
-    MessageFlagState, MessageHeaders, MessagePreview, MessageRenderMode, MessageSnapshot,
-    MessageSummary, NewAccount, NewDraft, OAuth2TargetConfig, OutboxJobState, OutboxJobSummary,
-    OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp, PendingOpKind,
-    PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, SearchScope, ServerHitRef,
-    StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget,
-    ThreadCounts, ThreadFilter, ThreadMarks, ThreadMessage, ThreadSnapshot, ThreadState,
-    ThreadSummary, ThreadView, VirtualMailbox, preferences::UiPreferences,
+    BodyLink, CachePolicySummary, DeliveryTarget, DraftAttachment, DraftDetail, DraftParent,
+    DraftState, DraftSummary, DraftThreading, DraftUpdate, HydratedBody, IdentitySummary,
+    IndexCandidate, IndexProgress, MailboxRole, MailboxSelection, MailboxSnapshot, MailboxSummary,
+    MessageAttachment, MessageFlagState, MessageHeaders, MessagePreview, MessageRenderMode,
+    MessageSnapshot, MessageSummary, NewAccount, NewDraft, OAuth2TargetConfig, OutboxJobState,
+    OutboxJobSummary, OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp,
+    PendingOpKind, PendingOutboxJob, ProtocolKind, ReceivedAttachment, ReplyAction, SearchHit,
+    SearchScope, ServerHitRef, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase,
+    SyncStatusSummary, SyncTarget, ThreadCounts, ThreadFilter, ThreadMarks, ThreadMessage,
+    ThreadSnapshot, ThreadState, ThreadSummary, ThreadView, VirtualMailbox,
+    preferences::UiPreferences,
 };
 use zmail_security::html::text_of_stored_html;
 pub use zmail_security::vault::{BlobVault, StoreKey, StoreKeychain};
@@ -183,6 +184,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0023_remote_content_senders", REMOTE_CONTENT_SENDERS_SCHEMA),
     ("0024_recipient_key_trust", key_trust::KEY_TRUST_SCHEMA),
     ("0025_message_reply_headers", MESSAGE_REPLY_HEADERS_SCHEMA),
+    ("0026_draft_threading", DRAFT_THREADING_SCHEMA),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -493,6 +495,22 @@ ALTER TABLE messages ADD COLUMN references_header TEXT;
 ALTER TABLE messages ADD COLUMN cc TEXT;
 ALTER TABLE messages ADD COLUMN delivered_to TEXT;
 ALTER TABLE messages ADD COLUMN headers_captured INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// What a reply or forward draft answers (issue #350): the reply action,
+/// its `In-Reply-To` and `References` ids, the answered message by
+/// mailbox and remote id, and whether that message's headers were still
+/// to be read when the draft was made (`threading_pending`; sending reads
+/// them first). `message_id_header` is the Message-ID the draft is sent
+/// with, given on its first delivery attempt and kept for retries.
+const DRAFT_THREADING_SCHEMA: &str = r#"
+ALTER TABLE drafts ADD COLUMN reply_action TEXT;
+ALTER TABLE drafts ADD COLUMN in_reply_to TEXT;
+ALTER TABLE drafts ADD COLUMN references_header TEXT;
+ALTER TABLE drafts ADD COLUMN parent_mailbox TEXT;
+ALTER TABLE drafts ADD COLUMN parent_remote_id TEXT;
+ALTER TABLE drafts ADD COLUMN threading_pending INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE drafts ADD COLUMN message_id_header TEXT;
 "#;
 
 const MESSAGE_REPLY_TO_SCHEMA: &str = r#"
@@ -3927,6 +3945,7 @@ impl LocalStore {
         })?;
         let now = utc_now_timestamp();
         let body = apply_default_signature(&draft.body, &identity.signature);
+        let threading = ThreadingColumns::of(&draft.threading);
         transaction.execute(
             r#"
             INSERT INTO drafts(
@@ -3943,9 +3962,16 @@ impl LocalStore {
                 body,
                 last_error_message,
                 created_at,
-                updated_at
+                updated_at,
+                reply_action,
+                in_reply_to,
+                references_header,
+                parent_mailbox,
+                parent_remote_id,
+                threading_pending
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13,
+                    ?14, ?15, ?16, ?17, ?18, ?19)
             "#,
             params![
                 draft.account_id,
@@ -3961,6 +3987,12 @@ impl LocalStore {
                 body,
                 now,
                 now,
+                threading.action,
+                threading.in_reply_to,
+                threading.references,
+                threading.parent_mailbox,
+                threading.parent_remote_id,
+                threading.pending,
             ],
         )?;
         let draft_id = transaction.last_insert_rowid();
@@ -4029,7 +4061,8 @@ impl LocalStore {
         let conn = self.connection()?;
         let draft = conn
             .query_row(
-                r#"
+                &format!(
+                    r#"
                 SELECT
                     id,
                     account_id,
@@ -4046,10 +4079,13 @@ impl LocalStore {
                     updated_at,
                     queued_at,
                     sent_at,
-                    last_error_message
+                    last_error_message,
+                    message_id_header,
+                    {THREADING_COLUMNS}
                 FROM drafts
                 WHERE id = ?1
-                "#,
+                "#
+                ),
                 params![draft_id],
                 |row| {
                     Ok(DraftDetail {
@@ -4073,6 +4109,8 @@ impl LocalStore {
                         queued_at: row.get(13)?,
                         sent_at: row.get(14)?,
                         last_error_message: row.get(15)?,
+                        message_id: row.get(16)?,
+                        threading: threading_from_row(row, 17)?,
                     })
                 },
             )
@@ -4584,10 +4622,112 @@ impl LocalStore {
             "#,
             params![draft_id, DraftState::Sending.as_str(), now],
         )?;
+        // The Message-ID is given once, on the first attempt, so a retry
+        // sends the same id and the sent copy, synced back, carries it.
+        let identity_email: String = transaction.query_row(
+            "SELECT identity_email FROM drafts WHERE id = ?1",
+            params![draft_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "UPDATE drafts SET message_id_header = ?2 WHERE id = ?1 AND message_id_header IS NULL",
+            params![draft_id, new_message_id(&identity_email)],
+        )?;
         transaction
             .commit()
             .context("failed to commit the outbox claim transaction")?;
         self.pending_outbox_job(job_id)
+    }
+
+    /// The conversation holding the message draft `draft_id` answers, when
+    /// that message's headers were still to be read when the draft was made
+    /// and it is still stored, so sending can fetch them first.
+    pub fn pending_threading_parent(&self, draft_id: i64) -> Result<Option<i64>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            r#"
+            SELECT threads.id
+            FROM drafts
+            JOIN mailboxes ON mailboxes.account_id = drafts.account_id
+                AND mailboxes.name = drafts.parent_mailbox
+            JOIN threads ON threads.mailbox_id = mailboxes.id
+            JOIN messages ON messages.thread_id = threads.id
+                AND messages.remote_id = drafts.parent_remote_id
+            WHERE drafts.id = ?1 AND drafts.threading_pending = 1
+            LIMIT 1
+            "#,
+            params![draft_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("failed to find the message a draft answers")
+    }
+
+    /// Works a pending draft's In-Reply-To and References out again from
+    /// the stored headers of the message it answers, if they have been
+    /// read by now, and stops it being pending either way: a send never
+    /// waits on them. Returns the draft's threading afterwards.
+    pub fn complete_draft_threading(&self, draft_id: i64) -> Result<DraftThreading> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin the draft threading transaction")?;
+        let threading = transaction
+            .query_row(
+                &format!("SELECT {THREADING_COLUMNS} FROM drafts WHERE id = ?1"),
+                params![draft_id],
+                |row| threading_from_row(row, 0),
+            )
+            .optional()?
+            .with_context(|| format!("draft {draft_id} does not exist"))?;
+        if !threading.pending {
+            return Ok(threading);
+        }
+        let parent_headers = transaction
+            .query_row(
+                &format!(
+                    r#"
+                    SELECT {}
+                    FROM drafts
+                    JOIN mailboxes ON mailboxes.account_id = drafts.account_id
+                        AND mailboxes.name = drafts.parent_mailbox
+                    JOIN threads ON threads.mailbox_id = mailboxes.id
+                    JOIN messages ON messages.thread_id = threads.id
+                        AND messages.remote_id = drafts.parent_remote_id
+                    WHERE drafts.id = ?1
+                    LIMIT 1
+                    "#,
+                    qualified_header_columns("messages")
+                ),
+                params![draft_id],
+                |row| headers_from_row(row, 0),
+            )
+            .optional()
+            .context("failed to load the headers of the message a draft answers")?;
+        let threading = match (threading.action, parent_headers) {
+            (Some(action), Some(headers)) if headers.captured => {
+                DraftThreading::answering(action, &headers, threading.parent)
+            }
+            _ => DraftThreading {
+                pending: false,
+                ..threading
+            },
+        };
+        let columns = ThreadingColumns::of(&threading);
+        transaction.execute(
+            "UPDATE drafts SET in_reply_to = ?2, references_header = ?3, threading_pending = ?4 \
+             WHERE id = ?1",
+            params![
+                draft_id,
+                columns.in_reply_to,
+                columns.references,
+                columns.pending
+            ],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the draft threading transaction")?;
+        Ok(threading)
     }
 
     /// Records a transient delivery failure and schedules the next retry attempt.
@@ -4944,7 +5084,14 @@ impl LocalStore {
                     accounts.submission_security,
                     accounts.submission_username,
                     accounts.submission_hello_name,
-                    accounts.auth_kind
+                    accounts.auth_kind,
+                    drafts.message_id_header,
+                    drafts.reply_action,
+                    drafts.in_reply_to,
+                    drafts.references_header,
+                    drafts.parent_mailbox,
+                    drafts.parent_remote_id,
+                    drafts.threading_pending
                 FROM outbox_jobs
                 JOIN drafts ON drafts.id = outbox_jobs.draft_id
                 JOIN accounts ON accounts.id = outbox_jobs.account_id
@@ -4994,12 +5141,26 @@ impl LocalStore {
                             .map_err(to_from_sql_error)?,
                         recipients_from_json(row.get::<_, String>(10)?)
                             .map_err(to_from_sql_error)?,
+                        row.get::<_, Option<String>>(22)?,
+                        threading_from_row(row, 23)?,
                     ))
                 },
             )
             .optional()
             .context("failed to load the pending outbox job")?;
-        let Some((job_id, attempt_count, target, subject, body, to, cc, bcc)) = row else {
+        let Some((
+            job_id,
+            attempt_count,
+            target,
+            subject,
+            body,
+            to,
+            cc,
+            bcc,
+            message_id,
+            threading,
+        )) = row
+        else {
             return Ok(None);
         };
 
@@ -5033,7 +5194,12 @@ impl LocalStore {
                 subject,
                 text_body: body,
                 attachments,
+                message_id,
+                in_reply_to: threading.in_reply_to,
+                references: threading.references,
+                reply_action: threading.action,
             },
+            threading_pending: threading.pending,
         }))
     }
 }
@@ -5132,6 +5298,65 @@ fn ensure_draft_is_editable(state: DraftState) -> Result<()> {
     Ok(())
 }
 
+/// The `drafts` columns [`DraftThreading`] is stored in, in the order
+/// [`threading_from_row`] reads them.
+const THREADING_COLUMNS: &str = "reply_action, in_reply_to, references_header, parent_mailbox, \
+     parent_remote_id, threading_pending";
+
+/// [`DraftThreading`] as the values of [`THREADING_COLUMNS`].
+struct ThreadingColumns {
+    action: Option<&'static str>,
+    in_reply_to: Option<String>,
+    references: Option<String>,
+    parent_mailbox: Option<String>,
+    parent_remote_id: Option<String>,
+    pending: bool,
+}
+
+impl ThreadingColumns {
+    fn of(threading: &DraftThreading) -> Self {
+        Self {
+            action: threading.action.map(ReplyAction::as_str),
+            in_reply_to: threading.in_reply_to.clone().filter(|id| !id.is_empty()),
+            references: (!threading.references.is_empty()).then(|| threading.references.join(" ")),
+            parent_mailbox: threading
+                .parent
+                .as_ref()
+                .map(|parent| parent.mailbox.clone()),
+            parent_remote_id: threading
+                .parent
+                .as_ref()
+                .map(|parent| parent.remote_id.clone()),
+            pending: threading.pending,
+        }
+    }
+}
+
+/// Reads [`THREADING_COLUMNS`] from `row`, starting at column `first`.
+fn threading_from_row(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<DraftThreading> {
+    let parent = match (
+        row.get::<_, Option<String>>(first + 3)?,
+        row.get::<_, Option<String>>(first + 4)?,
+    ) {
+        (Some(mailbox), Some(remote_id)) => Some(DraftParent { mailbox, remote_id }),
+        _ => None,
+    };
+    Ok(DraftThreading {
+        action: row
+            .get::<_, Option<String>>(first)?
+            .as_deref()
+            .and_then(ReplyAction::parse),
+        in_reply_to: row.get(first + 1)?,
+        references: row
+            .get::<_, Option<String>>(first + 2)?
+            .as_deref()
+            .map(zmail_core::threading::parse_message_ids)
+            .unwrap_or_default(),
+        parent,
+        pending: row.get(first + 5)?,
+    })
+}
+
 /// The `messages` columns [`MessageHeaders`] are stored in, in the order
 /// [`HeaderColumns::params`] binds and [`headers_from_row`] reads them.
 const HEADER_COLUMNS: &str =
@@ -5170,6 +5395,31 @@ impl HeaderColumns {
 fn headers_match(stored: &MessageHeaders, incoming: &MessageHeaders) -> bool {
     (stored.captured && !incoming.captured)
         || HeaderColumns::of(stored) == HeaderColumns::of(incoming)
+}
+
+/// [`HEADER_COLUMNS`] qualified with `table`, for queries that join.
+fn qualified_header_columns(table: &str) -> String {
+    HEADER_COLUMNS
+        .split(", ")
+        .map(|column| format!("{table}.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A new Message-ID for mail sent from `from_email`: random, on the
+/// sender's domain, so it names neither the device nor its host name (as
+/// a generated default would).
+fn new_message_id(from_email: &str) -> String {
+    let domain = from_email
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.trim())
+        .filter(|domain| !domain.is_empty() && !domain.contains(['<', '>', ' ']))
+        .unwrap_or("zmail.invalid");
+    format!(
+        "{}.{}@{domain}",
+        zmail_security::vault::random_hex(8),
+        zmail_security::vault::random_hex(8)
+    )
 }
 
 /// Overwrites one message's stored headers. A fetched message with no
@@ -8017,6 +8267,7 @@ mod tests {
                     bcc: Vec::new(),
                     subject: subject.to_owned(),
                     body: "Hello".to_owned(),
+                    threading: Default::default(),
                 })
                 .expect("the draft is stored")
         };
@@ -10523,6 +10774,7 @@ mod tests {
                     bcc: Vec::new(),
                     subject: "Concurrent".to_owned(),
                     body: String::new(),
+                    threading: Default::default(),
                 })
             });
             // Let the draft write start and block on the lock.
@@ -10559,6 +10811,7 @@ mod tests {
                 bcc: Vec::new(),
                 subject: String::new(),
                 body: String::new(),
+                threading: Default::default(),
             })
             .expect("draft should be created");
 
@@ -10625,6 +10878,7 @@ mod tests {
             bcc: Vec::new(),
             subject: "Gone".to_owned(),
             body: "Body".to_owned(),
+            threading: Default::default(),
         };
         let draft_id = store.create_draft(&new_draft(Vec::new())).expect("draft");
         let source = std::env::temp_dir().join(format!("zmail-delete-draft-{draft_id}.txt"));
@@ -10677,6 +10931,7 @@ mod tests {
                 bcc: Vec::new(),
                 subject: "Queued draft".to_owned(),
                 body: "Queued body".to_owned(),
+                threading: Default::default(),
             })
             .expect("draft should be created");
         let job_id = store.queue_draft(draft_id).expect("draft should queue");
@@ -10726,6 +10981,152 @@ mod tests {
     }
 
     #[test]
+    fn reply_drafts_carry_their_threading_and_keep_one_message_id() {
+        use zmail_core::{DraftParent, DraftThreading, MessageHeaders, ReplyAction};
+
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity = store.list_identities(account_id).expect("identities load")[0].clone();
+        // The message answered, stored before Zmail kept its headers.
+        store
+            .replace_account_snapshot(
+                account_id,
+                &merge_test_snapshot("Plan", "Body", "thread-plan", "41", None),
+            )
+            .expect("snapshot should apply");
+        let parent = DraftParent {
+            mailbox: "Inbox".to_owned(),
+            remote_id: "41".to_owned(),
+        };
+        let threading = DraftThreading::answering(
+            ReplyAction::ReplyAll,
+            &MessageHeaders::default(),
+            Some(parent.clone()),
+        );
+        assert!(threading.pending);
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id: identity.id,
+                to: vec!["kai@example.test".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Re: Plan".to_owned(),
+                body: "Yes.".to_owned(),
+                threading: threading.clone(),
+            })
+            .expect("draft should be created");
+        let detail = store
+            .draft_detail(draft_id)
+            .expect("loads")
+            .expect("exists");
+        assert_eq!(detail.threading, threading);
+        assert_eq!(detail.message_id, None, "given when it is first sent");
+
+        let job_id = store.queue_draft(draft_id).expect("draft should queue");
+        let claimed = store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("job should claim")
+            .expect("job should exist");
+        assert!(claimed.threading_pending);
+        assert_eq!(claimed.message.reply_action, Some(ReplyAction::ReplyAll));
+        let message_id = claimed.message.message_id.clone().expect("a Message-ID");
+        let domain = identity
+            .email_address
+            .rsplit_once('@')
+            .expect("an address")
+            .1;
+        assert!(
+            message_id.ends_with(&format!("@{domain}")) && message_id.len() > domain.len() + 20,
+            "a random id on the sender's domain: {message_id}"
+        );
+
+        // Sending reads the parent's headers first, then works the
+        // threading out again.
+        let thread_id = store
+            .pending_threading_parent(draft_id)
+            .expect("looks up")
+            .expect("the answered message is stored");
+        let parent_row = store
+            .messages_missing_bodies(thread_id)
+            .expect("lists")
+            .expect("the thread")[0]
+            .0;
+        store
+            .set_message_headers(
+                parent_row,
+                &MessageHeaders {
+                    captured: true,
+                    message_id: Some("plan-2@example.test".to_owned()),
+                    references: vec!["plan-1@example.test".to_owned()],
+                    ..MessageHeaders::default()
+                },
+            )
+            .expect("headers store");
+        let completed = store.complete_draft_threading(draft_id).expect("completes");
+        assert!(!completed.pending);
+        assert_eq!(
+            completed.in_reply_to.as_deref(),
+            Some("plan-2@example.test")
+        );
+        assert_eq!(
+            completed.references,
+            ["plan-1@example.test", "plan-2@example.test"]
+        );
+        assert_eq!(
+            store.pending_threading_parent(draft_id).expect("looks up"),
+            None
+        );
+
+        // A retry sends the same Message-ID and the completed headers.
+        store
+            .record_outbox_retry(job_id, "offline", Duration::ZERO)
+            .expect("retry should record");
+        let again = store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("job should claim")
+            .expect("job should exist");
+        assert_eq!(
+            again.message.message_id.as_deref(),
+            Some(message_id.as_str())
+        );
+        assert!(!again.threading_pending);
+        assert_eq!(
+            again.message.in_reply_to.as_deref(),
+            Some("plan-2@example.test")
+        );
+
+        // Completing a draft whose parent is gone keeps what it had.
+        let orphan = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id: identity.id,
+                to: vec!["kai@example.test".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Re: Gone".to_owned(),
+                body: String::new(),
+                threading: DraftThreading::answering(
+                    ReplyAction::Reply,
+                    &MessageHeaders {
+                        message_id: Some("gone@example.test".to_owned()),
+                        ..MessageHeaders::default()
+                    },
+                    Some(DraftParent {
+                        mailbox: "Inbox".to_owned(),
+                        remote_id: "999".to_owned(),
+                    }),
+                ),
+            })
+            .expect("draft should be created");
+        let kept = store.complete_draft_threading(orphan).expect("completes");
+        assert!(!kept.pending);
+        assert_eq!(kept.in_reply_to.as_deref(), Some("gone@example.test"));
+    }
+
+    #[test]
     fn undo_send_holds_the_job_until_its_time_and_can_take_it_back() {
         let store = LocalStore::open_ephemeral().expect("store should open");
         let account_id = store
@@ -10742,6 +11143,7 @@ mod tests {
                     bcc: Vec::new(),
                     subject: subject.to_owned(),
                     body: "Body".to_owned(),
+                    threading: Default::default(),
                 })
                 .expect("draft should be created")
         };
@@ -10873,6 +11275,7 @@ mod tests {
                 bcc: Vec::new(),
                 subject: "OAuth2 draft".to_owned(),
                 body: "OAuth2 body".to_owned(),
+                threading: Default::default(),
             })
             .expect("draft should be created");
         store.queue_draft(draft_id).expect("draft should queue");

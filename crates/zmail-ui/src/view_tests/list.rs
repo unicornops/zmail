@@ -641,6 +641,7 @@ fn drafts_and_the_outbox_reuse_the_message_row(cx: &mut TestAppContext) {
             bcc: Vec::new(),
             subject: "Q4 estimates".to_owned(),
             body: "Attached.".to_owned(),
+            threading: Default::default(),
         })
         .expect("the draft is stored");
     refresh(&view, cx);

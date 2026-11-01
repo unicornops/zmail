@@ -1,6 +1,7 @@
 // Ported from proton-bridge `internal/services/smtp/smtp.go`
-// (`smtpSendMail`, `sendWithKey`, `createDraft`, `createAttachments`,
-// `getRecipients`, `getContactSettings`, `constructEmail`),
+// (`smtpSendMail`, `sendWithKey`, `getParentID`, `createDraft`,
+// `createAttachments`, `getRecipients`, `getContactSettings`,
+// `constructEmail`),
 // `smtp_packages.go` (`createSendReq`,
 // `recipients`), `errors.go` (the API error codes) and
 // `internal/usertypes/types.go` (`SanitizeEmail`) at v3.27.1
@@ -13,9 +14,7 @@
 // outbox, which hands over a composed plain-text message rather than MIME
 // from an SMTP client, so there is no MIME parsing: the plain body is both
 // the "rich" and the plain body, as Bridge's parser makes them for a
-// text/plain message. Zmail's outbox carries no In-Reply-To or References
-// yet, so there is no parent message and the draft action is Forward, as
-// in Bridge for a new message. The send recorder (duplicate detection) is
+// text/plain message. The send recorder (duplicate detection) is
 // replaced by the outbox claiming each job once. Attachments are uploaded
 // and recipients looked up one at a time rather than in parallel, and the
 // attachments' session keys are kept from encryption rather than decrypted
@@ -28,22 +27,32 @@
 // Modified by UnicornOps on 2026-10-24: takes the account's key trust
 // decisions for recipients whose contact card pins other keys (see
 // `send_prefs.rs`, ADR 0004).
+// Modified by UnicornOps on 2026-11-01: the parent message comes from the
+// outbox message's In-Reply-To and References, as Bridge reads them from
+// the MIME it is handed, and its Message-ID is the draft's ExternalID. A
+// reply-all is created with the reply-all action, which Bridge cannot
+// tell from a reply. `getParentID` does not collect referenced drafts to
+// delete after sending: Zmail's drafts are local, so its mail never
+// references a Proton draft. The addresses are always combined, so the
+// metadata lookups are not limited to the sending address.
 
 //! Sending a message through Proton: Bridge's SMTP service.
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow, bail};
-use zmail_core::{OutgoingMessage, key_change::KeyTrust};
+use zmail_core::{OutgoingMessage, ReplyAction, key_change::KeyTrust};
 use zmail_proton_api::{
     ATTACHMENT_DISPOSITION, Address, AddressStatus, CardType, Client, ContactSettings,
     CreateAttachmentReq, CreateDraftAction, CreateDraftReq, DraftTemplate, EmailAddress,
-    EncryptionScheme, Error, KeyRing, MULTIPART_MIXED, MailSettings, Message, RecipientType,
-    SendDraftReq, SendPreferences, SessionKey, TEXT_HTML, TEXT_PLAIN, UnlockedKey,
+    EncryptionScheme, Error, KeyRing, MULTIPART_MIXED, MailSettings, Message, MessageFilter,
+    MessageFlags, RecipientType, SendDraftReq, SendPreferences, SessionKey, TEXT_HTML, TEXT_PLAIN,
+    UnlockedKey,
 };
 
 use crate::{
     ProtonSession,
+    message::INTERNAL_ID_DOMAIN,
     outgoing::{MimeSource, OutgoingFile, build_mime_body},
     send_prefs::{Recipient, build_send_prefs},
 };
@@ -218,6 +227,7 @@ async fn send_with_key(
         to_list: message.to.iter().map(address).collect(),
         cc_list: message.cc.iter().map(address).collect(),
         bcc_list: message.bcc.iter().map(address).collect(),
+        external_id: message.message_id.clone().unwrap_or_default(),
         ..DraftTemplate::default()
     };
     let mime_body = build_mime_body(
@@ -227,14 +237,28 @@ async fn send_with_key(
             cc: &template.cc_list,
             subject: &template.subject,
             text: body,
+            message_id: message.message_id.as_deref(),
+            in_reply_to: message.in_reply_to.as_deref(),
+            references: &message.references,
         },
         attachments,
     );
 
-    let draft = create_draft(client, addr_key, emails, from, to, template)
-        .await
-        .map_err(|error| draft_error(&error).unwrap_or_else(|| anyhow!(error)))
-        .context("failed to create draft")?;
+    let mut references = message.references.clone();
+    if let Some(in_reply_to) = &message.in_reply_to {
+        references.push(in_reply_to.clone());
+    }
+    // A parent that cannot be found leaves the message unthreaded at
+    // Proton, never unsent.
+    let parent_id = get_parent_id(client, &references).await.unwrap_or_default();
+    let action = draft_action(message);
+
+    let draft = create_draft(
+        client, addr_key, emails, from, to, &parent_id, action, template,
+    )
+    .await
+    .map_err(|error| draft_error(&error).unwrap_or_else(|| anyhow!(error)))
+    .context("failed to create draft")?;
 
     let prepared = async {
         let att_keys = create_attachments(client, addr_key, &draft.metadata.id, attachments)
@@ -278,13 +302,87 @@ fn draft_error(error: &Error) -> Option<anyhow::Error> {
     }
 }
 
+/// Finds the Proton message a reply answers from its References and
+/// In-Reply-To ids (`getParentID`): an internal reference names it by ID;
+/// otherwise the last external reference is looked up by external ID, and
+/// counts when exactly one sent or received message has it, or exactly
+/// one of several was sent by this account. Empty when there is none.
+async fn get_parent_id(client: &Client, references: &[String]) -> Result<String, Error> {
+    let mut parent_id = String::new();
+    let (internal, external): (Vec<&String>, Vec<&String>) = references
+        .iter()
+        .partition(|reference| reference.contains(INTERNAL_ID_DOMAIN));
+
+    // Try to find a parent ID in the internal references.
+    for internal in internal {
+        let id = internal
+            .strip_suffix(&format!("@{INTERNAL_ID_DOMAIN}"))
+            .unwrap_or(internal);
+        let metadata = client
+            .get_message_metadata(&MessageFilter {
+                id: vec![id.to_owned()],
+                ..MessageFilter::default()
+            })
+            .await?;
+        // A referenced draft is not a parent (Bridge deletes such drafts
+        // after sending; Zmail's mail never references one).
+        if let Some(metadata) = metadata.iter().rev().find(|metadata| !metadata.is_draft()) {
+            parent_id = metadata.id.clone();
+        }
+    }
+
+    // If no parent was found, try to find it in the last external
+    // reference.
+    if let (true, Some(last)) = (parent_id.is_empty(), external.last()) {
+        let metadata = client
+            .get_message_metadata(&MessageFilter {
+                external_id: (*last).clone(),
+                ..MessageFilter::default()
+            })
+            .await?;
+        match metadata.as_slice() {
+            [only] => {
+                // Only a message that has been sent or received can be
+                // referenced.
+                if only.flags.has(MessageFlags::SENT) || only.flags.has(MessageFlags::RECEIVED) {
+                    parent_id = only.id.clone();
+                }
+            }
+            [] => {}
+            several => {
+                if let Some(sent) = several
+                    .iter()
+                    .find(|metadata| metadata.flags.has(MessageFlags::SENT))
+                {
+                    parent_id = sent.id.clone();
+                }
+            }
+        }
+    }
+    Ok(parent_id)
+}
+
+/// How the draft answers its parent: a message with an In-Reply-To
+/// replies (to all, when it came from reply-all), anything else forwards,
+/// as in Bridge's `createDraft`.
+fn draft_action(message: &OutgoingMessage) -> CreateDraftAction {
+    match (message.in_reply_to.is_some(), message.reply_action) {
+        (true, Some(ReplyAction::ReplyAll)) => CreateDraftAction::ReplyAll,
+        (true, _) => CreateDraftAction::Reply,
+        (false, _) => CreateDraftAction::Forward,
+    }
+}
+
 /// Creates the draft to send (`createDraft`).
+#[allow(clippy::too_many_arguments)]
 async fn create_draft(
     client: &Client,
     addr_key: &UnlockedKey,
     emails: &[String],
     from: &str,
     to: &[String],
+    parent_id: &str,
+    action: CreateDraftAction,
     mut template: DraftTemplate,
 ) -> Result<Message, Error> {
     // Check sender: set the sender if it's missing.
@@ -334,8 +432,8 @@ async fn create_draft(
             addr_key,
             CreateDraftReq {
                 message: template,
-                // No reply: Bridge forwards.
-                action: CreateDraftAction::Forward,
+                parent_id: parent_id.to_owned(),
+                action,
                 ..CreateDraftReq::default()
             },
         )
@@ -555,6 +653,45 @@ mod tests {
     use zmail_proton_api::{RecipientKey, SignatureType};
 
     use crate::send_prefs::tests::KEY_A;
+
+    #[test]
+    fn replies_reply_and_everything_else_forwards() {
+        let message = |in_reply_to: Option<&str>, action| OutgoingMessage {
+            from_email: "zmail@proton.local".to_owned(),
+            from_name: None,
+            to: vec!["bob@example.com".to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Re: Hi".to_owned(),
+            text_body: String::new(),
+            attachments: Vec::new(),
+            message_id: None,
+            in_reply_to: in_reply_to.map(str::to_owned),
+            references: Vec::new(),
+            reply_action: action,
+        };
+        assert_eq!(
+            draft_action(&message(Some("p@x"), Some(ReplyAction::Reply))),
+            CreateDraftAction::Reply
+        );
+        assert_eq!(
+            draft_action(&message(Some("p@x"), Some(ReplyAction::ReplyAll))),
+            CreateDraftAction::ReplyAll
+        );
+        // An In-Reply-To from elsewhere still replies, as in Bridge.
+        assert_eq!(
+            draft_action(&message(Some("p@x"), None)),
+            CreateDraftAction::Reply
+        );
+        assert_eq!(
+            draft_action(&message(None, Some(ReplyAction::Forward))),
+            CreateDraftAction::Forward
+        );
+        assert_eq!(
+            draft_action(&message(None, None)),
+            CreateDraftAction::Forward
+        );
+    }
 
     #[test]
     fn keeps_plus_suffixes_as_bridge_does() {

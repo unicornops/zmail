@@ -8,18 +8,21 @@
 //! - The subject gets `Re:` or `Fwd:`, once.
 //! - A reply quotes the message under an "On …, … wrote:" line; a forward
 //!   copies it under a "Forwarded message" block with its headers.
+//! - A reply names the message it answers in `In-Reply-To` and extends
+//!   its `References` (RFC 5322 section 3.6.4,
+//!   [`DraftThreading::answering`]); a forward starts a conversation of its
+//!   own. Both record the message they came from, so sending can fill in
+//!   headers that had not been read yet.
 //!
 //! Nothing here reads the store or knows a UI toolkit: the frontend
-//! passes the message, the user's addresses and the message's date
-//! formatted for its own time zone, and creates the draft with
-//! [`MailActions::create_draft`](crate::MailActions::create_draft).
-//! Neither frontend sets `In-Reply-To` or `References` yet: a draft has no
-//! field for them.
+//! passes the message, the mailbox it is in, the user's addresses and the
+//! message's date formatted for its own time zone, and creates the draft
+//! with [`MailActions::create_draft`](crate::MailActions::create_draft).
 
 use std::collections::HashSet;
 
 use anyhow::{Result, bail};
-use zmail_core::{IdentitySummary, ThreadMessage};
+use zmail_core::{DraftParent, DraftThreading, IdentitySummary, ReplyAction, ThreadMessage};
 
 /// What a reply or forward draft starts with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +36,8 @@ pub struct DraftStart {
     /// The body: two empty lines to write in, then the quoted or
     /// forwarded message.
     pub body: String,
+    /// What the draft answers.
+    pub threading: DraftThreading,
 }
 
 /// The user's own addresses, normalised, for leaving them out of a reply.
@@ -44,38 +49,60 @@ pub fn own_addresses(identities: &[IdentitySummary]) -> HashSet<String> {
         .collect()
 }
 
-/// A reply to `message` in a conversation called `thread_subject`, to all
-/// its recipients when `reply_all` is set. `date` is when the message
-/// arrived, as the attribution line shows it.
+/// A reply to `message`, in mailbox `mailbox`, in a conversation called
+/// `thread_subject`, to all its recipients when `reply_all` is set. `date`
+/// is when the message arrived, as the attribution line shows it.
 ///
 /// Fails when nobody is left to reply to (the message has no sender and no
 /// recipient other than the user).
 pub fn reply(
     thread_subject: &str,
+    mailbox: &str,
     message: &ThreadMessage,
     own_addresses: &HashSet<String>,
     reply_all: bool,
     date: &str,
 ) -> Result<DraftStart> {
     let (to, cc) = reply_recipients(message, own_addresses, reply_all)?;
+    let action = if reply_all {
+        ReplyAction::ReplyAll
+    } else {
+        ReplyAction::Reply
+    };
     Ok(DraftStart {
         to,
         cc,
         subject: prefixed_subject("Re", thread_subject),
         body: quoted_reply_body(message, date),
+        threading: threading(action, mailbox, message),
     })
 }
 
-/// A forward of `message` in a conversation called `thread_subject`, with
-/// no recipients yet. `date` is when the message arrived, as the forwarded
-/// headers show it.
-pub fn forward(thread_subject: &str, message: &ThreadMessage, date: &str) -> DraftStart {
+/// A forward of `message`, in mailbox `mailbox`, in a conversation called
+/// `thread_subject`, with no recipients yet. `date` is when the message
+/// arrived, as the forwarded headers show it.
+pub fn forward(
+    thread_subject: &str,
+    mailbox: &str,
+    message: &ThreadMessage,
+    date: &str,
+) -> DraftStart {
     DraftStart {
         to: Vec::new(),
         cc: Vec::new(),
         subject: prefixed_subject("Fwd", thread_subject),
         body: forwarded_body(message, date),
+        threading: threading(ReplyAction::Forward, mailbox, message),
     }
+}
+
+/// What a draft made by `action` from `message` answers.
+fn threading(action: ReplyAction, mailbox: &str, message: &ThreadMessage) -> DraftThreading {
+    let parent = (!message.remote_id.is_empty() && !mailbox.is_empty()).then(|| DraftParent {
+        mailbox: mailbox.to_owned(),
+        remote_id: message.remote_id.clone(),
+    });
+    DraftThreading::answering(action, &message.headers, parent)
 }
 
 /// Who a reply to `message` goes to: the sender in To and, for reply all,
@@ -226,7 +253,9 @@ pub fn normalize_contact(value: &str) -> String {
 mod tests {
     use std::collections::HashSet;
 
-    use zmail_core::{IdentitySummary, MessageRenderMode, ThreadMessage};
+    use zmail_core::{
+        DraftParent, IdentitySummary, MessageHeaders, MessageRenderMode, ReplyAction, ThreadMessage,
+    };
 
     use super::{
         forward, normalize_contact, own_addresses, prefixed_subject, reply, split_contact_summary,
@@ -303,6 +332,7 @@ mod tests {
         );
         let start = reply(
             "Quarterly report",
+            "INBOX",
             &message,
             &me(),
             false,
@@ -325,7 +355,8 @@ mod tests {
             "Kai Santos <kai@example.com>",
             "ME@work.example, Ada <ada@example.com>; ada@example.com, kai@example.com",
         );
-        let start = reply("Quarterly report", &message, &me(), true, "today").expect("recipients");
+        let start =
+            reply("Quarterly report", "INBOX", &message, &me(), true, "today").expect("recipients");
         assert_eq!(start.to, ["Kai Santos <kai@example.com>"]);
         assert_eq!(start.cc, ["Ada <ada@example.com>"]);
     }
@@ -336,19 +367,63 @@ mod tests {
             "Me <me@work.example>",
             "Ada <ada@example.com>, bo@example.com",
         );
-        let start = reply("Plan", &message, &me(), true, "today").expect("recipients");
+        let start = reply("Plan", "INBOX", &message, &me(), true, "today").expect("recipients");
         assert_eq!(start.to, ["Ada <ada@example.com>"]);
         assert_eq!(start.cc, ["bo@example.com"]);
         assert!(
-            reply("Plan", &message, &me(), false, "today").is_err(),
+            reply("Plan", "INBOX", &message, &me(), false, "today").is_err(),
             "a plain reply to oneself has nobody to go to"
         );
     }
 
     #[test]
+    fn a_reply_answers_its_message_and_a_forward_records_it() {
+        let mut message = message("Kai Santos <kai@example.com>", "me@work.example");
+        message.headers = MessageHeaders {
+            captured: true,
+            message_id: Some("m2@example.com".to_owned()),
+            in_reply_to: vec!["m1@example.com".to_owned()],
+            references: vec!["m1@example.com".to_owned()],
+            ..MessageHeaders::default()
+        };
+        let parent = Some(DraftParent {
+            mailbox: "INBOX".to_owned(),
+            remote_id: "1".to_owned(),
+        });
+
+        let start = reply("Plan", "INBOX", &message, &me(), false, "today").expect("a reply");
+        assert_eq!(start.threading.action, Some(ReplyAction::Reply));
+        assert_eq!(
+            start.threading.in_reply_to.as_deref(),
+            Some("m2@example.com")
+        );
+        assert_eq!(
+            start.threading.references,
+            ["m1@example.com", "m2@example.com"]
+        );
+        assert_eq!(start.threading.parent, parent);
+        assert!(!start.threading.pending);
+
+        let all = reply("Plan", "INBOX", &message, &me(), true, "today").expect("a reply");
+        assert_eq!(all.threading.action, Some(ReplyAction::ReplyAll));
+
+        let forward = forward("Plan", "INBOX", &message, "today");
+        assert_eq!(forward.threading.action, Some(ReplyAction::Forward));
+        assert_eq!(forward.threading.in_reply_to, None);
+        assert!(forward.threading.references.is_empty());
+        assert_eq!(forward.threading.parent, parent);
+
+        // Mail stored before Zmail kept its headers: sending reads them.
+        message.headers = MessageHeaders::default();
+        let start = reply("Plan", "INBOX", &message, &me(), false, "today").expect("a reply");
+        assert!(start.threading.pending);
+        assert_eq!(start.threading.in_reply_to, None);
+    }
+
+    #[test]
     fn a_forward_copies_the_message_with_its_headers() {
         let message = message("Kai Santos <kai@example.com>", "");
-        let start = forward("Quarterly report", &message, "Sat 21 Mar 2026");
+        let start = forward("Quarterly report", "INBOX", &message, "Sat 21 Mar 2026");
         assert!(start.to.is_empty() && start.cc.is_empty());
         assert_eq!(start.subject, "Fwd: Quarterly report");
         assert_eq!(

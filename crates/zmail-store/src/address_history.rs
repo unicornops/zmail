@@ -733,6 +733,7 @@ mod tests {
                 bcc: vec!["eve@example.net".to_owned()],
                 subject: "Files".to_owned(),
                 body: "Attached.".to_owned(),
+                threading: Default::default(),
             })
             .expect("draft should be created");
         store.queue_draft(draft_id).expect("draft should queue");

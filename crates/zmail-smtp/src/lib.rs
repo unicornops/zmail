@@ -9,6 +9,7 @@ use mail_send::{
 use zmail_core::{
     AuthKind, OutgoingMessage,
     reauth::{ReauthReason, ReauthRequired},
+    threading::bare_message_id,
 };
 
 pub use zmail_core::SubmissionSecurity;
@@ -104,6 +105,10 @@ pub async fn submit_text_message(
         subject: message.subject.clone(),
         text_body: message.text_body.clone(),
         attachments: Vec::new(),
+        message_id: None,
+        in_reply_to: None,
+        references: Vec::new(),
+        reply_action: None,
     };
     submit_outgoing_message(config, &message).await
 }
@@ -254,6 +259,23 @@ pub fn render_rfc822_message(message: &OutgoingMessage) -> Result<Vec<u8>> {
         .subject(message.subject.as_str())
         .text_body(normalize_body(&message.text_body));
 
+    // The threading headers (RFC 5322 section 3.6.4). Without a Message-ID
+    // of the outbox's, mail-builder makes one up on the device's host name.
+    if let Some(message_id) = message.message_id.as_deref().and_then(bare_message_id) {
+        builder = builder.message_id(message_id);
+    }
+    if let Some(in_reply_to) = message.in_reply_to.as_deref().and_then(bare_message_id) {
+        builder = builder.in_reply_to(in_reply_to);
+    }
+    let references = message
+        .references
+        .iter()
+        .filter_map(|id| bare_message_id(id))
+        .collect::<Vec<_>>();
+    if !references.is_empty() {
+        builder = builder.references(references);
+    }
+
     if !message.to.is_empty() {
         builder = builder.to(message.to.iter().map(String::as_str).collect::<Vec<_>>());
     }
@@ -379,6 +401,10 @@ mod tests {
             subject: "Phase 2b".to_owned(),
             text_body: "Line one\nLine two".to_owned(),
             attachments: Vec::new(),
+            message_id: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            reply_action: None,
         };
 
         let rendered =
@@ -409,6 +435,10 @@ mod tests {
                 content_type: "text/plain".to_owned(),
                 bytes: b"payload".to_vec(),
             }],
+            message_id: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            reply_action: None,
         };
 
         let rendered =
@@ -418,6 +448,44 @@ mod tests {
         assert!(rendered.contains("note.txt"));
         assert!(rendered.contains("copy@localhost"));
         assert!(rendered.contains("blind@localhost"));
+    }
+
+    #[test]
+    fn renders_the_threading_headers_of_a_reply() {
+        let message = OutgoingMessage {
+            from_email: "me@work.example".to_owned(),
+            from_name: Some("Me".to_owned()),
+            to: vec!["kai@example.com".to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Re: Plan".to_owned(),
+            text_body: "Sounds good.".to_owned(),
+            attachments: Vec::new(),
+            message_id: Some("a1b2.c3d4@work.example".to_owned()),
+            in_reply_to: Some("<parent@example.com>".to_owned()),
+            references: vec![
+                "root@example.com".to_owned(),
+                "parent@example.com".to_owned(),
+            ],
+            reply_action: None,
+        };
+        let rendered =
+            String::from_utf8(render_rfc822_message(&message).expect("message should render"))
+                .expect("message should be utf-8");
+        assert!(rendered.contains("Message-ID: <a1b2.c3d4@work.example>\r\n"));
+        assert!(rendered.contains("In-Reply-To: <parent@example.com>\r\n"));
+        assert!(rendered.contains("References: <root@example.com> <parent@example.com>\r\n"));
+
+        // A new message: only a Message-ID.
+        let new = OutgoingMessage {
+            in_reply_to: None,
+            references: Vec::new(),
+            ..message
+        };
+        let rendered = String::from_utf8(render_rfc822_message(&new).expect("renders"))
+            .expect("message should be utf-8");
+        assert!(rendered.contains("Message-ID: <a1b2.c3d4@work.example>"));
+        assert!(!rendered.contains("In-Reply-To") && !rendered.contains("References"));
     }
 
     #[test]
@@ -439,6 +507,10 @@ mod tests {
             subject: message.subject,
             text_body: message.text_body,
             attachments: Vec::new(),
+            message_id: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            reply_action: None,
         };
         assert!(render_rfc822_message(&converted).is_ok());
     }
