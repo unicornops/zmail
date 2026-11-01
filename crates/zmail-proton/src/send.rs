@@ -27,7 +27,9 @@
 // Modified by UnicornOps on 2026-10-24: takes the account's key trust
 // decisions for recipients whose contact card pins other keys (see
 // `send_prefs.rs`, ADR 0004).
-// Modified by UnicornOps on 2026-11-01: the parent message comes from the
+// Modified by UnicornOps on 2026-11-01: recipients kept as `Name
+// <address>` are split into the name and the address. The parent message
+// comes from the
 // outbox message's In-Reply-To and References, as Bridge reads them from
 // the MIME it is handed, and its Message-ID is the draft's ExternalID. A
 // reply-all is created with the reply-all action, which Bridge cannot
@@ -41,7 +43,11 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow, bail};
-use zmail_core::{OutgoingMessage, ReplyAction, key_change::KeyTrust};
+use zmail_core::{
+    OutgoingMessage, ReplyAction,
+    key_change::KeyTrust,
+    participants::{Participant, envelope_address},
+};
 use zmail_proton_api::{
     ATTACHMENT_DISPOSITION, Address, AddressStatus, CardType, Client, ContactSettings,
     CreateAttachmentReq, CreateDraftAction, CreateDraftReq, DraftTemplate, EmailAddress,
@@ -86,7 +92,7 @@ pub(crate) async fn send_message(
         .iter()
         .chain(&message.cc)
         .chain(&message.bcc)
-        .cloned()
+        .map(|recipient| envelope_address(recipient))
         .collect();
     if to.is_empty() {
         bail!("sending through Proton needs at least one recipient");
@@ -212,9 +218,15 @@ async fn send_with_key(
     // A plain-text message: the body is the plain body and the rich body.
     let mime_type = TEXT_PLAIN;
     let body = message.text_body.as_str();
-    let address = |email: &String| EmailAddress {
-        name: String::new(),
-        address: email.clone(),
+    // Drafts keep recipients as `Name <address>`.
+    let address = |recipient: &String| {
+        let participant = Participant::parse(recipient);
+        EmailAddress {
+            name: participant.name.unwrap_or_default(),
+            address: participant
+                .email
+                .unwrap_or_else(|| recipient.trim().to_owned()),
+        }
     };
     let template = DraftTemplate {
         subject: message.subject.clone(),

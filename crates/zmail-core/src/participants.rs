@@ -104,6 +104,15 @@ impl Participant {
     }
 }
 
+/// The bare address of one recipient as drafts keep it (`Name
+/// <address>` or `address`), for an SMTP or JMAP envelope; the entry
+/// itself, trimmed, when it names no address.
+pub fn envelope_address(recipient: &str) -> String {
+    Participant::parse(recipient)
+        .email
+        .unwrap_or_else(|| recipient.trim().to_owned())
+}
+
 /// Splits a sender string into its display name and address, for headers
 /// that show both. When there is no display name, the address is used as
 /// the name and no separate address is returned.

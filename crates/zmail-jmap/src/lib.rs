@@ -1246,13 +1246,14 @@ fn format_jmap_addresses(addresses: Option<&[jmap_client::email::EmailAddress]>)
     }
 }
 
+/// Every recipient's bare address, for the submission envelope.
 fn all_recipients(message: &OutgoingMessage) -> Vec<String> {
     message
         .to
         .iter()
         .chain(message.cc.iter())
         .chain(message.bcc.iter())
-        .cloned()
+        .map(|recipient| zmail_core::participants::envelope_address(recipient))
         .collect()
 }
 

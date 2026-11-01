@@ -4,10 +4,13 @@ use std::sync::Once;
 
 use anyhow::{Context, Result, bail};
 use mail_send::{
-    Credentials, SmtpClientBuilder, mail_builder::MessageBuilder, smtp::message::Message,
+    Credentials, SmtpClientBuilder,
+    mail_builder::{MessageBuilder, headers::address::Address},
+    smtp::message::Message,
 };
 use zmail_core::{
     AuthKind, OutgoingMessage,
+    participants::{Participant, envelope_address},
     reauth::{ReauthReason, ReauthRequired},
     threading::bare_message_id,
 };
@@ -277,13 +280,13 @@ pub fn render_rfc822_message(message: &OutgoingMessage) -> Result<Vec<u8>> {
     }
 
     if !message.to.is_empty() {
-        builder = builder.to(message.to.iter().map(String::as_str).collect::<Vec<_>>());
+        builder = builder.to(address_list(&message.to));
     }
     if !message.cc.is_empty() {
-        builder = builder.cc(message.cc.iter().map(String::as_str).collect::<Vec<_>>());
+        builder = builder.cc(address_list(&message.cc));
     }
     if !message.bcc.is_empty() {
-        builder = builder.bcc(message.bcc.iter().map(String::as_str).collect::<Vec<_>>());
+        builder = builder.bcc(address_list(&message.bcc));
     }
 
     for attachment in &message.attachments {
@@ -303,13 +306,32 @@ fn normalize_body(body: &str) -> String {
     body.replace("\r\n", "\n")
 }
 
+/// Recipients as an address header: each `Name <address>` (as drafts keep
+/// them, a reply's included) with its name and address apart, so the
+/// header names the address, not the whole entry.
+fn address_list(recipients: &[String]) -> Address<'_> {
+    Address::new_list(
+        recipients
+            .iter()
+            .map(|recipient| {
+                let participant = Participant::parse(recipient);
+                match participant.email {
+                    Some(email) => Address::new_address(participant.name, email),
+                    None => Address::new_address(None::<String>, recipient.trim()),
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Every recipient's bare address, for the SMTP envelope (`RCPT TO`).
 fn all_recipients(message: &OutgoingMessage) -> Vec<String> {
     message
         .to
         .iter()
         .chain(message.cc.iter())
         .chain(message.bcc.iter())
-        .cloned()
+        .map(|recipient| envelope_address(recipient))
         .collect()
 }
 
@@ -486,6 +508,40 @@ mod tests {
             .expect("message should be utf-8");
         assert!(rendered.contains("Message-ID: <a1b2.c3d4@work.example>"));
         assert!(!rendered.contains("In-Reply-To") && !rendered.contains("References"));
+    }
+
+    #[test]
+    fn recipients_with_display_names_keep_the_address_apart() {
+        let message = OutgoingMessage {
+            from_email: "me@work.example".to_owned(),
+            from_name: Some("Me".to_owned()),
+            to: vec!["Kai Santos <kai@example.com>".to_owned()],
+            cc: vec![
+                "\"Doe, Jane\" <jane@example.com>".to_owned(),
+                "bo@example.com".to_owned(),
+            ],
+            bcc: Vec::new(),
+            subject: "Re: Plan".to_owned(),
+            text_body: "Yes.".to_owned(),
+            attachments: Vec::new(),
+            message_id: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            reply_action: None,
+        };
+        assert_eq!(
+            super::all_recipients(&message),
+            ["kai@example.com", "jane@example.com", "bo@example.com"],
+            "the envelope has bare addresses"
+        );
+        let rendered = String::from_utf8(render_rfc822_message(&message).expect("renders"))
+            .expect("message should be utf-8");
+        assert!(
+            rendered.contains("To: \"Kai Santos\" <kai@example.com>\r\n"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("<jane@example.com>"), "{rendered}");
+        assert!(!rendered.contains("<Kai Santos"), "{rendered}");
     }
 
     #[test]
