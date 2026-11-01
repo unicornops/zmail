@@ -42,6 +42,9 @@ use crate::widgets::{EllipsisExt, input_card};
 
 /// Width of the identity dialog.
 const DIALOG_WIDTH: f32 = 480.0;
+/// Width of the remove confirmation when it offers the server too, so its
+/// three buttons fit on one row.
+const REMOVE_EVERYWHERE_WIDTH: f32 = 580.0;
 
 /// The identity being removed, while the confirmation shows.
 pub(super) struct PendingIdentityRemoval {
@@ -733,6 +736,7 @@ impl AccountsSettings {
         let busy = self.identity_busy.is_some();
         Some(
             Modal::new("identity-remove-dialog", dialogs.remove.focus_handle())
+                .when(everywhere, |this| this.width(px(REMOVE_EVERYWHERE_WIDTH)))
                 .title(identity_editor::removal_title(&removal.identity))
                 .description(identity_editor::removal_text(
                     &removal.account,
