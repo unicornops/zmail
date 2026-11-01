@@ -10803,6 +10803,7 @@ dependencies = [
  "tokio",
  "unicode-width",
  "url",
+ "zeroize",
  "zmail-actions",
  "zmail-auth",
  "zmail-autodiscover",
