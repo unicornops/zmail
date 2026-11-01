@@ -1,5 +1,6 @@
-//! Sending an identity's values to its JMAP server, or creating it there
-//! again, when the user chooses to (Rob's decision of 1 November 2026;
+//! Sending an identity's values to its JMAP server, creating it there
+//! (again, or for the first time for one added in Zmail), or deleting it
+//! there, when the user chooses to (Rob's decision of 1 November 2026;
 //! the bookkeeping is `zmail_store`'s, the classification
 //! `zmail_core::identity_sync`'s). The sync itself only reads the
 //! server's identities and never writes them.
@@ -40,6 +41,30 @@ impl SyncService {
             .context("the identity worker exited before returning a result")?
     }
 
+    /// Creates an identity added in Zmail on the server (`Identity/set`
+    /// create) and links it to the new server identity: "Add and create
+    /// on the server". Like [`Self::push_identity_and_wait`], it runs on
+    /// the background runtime.
+    pub async fn create_identity_on_server_and_wait(&self, identity_id: i64) -> Result<()> {
+        // Creating one the server stopped listing and one it never had
+        // are the same request.
+        self.recreate_identity_and_wait(identity_id).await
+    }
+
+    /// Removes an identity from Zmail and deletes its server identity
+    /// (`Identity/set` destroy): "Remove from Zmail and the server". The
+    /// server is asked only when Zmail may remove the identity, and Zmail
+    /// removes it only once the server has; a refusal is the error and
+    /// leaves both. Runs on the background runtime.
+    pub async fn destroy_identity_and_wait(&self, identity_id: i64) -> Result<()> {
+        let service = self.clone();
+        self.inner
+            .handle
+            .spawn(async move { service.destroy_identity(identity_id).await })
+            .await
+            .context("the identity worker exited before returning a result")?
+    }
+
     async fn push_identity(&self, identity_id: i64) -> Result<()> {
         let (target, link) = self.jmap_identity(identity_id)?;
         let Some(server_id) = link.server_id.filter(|_| link.status.differs()) else {
@@ -49,12 +74,15 @@ impl SyncService {
         zmail_jmap::update_server_identity(&target, &secret, &server_id, &link.local).await?;
         self.inner
             .store
-            .record_identity_on_server(identity_id, &server_id, &link.local)
+            .record_identity_on_server(identity_id, &server_id, &link.local, false)
     }
 
     async fn recreate_identity(&self, identity_id: i64) -> Result<()> {
         let (target, link) = self.jmap_identity(identity_id)?;
-        if link.status != IdentitySyncStatus::NotOnServer {
+        if !matches!(
+            link.status,
+            IdentitySyncStatus::NotOnServer | IdentitySyncStatus::Local
+        ) {
             bail!("{} is already on the server", link.email);
         }
         let secret = self.connect_secret(&target).await?;
@@ -62,7 +90,26 @@ impl SyncService {
             zmail_jmap::create_server_identity(&target, &secret, &link.email, &link.local).await?;
         self.inner
             .store
-            .record_identity_on_server(identity_id, &server_id, &link.local)
+            .record_identity_on_server(identity_id, &server_id, &link.local, true)
+    }
+
+    async fn destroy_identity(&self, identity_id: i64) -> Result<()> {
+        let (target, link) = self.jmap_identity(identity_id)?;
+        let Some(server_id) = link
+            .server_id
+            .filter(|_| link.status != IdentitySyncStatus::NotOnServer)
+        else {
+            bail!("{} is not on the server", link.email);
+        };
+        if !link.may_delete {
+            bail!("the server doesn't let Zmail delete {}", link.email);
+        }
+        if let Some(blocker) = self.inner.store.identity_removal_blocker(identity_id)? {
+            bail!(blocker);
+        }
+        let secret = self.connect_secret(&target).await?;
+        zmail_jmap::destroy_server_identity(&target, &secret, &server_id).await?;
+        self.inner.store.remove_identity(identity_id)
     }
 
     /// The identity and its JMAP account.

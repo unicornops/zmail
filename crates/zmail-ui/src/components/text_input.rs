@@ -411,8 +411,6 @@ impl TextInput {
 
     /// Enables or disables editing. A disabled input cannot be focused or
     /// edited.
-    // Component API that no view uses yet.
-    #[allow(dead_code)]
     pub(crate) fn set_disabled(
         &mut self,
         disabled: bool,

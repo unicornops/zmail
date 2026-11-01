@@ -10,8 +10,15 @@
 //! comparison of its values with the server's last seen, so an edit made
 //! between syncs shows at once.
 //!
+//! `server_may_delete` (migration 0028) keeps the server's `mayDelete`
+//! for the linked identity, so removing one can offer to delete it on the
+//! server too without asking the server first.
+//!
 //! IMAP and Proton accounts never link their identities, so all of this
-//! leaves them alone.
+//! leaves them alone. The editor's writes ([`LocalStore::add_identity`],
+//! [`LocalStore::set_identity_address`], [`LocalStore::set_primary_identity`]
+//! and [`LocalStore::update_identity`]) work for every account; the rules
+//! about which an account allows are `zmail_setup::identity_editor`'s.
 
 use std::collections::{HashMap, HashSet};
 
@@ -36,6 +43,11 @@ ALTER TABLE identities ADD COLUMN server_name TEXT;
 ALTER TABLE identities ADD COLUMN server_reply_to TEXT;
 ALTER TABLE identities ADD COLUMN server_signature TEXT;
 ALTER TABLE identities ADD COLUMN server_state TEXT NOT NULL DEFAULT '';
+"#;
+
+/// The server's `mayDelete` for the linked identity (migration 0028).
+pub(crate) const IDENTITY_SERVER_MAY_DELETE_SCHEMA: &str = r#"
+ALTER TABLE identities ADD COLUMN server_may_delete INTEGER NOT NULL DEFAULT 0;
 "#;
 
 const CONFLICT: &str = "conflict";
@@ -68,6 +80,8 @@ pub struct IdentityLink {
     pub local: IdentityValues,
     /// How it stands.
     pub status: IdentitySyncStatus,
+    /// Whether the server lets the user delete the linked server identity.
+    pub may_delete: bool,
 }
 
 /// One identity row with its bookkeeping.
@@ -80,6 +94,7 @@ struct Row {
     server_id: Option<String>,
     seen: Option<IdentityValues>,
     state: String,
+    may_delete: bool,
 }
 
 impl Row {
@@ -100,7 +115,7 @@ impl Row {
 }
 
 const ROW_COLUMNS: &str = "id, email_address, is_primary, display_name, reply_to, signature, \
-     server_id, server_name, server_reply_to, server_signature, server_state";
+     server_id, server_name, server_reply_to, server_signature, server_state, server_may_delete";
 
 fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
     let server_name: Option<String> = row.get(7)?;
@@ -122,6 +137,7 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
             signature: server_signature.unwrap_or_default(),
         }),
         state: row.get(10)?,
+        may_delete: row.get(11)?,
     })
 }
 
@@ -163,6 +179,7 @@ fn load_row(conn: &rusqlite::Connection, identity_id: i64) -> Result<Option<(i64
                         signature: server_signature.unwrap_or_default(),
                     }),
                     state: row.get(11)?,
+                    may_delete: row.get(12)?,
                 },
             ))
         },
@@ -183,7 +200,7 @@ fn write_linked(
         .execute(
             "UPDATE identities SET display_name = ?2, reply_to = ?3, signature = ?4, \
              server_id = ?5, server_name = ?6, server_reply_to = ?7, server_signature = ?8, \
-             server_state = ?9 WHERE id = ?1",
+             server_state = ?9, server_may_delete = ?10 WHERE id = ?1",
             params![
                 identity_id,
                 local.name,
@@ -194,6 +211,7 @@ fn write_linked(
                 server.values.reply_to,
                 server.values.signature,
                 state,
+                server.may_delete,
             ],
         )
         .context("failed to update the identity from the server")?;
@@ -277,8 +295,8 @@ impl LocalStore {
                     .execute(
                         "INSERT INTO identities(account_id, display_name, email_address, \
                          signature, is_primary, reply_to, server_id, server_name, \
-                         server_reply_to, server_signature, server_state) \
-                         VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?2, ?5, ?4, '')",
+                         server_reply_to, server_signature, server_state, server_may_delete) \
+                         VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?2, ?5, ?4, '', ?7)",
                         params![
                             account_id,
                             identity.values.name,
@@ -286,6 +304,7 @@ impl LocalStore {
                             identity.values.signature,
                             identity.values.reply_to,
                             identity.id,
+                            identity.may_delete,
                         ],
                     )
                     .context("failed to add the server's identity")?;
@@ -357,6 +376,7 @@ impl LocalStore {
             .into_iter()
             .map(|row| {
                 let status = row.status();
+                let linked = row.server_id.is_some();
                 SyncedIdentity {
                     identity: IdentitySummary {
                         id: row.id,
@@ -366,8 +386,9 @@ impl LocalStore {
                         is_primary: row.is_primary,
                     },
                     local: row.local,
-                    server: row.seen.filter(|_| row.server_id.is_some()),
+                    server: row.seen.filter(|_| linked),
                     status,
+                    may_delete_on_server: linked && row.may_delete,
                 }
             })
             .collect())
@@ -425,39 +446,145 @@ impl LocalStore {
                 server_id: row.server_id,
                 local: row.local,
                 status,
+                may_delete: row.may_delete,
             }
         }))
     }
 
     /// Records that the server now holds `values` for the identity, as
     /// server identity `server_id`: after updating the server with it, or
-    /// creating it there again.
+    /// creating it there (`created`: an identity the user made, which the
+    /// user may delete again).
     pub fn record_identity_on_server(
         &self,
         identity_id: i64,
         server_id: &str,
         values: &IdentityValues,
+        created: bool,
     ) -> Result<()> {
         self.connection()?
             .execute(
                 "UPDATE identities SET server_id = ?2, server_name = ?3, server_reply_to = ?4, \
-                 server_signature = ?5, server_state = '' WHERE id = ?1",
+                 server_signature = ?5, server_state = '', \
+                 server_may_delete = CASE WHEN ?6 THEN 1 ELSE server_may_delete END \
+                 WHERE id = ?1",
                 params![
                     identity_id,
                     server_id,
                     values.name,
                     values.reply_to,
                     values.signature,
+                    created,
                 ],
             )
             .context("failed to record the server's identity")?;
         Ok(())
     }
 
-    /// Removes an identity from Zmail (not from the server): offered for
-    /// one the server no longer lists. Its mail is filed under the
-    /// account's primary identity. The primary identity, the last one and
-    /// one a draft is written from are kept.
+    /// Adds an identity the user made to an account, with `values`; it
+    /// becomes the primary identity only when the account has none.
+    /// Returns its id. The address must be new to the account (Zmail keeps
+    /// one identity per address).
+    pub fn add_identity(
+        &self,
+        account_id: i64,
+        email: &str,
+        values: &IdentityValues,
+    ) -> Result<i64> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin adding the identity")?;
+        ensure_address_is_new(&transaction, account_id, email, None)?;
+        let has_primary = primary_identity_id(&transaction, account_id)?.is_some();
+        transaction
+            .execute(
+                "INSERT INTO identities(account_id, display_name, email_address, signature, \
+                 is_primary, reply_to) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    account_id,
+                    values.name,
+                    email,
+                    values.signature,
+                    !has_primary,
+                    values.reply_to,
+                ],
+            )
+            .context("failed to add the identity")?;
+        let identity_id = transaction.last_insert_rowid();
+        transaction
+            .commit()
+            .context("failed to commit adding the identity")?;
+        Ok(identity_id)
+    }
+
+    /// Changes the address of an identity that isn't linked to a server
+    /// identity (a linked one's address is the server's, RFC 8621). The new
+    /// address must be new to the account. Drafts keep the address they
+    /// started with.
+    pub fn set_identity_address(&self, identity_id: i64, email: &str) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin changing the address")?;
+        let Some((account_id, row)) = load_row(&transaction, identity_id)? else {
+            bail!("that identity no longer exists");
+        };
+        if row.email == email {
+            return Ok(());
+        }
+        if row.server_id.is_some() {
+            bail!("{}'s address is set by the server", row.email);
+        }
+        ensure_address_is_new(&transaction, account_id, email, Some(identity_id))?;
+        transaction
+            .execute(
+                "UPDATE identities SET email_address = ?2 WHERE id = ?1",
+                params![identity_id, email],
+            )
+            .context("failed to change the address")?;
+        transaction
+            .commit()
+            .context("failed to commit changing the address")
+    }
+
+    /// Makes an identity its account's primary one: the identity new mail
+    /// starts from, and the one mail from a removed identity is filed
+    /// under.
+    pub fn set_primary_identity(&self, identity_id: i64) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin changing the primary identity")?;
+        let Some((account_id, _)) = load_row(&transaction, identity_id)? else {
+            bail!("that identity no longer exists");
+        };
+        transaction
+            .execute(
+                "UPDATE identities SET is_primary = (id = ?2) WHERE account_id = ?1",
+                params![account_id, identity_id],
+            )
+            .context("failed to change the primary identity")?;
+        transaction
+            .commit()
+            .context("failed to commit changing the primary identity")
+    }
+
+    /// Why an identity can't be removed from Zmail, or `None` when it can:
+    /// the primary identity, the last one and one a draft is written from
+    /// are kept.
+    pub fn identity_removal_blocker(&self, identity_id: i64) -> Result<Option<String>> {
+        let conn = self.connection()?;
+        let Some((account_id, row)) = load_row(&conn, identity_id)? else {
+            bail!("that identity no longer exists");
+        };
+        removal_blocker(&conn, account_id, &row)
+    }
+
+    /// Removes an identity from Zmail (not from the server). Its mail is
+    /// filed under the account's primary identity. The primary identity,
+    /// the last one and one a draft is written from are kept
+    /// ([`Self::identity_removal_blocker`]).
     pub fn remove_identity(&self, identity_id: i64) -> Result<()> {
         let mut conn = self.connection()?;
         let transaction = conn
@@ -466,22 +593,8 @@ impl LocalStore {
         let Some((account_id, row)) = load_row(&transaction, identity_id)? else {
             bail!("that identity no longer exists");
         };
-        if row.is_primary {
-            bail!(
-                "{} is the account's primary identity, so it stays",
-                row.email
-            );
-        }
-        let drafts: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM drafts WHERE identity_id = ?1",
-            params![identity_id],
-            |row| row.get(0),
-        )?;
-        if drafts > 0 {
-            bail!(
-                "a draft is written from {}: send or delete it first",
-                row.email
-            );
+        if let Some(blocker) = removal_blocker(&transaction, account_id, &row)? {
+            bail!(blocker);
         }
         let primary = primary_identity_id(&transaction, account_id)?
             .filter(|primary| *primary != identity_id)
@@ -499,6 +612,63 @@ impl LocalStore {
             .commit()
             .context("failed to commit removing the identity")
     }
+}
+
+/// Why `row`, an identity of `account_id`, can't be removed, if it can't.
+fn removal_blocker(
+    conn: &rusqlite::Connection,
+    account_id: i64,
+    row: &Row,
+) -> Result<Option<String>> {
+    if row.is_primary {
+        return Ok(Some(format!(
+            "{} is the account's primary identity, so it stays",
+            row.email
+        )));
+    }
+    let others: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM identities WHERE account_id = ?1 AND id <> ?2",
+        params![account_id, row.id],
+        |row| row.get(0),
+    )?;
+    if others == 0 {
+        return Ok(Some(format!(
+            "{} is the account's only identity",
+            row.email
+        )));
+    }
+    let drafts: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM drafts WHERE identity_id = ?1",
+        params![row.id],
+        |row| row.get(0),
+    )?;
+    if drafts > 0 {
+        return Ok(Some(format!(
+            "a draft is written from {}: send or delete it first",
+            row.email
+        )));
+    }
+    Ok(None)
+}
+
+/// Fails when `account_id` already has an identity for `email` (ignoring
+/// case), other than `except`.
+fn ensure_address_is_new(
+    conn: &rusqlite::Connection,
+    account_id: i64,
+    email: &str,
+    except: Option<i64>,
+) -> Result<()> {
+    let taken: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM identities WHERE account_id = ?1 \
+         AND email_address = ?2 COLLATE NOCASE AND id IS NOT ?3)",
+        params![account_id, email, except],
+        |row| row.get(0),
+    )?;
+    if taken {
+        bail!("the account already has an identity for {email}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -678,7 +848,7 @@ mod tests {
             .expect("exists");
         assert_eq!(link.server_id.as_deref(), Some("i1"));
         store
-            .record_identity_on_server(primary, "i1", &link.local)
+            .record_identity_on_server(primary, "i1", &link.local, false)
             .expect("recorded");
         assert_eq!(
             status_of(&store, account, "rob@example.com"),
@@ -690,6 +860,115 @@ mod tests {
             .merge_server_identities(account, &listed)
             .expect("the merge runs");
         assert_eq!(report, Default::default());
+    }
+
+    #[test]
+    fn the_editor_adds_readdresses_makes_primary_and_guards_removal() {
+        use zmail_core::{DraftThreading, DraftUpdate, NewDraft};
+
+        let store = LocalStore::open_ephemeral().expect("the store opens");
+        let account = jmap_account(&store);
+        let primary = store.list_identities(account).expect("identities")[0].id;
+        assert_eq!(
+            store.identity_removal_blocker(primary).expect("checked"),
+            Some("rob@example.com is the account's primary identity, so it stays".to_owned())
+        );
+
+        // Added: not primary, one per address.
+        let help = store
+            .add_identity(account, "help@example.com", &values("Help", "-- Help"))
+            .expect("added");
+        assert!(
+            store
+                .add_identity(account, "HELP@example.com", &values("Help", ""))
+                .is_err()
+        );
+        let listed = store.list_synced_identities(account).expect("identities");
+        assert_eq!(listed[1].identity.id, help);
+        assert!(!listed[1].identity.is_primary);
+        assert_eq!(listed[1].status, IdentitySyncStatus::Local);
+        assert!(!listed[1].may_delete_on_server);
+
+        // Its address can change, but not to one the account has, and a
+        // linked identity's never.
+        store
+            .set_identity_address(help, "desk@example.com")
+            .expect("readdressed");
+        assert!(store.set_identity_address(help, "rob@example.com").is_err());
+        store
+            .merge_server_identities(
+                account,
+                &[server("i1", "rob@example.com", values("Rob", ""))],
+            )
+            .expect("merged");
+        let error = store
+            .set_identity_address(primary, "rob2@example.com")
+            .expect_err("linked");
+        assert!(error.to_string().contains("set by the server"), "{error}");
+        let link = store
+            .identity_link(primary)
+            .expect("loads")
+            .expect("exists");
+        assert!(link.may_delete, "the server's mayDelete is kept");
+        assert!(store.list_synced_identities(account).expect("identities")[0].may_delete_on_server);
+
+        // Make primary: the other one is no longer.
+        store.set_primary_identity(help).expect("made primary");
+        let listed = store.list_identities(account).expect("identities");
+        assert_eq!(listed[0].id, help);
+        assert!(listed[0].is_primary && !listed[1].is_primary);
+        assert_eq!(
+            store.identity_removal_blocker(primary).expect("checked"),
+            None
+        );
+
+        // A draft written from it keeps it, and keeps the values it started
+        // with when the identity is edited meanwhile.
+        let draft = store
+            .create_draft(&NewDraft {
+                account_id: account,
+                identity_id: primary,
+                to: Vec::new(),
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Hello".to_owned(),
+                body: String::new(),
+                threading: DraftThreading::default(),
+            })
+            .expect("the draft starts");
+        assert!(
+            store
+                .identity_removal_blocker(primary)
+                .expect("checked")
+                .is_some_and(|blocker| blocker.contains("a draft is written from"))
+        );
+        assert!(store.remove_identity(primary).is_err());
+        store
+            .update_identity(primary, &values("Rob, edited", "-- edited"))
+            .expect("edited");
+        let update = |identity_id| DraftUpdate {
+            identity_id,
+            to: Vec::new(),
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Hello".to_owned(),
+            body: "Hi".to_owned(),
+        };
+        store.update_draft(draft, &update(primary)).expect("saved");
+        let detail = store.draft_detail(draft).expect("loads").expect("exists");
+        assert_eq!(detail.identity_name, "Rob");
+        // Choosing another identity takes that one's values.
+        store.update_draft(draft, &update(help)).expect("saved");
+        let detail = store.draft_detail(draft).expect("loads").expect("exists");
+        assert_eq!(detail.identity_email, "desk@example.com");
+        assert_eq!(detail.identity_signature, "-- Help");
+
+        // Now the old primary can go; its mail is filed under the new one.
+        store.remove_identity(primary).expect("removed");
+        assert_eq!(
+            store.identity_removal_blocker(help).expect("checked"),
+            Some("desk@example.com is the account's primary identity, so it stays".to_owned())
+        );
     }
 
     #[test]

@@ -112,6 +112,17 @@ pub struct SyncedIdentity {
     pub server: Option<IdentityValues>,
     /// How it stands.
     pub status: IdentitySyncStatus,
+    /// Whether the server lets the user delete the server identity it is
+    /// linked to (`mayDelete`, as last seen); false when it isn't linked.
+    pub may_delete_on_server: bool,
+}
+
+impl SyncedIdentity {
+    /// Whether it is linked to a server identity, so its address is the
+    /// server's and can't change (RFC 8621 makes it immutable).
+    pub fn is_linked(&self) -> bool {
+        self.server.is_some()
+    }
 }
 
 /// What a sync does with a local identity linked to a server identity.

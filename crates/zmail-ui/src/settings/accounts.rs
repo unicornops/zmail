@@ -19,8 +19,11 @@
 //! - **Identities** that differ from their JMAP server get a notice on
 //!   the card, worded by `zmail_setup::identities`, with Update the
 //!   server and Use the server's; one the server no longer lists offers
-//!   to create it there again or to remove it from Zmail. Updating and
-//!   creating run on the sync runtime and report back with a toast.
+//!   to create it there again or to remove it from Zmail (after asking).
+//!   Updating and creating run on the sync runtime and report back with a
+//!   toast.
+//! - **Identities** also lists every identity, with Edit…, Add Identity…,
+//!   Remove… and Make primary (`identities`, #366).
 //!
 //! The sidebar's Fix… on a failing account opens this section on that
 //! account ([`AccountsSettings::focus_account`]), as does Re-authenticate
@@ -35,11 +38,18 @@ use zmail_core::{
     identity_sync::{IdentitySyncStatus, SyncedIdentity},
     reauth::ReauthReason,
 };
-use zmail_setup::accounts::{
-    RemoveError, budget_label, budget_options, removal_blocker, removal_description, removal_lines,
+use zmail_setup::{
+    accounts::{
+        RemoveError, budget_label, budget_options, removal_blocker, removal_description,
+        removal_lines,
+    },
+    identity_editor::AccountIdentities,
 };
 use zmail_store::AccountRemovalImpact;
 
+mod identities;
+
+use self::identities::IdentityDialogs;
 use super::{
     SettingsEvent, SettingsHost, dotted_label, section_heading, setting_row, setting_text,
     update_workspace,
@@ -96,6 +106,8 @@ struct AccountCard {
     /// The account's identities that differ from the server, or that the
     /// server no longer lists.
     identities: Vec<SyncedIdentity>,
+    /// All the account's identities, for the Identities group.
+    all_identities: AccountIdentities,
     _subscriptions: [Subscription; 2],
 }
 
@@ -121,6 +133,8 @@ pub(crate) struct AccountsSettings {
     remove_cancel: FocusHandle,
     /// The identity being sent to the server, whose buttons wait.
     identity_busy: Option<i64>,
+    /// The identity editor and its remove confirmation.
+    identity_dialogs: IdentityDialogs,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -151,6 +165,7 @@ impl AccountsSettings {
             removal: None,
             remove_cancel: cx.focus_handle(),
             identity_busy: None,
+            identity_dialogs: IdentityDialogs::new(window, cx),
             _subscriptions: subscriptions,
         };
         this.refresh(cx);
@@ -233,11 +248,17 @@ impl AccountsSettings {
                 .filter(|job| job.state == OutboxJobState::Failed)
                 .filter_map(|job| job.last_error_message)
                 .find(|message| ReauthReason::of_message(message).is_some());
-            card.identities = store
-                .list_synced_identities(account.id)
-                .unwrap_or_default()
-                .into_iter()
+            card.all_identities = AccountIdentities {
+                account_id: account.id,
+                protocol: account.protocol,
+                identities: store.list_synced_identities(account.id).unwrap_or_default(),
+            };
+            card.identities = card
+                .all_identities
+                .identities
+                .iter()
                 .filter(|identity| identity.status.needs_attention())
+                .cloned()
                 .collect();
             card.account = account;
             card.auth = auth;
@@ -279,6 +300,11 @@ impl AccountsSettings {
             refused_send: None,
             google_oauth: false,
             identities: Vec::new(),
+            all_identities: AccountIdentities {
+                account_id: account.id,
+                protocol: account.protocol,
+                identities: Vec::new(),
+            },
             _subscriptions: [color_subscription, budget_subscription],
         }
     }
@@ -569,25 +595,6 @@ impl AccountsSettings {
         self.refresh(cx);
     }
 
-    /// Removes an identity the server no longer lists from Zmail.
-    pub(crate) fn remove_identity(&mut self, identity_id: i64, cx: &mut Context<Self>) {
-        let Some(email) = self.identity_email(identity_id) else {
-            return;
-        };
-        match SettingsHost::get(cx).store.remove_identity(identity_id) {
-            Ok(()) => {
-                refresh_workspace(cx);
-                cx.emit(SettingsEvent::Status(format!(
-                    "Removed {email} from Zmail."
-                )));
-            }
-            Err(error) => cx.emit(SettingsEvent::Error(format!(
-                "Could not remove {email}: {error:#}"
-            ))),
-        }
-        self.refresh(cx);
-    }
-
     fn identity_email(&self, identity_id: i64) -> Option<String> {
         self.cards
             .iter()
@@ -638,7 +645,18 @@ impl AccountsSettings {
                     RECREATE,
                     Self::recreate_identity,
                 ))
-                .action(button("identity-remove", REMOVE, Self::remove_identity))
+                .action(
+                    div()
+                        .debug_selector(move || format!("identity-remove-{identity_id}"))
+                        .child(
+                            Button::new(("identity-remove", identity_id as u64), REMOVE)
+                                .size(ButtonSize::Small)
+                                .disabled(busy)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.confirm_remove_identity(identity_id, window, cx)
+                                })),
+                        ),
+                )
         } else {
             banner
                 .action(button(
@@ -737,6 +755,7 @@ impl AccountsSettings {
         self.remove.close(window, cx);
         self.reauth_account = None;
         self.removal = None;
+        self.close_identity_dialogs(window, cx);
         cx.notify();
     }
 
@@ -877,6 +896,7 @@ impl AccountsSettings {
                     .map(|identity| self.render_identity_notice(identity, cx))
                     .collect::<Vec<_>>(),
             )
+            .child(self.render_identities(card, colors, cx))
             .child(setting_row(
                 "Colour",
                 Some("Marks this account's mail and folders.".into()),
@@ -1103,5 +1123,7 @@ impl Render for AccountsSettings {
             .children(cards)
             .children(self.render_reauth_dialog(cx))
             .children(self.render_remove_dialog(&colors, cx))
+            .children(self.render_identity_dialog(&colors, cx))
+            .children(self.render_identity_remove_dialog(&colors, cx))
     }
 }

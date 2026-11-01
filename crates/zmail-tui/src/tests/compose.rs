@@ -1117,19 +1117,14 @@ fn from_offers_the_accounts_identities() {
 fn a_new_message_leaves_room_above_the_signature() {
     let store = seeded_store();
     let (work, _) = accounts(&store);
+    let identity = store.list_identities(work).expect("identities")[0].clone();
     store
-        .replace_account_snapshot(
-            work,
-            &AccountSyncSnapshot {
-                checkpoint: "test:4".to_owned(),
-                detail: "Up to date".to_owned(),
-                identities: Some(vec![zmail_core::NewIdentity {
-                    display_name: "Work".to_owned(),
-                    email_address: "me@work.example".to_owned(),
-                    signature: "Ada\nWork".to_owned(),
-                    is_primary: true,
-                }]),
-                mailboxes: vec![mailbox("INBOX", Some("inbox"), Vec::new())],
+        .update_identity(
+            identity.id,
+            &zmail_core::identity_sync::IdentityValues {
+                name: identity.display_name,
+                reply_to: String::new(),
+                signature: "Ada\nWork".to_owned(),
             },
         )
         .expect("the signature is stored");

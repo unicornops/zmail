@@ -152,6 +152,7 @@ mod tests {
             }),
             local,
             status,
+            may_delete_on_server: true,
         }
     }
 

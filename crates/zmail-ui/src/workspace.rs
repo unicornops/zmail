@@ -338,6 +338,7 @@ impl WorkspaceView {
                 | InitialView::KeyboardShortcuts
                 | InitialView::Settings(_)
                 | InitialView::SettingsAccount(_)
+                | InitialView::SettingsIdentity { .. }
         ) {
             view.restore_last_mailbox(cx);
         }
@@ -422,6 +423,13 @@ impl WorkspaceView {
             }),
             InitialView::SettingsAccount(account_id) => cx.defer_in(window, move |_, _, cx| {
                 crate::settings::open_account(account_id, cx);
+            }),
+            InitialView::SettingsIdentity {
+                account_id,
+                identity_id,
+                remove,
+            } => cx.defer_in(window, move |_, _, cx| {
+                crate::settings::open_identity(account_id, identity_id, remove, cx);
             }),
             InitialView::Search(query) => {
                 view.search_query

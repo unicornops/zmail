@@ -191,6 +191,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0027_identity_server_sync",
         identities::IDENTITY_SERVER_SYNC_SCHEMA,
     ),
+    (
+        "0028_identity_server_may_delete",
+        identities::IDENTITY_SERVER_MAY_DELETE_SCHEMA,
+    ),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -4136,27 +4140,41 @@ impl LocalStore {
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the draft autosave transaction")?;
-        let (account_id, state) = transaction
+        let (account_id, state, started_from) = transaction
             .query_row(
-                "SELECT account_id, state FROM drafts WHERE id = ?1",
+                "SELECT account_id, state, identity_id, identity_name, identity_email, \
+                 identity_signature FROM drafts WHERE id = ?1",
                 params![draft_id],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         draft_state_from_db(row.get::<_, String>(1)?)?,
+                        IdentitySummary {
+                            id: row.get(2)?,
+                            display_name: row.get(3)?,
+                            email_address: row.get(4)?,
+                            signature: row.get(5)?,
+                            is_primary: false,
+                        },
                     ))
                 },
             )
             .optional()?
             .with_context(|| format!("draft {draft_id} does not exist"))?;
         ensure_draft_is_editable(state)?;
-        let identity = load_identity_snapshot(&transaction, account_id, update.identity_id)?
+        let mut identity = load_identity_snapshot(&transaction, account_id, update.identity_id)?
             .with_context(|| {
                 format!(
                     "identity {} does not belong to account {}",
                     update.identity_id, account_id
                 )
             })?;
+        // A draft keeps the name, address and signature it started with
+        // while it stays on that identity, even if the identity is edited
+        // meanwhile; choosing another identity takes that one's.
+        if identity.id == started_from.id {
+            identity = started_from;
+        }
         let now = utc_now_timestamp();
         let next_body = if update.body.trim().is_empty() {
             apply_default_signature(&update.body, &identity.signature)
@@ -6126,6 +6144,13 @@ fn replace_account_identities(
     // Identities are merged by email address so their row ids stay stable
     // across syncs; messages reference identity ids and a delete-and-
     // reinsert would break those references.
+    //
+    // What the user edits stays theirs (only Proton sends identities in
+    // a snapshot, and its edits are local): the signature, the reply-to
+    // and which identity is primary are never overwritten. The name takes
+    // the server's only while the user hasn't changed it: `server_name`
+    // keeps the name the server last sent (with no `server_id`, so the
+    // identity is still not linked, `identities.rs`).
     let existing = identity_id_map(transaction, account_id)?;
     for identity in identities {
         match existing.get(&identity.email_address) {
@@ -6134,33 +6159,33 @@ fn replace_account_identities(
                     .execute(
                         r#"
                     UPDATE identities
-                    SET display_name = ?2, signature = ?3, is_primary = ?4
+                    SET display_name = CASE
+                            WHEN server_name IS NULL OR display_name = server_name THEN ?2
+                            ELSE display_name
+                        END,
+                        server_name = ?2
                     WHERE id = ?1
                     "#,
-                        params![
-                            identity_id,
-                            identity.display_name,
-                            identity.signature,
-                            identity.is_primary,
-                        ],
+                        params![identity_id, identity.display_name],
                     )
                     .context("failed to update the identity during the snapshot merge")?;
             }
             None => {
-                transaction.execute(
-                    r#"
-                    INSERT INTO identities(account_id, display_name, email_address, signature, is_primary)
-                    VALUES (?1, ?2, ?3, ?4, ?5)
+                transaction
+                    .execute(
+                        r#"
+                    INSERT INTO identities(account_id, display_name, email_address, signature,
+                                           is_primary, server_name)
+                    VALUES (?1, ?2, ?3, ?4, 0, ?2)
                     "#,
-                    params![
-                        account_id,
-                        identity.display_name,
-                        identity.email_address,
-                        identity.signature,
-                        identity.is_primary,
-                    ],
-                )
-                .context("failed to insert the identity during the snapshot merge")?;
+                        params![
+                            account_id,
+                            identity.display_name,
+                            identity.email_address,
+                            identity.signature,
+                        ],
+                    )
+                    .context("failed to insert the identity during the snapshot merge")?;
             }
         }
     }
@@ -6189,6 +6214,28 @@ fn replace_account_identities(
                     format!("failed to remove the {email_address} identity from the snapshot merge")
                 })?;
         }
+    }
+
+    // The account keeps a primary identity: the snapshot's, when the user's
+    // choice is gone (or there was none yet).
+    let has_primary: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM identities WHERE account_id = ?1 AND is_primary = 1)",
+            params![account_id],
+            |row| row.get(0),
+        )
+        .context("failed to check the primary identity during the snapshot merge")?;
+    if !has_primary {
+        let primary = identities
+            .iter()
+            .find(|identity| identity.is_primary)
+            .unwrap_or(&identities[0]);
+        transaction
+            .execute(
+                "UPDATE identities SET is_primary = 1 WHERE account_id = ?1 AND email_address = ?2",
+                params![account_id, primary.email_address],
+            )
+            .context("failed to mark the primary identity during the snapshot merge")?;
     }
     Ok(())
 }
@@ -9388,6 +9435,71 @@ mod tests {
             .map(|mailbox| mailbox.name)
             .collect();
         assert_eq!(names, vec!["Inbox".to_owned()]);
+    }
+
+    #[test]
+    fn a_proton_resync_keeps_the_users_identity_edits() {
+        use zmail_core::identity_sync::IdentityValues;
+
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Proton)
+            .expect("account should be created");
+        let before = store.list_identities(account_id).expect("identities");
+        let (primary, alias) = (&before[0], &before[1]);
+        let snapshot = |primary_name: &str, alias_name: &str| AccountSyncSnapshot {
+            checkpoint: "proton:1".to_owned(),
+            detail: "Proton resync".to_owned(),
+            identities: Some(vec![
+                NewIdentity {
+                    display_name: primary_name.to_owned(),
+                    email_address: primary.email_address.clone(),
+                    signature: String::new(),
+                    is_primary: true,
+                },
+                NewIdentity {
+                    display_name: alias_name.to_owned(),
+                    email_address: alias.email_address.clone(),
+                    signature: String::new(),
+                    is_primary: false,
+                },
+            ]),
+            mailboxes: Vec::new(),
+        };
+        // The first resync takes Proton's names (nothing was edited yet)
+        // but keeps the signatures Proton doesn't send.
+        store
+            .replace_account_snapshot(account_id, &snapshot("Proton Name", "Alias"))
+            .expect("snapshot should apply");
+        let identities = store.list_identities(account_id).expect("identities");
+        assert_eq!(identities[0].display_name, "Proton Name");
+        assert_eq!(identities[0].signature, primary.signature);
+
+        // The user edits the alias and makes it primary; Proton renames
+        // both. The edited name stays, the untouched one follows Proton.
+        store
+            .update_identity(
+                alias.id,
+                &IdentityValues {
+                    name: "Alias, edited".to_owned(),
+                    reply_to: "team@proton.zmail.dev".to_owned(),
+                    signature: "-- edited".to_owned(),
+                },
+            )
+            .expect("edited");
+        store.set_primary_identity(alias.id).expect("primary");
+        store
+            .replace_account_snapshot(account_id, &snapshot("Renamed", "Alias renamed"))
+            .expect("snapshot should apply");
+        let synced = store
+            .list_synced_identities(account_id)
+            .expect("identities");
+        assert_eq!(synced[0].identity.id, alias.id, "the user's primary stays");
+        assert_eq!(synced[0].local.name, "Alias, edited");
+        assert_eq!(synced[0].local.reply_to, "team@proton.zmail.dev");
+        assert_eq!(synced[0].local.signature, "-- edited");
+        assert_eq!(synced[1].local.name, "Renamed");
+        assert!(synced.iter().all(|identity| !identity.is_linked()));
     }
 
     #[test]

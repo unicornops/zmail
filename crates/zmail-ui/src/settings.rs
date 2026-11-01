@@ -7,7 +7,7 @@
 //!
 //! | Module | Section |
 //! |--------|---------|
-//! | `accounts` | each account's status, colour, cache budget, Re-authenticate and Remove; Add Account |
+//! | `accounts` | each account's status, identities (edit, add, remove, make primary), colour, cache budget, Re-authenticate and Remove; Add Account |
 //! | `appearance` | theme mode, imported Zed theme, row density, reading pane |
 //! | `keyboard` | Standard or Gmail shortcuts, and the shortcut list with search |
 //! | `privacy` | remote content (always blocked), the sender-warning level |
@@ -45,7 +45,7 @@ use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
 use self::about::AboutSettings;
-use self::accounts::AccountsSettings;
+pub(crate) use self::accounts::AccountsSettings;
 use self::appearance::AppearanceSettings;
 use self::keyboard::KeyboardSettings;
 use self::privacy::PrivacySettings;
@@ -237,6 +237,23 @@ pub(crate) fn open_account(account_id: i64, cx: &mut App) {
         let _ = handle.update(cx, |root, _, cx| {
             root.accounts
                 .update(cx, |accounts, cx| accounts.focus_account(account_id, cx));
+        });
+    }
+}
+
+/// Opens Settings → Accounts on `account_id` with its identity editor
+/// open on `identity_id` (or to add one), or with `remove` the identity's
+/// remove confirmation: for the UI fixture's screenshots.
+pub(crate) fn open_identity(account_id: i64, identity_id: Option<i64>, remove: bool, cx: &mut App) {
+    open_account(account_id, cx);
+    if let Some(handle) = window(cx) {
+        let _ = handle.update(cx, |root, window, cx| {
+            root.accounts.update(cx, |accounts, cx| match identity_id {
+                Some(identity_id) if remove => {
+                    accounts.confirm_remove_identity(identity_id, window, cx)
+                }
+                _ => accounts.open_identity_editor(account_id, identity_id, window, cx),
+            });
         });
     }
 }
