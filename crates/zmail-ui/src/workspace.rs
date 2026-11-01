@@ -21,8 +21,8 @@ use gpui::{
 use std::sync::Arc;
 use zmail_actions::reply;
 use zmail_core::{
-    AccountSummary, AppBootstrap, IdentitySummary, MailboxRole, MailboxSelection, MailboxSummary,
-    NewDraft, OutboxJobState, SyncPhase, ThemeAppearance, ThreadView, VirtualMailbox,
+    AccountSummary, AppBootstrap, MailboxRole, MailboxSelection, MailboxSummary, NewDraft,
+    OutboxJobState, SyncPhase, ThemeAppearance, ThreadView, VirtualMailbox,
     preferences::ReadingPanePosition,
     text::count_noun,
     time::{HourCycle, format_full_date, next_local_midnight},
@@ -1516,7 +1516,13 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> i64 {
-        let identity = self.default_compose_identity().expect("an identity");
+        let identity = self
+            .identities
+            .iter()
+            .find(|identity| identity.is_primary)
+            .or_else(|| self.identities.first())
+            .cloned()
+            .expect("an identity");
         let account_id = self.selected_account_id.expect("an account");
         let draft_id = self
             .mail_actions
@@ -1887,7 +1893,7 @@ impl WorkspaceView {
             &thread.subject,
             &thread.mailbox_name,
             latest_message,
-            &reply::own_addresses(&self.identities),
+            &self.identities,
             reply_all,
             &format_full_date(&latest_message.received_at, &chrono::Local, self.hour_cycle),
         )?;
@@ -1903,37 +1909,28 @@ impl WorkspaceView {
             &thread.subject,
             &thread.mailbox_name,
             latest_message,
+            &self.identities,
             &format_full_date(&latest_message.received_at, &chrono::Local, self.hour_cycle),
         );
         self.create_thread_draft(start, cx)
     }
 
+    /// Creates the draft a reply or forward starts with, from the
+    /// identity the message was addressed to. Attachments a forward could
+    /// not copy are reported, and the draft opens without them.
     fn create_thread_draft(&self, start: reply::DraftStart, cx: &mut Context<Self>) -> Result<i64> {
         let account_id = self
             .selected_account_id
             .context("select an account before composing")?;
-        let identity = self.default_compose_identity()?;
-        let draft = NewDraft {
-            account_id,
-            identity_id: identity.id,
-            to: start.to,
-            cc: start.cc,
-            bcc: Vec::new(),
-            subject: start.subject,
-            body: start.body,
-            threading: start.threading,
-        };
-        self.mail_actions
-            .update(cx, |actions, cx| actions.create_draft(&draft, cx))
-    }
-
-    fn default_compose_identity(&self) -> Result<IdentitySummary> {
-        self.identities
-            .iter()
-            .find(|identity| identity.is_primary)
-            .or_else(|| self.identities.first())
-            .cloned()
-            .context("select or configure an account identity before composing")
+        let started = self.mail_actions.update(cx, |actions, cx| {
+            actions.create_started_draft(account_id, &start, cx)
+        })?;
+        if let Some(notice) = started.missing_attachments_notice() {
+            self.toasts.update(cx, |toasts, cx| {
+                toasts.push(Toast::new(notice).kind(ToastKind::Error), cx);
+            });
+        }
+        Ok(started.draft_id)
     }
 
     /// Sends every failed outbox message again (the sidebar's Retry).

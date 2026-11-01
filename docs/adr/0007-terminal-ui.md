@@ -73,9 +73,11 @@ Progress:
   Local in the Folder List) lists queued, failed and refused messages
   with retry and take-back. Bracketed paste goes into the focused field,
   a multi-line paste into an address field becoming a comma list.
-  Replies carry `In-Reply-To` and `References` (#350), worked out in
-  `zmail_actions::reply` for both frontends. Not done: forwarding the
-  original's attachments (the GUI doesn't either). The
+  Replies carry `In-Reply-To` and `References`, go to `Reply-To` and
+  come from the identity the message was addressed to, and forwards
+  carry the original's attachments (#350), all worked out in
+  `zmail_actions::reply` and `MailActions::create_started_draft` for
+  both frontends. The
   live harness send test (`live_tui_send`: Compose, `^X`, the outbox,
   SMTP, the next sync) runs in CI's quality job only.
 - Phase 3: the external editor, opt-in (`external_editor` in

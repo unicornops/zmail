@@ -5,12 +5,12 @@
 use std::sync::Arc;
 
 use zmail_core::{
-    AccountSyncSnapshot, DraftUpdate, MailboxSnapshot, MessageSnapshot, NewDraft, PendingOpKind,
-    ProtocolKind, ThreadSnapshot,
+    AccountSyncSnapshot, DraftUpdate, HydratedBody, MailboxSnapshot, MessageAttachment,
+    MessageSnapshot, NewDraft, PendingOpKind, ProtocolKind, ThreadSnapshot,
 };
 use zmail_store::LocalStore;
 
-use super::{InverseOp, MailActions, MailEvent, UNDO_LIMIT};
+use super::{InverseOp, MailActions, MailEvent, UNDO_LIMIT, reply};
 
 /// A temporary store with one account holding Inbox, Archive and,
 /// optionally, Trash. The Inbox has two threads: an unread, unflagged
@@ -695,5 +695,127 @@ fn draft_changes_write_the_store_and_emit() {
         actions.undo_entries().len(),
         0,
         "draft edits have their own undo in the text inputs"
+    );
+}
+
+#[test]
+fn a_started_draft_comes_from_the_chosen_identity_with_the_forwarded_files() {
+    let fixture = fixture(false);
+    let mut actions = MailActions::new(fixture.store.clone());
+    let mut events = Vec::new();
+    let identities = fixture
+        .store
+        .list_identities(fixture.account_id)
+        .expect("identities load");
+    let view = fixture
+        .store
+        .thread_view(fixture.thread_id)
+        .expect("thread loads")
+        .expect("thread exists");
+    let mut start = reply::forward(
+        &view.subject,
+        &view.mailbox_name,
+        &view.messages[0],
+        &identities,
+        "today",
+    );
+    assert_eq!(start.identity_id, Some(identities[0].id));
+
+    // One file the store holds, and one whose file is gone.
+    let blobs = fixture
+        .store
+        .sync_target(fixture.account_id)
+        .expect("target loads")
+        .expect("account exists")
+        .blobs;
+    let held = blobs
+        .write("held", b"forwarded bytes")
+        .expect("blob writes");
+    let message_id = view.messages[0].id;
+    fixture
+        .store
+        .hydrate_message_body(
+            message_id,
+            &HydratedBody {
+                body_text: Some("Numbers attached".to_owned()),
+                sanitized_html: None,
+                raw_html: None,
+                has_remote_content: false,
+                body_preview: "Numbers attached".to_owned(),
+                attachments: vec![
+                    MessageAttachment {
+                        filename: "numbers.txt".to_owned(),
+                        content_type: "text/plain".to_owned(),
+                        size_bytes: 15,
+                        storage_path: held,
+                        content_id: None,
+                        inline_only: false,
+                    },
+                    MessageAttachment {
+                        filename: "gone.txt".to_owned(),
+                        content_type: "text/plain".to_owned(),
+                        size_bytes: 15,
+                        storage_path: "gone".to_owned(),
+                        content_id: None,
+                        inline_only: false,
+                    },
+                ],
+                headers: Default::default(),
+            },
+        )
+        .expect("hydrates");
+    start.attachments = fixture
+        .store
+        .thread_view(fixture.thread_id)
+        .expect("thread loads")
+        .expect("thread exists")
+        .messages[0]
+        .attachments
+        .clone();
+    assert_eq!(start.attachments.len(), 2);
+
+    let started = actions
+        .create_started_draft(fixture.account_id, &start, &mut log(&mut events))
+        .expect("the draft is created");
+    assert_eq!(started.missing_attachments, ["gone.txt"]);
+    assert_eq!(
+        started.missing_attachments_notice().as_deref(),
+        Some("Couldn't attach gone.txt: it isn't stored any more.")
+    );
+    let draft = fixture
+        .store
+        .draft_detail(started.draft_id)
+        .expect("draft loads")
+        .expect("draft exists");
+    assert_eq!(draft.identity_id, identities[0].id);
+    assert_eq!(draft.subject, "Fwd: Quarterly report");
+    assert_eq!(draft.threading, start.threading);
+    assert_eq!(
+        draft
+            .attachments
+            .iter()
+            .map(|attachment| attachment.filename.as_str())
+            .collect::<Vec<_>>(),
+        ["numbers.txt"]
+    );
+    assert_eq!(
+        events,
+        [
+            MailEvent::DraftCreated {
+                draft_id: started.draft_id,
+                account_id: fixture.account_id,
+            },
+            MailEvent::DraftAttachmentsChanged {
+                draft_id: started.draft_id
+            },
+        ]
+    );
+
+    // Without an identity there is nothing to send from.
+    start.identity_id = None;
+    assert!(
+        actions
+            .create_started_draft(fixture.account_id, &start, &mut log(&mut events))
+            .is_err()
     );
 }

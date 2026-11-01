@@ -838,7 +838,7 @@ fn a_reply_is_created_with_its_parent_and_threads() -> Result<()> {
                 &view.subject,
                 &view.mailbox_name,
                 &view.messages[index],
-                &zmail_actions::reply::own_addresses(&store.list_identities(account_id)?),
+                &store.list_identities(account_id)?,
                 all,
                 "today",
             )?;
@@ -883,6 +883,27 @@ fn a_reply_is_created_with_its_parent_and_threads() -> Result<()> {
                 anyhow::Ok(client.get_message_metadata(&filter).await?)
             })
     };
+
+    // A message to the alias is answered from the alias.
+    let (alias, index) = open("INBOX", "To the alias")?;
+    let identities = store.list_identities(account_id)?;
+    let start = zmail_actions::reply::reply(
+        &alias.subject,
+        &alias.mailbox_name,
+        &alias.messages[index],
+        &identities,
+        false,
+        "today",
+    )?;
+    let chosen = identities
+        .iter()
+        .find(|identity| Some(identity.id) == start.identity_id)
+        .context("an identity is chosen")?;
+    ensure!(
+        chosen.email_address == PROTON_HARNESS_ALIAS_ADDRESS,
+        "the reply comes from {}",
+        chosen.email_address
+    );
 
     // The seeded report has no external ID, so its Message-ID is Bridge's
     // internal one, and the parent is found by ID.

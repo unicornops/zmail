@@ -1,13 +1,19 @@
-//! Replies and forwards: the recipients, subject and body a new draft
-//! starts with, worked out the same way in both frontends.
+//! Replies and forwards: the recipients, identity, subject, body and
+//! attachments a new draft starts with, worked out the same way in both
+//! frontends.
 //!
-//! - **Reply** goes to the message's sender; **reply all** adds its other
-//!   recipients as Cc. The user's own addresses are left out, and when
-//!   the sender is the user (a reply to their own message), the first
-//!   remaining recipient moves to To.
+//! - **Reply** goes to the message's `Reply-To` when it has one, else to
+//!   its sender; **reply all** adds its other To and Cc recipients as Cc.
+//!   The user's own addresses are left out, and when the sender is the
+//!   user (a reply to their own message), the first remaining recipient
+//!   moves to To.
+//! - The draft is sent from the identity the message was addressed to (in
+//!   To, Cc or Delivered-To, or the one that sent it), else the primary
+//!   ([`reply_identity`]); the user can change it in compose.
 //! - The subject gets `Re:` or `Fwd:`, once.
 //! - A reply quotes the message under an "On …, … wrote:" line; a forward
-//!   copies it under a "Forwarded message" block with its headers.
+//!   copies it under a "Forwarded message" block with its headers, and
+//!   takes its attachments along.
 //! - A reply names the message it answers in `In-Reply-To` and extends
 //!   its `References` (RFC 5322 section 3.6.4,
 //!   [`DraftThreading::answering`]); a forward starts a conversation of its
@@ -15,18 +21,24 @@
 //!   headers that had not been read yet.
 //!
 //! Nothing here reads the store or knows a UI toolkit: the frontend
-//! passes the message, the mailbox it is in, the user's addresses and the
-//! message's date formatted for its own time zone, and creates the draft
-//! with [`MailActions::create_draft`](crate::MailActions::create_draft).
+//! passes the message, the mailbox it is in, the account's identities and
+//! the message's date formatted for its own time zone, and creates the
+//! draft with
+//! [`MailActions::create_started_draft`](crate::MailActions::create_started_draft).
 
 use std::collections::HashSet;
 
 use anyhow::{Result, bail};
-use zmail_core::{DraftParent, DraftThreading, IdentitySummary, ReplyAction, ThreadMessage};
+use zmail_core::{
+    DraftParent, DraftThreading, IdentitySummary, ReceivedAttachment, ReplyAction, ThreadMessage,
+};
 
 /// What a reply or forward draft starts with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftStart {
+    /// The identity it is sent from ([`reply_identity`]); `None` when the
+    /// account has none.
+    pub identity_id: Option<i64>,
     /// To recipients.
     pub to: Vec<String>,
     /// Cc recipients.
@@ -38,6 +50,10 @@ pub struct DraftStart {
     pub body: String,
     /// What the draft answers.
     pub threading: DraftThreading,
+    /// The received attachments a forward takes along: the ones the reader
+    /// lists. Parts kept only for an HTML body's `cid:` images are not
+    /// among them; the forward carries the message's text, not its HTML.
+    pub attachments: Vec<ReceivedAttachment>,
 }
 
 /// The user's own addresses, normalised, for leaving them out of a reply.
@@ -50,8 +66,9 @@ pub fn own_addresses(identities: &[IdentitySummary]) -> HashSet<String> {
 }
 
 /// A reply to `message`, in mailbox `mailbox`, in a conversation called
-/// `thread_subject`, to all its recipients when `reply_all` is set. `date`
-/// is when the message arrived, as the attribution line shows it.
+/// `thread_subject`, to all its recipients when `reply_all` is set, from
+/// one of the account's `identities`. `date` is when the message arrived,
+/// as the attribution line shows it.
 ///
 /// Fails when nobody is left to reply to (the message has no sender and no
 /// recipient other than the user).
@@ -59,40 +76,46 @@ pub fn reply(
     thread_subject: &str,
     mailbox: &str,
     message: &ThreadMessage,
-    own_addresses: &HashSet<String>,
+    identities: &[IdentitySummary],
     reply_all: bool,
     date: &str,
 ) -> Result<DraftStart> {
-    let (to, cc) = reply_recipients(message, own_addresses, reply_all)?;
+    let (to, cc) = reply_recipients(message, &own_addresses(identities), reply_all)?;
     let action = if reply_all {
         ReplyAction::ReplyAll
     } else {
         ReplyAction::Reply
     };
     Ok(DraftStart {
+        identity_id: reply_identity(message, identities).map(|identity| identity.id),
         to,
         cc,
         subject: prefixed_subject("Re", thread_subject),
         body: quoted_reply_body(message, date),
         threading: threading(action, mailbox, message),
+        attachments: Vec::new(),
     })
 }
 
 /// A forward of `message`, in mailbox `mailbox`, in a conversation called
-/// `thread_subject`, with no recipients yet. `date` is when the message
-/// arrived, as the forwarded headers show it.
+/// `thread_subject`, with no recipients yet, from one of the account's
+/// `identities`. `date` is when the message arrived, as the forwarded
+/// headers show it.
 pub fn forward(
     thread_subject: &str,
     mailbox: &str,
     message: &ThreadMessage,
+    identities: &[IdentitySummary],
     date: &str,
 ) -> DraftStart {
     DraftStart {
+        identity_id: reply_identity(message, identities).map(|identity| identity.id),
         to: Vec::new(),
         cc: Vec::new(),
         subject: prefixed_subject("Fwd", thread_subject),
         body: forwarded_body(message, date),
         threading: threading(ReplyAction::Forward, mailbox, message),
+        attachments: message.attachments.clone(),
     }
 }
 
@@ -105,9 +128,59 @@ fn threading(action: ReplyAction, mailbox: &str, message: &ThreadMessage) -> Dra
     DraftThreading::answering(action, &message.headers, parent)
 }
 
-/// Who a reply to `message` goes to: the sender in To and, for reply all,
-/// the other recipients in Cc, without the user's own addresses or
-/// duplicates.
+/// The identity a reply to (or forward of) `message` is sent from: the
+/// one that sent it (a reply from Sent), else the first the message was
+/// addressed to in To, then Cc, then Delivered-To (an alias or a Bcc), an
+/// address with a `+tag` matching the identity without it; else the
+/// primary identity, else the first.
+pub fn reply_identity<'a>(
+    message: &ThreadMessage,
+    identities: &'a [IdentitySummary],
+) -> Option<&'a IdentitySummary> {
+    let addressed = [message.sender.as_str()]
+        .into_iter()
+        .map(normalize_contact)
+        .chain(
+            split_contact_summary(&message.recipients)
+                .iter()
+                .chain(&split_contact_summary(&message.headers.cc))
+                .chain(&message.headers.delivered_to)
+                .map(|address| normalize_contact(address)),
+        )
+        .filter(|address| !address.is_empty())
+        .collect::<Vec<_>>();
+    let identity_of = |address: &str| {
+        identities
+            .iter()
+            .find(|identity| normalize_contact(&identity.email_address) == address)
+    };
+    addressed
+        .iter()
+        .find_map(|address| identity_of(address))
+        .or_else(|| {
+            addressed
+                .iter()
+                .find_map(|address| identity_of(&without_subaddress(address)))
+        })
+        .or_else(|| identities.iter().find(|identity| identity.is_primary))
+        .or_else(|| identities.first())
+}
+
+/// `local+tag@domain` as `local@domain`.
+fn without_subaddress(address: &str) -> String {
+    match address.split_once('@') {
+        Some((local, domain)) => match local.split_once('+') {
+            Some((base, _)) if !base.is_empty() => format!("{base}@{domain}"),
+            _ => address.to_owned(),
+        },
+        None => address.to_owned(),
+    }
+}
+
+/// Who a reply to `message` goes to: its `Reply-To` (else its sender) in
+/// To and, for reply all, its other To and Cc recipients in Cc, without
+/// the user's own addresses or duplicates. With a `Reply-To`, the sender
+/// is left out, as they asked.
 pub fn reply_recipients(
     message: &ThreadMessage,
     own_addresses: &HashSet<String>,
@@ -115,22 +188,43 @@ pub fn reply_recipients(
 ) -> Result<(Vec<String>, Vec<String>)> {
     let sender = message.sender.trim().to_owned();
     let sender_key = normalize_contact(&sender);
+    let from_self = own_addresses.contains(&sender_key);
+    let reply_to = dedupe_contacts(
+        message
+            .reply_to
+            .as_deref()
+            .map(split_contact_summary)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|address| {
+                let normalized = normalize_contact(address);
+                !normalized.is_empty() && !own_addresses.contains(&normalized)
+            })
+            .collect(),
+    );
 
-    let mut to =
-        if sender.is_empty() || sender_key.is_empty() || own_addresses.contains(&sender_key) {
-            Vec::new()
-        } else {
-            vec![sender]
-        };
+    let mut to = if sender.is_empty() || sender_key.is_empty() || from_self {
+        Vec::new()
+    } else if !reply_to.is_empty() {
+        reply_to
+    } else {
+        vec![sender]
+    };
 
     let mut cc = if reply_all {
+        let in_to = to
+            .iter()
+            .map(|address| normalize_contact(address))
+            .collect::<HashSet<_>>();
         dedupe_contacts(
             split_contact_summary(&message.recipients)
                 .into_iter()
+                .chain(split_contact_summary(&message.headers.cc))
                 .filter(|recipient| {
                     let normalized = normalize_contact(recipient);
                     !normalized.is_empty()
                         && normalized != sender_key
+                        && !in_to.contains(&normalized)
                         && !own_addresses.contains(&normalized)
                 })
                 .collect(),
@@ -251,14 +345,14 @@ pub fn normalize_contact(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use zmail_core::{
-        DraftParent, IdentitySummary, MessageHeaders, MessageRenderMode, ReplyAction, ThreadMessage,
+        DraftParent, IdentitySummary, MessageHeaders, MessageRenderMode, ReceivedAttachment,
+        ReplyAction, ThreadMessage,
     };
 
     use super::{
-        forward, normalize_contact, own_addresses, prefixed_subject, reply, split_contact_summary,
+        forward, normalize_contact, own_addresses, prefixed_subject, reply, reply_identity,
+        reply_recipients, split_contact_summary,
     };
 
     fn message(sender: &str, recipients: &str) -> ThreadMessage {
@@ -289,14 +383,18 @@ mod tests {
         }
     }
 
-    fn me() -> HashSet<String> {
-        own_addresses(&[IdentitySummary {
-            id: 1,
+    fn identity(id: i64, email: &str, is_primary: bool) -> IdentitySummary {
+        IdentitySummary {
+            id,
             display_name: "Me".to_owned(),
-            email_address: "Me@Work.example".to_owned(),
+            email_address: email.to_owned(),
             signature: String::new(),
-            is_primary: true,
-        }])
+            is_primary,
+        }
+    }
+
+    fn me() -> Vec<IdentitySummary> {
+        vec![identity(1, "Me@Work.example", true)]
     }
 
     #[test]
@@ -407,7 +505,7 @@ mod tests {
         let all = reply("Plan", "INBOX", &message, &me(), true, "today").expect("a reply");
         assert_eq!(all.threading.action, Some(ReplyAction::ReplyAll));
 
-        let forward = forward("Plan", "INBOX", &message, "today");
+        let forward = forward("Plan", "INBOX", &message, &me(), "today");
         assert_eq!(forward.threading.action, Some(ReplyAction::Forward));
         assert_eq!(forward.threading.in_reply_to, None);
         assert!(forward.threading.references.is_empty());
@@ -421,9 +519,108 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_goes_to_reply_to_and_reply_all_adds_to_and_cc() {
+        let mut message = message(
+            "Kai Santos <kai@example.com>",
+            "Me <me@work.example>, Ada <ada@example.com>",
+        );
+        message.reply_to = Some("Team <team@lists.example>, kai@example.com".to_owned());
+        message.headers.cc = "Bo <bo@example.com>, ME@work.example, ada@example.com".to_owned();
+
+        let (to, cc) = reply_recipients(&message, &own_addresses(&me()), false).expect("to");
+        assert_eq!(to, ["Team <team@lists.example>", "kai@example.com"]);
+        assert!(cc.is_empty());
+
+        let (to, cc) = reply_recipients(&message, &own_addresses(&me()), true).expect("to");
+        assert_eq!(to, ["Team <team@lists.example>", "kai@example.com"]);
+        assert_eq!(
+            cc,
+            ["Ada <ada@example.com>", "Bo <bo@example.com>"],
+            "To and Cc, without the user, duplicates or anyone already in To"
+        );
+
+        // Without Reply-To: the sender, and Cc joins reply-all.
+        message.reply_to = None;
+        let (to, cc) = reply_recipients(&message, &own_addresses(&me()), true).expect("to");
+        assert_eq!(to, ["Kai Santos <kai@example.com>"]);
+        assert_eq!(cc, ["Ada <ada@example.com>", "Bo <bo@example.com>"]);
+
+        // A Reply-To naming only the user falls back to the sender.
+        message.reply_to = Some("me@work.example".to_owned());
+        let (to, _) = reply_recipients(&message, &own_addresses(&me()), false).expect("to");
+        assert_eq!(to, ["Kai Santos <kai@example.com>"]);
+    }
+
+    #[test]
+    fn a_reply_comes_from_the_identity_the_message_was_addressed_to() {
+        let identities = vec![
+            identity(1, "me@work.example", true),
+            identity(2, "Alias@Work.example", false),
+            identity(3, "lists@home.example", false),
+        ];
+        let id = |message: &ThreadMessage| {
+            reply_identity(message, &identities).map(|identity| identity.id)
+        };
+
+        // To names the alias (any case).
+        let mut to_alias = message(
+            "kai@example.com",
+            "Ada <ada@example.com>, alias@work.example",
+        );
+        assert_eq!(id(&to_alias), Some(2));
+        let start = reply("Plan", "INBOX", &to_alias, &identities, false, "today").expect("reply");
+        assert_eq!(start.identity_id, Some(2));
+        assert_eq!(
+            forward("Plan", "INBOX", &to_alias, &identities, "today").identity_id,
+            Some(2)
+        );
+
+        // Cc, then Delivered-To (a Bcc or a list), then a +tag.
+        to_alias.recipients = "ada@example.com".to_owned();
+        to_alias.headers.cc = "Lists <lists@home.example>".to_owned();
+        assert_eq!(id(&to_alias), Some(3));
+        to_alias.headers.cc = String::new();
+        to_alias.headers.delivered_to = vec!["ALIAS@work.example".to_owned()];
+        assert_eq!(id(&to_alias), Some(2));
+        to_alias.headers.delivered_to = vec!["lists+rust@home.example".to_owned()];
+        assert_eq!(id(&to_alias), Some(3));
+
+        // A message the user sent from the alias: that identity.
+        let sent = message("Me <alias@work.example>", "kai@example.com");
+        assert_eq!(id(&sent), Some(2));
+
+        // Addressed to none of them: the primary.
+        let elsewhere = message("kai@example.com", "list@example.com");
+        assert_eq!(id(&elsewhere), Some(1));
+        assert_eq!(reply_identity(&elsewhere, &[]), None);
+    }
+
+    #[test]
+    fn a_forward_takes_the_attachments_along_and_a_reply_does_not() {
+        let mut message = message("Kai Santos <kai@example.com>", "me@work.example");
+        message.attachments = vec![ReceivedAttachment {
+            id: 7,
+            filename: "report.pdf".to_owned(),
+            content_type: "application/pdf".to_owned(),
+            size_bytes: 1024,
+            storage_path: "blob".to_owned(),
+        }];
+        let forward = forward("Plan", "INBOX", &message, &me(), "today");
+        assert_eq!(forward.attachments, message.attachments);
+        let reply = reply("Plan", "INBOX", &message, &me(), false, "today").expect("reply");
+        assert!(reply.attachments.is_empty());
+    }
+
+    #[test]
     fn a_forward_copies_the_message_with_its_headers() {
         let message = message("Kai Santos <kai@example.com>", "");
-        let start = forward("Quarterly report", "INBOX", &message, "Sat 21 Mar 2026");
+        let start = forward(
+            "Quarterly report",
+            "INBOX",
+            &message,
+            &me(),
+            "Sat 21 Mar 2026",
+        );
         assert!(start.to.is_empty() && start.cc.is_empty());
         assert_eq!(start.subject, "Fwd: Quarterly report");
         assert_eq!(
