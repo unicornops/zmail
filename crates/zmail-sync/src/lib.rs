@@ -1,6 +1,7 @@
 //! Background runtime bootstrap and sync supervision for Phase 3.
 
 mod backoff;
+mod identities;
 mod imap_watch;
 mod proton;
 #[cfg(feature = "proton")]
@@ -1327,7 +1328,22 @@ impl SyncService {
                         zmail_imap::discover_and_sync(&target, secret, &existing_mailboxes).await?
                     }
                     ProtocolKind::Jmap => {
-                        zmail_jmap::discover_and_sync(&target, secret, &existing_mailboxes).await?
+                        let sync =
+                            zmail_jmap::discover_and_sync(&target, secret, &existing_mailboxes)
+                                .await?;
+                        let mut snapshot = sync.snapshot;
+                        // The server's identities go in first, so mail
+                        // from an identity new to Zmail is filed under it.
+                        if let Some(identities) = &sync.identities {
+                            let report = self
+                                .inner
+                                .store
+                                .merge_server_identities(account_id, identities)?;
+                            if let Some(note) = identities::sync_note(&report) {
+                                snapshot.detail = format!("{} \u{2022} {note}", snapshot.detail);
+                            }
+                        }
+                        snapshot
                     }
                     ProtocolKind::Proton => bail!("Proton accounts need a Proton session"),
                 };

@@ -1,6 +1,7 @@
 //! Real JMAP adapter for Phase 2.
 
 mod changes;
+mod identities;
 mod push;
 
 use std::collections::{BTreeMap, HashMap};
@@ -11,7 +12,7 @@ use jmap_client::{
     client::Client,
     core::{
         query::QueryResponse,
-        response::{EmailGetResponse, IdentityGetResponse, MailboxGetResponse},
+        response::{EmailGetResponse, MailboxGetResponse},
     },
     email::{self, Property},
     mailbox::Role,
@@ -27,6 +28,7 @@ use zmail_core::{
 use zmail_security::sanitize_html_for_display;
 use zmail_smtp::render_rfc822_message;
 
+pub use identities::{create_server_identity, update_server_identity};
 pub use push::{
     PUSH_PING_INTERVAL, PushEnd, PushEvent, PushPreference, PushTransport, watch_mail_changes,
 };
@@ -51,12 +53,26 @@ const MAX_ATTACHMENTS_PER_MESSAGE: usize = 25;
 /// adapter's cap.
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 
-/// Connects to a live JMAP account and returns the mailbox snapshot written into the local store.
+/// What a JMAP sync brings back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JmapSync {
+    /// The mailbox snapshot written into the local store. It carries no
+    /// identities: the server's are merged separately, so a sync never
+    /// overwrites the user's own.
+    pub snapshot: AccountSyncSnapshot,
+    /// The server's identities (`Identity/get`), for
+    /// `LocalStore::merge_server_identities`; `None` when the server would
+    /// not list them, which leaves the local identities as they are.
+    pub identities: Option<Vec<zmail_core::identity_sync::ServerIdentity>>,
+}
+
+/// Connects to a live JMAP account and returns the mailbox snapshot written
+/// into the local store, with the server's identities.
 pub async fn discover_and_sync(
     target: &SyncTarget,
     secret: &str,
     existing_mailboxes: &[MailboxSnapshot],
-) -> Result<AccountSyncSnapshot> {
+) -> Result<JmapSync> {
     if target.protocol != ProtocolKind::Jmap {
         bail!("JMAP adapter received a non-JMAP sync target");
     }
@@ -67,20 +83,25 @@ pub async fn discover_and_sync(
     let client = connect_client(&target.endpoint, &target.username, secret, target.auth).await?;
 
     let checkpoint = JmapCheckpoint::from_json(target.checkpoint.as_deref())?;
-    let mut identities = fetch_identities(&client).await.unwrap_or_default();
-    if identities.is_empty() {
-        identities = target
-            .identities
-            .iter()
-            .enumerate()
-            .map(|(index, identity)| NewIdentity {
-                display_name: identity.display_name.clone(),
-                email_address: identity.email_address.clone(),
-                signature: String::new(),
-                is_primary: identity.is_primary || index == 0,
-            })
-            .collect();
-    }
+    // A server that won't list its identities (no submission capability,
+    // say) still syncs mail; the local identities stay as they are.
+    let server_identities = identities::fetch_server_identities(&client).await.ok();
+    // Mail without a sender identity is filed under the local primary.
+    let identities = target
+        .identities
+        .iter()
+        .enumerate()
+        .map(|(index, identity)| NewIdentity {
+            display_name: identity.display_name.clone(),
+            email_address: identity.email_address.clone(),
+            signature: String::new(),
+            is_primary: identity.is_primary || index == 0,
+        })
+        .collect::<Vec<_>>();
+    let finish = |snapshot| JmapSync {
+        snapshot,
+        identities: server_identities.clone(),
+    };
     let (mailbox_details, mailbox_state) = fetch_mailboxes(&client).await?;
     let mailbox_ids = changes::mailbox_id_map(&mailbox_details);
 
@@ -113,7 +134,7 @@ pub async fn discover_and_sync(
                     incremental.changed_emails, target.display_name
                 )
             };
-            return Ok(AccountSyncSnapshot {
+            return Ok(finish(AccountSyncSnapshot {
                 checkpoint: JmapCheckpoint {
                     mailbox_query_state: Some(mailbox_state),
                     email_query_state: None,
@@ -122,9 +143,9 @@ pub async fn discover_and_sync(
                 }
                 .to_json()?,
                 detail,
-                identities: Some(identities),
+                identities: None,
                 mailboxes: incremental.mailboxes,
-            });
+            }));
         }
     }
 
@@ -137,7 +158,7 @@ pub async fn discover_and_sync(
         && checkpoint.email_query_state.as_deref() == Some(email_query.query_state.as_str())
         && !existing_mailboxes.is_empty()
     {
-        return Ok(AccountSyncSnapshot {
+        return Ok(finish(AccountSyncSnapshot {
             checkpoint: JmapCheckpoint {
                 mailbox_query_state: Some(mailbox_state),
                 email_query_state: Some(email_query.query_state),
@@ -146,15 +167,15 @@ pub async fn discover_and_sync(
             }
             .to_json()?,
             detail: format!("JMAP mailbox state unchanged for {}", target.display_name),
-            identities: Some(identities),
+            identities: None,
             mailboxes: existing_mailboxes.to_vec(),
-        });
+        }));
     }
 
     let emails = fetch_emails(&client, &email_query.ids, &target.blobs).await?;
     let mailboxes = group_mailboxes(mailbox_details, emails, &identities, &target.username);
 
-    Ok(AccountSyncSnapshot {
+    Ok(finish(AccountSyncSnapshot {
         checkpoint: JmapCheckpoint {
             mailbox_query_state: Some(mailbox_state),
             email_query_state: Some(email_query.query_state),
@@ -167,9 +188,9 @@ pub async fn discover_and_sync(
             target.endpoint,
             MVP_SCOPE.join(", ")
         ),
-        identities: Some(identities),
+        identities: None,
         mailboxes,
-    })
+    }))
 }
 
 /// Applies queued mailbox operations to the live JMAP account.
@@ -434,44 +455,12 @@ pub async fn check_sign_in(
     Ok(())
 }
 
-/// An `Identity/get` of every identity, with the submission capability it
-/// needs (RFC 8621 section 6), which `jmap-client` does not add.
-fn identity_get_request(client: &Client) -> jmap_client::core::request::Request<'_> {
-    let mut request = client.build();
-    request.get_identity();
-    request.add_capability(jmap_client::URI::Submission);
-    request
-}
-
-async fn fetch_identities(client: &Client) -> Result<Vec<NewIdentity>> {
-    let request = client.build();
-    let mut response: IdentityGetResponse = request
-        .send_get_identity()
-        .await
-        .context("failed to fetch JMAP identities")?;
-    let identities = response
-        .take_list()
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, identity)| {
-            Some(NewIdentity {
-                display_name: identity.name()?.to_owned(),
-                email_address: identity.email()?.to_owned(),
-                signature: identity.text_signature().unwrap_or_default().to_owned(),
-                is_primary: index == 0,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    Ok(identities)
-}
-
 async fn fetch_submission_identities(client: &Client) -> Result<Vec<SubmissionIdentity>> {
     // Read as plain JSON: the identities' ids and addresses are all a
     // submission needs, and `jmap-client`'s typed response refuses what
     // some servers send (Apache James's, for one), failing every send.
     let response = client
-        .send::<serde_json::Value>(&identity_get_request(client))
+        .send::<serde_json::Value>(&identities::identity_get_request(client))
         .await
         .map_err(|error| anyhow!("failed to fetch JMAP identities for submission: {error}"))?;
     submission_identities(response.method_responses().first())
@@ -482,25 +471,7 @@ async fn fetch_submission_identities(client: &Client) -> Result<Vec<SubmissionId
 fn submission_identities(
     method_response: Option<&serde_json::Value>,
 ) -> Result<Vec<SubmissionIdentity>> {
-    let [name, arguments, _] = method_response
-        .and_then(serde_json::Value::as_array)
-        .and_then(|call| <&[serde_json::Value; 3]>::try_from(call.as_slice()).ok())
-        .context("the JMAP server answered Identity/get with no method response")?;
-    if name.as_str() != Some("Identity/get") {
-        bail!(
-            "the JMAP server refused Identity/get: {}",
-            arguments
-                .get("description")
-                .or_else(|| arguments.get("type"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("no reason given")
-        );
-    }
-    Ok(arguments
-        .get("list")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
+    Ok(identities::identity_list(method_response)?
         .iter()
         .filter_map(|identity| {
             Some(SubmissionIdentity {
