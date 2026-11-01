@@ -1320,7 +1320,18 @@ fn the_identity_editor_edits_adds_and_removes_identities_on_james() -> Result<()
     }
     tui_type(&mut app, "b");
     assert!(store.list_hidden_identities(account_id)?.is_empty());
-    sync_service.sync_account_and_wait(account_id)?;
+    // Bring back starts a sync of its own; wait for a sync of ours to run
+    // after it.
+    tick_until(
+        &mut app,
+        "a sync after Bring back",
+        60,
+        || match sync_service.sync_account_and_wait(account_id) {
+            Ok(()) => Ok(true),
+            Err(error) if error.to_string().contains("already running") => Ok(false),
+            Err(error) => Err(error),
+        },
+    )?;
     let back = synced_identity(&store, account_id, &alias)?;
     assert_eq!(back.status, IdentitySyncStatus::InSync);
     assert_eq!(back.local.name, "Support");
