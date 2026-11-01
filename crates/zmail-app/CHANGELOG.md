@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.0](https://github.com/unicornops/zmail/compare/v0.28.0...v0.29.0) (2026-11-01)
+
+
+### Features
+
+* **ui:** offer to update the server or use the server's identity ([#364](https://github.com/unicornops/zmail/issues/364)) ([64421e2](https://github.com/unicornops/zmail/commit/64421e27a242195efbd2921377a7d6a46667eb51))
+
 ## [0.28.0](https://github.com/unicornops/zmail/compare/v0.27.1...v0.28.0) (2026-11-01)
 
 
