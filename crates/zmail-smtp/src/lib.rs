@@ -285,9 +285,9 @@ pub fn render_rfc822_message(message: &OutgoingMessage) -> Result<Vec<u8>> {
     if !message.cc.is_empty() {
         builder = builder.cc(address_list(&message.cc));
     }
-    if !message.bcc.is_empty() {
-        builder = builder.bcc(address_list(&message.bcc));
-    }
+    // Bcc recipients never appear in the message itself, or every
+    // recipient would see them: they are only in the envelope (SMTP
+    // `RCPT TO` here, the JMAP EmailSubmission envelope in zmail-jmap).
 
     for attachment in &message.attachments {
         builder = builder.attachment(
@@ -469,7 +469,38 @@ mod tests {
         assert!(rendered.contains("multipart/mixed"));
         assert!(rendered.contains("note.txt"));
         assert!(rendered.contains("copy@localhost"));
-        assert!(rendered.contains("blind@localhost"));
+        // Bcc goes in the envelope only, never in the message.
+        assert!(!rendered.contains("blind@localhost"), "{rendered}");
+        assert!(
+            !rendered.to_ascii_lowercase().contains("bcc:"),
+            "{rendered}"
+        );
+        assert!(super::all_recipients(&message).contains(&"blind@localhost".to_owned()));
+    }
+
+    #[test]
+    fn bcc_only_messages_render_and_keep_the_recipient_in_the_envelope() {
+        let message = OutgoingMessage {
+            from_email: "sender@localhost".to_owned(),
+            from_name: None,
+            to: Vec::new(),
+            cc: Vec::new(),
+            bcc: vec!["Hidden Person <hidden@localhost>".to_owned()],
+            subject: "Only Bcc".to_owned(),
+            text_body: "Body".to_owned(),
+            attachments: Vec::new(),
+            message_id: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            reply_action: None,
+        };
+        let rendered =
+            String::from_utf8(render_rfc822_message(&message).expect("renders")).expect("utf-8");
+        assert!(!rendered.contains("hidden@localhost"), "{rendered}");
+        assert_eq!(
+            super::all_recipients(&message),
+            vec!["hidden@localhost".to_owned()]
+        );
     }
 
     #[test]
