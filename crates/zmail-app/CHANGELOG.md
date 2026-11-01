@@ -8,6 +8,10 @@
 * **compose:** send replies with In-Reply-To and References ([#358](https://github.com/unicornops/zmail/issues/358)) ([c30d057](https://github.com/unicornops/zmail/commit/c30d057aa43f9134c83d3f4d6b2d34eaf4b254c5))
 * **store:** keep each message's Message-ID, In-Reply-To, References, Cc and Delivered-To ([#357](https://github.com/unicornops/zmail/issues/357)) ([9823e1d](https://github.com/unicornops/zmail/commit/9823e1de6d87239922fb7ac919ca736c6a8e7e91))
 
+### Bug Fixes
+
+* **compose:** forward attachments, follow Reply-To and reply from the addressed identity ([#359](https://github.com/unicornops/zmail/issues/359)) ([ee35d9f](https://github.com/unicornops/zmail/commit/ee35d9f05af5bd0facdc1285db907a1eb9a7aee4))
+
 ## [0.27.1](https://github.com/unicornops/zmail/compare/v0.27.0...v0.27.1) (2026-11-01)
 
 
