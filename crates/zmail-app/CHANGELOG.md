@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.0](https://github.com/unicornops/zmail/compare/v0.26.0...v0.27.0) (2026-11-01)
+
+
+### Features
+
+* **tui:** set accounts up in the terminal ([#353](https://github.com/unicornops/zmail/issues/353)) ([af1b55c](https://github.com/unicornops/zmail/commit/af1b55c78582788be9a643b35b196792d50af8ba))
+
 ## [0.26.0](https://github.com/unicornops/zmail/compare/v0.25.0...v0.26.0) (2026-10-31)
 
 
