@@ -616,6 +616,40 @@ fn a_jmap_identity_keeps_its_address_and_the_server_is_offered_each_change() {
         2
     );
 
+    // The server still lists it, so it is hidden from later syncs, under
+    // Hidden identities; Ret brings it back.
+    let edit = app.edit.as_ref().expect("changing");
+    assert_eq!(edit.hidden.len(), 1);
+    let rows = edit.rows();
+    while app.edit.as_ref().is_some_and(|edit| edit.cursor + 1 < rows) {
+        key(&mut app, KeyCode::Down);
+    }
+    for (width, height) in [(80, 24), (160, 48)] {
+        let text = screen(&mut app, width, height);
+        assert!(text.contains("Hidden identities"), "{text}");
+        assert!(text.contains("BringBack"), "{text}");
+        assert!(!text.contains('\u{202E}'), "{text}");
+        assert_snapshot(
+            &format!("identity-hidden-{width}x{height}"),
+            &draw(&mut app, width, height),
+        );
+    }
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Brought back help@fast.example")
+    );
+    assert_eq!(
+        app.store.list_identities(jmap).expect("identities").len(),
+        3
+    );
+    assert!(
+        app.store
+            .list_hidden_identities(jmap)
+            .expect("hidden")
+            .is_empty()
+    );
+
     // Proton: no adding, and the address is Proton's.
     key(&mut app, KeyCode::Esc);
     key(&mut app, KeyCode::Down);

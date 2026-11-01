@@ -1182,8 +1182,10 @@ fn settle(app: &mut zmail_tui::App) {
 
 /// The identity editor of #366, driven through the terminal UI against
 /// James: an edit to a server identity, sent up with "Update the server
-/// too?", read back from James; an identity added and created on the
-/// server; and that identity removed from Zmail and the server.
+/// too?", read back from James; that identity removed from Zmail only,
+/// still gone after a sync, then brought back; an identity added and
+/// created on the server; and that identity removed from Zmail and the
+/// server.
 #[test]
 #[ignore = "requires docker compose and the Phase 2b live mail harness"]
 fn the_identity_editor_edits_adds_and_removes_identities_on_james() -> Result<()> {
@@ -1291,6 +1293,46 @@ fn the_identity_editor_edits_adds_and_removes_identities_on_james() -> Result<()
             .as_deref(),
         Some(server_id.as_str())
     );
+
+    // Remove it from Zmail only (the cursor is still on it): James keeps
+    // it, and Zmail hides it, so a sync doesn't bring it back.
+    tui_type(&mut app, "d");
+    tui_type(&mut app, "y");
+    assert!(synced_identity(&store, account_id, &alias).is_err());
+    let hidden = store.list_hidden_identities(account_id)?;
+    assert_eq!(hidden.len(), 1, "{hidden:?}");
+    assert_eq!(hidden[0].server_id, server_id);
+    sync_service.sync_account_and_wait(account_id)?;
+    assert!(
+        synced_identity(&store, account_id, &alias).is_err(),
+        "a sync leaves the hidden identity out"
+    );
+    assert_eq!(store.list_hidden_identities(account_id)?.len(), 1);
+    assert!(
+        james_identities()?
+            .iter()
+            .any(|identity| identity["id"].as_str() == Some(server_id.as_str())),
+        "James still has it"
+    );
+    // Bring back: the hidden list is the last rows of Change.
+    for _ in 0..20 {
+        tui_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    }
+    tui_type(&mut app, "b");
+    assert!(store.list_hidden_identities(account_id)?.is_empty());
+    sync_service.sync_account_and_wait(account_id)?;
+    let back = synced_identity(&store, account_id, &alias)?;
+    assert_eq!(back.status, IdentitySyncStatus::InSync);
+    assert_eq!(back.local.name, "Support");
+    assert_eq!(
+        store
+            .identity_link(back.identity.id)?
+            .context("linked")?
+            .server_id
+            .as_deref(),
+        Some(server_id.as_str())
+    );
+    settle(&mut app);
 
     // Add an identity for a second alias, and create it on James.
     let added = format!("added-{stamp}@localhost");

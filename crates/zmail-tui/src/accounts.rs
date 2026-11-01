@@ -566,6 +566,8 @@ pub struct EditAccount {
     browser: Option<CancelSignIn>,
     /// The account's identities, after the fixed rows.
     pub identities: Vec<SyncedIdentity>,
+    /// Its hidden server identities, after the identities.
+    pub hidden: Vec<zmail_store::HiddenIdentity>,
     /// An identity is being sent to the server.
     pub identity_busy: bool,
     /// The identity form, while it is open.
@@ -578,7 +580,7 @@ pub const EDIT_ROWS: usize = 2;
 impl EditAccount {
     /// How many rows Change has.
     pub fn rows(&self) -> usize {
-        EDIT_ROWS + self.identities.len()
+        EDIT_ROWS + self.identities.len() + self.hidden.len()
     }
 
     /// The identity the cursor is on, if any.
@@ -666,6 +668,10 @@ impl App {
             .store
             .list_synced_identities(account.id)
             .unwrap_or_default();
+        let hidden = self
+            .store
+            .list_hidden_identities(account.id)
+            .unwrap_or_default();
         self.edit = Some(EditAccount {
             account,
             auth,
@@ -675,6 +681,7 @@ impl App {
             sign_in_url: None,
             browser: None,
             identities,
+            hidden,
             identity_busy: false,
             form: None,
         });
@@ -1457,6 +1464,9 @@ impl App {
                 edit.password.pop();
             }
             KeyCode::Char(ch) if typing && !ch.is_control() => edit.password.push(ch),
+            KeyCode::Char('b' | 'B') | KeyCode::Enter if edit.hidden_at_cursor().is_some() => {
+                self.bring_back_identity();
+            }
             KeyCode::Char('a' | 'A') => self.open_identity_form(None),
             KeyCode::Char(ch) if edit.identity_at_cursor().is_some() => self.identity_key(ch),
             KeyCode::Enter if edit.identity_at_cursor().is_some() => self.identity_key('e'),
@@ -1604,6 +1614,10 @@ impl App {
         edit.identities = self
             .store
             .list_synced_identities(edit.account.id)
+            .unwrap_or_default();
+        edit.hidden = self
+            .store
+            .list_hidden_identities(edit.account.id)
             .unwrap_or_default();
         edit.cursor = edit.cursor.min(edit.rows() - 1);
     }
@@ -1780,6 +1794,18 @@ impl App {
                         entry("^C", "Cancel", Press(KeyCode::Char('c'), true)),
                         entry("Tab", "NextFld", Press(KeyCode::Tab, false)),
                         entry("^U", "Clear", Press(KeyCode::Char('u'), true)),
+                    ];
+                }
+                if self
+                    .edit
+                    .as_ref()
+                    .is_some_and(|edit| edit.hidden_at_cursor().is_some())
+                {
+                    return vec![
+                        entry("B", "BringBack", Press(KeyCode::Char('b'), false)),
+                        entry("P", "PrevRow", Press(KeyCode::Up, false)),
+                        entry("N", "NextRow", Press(KeyCode::Down, false)),
+                        entry("Esc", "Accounts", Press(KeyCode::Esc, false)),
                     ];
                 }
                 let identity = self

@@ -3,7 +3,9 @@
 //! cursor in a form with labelled fields, `A` an empty form to add one.
 //! `^X` saves, `^C` cancels. The signature edits in `ratatui-textarea`,
 //! as Compose's message text does. On the list, `D` removes an identity
-//! after asking and `*` makes it the primary one.
+//! after asking and `*` makes it the primary one. Server identities removed
+//! from Zmail only are hidden from later syncs and listed under Hidden
+//! identities, where `Ret` or `B` brings one back.
 //!
 //! The fields, validation, wording and each account kind's rules are
 //! `zmail_setup::identity_editor`'s, the same as the GUI's:
@@ -29,6 +31,7 @@ use zmail_security::terminal::sanitize_line;
 use zmail_setup::identity_editor::{
     self, AccountIdentities, FormMode, IdentityField, IdentityForm, messages,
 };
+use zmail_store::HiddenIdentity;
 
 use crate::{
     accounts::EditAccount,
@@ -187,7 +190,16 @@ impl EditAccount {
             account_id: self.account.id,
             protocol: self.account.protocol,
             identities: self.identities.clone(),
+            hidden: self.hidden.clone(),
         }
+    }
+
+    /// The hidden server identity the cursor is on, if any: the rows after
+    /// the identities.
+    pub fn hidden_at_cursor(&self) -> Option<&HiddenIdentity> {
+        self.cursor
+            .checked_sub(crate::accounts::EDIT_ROWS + self.identities.len())
+            .and_then(|index| self.hidden.get(index))
     }
 }
 
@@ -388,6 +400,36 @@ impl App {
                 });
             }
             Err(error) => self.report(error),
+        }
+    }
+
+    /// `Ret` or `B` on a hidden server identity: it is back at once, and a
+    /// sync, when this Zmail can start one, confirms it.
+    pub(crate) fn bring_back_identity(&mut self) {
+        let Some(edit) = self.edit.as_ref() else {
+            return;
+        };
+        let Some(hidden) = edit.hidden_at_cursor() else {
+            return;
+        };
+        let (hidden_id, account_id) = (hidden.id, edit.account.id);
+        let email = sanitize_line(&hidden.email);
+        let identity_id = match self.store.bring_back_identity(hidden_id) {
+            Ok(identity_id) => identity_id,
+            Err(error) => return self.report(error),
+        };
+        if let Some(sync) = &self.sync {
+            let _ = sync.sync_account(account_id);
+        }
+        self.status = Some(status_line(messages::brought_back(&email)));
+        self.refresh_identities();
+        if let Some(edit) = self.edit.as_mut()
+            && let Some(index) = edit
+                .identities
+                .iter()
+                .position(|identity| Some(identity.identity.id) == identity_id)
+        {
+            edit.cursor = crate::accounts::EDIT_ROWS + index;
         }
     }
 
