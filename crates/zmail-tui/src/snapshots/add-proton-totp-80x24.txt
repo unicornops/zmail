@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                ADD ACCOUNT
+  Two-factor authentication
+  Enter the code your authenticator app shows for Proton.
+
+  Two-factor code : 123456
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Ret Continue ^U Clear     ^C Cancel
+Tab NextFld  Esc Back

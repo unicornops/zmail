@@ -1,5 +1,6 @@
   ZMAIL 0.0.0-test                   SETUP                        Folder: INBOX
   The terminal's settings, kept in the encrypted mail store. Enter changes one.
+  A: your mail accounts, to add, change or delete one.
 
   [X] Use the mouse: click, wheel, drag to select and copy
   [X] Ring the bell when new mail arrives
@@ -19,6 +20,5 @@
         off to keep drafts only in the encrypted store.
 
 
-
-? Help       > [Change]   N Next
-< Main Menu  P Prev       Q Quit
+? Help       > [Change]   N Next       Q Quit
+< Main Menu  P Prev       A Accounts

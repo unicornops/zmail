@@ -17,6 +17,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use zmail_actions::MailActions;
+use zmail_autodiscover::Network;
 use zmail_core::{
     AccountSummary, MailboxRole, MailboxSelection, SearchScope, SyncPhase, ThreadSummary,
     VirtualMailbox,
@@ -25,11 +26,12 @@ use zmail_core::{
     time::HourCycle,
 };
 use zmail_notify::NewMailBatch;
-use zmail_security::terminal::sanitize_line;
+use zmail_security::{SecretStore, terminal::sanitize_line};
 use zmail_store::LocalStore;
 use zmail_sync::{SYNCS_ELSEWHERE, SyncService};
 
 use crate::{
+    accounts::{AddAccount, EditAccount, SetupEvent},
     compose::{Compose, Confirm, PathPrompt, PendingSend, Pico},
     data::{Folder, FolderRow, IndexEntry, LocalFolder, folder_rows, index_entries},
     links::misleading_host,
@@ -50,6 +52,8 @@ const MULTI_CLICK: Duration = Duration::from_millis(400);
 const WHEEL_LINES: usize = 3;
 /// The narrowest terminal with room for the preview pane.
 pub const PREVIEW_MIN_WIDTH: u16 = 120;
+/// What the status line says with no account: `S` goes straight to Add.
+pub const NO_ACCOUNTS: &str = "No accounts yet: press S to add one";
 
 /// The current time with the viewer's UTC offset.
 pub type Clock = Arc<dyn Fn() -> DateTime<FixedOffset> + Send + Sync>;
@@ -134,6 +138,12 @@ pub enum Screen {
     Postponed,
     /// The Outbox.
     Outbox,
+    /// Setup → Accounts, Alpine's collection list.
+    Accounts,
+    /// Adding an account, step by step.
+    AddAccount,
+    /// Changing an account.
+    EditAccount,
 }
 
 /// A command: what a key or a click on the command bar does.
@@ -219,6 +229,17 @@ pub enum Cmd {
     Apply,
     /// Complete the folder name.
     Complete,
+    /// Setup → Accounts.
+    Accounts,
+    /// Add an account.
+    AddAccount,
+    /// Change the account under the cursor.
+    ChangeAccount,
+    /// Delete the account under the cursor (asked).
+    DeleteAccount,
+    /// The key itself, for a screen whose form takes keys (Add, Change):
+    /// its code, and whether with Control.
+    Press(KeyCode, bool),
 }
 
 /// A command bar entry.
@@ -269,6 +290,13 @@ pub enum Prompt {
     Confirm(Confirm),
     /// A file to attach or read in, with Tab completion.
     Path(PathPrompt),
+    /// "Remove this account from this computer?"
+    RemoveAccount {
+        /// The account.
+        account_id: i64,
+        /// The unsent mail and drafts that go with it.
+        lines: Vec<String>,
+    },
 }
 
 /// What a text field on the status line is for.
@@ -498,6 +526,20 @@ pub struct App {
     /// The Compose screen's fields on screen, for clicks: the field, and
     /// the attachment for an Attchmnt row.
     pub(crate) compose_targets: Vec<(ratatui::layout::Rect, crate::compose::Field, Option<usize>)>,
+
+    /// The keychain, for new accounts' secrets.
+    pub(crate) secrets: Option<Arc<dyn SecretStore>>,
+    /// What autodiscovery talks to.
+    pub(crate) network: Network,
+    /// The Accounts list's cursor.
+    pub(crate) accounts_cursor: usize,
+    /// The account being added.
+    pub(crate) add: Option<AddAccount>,
+    /// The account being changed.
+    pub(crate) edit: Option<EditAccount>,
+    /// Counts Adds and their steps, so background work for one left
+    /// behind is ignored.
+    pub(crate) setup_generation: u64,
 }
 
 /// News from work running elsewhere.
@@ -512,6 +554,8 @@ pub enum Notice {
         /// Hits it added, or what went wrong.
         result: Result<usize, String>,
     },
+    /// Background work for Setup → Accounts.
+    Setup(Box<SetupEvent>),
 }
 
 /// What [`App::new`] needs.
@@ -532,6 +576,12 @@ pub struct AppOptions {
     pub version: String,
     /// New-mail batches from the TUI notifier.
     pub arrivals: Option<mpsc::Receiver<NewMailBatch>>,
+    /// The keychain, where new accounts' secrets go. `None` (the
+    /// fixture) can't add accounts.
+    pub secrets: Option<Arc<dyn SecretStore>>,
+    /// What autodiscovery talks to; `None` is the real network. Tests
+    /// pass fakes.
+    pub network: Option<Network>,
 }
 
 impl App {
@@ -593,15 +643,17 @@ impl App {
             outbox_cursor: 0,
             browse_folder: None,
             compose_targets: Vec::new(),
+            secrets: options.secrets,
+            network: options.network.unwrap_or_else(Network::system),
+            accounts_cursor: 0,
+            add: None,
+            edit: None,
+            setup_generation: 0,
         };
         app.load_folders();
         app.open_default_folder();
         if app.accounts.is_empty() {
-            app.status = Some(
-                "No accounts yet: add one in the Zmail window, or with zmail-app add-imap or \
-                 add-jmap"
-                    .to_owned(),
-            );
+            app.status = Some(NO_ACCOUNTS.to_owned());
         }
         app
     }
@@ -952,6 +1004,7 @@ impl App {
         while let Ok(notice) = self.notices.1.try_recv() {
             match notice {
                 Notice::Status(status) => self.status = Some(status),
+                Notice::Setup(event) => self.setup_event(*event),
                 Notice::ServerSearchDone { query, result } => {
                     if self.index.search.as_deref() == Some(query.as_str()) {
                         self.load_index(None);
@@ -969,6 +1022,7 @@ impl App {
         }
         if refresh {
             self.refresh();
+            self.refresh_add_progress();
         }
         self.mark_read_if_due();
         self.autosave_if_due();
@@ -1028,6 +1082,8 @@ impl App {
                 path.field.edited();
             }
             None if self.screen == Screen::Compose => self.compose_paste(pasted),
+            None if self.screen == Screen::AddAccount => self.add_paste(pasted),
+            None if self.screen == Screen::EditAccount => self.edit_paste(pasted),
             _ => self.status = Some("Pasting works in text fields only".to_owned()),
         }
     }
@@ -1043,10 +1099,13 @@ impl App {
             self.effects.push(Effect::Redraw);
             return;
         }
-        // Compose takes every key: letters are text there.
-        if self.screen == Screen::Compose {
-            self.compose_key(key);
-            return;
+        // Compose takes every key: letters are text there. So do Add and
+        // Change, whose forms have text fields.
+        match self.screen {
+            Screen::Compose => return self.compose_key(key),
+            Screen::AddAccount => return self.add_key(key),
+            Screen::EditAccount => return self.edit_key(key),
+            _ => {}
         }
         // The keyboard selection in Message Text takes the arrow keys.
         if self.keyboard_selection_key(key) {
@@ -1096,10 +1155,16 @@ impl App {
                 'o' => Cmd::OtherCmds,
                 'y' => Cmd::Copy,
                 's' if self.screen == Screen::MainMenu => Cmd::Setup,
+                'a' if self.screen == Screen::Setup => Cmd::Accounts,
+                'a' if self.screen == Screen::Accounts => Cmd::AddAccount,
+                'c' if self.screen == Screen::Accounts => Cmd::ChangeAccount,
+                'd' if self.screen == Screen::Accounts => Cmd::DeleteAccount,
                 'a' if self.screen == Screen::MainMenu => Cmd::AddressBook,
                 't' if self.screen == Screen::MainMenu => Cmd::Outbox,
                 // Compose wherever C is free.
-                'c' if !matches!(self.screen, Screen::Setup | Screen::Help) => Cmd::Compose,
+                'c' if !matches!(self.screen, Screen::Setup | Screen::Help | Screen::Accounts) => {
+                    Cmd::Compose
+                }
                 'r' if triage => Cmd::Reply,
                 'f' if triage => Cmd::Forward,
                 'r' if self.screen == Screen::Outbox => Cmd::Retry,
@@ -1185,7 +1250,7 @@ impl App {
                     entry("^C", "Cancel", Pico(crate::compose::Pico::Cancel)),
                 ];
             }
-            Some(Prompt::Confirm(_)) => {
+            Some(Prompt::Confirm(_) | Prompt::RemoveAccount { .. }) => {
                 return vec![entry("Y", "Yes", Select), entry("N", "No", Back)];
             }
             Some(Prompt::Path(ref path)) => {
@@ -1205,8 +1270,12 @@ impl App {
             }
             None => {}
         }
-        if self.screen == Screen::Compose {
-            return self.compose_commands();
+        match self.screen {
+            Screen::Compose => return self.compose_commands(),
+            Screen::Accounts | Screen::AddAccount | Screen::EditAccount => {
+                return self.accounts_commands();
+            }
+            _ => {}
         }
         let current = self.index.entries.get(self.index.cursor);
         let flag = if current.is_some_and(|entry| entry.flagged) {
@@ -1311,6 +1380,7 @@ impl App {
                 entry(">", "[Change]", Select),
                 entry("P", "Prev", Prev),
                 entry("N", "Next", Next),
+                entry("A", "Accounts", Accounts),
                 entry("Q", "Quit", Quit),
             ],
             Screen::Help => vec![
@@ -1343,7 +1413,9 @@ impl App {
                 entry("Q", "Quit", Quit),
             ],
             // Answered above.
-            Screen::Compose => Vec::new(),
+            Screen::Compose | Screen::Accounts | Screen::AddAccount | Screen::EditAccount => {
+                Vec::new()
+            }
         }
     }
 
@@ -1397,7 +1469,26 @@ impl App {
                     self.goto(Screen::FolderList);
                 }
             }
+            // With no account yet, Setup is where one is added: straight
+            // to Add.
+            Cmd::Setup if self.accounts.is_empty() && self.screen == Screen::MainMenu => {
+                self.goto(Screen::Setup);
+                self.open_accounts();
+                self.add_account();
+            }
             Cmd::Setup => self.goto(Screen::Setup),
+            Cmd::Accounts => self.open_accounts(),
+            Cmd::AddAccount => self.add_account(),
+            Cmd::ChangeAccount => self.change_account(),
+            Cmd::DeleteAccount => self.delete_account(),
+            Cmd::Press(code, control) => {
+                let modifiers = if control {
+                    KeyModifiers::CONTROL
+                } else {
+                    KeyModifiers::NONE
+                };
+                self.on_key(KeyEvent::new(code, modifiers));
+            }
             Cmd::Compose => self.compose(),
             Cmd::Reply => self.reply(),
             Cmd::Forward => self.forward(),
@@ -1466,6 +1557,9 @@ impl App {
             Screen::Postponed => {
                 self.reveal.insert(PaneId::Postponed);
             }
+            Screen::Accounts => {
+                self.reveal.insert(PaneId::Accounts);
+            }
             _ => {}
         }
     }
@@ -1474,6 +1568,7 @@ impl App {
         match self.screen {
             Screen::MainMenu => {}
             Screen::FolderList | Screen::Setup => self.goto(Screen::MainMenu),
+            Screen::Accounts => self.goto(Screen::Setup),
             Screen::Index => {
                 if self.index.search.take().is_some() {
                     self.load_index(None);
@@ -1496,8 +1591,8 @@ impl App {
                 };
                 self.goto(back);
             }
-            // Compose is left with ^O, ^C or ^X.
-            Screen::Compose => {}
+            // Compose is left with ^O, ^C or ^X, Add and Change with Esc.
+            Screen::Compose | Screen::AddAccount | Screen::EditAccount => {}
         }
     }
 
@@ -1516,9 +1611,10 @@ impl App {
                 }
             }
             Screen::Setup => self.change_setting(self.setup_cursor),
+            Screen::Accounts => self.change_account(),
             Screen::Postponed => self.continue_postponed(),
             Screen::Outbox => self.outbox_details(),
-            Screen::Help | Screen::Compose => {}
+            Screen::Help | Screen::Compose | Screen::AddAccount | Screen::EditAccount => {}
         }
     }
 
@@ -1586,7 +1682,11 @@ impl App {
                 self.outbox_cursor = offset(self.outbox_cursor, by, self.outbox.len());
                 self.reveal.insert(PaneId::Outbox);
             }
-            Screen::Compose => {}
+            Screen::Accounts => {
+                self.accounts_cursor = offset(self.accounts_cursor, by, self.accounts.len());
+                self.reveal.insert(PaneId::Accounts);
+            }
+            Screen::Compose | Screen::AddAccount | Screen::EditAccount => {}
         }
     }
 
@@ -1912,6 +2012,14 @@ impl App {
                     Confirm::DeleteDraft(draft_id) if yes => self.delete_draft(draft_id),
                     Confirm::Send => self.status = Some("Not sent".to_owned()),
                     Confirm::Cancel | Confirm::DeleteDraft(_) => {}
+                }
+            }
+            Prompt::RemoveAccount { account_id, .. } => {
+                self.prompt = None;
+                if matches!(key.code, KeyCode::Char('y' | 'Y')) {
+                    self.remove_account_now(account_id);
+                } else {
+                    self.status = Some("Nothing removed".to_owned());
                 }
             }
             Prompt::Text { purpose, mut input } => {
@@ -2457,6 +2565,25 @@ impl App {
                     self.outbox_details();
                 }
             }
+            PaneId::Accounts => {
+                if let Some(row) = target {
+                    self.accounts_cursor = row;
+                }
+            }
+            PaneId::AddAccount => {
+                if let (Some(row), Some(add)) = (target, self.add.as_mut()) {
+                    if add.step == crate::accounts::Step::Method {
+                        add.method_cursor = row;
+                    } else {
+                        add.focus = row;
+                    }
+                }
+            }
+            PaneId::EditAccount => {
+                if let (Some(row), Some(edit)) = (target, self.edit.as_mut()) {
+                    edit.cursor = row;
+                }
+            }
             PaneId::Help | PaneId::Picker => {}
         }
     }
@@ -2479,7 +2606,8 @@ impl App {
                 self.setup_cursor = offset(self.setup_cursor, direction, SETUP_ROWS.len())
             }
             PaneId::Message | PaneId::Preview | PaneId::Help => self.scroll_pane(id, by),
-            PaneId::Postponed | PaneId::Outbox => self.step(direction),
+            PaneId::Postponed | PaneId::Outbox | PaneId::Accounts => self.step(direction),
+            PaneId::AddAccount | PaneId::EditAccount => self.scroll_pane(id, by),
             PaneId::Picker => {}
         }
     }
@@ -2514,6 +2642,7 @@ impl App {
                 "Delete this postponed message? (y/n)".to_owned()
             }
             Prompt::Path(path) => path.label(),
+            Prompt::RemoveAccount { account_id, lines } => self.remove_question(*account_id, lines),
         })
     }
 

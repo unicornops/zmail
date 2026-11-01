@@ -1,0 +1,48 @@
+  ZMAIL 0.0.0-test                                                        ADD ACCOUNT
+  Add an account
+  Your email address first. Zmail finds your provider's settings from it; your password isn't sent anywhere until Zmail signs in.
+
+  Email address : jane@example.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Ret Continue        ^U Clear            ^C Cancel
+Tab NextFld         Esc Back

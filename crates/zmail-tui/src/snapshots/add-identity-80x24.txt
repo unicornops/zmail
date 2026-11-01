@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                ADD ACCOUNT
+  Your identity
+  The connection works. This is the name and address your mail is sent with; the
+  signature goes under messages you write.
+
+  Your name : Jane Doe
+    Send as : jane@icloud.com
+  Signature : Optional
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Ret NextFld  ^U Clear     ^C Cancel
+Tab NextFld  Esc Back

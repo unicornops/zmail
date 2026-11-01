@@ -680,6 +680,8 @@ fn holding_the_sync_lock_it_sends_and_the_outbox_retries_a_failure() {
         hour_cycle: HourCycle::H24,
         version: "0.0.0-test".to_owned(),
         arrivals: None,
+        secrets: None,
+        network: None,
     });
     write_message(&mut app, "ada@example.com", "Now", "Straight away");
     control(&mut app, 'x');

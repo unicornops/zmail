@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                ADD ACCOUNT
+  Add an account
+  Your email address first. Zmail finds your provider's settings from it; your
+  password isn't sent anywhere until Zmail signs in.
+
+  Email address : jane@example.com
+
+  Proton Mail: ^P signs in to Proton instead (paid Proton plans; Zmail signs in
+  the way Proton Mail Bridge does).
+
+
+
+
+
+
+
+
+
+
+
+
+
+Ret Continue Tab NextFld  Esc Back
+^P Proton    ^U Clear     ^C Cancel

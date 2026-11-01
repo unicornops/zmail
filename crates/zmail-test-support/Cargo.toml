@@ -29,8 +29,11 @@ zmail-proton = { path = "../zmail-proton" }
 zmail-sync = { path = "../zmail-sync", features = ["proton"] }
 # Records the new-mail notifications a Proton sync raises.
 zmail-notify = { path = "../zmail-notify" }
-# The terminal UI's send test drives its Compose screen with key events.
+# The terminal UI's send and setup tests drive its screens with key events;
+# the setup test runs discovery on a fake network.
 crossterm.workspace = true
+url.workspace = true
+zmail-autodiscover = { path = "../zmail-autodiscover" }
 zmail-tui = { path = "../zmail-tui" }
 
 [lints]

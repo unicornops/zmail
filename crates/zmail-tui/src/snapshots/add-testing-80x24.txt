@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                ADD ACCOUNT
+  Testing the connection
+  Zmail signs in and out again, and sends nothing.
+
+  ✓ Signing in to 127.0.0.1:9
+  … Signing in to 127.0.0.1:9
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Esc Stop
+^C Cancel

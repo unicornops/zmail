@@ -35,6 +35,12 @@ pub enum PaneId {
     Postponed,
     /// The Outbox.
     Outbox,
+    /// Setup → Accounts.
+    Accounts,
+    /// Adding an account.
+    AddAccount,
+    /// Changing an account.
+    EditAccount,
 }
 
 /// A line a pane draws.

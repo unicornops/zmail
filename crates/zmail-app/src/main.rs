@@ -638,7 +638,8 @@ fn launch_tui() -> Result<()> {
     )?);
     let runtime = BackgroundRuntime::start(4)?;
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-    let sync = SyncService::with_sync_lock(runtime.handle().clone(), store.clone(), secrets)?;
+    let sync =
+        SyncService::with_sync_lock(runtime.handle().clone(), store.clone(), secrets.clone())?;
     #[cfg(feature = "proton")]
     sync.configure_proton(zmail_sync::proton_production_config(env!(
         "CARGO_PKG_VERSION"
@@ -648,6 +649,7 @@ fn launch_tui() -> Result<()> {
         sync: Some(sync),
         runtime: runtime.handle().clone(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        secrets: Some(secrets),
     });
     drop(runtime);
     result
@@ -666,6 +668,9 @@ fn launch_tui_fixture(view: ui_fixture::FixtureView) -> Result<()> {
         sync: None,
         runtime: runtime.handle().clone(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        // A keychain in memory, so Setup → Accounts can be tried on the
+        // fixture without touching the real one.
+        secrets: Some(InMemorySecretStore::shared()),
     });
     drop(runtime);
     result
