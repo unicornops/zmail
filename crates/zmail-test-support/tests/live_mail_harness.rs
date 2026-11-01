@@ -444,7 +444,7 @@ fn a_reply_from_zmail_threads_on_the_server() -> Result<()> {
         &view.subject,
         &view.mailbox_name,
         original,
-        &zmail_actions::reply::own_addresses(&identities),
+        &identities,
         false,
         "today",
     )?;
@@ -507,6 +507,137 @@ fn a_reply_from_zmail_threads_on_the_server() -> Result<()> {
     assert!(
         headers.contains(&format!("Message-ID: <{sent_id}>")),
         "the Message-ID is the one the draft keeps: {headers}"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn a_forward_from_zmail_arrives_with_the_attachment() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&sending_imap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_RECIPIENT_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+
+    let subject = "Forwarding: the contract";
+    let bytes = b"%PDF-1.4 the signed contract".to_vec();
+    Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(submit_outgoing_message(
+            &harness_submission(),
+            &OutgoingMessage {
+                from_email: MAIL_HARNESS_SENDER.to_owned(),
+                from_name: Some("Harness Sender".to_owned()),
+                to: vec![MAIL_HARNESS_RECIPIENT.to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: subject.to_owned(),
+                text_body: "Signed copy attached.".to_owned(),
+                attachments: vec![OutgoingAttachment {
+                    filename: "contract.pdf".to_owned(),
+                    content_type: "application/pdf".to_owned(),
+                    bytes: bytes.clone(),
+                }],
+                message_id: None,
+                in_reply_to: None,
+                references: Vec::new(),
+                reply_action: None,
+            },
+        ))?;
+    sync_service.sync_account_and_wait(account_id)?;
+    let thread = store
+        .list_threads(inbox_id(&store, account_id)?, 0..50)?
+        .into_iter()
+        .find(|thread| thread.subject == subject)
+        .context("the message should sync")?;
+    // Opening it fetches the body and the attachment, as the reader does.
+    runtime
+        .handle()
+        .block_on(sync_service.hydrate_thread_body_and_wait(account_id, thread.id))?;
+    let view = store
+        .thread_view(thread.id)?
+        .context("the thread should load")?;
+
+    // Forward it back to the sender, as both frontends do.
+    let mut start = zmail_actions::reply::forward(
+        &view.subject,
+        &view.mailbox_name,
+        &view.messages[0],
+        &store.list_identities(account_id)?,
+        "today",
+    );
+    start.to = vec![MAIL_HARNESS_SENDER.to_owned()];
+    let started = zmail_actions::MailActions::new(store.clone()).create_started_draft(
+        account_id,
+        &start,
+        &mut |_| {},
+    )?;
+    assert!(started.missing_attachments.is_empty());
+    sync_service.queue_draft_and_send(started.draft_id)?;
+    wait_until_sent(&store, &sync_service, account_id)?;
+
+    // The sender's own mirror of their mailbox gets it with the file.
+    let sender_store = Arc::new(LocalStore::open_ephemeral()?);
+    let sender_account = sender_store.insert_account(&NewAccount {
+        username: MAIL_HARNESS_SENDER_LOGIN.to_owned(),
+        identities: vec![NewIdentity {
+            display_name: "Harness Sender".to_owned(),
+            email_address: MAIL_HARNESS_SENDER.to_owned(),
+            signature: String::new(),
+            is_primary: true,
+        }],
+        ..imap_account()
+    })?;
+    let sender_secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sender_secrets.set_account_secret(sender_account, MAIL_HARNESS_SENDER_PASSWORD)?;
+    let sender_sync = SyncService::new(
+        runtime.handle().clone(),
+        sender_store.clone(),
+        sender_secrets,
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let forwarded = loop {
+        sender_sync.sync_account_and_wait(sender_account)?;
+        if let Some(thread) = sender_store
+            .list_threads(inbox_id(&sender_store, sender_account)?, 0..50)?
+            .into_iter()
+            .find(|thread| thread.subject == start.subject)
+        {
+            break thread;
+        }
+        if Instant::now() > deadline {
+            bail!("the forward never reached the sender");
+        }
+        thread::sleep(Duration::from_millis(500));
+    };
+    runtime
+        .handle()
+        .block_on(sender_sync.hydrate_thread_body_and_wait(sender_account, forwarded.id))?;
+    let forwarded = sender_store
+        .thread_view(forwarded.id)?
+        .context("the forward should load")?;
+    let message = &forwarded.messages[0];
+    assert!(
+        message
+            .body_text
+            .as_deref()
+            .is_some_and(|body| body.contains("Signed copy attached.")),
+        "the forwarded text: {:?}",
+        message.body_text
+    );
+    assert_eq!(message.attachments.len(), 1, "{:?}", message.attachments);
+    assert_eq!(message.attachments[0].filename, "contract.pdf");
+    assert_eq!(
+        sender_store
+            .attachment_blob(message.attachments[0].id)?
+            .read()?,
+        bytes,
+        "the attachment arrives byte for byte"
     );
     Ok(())
 }

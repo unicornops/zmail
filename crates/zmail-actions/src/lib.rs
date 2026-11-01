@@ -50,6 +50,30 @@ pub const MARK_READ_DELAY: Duration = Duration::from_millis(1500);
 /// compose and the terminal's both wait this long.
 pub const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
 
+/// A reply or forward draft from [`MailActions::create_started_draft`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedDraft {
+    /// The draft.
+    pub draft_id: i64,
+    /// The file names of a forward's attachments that could not be copied
+    /// into it.
+    pub missing_attachments: Vec<String>,
+}
+
+impl StartedDraft {
+    /// What to tell the user about attachments left out, if any.
+    pub fn missing_attachments_notice(&self) -> Option<String> {
+        match self.missing_attachments.as_slice() {
+            [] => None,
+            [one] => Some(format!("Couldn't attach {one}: it isn't stored any more.")),
+            several => Some(format!(
+                "Couldn't attach {}: they aren't stored any more.",
+                several.join(", ")
+            )),
+        }
+    }
+}
+
 /// Identifies one recorded change, so the undo offer for it (the GUI's
 /// toast) can undo exactly that change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -541,6 +565,53 @@ impl MailActions {
             account_id: draft.account_id,
         });
         Ok(draft_id)
+    }
+
+    /// Creates the draft a reply or forward starts with
+    /// ([`reply::DraftStart`]) in account `account_id`: from the identity
+    /// the start chose, with a forward's attachments copied in (encrypted
+    /// again as the draft's own, ADR 0005). An attachment that cannot be
+    /// copied (its file was evicted, say) is left out rather than losing
+    /// the draft; the result names it.
+    pub fn create_started_draft(
+        &mut self,
+        account_id: i64,
+        start: &reply::DraftStart,
+        events: &mut impl FnMut(MailEvent),
+    ) -> Result<StartedDraft> {
+        let identity_id = start
+            .identity_id
+            .context("select or configure an account identity before composing")?;
+        let draft_id = self.create_draft(
+            &NewDraft {
+                account_id,
+                identity_id,
+                to: start.to.clone(),
+                cc: start.cc.clone(),
+                bcc: Vec::new(),
+                subject: start.subject.clone(),
+                body: start.body.clone(),
+                threading: start.threading.clone(),
+            },
+            events,
+        )?;
+        let mut missing_attachments = Vec::new();
+        for attachment in &start.attachments {
+            if self
+                .store
+                .add_forwarded_attachment(draft_id, attachment.id)
+                .is_err()
+            {
+                missing_attachments.push(attachment.filename.clone());
+            }
+        }
+        if missing_attachments.len() < start.attachments.len() {
+            events(MailEvent::DraftAttachmentsChanged { draft_id });
+        }
+        Ok(StartedDraft {
+            draft_id,
+            missing_attachments,
+        })
     }
 
     /// Saves a draft's fields.

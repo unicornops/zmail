@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test              COMPOSE MESSAGE                   Folder: INBOX
+From    : Books <me.books@home.example>
+To      :
+Cc      :
+Bcc     :
+Attchmnt: 1. shortlist.txt (18 B)
+Subject : Fwd: Book club: next read
+----- Message Text -----
+
+
+---------- Forwarded message ----------
+From: Ada Lovelace <ada@home.example>
+Date: Thu 15 Oct 2026, 11:55
+To: Book Club <me.books@home.example>
+Subject: Book club: next read
+
+Shortlist attached.
+
+Ada
+
+
+
+^G Get Help  ^X Send      ^R Read File ^K Cut Text  ^O Postpone
+^C Cancel    ^J Attach    Tab Complete ^U UnCut     ^T To AddrBk

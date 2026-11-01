@@ -25,10 +25,10 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 use ratatui_textarea::{CursorMove, DataCursor, Input, Key, TextArea, WrapMode};
-use zmail_actions::{AUTOSAVE_DELAY, MailEvent, reply};
+use zmail_actions::{AUTOSAVE_DELAY, MailEvent, StartedDraft, reply};
 use zmail_core::{
-    DraftAttachment, DraftDetail, DraftState, DraftUpdate, IdentitySummary, NewDraft,
-    ThreadMessage,
+    DraftAttachment, DraftDetail, DraftState, DraftUpdate, IdentitySummary, MessageHeaders,
+    NewDraft, ThreadMessage,
     participants::{Participant, parse_address_list},
     text::count_noun,
     time::format_full_date,
@@ -392,9 +392,20 @@ pub fn attachment_label(attachment: &DraftAttachment) -> String {
 fn filtered(message: &ThreadMessage) -> ThreadMessage {
     ThreadMessage {
         sender: sanitize_line(&message.sender),
+        reply_to: message.reply_to.as_deref().map(sanitize_line),
         recipients: sanitize_line(&message.recipients),
         subject: sanitize_line(&message.subject),
         rendered_body: sanitize(&message.rendered_body),
+        headers: MessageHeaders {
+            cc: sanitize_line(&message.headers.cc),
+            delivered_to: message
+                .headers
+                .delivered_to
+                .iter()
+                .map(|address| sanitize_line(address))
+                .collect(),
+            ..message.headers.clone()
+        },
         ..message.clone()
     }
 }
@@ -980,16 +991,13 @@ impl App {
                     &subject,
                     &mailbox,
                     &message,
-                    &self.own_addresses(account_id),
+                    &self.store.list_identities(account_id)?,
                     reply_all,
                     &date,
                 )
             })
-            .and_then(|start| self.create_started_draft(account_id, start));
-        match result {
-            Ok(draft_id) => self.open_compose(draft_id, true, Field::Body),
-            Err(error) => self.report(error),
-        }
+            .and_then(|start| self.create_started_draft(account_id, &start));
+        self.open_started_draft(result, Field::Body);
     }
 
     /// `F`: forwards the message, the cursor in To.
@@ -1001,36 +1009,46 @@ impl App {
         let zone = *self.now().offset();
         let result = self
             .reply_message(thread_id, message_id)
-            .map(|(subject, mailbox, message)| {
+            .and_then(|(subject, mailbox, message)| {
                 let date = format_full_date(&message.received_at, &zone, self.hour_cycle);
-                reply::forward(&subject, &mailbox, &message, &date)
+                anyhow::Ok(reply::forward(
+                    &subject,
+                    &mailbox,
+                    &message,
+                    &self.store.list_identities(account_id)?,
+                    &date,
+                ))
             })
-            .and_then(|start| self.create_started_draft(account_id, start));
-        match result {
-            Ok(draft_id) => self.open_compose(draft_id, true, Field::To),
-            Err(error) => self.report(error),
-        }
+            .and_then(|start| self.create_started_draft(account_id, &start));
+        self.open_started_draft(result, Field::To);
     }
 
+    /// Creates a reply or forward draft, from the identity the message was
+    /// addressed to, with a forward's attachments.
     fn create_started_draft(
         &mut self,
         account_id: i64,
-        start: reply::DraftStart,
-    ) -> anyhow::Result<i64> {
-        let (_, identity_id) = self.identities_of(account_id)?;
-        self.actions.create_draft(
-            &NewDraft {
-                account_id,
-                identity_id,
-                to: start.to,
-                cc: start.cc,
-                bcc: Vec::new(),
-                subject: start.subject,
-                body: start.body,
-                threading: start.threading,
-            },
-            &mut |_| {},
-        )
+        start: &reply::DraftStart,
+    ) -> anyhow::Result<StartedDraft> {
+        if start.identity_id.is_none() {
+            anyhow::bail!("This account has no address to send from yet");
+        }
+        self.actions
+            .create_started_draft(account_id, start, &mut |_| {})
+    }
+
+    /// Opens a reply or forward draft with the cursor in `focus`, saying
+    /// which of a forward's attachments could not be copied.
+    fn open_started_draft(&mut self, started: anyhow::Result<StartedDraft>, focus: Field) {
+        match started {
+            Ok(started) => {
+                self.open_compose(started.draft_id, true, focus);
+                if let Some(notice) = started.missing_attachments_notice() {
+                    self.status = Some(sanitize_line(&notice));
+                }
+            }
+            Err(error) => self.report(error),
+        }
     }
 
     // ------------------------------------------------------------------

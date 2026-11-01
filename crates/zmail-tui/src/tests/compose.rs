@@ -149,6 +149,69 @@ fn add_team_thread(store: &LocalStore) {
         .expect("the Home mail is stored");
 }
 
+/// Gives Home an alias, and a book club message to it that asks for
+/// replies to the club's list and carries a file the store holds.
+fn add_alias_thread(store: &LocalStore) {
+    let (_, home) = accounts(store);
+    let blobs = store
+        .sync_target(home)
+        .expect("the target loads")
+        .expect("Home exists")
+        .blobs;
+    let mut club = thread(
+        "club",
+        "Book club: next read",
+        false,
+        &[Mail {
+            sender: "Ada Lovelace <ada@home.example>",
+            minutes_ago: 5,
+            read: true,
+            text: Some("Shortlist attached.\n\nAda"),
+            html: None,
+            attachments: &[],
+        }],
+    );
+    let message = &mut club.messages[0];
+    message.recipients = "Book Club <me.books@home.example>".to_owned();
+    message.reply_to = Some("Club List <club@lists.example>".to_owned());
+    message.headers.message_id = Some("club-1@home.example".to_owned());
+    message.headers.cc = "Bo Diddley <bo@home.example>".to_owned();
+    message.attachments = vec![zmail_core::MessageAttachment {
+        filename: "shortlist.txt".to_owned(),
+        content_type: "text/plain".to_owned(),
+        size_bytes: 18,
+        storage_path: blobs
+            .write("shortlist", b"Dune\nEmma\nUlysses\n")
+            .expect("the blob is written"),
+        content_id: None,
+        inline_only: false,
+    }];
+    store
+        .replace_account_snapshot(
+            home,
+            &AccountSyncSnapshot {
+                checkpoint: "test:3".to_owned(),
+                detail: "Up to date".to_owned(),
+                identities: Some(vec![
+                    zmail_core::NewIdentity {
+                        display_name: "Home".to_owned(),
+                        email_address: "me@home.example".to_owned(),
+                        signature: String::new(),
+                        is_primary: true,
+                    },
+                    zmail_core::NewIdentity {
+                        display_name: "Books".to_owned(),
+                        email_address: "me.books@home.example".to_owned(),
+                        signature: String::new(),
+                        is_primary: false,
+                    },
+                ]),
+                mailboxes: vec![mailbox("INBOX", Some("inbox"), vec![club])],
+            },
+        )
+        .expect("the Home mail is stored");
+}
+
 /// Opens the Home INBOX from the Folder List.
 fn open_home_inbox(app: &mut App) {
     keys(app, "l");
@@ -273,6 +336,62 @@ fn a_forward_copies_the_message_and_starts_in_to() {
     );
     assert!(draft.body.contains("Hello from the harbour newsletter."));
     assert_eq!(compose(&app).focus, Field::To);
+}
+
+#[test]
+fn a_reply_follows_reply_to_and_comes_from_the_alias_it_was_sent_to() {
+    let store = seeded_store();
+    add_alias_thread(&store);
+    let mut app = app_with(store, environment());
+    open_home_inbox(&mut app);
+    keys(&mut app, "r");
+    assert!(
+        matches!(app.prompt, Some(Prompt::ReplyAll { .. })),
+        "Cc adds Bo"
+    );
+    keys(&mut app, "y");
+    let draft = stored_draft(&app);
+    assert_eq!(draft.to, ["Club List <club@lists.example>"]);
+    assert_eq!(draft.cc, ["Bo Diddley <bo@home.example>"]);
+    assert_eq!(draft.identity_email, "me.books@home.example");
+    assert_eq!(
+        draft.threading.in_reply_to.as_deref(),
+        Some("club-1@home.example")
+    );
+    assert!(draft.attachments.is_empty(), "a reply takes no attachments");
+    assert_snapshot("compose-reply-alias-80x24", &draw(&mut app, 80, 24));
+}
+
+#[test]
+fn a_forward_takes_the_attachments_along_and_they_can_be_removed() {
+    let store = seeded_store();
+    add_alias_thread(&store);
+    let mut app = app_with(store, environment());
+    open_home_inbox(&mut app);
+    keys(&mut app, "f");
+    let draft = stored_draft(&app);
+    assert_eq!(draft.identity_email, "me.books@home.example");
+    assert_eq!(draft.threading.in_reply_to, None);
+    assert_eq!(draft.attachments.len(), 1);
+    assert_eq!(draft.attachments[0].filename, "shortlist.txt");
+    assert_eq!(draft.attachments[0].size_bytes, 18);
+    assert_snapshot("compose-forward-attachments-80x24", &draw(&mut app, 80, 24));
+}
+
+#[test]
+fn a_forward_says_which_attachments_it_could_not_take() {
+    let mut app = app();
+    open_work_inbox(&mut app, 80, 24);
+    // The Tokyo meeting's agenda.pdf has no stored file.
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+    keys(&mut app, "f");
+    assert_eq!(app.screen, Screen::Compose);
+    assert!(stored_draft(&app).attachments.is_empty());
+    assert_eq!(
+        status(&app),
+        "Couldn't attach agenda.pdf: it isn't stored any more."
+    );
 }
 
 #[test]

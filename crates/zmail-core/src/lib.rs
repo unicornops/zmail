@@ -834,7 +834,8 @@ pub struct DraftAttachment {
     pub content_type: String,
     /// Size in bytes.
     pub size_bytes: u64,
-    /// Original source path supplied by the user.
+    /// Original source path supplied by the user; empty for an
+    /// attachment forwarded from a message.
     pub original_path: String,
     /// Local persisted storage path.
     pub storage_path: String,

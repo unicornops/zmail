@@ -907,3 +907,124 @@ fn with_undo_send_off_the_message_goes_at_once(cx: &mut TestAppContext) {
         Some("Message queued for sending.".to_owned())
     );
 }
+
+/// Gives the account an alias and replaces its mail with one message to
+/// the alias that asks for replies elsewhere and carries a file; returns
+/// the conversation.
+fn seed_alias_message(harness: &Harness) -> i64 {
+    let account_id = harness.store.list_accounts().expect("accounts load")[0].id;
+    let blobs = harness
+        .store
+        .sync_target(account_id)
+        .expect("the target loads")
+        .expect("the account exists")
+        .blobs;
+    let identity = |name: &str, email: &str, is_primary| NewIdentity {
+        display_name: name.to_owned(),
+        email_address: email.to_owned(),
+        signature: String::new(),
+        is_primary,
+    };
+    let mut thread = super::thread_snapshot(0);
+    thread.subject = "Support ticket".to_owned();
+    let message = &mut thread.messages[0];
+    message.subject = "Support ticket".to_owned();
+    message.recipients = "Support <support@example.test>".to_owned();
+    message.reply_to = Some("Tickets <tickets@vendor.test>".to_owned());
+    message.headers.message_id = Some("ticket-1@vendor.test".to_owned());
+    message.attachments = vec![zmail_core::MessageAttachment {
+        filename: "logs.txt".to_owned(),
+        content_type: "text/plain".to_owned(),
+        size_bytes: 9,
+        storage_path: blobs
+            .write("logs", b"log lines")
+            .expect("the blob is written"),
+        content_id: None,
+        inline_only: false,
+    }];
+    harness
+        .store
+        .replace_account_snapshot(
+            account_id,
+            &AccountSyncSnapshot {
+                checkpoint: "test".to_owned(),
+                detail: "test".to_owned(),
+                identities: Some(vec![
+                    identity("Me", "me@example.test", true),
+                    identity("Support", "support@example.test", false),
+                ]),
+                mailboxes: vec![zmail_core::MailboxSnapshot {
+                    name: "INBOX".to_owned(),
+                    role: Some("inbox".to_owned()),
+                    threads: vec![thread],
+                    ..Default::default()
+                }],
+            },
+        )
+        .expect("the mail is stored");
+    let inbox = harness
+        .store
+        .mailbox_id_by_role(account_id, "inbox")
+        .expect("lookup")
+        .expect("an inbox");
+    harness.store.list_threads(inbox, 0..1).expect("threads")[0].id
+}
+
+#[gpui::test]
+fn a_reply_goes_to_reply_to_from_the_alias_the_message_was_sent_to(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let thread_id = seed_alias_message(&harness);
+    view.update(cx, |view, cx| {
+        view.selected_thread_id = Some(thread_id);
+        view.refresh_from_store(cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.reply_to_selected_thread(false, None, window, cx)
+        })
+    });
+    cx.run_until_parked();
+    let reply = inline_reply(&view, cx).expect("an inline reply");
+    let (draft_id, _, _) = inputs(&reply, cx);
+    let draft = harness
+        .store
+        .draft_detail(draft_id)
+        .expect("the draft loads")
+        .expect("the draft exists");
+    assert_eq!(draft.to, ["Tickets <tickets@vendor.test>"]);
+    assert_eq!(draft.identity_email, "support@example.test");
+    assert_eq!(
+        draft.threading.in_reply_to.as_deref(),
+        Some("ticket-1@vendor.test")
+    );
+    assert!(
+        cx.read_entity(&reply, |compose, _| compose.has_from_menu()),
+        "From shows the alias, and can be changed"
+    );
+}
+
+#[gpui::test]
+fn a_forward_opens_with_the_messages_attachments(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let thread_id = seed_alias_message(&harness);
+    view.update(cx, |view, cx| {
+        view.selected_thread_id = Some(thread_id);
+        view.refresh_from_store(cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| view.update(cx, |view, cx| view.forward_selected_thread(window, cx)));
+    cx.run_until_parked();
+    let (compose, mut w) = compose_window(&view, cx);
+    assert_eq!(attachment_names(&compose, &mut w), ["logs.txt"]);
+    let (draft_id, _, _) = inputs(&compose, &mut w);
+    let draft = harness
+        .store
+        .draft_detail(draft_id)
+        .expect("the draft loads")
+        .expect("the draft exists");
+    assert!(draft.to.is_empty());
+    assert_eq!(draft.identity_email, "support@example.test");
+    assert_eq!(draft.attachments.len(), 1);
+    assert_eq!(draft.attachments[0].size_bytes, 9);
+}

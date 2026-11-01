@@ -141,6 +141,18 @@ impl MailActions {
         self.inner.create_draft(draft, &mut emit(cx))
     }
 
+    /// Creates the draft a reply or forward starts with: from the identity
+    /// it chose, with a forward's attachments copied in.
+    pub(crate) fn create_started_draft(
+        &mut self,
+        account_id: i64,
+        start: &zmail_actions::reply::DraftStart,
+        cx: &mut Context<Self>,
+    ) -> Result<zmail_actions::StartedDraft> {
+        self.inner
+            .create_started_draft(account_id, start, &mut emit(cx))
+    }
+
     /// Saves a draft's fields.
     pub(crate) fn save_draft(
         &mut self,

@@ -696,7 +696,7 @@ fn a_reply_from_zmail_threads_over_jmap() -> Result<()> {
         &view.subject,
         &view.mailbox_name,
         original,
-        &zmail_actions::reply::own_addresses(&identities),
+        &identities,
         true,
         "today",
     )?;
@@ -719,18 +719,7 @@ fn a_reply_from_zmail_threads_over_jmap() -> Result<()> {
         threading: start.threading,
     })?;
     sync_service.queue_draft_and_send(draft_id)?;
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let _ = sync_service.process_outbox_and_wait(Some(account_id));
-        let jobs = store.list_outbox_jobs(Some(account_id))?;
-        let job = jobs.first().context("the reply was queued")?;
-        match job.state {
-            OutboxJobState::Sent => break,
-            OutboxJobState::Failed => bail!("delivery failed: {:?}", job.last_error_message),
-            _ if Instant::now() > deadline => bail!("not sent in time: {job:?}"),
-            _ => thread::sleep(Duration::from_millis(250)),
-        }
-    }
+    wait_until_sent(&store, &sync_service, account_id)?;
     let sent_id = store
         .draft_detail(draft_id)?
         .context("the draft should still exist")?
@@ -738,24 +727,7 @@ fn a_reply_from_zmail_threads_over_jmap() -> Result<()> {
         .context("the sent draft should keep its Message-ID")?;
 
     // The delivered copy, read from the harness sender's account over JMAP.
-    let sender_store = Arc::new(LocalStore::open_ephemeral()?);
-    let sender_account = sender_store.insert_account(&NewAccount {
-        username: MAIL_HARNESS_SENDER.to_owned(),
-        identities: vec![NewIdentity {
-            display_name: "Harness Sender".to_owned(),
-            email_address: MAIL_HARNESS_SENDER.to_owned(),
-            signature: String::new(),
-            is_primary: true,
-        }],
-        ..jmap_account()
-    })?;
-    let sender_secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
-    sender_secrets.set_account_secret(sender_account, MAIL_HARNESS_SENDER_PASSWORD)?;
-    let sender_sync = SyncService::new(
-        runtime.handle().clone(),
-        sender_store.clone(),
-        sender_secrets,
-    );
+    let (sender_store, sender_account, sender_sync) = harness_sender_account(&runtime)?;
     let delivered = sync_until_subject(
         &sender_sync,
         &sender_store,
@@ -784,6 +756,113 @@ fn a_reply_from_zmail_threads_over_jmap() -> Result<()> {
     );
     assert_eq!(headers.message_id.as_deref(), Some(sent_id.as_str()));
     Ok(())
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn a_forward_over_jmap_arrives_with_the_attachment() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_JMAP_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+
+    let subject = "Forwarding over JMAP";
+    // No line break: a text part's line breaks travel as CRLF (RFC 2046),
+    // which is not what this checks.
+    let bytes = b"minutes of the meeting".to_vec();
+    submit_harness_attachment_message(subject, "Minutes attached.", "minutes.txt", bytes.clone())?;
+    let thread_id = sync_until_subject(&sync_service, &store, account_id, subject, 12)?;
+    let view = store
+        .thread_view(thread_id)?
+        .context("the thread should load")?;
+
+    let mut start = zmail_actions::reply::forward(
+        &view.subject,
+        &view.mailbox_name,
+        &view.messages[0],
+        &store.list_identities(account_id)?,
+        "today",
+    );
+    start.to = vec![MAIL_HARNESS_SENDER.to_owned()];
+    let started = zmail_actions::MailActions::new(store.clone()).create_started_draft(
+        account_id,
+        &start,
+        &mut |_| {},
+    )?;
+    assert!(started.missing_attachments.is_empty());
+    sync_service.queue_draft_and_send(started.draft_id)?;
+    wait_until_sent(&store, &sync_service, account_id)?;
+
+    let (sender_store, sender_account, sender_sync) = harness_sender_account(&runtime)?;
+    let delivered = sync_until_subject(
+        &sender_sync,
+        &sender_store,
+        sender_account,
+        &start.subject,
+        60,
+    )?;
+    let delivered = sender_store
+        .thread_view(delivered)?
+        .context("the forward should load")?;
+    let message = delivered
+        .messages
+        .iter()
+        .find(|message| message.subject == start.subject)
+        .context("the forward is in the thread")?;
+    assert_eq!(message.attachments.len(), 1, "{:?}", message.attachments);
+    assert_eq!(message.attachments[0].filename, "minutes.txt");
+    assert_eq!(
+        sender_store
+            .attachment_blob(message.attachments[0].id)?
+            .read()?,
+        bytes,
+        "the attachment arrives byte for byte"
+    );
+    Ok(())
+}
+
+/// The harness sender's JMAP account, in a store of its own.
+fn harness_sender_account(
+    runtime: &BackgroundRuntime,
+) -> Result<(Arc<LocalStore>, i64, SyncService)> {
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&NewAccount {
+        username: MAIL_HARNESS_SENDER.to_owned(),
+        identities: vec![NewIdentity {
+            display_name: "Harness Sender".to_owned(),
+            email_address: MAIL_HARNESS_SENDER.to_owned(),
+            signature: String::new(),
+            is_primary: true,
+        }],
+        ..jmap_account()
+    })?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_SENDER_PASSWORD)?;
+    let sync = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    Ok((store, account_id, sync))
+}
+
+/// Waits until the account's outbox has sent everything, running passes.
+fn wait_until_sent(store: &LocalStore, sync_service: &SyncService, account_id: i64) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let _ = sync_service.process_outbox_and_wait(Some(account_id));
+        let jobs = store.list_outbox_jobs(Some(account_id))?;
+        if let Some(failed) = jobs.iter().find(|job| job.state == OutboxJobState::Failed) {
+            bail!("delivery failed: {:?}", failed.last_error_message);
+        }
+        if !jobs.is_empty() && jobs.iter().all(|job| job.state == OutboxJobState::Sent) {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            bail!("not sent in time: {jobs:?}");
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn submit_harness_message(subject: &str, body: &str) -> Result<()> {

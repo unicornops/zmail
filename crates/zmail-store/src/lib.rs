@@ -4216,19 +4216,118 @@ impl LocalStore {
         // The copy is encrypted like received attachments (ADR 0005).
         let mut source = fs::File::open(source_path)
             .with_context(|| format!("failed to open {}", source_path.display()))?;
-        let (storage_name, size_bytes) = self
-            .vault
-            .write_from(
-                &format!(
-                    "draft-{draft_id}-{}-{}",
-                    EPHEMERAL_COUNTER.fetch_add(1, Ordering::Relaxed),
-                    sanitize_filename(&filename)
-                ),
-                &mut source,
-            )
+        let (storage_path, size_bytes) = self
+            .write_draft_blob(draft_id, &filename, &mut source)
             .with_context(|| format!("failed to copy attachment {}", source_path.display()))?;
-        let storage_path = self.vault.path_of(&storage_name)?;
+        self.insert_draft_attachment(
+            draft_id,
+            filename,
+            content_type,
+            size_bytes,
+            source_path.display().to_string(),
+            storage_path,
+        )
+    }
 
+    /// Copies a received attachment (`attachment_id`, as the reader lists
+    /// it) into a draft: a forward's attachments. The copy is decrypted
+    /// and encrypted again as a draft attachment of its own, under its own
+    /// file key, streaming (ADR 0005), so removing it from the draft
+    /// leaves the received one alone. Its original path is empty.
+    pub fn add_forwarded_attachment(
+        &self,
+        draft_id: i64,
+        attachment_id: i64,
+    ) -> Result<DraftAttachment> {
+        let content_type: String = self
+            .connection()?
+            .query_row(
+                "SELECT content_type FROM message_attachments WHERE id = ?1",
+                params![attachment_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to load the attachment")?
+            .with_context(|| format!("attachment {attachment_id} does not exist"))?;
+        let blob = self.attachment_blob(attachment_id)?;
+        let mut source = self.vault.reader(&blob.path)?;
+        let (storage_path, size_bytes) = self
+            .write_draft_blob(draft_id, &blob.filename, &mut source)
+            .with_context(|| format!("failed to copy attachment {}", blob.filename))?;
+        self.insert_draft_attachment(
+            draft_id,
+            blob.filename,
+            content_type,
+            size_bytes,
+            String::new(),
+            storage_path,
+        )
+    }
+
+    /// Writes a draft attachment's encrypted copy from `source`, returning
+    /// its path and plaintext size.
+    fn write_draft_blob(
+        &self,
+        draft_id: i64,
+        filename: &str,
+        source: &mut dyn std::io::Read,
+    ) -> Result<(PathBuf, u64)> {
+        let (storage_name, size_bytes) = self.vault.write_from(
+            &format!(
+                "draft-{draft_id}-{}-{}",
+                EPHEMERAL_COUNTER.fetch_add(1, Ordering::Relaxed),
+                sanitize_filename(filename)
+            ),
+            source,
+        )?;
+        Ok((self.vault.path_of(&storage_name)?, size_bytes))
+    }
+
+    /// Links a stored copy to an editable draft. The copy is removed when
+    /// the draft cannot take it.
+    fn insert_draft_attachment(
+        &self,
+        draft_id: i64,
+        filename: String,
+        content_type: String,
+        size_bytes: u64,
+        original_path: String,
+        storage_path: PathBuf,
+    ) -> Result<DraftAttachment> {
+        let inserted = self.link_draft_attachment(
+            draft_id,
+            &filename,
+            &content_type,
+            size_bytes,
+            &original_path,
+            &storage_path,
+        );
+        let attachment_id = match inserted {
+            Ok(attachment_id) => attachment_id,
+            Err(error) => {
+                let _ = fs::remove_file(&storage_path);
+                return Err(error);
+            }
+        };
+        Ok(DraftAttachment {
+            id: attachment_id,
+            filename,
+            content_type,
+            size_bytes,
+            original_path,
+            storage_path: storage_path.display().to_string(),
+        })
+    }
+
+    fn link_draft_attachment(
+        &self,
+        draft_id: i64,
+        filename: &str,
+        content_type: &str,
+        size_bytes: u64,
+        original_path: &str,
+        storage_path: &Path,
+    ) -> Result<i64> {
         let mut conn = self.connection()?;
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -4261,7 +4360,7 @@ impl LocalStore {
                 filename,
                 content_type,
                 size_bytes as i64,
-                source_path.display().to_string(),
+                original_path,
                 storage_path.display().to_string(),
                 now,
             ],
@@ -4274,15 +4373,7 @@ impl LocalStore {
         transaction
             .commit()
             .context("failed to commit the attachment transaction")?;
-
-        Ok(DraftAttachment {
-            id: attachment_id,
-            filename,
-            content_type,
-            size_bytes,
-            original_path: source_path.display().to_string(),
-            storage_path: storage_path.display().to_string(),
-        })
+        Ok(attachment_id)
     }
 
     /// Removes an attachment from a draft and deletes its stored copy.
@@ -11124,6 +11215,122 @@ mod tests {
         let kept = store.complete_draft_threading(orphan).expect("completes");
         assert!(!kept.pending);
         assert_eq!(kept.in_reply_to.as_deref(), Some("gone@example.test"));
+    }
+
+    #[test]
+    fn forwarded_attachments_are_copied_encrypted_into_the_draft() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity_id = store.list_identities(account_id).expect("identities load")[0].id;
+        let blobs = store
+            .sync_target(account_id)
+            .expect("the target loads")
+            .expect("the account exists")
+            .blobs;
+        let payload = b"quarterly numbers: forwarded".as_slice();
+        let mut snapshot = merge_test_snapshot("Report", "Body", "thread-report", "9", None);
+        snapshot.mailboxes[0].threads[0].messages[0].attachments = vec![
+            MessageAttachment {
+                filename: "report.csv".to_owned(),
+                content_type: "text/csv".to_owned(),
+                size_bytes: payload.len() as u64,
+                storage_path: blobs.write("report", payload).expect("the blob is written"),
+                content_id: None,
+                inline_only: false,
+            },
+            MessageAttachment {
+                filename: "gone.pdf".to_owned(),
+                content_type: "application/pdf".to_owned(),
+                size_bytes: 4,
+                storage_path: "never-written".to_owned(),
+                content_id: None,
+                inline_only: false,
+            },
+        ];
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+        let thread_id = store
+            .list_threads(mailbox_id_by_name(&store, account_id, "Inbox"), 0..10)
+            .expect("threads should load")[0]
+            .id;
+        let received = store
+            .thread_view(thread_id)
+            .expect("loads")
+            .expect("exists")
+            .messages[0]
+            .attachments
+            .clone();
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id,
+                to: Vec::new(),
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Fwd: Report".to_owned(),
+                body: String::new(),
+                threading: Default::default(),
+            })
+            .expect("draft should be created");
+
+        let copy = store
+            .add_forwarded_attachment(draft_id, received[0].id)
+            .expect("the attachment is copied");
+        assert_eq!(copy.filename, "report.csv");
+        assert_eq!(copy.content_type, "text/csv");
+        assert_eq!(copy.size_bytes, payload.len() as u64);
+        assert_eq!(copy.original_path, "");
+        let on_disk = fs::read(&copy.storage_path).expect("the copy is stored");
+        assert!(
+            !on_disk
+                .windows(payload.len())
+                .any(|window| window == payload),
+            "the copy is encrypted"
+        );
+        assert_ne!(
+            std::path::Path::new(&copy.storage_path),
+            store.attachment_blob(received[0].id).expect("blob").path,
+            "a file of its own"
+        );
+        // The outbox reads it back decrypted.
+        assert_eq!(
+            store
+                .vault
+                .read_file(std::path::Path::new(&copy.storage_path))
+                .expect("decrypts"),
+            payload
+        );
+        assert!(
+            store
+                .add_forwarded_attachment(draft_id, received[1].id)
+                .is_err(),
+            "a received attachment whose file is gone cannot be forwarded"
+        );
+
+        // Removing it from the draft leaves the received one alone.
+        store
+            .remove_draft_attachment(copy.id)
+            .expect("the copy is removed");
+        assert!(!std::path::Path::new(&copy.storage_path).exists());
+        assert_eq!(
+            store
+                .attachment_blob(received[0].id)
+                .expect("still there")
+                .read()
+                .expect("decrypts"),
+            payload
+        );
+        assert!(
+            store
+                .draft_detail(draft_id)
+                .expect("loads")
+                .expect("exists")
+                .attachments
+                .is_empty()
+        );
     }
 
     #[test]
