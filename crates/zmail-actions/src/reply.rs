@@ -4,9 +4,11 @@
 //!
 //! - **Reply** goes to the message's `Reply-To` when it has one, else to
 //!   its sender; **reply all** adds its other To and Cc recipients as Cc.
-//!   The user's own addresses are left out, and when the sender is the
-//!   user (a reply to their own message), the first remaining recipient
-//!   moves to To.
+//!   The user's own addresses are left out.
+//! - A reply to the user's **own message** (its sender is one of the
+//!   account's identities) goes where that message went, as Thunderbird
+//!   and Apple Mail do: reply to its To, reply all to its To and Cc. A
+//!   message the user sent only to themselves is answered to themselves.
 //! - The draft is sent from the identity the message was addressed to (in
 //!   To, Cc or Delivered-To, or the one that sent it), else the primary
 //!   ([`reply_identity`]); the user can change it in compose.
@@ -71,7 +73,8 @@ pub fn own_addresses(identities: &[IdentitySummary]) -> HashSet<String> {
 /// as the attribution line shows it.
 ///
 /// Fails when nobody is left to reply to (the message has no sender and no
-/// recipient other than the user).
+/// recipient other than the user). A message from the user always has
+/// someone: themselves, at worst.
 pub fn reply(
     thread_subject: &str,
     mailbox: &str,
@@ -180,7 +183,8 @@ fn without_subaddress(address: &str) -> String {
 /// Who a reply to `message` goes to: its `Reply-To` (else its sender) in
 /// To and, for reply all, its other To and Cc recipients in Cc, without
 /// the user's own addresses or duplicates. With a `Reply-To`, the sender
-/// is left out, as they asked.
+/// is left out, as they asked. A message the user sent is answered to its
+/// recipients ([`own_message_recipients`]).
 pub fn reply_recipients(
     message: &ThreadMessage,
     own_addresses: &HashSet<String>,
@@ -188,7 +192,14 @@ pub fn reply_recipients(
 ) -> Result<(Vec<String>, Vec<String>)> {
     let sender = message.sender.trim().to_owned();
     let sender_key = normalize_contact(&sender);
-    let from_self = own_addresses.contains(&sender_key);
+    if !sender_key.is_empty() && own_addresses.contains(&sender_key) {
+        return Ok(own_message_recipients(
+            message,
+            &sender,
+            own_addresses,
+            reply_all,
+        ));
+    }
     let reply_to = dedupe_contacts(
         message
             .reply_to
@@ -203,7 +214,7 @@ pub fn reply_recipients(
             .collect(),
     );
 
-    let mut to = if sender.is_empty() || sender_key.is_empty() || from_self {
+    let mut to = if sender_key.is_empty() {
         Vec::new()
     } else if !reply_to.is_empty() {
         reply_to
@@ -241,6 +252,50 @@ pub fn reply_recipients(
         bail!("the selected message does not expose reply recipients");
     }
     Ok((to, cc))
+}
+
+/// Who a reply to the user's own `message`, sent from `sender`, goes to:
+/// its To recipients again and, for reply all, its Cc recipients in Cc,
+/// without the user's addresses or duplicates. Reply all on a message
+/// whose To held only the user moves the first Cc recipient to To; one
+/// sent to nobody else goes back to `sender`.
+fn own_message_recipients(
+    message: &ThreadMessage,
+    sender: &str,
+    own_addresses: &HashSet<String>,
+    reply_all: bool,
+) -> (Vec<String>, Vec<String>) {
+    let others = |summary: &str| {
+        split_contact_summary(summary)
+            .into_iter()
+            .filter(|address| {
+                let normalized = normalize_contact(address);
+                !normalized.is_empty() && !own_addresses.contains(&normalized)
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut to = dedupe_contacts(others(&message.recipients));
+    let mut cc = if reply_all {
+        let in_to = to
+            .iter()
+            .map(|address| normalize_contact(address))
+            .collect::<HashSet<_>>();
+        dedupe_contacts(
+            others(&message.headers.cc)
+                .into_iter()
+                .filter(|address| !in_to.contains(&normalize_contact(address)))
+                .collect(),
+        )
+    } else {
+        Vec::new()
+    };
+    if to.is_empty() {
+        if cc.is_empty() {
+            return (vec![sender.to_owned()], Vec::new());
+        }
+        to.push(cc.remove(0));
+    }
+    (to, cc)
 }
 
 /// `subject` with `prefix:` in front, unless it already starts with it.
@@ -461,17 +516,68 @@ mod tests {
 
     #[test]
     fn a_reply_to_the_users_own_message_goes_to_its_recipients() {
-        let message = message(
+        let mut message = message(
             "Me <me@work.example>",
-            "Ada <ada@example.com>, bo@example.com",
+            "Ada <ada@example.com>, bo@example.com, ME@work.example, ada@example.com",
         );
-        let start = reply("Plan", "INBOX", &message, &me(), true, "today").expect("recipients");
-        assert_eq!(start.to, ["Ada <ada@example.com>"]);
-        assert_eq!(start.cc, ["bo@example.com"]);
-        assert!(
-            reply("Plan", "INBOX", &message, &me(), false, "today").is_err(),
-            "a plain reply to oneself has nobody to go to"
+        message.headers.cc = "Cy <cy@example.com>, bo@example.com, me@work.example".to_owned();
+        // A Reply-To on one's own message does not send the reply there.
+        message.reply_to = Some("me@work.example".to_owned());
+
+        let start = reply("Plan", "Sent", &message, &me(), false, "today").expect("recipients");
+        assert_eq!(
+            start.to,
+            ["Ada <ada@example.com>", "bo@example.com"],
+            "the original To, without the user or duplicates"
         );
+        assert!(start.cc.is_empty(), "a plain reply leaves Cc out");
+        assert_eq!(
+            start.identity_id,
+            Some(1),
+            "sent from the identity that sent it"
+        );
+        assert_eq!(start.threading.action, Some(ReplyAction::Reply));
+
+        let all = reply("Plan", "Sent", &message, &me(), true, "today").expect("recipients");
+        assert_eq!(all.to, ["Ada <ada@example.com>", "bo@example.com"]);
+        assert_eq!(
+            all.cc,
+            ["Cy <cy@example.com>"],
+            "the original Cc, without the user or anyone already in To"
+        );
+    }
+
+    #[test]
+    fn a_message_the_user_sent_only_to_themselves_is_answered_to_them() {
+        let mut note = message("Me <me@work.example>", "me@work.example");
+        for reply_all in [false, true] {
+            let start =
+                reply("Note", "Sent", &note, &me(), reply_all, "today").expect("recipients");
+            assert_eq!(start.to, ["Me <me@work.example>"]);
+            assert!(start.cc.is_empty());
+        }
+
+        // Nobody else in To: a plain reply goes to the user, reply all to
+        // the Cc recipients, the first of them in To.
+        note.headers.cc = "Ada <ada@example.com>, bo@example.com".to_owned();
+        let (to, cc) = reply_recipients(&note, &own_addresses(&me()), false).expect("to");
+        assert_eq!(
+            (to, cc),
+            (vec!["Me <me@work.example>".to_owned()], Vec::new())
+        );
+        let (to, cc) = reply_recipients(&note, &own_addresses(&me()), true).expect("to");
+        assert_eq!(to, ["Ada <ada@example.com>"]);
+        assert_eq!(cc, ["bo@example.com"]);
+
+        // From another of the user's identities: still their own message.
+        let identities = vec![
+            identity(1, "me@work.example", true),
+            identity(2, "alias@work.example", false),
+        ];
+        let sent = message("alias@work.example", "Kai <kai@example.com>");
+        let start = reply("Plan", "Sent", &sent, &identities, false, "today").expect("to");
+        assert_eq!(start.to, ["Kai <kai@example.com>"]);
+        assert_eq!(start.identity_id, Some(2));
     }
 
     #[test]

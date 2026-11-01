@@ -315,6 +315,81 @@ fn reply_all_asks_inline_and_adds_the_other_recipients() {
     assert_eq!(app.screen, Screen::Compose);
 }
 
+/// Home gets two messages the user sent: a picnic plan to Ada and Bo
+/// with Cy in Cc, and a note to themselves.
+fn add_own_threads(store: &LocalStore) {
+    let (_, home) = accounts(store);
+    let mail = |minutes_ago, text| Mail {
+        sender: "Me <me@home.example>",
+        minutes_ago,
+        read: true,
+        text: Some(text),
+        html: None,
+        attachments: &[],
+    };
+    let mut picnic = thread(
+        "picnic",
+        "Picnic on Sunday",
+        false,
+        &[mail(10, "Bring a rug.")],
+    );
+    picnic.messages[0].recipients = "Ada Lovelace <ada@home.example>, bo@home.example".to_owned();
+    picnic.messages[0].headers.cc = "Cy <cy@home.example>, me@home.example".to_owned();
+    let mut note = thread("note", "Note to self", false, &[mail(20, "Buy milk.")]);
+    note.messages[0].recipients = "Me <me@home.example>".to_owned();
+    store
+        .replace_account_snapshot(
+            home,
+            &AccountSyncSnapshot {
+                checkpoint: "test:4".to_owned(),
+                detail: "Up to date".to_owned(),
+                identities: None,
+                mailboxes: vec![mailbox("INBOX", Some("inbox"), vec![picnic, note])],
+            },
+        )
+        .expect("the Home mail is stored");
+}
+
+#[test]
+fn a_reply_to_my_own_message_goes_to_its_recipients() {
+    let store = seeded_store();
+    add_own_threads(&store);
+    let mut app = app_with(store, environment());
+    open_home_inbox(&mut app);
+
+    // The picnic: Cy in Cc makes reply all ask.
+    keys(&mut app, "r");
+    assert!(matches!(app.prompt, Some(Prompt::ReplyAll { .. })));
+    keys(&mut app, "y");
+    let draft = stored_draft(&app);
+    assert_eq!(
+        draft.to,
+        ["Ada Lovelace <ada@home.example>", "bo@home.example"]
+    );
+    assert_eq!(draft.cc, ["Cy <cy@home.example>"], "not me");
+    assert_eq!(draft.identity_email, "me@home.example");
+    control(&mut app, 'c');
+
+    keys(&mut app, "r");
+    keys(&mut app, "n");
+    let draft = stored_draft(&app);
+    assert_eq!(
+        draft.to,
+        ["Ada Lovelace <ada@home.example>", "bo@home.example"]
+    );
+    assert!(draft.cc.is_empty());
+    control(&mut app, 'c');
+
+    // The note to myself goes back to me, without asking.
+    key(&mut app, KeyCode::Down);
+    keys(&mut app, "r");
+    assert!(app.prompt.is_none());
+    assert_eq!(app.screen, Screen::Compose);
+    let draft = stored_draft(&app);
+    assert_eq!(draft.to, ["Me <me@home.example>"]);
+    assert!(draft.cc.is_empty());
+}
+
 #[test]
 fn a_forward_copies_the_message_and_starts_in_to() {
     let mut app = app();
