@@ -32,6 +32,10 @@ fn message(sender: &str, at: &str, is_read: bool, body: &str) -> MessageSnapshot
         is_flagged: false,
         received_at: at.to_owned(),
         attachments: Vec::new(),
+        headers: zmail_core::MessageHeaders {
+            captured: true,
+            ..Default::default()
+        },
     }
 }
 
@@ -50,6 +54,10 @@ fn seed_conversation(store: &LocalStore) {
             body_text: None,
             sanitized_html: Some(zmail_security::sanitize_html_for_display(ROADMAP_HTML).html),
             raw_html: Some(ROADMAP_HTML.to_owned()),
+            headers: zmail_core::MessageHeaders {
+                captured: true,
+                ..Default::default()
+            },
             ..message(
                 "Priya Raman <priya@example.test>",
                 "2026-03-24T09:00:00Z",
@@ -468,6 +476,10 @@ fn html_mail_reads_as_paragraphs_with_cells_apart(cx: &mut TestAppContext) {
                         zmail_security::sanitize_html_for_display(ORDER_HTML).html,
                     ),
                     raw_html: Some(ORDER_HTML.to_owned()),
+                    headers: zmail_core::MessageHeaders {
+                        captured: true,
+                        ..Default::default()
+                    },
                     ..message(
                         "Shop <orders@shop.example>",
                         "2026-03-24T09:00:00Z",

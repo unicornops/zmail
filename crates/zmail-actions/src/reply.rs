@@ -235,6 +235,7 @@ mod tests {
     fn message(sender: &str, recipients: &str) -> ThreadMessage {
         ThreadMessage {
             id: 1,
+            remote_id: "1".to_owned(),
             sender: sender.to_owned(),
             reply_to: None,
             recipients: recipients.to_owned(),
@@ -252,6 +253,10 @@ mod tests {
             sender_warning_dismissed: false,
             received_at: "2026-03-21T09:15:00Z".to_owned(),
             attachments: Vec::new(),
+            headers: zmail_core::MessageHeaders {
+                captured: true,
+                ..Default::default()
+            },
         }
     }
 

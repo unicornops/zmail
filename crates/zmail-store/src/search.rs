@@ -534,6 +534,7 @@ mod store_tests {
                 } else {
                     Vec::new()
                 },
+                headers: Default::default(),
             };
             let thread = ThreadSnapshot {
                 remote_thread_id: item.id.to_owned(),
@@ -1087,6 +1088,7 @@ mod store_tests {
                     has_remote_content: false,
                     body_preview: "x".to_owned(),
                     attachments: Vec::new(),
+                    headers: Default::default(),
                 },
             )
             .expect("hydration should persist");

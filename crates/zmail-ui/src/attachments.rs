@@ -770,6 +770,10 @@ mod tests {
                         content_id: None,
                         inline_only: false,
                     }],
+                    headers: zmail_core::MessageHeaders {
+                        captured: true,
+                        ..Default::default()
+                    },
                 }],
             }],
             ..Default::default()

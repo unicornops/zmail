@@ -155,6 +155,24 @@ fn a_store_from_sqlcipher_4_14_opens_upgrades_and_stays_writable() {
         let store = LocalStore::open(&path, fixture_key()).expect("the old store opens");
         let (account, thread) = read_back(&store);
 
+        // The fixture predates migration 0025: its message has no reply
+        // headers yet, so opening its conversation fetches them, as it
+        // fetches a missing body.
+        let view = store
+            .thread_view(thread)
+            .expect("reads")
+            .expect("the thread");
+        assert!(!view.messages[0].headers.captured);
+        assert_eq!(view.messages[0].headers.message_id, None);
+        let missing = store
+            .messages_missing_bodies(thread)
+            .expect("reads")
+            .expect("the thread");
+        assert_eq!(
+            missing.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [view.messages[0].id]
+        );
+
         // Writes after the upgrade: a flag, and a second draft.
         store.set_thread_flagged(thread, true).expect("flags");
         let identity = store.list_identities(account).expect("identities")[0].id;
@@ -265,6 +283,7 @@ fn write_fixture() {
                 content_id: None,
                 inline_only: false,
             }],
+            headers: Default::default(),
         };
         store
             .replace_account_snapshot(

@@ -462,6 +462,10 @@ fn a_body_match_shows_an_excerpt_in_place_of_the_snippet(cx: &mut TestAppContext
                         has_remote_content: false,
                         body_preview: "Numbers attached".to_owned(),
                         attachments: Vec::new(),
+                        headers: zmail_core::MessageHeaders {
+                            captured: true,
+                            ..Default::default()
+                        },
                     },
                 )
                 .expect("the body is stored");

@@ -19,13 +19,13 @@ use zmail_core::{
     BodyLink, CachePolicySummary, DeliveryTarget, DraftAttachment, DraftDetail, DraftState,
     DraftSummary, DraftUpdate, HydratedBody, IdentitySummary, IndexCandidate, IndexProgress,
     MailboxRole, MailboxSelection, MailboxSnapshot, MailboxSummary, MessageAttachment,
-    MessageFlagState, MessagePreview, MessageRenderMode, MessageSnapshot, MessageSummary,
-    NewAccount, NewDraft, OAuth2TargetConfig, OutboxJobState, OutboxJobSummary, OutgoingAttachment,
-    OutgoingConfig, OutgoingMessage, PendingOp, PendingOpKind, PendingOutboxJob, ProtocolKind,
-    ReceivedAttachment, SearchHit, SearchScope, ServerHitRef, StoreStats, SubmissionKind,
-    SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget, ThreadCounts, ThreadFilter,
-    ThreadMarks, ThreadMessage, ThreadSnapshot, ThreadState, ThreadSummary, ThreadView,
-    VirtualMailbox, preferences::UiPreferences,
+    MessageFlagState, MessageHeaders, MessagePreview, MessageRenderMode, MessageSnapshot,
+    MessageSummary, NewAccount, NewDraft, OAuth2TargetConfig, OutboxJobState, OutboxJobSummary,
+    OutgoingAttachment, OutgoingConfig, OutgoingMessage, PendingOp, PendingOpKind,
+    PendingOutboxJob, ProtocolKind, ReceivedAttachment, SearchHit, SearchScope, ServerHitRef,
+    StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase, SyncStatusSummary, SyncTarget,
+    ThreadCounts, ThreadFilter, ThreadMarks, ThreadMessage, ThreadSnapshot, ThreadState,
+    ThreadSummary, ThreadView, VirtualMailbox, preferences::UiPreferences,
 };
 use zmail_security::html::text_of_stored_html;
 pub use zmail_security::vault::{BlobVault, StoreKey, StoreKeychain};
@@ -182,6 +182,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0022_message_html_parts", MESSAGE_HTML_PARTS_SCHEMA),
     ("0023_remote_content_senders", REMOTE_CONTENT_SENDERS_SCHEMA),
     ("0024_recipient_key_trust", key_trust::KEY_TRUST_SCHEMA),
+    ("0025_message_reply_headers", MESSAGE_REPLY_HEADERS_SCHEMA),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -473,6 +474,25 @@ CREATE TABLE IF NOT EXISTS remote_content_senders (
     PRIMARY KEY (account_id, address),
     FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
+"#;
+
+/// The headers a reply is worked out from (issue #350): the message's
+/// threading identity (`Message-ID`, `In-Reply-To` and `References`, ids
+/// without angle brackets, separated by spaces), its Cc recipients and
+/// the addresses it was delivered to (`Delivered-To`, `X-Original-To`).
+///
+/// `headers_captured` says the adapter read them from the message.
+/// Messages stored before this migration have it unset, and count as
+/// missing (see [`LocalStore::messages_missing_bodies`]): opening their
+/// conversation fetches them again, as bodies are fetched, instead of
+/// refetching every message's headers up front.
+const MESSAGE_REPLY_HEADERS_SCHEMA: &str = r#"
+ALTER TABLE messages ADD COLUMN message_id_header TEXT;
+ALTER TABLE messages ADD COLUMN in_reply_to TEXT;
+ALTER TABLE messages ADD COLUMN references_header TEXT;
+ALTER TABLE messages ADD COLUMN cc TEXT;
+ALTER TABLE messages ADD COLUMN delivered_to TEXT;
+ALTER TABLE messages ADD COLUMN headers_captured INTEGER NOT NULL DEFAULT 0;
 "#;
 
 const MESSAGE_REPLY_TO_SCHEMA: &str = r#"
@@ -2318,7 +2338,7 @@ impl LocalStore {
             return Ok(None);
         };
 
-        let mut statement = conn.prepare(
+        let mut statement = conn.prepare(&format!(
             r#"
             SELECT
                 messages.id,
@@ -2334,12 +2354,14 @@ impl LocalStore {
                 messages.has_remote_content,
                 messages.received_at,
                 messages.sender_warning_dismissed,
-                messages.raw_html IS NULL
+                messages.raw_html IS NULL,
+                COALESCE(messages.remote_id, ''),
+                {HEADER_COLUMNS}
             FROM messages
             WHERE messages.thread_id = ?1
             ORDER BY messages.received_at ASC, messages.id ASC
             "#,
-        )?;
+        ))?;
 
         let mut messages = statement
             .query_map(params![thread_id], |row| {
@@ -2355,6 +2377,7 @@ impl LocalStore {
 
                 Ok(ThreadMessage {
                     id: row.get(0)?,
+                    remote_id: row.get(14)?,
                     sender: row.get(1)?,
                     reply_to: row.get(2)?,
                     recipients: row.get(3)?,
@@ -2372,6 +2395,7 @@ impl LocalStore {
                     sender_warning_dismissed: row.get::<_, bool>(12)?,
                     received_at: row.get(11)?,
                     attachments: Vec::new(),
+                    headers: headers_from_row(row, 15)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -2661,6 +2685,12 @@ impl LocalStore {
     /// original part) count as missing on IMAP and Proton accounts, so
     /// opening their conversation fetches them again with the original
     /// HTML and inline parts; JMAP sends bodies with its sync instead.
+    ///
+    /// So do messages whose reply headers were never read (stored before
+    /// migration 0025, or a Proton message known only from its metadata):
+    /// on IMAP and Proton accounts the body fetch reads them, and on JMAP
+    /// accounts [`Self::set_message_headers`] stores them from a small
+    /// `Email/get`.
     pub fn messages_missing_bodies(&self, thread_id: i64) -> Result<Option<Vec<(i64, String)>>> {
         let conn = self.connection()?;
         let exists: Option<i64> = conn
@@ -2684,7 +2714,8 @@ impl LocalStore {
             WHERE messages.thread_id = ?1
               AND ((messages.body_text IS NULL AND messages.sanitized_html IS NULL)
                 OR (messages.body_text IS NULL AND messages.sanitized_html IS NOT NULL
-                    AND messages.raw_html IS NULL AND accounts.protocol_kind != 'jmap'))
+                    AND messages.raw_html IS NULL AND accounts.protocol_kind != 'jmap')
+                OR (messages.headers_captured = 0 AND COALESCE(messages.remote_id, '') <> ''))
             ORDER BY messages.received_at ASC, messages.id ASC
             "#,
         )?;
@@ -2695,6 +2726,26 @@ impl LocalStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to list the messages missing bodies")?;
         Ok(Some(rows))
+    }
+
+    /// Stores the headers read from message `message_id` (a JMAP
+    /// account's `Email/get` for mail stored before Zmail kept them).
+    /// Returns whether the message exists.
+    pub fn set_message_headers(&self, message_id: i64, headers: &MessageHeaders) -> Result<bool> {
+        let conn = self.connection()?;
+        let exists = conn
+            .query_row(
+                "SELECT 1 FROM messages WHERE id = ?1",
+                params![message_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .context("failed to look up the message")?
+            .is_some();
+        if exists {
+            write_message_headers(&conn, message_id, headers)?;
+        }
+        Ok(exists)
     }
 
     /// Returns the account's messages the background indexer should fetch
@@ -2872,6 +2923,9 @@ impl LocalStore {
                 ],
             )
             .context("failed to store the hydrated body")?;
+        if hydration.headers.captured {
+            write_message_headers(&transaction, message_id, &hydration.headers)?;
+        }
         transaction.execute(
             "DELETE FROM message_attachments WHERE message_id = ?1",
             params![message_id],
@@ -5078,6 +5132,109 @@ fn ensure_draft_is_editable(state: DraftState) -> Result<()> {
     Ok(())
 }
 
+/// The `messages` columns [`MessageHeaders`] are stored in, in the order
+/// [`HeaderColumns::params`] binds and [`headers_from_row`] reads them.
+const HEADER_COLUMNS: &str =
+    "message_id_header, in_reply_to, references_header, cc, delivered_to, headers_captured";
+
+/// [`MessageHeaders`] as the values of [`HEADER_COLUMNS`].
+#[derive(PartialEq, Eq)]
+struct HeaderColumns {
+    message_id: Option<String>,
+    in_reply_to: Option<String>,
+    references: Option<String>,
+    cc: Option<String>,
+    delivered_to: Option<String>,
+    captured: bool,
+}
+
+impl HeaderColumns {
+    fn of(headers: &MessageHeaders) -> Self {
+        let joined = |values: &[String], separator: &str| {
+            (!values.is_empty()).then(|| values.join(separator))
+        };
+        Self {
+            message_id: headers.message_id.clone().filter(|id| !id.is_empty()),
+            in_reply_to: joined(&headers.in_reply_to, " "),
+            references: joined(&headers.references, " "),
+            cc: Some(headers.cc.trim().to_owned()).filter(|cc| !cc.is_empty()),
+            delivered_to: joined(&headers.delivered_to, ", "),
+            captured: headers.captured,
+        }
+    }
+}
+
+/// Whether writing `incoming` would leave the stored headers as they are.
+/// Headers an adapter did not read (a lazy snapshot, or Proton metadata)
+/// never replace ones read from the message.
+fn headers_match(stored: &MessageHeaders, incoming: &MessageHeaders) -> bool {
+    (stored.captured && !incoming.captured)
+        || HeaderColumns::of(stored) == HeaderColumns::of(incoming)
+}
+
+/// Overwrites one message's stored headers. A fetched message with no
+/// `Delivered-To` keeps the address stored from the sync (a Proton
+/// message's address, which its metadata names but its rebuilt header
+/// does not).
+fn write_message_headers(
+    conn: &Connection,
+    message_id: i64,
+    headers: &MessageHeaders,
+) -> Result<()> {
+    let columns = HeaderColumns::of(headers);
+    conn.execute(
+        r#"
+        UPDATE messages
+        SET message_id_header = ?2,
+            in_reply_to = ?3,
+            references_header = ?4,
+            cc = ?5,
+            delivered_to = COALESCE(?6, delivered_to),
+            headers_captured = ?7
+        WHERE id = ?1
+        "#,
+        params![
+            message_id,
+            columns.message_id,
+            columns.in_reply_to,
+            columns.references,
+            columns.cc,
+            columns.delivered_to,
+            columns.captured,
+        ],
+    )
+    .with_context(|| format!("failed to store the headers of message {message_id}"))?;
+    Ok(())
+}
+
+/// Reads [`HEADER_COLUMNS`] from `row`, starting at column `first`.
+fn headers_from_row(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<MessageHeaders> {
+    let ids = |value: Option<String>| -> Vec<String> {
+        value
+            .as_deref()
+            .map(zmail_core::threading::parse_message_ids)
+            .unwrap_or_default()
+    };
+    Ok(MessageHeaders {
+        message_id: row.get(first)?,
+        in_reply_to: ids(row.get(first + 1)?),
+        references: ids(row.get(first + 2)?),
+        cc: row.get::<_, Option<String>>(first + 3)?.unwrap_or_default(),
+        delivered_to: row
+            .get::<_, Option<String>>(first + 4)?
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        captured: row.get(first + 5)?,
+    })
+}
+
 fn recipients_to_json(recipients: &[String]) -> Result<String> {
     serde_json::to_string(recipients).context("failed to encode recipients")
 }
@@ -5805,7 +5962,13 @@ fn thread_message_snapshots(conn: &Connection, thread_id: i64) -> Result<Vec<Mes
             messages.has_remote_content,
             messages.is_read,
             messages.is_flagged,
-            messages.received_at
+            messages.received_at,
+            messages.message_id_header,
+            messages.in_reply_to,
+            messages.references_header,
+            messages.cc,
+            messages.delivered_to,
+            messages.headers_captured
         FROM messages
         JOIN identities ON identities.id = messages.identity_id
         WHERE messages.thread_id = ?1
@@ -5829,6 +5992,7 @@ fn thread_message_snapshots(conn: &Connection, thread_id: i64) -> Result<Vec<Mes
             is_flagged: row.get::<_, bool>(11)?,
             received_at: row.get(12)?,
             attachments: Vec::new(),
+            headers: headers_from_row(row, 13)?,
         })
     })?
     .collect::<rusqlite::Result<Vec<_>>>()
@@ -5972,12 +6136,14 @@ fn merge_mailbox_threads(
 
         // Lazy adapters sync headers without bodies, and hydration is local
         // state the server snapshot cannot re-supply. When a changed thread is
-        // rewritten, the stored bodies, previews, and attachment metadata are
-        // re-attached first so the rewrite cannot drop them.
+        // rewritten, the stored bodies, previews, attachment metadata and
+        // headers read from the message are re-attached first so the rewrite
+        // cannot drop them.
         let write_messages: Vec<MessageSnapshot> = match existing_thread_id {
             Some(existing_id)
                 if thread.messages.iter().any(|message| {
-                    message.body_text.is_none() && message.sanitized_html.is_none()
+                    (message.body_text.is_none() && message.sanitized_html.is_none())
+                        || !message.headers.captured
                 }) || (thread_had_attachments
                     && thread
                         .messages
@@ -6082,6 +6248,7 @@ fn merge_mailbox_threads(
 
         let mut latest_message_id = None;
         for (message, is_read, is_flagged, identity_id) in merged_messages {
+            let headers = HeaderColumns::of(&message.headers);
             transaction
                 .execute(
                     r#"
@@ -6101,9 +6268,16 @@ fn merge_mailbox_threads(
                     is_flagged,
                     received_at,
                     sender_warning_dismissed,
-                    raw_html
+                    raw_html,
+                    message_id_header,
+                    in_reply_to,
+                    references_header,
+                    cc,
+                    delivered_to,
+                    headers_captured
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                        ?17, ?18, ?19, ?20, ?21, ?22)
                 "#,
                     params![
                         thread_row_id,
@@ -6123,6 +6297,12 @@ fn merge_mailbox_threads(
                         !message.remote_id.is_empty()
                             && dismissed_warnings.contains(&message.remote_id),
                         message.raw_html,
+                        headers.message_id,
+                        headers.in_reply_to,
+                        headers.references,
+                        headers.cc,
+                        headers.delivered_to,
+                        headers.captured,
                     ],
                 )
                 .context("failed to insert the message during the snapshot merge")?;
@@ -6218,6 +6398,9 @@ fn stored_thread_matches(
         };
         let stored_has_body = stored.body_text.is_some() || stored.sanitized_html.is_some();
         let incoming_has_body = message.body_text.is_some() || message.sanitized_html.is_some();
+        if !headers_match(&stored.headers, &message.headers) {
+            return Ok(false);
+        }
         if incoming_has_body {
             if stored.identity_id != *identity_id
                 || stored.sender != message.sender
@@ -6278,7 +6461,8 @@ fn stored_thread_matches(
 }
 
 /// Hydrated state re-attached to a lazy snapshot's messages during a
-/// rewrite: body, remote-content flag, preview, and attachment metadata.
+/// rewrite: body, remote-content flag, preview, attachment metadata and
+/// the headers read from the message.
 struct StoredHydration {
     body_text: Option<String>,
     sanitized_html: Option<String>,
@@ -6286,6 +6470,7 @@ struct StoredHydration {
     has_remote_content: bool,
     body_preview: String,
     attachments: Vec<MessageAttachment>,
+    headers: MessageHeaders,
 }
 
 /// The stored form of a message attachment for merge comparisons.
@@ -6369,6 +6554,7 @@ struct StoredMessage {
     is_read: bool,
     is_flagged: bool,
     received_at: String,
+    headers: MessageHeaders,
 }
 
 /// Loads a thread row for merge comparison.
@@ -6407,15 +6593,15 @@ fn load_stored_messages(
     transaction: &Transaction<'_>,
     thread_id: i64,
 ) -> Result<Vec<StoredMessage>> {
-    let mut statement = transaction.prepare(
+    let mut statement = transaction.prepare(&format!(
         r#"
         SELECT id, COALESCE(remote_id, ''), identity_id, sender, reply_to, recipients, subject,
                body_preview, body_text, sanitized_html, has_remote_content,
-               is_read, is_flagged, received_at, raw_html
+               is_read, is_flagged, received_at, raw_html, {HEADER_COLUMNS}
         FROM messages
         WHERE thread_id = ?1
         "#,
-    )?;
+    ))?;
     let rows = statement.query_map(params![thread_id], |row| {
         Ok(StoredMessage {
             id: row.get(0)?,
@@ -6433,6 +6619,7 @@ fn load_stored_messages(
             is_flagged: row.get(12)?,
             received_at: row.get(13)?,
             raw_html: row.get(14)?,
+            headers: headers_from_row(row, 15)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -6777,14 +6964,15 @@ fn materialize_stored_state(
                 |row| row.get::<_, bool>(0),
             )
             .context("failed to look for stored parts during the snapshot merge")?;
-    let mut statement = transaction.prepare(
+    let mut statement = transaction.prepare(&format!(
         r#"
         SELECT id, COALESCE(remote_id, ''),
-               body_text, sanitized_html, has_remote_content, body_preview, raw_html
+               body_text, sanitized_html, has_remote_content, body_preview, raw_html,
+               {HEADER_COLUMNS}
         FROM messages
         WHERE thread_id = ?1
         "#,
-    )?;
+    ))?;
     let rows = statement
         .query_map(params![thread_id], |row| {
             Ok((
@@ -6797,6 +6985,7 @@ fn materialize_stored_state(
                     body_preview: row.get(5)?,
                     raw_html: row.get(6)?,
                     attachments: Vec::new(),
+                    headers: headers_from_row(row, 7)?,
                 },
             ))
         })?
@@ -6829,6 +7018,9 @@ fn materialize_stored_state(
             }
             if owned.attachments.is_empty() && load_parts {
                 owned.attachments = stored.attachments.clone();
+            }
+            if stored.headers.captured && !owned.headers.captured {
+                owned.headers = stored.headers.clone();
             }
         }
         materialized.push(owned);
@@ -6925,14 +7117,22 @@ fn store_ui_preferences(conn: &Connection, preferences: &UiPreferences) -> Resul
 
 #[cfg(test)]
 mod tests {
+    /// Headers as an adapter reads them from a fetched message.
+    fn read_headers() -> zmail_core::MessageHeaders {
+        zmail_core::MessageHeaders {
+            captured: true,
+            ..Default::default()
+        }
+    }
     use std::{fs, time::Duration};
 
     use super::LocalStore;
     use zmail_core::{
         AccountColor, AccountSyncSnapshot, AuthKind, CachePolicySummary, DraftState, HydratedBody,
-        MailboxRole, MailboxSelection, MailboxSnapshot, MessageAttachment, MessageRenderMode,
-        MessageSnapshot, NewAccount, NewDraft, NewIdentity, PendingOpKind, ProtocolKind,
-        SearchScope, SyncPhase, ThreadCounts, ThreadFilter, ThreadSnapshot, VirtualMailbox,
+        MailDelta, MailboxRole, MailboxSelection, MailboxSnapshot, MessageAttachment,
+        MessageRenderMode, MessageSnapshot, NewAccount, NewDraft, NewIdentity, PendingOpKind,
+        ProtocolKind, SearchScope, SyncPhase, ThreadCounts, ThreadFilter, ThreadSnapshot,
+        VirtualMailbox,
     };
 
     #[test]
@@ -7391,6 +7591,7 @@ mod tests {
                         is_flagged: false,
                         received_at: "2026-03-21T09:15:00Z".to_owned(),
                         attachments: Vec::new(),
+                        headers: Default::default(),
                     }],
                 }],
                 ..Default::default()
@@ -7467,6 +7668,7 @@ mod tests {
                         is_flagged: false,
                         received_at: "2026-10-15T09:00:00Z".to_owned(),
                         attachments: Vec::new(),
+                        headers: Default::default(),
                     }],
                 }],
                 ..Default::default()
@@ -7648,6 +7850,7 @@ mod tests {
                 is_flagged: flagged,
                 received_at: at,
                 attachments: Vec::new(),
+                headers: Default::default(),
             }],
         }
     }
@@ -8251,6 +8454,7 @@ mod tests {
                         is_flagged: false,
                         received_at: "2026-03-21T09:15:00Z".to_owned(),
                         attachments: Vec::new(),
+                        headers: Default::default(),
                     }],
                 }],
                 ..Default::default()
@@ -8881,6 +9085,7 @@ mod tests {
                         is_flagged: false,
                         received_at: "2026-03-21T09:15:00Z".to_owned(),
                         attachments: Vec::new(),
+                        headers: Default::default(),
                     }],
                 }],
                 ..Default::default()
@@ -8928,6 +9133,7 @@ mod tests {
                         is_flagged: true,
                         received_at: "2026-03-21T10:00:00Z".to_owned(),
                         attachments: Vec::new(),
+                        headers: Default::default(),
                     }],
                 }],
                 ..Default::default()
@@ -9002,6 +9208,7 @@ mod tests {
                         is_flagged: true,
                         received_at: "2026-03-22T12:00:00Z".to_owned(),
                         attachments: Vec::new(),
+                        headers: Default::default(),
                     }],
                 }],
                 ..Default::default()
@@ -9314,6 +9521,7 @@ mod tests {
                         content_id: None,
                         inline_only: false,
                     }],
+                    headers: read_headers(),
                 },
             )
             .expect("hydration should persist");
@@ -9429,6 +9637,7 @@ mod tests {
                             inline_only: false,
                         },
                     ],
+                    headers: read_headers(),
                 },
             )
             .expect("hydration should persist");
@@ -9587,6 +9796,7 @@ mod tests {
         // An HTML-only body as the old sanitiser stored it: no raw HTML.
         let mut snapshot = merge_test_snapshot("Old", "Old", "thread-old", "message-old", None);
         let old = &mut snapshot.mailboxes[0].threads[0].messages[0];
+        old.headers = read_headers();
         old.body_text = None;
         old.sanitized_html =
             Some("<p>Read <a href=\"blocked://example.com/post\">the post</a></p>".to_owned());
@@ -9631,6 +9841,7 @@ mod tests {
                     has_remote_content: false,
                     body_preview: stored.text,
                     attachments: Vec::new(),
+                    headers: read_headers(),
                 },
             )
             .expect("hydration should persist");
@@ -9724,6 +9935,7 @@ mod tests {
                     has_remote_content: false,
                     body_preview: "The lazy cormorant body".to_owned(),
                     attachments: Vec::new(),
+                    headers: read_headers(),
                 },
             )
             .expect("hydration should persist");
@@ -9745,6 +9957,7 @@ mod tests {
                     has_remote_content: false,
                     body_preview: "The lazy cormorant body".to_owned(),
                     attachments: Vec::new(),
+                    headers: read_headers(),
                 },
             )
             .expect("repeated hydration should persist");
@@ -9863,6 +10076,7 @@ mod tests {
             is_flagged: false,
             received_at: at.to_owned(),
             attachments: Vec::new(),
+            headers: Default::default(),
         };
         let mut snapshot =
             merge_test_snapshot("Undo subject", "Undo body", "thread-u", "unused", None);
@@ -10167,6 +10381,7 @@ mod tests {
                             is_flagged: false,
                             received_at: "2026-03-22T13:00:00Z".to_owned(),
                             attachments: Vec::new(),
+                            headers: Default::default(),
                         }],
                     }],
                     ..Default::default()
@@ -10703,6 +10918,7 @@ mod tests {
                 })
                 .into_iter()
                 .collect(),
+            headers: Default::default(),
         };
         store
             .replace_account_snapshot(
@@ -10850,6 +11066,171 @@ mod tests {
                 theme_mode: ThemeMode::Dark,
                 ..UiPreferences::default()
             }
+        );
+    }
+
+    fn reply_headers() -> zmail_core::MessageHeaders {
+        zmail_core::MessageHeaders {
+            captured: true,
+            message_id: Some("reply-2@example.com".to_owned()),
+            in_reply_to: vec!["root@example.com".to_owned()],
+            references: vec!["root@example.com".to_owned(), "mid@example.com".to_owned()],
+            cc: "Ada <ada@example.com>, bo@example.com".to_owned(),
+            delivered_to: vec!["me+lists@work.example".to_owned()],
+        }
+    }
+
+    #[test]
+    fn reply_headers_round_trip_and_survive_lazy_resyncs_and_moves() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let mut snapshot =
+            merge_test_snapshot("Headers", "Body", "thread-headers", "message-headers", None);
+        snapshot.mailboxes[0].threads[0].messages[0].headers = reply_headers();
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("snapshot should apply");
+        let thread_id = |store: &LocalStore, mailbox: &str| {
+            store
+                .list_threads(mailbox_id_by_name(store, account_id, mailbox), 0..10)
+                .expect("threads should load")[0]
+                .id
+        };
+        let headers_of = |store: &LocalStore, thread: i64| {
+            let view = store
+                .thread_view(thread)
+                .expect("the thread view should load")
+                .expect("the thread view should exist");
+            assert_eq!(view.messages[0].remote_id, "message-headers");
+            view.messages[0].headers.clone()
+        };
+        let inbox_thread = thread_id(&store, "Inbox");
+        assert_eq!(headers_of(&store, inbox_thread), reply_headers());
+        assert!(
+            store
+                .messages_missing_bodies(inbox_thread)
+                .expect("missing bodies should load")
+                .expect("the thread should exist")
+                .is_empty(),
+            "captured headers are not fetched again"
+        );
+
+        // A later snapshot that did not read the headers (a lazy adapter,
+        // or Proton metadata with only the Message-ID) keeps them.
+        let mut lazy = snapshot.clone();
+        lazy.mailboxes[0].threads[0].messages[0].headers = zmail_core::MessageHeaders {
+            message_id: Some("reply-2@example.com".to_owned()),
+            ..Default::default()
+        };
+        lazy.mailboxes[0].threads[0].messages[0].subject = "Headers, renamed".to_owned();
+        store
+            .merge_account_snapshot(account_id, &lazy)
+            .expect("the merge should apply");
+        assert_eq!(
+            headers_of(&store, thread_id(&store, "Inbox")),
+            reply_headers()
+        );
+
+        // A move (a delta that places the message elsewhere) keeps them too.
+        let mut moved = lazy.mailboxes[0].clone();
+        moved.name = "Archive".to_owned();
+        moved.role = Some("archive".to_owned());
+        store
+            .apply_mail_delta(
+                account_id,
+                &MailDelta {
+                    mailboxes: vec![moved],
+                    message_ids: vec!["message-headers".to_owned()],
+                },
+            )
+            .expect("the delta should apply");
+        assert_eq!(
+            headers_of(&store, thread_id(&store, "Archive")),
+            reply_headers()
+        );
+
+        // Headers the adapter did read replace the stored ones.
+        let mut reread = snapshot.clone();
+        reread.mailboxes[0].name = "Archive".to_owned();
+        reread.mailboxes[0].role = Some("archive".to_owned());
+        reread.mailboxes[0].threads[0].messages[0].headers.cc = String::new();
+        store
+            .merge_account_snapshot(account_id, &reread)
+            .expect("the merge should apply");
+        assert_eq!(headers_of(&store, thread_id(&store, "Archive")).cc, "");
+    }
+
+    #[test]
+    fn missing_reply_headers_are_fetched_like_missing_bodies() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        for protocol in [ProtocolKind::Imap, ProtocolKind::Jmap] {
+            let account_id = store
+                .create_demo_account(protocol)
+                .expect("account should be created");
+            // Stored with its body, before Zmail kept reply headers.
+            let snapshot =
+                merge_test_snapshot("Old", "Old body", "thread-old", "message-old", None);
+            store
+                .replace_account_snapshot(account_id, &snapshot)
+                .expect("snapshot should apply");
+            let thread_id = store
+                .list_threads(mailbox_id_by_name(&store, account_id, "Inbox"), 0..10)
+                .expect("threads should load")[0]
+                .id;
+            let missing = store
+                .messages_missing_bodies(thread_id)
+                .expect("missing bodies should load")
+                .expect("the thread should exist");
+            assert_eq!(
+                missing.len(),
+                1,
+                "{protocol:?}: its headers are fetched on open"
+            );
+            let message_id = missing[0].0;
+
+            if protocol == ProtocolKind::Jmap {
+                // JMAP fetches only the headers.
+                assert!(
+                    store
+                        .set_message_headers(message_id, &reply_headers())
+                        .expect("the headers should store")
+                );
+            } else {
+                // IMAP (and Proton) read them from the fetched message.
+                store
+                    .hydrate_message_body(
+                        message_id,
+                        &HydratedBody {
+                            body_text: Some("Old body".to_owned()),
+                            sanitized_html: None,
+                            raw_html: None,
+                            has_remote_content: false,
+                            body_preview: "Old body".to_owned(),
+                            attachments: Vec::new(),
+                            headers: reply_headers(),
+                        },
+                    )
+                    .expect("hydration should persist");
+            }
+            let view = store
+                .thread_view(thread_id)
+                .expect("the thread view should load")
+                .expect("the thread view should exist");
+            assert_eq!(view.messages[0].headers, reply_headers());
+            assert!(
+                store
+                    .messages_missing_bodies(thread_id)
+                    .expect("missing bodies should load")
+                    .expect("the thread should exist")
+                    .is_empty()
+            );
+        }
+        assert!(
+            !store
+                .set_message_headers(i64::MAX, &reply_headers())
+                .expect("a missing message is not an error")
         );
     }
 }

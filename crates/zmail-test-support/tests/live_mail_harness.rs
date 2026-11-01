@@ -93,6 +93,16 @@ fn syncs_preloaded_mail_and_round_trips_smtp_submission() -> Result<()> {
         store.stats()?.message_count > initial_message_count,
         "message count should increase after SMTP submission"
     );
+    // The header-only sync reads the headers a reply needs.
+    let synced = store
+        .thread_view(roundtrip_thread.id)?
+        .context("the round-trip thread should load")?;
+    let headers = &synced.messages[0].headers;
+    assert!(headers.captured, "the sync reads the reply headers");
+    assert!(
+        headers.message_id.is_some(),
+        "the round-trip message's Message-ID is stored: {headers:?}"
+    );
 
     // Lazy sync stores headers only; the round-trip body arrives on demand.
     let hydrated = runtime

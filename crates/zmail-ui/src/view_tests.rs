@@ -134,6 +134,10 @@ fn thread_snapshot(index: usize) -> ThreadSnapshot {
             is_flagged: false,
             received_at: at,
             attachments: Vec::new(),
+            headers: zmail_core::MessageHeaders {
+                captured: true,
+                ..Default::default()
+            },
         }],
     }
 }

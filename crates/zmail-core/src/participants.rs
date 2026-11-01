@@ -322,6 +322,7 @@ mod tests {
             is_flagged: false,
             received_at: received_at.to_owned(),
             attachments: Vec::new(),
+            headers: Default::default(),
         }
     }
 

@@ -24,7 +24,7 @@ use zeroize::Zeroizing;
 use zmail_proton_api::{Attachment, EmailAddress, Headers, KeyRing, Message};
 
 /// Bridge's `InternalIDDomain`.
-const INTERNAL_ID_DOMAIN: &str = "protonmail.internalid";
+pub(crate) const INTERNAL_ID_DOMAIN: &str = "protonmail.internalid";
 
 /// One attachment after decryption (Bridge's `DecryptedAttachment`).
 pub(crate) struct DecryptedAttachment {

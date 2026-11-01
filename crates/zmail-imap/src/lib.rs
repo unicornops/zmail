@@ -27,10 +27,11 @@ use tokio_rustls::{
     rustls::{ClientConfig, RootCertStore, pki_types::ServerName},
 };
 use url::Url;
+use zmail_core::threading::{bare_message_id, parse_message_ids};
 use zmail_core::{
     AccountSyncSnapshot, AuthKind, BlobStore, HydratedBody, MailboxSnapshot, MessageAttachment,
-    MessageSnapshot, OpApplyReport, PendingOp, PendingOpKind, ProtocolKind, SyncTarget,
-    ThreadSnapshot,
+    MessageHeaders, MessageSnapshot, OpApplyReport, PendingOp, PendingOpKind, ProtocolKind,
+    SyncTarget, ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
 
@@ -404,7 +405,49 @@ pub fn hydrated_body_from_rfc822(
         has_remote_content,
         body_preview: excerpt(&preview_source, 180),
         attachments,
+        headers: message_headers(&message),
     })
+}
+
+/// The headers a reply is worked out from, read from a parsed message
+/// (its full header, so a header-only fetch has them all).
+pub fn message_headers(message: &mail_parser::Message<'_>) -> MessageHeaders {
+    let delivered_to = message
+        .headers_raw()
+        .filter(|(name, _)| {
+            name.eq_ignore_ascii_case("Delivered-To") || name.eq_ignore_ascii_case("X-Original-To")
+        })
+        .filter_map(|(_, value)| {
+            let address = value.trim().trim_start_matches('<').trim_end_matches('>');
+            (address.contains('@') && !address.contains(char::is_whitespace))
+                .then(|| address.to_owned())
+        })
+        .fold(Vec::<String>::new(), |mut addresses, address| {
+            if !addresses
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&address))
+            {
+                addresses.push(address);
+            }
+            addresses
+        });
+    MessageHeaders {
+        captured: true,
+        message_id: message.message_id().and_then(bare_message_id),
+        in_reply_to: message_ids(message.in_reply_to()),
+        references: message_ids(message.references()),
+        cc: collect_addresses(message.cc()).join(", "),
+        delivered_to,
+    }
+}
+
+/// The message ids of a parsed `In-Reply-To` or `References` header.
+fn message_ids(value: &mail_parser::HeaderValue<'_>) -> Vec<String> {
+    match (value.as_text_list(), value.as_text()) {
+        (Some(ids), _) => ids.iter().filter_map(|id| bare_message_id(id)).collect(),
+        (None, Some(id)) => parse_message_ids(id),
+        (None, None) => Vec::new(),
+    }
 }
 
 /// Bodies fetched for background indexing from one mailbox.
@@ -1484,6 +1527,7 @@ fn accumulate_fetch(
         is_flagged,
         received_at: received_at.clone(),
         attachments,
+        headers: message_headers(&message),
     };
     let key = conversation_key(&message, uid);
 
@@ -1920,9 +1964,9 @@ mod tests {
 
     use super::{
         ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, conversation_key, excerpt, guess_role,
-        hydrate_bodies, hydrated_body_from_rfc822, mailbox_roles, parent_name, parse_endpoint,
-        persist_attachments, recompute_thread_aggregates, resume_uid, special_use_role,
-        xoauth2_response,
+        hydrate_bodies, hydrated_body_from_rfc822, mailbox_roles, message_headers, parent_name,
+        parse_endpoint, persist_attachments, recompute_thread_aggregates, resume_uid,
+        special_use_role, xoauth2_response,
     };
     use zmail_core::{MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
 
@@ -2167,6 +2211,7 @@ mod tests {
 
         let body = hydrated_body_from_rfc822(raw.as_bytes(), "Inbox", "7", &blobs)
             .expect("the message parses");
+        assert!(body.headers.captured, "hydration reads the reply headers");
         assert_eq!(body.body_text.as_deref(), Some("Hello in text."));
         assert_eq!(body.sanitized_html, None, "the text alternative is shown");
         assert!(
@@ -2223,6 +2268,49 @@ mod tests {
         assert!(sanitized_html.is_none());
         assert!(!has_remote_content);
         assert_eq!(preview, "Body not downloaded.");
+    }
+
+    #[test]
+    fn reply_headers_are_read_from_a_header_only_fetch() {
+        let raw = concat!(
+            "Delivered-To: me+lists@work.example\r\n",
+            "X-Original-To: <alias@work.example>\r\n",
+            "Delivered-To: ME+lists@work.example\r\n",
+            "From: Kai <kai@example.test>\r\n",
+            "To: list@example.test\r\n",
+            "Cc: Ada <ada@example.test>, bo@example.test\r\n",
+            "Subject: Re: plan\r\n",
+            "Message-ID: <reply-2@example.test>\r\n",
+            "In-Reply-To: <reply-1@example.test>\r\n",
+            "References: <root@example.test>\r\n <reply-1@example.test>\r\n",
+            "\r\n",
+        );
+        let message = mail_parser::MessageParser::default()
+            .parse(raw.as_bytes())
+            .expect("a header-only message should parse");
+        let headers = message_headers(&message);
+        assert!(headers.captured);
+        assert_eq!(headers.message_id.as_deref(), Some("reply-2@example.test"));
+        assert_eq!(headers.in_reply_to, ["reply-1@example.test"]);
+        assert_eq!(
+            headers.references,
+            ["root@example.test", "reply-1@example.test"]
+        );
+        assert_eq!(headers.cc, "Ada <ada@example.test>, bo@example.test");
+        assert_eq!(
+            headers.delivered_to,
+            ["me+lists@work.example", "alias@work.example"],
+            "both headers, each address once"
+        );
+
+        // A message with none of them still counts as read.
+        let bare = mail_parser::MessageParser::default()
+            .parse(b"From: a@example.test\r\nSubject: hi\r\n\r\nbody".as_slice())
+            .expect("parses");
+        let headers = message_headers(&bare);
+        assert!(headers.captured);
+        assert_eq!(headers.message_id, None);
+        assert!(headers.references.is_empty() && headers.cc.is_empty());
     }
 
     fn hydrate_raw(raw: &str) -> (Option<String>, Option<String>, bool, String) {
@@ -2450,6 +2538,7 @@ mod tests {
             is_flagged: false,
             received_at: "2026-01-01T00:00:00Z".to_owned(),
             attachments: Vec::new(),
+            headers: Default::default(),
         };
         let newer = MessageSnapshot {
             remote_id: "2".to_owned(),
@@ -2467,6 +2556,7 @@ mod tests {
             is_flagged: true,
             received_at: "2026-02-01T00:00:00Z".to_owned(),
             attachments: Vec::new(),
+            headers: Default::default(),
         };
         let mut thread = ThreadSnapshot {
             remote_thread_id: "root@example.com".to_owned(),

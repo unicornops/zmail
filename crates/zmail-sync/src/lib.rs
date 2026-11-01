@@ -633,10 +633,9 @@ impl SyncService {
         Ok(())
     }
 
-    /// Fetches and stores the bodies of a thread's not-yet-hydrated messages.
-    ///
-    /// Returns `false` when the protocol has no lazy body path (JMAP syncs
-    /// bodies with the message) or when the thread has nothing to fetch.
+    /// Fetches and stores the bodies of a thread's not-yet-hydrated messages,
+    /// and the reply headers of messages stored before Zmail kept them
+    /// (on JMAP, which syncs bodies with the message, only those).
     pub fn hydrate_thread_body(&self, account_id: i64, thread_id: i64) -> Result<bool> {
         let service = self.clone();
         self.inner.handle.spawn(async move {
@@ -677,15 +676,16 @@ impl SyncService {
         let Some(target) = self.inner.store.sync_target(account_id)? else {
             bail!("account {account_id} no longer exists");
         };
-        if target.protocol == ProtocolKind::Jmap {
-            // JMAP delivers bodies with the sync snapshot; nothing to fetch.
-            return Ok(0);
-        }
         let Some(missing) = self.inner.store.messages_missing_bodies(thread_id)? else {
             bail!("thread {thread_id} does not exist");
         };
         if missing.is_empty() {
             return Ok(0);
+        }
+        if target.protocol == ProtocolKind::Jmap {
+            // JMAP delivers bodies with the sync snapshot: what is missing
+            // is the reply headers of mail stored before Zmail kept them.
+            return self.fetch_jmap_headers(&target, &missing).await;
         }
 
         let thread = self
@@ -730,6 +730,34 @@ impl SyncService {
             hydrated += 1;
         }
         Ok(hydrated)
+    }
+
+    /// Fetches and stores the reply headers of a JMAP account's messages
+    /// (`(row id, email id)` pairs). Returns the number stored.
+    async fn fetch_jmap_headers(
+        &self,
+        target: &SyncTarget,
+        messages: &[(i64, String)],
+    ) -> Result<usize> {
+        let secret = self.connect_secret(target).await?;
+        let ids = messages
+            .iter()
+            .map(|(_, remote_id)| remote_id.clone())
+            .collect::<Vec<_>>();
+        let headers: std::collections::HashMap<String, zmail_core::MessageHeaders> =
+            zmail_jmap::fetch_message_headers(target, &secret, &ids)
+                .await?
+                .into_iter()
+                .collect();
+        let mut stored = 0;
+        for (message_id, remote_id) in messages {
+            if let Some(headers) = headers.get(remote_id)
+                && self.inner.store.set_message_headers(*message_id, headers)?
+            {
+                stored += 1;
+            }
+        }
+        Ok(stored)
     }
 
     /// Installs the new-mail notifier the sync reports arrivals through.
@@ -2435,6 +2463,7 @@ mod tests {
                     is_flagged: false,
                     received_at: "2026-10-07T10:00:00Z".to_owned(),
                     attachments: Vec::new(),
+                    headers: Default::default(),
                 })
                 .collect(),
         }

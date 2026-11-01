@@ -32,7 +32,7 @@ use std::{
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use zmail_core::{MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
+use zmail_core::{MailboxSnapshot, MessageHeaders, MessageSnapshot, ThreadSnapshot};
 use zmail_proton_api::{Client, EmailAddress, Label, LabelType, MessageFilter, MessageMetadata};
 
 use crate::mailbox::{DELIMITER, ProtonMailbox, mailboxes_for};
@@ -244,6 +244,30 @@ fn mailbox_snapshot(
     }
 }
 
+/// The reply headers the metadata gives: the Message-ID (Bridge's, an
+/// internal one when the message has no external ID), the Cc recipients
+/// and the address the message belongs to. In-Reply-To and References
+/// are only in the message itself, so they come with hydration and the
+/// headers are not `captured` yet.
+fn metadata_headers(meta: &MessageMetadata, identity_email: &str) -> MessageHeaders {
+    MessageHeaders {
+        captured: false,
+        message_id: Some(if meta.external_id.trim().is_empty() {
+            format!("{}@{}", meta.id, crate::message::INTERNAL_ID_DOMAIN)
+        } else {
+            meta.external_id
+                .trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_owned()
+        }),
+        in_reply_to: Vec::new(),
+        references: Vec::new(),
+        cc: format_addresses(&meta.cc_list),
+        delivered_to: vec![identity_email.to_owned()],
+    }
+}
+
 /// A headers-only message snapshot: the body is filled in by hydration.
 fn message_snapshot(meta: &MessageMetadata, identity_email: &str) -> MessageSnapshot {
     let subject = if meta.subject.trim().is_empty() {
@@ -277,6 +301,7 @@ fn message_snapshot(meta: &MessageMetadata, identity_email: &str) -> MessageSnap
         is_flagged: meta.starred(),
         received_at: timestamp(meta.time),
         attachments: Vec::new(),
+        headers: metadata_headers(meta, identity_email),
     }
 }
 
@@ -478,6 +503,34 @@ mod tests {
         let end_id = first.next_end_id.expect("cursor");
         let rest = list_pages(fetch, &end_id, 8, &|_| {}).await.expect("rest");
         assert!(rest.messages.is_empty() && rest.next_end_id.is_none());
+    }
+
+    #[test]
+    fn metadata_gives_the_message_id_cc_and_address_but_not_the_references() {
+        let mut external = meta("m1", "c1", &["0"], 1_700_000_100, false);
+        external.external_id = "<ext-1@example.com>".to_owned();
+        external.cc_list = vec![EmailAddress {
+            name: "Ada".to_owned(),
+            address: "ada@example.com".to_owned(),
+        }];
+        let headers = message_snapshot(&external, "zmail.alias@proton.local").headers;
+        assert!(
+            !headers.captured,
+            "In-Reply-To and References come with hydration"
+        );
+        assert_eq!(headers.message_id.as_deref(), Some("ext-1@example.com"));
+        assert_eq!(headers.cc, "Ada <ada@example.com>");
+        assert_eq!(headers.delivered_to, ["zmail.alias@proton.local"]);
+
+        // Between Proton users there is no external ID: Bridge's internal one.
+        let internal = meta("m2", "c1", &["0"], 1_700_000_000, false);
+        assert_eq!(
+            message_snapshot(&internal, "zmail@proton.local")
+                .headers
+                .message_id
+                .as_deref(),
+            Some("m2@protonmail.internalid")
+        );
     }
 
     #[test]

@@ -41,6 +41,10 @@ fn thread(id: &str, sender: &str, reply_to: Option<&str>, remote_content: bool) 
             is_flagged: false,
             received_at: at,
             attachments: Vec::new(),
+            headers: zmail_core::MessageHeaders {
+                captured: true,
+                ..Default::default()
+            },
         }],
     }
 }

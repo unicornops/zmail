@@ -395,6 +395,10 @@ fn large_mailbox_search_timings() -> Result<()> {
                 has_remote_content: false,
                 body_preview: "hydrated body".to_owned(),
                 attachments: Vec::new(),
+                headers: zmail_core::MessageHeaders {
+                    captured: true,
+                    ..Default::default()
+                },
             },
         )?;
     }
