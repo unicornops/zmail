@@ -72,7 +72,7 @@ hkdf = "0.12.4"
 html5ever = "0.40.1"
 # HMAC-SHA256 for the store's opaque attachment file names (ADR 0005);
 # already in the tree through pgp.
-hmac = "0.12.1"
+hmac = "0.13.0"
 # Exactly 0.4.1: 0.4.2 and later put every capability jmap-client knows
 # (contacts, calendars, Sieve, quota, principals...) in each request's
 # `using`, which RFC 8620 section 3.6.1 has servers reject
