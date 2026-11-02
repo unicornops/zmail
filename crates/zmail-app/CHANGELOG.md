@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.0](https://github.com/unicornops/zmail/compare/v0.30.0...v0.31.0) (2026-11-02)
+
+
+### Features
+
+* **compose:** send the identity's Reply-To ([#373](https://github.com/unicornops/zmail/issues/373)) ([811daa2](https://github.com/unicornops/zmail/commit/811daa2f003cf4b3abd7d8f399388b2da37e6c76))
+
 ## [0.30.0](https://github.com/unicornops/zmail/compare/v0.29.0...v0.30.0) (2026-11-02)
 
 
