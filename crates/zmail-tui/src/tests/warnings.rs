@@ -17,7 +17,7 @@ use crate::app::{App, Screen};
 /// A store whose Work inbox has a look-alike PayPal message whose
 /// Reply-To also goes elsewhere (with an escape sequence in it), a
 /// newsletter replying to a related domain, and an ordinary message.
-fn store_with_suspicious_mail() -> Arc<LocalStore> {
+pub(super) fn store_with_suspicious_mail() -> Arc<LocalStore> {
     let store = Arc::new(LocalStore::open_ephemeral().expect("the store opens"));
     let work = account(&store, "Work", "me@work.example");
     let mut lookalike = thread(
@@ -70,7 +70,7 @@ fn store_with_suspicious_mail() -> Arc<LocalStore> {
 }
 
 /// Opens the `row`th conversation of the Work inbox in Message Text.
-fn open(app: &mut App, row: usize, width: u16, height: u16) {
+pub(super) fn open(app: &mut App, row: usize, width: u16, height: u16) {
     keys(app, "l");
     draw(app, width, height);
     key(app, KeyCode::Enter);

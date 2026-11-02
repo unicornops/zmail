@@ -30,7 +30,7 @@ Phases 1 through 4 are implemented in-repo, and most of Phase 5 hardening is in 
 - Tagged releases also attach a Linux screenshot captured from the live mail harness by the Release Please workflow chain
 - pull requests that change the UI get a `ui-screenshots` CI artefact: every main UI state in light and dark plus narrow and wide windows, captured from seeded fixture data (see `AGENTS.md`)
 - release archives ship platform binaries plus a Linux `.deb`, a macOS DMG (Developer ID signed and notarized when the org-wide Apple credentials are present), and a Windows MSI installer; Windows code signing remains opt-in pending work
-- a terminal UI for reading, triaging and writing mail, `zmail-app tui` ([ADR 0007](./docs/adr/0007-terminal-ui.md); see "Terminal UI" below): Pine/Alpine-style screens on the same encrypted store, every string from mail filtered for escape sequences before it reaches the terminal; delete, archive, save to a folder, flag and mark read with undo, sharing the desktop app's mail actions; Pico-style compose, reply and forward with drafts, attachments, undo-send and an Outbox; and Setup → Accounts to add (with autodiscovery, a connection test, OAuth through the browser, and Proton sign-in in builds with Proton), change and delete accounts, through the same account setup code as the desktop app (`zmail-setup`)
+- a terminal UI for reading, triaging and writing mail (with saving attachments, sender-safety warnings, a `:` command palette and a user keymap file), `zmail-app tui` ([ADR 0007](./docs/adr/0007-terminal-ui.md); see "Terminal UI" below): Pine/Alpine-style screens on the same encrypted store, every string from mail filtered for escape sequences before it reaches the terminal; delete, archive, save to a folder, flag and mark read with undo, sharing the desktop app's mail actions; Pico-style compose, reply and forward with drafts, attachments, undo-send and an Outbox; and Setup → Accounts to add (with autodiscovery, a connection test, OAuth through the browser, and Proton sign-in in builds with Proton), change and delete accounts, through the same account setup code as the desktop app (`zmail-setup`)
 - screen-reader roles, names and announcements through AccessKit (VoiceOver, UI Automation, AT-SPI), Windows contrast themes and macOS Increase Contrast, reduced motion, text size up to 200% and 24px pointer targets; not yet checked with a real screen reader (see [`docs/phase5-hardening.md`](./docs/phase5-hardening.md#accessibility))
 - Phase 5 hardening and release policy documentation
 
@@ -228,6 +228,22 @@ Drafts autosave to the encrypted store a second after typing pauses, as in the d
 Proton sign-in (builds with Proton) asks for your Proton username and password, under the desktop app's note on what a third-party Proton client means (Zmail signs in as Proton Mail Bridge), then the two-factor code and the mailbox password when the account has them. When Proton asks for human verification, Zmail opens Proton's page in the browser (and shows its address) and signs in again once you press Enter.
 
 In the forms, Up, Down and Tab move between fields, Enter goes to the next one or continues from the last, Space changes a choice, `Ctrl-U` clears a field, Esc goes back a step and `Ctrl-C` cancels. Password fields show `[hidden]` once typed, never the text or its length. Everything a server, DNS or Proton returns (discovery results and errors, connection errors) is filtered for the terminal before it is drawn.
+
+**Your own keys.** A keymap file rebinds keys on each screen. It is `tui-keymap.json` in the store's folder (see above: `~/.local/share/zmail/tui-keymap.json` on Linux, `~/Library/Application Support/zmail/tui-keymap.json` on macOS, `%APPDATA%\zmail\tui-keymap.json` on Windows, or in `ZMAIL_DATA_DIR`), read when the terminal UI starts; Help (`?`) shows its path and what it binds. The format is the desktop app's keymap format (Zed's): a JSON array of sections, each with an optional `context`, the screen, and `bindings` from keys to commands:
+
+```json
+[
+  { "context": "MessageIndex", "bindings": { "x": "Delete", "d": null } },
+  { "context": "MessageText", "bindings": { "ctrl-s": "LooksSafe" } },
+  { "bindings": { "ctrl-p": "Palette" } }
+]
+```
+
+- Screens (`context`): `MainMenu`, `FolderList`, `MessageIndex`, `MessageText`, `AttachmentIndex`, `Setup`, `Help`, `Postponed`, `Outbox` and `Accounts`. A section without one applies on all of them, and a section for the screen wins over it. Compose and the account forms aren't keymapped: their keys are text.
+- Keys as Zed writes them: `x`, `ctrl-x`, `alt-x`, `shift-tab`, `enter`, `space`, `tab`, `backspace`, `up`, `pageup`, `home`, `f1` to `f12`, or a character such as `<` or `*`. Letters work in either case. Esc and `ctrl-l` (redraw) are the terminal's own and can't be bound.
+- Commands: `Help`, `Back`, `Select`, `Prev`, `Next`, `PageUp`, `PageDown`, `Home`, `End`, `WhereIs`, `Threads`, `Preview`, `MainMenu`, `FolderList`, `Index`, `Setup`, `Compose`, `Reply`, `Forward`, `Outbox`, `Retry`, `CancelSend`, `DeleteDraft`, `AddressBook`, `Quit`, `OtherCmds`, `NextLink`, `PrevLink`, `Mark`, `Copy`, `Delete`, `Undo`, `Archive`, `Save`, `Flag`, `ReadState`, `ToggleSelected`, `Apply`, `Accounts`, `AddAccount`, `ChangeAccount`, `DeleteAccount`, `Attachments`, `SaveAttachment`, `SaveAllAttachments`, `LooksSafe` and `Palette`. `null` makes the key do nothing on that screen.
+- A key you bind replaces what Zmail had on it there; Zmail's other keys keep working. The command bar, the Main Menu, Help and the palette show your key for a command, and a command whose only key you took is left off the bar but stays in the palette (`:`). A command that doesn't work on a screen says so when its key is pressed.
+- A file that isn't valid JSON, or names an unknown screen, key or command, is ignored as a whole (nothing of it applies), and the status line and Help say why; the terminal UI always starts.
 
 The mouse works too: a click opens what it is on (a click on the index's first column selects), the wheel scrolls, and the command bar's entries can be clicked.
 

@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                    HELP                        Folder: INBOX
+  ZMAIL IN THE TERMINAL
+
+  Zmail's terminal screens work like Pine and Alpine: the keys that work on a
+  screen are always listed at the bottom, and O shows more of them. Letters work
+  in either case.
+
+  Your keys
+    The keymap file, /home/ada/.local/share/zmail/tui-keymap.json, rebinds keys
+  on each screen; the README says how to write one.
+    D          nothing (MessageIndex)
+    X          Delete: move to the Trash (MessageIndex)
+    W          Write a new message (MainMenu)
+    ^P         Every command of this screen, searchable (every screen)
+
+  Moving around
+    M          Main Menu, from anywhere
+    L          Folder List: each account is a collection of folders
+    I          Message Index of the current folder
+    < or Left  up a level;  > Enter or Right  open what the cursor is on
+    P N        previous and next item (Up and Down work too)
+
+< Back       Spc NextPage ^P Commands
+- PrevPage   M Main Menu  Q Quit

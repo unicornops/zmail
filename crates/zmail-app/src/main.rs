@@ -692,6 +692,7 @@ fn launch_tui() -> Result<()> {
         runtime: runtime.handle().clone(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         secrets: Some(secrets),
+        keymap: Some(data_dir()?.join(zmail_tui::KEYMAP_FILE)),
     });
     drop(runtime);
     result
@@ -713,6 +714,8 @@ fn launch_tui_fixture(view: ui_fixture::FixtureView) -> Result<()> {
         // A keychain in memory, so Setup → Accounts can be tried on the
         // fixture without touching the real one.
         secrets: Some(InMemorySecretStore::shared()),
+        // The user's keymap, as `tui` reads it, so it can be tried here.
+        keymap: Some(data_dir()?.join(zmail_tui::KEYMAP_FILE)),
     });
     drop(runtime);
     result

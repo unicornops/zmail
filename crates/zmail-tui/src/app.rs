@@ -312,10 +312,11 @@ impl Cmd {
 }
 
 /// A command bar entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandEntry {
-    /// The key shown.
-    pub key: &'static str,
+    /// The key shown: the built-in one, the user's (the keymap file), or
+    /// none when the user's keymap took the key away.
+    pub key: std::borrow::Cow<'static, str>,
     /// What it does.
     pub label: &'static str,
     /// The command.
@@ -323,7 +324,11 @@ pub struct CommandEntry {
 }
 
 pub(crate) const fn entry(key: &'static str, label: &'static str, cmd: Cmd) -> CommandEntry {
-    CommandEntry { key, label, cmd }
+    CommandEntry {
+        key: std::borrow::Cow::Borrowed(key),
+        label,
+        cmd,
+    }
 }
 
 /// A question or a text field on the status line.
@@ -648,6 +653,8 @@ pub struct App {
     pub(crate) attachments: Option<crate::attachments::AttachmentList>,
     /// The folder last saved to, where the next save starts.
     pub(crate) save_folder: Option<std::path::PathBuf>,
+    /// The user's keymap file.
+    pub(crate) keymap: crate::keymap::UserKeymap,
 }
 
 /// News from work running elsewhere.
@@ -759,6 +766,7 @@ impl App {
             setup_generation: 0,
             attachments: None,
             save_folder: None,
+            keymap: crate::keymap::UserKeymap::default(),
         };
         app.load_folders();
         app.open_default_folder();
@@ -1230,13 +1238,20 @@ impl App {
             }
             return;
         }
+        // The user's keymap first: a key it binds is the user's.
+        if let Some(bound) = self.keymap.lookup(self.screen, crate::keymap::Key::of(key)) {
+            if let Some(cmd) = bound {
+                self.run_bound(cmd);
+            }
+            return;
+        }
         if let Some(cmd) = self.command_for(key) {
             self.run(cmd);
         }
     }
 
     /// The command `key` gives on this screen. Letters work in either case.
-    fn command_for(&self, key: KeyEvent) -> Option<Cmd> {
+    pub(crate) fn command_for(&self, key: KeyEvent) -> Option<Cmd> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let in_message = self.screen == Screen::Message;
         let triage = matches!(self.screen, Screen::Index | Screen::Message);
@@ -1313,8 +1328,27 @@ impl App {
         Some(cmd)
     }
 
-    /// The command bar's entries for this screen, every page.
+    /// The command bar's entries for this screen, every page, with the
+    /// user's keys: a command the keymap file binds shows the user's key,
+    /// and one whose key the file took away shows none (the palette still
+    /// runs it; the bar leaves it out).
     pub fn commands(&self) -> Vec<CommandEntry> {
+        let mut entries = self.builtin_commands();
+        if self.prompt.is_some() {
+            return entries;
+        }
+        for entry in &mut entries {
+            if let Some(key) = self.keymap.key_for(self.screen, entry.cmd) {
+                entry.key = key.label().into();
+            } else if self.keymap.shadows(self.screen, &entry.key, entry.cmd) {
+                entry.key = "".into();
+            }
+        }
+        entries
+    }
+
+    /// The command bar's entries for this screen with the built-in keys.
+    pub(crate) fn builtin_commands(&self) -> Vec<CommandEntry> {
         use Cmd::*;
         match self.prompt {
             Some(Prompt::Quit) => {
@@ -1610,7 +1644,11 @@ impl App {
     pub fn command_bar(&self, width: u16) -> Vec<CommandEntry> {
         let columns = usize::from(width / 13).clamp(2, 8);
         let slots = columns * 2;
-        let all = self.commands();
+        let all: Vec<CommandEntry> = self
+            .commands()
+            .into_iter()
+            .filter(|entry| !entry.key.is_empty())
+            .collect();
         if all.len() <= slots {
             return all;
         }

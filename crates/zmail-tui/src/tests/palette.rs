@@ -29,27 +29,27 @@ fn the_palette_matches_its_snapshots_narrow_and_wide() {
 fn it_lists_every_command_of_the_bar_with_its_key() {
     let mut app = app();
     open_work_inbox(&mut app, 80, 24);
-    let bar: Vec<(&str, Cmd)> = app
+    let bar: Vec<(String, Cmd)> = app
         .commands()
         .into_iter()
         .filter(|entry| entry.cmd != Cmd::Palette)
-        .map(|entry| (entry.key, entry.cmd))
+        .map(|entry| (entry.key.into_owned(), entry.cmd))
         .collect();
     keys(&mut app, ":");
     let Some(Prompt::Palette(palette)) = &app.prompt else {
         panic!("the palette is open");
     };
-    let listed: Vec<(&str, Cmd)> = palette
+    let listed: Vec<(String, Cmd)> = palette
         .shown
         .iter()
         .map(|(index, _)| {
-            let entry = palette.items[*index].entry;
-            (entry.key, entry.cmd)
+            let entry = &palette.items[*index].entry;
+            (entry.key.clone().into_owned(), entry.cmd)
         })
         .collect();
     assert_eq!(listed, bar);
     // Every page of the bar, not just the first.
-    assert!(listed.contains(&("V", Cmd::Preview)));
+    assert!(listed.contains(&("V".to_owned(), Cmd::Preview)));
 }
 
 #[test]

@@ -33,6 +33,7 @@ mod compose;
 mod data;
 mod editor;
 mod identities;
+mod keymap;
 mod links;
 mod message;
 mod notifier;
@@ -63,6 +64,7 @@ use zmail_sync::SyncService;
 
 pub use accounts::Step as AddStep;
 pub use app::{App, AppOptions, Effect, Environment};
+pub use keymap::{KEYMAP_FILE, UserKeymap};
 pub use notifier::TerminalNotifier;
 
 use crate::{
@@ -86,6 +88,9 @@ pub struct Launch {
     pub secrets: Option<Arc<dyn zmail_security::SecretStore>>,
     /// Zmail's version, for the title bar.
     pub version: String,
+    /// The user's keymap file ([`KEYMAP_FILE`] beside the store), read
+    /// at start; `None` reads none.
+    pub keymap: Option<std::path::PathBuf>,
 }
 
 /// Runs the terminal UI until the user quits.
@@ -112,6 +117,9 @@ pub fn run(launch: Launch) -> Result<()> {
         secrets: launch.secrets,
         network: None,
     });
+    if let Some(path) = &launch.keymap {
+        app.set_keymap(UserKeymap::load(path));
+    }
 
     let guard = terminal::TerminalGuard::enter(app.preferences().mouse)
         .context("couldn't set up the terminal")?;
