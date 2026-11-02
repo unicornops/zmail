@@ -30,6 +30,7 @@ use crate::{
 };
 
 mod accounts;
+mod attachments;
 mod compose;
 mod triage;
 

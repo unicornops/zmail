@@ -183,6 +183,11 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
             let cursor = compose::outbox_cursor_line(app);
             draw_pane(app, frame, PaneId::Outbox, body, lines, Some(cursor));
         }
+        Screen::Attachments => {
+            let lines = attachment_lines(app, theme, width);
+            let cursor = app.attachments.as_ref().map(|list| list.cursor + 4);
+            draw_pane(app, frame, PaneId::Attachments, body, lines, cursor);
+        }
         Screen::Accounts => accounts::draw_accounts(app, frame, theme, body),
         Screen::AddAccount => accounts::draw_add(app, frame, theme, body),
         Screen::EditAccount if app.edit.as_ref().is_some_and(|edit| edit.form.is_some()) => {
@@ -348,6 +353,7 @@ fn draw_title(app: &App, frame: &mut Frame, theme: Theme, area: Rect) {
         Screen::Compose => "COMPOSE MESSAGE",
         Screen::Postponed => "POSTPONED MESSAGES",
         Screen::Outbox => "OUTBOX",
+        Screen::Attachments => "ATTACHMENT INDEX",
         Screen::Accounts => "SETUP ACCOUNTS",
         Screen::AddAccount => "ADD ACCOUNT",
         Screen::EditAccount => match app.edit.as_ref().and_then(|edit| edit.form.as_ref()) {
@@ -829,6 +835,82 @@ fn styled(text: &str, base: Style, marks: &[(Range<usize>, Style)]) -> Vec<Span<
         .collect()
 }
 
+/// The Attachment Index: what it is for, a header, then each attachment's
+/// number, size, type and name (filtered when read), with the message it
+/// came with when the conversation has several.
+fn attachment_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
+    let width = usize::from(width);
+    let Some(list) = &app.attachments else {
+        return Vec::new();
+    };
+    let mut lines = vec![
+        PaneLine::new(Span::styled(
+            fit(
+                &format!("  Attachments in \"{}\"", list.subject),
+                width,
+                theme.ellipsis(),
+            ),
+            theme.faint(),
+        )),
+        PaneLine::new(Span::styled(
+            fit(
+                "  S saves one, A saves them all into a folder. Zmail doesn't open them here.",
+                width,
+                theme.ellipsis(),
+            ),
+            theme.faint(),
+        )),
+        PaneLine::default(),
+    ];
+    let type_width = (width / 5).clamp(10, 28);
+    // "Msg 2  " and the sender, when the conversation has several messages
+    // and there is room.
+    let from_width = if list.messages > 1 && width >= 100 {
+        (width / 4).min(32)
+    } else {
+        0
+    };
+    let fixed = 2 + 3 + 2 + 8 + 2 + type_width + 2;
+    let name_width = width.saturating_sub(fixed + from_width).max(8);
+    let row = |number: &str, size: &str, kind: &str, name: &str, from: &str| {
+        let mut row = format!(
+            "  {number:>3}  {}  {}  {}",
+            fit_right(size, 8, theme.ellipsis()),
+            fit(kind, type_width, theme.ellipsis()),
+            fit(name, name_width, theme.ellipsis()),
+        );
+        if from_width > 0 {
+            row.push_str(&fit(&format!("  {from}"), from_width, theme.ellipsis()));
+        }
+        fit(&row, width, theme.ellipsis())
+    };
+    lines.push(PaneLine::new(Span::styled(
+        row("#", "Size", "Type", "Name", "From"),
+        theme.bold(),
+    )));
+    for (index, attachment) in list.rows.iter().enumerate() {
+        let style = if index == list.cursor {
+            theme.reversed()
+        } else {
+            Style::new()
+        };
+        lines.push(PaneLine {
+            target: Some(index),
+            ..PaneLine::new(Span::styled(
+                row(
+                    &(index + 1).to_string(),
+                    &crate::message::size_label(attachment.size),
+                    &attachment.content_type,
+                    &attachment.name,
+                    &format!("Msg {}: {}", attachment.message, attachment.sender),
+                ),
+                style,
+            ))
+        });
+    }
+    lines
+}
+
 fn setup_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
     let width = usize::from(width);
     let check = |on: bool| if on { "[X]" } else { "[ ]" };
@@ -985,6 +1067,16 @@ Reading
 Tab and Shift-Tab move between them, and Enter (or a click) shows the real \
 address before anything opens it. Remote images and HTML formatting are not \
 shown in the terminal.
+  V          the Attachment Index: the conversation's attachments, with \
+their names, types and sizes
+  S or Enter there saves the attachment under the cursor. The path starts \
+in the folder you last saved to (else Downloads, else your home folder) with \
+the attachment's name made safe for a file; Tab completes it, and a folder \
+saves into that folder. Zmail asks before replacing a file.
+  A there saves every attachment into a folder, numbering a name that is \
+taken (report (1).pdf).
+  Zmail never opens an attachment from the terminal: save it, then open it \
+yourself.
 
 Writing mail
   C          compose, from anywhere it is free. When messages are postponed, \

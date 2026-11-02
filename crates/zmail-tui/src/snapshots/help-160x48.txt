@@ -33,16 +33,16 @@
   Reading
     Message Text shows the text of each message. Links are numbered, like [3]; Tab and Shift-Tab move between them, and Enter (or a click) shows the real
   address before anything opens it. Remote images and HTML formatting are not shown in the terminal.
+    V          the Attachment Index: the conversation's attachments, with their names, types and sizes
+    S or Enter there saves the attachment under the cursor. The path starts in the folder you last saved to (else Downloads, else your home folder) with the
+  attachment's name made safe for a file; Tab completes it, and a folder saves into that folder. Zmail asks before replacing a file.
+    A there saves every attachment into a folder, numbering a name that is taken (report (1).pdf).
+    Zmail never opens an attachment from the terminal: save it, then open it yourself.
 
   Writing mail
     C          compose, from anywhere it is free. When messages are postponed, Zmail asks first whether to continue one.
     R          reply to the message (in Message Text, the one you are reading); when others got it too, Zmail asks whether to reply to all
     F          forward the message, with its text
-    T          the Outbox, from the Main Menu (or Outbox in the Folder List): messages waiting to send or that couldn't be sent. R sends a failed one again; D
-               takes back one that hasn't started sending.
-    Compose works like Pico. Up and Down, Enter and Tab move between the fields; Tab in To, Cc and Bcc completes an address you have used before, again to go
-  through the matches.
-    ^X         send (Zmail asks first). The message waits for the undo-send delay set in the Zmail window; until then U takes it back and opens it again
 
 < Back              Spc NextPage        Q Quit
 - PrevPage          M Main Menu

@@ -41,6 +41,8 @@ pub enum PaneId {
     AddAccount,
     /// Changing an account.
     EditAccount,
+    /// The Attachment Index.
+    Attachments,
 }
 
 /// A line a pane draws.

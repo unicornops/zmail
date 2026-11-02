@@ -144,6 +144,8 @@ pub enum Screen {
     AddAccount,
     /// Changing an account.
     EditAccount,
+    /// The Attachment Index: the open conversation's attachments, to save.
+    Attachments,
 }
 
 /// A command: what a key or a click on the command bar does.
@@ -237,6 +239,12 @@ pub enum Cmd {
     ChangeAccount,
     /// Delete the account under the cursor (asked).
     DeleteAccount,
+    /// The Attachment Index of the open conversation.
+    Attachments,
+    /// Save the attachment under the cursor.
+    SaveAttachment,
+    /// Save every attachment into a folder.
+    SaveAllAttachments,
     /// The key itself, for a screen whose form takes keys (Add, Change):
     /// its code, and whether with Control.
     Press(KeyCode, bool),
@@ -288,8 +296,16 @@ pub enum Prompt {
     Postponed,
     /// A question about the draft being written.
     Confirm(Confirm),
-    /// A file to attach or read in, with Tab completion.
+    /// A file to attach or read in, or where to save an attachment, with
+    /// Tab completion.
     Path(PathPrompt),
+    /// "Replace it?" when saving an attachment over a file.
+    ReplaceFile {
+        /// The save prompt, to go back to.
+        prompt: PathPrompt,
+        /// The file that is there.
+        path: std::path::PathBuf,
+    },
     /// "Remove this account from this computer?"
     RemoveAccount {
         /// The account.
@@ -561,6 +577,11 @@ pub struct App {
     /// Counts Adds and their steps, so background work for one left
     /// behind is ignored.
     pub(crate) setup_generation: u64,
+
+    /// The Attachment Index.
+    pub(crate) attachments: Option<crate::attachments::AttachmentList>,
+    /// The folder last saved to, where the next save starts.
+    pub(crate) save_folder: Option<std::path::PathBuf>,
 }
 
 /// News from work running elsewhere.
@@ -670,6 +691,8 @@ impl App {
             add: None,
             edit: None,
             setup_generation: 0,
+            attachments: None,
+            save_folder: None,
         };
         app.load_folders();
         app.open_default_folder();
@@ -1168,6 +1191,7 @@ impl App {
                 ' ' => Cmd::PageDown,
                 'w' => Cmd::WhereIs,
                 '/' => Cmd::Threads,
+                'v' if in_message => Cmd::Attachments,
                 'v' => Cmd::Preview,
                 'm' => Cmd::MainMenu,
                 'l' => Cmd::FolderList,
@@ -1201,6 +1225,8 @@ impl App {
                 'k' if triage => Cmd::ReadState,
                 ';' if self.screen == Screen::Index => Cmd::ToggleSelected,
                 'a' if self.screen == Screen::Index => Cmd::Apply,
+                's' if self.screen == Screen::Attachments => Cmd::SaveAttachment,
+                'a' if self.screen == Screen::Attachments => Cmd::SaveAllAttachments,
                 _ => return None,
             },
             KeyCode::Enter | KeyCode::Right => Cmd::Select,
@@ -1292,6 +1318,16 @@ impl App {
             ) => {
                 return vec![entry("Y", "Yes", Select), entry("N", "No", Back)];
             }
+            Some(Prompt::Path(ref path)) if path.purpose.saves() => {
+                return vec![
+                    entry("Ret", "Save", Select),
+                    entry("Tab", "Complete", Complete),
+                    entry("Esc", "Cancel", Back),
+                ];
+            }
+            Some(Prompt::ReplaceFile { .. }) => {
+                return vec![entry("Y", "Replace", Select), entry("N", "No", Back)];
+            }
             Some(Prompt::Path(ref path)) => {
                 return vec![
                     entry(
@@ -1299,6 +1335,8 @@ impl App {
                         match path.purpose {
                             crate::compose::PathPurpose::Attach => "Attach",
                             crate::compose::PathPurpose::ReadFile => "Insert",
+                            crate::compose::PathPurpose::SaveAttachment(_)
+                            | crate::compose::PathPurpose::SaveAll => "Save",
                         },
                         Select,
                     ),
@@ -1406,6 +1444,7 @@ impl App {
                 entry("W", "WhereIs", WhereIs),
                 entry("Tab", "NextLink", NextLink),
                 entry("Ret", "OpenLink", Select),
+                entry("V", "ViewAttch", Attachments),
                 entry("^Spc", "Mark", Mark),
                 entry("Y", "Copy", Copy),
                 entry("C", "Compose", Compose),
@@ -1436,6 +1475,18 @@ impl App {
                 entry("P", "PrevMsg", Prev),
                 entry("N", "NextMsg", Next),
                 entry("D", "Delete", DeleteDraft),
+                entry("M", "Main Menu", MainMenu),
+                entry("Q", "Quit", Quit),
+            ],
+            Screen::Attachments => vec![
+                entry("?", "Help", Help),
+                entry("<", "MsgText", Back),
+                entry(">", "[Save]", Select),
+                entry("P", "PrevAttch", Prev),
+                entry("N", "NextAttch", Next),
+                entry("S", "Save", SaveAttachment),
+                entry("A", "SaveAll", SaveAllAttachments),
+                entry("C", "Compose", Compose),
                 entry("M", "Main Menu", MainMenu),
                 entry("Q", "Quit", Quit),
             ],
@@ -1520,6 +1571,12 @@ impl App {
             Cmd::AddAccount => self.add_account(),
             Cmd::ChangeAccount => self.change_account(),
             Cmd::DeleteAccount => self.delete_account(),
+            Cmd::Attachments if self.screen == Screen::Message => self.open_attachments(),
+            Cmd::SaveAttachment if self.screen == Screen::Attachments => self.ask_save_attachment(),
+            Cmd::SaveAllAttachments if self.screen == Screen::Attachments => {
+                self.ask_save_all_attachments()
+            }
+            Cmd::Attachments | Cmd::SaveAttachment | Cmd::SaveAllAttachments => {}
             Cmd::Press(code, control) => {
                 let modifiers = if control {
                     KeyModifiers::CONTROL
@@ -1599,6 +1656,9 @@ impl App {
             Screen::Accounts => {
                 self.reveal.insert(PaneId::Accounts);
             }
+            Screen::Attachments => {
+                self.reveal.insert(PaneId::Attachments);
+            }
             _ => {}
         }
     }
@@ -1619,6 +1679,10 @@ impl App {
             Screen::Message => {
                 self.message = None;
                 self.goto(Screen::Index);
+            }
+            Screen::Attachments => {
+                self.attachments = None;
+                self.goto(Screen::Message);
             }
             Screen::Help => self.goto(self.help_from),
             Screen::Postponed | Screen::Outbox => {
@@ -1653,6 +1717,7 @@ impl App {
             Screen::Accounts => self.change_account(),
             Screen::Postponed => self.continue_postponed(),
             Screen::Outbox => self.outbox_details(),
+            Screen::Attachments => self.ask_save_attachment(),
             Screen::Help | Screen::Compose | Screen::AddAccount | Screen::EditAccount => {}
         }
     }
@@ -1724,6 +1789,12 @@ impl App {
             Screen::Accounts => {
                 self.accounts_cursor = offset(self.accounts_cursor, by, self.accounts.len());
                 self.reveal.insert(PaneId::Accounts);
+            }
+            Screen::Attachments => {
+                if let Some(list) = self.attachments.as_mut() {
+                    list.cursor = offset(list.cursor, by, list.rows.len());
+                }
+                self.reveal.insert(PaneId::Attachments);
             }
             Screen::Compose | Screen::AddAccount | Screen::EditAccount => {}
         }
@@ -2010,6 +2081,11 @@ impl App {
             }
             Prompt::Save(save) => self.save_key(save, key),
             Prompt::Path(path) => self.path_key(path, key),
+            Prompt::ReplaceFile { prompt, path } => {
+                self.prompt = None;
+                let replace = matches!(key.code, KeyCode::Char('y' | 'Y'));
+                self.replace_file_key(prompt, path, replace);
+            }
             Prompt::ReplyAll {
                 thread_id,
                 account_id,
@@ -2632,6 +2708,11 @@ impl App {
                     self.accounts_cursor = row;
                 }
             }
+            PaneId::Attachments => {
+                if let (Some(row), Some(list)) = (target, self.attachments.as_mut()) {
+                    list.cursor = row;
+                }
+            }
             PaneId::AddAccount => {
                 if let (Some(row), Some(add)) = (target, self.add.as_mut()) {
                     if add.step == crate::accounts::Step::Method {
@@ -2668,7 +2749,9 @@ impl App {
                 self.setup_cursor = offset(self.setup_cursor, direction, SETUP_ROWS.len())
             }
             PaneId::Message | PaneId::Preview | PaneId::Help => self.scroll_pane(id, by),
-            PaneId::Postponed | PaneId::Outbox | PaneId::Accounts => self.step(direction),
+            PaneId::Postponed | PaneId::Outbox | PaneId::Accounts | PaneId::Attachments => {
+                self.step(direction)
+            }
             PaneId::AddAccount | PaneId::EditAccount => self.scroll_pane(id, by),
             PaneId::Picker => {}
         }
@@ -2704,6 +2787,15 @@ impl App {
                 "Delete this postponed message? (y/n)".to_owned()
             }
             Prompt::Path(path) => path.label(),
+            Prompt::ReplaceFile { path, .. } => format!(
+                "{} is already there. Replace it? (y/n)",
+                sanitize_line(
+                    &path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                )
+            ),
             Prompt::RemoveAccount { account_id, lines } => self.remove_question(*account_id, lines),
             Prompt::RemoveIdentity {
                 email,

@@ -334,9 +334,35 @@ pub fn is_executable_or_script(filename: &str, content_type: &str) -> bool {
         || EXECUTABLE_CONTENT_TYPES.contains(&mime.as_str())
 }
 
+/// How many numbered names [`numbered_filename`] callers try before giving
+/// up on a file: `report (999).pdf` is the last.
+pub const MAX_NUMBERED_NAMES: u32 = 999;
+
+/// `filename` with ` (number)` before its extension, for saving beside a
+/// file of the same name without replacing it; `number` 0 is the name
+/// itself.
+pub fn numbered_filename(filename: &str, number: u32) -> String {
+    if number == 0 {
+        return filename.to_owned();
+    }
+    match filename.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => format!("{stem} ({number}).{extension}"),
+        _ => format!("{filename} ({number})"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbered_names_go_before_the_extension() {
+        assert_eq!(numbered_filename("report.pdf", 0), "report.pdf");
+        assert_eq!(numbered_filename("report.pdf", 1), "report (1).pdf");
+        assert_eq!(numbered_filename("archive.tar.gz", 2), "archive.tar (2).gz");
+        assert_eq!(numbered_filename("README", 3), "README (3)");
+        assert_eq!(numbered_filename(".profile", 4), ".profile (4)");
+    }
 
     #[test]
     fn ordinary_names_are_kept() {

@@ -34,7 +34,9 @@ use gpui::{
     div, prelude::*,
 };
 use zmail_core::{ReceivedAttachment, text::count_noun};
-use zmail_security::attachment_safety::{OpenRisk, open_risk, sanitize_filename};
+use zmail_security::attachment_safety::{
+    MAX_NUMBERED_NAMES, OpenRisk, numbered_filename, open_risk, sanitize_filename,
+};
 use zmail_store::AttachmentBlob;
 
 use crate::WorkspaceView;
@@ -52,9 +54,6 @@ const OPEN_CACHE_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// How often the open cache is pruned while Zmail runs.
 const OPEN_CACHE_PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
-
-/// How many numbered names Save All tries before giving up on a file.
-const MAX_NUMBERED_NAMES: u32 = 999;
 
 /// The workspace's attachment state: the open warning and where Save As
 /// starts.
@@ -563,7 +562,7 @@ pub(crate) fn copy_to_unique_path(
     filename: &str,
 ) -> io::Result<PathBuf> {
     for number in 0..=MAX_NUMBERED_NAMES {
-        let destination = directory.join(numbered_name(filename, number));
+        let destination = directory.join(numbered_filename(filename, number));
         match write_new(&destination) {
             Ok(()) => return Ok(destination),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -574,18 +573,6 @@ pub(crate) fn copy_to_unique_path(
         io::ErrorKind::AlreadyExists,
         format!("{filename} and {MAX_NUMBERED_NAMES} numbered copies already exist"),
     ))
-}
-
-/// `filename` with ` (number)` before its extension; `number` 0 is the
-/// name itself.
-fn numbered_name(filename: &str, number: u32) -> String {
-    if number == 0 {
-        return filename.to_owned();
-    }
-    match filename.rsplit_once('.') {
-        Some((stem, extension)) if !stem.is_empty() => format!("{stem} ({number}).{extension}"),
-        _ => format!("{filename} ({number})"),
-    }
 }
 
 #[cfg(test)]
@@ -653,14 +640,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("the scratch dir is created");
         dir
-    }
-
-    #[test]
-    fn numbered_names_go_before_the_extension() {
-        assert_eq!(numbered_name("report.pdf", 0), "report.pdf");
-        assert_eq!(numbered_name("report.pdf", 1), "report (1).pdf");
-        assert_eq!(numbered_name("archive.tar.gz", 2), "archive.tar (2).gz");
-        assert_eq!(numbered_name("README", 3), "README (3)");
     }
 
     #[test]

@@ -135,6 +135,16 @@ Progress:
   sending to the holder; `--force` runs them beside it anyway (tested
   with a second process). Commands that only read the store never touch
   the lock.
+- Phase 5: saving attachments. `V` in Message Text (Alpine's
+  ViewAttch) opens the Attachment Index: each attachment's number, size,
+  type and name, filtered, with its message and sender when there is
+  room. `S` or Enter saves one to a path with Tab completion, starting
+  in the folder last saved to (else Downloads, else home) with the
+  `attachment_safety` name, and asks before replacing a file; `A` saves
+  all into a folder, numbering taken names
+  (`attachment_safety::numbered_filename`, moved out of the GUI's Save
+  All). Both go through `AttachmentBlob::save_to`. Nothing is opened or
+  launched.
 
 ## Context
 

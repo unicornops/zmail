@@ -313,9 +313,13 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         snapshot.mailboxes[0].threads.insert(0, thread);
     }
     if view == FixtureView::ReaderAttachments {
+        let blobs = store
+            .sync_target(account_id)?
+            .context("the fixture account is missing")?
+            .blobs;
         snapshot.mailboxes[0]
             .threads
-            .insert(0, attachments_thread(now));
+            .insert(0, attachments_thread(now, &blobs)?);
     }
     store
         .replace_account_snapshot(account_id, &snapshot)
@@ -582,9 +586,10 @@ const ATTACHMENTS_SUBJECT: &str = "Files for Thursday's design review";
 
 /// The `reader-attachments` view's thread: one message with a document,
 /// a spreadsheet, images, an archive, a calendar invite and a program,
-/// at sizes from bytes to megabytes. (Only the metadata is seeded; there
-/// are no blobs to open or save.)
-fn attachments_thread(now: u64) -> ThreadSnapshot {
+/// at sizes from bytes to megabytes. Only the calendar invite's contents
+/// are stored (encrypted, as synced mail's are), so it is the one that
+/// can be saved or opened; the others are metadata.
+fn attachments_thread(now: u64, blobs: &zmail_core::BlobStore) -> Result<ThreadSnapshot> {
     const FILES: &[(&str, &str, u64)] = &[
         ("Design review notes.pdf", "application/pdf", 1_258_291),
         (
@@ -615,18 +620,43 @@ fn attachments_thread(now: u64) -> ThreadSnapshot {
         now,
     );
     thread.has_attachments = true;
+    let invite = fixture_invite();
     thread.messages[0].attachments = FILES
         .iter()
-        .map(|(filename, content_type, size_bytes)| MessageAttachment {
-            filename: (*filename).to_owned(),
-            content_type: (*content_type).to_owned(),
-            size_bytes: *size_bytes,
-            storage_path: format!("fixture/{filename}"),
-            content_id: None,
-            inline_only: false,
+        .map(|(filename, content_type, size_bytes)| {
+            let storage_path = if *filename == "review.ics" {
+                blobs
+                    .write("review", invite.as_bytes())
+                    .context("failed to store the fixture invite")?
+            } else {
+                format!("fixture/{filename}")
+            };
+            Ok(MessageAttachment {
+                filename: (*filename).to_owned(),
+                content_type: (*content_type).to_owned(),
+                size_bytes: *size_bytes,
+                storage_path,
+                content_id: None,
+                inline_only: false,
+            })
         })
-        .collect();
-    thread
+        .collect::<Result<_>>()?;
+    Ok(thread)
+}
+
+/// The `reader-attachments` view's calendar invite, 912 bytes as listed.
+fn fixture_invite() -> String {
+    let mut invite = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Zmail//Fixture//EN\r\n\
+        BEGIN:VEVENT\r\nUID:design-review@example.org\r\nDTSTART:20261015T140000Z\r\n\
+        DTEND:20261015T150000Z\r\nSUMMARY:Design review\r\nLOCATION:Room 4\r\n\
+        DESCRIPTION:"
+        .to_owned();
+    let end = "\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    while invite.len() + end.len() < 912 {
+        invite.push('.');
+    }
+    invite.push_str(end);
+    invite
 }
 
 /// Subject of the sender-safety views' thread.
