@@ -33,6 +33,9 @@
   Reading
     Message Text shows the text of each message. Links are numbered, like [3]; Tab and Shift-Tab move between them, and Enter (or a click) shows the real
   address before anything opens it. Remote images and HTML formatting are not shown in the terminal.
+    A message whose sender looks suspicious gets the Zmail window's warning above its text: a sender's domain that imitates a well-known one, or replies that go
+  to another domain than the sender's, with the addresses it is based on. Settings in the Zmail window can leave out the mildest (a related domain).
+    X          Looks safe: hide the warning in view, for that message only (the Zmail window hides it too)
     V          the Attachment Index: the conversation's attachments, with their names, types and sizes
     S or Enter there saves the attachment under the cursor. The path starts in the folder you last saved to (else Downloads, else your home folder) with the
   attachment's name made safe for a file; Tab completes it, and a folder saves into that folder. Zmail asks before replacing a file.
@@ -40,9 +43,6 @@
     Zmail never opens an attachment from the terminal: save it, then open it yourself.
 
   Writing mail
-    C          compose, from anywhere it is free. When messages are postponed, Zmail asks first whether to continue one.
-    R          reply to the message (in Message Text, the one you are reading); when others got it too, Zmail asks whether to reply to all
-    F          forward the message, with its text
 
 < Back              Spc NextPage        Q Quit
 - PrevPage          M Main Menu

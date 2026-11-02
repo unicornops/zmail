@@ -3,6 +3,7 @@
 pub mod attachment_safety;
 pub mod html;
 pub mod sender_safety;
+pub mod sender_warning;
 pub mod terminal;
 pub mod vault;
 

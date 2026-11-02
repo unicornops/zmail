@@ -245,6 +245,8 @@ pub enum Cmd {
     SaveAttachment,
     /// Save every attachment into a folder.
     SaveAllAttachments,
+    /// Hide the sender-safety warning in view ("Looks safe").
+    LooksSafe,
     /// The key itself, for a screen whose form takes keys (Add, Change):
     /// its code, and whether with Control.
     Press(KeyCode, bool),
@@ -467,6 +469,9 @@ pub struct MessageState {
     /// Where each message starts on screen, as last drawn: a reply goes to
     /// the one being read.
     pub drawn_starts: Vec<(i64, usize)>,
+    /// Where each sender-safety warning starts on screen, as last drawn:
+    /// "Looks safe" hides the one in view.
+    pub drawn_warnings: Vec<(i64, usize)>,
 }
 
 /// The mouse button's state.
@@ -966,7 +971,7 @@ impl App {
         }
     }
 
-    fn reload_message(&mut self, thread_id: i64, account_id: i64) {
+    pub(crate) fn reload_message(&mut self, thread_id: i64, account_id: i64) {
         match self.load_conversation(thread_id, account_id) {
             Some(conversation) => {
                 if let Some(state) = self.message.as_mut() {
@@ -1192,6 +1197,7 @@ impl App {
                 'w' => Cmd::WhereIs,
                 '/' => Cmd::Threads,
                 'v' if in_message => Cmd::Attachments,
+                'x' if self.shows_sender_warning() => Cmd::LooksSafe,
                 'v' => Cmd::Preview,
                 'm' => Cmd::MainMenu,
                 'l' => Cmd::FolderList,
@@ -1426,32 +1432,42 @@ impl App {
                 entry("Y", "Copy", Copy),
                 entry("Q", "Quit", Quit),
             ],
-            Screen::Message => vec![
-                entry("?", "Help", Help),
-                entry("<", "MsgIndex", Back),
-                entry("P", "PrevMsg", Prev),
-                entry("N", "NextMsg", Next),
-                entry("-", "PrevPage", PageUp),
-                entry("Spc", "NextPage", PageDown),
-                entry("D", "Delete", Delete),
-                entry("U", "Undo", Undo),
-                entry("R", "Reply", Reply),
-                entry("F", "Forward", Forward),
-                entry("E", "Archive", Archive),
-                entry("S", "Save", Save),
-                entry("*", flag, Flag),
-                entry("K", read, ReadState),
-                entry("W", "WhereIs", WhereIs),
-                entry("Tab", "NextLink", NextLink),
-                entry("Ret", "OpenLink", Select),
-                entry("V", "ViewAttch", Attachments),
-                entry("^Spc", "Mark", Mark),
-                entry("Y", "Copy", Copy),
-                entry("C", "Compose", Compose),
-                entry("M", "Main Menu", MainMenu),
-                entry("L", "FldrList", FolderList),
-                entry("Q", "Quit", Quit),
-            ],
+            Screen::Message => {
+                let mut entries = vec![
+                    entry("?", "Help", Help),
+                    entry("<", "MsgIndex", Back),
+                    entry("P", "PrevMsg", Prev),
+                    entry("N", "NextMsg", Next),
+                    entry("-", "PrevPage", PageUp),
+                    entry("Spc", "NextPage", PageDown),
+                    entry("D", "Delete", Delete),
+                    entry("U", "Undo", Undo),
+                    entry("R", "Reply", Reply),
+                    entry("F", "Forward", Forward),
+                    entry("E", "Archive", Archive),
+                    entry("S", "Save", Save),
+                    entry("*", flag, Flag),
+                    entry("K", read, ReadState),
+                    entry("W", "WhereIs", WhereIs),
+                    entry("Tab", "NextLink", NextLink),
+                    entry("Ret", "OpenLink", Select),
+                    entry("V", "ViewAttch", Attachments),
+                    entry("^Spc", "Mark", Mark),
+                    entry("Y", "Copy", Copy),
+                    entry("C", "Compose", Compose),
+                    entry("M", "Main Menu", MainMenu),
+                    entry("L", "FldrList", FolderList),
+                    entry("Q", "Quit", Quit),
+                ];
+                // On the first page while a warning shows.
+                if self.shows_sender_warning() {
+                    entries.insert(
+                        2,
+                        entry(crate::warnings::LOOKS_SAFE_KEY, "LooksSafe", LooksSafe),
+                    );
+                }
+                entries
+            }
             Screen::Setup => vec![
                 entry("?", "Help", Help),
                 entry("<", "Main Menu", Back),
@@ -1577,6 +1593,8 @@ impl App {
                 self.ask_save_all_attachments()
             }
             Cmd::Attachments | Cmd::SaveAttachment | Cmd::SaveAllAttachments => {}
+            Cmd::LooksSafe if self.screen == Screen::Message => self.looks_safe(),
+            Cmd::LooksSafe => {}
             Cmd::Press(code, control) => {
                 let modifiers = if control {
                     KeyModifiers::CONTROL
@@ -1882,6 +1900,7 @@ impl App {
             find: None,
             caret: None,
             drawn_starts: Vec::new(),
+            drawn_warnings: Vec::new(),
         });
         self.scroll.insert(PaneId::Message, 0);
         self.goto(Screen::Message);

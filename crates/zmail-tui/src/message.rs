@@ -2,9 +2,15 @@
 //! headers, attachments and text (the Simple view, from
 //! [`zmail_render::prepare`]), with its links as numbered references.
 //!
+//! A message whose sender looks suspicious (a look-alike domain, replies
+//! going elsewhere) gets the desktop app's sender-safety warning above its
+//! text, with the same words (`zmail_security::sender_warning`), until
+//! "Looks safe" hides it for that message.
+//!
 //! Everything from the mail goes through the terminal filter here, before
 //! anything is drawn: subjects, senders, recipients, file names, bodies,
-//! link text and addresses.
+//! link text and addresses, and the domains and addresses a warning
+//! quotes.
 
 use std::ops::Range;
 
@@ -12,10 +18,15 @@ use anyhow::{Context, Result};
 use chrono::FixedOffset;
 use zmail_core::{
     ThreadMessage,
+    preferences::SenderWarnings,
     time::{HourCycle, format_full_date},
 };
 use zmail_render::{PrepareOptions, prepare, render_source};
-use zmail_security::terminal::{sanitize, sanitize_line};
+use zmail_security::{
+    sender_safety::SafetyTier,
+    sender_warning::sender_warning,
+    terminal::{sanitize, sanitize_line},
+};
 use zmail_store::LocalStore;
 
 use crate::links::{link_target, written_urls};
@@ -43,6 +54,17 @@ pub enum DocLine {
     Rule(String),
     /// Something Zmail says about the message, not from it.
     Note(String),
+    /// The sender-safety warning's title and sentence, filtered.
+    Warning {
+        /// How serious it is, for its style.
+        tier: SafetyTier,
+        /// "Possible impersonation: The sender's domain imitates …".
+        text: String,
+    },
+    /// A line of a warning's evidence.
+    WarningDetail(String),
+    /// How to hide the warning ("Looks safe"), with the key bound to it.
+    LooksSafe,
     /// An empty line.
     Blank,
 }
@@ -76,6 +98,9 @@ pub struct Conversation {
     pub message_starts: Vec<(i64, usize)>,
     /// Some message bodies haven't been downloaded yet.
     pub missing_bodies: bool,
+    /// The messages with a sender-safety warning, and the line it starts
+    /// on.
+    pub warnings: Vec<(i64, usize)>,
 }
 
 /// Reads thread `thread_id` from the store; `None` when it's gone.
@@ -92,6 +117,11 @@ pub fn load(
     let missing_bodies = store
         .messages_missing_bodies(thread_id)?
         .is_some_and(|missing| !missing.is_empty());
+    // The desktop app's Settings → Privacy → Sender warnings.
+    let level = store
+        .ui_preferences()
+        .map(|preferences| preferences.sender_warnings)
+        .unwrap_or_default();
     let mut conversation = Conversation {
         thread_id,
         account_id,
@@ -101,6 +131,7 @@ pub fn load(
         links: Vec::new(),
         message_starts: Vec::new(),
         missing_bodies,
+        warnings: Vec::new(),
     };
     let count = view.messages.len();
     for (index, message) in view.messages.iter().enumerate() {
@@ -112,7 +143,7 @@ pub fn load(
         conversation
             .message_starts
             .push((message.id, conversation.lines.len()));
-        add_message(store, &mut conversation, message, zone, hour_cycle)?;
+        add_message(store, &mut conversation, message, zone, hour_cycle, level)?;
         conversation.lines.push(DocLine::Blank);
     }
     if !conversation.links.is_empty() {
@@ -140,6 +171,7 @@ fn add_message(
     message: &ThreadMessage,
     zone: &FixedOffset,
     hour_cycle: HourCycle,
+    level: SenderWarnings,
 ) -> Result<()> {
     let lines = &mut conversation.lines;
     let header = |label, value: &str| DocLine::Header {
@@ -173,6 +205,23 @@ fn add_message(
         });
     }
     lines.push(DocLine::Blank);
+    if let Some(warning) = sender_warning(message, level) {
+        let lines = &mut conversation.lines;
+        let start = lines.len();
+        lines.push(DocLine::Warning {
+            tier: warning.tier,
+            text: format!("{}: {}", warning.title, sanitize_line(&warning.message)),
+        });
+        for (label, value) in warning.details {
+            lines.push(DocLine::WarningDetail(format!(
+                "{label}: {}",
+                sanitize_line(&value)
+            )));
+        }
+        lines.push(DocLine::LooksSafe);
+        lines.push(DocLine::Blank);
+        conversation.warnings.push((message.id, start));
+    }
 
     let source = render_source(store, message.id)
         .with_context(|| format!("failed to read message {}", message.id))?;
@@ -289,6 +338,7 @@ mod tests {
             links: Vec::new(),
             message_starts: Vec::new(),
             missing_bodies: false,
+            warnings: Vec::new(),
         }
     }
 

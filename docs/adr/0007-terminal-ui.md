@@ -145,6 +145,13 @@ Progress:
   (`attachment_safety::numbered_filename`, moved out of the GUI's Save
   All). Both go through `AttachmentBlob::save_to`. Nothing is opened or
   launched.
+- Phase 5: sender-safety warnings in Message Text. What the GUI's reader
+  banner says (tier, title, sentence, evidence, and the Fewer Warnings
+  level) moved out of `zmail-ui`'s `reader/banners.rs` into
+  `zmail_security::sender_warning`; the GUI draws it as before, and the
+  TUI shows it above the message text, filtered and coloured by tier.
+  `X` (Looks safe) hides the warning in view through
+  `LocalStore::dismiss_sender_warning`, so the GUI hides it too.
 
 ## Context
 
