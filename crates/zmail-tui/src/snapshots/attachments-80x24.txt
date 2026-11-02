@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test              ATTACHMENT INDEX                  Folder: INBOX
+  Attachments in "Signed contract"
+  S saves one, A saves them all into a folder. Zmail doesn't open them here.
+
+    #      Size  Type              Name
+    1      11 B  application/pdf   contract.pdf
+    2       2 B  application/x-m…  ../invoicefdp.exe
+    3      3 KB  text/plain        notes.txt
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+? Help       > [Save]     N NextAttch  A SaveAll    M Main Menu
+< MsgText    P PrevAttch  S Save       C Compose    Q Quit

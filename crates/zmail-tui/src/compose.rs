@@ -194,6 +194,17 @@ pub enum PathPurpose {
     Attach,
     /// Read the file into the body (`^R`).
     ReadFile,
+    /// Save a received attachment to the path (the Attachment Index).
+    SaveAttachment(i64),
+    /// Save every attachment of the conversation into the folder.
+    SaveAll,
+}
+
+impl PathPurpose {
+    /// Whether the path is where Zmail writes, not a file to read.
+    pub fn saves(self) -> bool {
+        matches!(self, Self::SaveAttachment(_) | Self::SaveAll)
+    }
 }
 
 /// A file prompt: the path typed, with Tab completion.
@@ -211,6 +222,8 @@ impl PathPrompt {
         let question = match self.purpose {
             PathPurpose::Attach => "File to attach",
             PathPurpose::ReadFile => "File to insert into the text",
+            PathPurpose::SaveAttachment(_) => "Save attachment to",
+            PathPurpose::SaveAll => "Save every attachment into the folder",
         };
         format!("{question}: {}", self.field.input)
     }
@@ -1701,7 +1714,8 @@ impl App {
                 self.prompt = None;
                 return;
             }
-            KeyCode::Char('t') if control => {
+            // The file browser picks files to read, not where to save.
+            KeyCode::Char('t') if control && !prompt.purpose.saves() => {
                 self.prompt = None;
                 let typed = prompt.field.path();
                 let folder = if typed.is_dir() {
@@ -1717,6 +1731,17 @@ impl App {
                     return;
                 }
                 let path = prompt.field.path();
+                match prompt.purpose {
+                    PathPurpose::SaveAttachment(id) => {
+                        self.prompt = None;
+                        return self.save_attachment_to(id, prompt);
+                    }
+                    PathPurpose::SaveAll => {
+                        self.prompt = None;
+                        return self.save_all_attachments_to(&path);
+                    }
+                    PathPurpose::Attach | PathPurpose::ReadFile => {}
+                }
                 if path.is_dir() {
                     // Enter on a folder lists it, as Tab would.
                     prompt.field.complete(true);
@@ -1727,6 +1752,7 @@ impl App {
                 return match prompt.purpose {
                     PathPurpose::Attach => self.attach(&path),
                     PathPurpose::ReadFile => self.read_into_body(&path),
+                    PathPurpose::SaveAttachment(_) | PathPurpose::SaveAll => {}
                 };
             }
             KeyCode::Tab => prompt.field.complete(true),

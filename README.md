@@ -170,6 +170,7 @@ The screens work like Pine and Alpine: a title bar, the screen, a status line, a
 | `/` | list conversations or single messages |
 | `V` | preview pane beside the index, in terminals 120 columns or wider |
 | Tab, Enter | in Message Text, move to a numbered link and open it after seeing its real address |
+| `V` | in Message Text, the Attachment Index: the conversation's attachments (name, type, size), to save |
 | `C` | compose (wherever `C` is free); `R` reply and `F` forward in the Message Index and Message Text |
 | `T` | the Outbox (from the Main Menu; also under Local in the Folder List) |
 | `S` | Setup (from the Main Menu); `A` there opens Accounts |
@@ -187,6 +188,8 @@ The screens work like Pine and Alpine: a title bar, the screen, a status line, a
 | `U` or `Z` | undo the last of these, whichever screen it was done on |
 | `;` | select the message under the cursor, or not (an `X` in the first column) |
 | `A` | apply the next command (`D`, `E`, `S`, `*` or `K`) to every selected message; `;` there unselects them all |
+
+**Attachments** are saved from the Attachment Index (`V` in Message Text). `S` or Enter saves the one under the cursor: the path starts in the folder last saved to (else Downloads, else the home folder) with the attachment's name made safe for a file (`zmail_security::attachment_safety`), Tab completes it, and a folder there saves into that folder. A file that is already there is replaced only after asking. `A` saves them all into a folder, numbering a name that is taken (`report (1).pdf`), as the desktop app's Save All does. The attachment is decrypted to a temporary file beside the destination and renamed into place (`AttachmentBlob::save_to`), so a failed save leaves nothing partial. Names and types from the mail are filtered before they are drawn. The terminal never opens or launches an attachment: save it, and open it yourself.
 
 Opening a message in Message Text marks it read once it has been open for 1.5 seconds, as the desktop app's reader does. The changes go through the same mail actions as the desktop app (`zmail-actions`): each is written to the store at once and sent to the server by whichever Zmail syncs.
 

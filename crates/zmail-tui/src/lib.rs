@@ -27,6 +27,7 @@
 
 mod accounts;
 mod app;
+mod attachments;
 mod clipboard;
 mod compose;
 mod data;
