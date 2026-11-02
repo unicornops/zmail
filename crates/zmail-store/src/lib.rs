@@ -26,7 +26,7 @@ use zmail_core::{
     SearchScope, ServerHitRef, StoreStats, SubmissionKind, SubmissionSecurity, SyncPhase,
     SyncStatusSummary, SyncTarget, ThreadCounts, ThreadFilter, ThreadMarks, ThreadMessage,
     ThreadSnapshot, ThreadState, ThreadSummary, ThreadView, VirtualMailbox,
-    preferences::UiPreferences,
+    participants::address_entries, preferences::UiPreferences,
 };
 use zmail_security::html::text_of_stored_html;
 pub use zmail_security::vault::{BlobVault, StoreKey, StoreKeychain};
@@ -198,6 +198,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0029_hidden_identities",
         identities::HIDDEN_IDENTITIES_SCHEMA,
+    ),
+    (
+        "0030_draft_identity_reply_to",
+        DRAFT_IDENTITY_REPLY_TO_SCHEMA,
     ),
 ];
 
@@ -529,6 +533,17 @@ ALTER TABLE drafts ADD COLUMN message_id_header TEXT;
 
 const MESSAGE_REPLY_TO_SCHEMA: &str = r#"
 ALTER TABLE messages ADD COLUMN reply_to TEXT;
+"#;
+
+/// The sending identity's reply-to, kept on the draft like its name and
+/// signature (migration 0030). Drafts written before it take their
+/// identity's current reply-to, which is what sending them now would use.
+const DRAFT_IDENTITY_REPLY_TO_SCHEMA: &str = r#"
+ALTER TABLE drafts ADD COLUMN identity_reply_to TEXT NOT NULL DEFAULT '';
+UPDATE drafts SET identity_reply_to = COALESCE(
+    (SELECT reply_to FROM identities WHERE identities.id = drafts.identity_id),
+    ''
+);
 "#;
 
 /// App-wide settings as one JSON document per key (for example the UI
@@ -3982,10 +3997,11 @@ impl LocalStore {
                 references_header,
                 parent_mailbox,
                 parent_remote_id,
-                threading_pending
+                threading_pending,
+                identity_reply_to
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13,
-                    ?14, ?15, ?16, ?17, ?18, ?19)
+                    ?14, ?15, ?16, ?17, ?18, ?19, ?20)
             "#,
             params![
                 draft.account_id,
@@ -4007,6 +4023,7 @@ impl LocalStore {
                 threading.parent_mailbox,
                 threading.parent_remote_id,
                 threading.pending,
+                identity.reply_to,
             ],
         )?;
         let draft_id = transaction.last_insert_rowid();
@@ -4095,6 +4112,7 @@ impl LocalStore {
                     sent_at,
                     last_error_message,
                     message_id_header,
+                    identity_reply_to,
                     {THREADING_COLUMNS}
                 FROM drafts
                 WHERE id = ?1
@@ -4109,6 +4127,7 @@ impl LocalStore {
                         identity_name: row.get(3)?,
                         identity_email: row.get(4)?,
                         identity_signature: row.get(5)?,
+                        identity_reply_to: row.get(17)?,
                         state: draft_state_from_db(row.get::<_, String>(6)?)?,
                         to: recipients_from_json(row.get::<_, String>(7)?)
                             .map_err(to_from_sql_error)?,
@@ -4124,7 +4143,7 @@ impl LocalStore {
                         sent_at: row.get(14)?,
                         last_error_message: row.get(15)?,
                         message_id: row.get(16)?,
-                        threading: threading_from_row(row, 17)?,
+                        threading: threading_from_row(row, 18)?,
                     })
                 },
             )
@@ -4147,7 +4166,7 @@ impl LocalStore {
         let (account_id, state, started_from) = transaction
             .query_row(
                 "SELECT account_id, state, identity_id, identity_name, identity_email, \
-                 identity_signature FROM drafts WHERE id = ?1",
+                 identity_signature, identity_reply_to FROM drafts WHERE id = ?1",
                 params![draft_id],
                 |row| {
                     Ok((
@@ -4158,6 +4177,7 @@ impl LocalStore {
                             display_name: row.get(3)?,
                             email_address: row.get(4)?,
                             signature: row.get(5)?,
+                            reply_to: row.get(6)?,
                             is_primary: false,
                         },
                     ))
@@ -4173,9 +4193,10 @@ impl LocalStore {
                     update.identity_id, account_id
                 )
             })?;
-        // A draft keeps the name, address and signature it started with
-        // while it stays on that identity, even if the identity is edited
-        // meanwhile; choosing another identity takes that one's.
+        // A draft keeps the name, address, signature and reply-to it
+        // started with while it stays on that identity, even if the
+        // identity is edited meanwhile; choosing another identity takes
+        // that one's.
         if identity.id == started_from.id {
             identity = started_from;
         }
@@ -4200,7 +4221,8 @@ impl LocalStore {
                 subject = ?10,
                 body = ?11,
                 last_error_message = NULL,
-                updated_at = ?12
+                updated_at = ?12,
+                identity_reply_to = ?13
             WHERE id = ?1
             "#,
             params![
@@ -4216,6 +4238,7 @@ impl LocalStore {
                 update.subject,
                 next_body,
                 now,
+                identity.reply_to,
             ],
         )?;
         transaction
@@ -5210,7 +5233,8 @@ impl LocalStore {
                     drafts.references_header,
                     drafts.parent_mailbox,
                     drafts.parent_remote_id,
-                    drafts.threading_pending
+                    drafts.threading_pending,
+                    drafts.identity_reply_to
                 FROM outbox_jobs
                 JOIN drafts ON drafts.id = outbox_jobs.draft_id
                 JOIN accounts ON accounts.id = outbox_jobs.account_id
@@ -5262,6 +5286,7 @@ impl LocalStore {
                             .map_err(to_from_sql_error)?,
                         row.get::<_, Option<String>>(22)?,
                         threading_from_row(row, 23)?,
+                        row.get::<_, String>(29)?,
                     ))
                 },
             )
@@ -5278,6 +5303,7 @@ impl LocalStore {
             bcc,
             message_id,
             threading,
+            reply_to,
         )) = row
         else {
             return Ok(None);
@@ -5310,6 +5336,7 @@ impl LocalStore {
                 to,
                 cc,
                 bcc,
+                reply_to: address_entries(&reply_to),
                 subject,
                 text_body: body,
                 attachments,
@@ -5339,7 +5366,7 @@ fn query_count(conn: &Connection, sql: &str) -> Result<usize> {
 fn load_identities(conn: &Connection, account_id: i64) -> Result<Vec<IdentitySummary>> {
     let mut statement = conn.prepare(
         r#"
-        SELECT id, display_name, email_address, signature, is_primary
+        SELECT id, display_name, email_address, signature, is_primary, reply_to
         FROM identities
         WHERE account_id = ?1
         ORDER BY is_primary DESC, id ASC
@@ -5351,6 +5378,7 @@ fn load_identities(conn: &Connection, account_id: i64) -> Result<Vec<IdentitySum
             display_name: row.get(1)?,
             email_address: row.get(2)?,
             signature: row.get(3)?,
+            reply_to: row.get(5)?,
             is_primary: row.get::<_, bool>(4)?,
         })
     })?;
@@ -5365,7 +5393,7 @@ fn load_identity_snapshot(
 ) -> Result<Option<IdentitySummary>> {
     conn.query_row(
         r#"
-        SELECT id, display_name, email_address, signature, is_primary
+        SELECT id, display_name, email_address, signature, is_primary, reply_to
         FROM identities
         WHERE account_id = ?1 AND id = ?2
         "#,
@@ -5376,6 +5404,7 @@ fn load_identity_snapshot(
                 display_name: row.get(1)?,
                 email_address: row.get(2)?,
                 signature: row.get(3)?,
+                reply_to: row.get(5)?,
                 is_primary: row.get::<_, bool>(4)?,
             })
         },
@@ -11191,6 +11220,186 @@ mod tests {
             .expect("draft should exist");
         assert_eq!(sent.state, DraftState::Sent);
         assert!(sent.sent_at.is_some());
+    }
+
+    #[test]
+    fn drafts_keep_the_identity_reply_to_and_the_outbox_sends_it() {
+        use zmail_core::{DraftUpdate, identity_sync::IdentityValues};
+
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let primary = store.list_identities(account_id).expect("identities load")[0].clone();
+        let values = |reply_to: &str| IdentityValues {
+            name: primary.display_name.clone(),
+            reply_to: reply_to.to_owned(),
+            signature: String::new(),
+        };
+        store
+            .update_identity(
+                primary.id,
+                &values("Help Desk <desk@example.test>, ops@example.test"),
+            )
+            .expect("reply-to set");
+        let listed = store.list_identities(account_id).expect("identities load");
+        assert_eq!(
+            listed[0].reply_to,
+            "Help Desk <desk@example.test>, ops@example.test"
+        );
+        let other = store
+            .add_identity(account_id, "other@example.test", &values(""))
+            .expect("added");
+
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id: primary.id,
+                to: vec!["kai@example.test".to_owned()],
+                cc: Vec::new(),
+                bcc: vec!["hidden@example.test".to_owned()],
+                subject: "Plan".to_owned(),
+                body: "Yes.".to_owned(),
+                threading: Default::default(),
+            })
+            .expect("draft should be created");
+        let reply_to = |store: &LocalStore| {
+            store
+                .draft_detail(draft_id)
+                .expect("loads")
+                .expect("exists")
+                .identity_reply_to
+        };
+        assert_eq!(
+            reply_to(&store),
+            "Help Desk <desk@example.test>, ops@example.test"
+        );
+
+        // An open draft keeps the reply-to it started with while it stays
+        // on that identity...
+        store
+            .update_identity(primary.id, &values("changed@example.test"))
+            .expect("edited");
+        let update = |identity_id| DraftUpdate {
+            identity_id,
+            to: vec!["kai@example.test".to_owned()],
+            cc: Vec::new(),
+            bcc: vec!["hidden@example.test".to_owned()],
+            subject: "Plan".to_owned(),
+            body: "Yes.".to_owned(),
+        };
+        store
+            .update_draft(draft_id, &update(primary.id))
+            .expect("saved");
+        assert_eq!(
+            reply_to(&store),
+            "Help Desk <desk@example.test>, ops@example.test"
+        );
+        // ...and takes the new identity's when it changes: none here.
+        store.update_draft(draft_id, &update(other)).expect("saved");
+        assert_eq!(reply_to(&store), "");
+        let job_id = store.queue_draft(draft_id).expect("draft should queue");
+        let claimed = store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("job should claim")
+            .expect("job should exist");
+        assert!(claimed.message.reply_to.is_empty(), "no Reply-To invented");
+        store.record_outbox_sent(job_id).expect("sent");
+
+        // Back on the first identity, the draft takes its current reply-to,
+        // and the outbox sends it as address entries.
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id: other,
+                to: vec!["kai@example.test".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Again".to_owned(),
+                body: "Yes.".to_owned(),
+                threading: Default::default(),
+            })
+            .expect("draft should be created");
+        store
+            .update_identity(
+                primary.id,
+                &values("\"Tickets, Inc\" <tickets@example.test>; ops@example.test"),
+            )
+            .expect("edited");
+        store
+            .update_draft(
+                draft_id,
+                &DraftUpdate {
+                    subject: "Again".to_owned(),
+                    bcc: Vec::new(),
+                    ..update(primary.id)
+                },
+            )
+            .expect("saved");
+        store.queue_draft(draft_id).expect("draft should queue");
+        let claimed = store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("job should claim")
+            .expect("job should exist");
+        assert_eq!(
+            claimed.message.reply_to,
+            [
+                "\"Tickets, Inc\" <tickets@example.test>",
+                "ops@example.test"
+            ]
+        );
+        assert_eq!(claimed.message.from_email, primary.email_address);
+    }
+
+    #[test]
+    fn the_reply_to_migration_fills_existing_drafts_from_their_identity() {
+        use zmail_core::identity_sync::IdentityValues;
+
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity = store.list_identities(account_id).expect("identities load")[0].clone();
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id: identity.id,
+                to: vec!["kai@example.test".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Old".to_owned(),
+                body: "Yes.".to_owned(),
+                threading: Default::default(),
+            })
+            .expect("draft should be created");
+        store
+            .update_identity(
+                identity.id,
+                &IdentityValues {
+                    name: identity.display_name.clone(),
+                    reply_to: "desk@example.test".to_owned(),
+                    signature: String::new(),
+                },
+            )
+            .expect("edited");
+        // The draft as a store before migration 0030 held it.
+        store
+            .connection()
+            .expect("connects")
+            .execute_batch(
+                "ALTER TABLE drafts DROP COLUMN identity_reply_to; \
+                 DELETE FROM schema_migrations WHERE version = '0030_draft_identity_reply_to';",
+            )
+            .expect("rolled back");
+        store.apply_migrations().expect("migrates");
+        assert_eq!(
+            store
+                .draft_detail(draft_id)
+                .expect("loads")
+                .expect("exists")
+                .identity_reply_to,
+            "desk@example.test"
+        );
     }
 
     #[test]

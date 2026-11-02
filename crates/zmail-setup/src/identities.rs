@@ -143,6 +143,7 @@ mod tests {
                 display_name: local.name.clone(),
                 email_address: "help@example.com".to_owned(),
                 signature: local.signature.clone(),
+                reply_to: local.reply_to.clone(),
                 is_primary: false,
             },
             server: Some(IdentityValues {

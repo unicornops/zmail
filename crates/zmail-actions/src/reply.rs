@@ -444,6 +444,7 @@ mod tests {
             display_name: "Me".to_owned(),
             email_address: email.to_owned(),
             signature: String::new(),
+            reply_to: String::new(),
             is_primary,
         }
     }

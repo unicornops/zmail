@@ -223,6 +223,9 @@ pub struct IdentitySummary {
     pub email_address: String,
     /// Signature block appended to new drafts by default.
     pub signature: String,
+    /// Where replies should go, as an address list; empty for the sender.
+    /// Mail sent from the identity carries it as `Reply-To`.
+    pub reply_to: String,
     /// Whether this is the primary identity for the account.
     pub is_primary: bool,
 }
@@ -879,6 +882,10 @@ pub struct DraftDetail {
     pub identity_email: String,
     /// Selected identity signature.
     pub identity_signature: String,
+    /// Selected identity reply-to, an address list; empty for none. Like
+    /// the name and signature, the draft keeps the one it started with
+    /// while it stays on that identity.
+    pub identity_reply_to: String,
     /// Current draft state.
     pub state: DraftState,
     /// To recipients.
@@ -989,6 +996,9 @@ pub struct OutgoingMessage {
     pub cc: Vec<String>,
     /// Bcc recipients.
     pub bcc: Vec<String>,
+    /// `Reply-To` addresses, as `Name <address>` or `address`: the sending
+    /// identity's reply-to. Empty means no `Reply-To` header.
+    pub reply_to: Vec<String>,
     /// Subject line.
     pub subject: String,
     /// Plain-text body.
