@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.1](https://github.com/unicornops/zmail/compare/v0.31.0...v0.31.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **cli:** respect the sync lock in commands that sync or send ([#377](https://github.com/unicornops/zmail/issues/377)) ([c4f1be4](https://github.com/unicornops/zmail/commit/c4f1be44d107eebd5655f4b2f18469a3d32f0eb5))
+
 ## [0.31.0](https://github.com/unicornops/zmail/compare/v0.30.0...v0.31.0) (2026-11-02)
 
 
