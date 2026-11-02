@@ -24,6 +24,7 @@ use crate::{
     clipboard::{CopyTarget, copy_target},
     data::{FolderRow, LocalFolder},
     message::{Conversation, DocLine},
+    palette::Palette,
     pane::{DrawnPane, PaneId, PaneLine},
     text::{self, column_of, fit, fit_right, wrap},
     triage::SavePrompt,
@@ -215,6 +216,19 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     if let Some(Prompt::Save(save)) = app.prompt.clone() {
         draw_save(app, frame, theme, body, &save);
     }
+    if let Some(Prompt::Palette(palette)) = app.prompt.clone() {
+        clear(frame, body);
+        let lines = palette_lines(&palette, theme, width);
+        app.reveal.insert(PaneId::Palette);
+        draw_pane(
+            app,
+            frame,
+            PaneId::Palette,
+            body,
+            lines,
+            Some(palette.cursor + 3),
+        );
+    }
     draw_status(app, frame, theme, Rect::new(0, area.height - 3, width, 1));
     draw_commands(app, frame, theme, Rect::new(0, area.height - 2, width, 2));
 }
@@ -289,6 +303,74 @@ fn draw_save(app: &mut App, frame: &mut Frame, theme: Theme, body: Rect, save: &
     frame
         .buffer_mut()
         .set_line(row.x, row.y, &Line::from(spans), row.width);
+}
+
+/// The command palette over the body: each command that matches, best
+/// first, with its key, its label and what it does, the letters that
+/// matched in bold.
+fn palette_lines(palette: &Palette, theme: Theme, width: u16) -> Vec<PaneLine> {
+    let width = usize::from(width);
+    let mut lines = vec![
+        PaneLine::new(Span::styled(
+            fit("  COMMANDS ON THIS SCREEN", width, theme.ellipsis()),
+            theme.bold().add_modifier(Modifier::UNDERLINED),
+        )),
+        PaneLine::new(Span::styled(
+            fit(
+                "  Type to narrow the list. Enter runs the one under the cursor, Esc closes.",
+                width,
+                theme.ellipsis(),
+            ),
+            theme.faint(),
+        )),
+        PaneLine::default(),
+    ];
+    if palette.shown.is_empty() {
+        lines.push(PaneLine::new(Span::raw(fit(
+            &format!("  Nothing matches \"{}\"", palette.query),
+            width,
+            theme.ellipsis(),
+        ))));
+        return lines;
+    }
+    let label_width = palette
+        .items
+        .iter()
+        .map(|item| item.entry.label.len())
+        .max()
+        .unwrap_or(0);
+    for (row, (index, positions)) in palette.shown.iter().enumerate() {
+        let item = &palette.items[*index];
+        let label = item.entry.label;
+        let prefix = format!("    {:<5}  ", item.entry.key);
+        let line = format!("{prefix}{label:<label_width$}  {}", item.description);
+        // Matched offsets are in "label description".
+        let description_start = prefix.len() + label_width + 2;
+        let marks: Vec<(Range<usize>, Style)> = positions
+            .iter()
+            .map(|&offset| {
+                let at = if offset < label.len() {
+                    prefix.len() + offset
+                } else {
+                    description_start + offset - label.len() - 1
+                };
+                let end = at + line[at..].chars().next().map_or(1, char::len_utf8);
+                (at..end, theme.bold().add_modifier(Modifier::UNDERLINED))
+            })
+            .collect();
+        let base = if row == palette.cursor {
+            theme.reversed()
+        } else {
+            Style::new()
+        };
+        let line = fit(&line, width, theme.ellipsis());
+        lines.push(PaneLine {
+            spans: styled(&line, base, &marks),
+            target: Some(row),
+            ..PaneLine::default()
+        });
+    }
+    lines
 }
 
 /// Blanks `area`, for what is drawn over the body.
@@ -414,6 +496,7 @@ fn draw_status(app: &App, frame: &mut Frame, theme: Theme, area: Rect) {
                 Prompt::Text { .. }
                     | Prompt::Save(SavePrompt { picker: None, .. })
                     | Prompt::Path(_)
+                    | Prompt::Palette(_)
             )
         );
         // A field shows its end, where the typing is.
@@ -1105,6 +1188,10 @@ folder, or find text in a message. The index follows as you type; Enter also \
 asks the server for mail not downloaded yet.
   /          list conversations or single messages
   V          the preview pane, beside the index in terminals 120 columns or wider
+  :          the command palette: every command of the screen with its key; \
+type a few letters of what you want (arch, folder, trash), Up and Down move, \
+Enter runs it, Esc closes. Not in Compose or the account forms, where : is \
+text.
   Q          quit (Zmail asks first)
 
 Triage

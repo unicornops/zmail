@@ -10,7 +10,7 @@
 //!   Flagged and Sent across accounts;
 //! - every account (opening it opens its Inbox).
 //!
-//! Typing filters them with the in-house [fuzzy matcher](crate::fuzzy) and
+//! Typing filters them with the in-house [fuzzy matcher](zmail_core::fuzzy) and
 //! highlights the matched letters. Recently used entries (kept in the UI
 //! preferences) come first when nothing is typed and rank higher when
 //! something is. Up and Down move the highlight, Enter or a click picks,
@@ -27,7 +27,7 @@ use gpui::{
     StyledText, Subscription, UniformListScrollHandle, Window, div, prelude::*, px, rgb,
     uniform_list,
 };
-use zmail_core::{AccountSummary, MailboxRole, MailboxSummary, VirtualMailbox};
+use zmail_core::{AccountSummary, MailboxRole, MailboxSummary, VirtualMailbox, fuzzy::fuzzy_match};
 
 use crate::WorkspaceView;
 use crate::a11y::{
@@ -37,7 +37,6 @@ use crate::actions::ToggleCommandPalette;
 use crate::components::actions::{SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use crate::components::kbd::spoken_keystrokes;
 use crate::components::{ComponentTheme, HitTargetExt, Kbd, Modal, TextInput, TextInputEvent};
-use crate::fuzzy::fuzzy_match;
 use crate::menus::{MenuModel, MenuModelItem, binding_label, menu_binding};
 use crate::pane::Pane;
 use crate::sidebar::{folder_label, mailbox_icon_name};

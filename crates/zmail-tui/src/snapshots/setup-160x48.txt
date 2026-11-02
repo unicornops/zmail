@@ -44,5 +44,5 @@
 
 
 
-? Help              > [Change]          N Next              Q Quit
-< Main Menu         P Prev              A Accounts
+? Help              > [Change]          N Next              : Commands
+< Main Menu         P Prev              A Accounts          Q Quit

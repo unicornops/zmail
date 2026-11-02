@@ -20,5 +20,5 @@
 
 
 
-? Help       > [Select]   L FldrList   S Setup      T Outbox
-P PrevCmd    N NextCmd    I Index      C Compose    Q Quit
+? Help       > [Select]   L FldrList   S Setup      T Outbox     Q Quit
+P PrevCmd    N NextCmd    I Index      C Compose    : Commands

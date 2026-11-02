@@ -247,9 +247,68 @@ pub enum Cmd {
     SaveAllAttachments,
     /// Hide the sender-safety warning in view ("Looks safe").
     LooksSafe,
+    /// The command palette: every command of this screen, searchable.
+    Palette,
     /// The key itself, for a screen whose form takes keys (Add, Change):
     /// its code, and whether with Control.
     Press(KeyCode, bool),
+}
+
+impl Cmd {
+    /// What the command does, in words, for the command palette.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Help => "Help for this screen",
+            Self::Back => "Go up a level",
+            Self::Select => "Open or choose what the cursor is on",
+            Self::Prev => "The previous item",
+            Self::Next => "The next item",
+            Self::PageUp => "Up a page",
+            Self::PageDown => "Down a page",
+            Self::WhereIs => "Search: WhereIs",
+            Self::Threads => "List conversations or single messages",
+            Self::Preview => "Show or hide the preview pane",
+            Self::MainMenu => "Go to the Main Menu",
+            Self::FolderList => "Go to the Folder List",
+            Self::Index => "Go to the Message Index",
+            Self::Setup => "Go to Setup",
+            Self::Compose => "Write a new message",
+            Self::Reply => "Reply to the message",
+            Self::Forward => "Forward the message",
+            Self::Outbox => "Go to the Outbox",
+            Self::Retry => "Send a failed message again",
+            Self::CancelSend => "Take a queued message back",
+            Self::DeleteDraft => "Delete the postponed message",
+            Self::AddressBook => "The address book",
+            Self::Quit => "Leave Zmail",
+            Self::OtherCmds => "More commands on the command bar",
+            Self::NextLink => "Move to the next link",
+            Self::PrevLink => "Move to the previous link",
+            Self::Mark => "Set the mark, to select text with the arrow keys",
+            Self::Copy => "Copy the selection",
+            Self::Home => "To the first line or item",
+            Self::End => "To the last line or item",
+            Self::Delete => "Delete: move to the Trash",
+            Self::Undo => "Undo the last change",
+            Self::Archive => "Archive the conversation",
+            Self::Save => "Save (move) to a folder",
+            Self::Flag => "Flag or unflag",
+            Self::ReadState => "Mark read or unread",
+            Self::ToggleSelected => "Select the message, or not",
+            Self::Apply => "Apply the next command to the selected messages",
+            Self::Complete => "Complete the name",
+            Self::Accounts => "Your mail accounts",
+            Self::AddAccount => "Add a mail account",
+            Self::ChangeAccount => "Change the account",
+            Self::DeleteAccount => "Delete the account from this computer",
+            Self::Attachments => "List the attachments, to save them",
+            Self::SaveAttachment => "Save the attachment",
+            Self::SaveAllAttachments => "Save every attachment into a folder",
+            Self::LooksSafe => "Looks safe: hide the sender warning",
+            Self::Palette => "Every command of this screen, searchable",
+            Self::Pico(_) | Self::Press(..) => "",
+        }
+    }
 }
 
 /// A command bar entry.
@@ -301,6 +360,8 @@ pub enum Prompt {
     /// A file to attach or read in, or where to save an attachment, with
     /// Tab completion.
     Path(PathPrompt),
+    /// The command palette (`:`).
+    Palette(crate::palette::Palette),
     /// "Replace it?" when saving an attachment over a file.
     ReplaceFile {
         /// The save prompt, to go back to.
@@ -1130,6 +1191,7 @@ impl App {
                 path.field.input.push_str(&sanitize_line(pasted));
                 path.field.edited();
             }
+            Some(Prompt::Palette(_)) => self.palette_paste(pasted),
             None if self.screen == Screen::Compose => self.compose_paste(pasted),
             None if self.screen == Screen::AddAccount => self.add_paste(pasted),
             None if self.screen == Screen::EditAccount => self.edit_paste(pasted),
@@ -1198,6 +1260,7 @@ impl App {
                 '/' => Cmd::Threads,
                 'v' if in_message => Cmd::Attachments,
                 'x' if self.shows_sender_warning() => Cmd::LooksSafe,
+                ':' if self.palette_available() => Cmd::Palette,
                 'v' => Cmd::Preview,
                 'm' => Cmd::MainMenu,
                 'l' => Cmd::FolderList,
@@ -1331,6 +1394,14 @@ impl App {
                     entry("Esc", "Cancel", Back),
                 ];
             }
+            Some(Prompt::Palette(_)) => {
+                return vec![
+                    entry("Ret", "Run", Select),
+                    entry("Up", "Prev", Prev),
+                    entry("Down", "Next", Next),
+                    entry("Esc", "Cancel", Back),
+                ];
+            }
             Some(Prompt::ReplaceFile { .. }) => {
                 return vec![entry("Y", "Replace", Select), entry("N", "No", Back)];
             }
@@ -1382,6 +1453,7 @@ impl App {
                 entry("S", "Setup", Setup),
                 entry("C", "Compose", Compose),
                 entry("T", "Outbox", Outbox),
+                entry(":", "Commands", Palette),
                 entry("Q", "Quit", Quit),
             ],
             Screen::FolderList => vec![
@@ -1396,6 +1468,7 @@ impl App {
                 entry("M", "Main Menu", MainMenu),
                 entry("I", "Index", Index),
                 entry("C", "Compose", Compose),
+                entry(":", "Commands", Palette),
                 entry("Q", "Quit", Quit),
             ],
             Screen::Index => vec![
@@ -1430,6 +1503,7 @@ impl App {
                 entry("C", "Compose", Compose),
                 entry("M", "Main Menu", MainMenu),
                 entry("Y", "Copy", Copy),
+                entry(":", "Commands", Palette),
                 entry("Q", "Quit", Quit),
             ],
             Screen::Message => {
@@ -1457,6 +1531,7 @@ impl App {
                     entry("C", "Compose", Compose),
                     entry("M", "Main Menu", MainMenu),
                     entry("L", "FldrList", FolderList),
+                    entry(":", "Commands", Palette),
                     entry("Q", "Quit", Quit),
                 ];
                 // On the first page while a warning shows.
@@ -1475,6 +1550,7 @@ impl App {
                 entry("P", "Prev", Prev),
                 entry("N", "Next", Next),
                 entry("A", "Accounts", Accounts),
+                entry(":", "Commands", Palette),
                 entry("Q", "Quit", Quit),
             ],
             Screen::Help => vec![
@@ -1482,6 +1558,7 @@ impl App {
                 entry("-", "PrevPage", PageUp),
                 entry("Spc", "NextPage", PageDown),
                 entry("M", "Main Menu", MainMenu),
+                entry(":", "Commands", Palette),
                 entry("Q", "Quit", Quit),
             ],
             Screen::Postponed => vec![
@@ -1492,6 +1569,7 @@ impl App {
                 entry("N", "NextMsg", Next),
                 entry("D", "Delete", DeleteDraft),
                 entry("M", "Main Menu", MainMenu),
+                entry(":", "Commands", Palette),
                 entry("Q", "Quit", Quit),
             ],
             Screen::Attachments => vec![
@@ -1504,6 +1582,7 @@ impl App {
                 entry("A", "SaveAll", SaveAllAttachments),
                 entry("C", "Compose", Compose),
                 entry("M", "Main Menu", MainMenu),
+                entry(":", "Commands", Palette),
                 entry("Q", "Quit", Quit),
             ],
             Screen::Outbox => vec![
@@ -1516,6 +1595,7 @@ impl App {
                 entry("D", "TakeBack", CancelSend),
                 entry("C", "Compose", Compose),
                 entry("M", "Main Menu", MainMenu),
+                entry(":", "Commands", Palette),
                 entry("Q", "Quit", Quit),
             ],
             // Answered above.
@@ -1595,6 +1675,8 @@ impl App {
             Cmd::Attachments | Cmd::SaveAttachment | Cmd::SaveAllAttachments => {}
             Cmd::LooksSafe if self.screen == Screen::Message => self.looks_safe(),
             Cmd::LooksSafe => {}
+            Cmd::Palette if self.palette_available() => self.open_palette(),
+            Cmd::Palette => {}
             Cmd::Press(code, control) => {
                 let modifiers = if control {
                     KeyModifiers::CONTROL
@@ -2100,6 +2182,7 @@ impl App {
             }
             Prompt::Save(save) => self.save_key(save, key),
             Prompt::Path(path) => self.path_key(path, key),
+            Prompt::Palette(palette) => self.palette_key(palette, key),
             Prompt::ReplaceFile { prompt, path } => {
                 self.prompt = None;
                 let replace = matches!(key.code, KeyCode::Char('y' | 'Y'));
@@ -2453,7 +2536,7 @@ impl App {
         // While a question is asked, only its answers on the command bar
         // can be clicked.
         if self.prompt.is_some() {
-            if self.picker_mouse(mouse) {
+            if self.picker_mouse(mouse) || self.palette_mouse(mouse) {
                 return;
             }
             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind
@@ -2746,7 +2829,7 @@ impl App {
                     edit.cursor = row;
                 }
             }
-            PaneId::Help | PaneId::Picker => {}
+            PaneId::Help | PaneId::Picker | PaneId::Palette => {}
         }
     }
 
@@ -2772,7 +2855,7 @@ impl App {
                 self.step(direction)
             }
             PaneId::AddAccount | PaneId::EditAccount => self.scroll_pane(id, by),
-            PaneId::Picker => {}
+            PaneId::Picker | PaneId::Palette => {}
         }
     }
 
@@ -2806,6 +2889,7 @@ impl App {
                 "Delete this postponed message? (y/n)".to_owned()
             }
             Prompt::Path(path) => path.label(),
+            Prompt::Palette(palette) => format!(": {}", palette.query),
             Prompt::ReplaceFile { path, .. } => format!(
                 "{} is already there. Replace it? (y/n)",
                 sanitize_line(

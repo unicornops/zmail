@@ -1,4 +1,5 @@
-//! A small fuzzy matcher for the command palette.
+//! A small fuzzy matcher for the command palettes: the desktop app's
+//! (Secondary+K) and the terminal UI's (`:`).
 //!
 //! A query matches a text when every word of the query appears in the text
 //! as a subsequence: "arch" matches "Go to Archive", and "gt arc" does too.
@@ -29,18 +30,18 @@ const MAX_LEADING_PENALTY: i32 = 12;
 
 /// A successful match.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FuzzyMatch {
+pub struct FuzzyMatch {
     /// Higher is better.
-    pub(crate) score: i32,
+    pub score: i32,
     /// Byte offsets into the text of the matched characters, ascending and
     /// without duplicates, for highlighting.
-    pub(crate) positions: Vec<usize>,
+    pub positions: Vec<usize>,
 }
 
 /// Matches `query` against `text`. An empty or blank query matches
 /// everything with a score of zero; otherwise every whitespace-separated
 /// word of the query must match, and the scores add up.
-pub(crate) fn fuzzy_match(query: &str, text: &str) -> Option<FuzzyMatch> {
+pub fn fuzzy_match(query: &str, text: &str) -> Option<FuzzyMatch> {
     let haystack: Vec<(usize, char)> = text
         .char_indices()
         .map(|(offset, ch)| (offset, fold(ch)))

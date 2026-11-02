@@ -20,5 +20,5 @@
 
 
 
-? Help       > [Save]     N NextAttch  A SaveAll    M Main Menu
-< MsgText    P PrevAttch  S Save       C Compose    Q Quit
+? Help       > [Save]     N NextAttch  A SaveAll    M Main Menu  Q Quit
+< MsgText    P PrevAttch  S Save       C Compose    : Commands

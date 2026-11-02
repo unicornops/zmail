@@ -19,7 +19,6 @@
 //! | `drag` | `DraggedThreads`: conversations dragged from the list onto sidebar folders |
 //! | `move_picker` | `MovePicker`: the searchable Move to… folder picker |
 //! | `command_palette` | `CommandPalette`: Secondary+K's search over commands, folders and accounts |
-//! | `fuzzy` | the palette's fuzzy matcher |
 //! | `cheat_sheet` | the keyboard shortcut cheat sheet, grouped from the bound keymap |
 //! | `actions` | every command as a GPUI action |
 //! | `keymap` | loads `keymaps/default.json` (and `keymaps/macos.json` on macOS); binds and switches the saved keymap |
@@ -75,7 +74,6 @@ mod command_palette;
 mod compose;
 mod drag;
 mod fonts;
-mod fuzzy;
 mod keymap;
 mod layout;
 mod mail_actions;

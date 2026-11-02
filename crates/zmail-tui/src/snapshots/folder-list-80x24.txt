@@ -21,4 +21,4 @@ Local
 
 
 ? Help       > [ViewFldr] N NextFldr   Spc NextPage M Main Menu  C Compose
-< Main Menu  P PrevFldr   - PrevPage   W WhereIs    I Index      Q Quit
+< Main Menu  P PrevFldr   - PrevPage   W WhereIs    I Index      O OTHER CMDS

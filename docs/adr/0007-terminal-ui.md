@@ -152,6 +152,12 @@ Progress:
   TUI shows it above the message text, filtered and coloured by tier.
   `X` (Looks safe) hides the warning in view through
   `LocalStore::dismiss_sender_warning`, so the GUI hides it too.
+- Phase 5: the command palette (`:`, on every screen whose keys are
+  commands; Compose and the account forms take `:` as text). It lists
+  the screen's command-bar entries, every page, with their keys and what
+  each does, filtered as you type by the GUI palette's fuzzy matcher,
+  moved from `zmail-ui` to `zmail_core::fuzzy`; Enter or a click runs
+  one. Built from the command bar's own table, so the two can't disagree.
 
 ## Context
 

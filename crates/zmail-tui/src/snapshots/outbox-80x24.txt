@@ -20,5 +20,5 @@
 
 
 
-? Help       > [Details]  N NextMsg    D TakeBack   M Main Menu
-< Back       P PrevMsg    R Retry      C Compose    Q Quit
+? Help       > [Details]  N NextMsg    D TakeBack   M Main Menu  Q Quit
+< Back       P PrevMsg    R Retry      C Compose    : Commands
