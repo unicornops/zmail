@@ -13,6 +13,7 @@ use ratatui::{
     text::{Line, Span},
 };
 use zmail_core::{preferences::CopyClipboard, time::format_list_date};
+use zmail_security::sender_safety::SafetyTier;
 
 mod accounts;
 mod compose;
@@ -81,6 +82,21 @@ impl Theme {
         }
     }
 
+    /// A sender-safety warning: red for a likely impersonation, yellow for
+    /// replies going elsewhere, cyan for a related address; bold without
+    /// colour, except the mildest.
+    fn warning(self, tier: SafetyTier) -> Style {
+        match (tier, self.color) {
+            (SafetyTier::Danger, true) => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+            (SafetyTier::Caution, true) => {
+                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            }
+            (SafetyTier::Info, true) => Style::new().fg(Color::Cyan),
+            (SafetyTier::Info, false) => Style::new(),
+            (_, false) => self.bold(),
+        }
+    }
+
     fn found(self) -> Style {
         if self.color {
             Style::new().bg(Color::Yellow).fg(Color::Black)
@@ -145,9 +161,10 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
                         .buffer_mut()
                         .set_string(left, y, theme.vertical(), theme.faint());
                 }
+                // "Looks safe" works in Message Text, not on the preview.
                 let lines = match app.preview_conversation() {
                     Some(conversation) => {
-                        message_lines(conversation, preview_area.width, theme, None, None).0
+                        message_lines(conversation, preview_area.width, theme, None, None, None).0
                     }
                     None => Vec::new(),
                 };
@@ -658,6 +675,7 @@ fn index_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
 }
 
 fn draw_message(app: &mut App, frame: &mut Frame, theme: Theme, area: Rect) {
+    let looks_safe = app.looks_safe_key();
     let Some(state) = app.message.as_mut() else {
         return;
     };
@@ -667,7 +685,14 @@ fn draw_message(app: &mut App, frame: &mut Frame, theme: Theme, area: Rect) {
         theme,
         state.selected_link,
         state.find.as_deref(),
+        Some(&looks_safe),
     );
+    state.drawn_warnings = state
+        .conversation
+        .warnings
+        .iter()
+        .filter_map(|(id, doc_line)| Some((*id, *starts.get(*doc_line)?)))
+        .collect();
     state.drawn_starts = state
         .conversation
         .message_starts
@@ -711,13 +736,15 @@ fn draw_message(app: &mut App, frame: &mut Frame, theme: Theme, area: Rect) {
 }
 
 /// The lines of `conversation` wrapped to `width`, and the first line of
-/// each of its document lines.
+/// each of its document lines. A sender-safety warning ends with the key
+/// that hides it, `looks_safe`, where that key works.
 pub(crate) fn message_lines(
     conversation: &Conversation,
     width: u16,
     theme: Theme,
     selected_link: Option<usize>,
     find: Option<&str>,
+    looks_safe: Option<&str>,
 ) -> (Vec<PaneLine>, Vec<usize>) {
     let width = usize::from(width.max(1));
     let mut lines = Vec::new();
@@ -747,6 +774,42 @@ pub(crate) fn message_lines(
                             row.text,
                             theme.faint().add_modifier(Modifier::ITALIC),
                         ))
+                    });
+                }
+            }
+            DocLine::Warning { tier, text } => {
+                let style = theme.warning(*tier);
+                for row in wrap(&format!("! {text}"), width) {
+                    lines.push(PaneLine {
+                        joiner: row.joiner,
+                        ..PaneLine::new(Span::styled(row.text, style))
+                    });
+                }
+            }
+            DocLine::WarningDetail(detail) => {
+                for row in wrap(&format!("  {detail}"), width) {
+                    lines.push(PaneLine {
+                        joiner: row.joiner,
+                        ..PaneLine::new(Span::raw(row.text))
+                    });
+                }
+            }
+            DocLine::LooksSafe => {
+                if let Some(key) = looks_safe {
+                    lines.push(PaneLine {
+                        spans: vec![
+                            Span::raw("  "),
+                            Span::styled(key.to_owned(), theme.reversed()),
+                            Span::styled(
+                                fit(
+                                    " Looks safe: hide this warning for this message",
+                                    width.saturating_sub(2 + text::width(key)),
+                                    theme.ellipsis(),
+                                ),
+                                theme.faint(),
+                            ),
+                        ],
+                        ..PaneLine::default()
                     });
                 }
             }
@@ -1067,6 +1130,13 @@ Reading
 Tab and Shift-Tab move between them, and Enter (or a click) shows the real \
 address before anything opens it. Remote images and HTML formatting are not \
 shown in the terminal.
+  A message whose sender looks suspicious gets the Zmail window's warning \
+above its text: a sender's domain that imitates a well-known one, or replies \
+that go to another domain than the sender's, with the addresses it is based \
+on. Settings in the Zmail window can leave out the mildest (a related \
+domain).
+  X          Looks safe: hide the warning in view, for that message only \
+(the Zmail window hides it too)
   V          the Attachment Index: the conversation's attachments, with \
 their names, types and sizes
   S or Enter there saves the attachment under the cursor. The path starts \

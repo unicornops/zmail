@@ -43,6 +43,7 @@ mod terminal;
 mod text;
 mod triage;
 mod view;
+mod warnings;
 
 #[cfg(test)]
 mod tests;

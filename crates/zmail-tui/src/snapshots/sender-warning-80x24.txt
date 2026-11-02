@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                MESSAGE TEXT       Folder: INBOX  Conv 1 of 3
+Date: Thu 15 Oct 2026, 11:50
+From: PayPal Security <security@paypa1.com>
+Reply-To: Billing <collect@evil.example>
+To: Me <me@work.example>
+Subject: Confirm your payment details
+
+! Possible impersonation: The sender's domain imitates paypal.com, so this
+message may not be from them.
+  From: security@paypa1.com
+  Sender's domain: paypa1.com
+  Looks like: paypal.com
+  Replies go to (Reply-To): collect@evil.example
+  X Looks safe: hide this warning for this message
+
+Your account is limited. Confirm your details today.
+
+
+
+
+
+
+? Help       X LooksSafe  N NextMsg    Spc NextPage U Undo       F Forward
+< MsgIndex   P PrevMsg    - PrevPage   D Delete     R Reply      O OTHER CMDS

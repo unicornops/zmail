@@ -33,6 +33,7 @@ mod accounts;
 mod attachments;
 mod compose;
 mod triage;
+mod warnings;
 
 /// Thursday 15 October 2026, 12:00 UTC.
 const NOW: &str = "2026-10-15T12:00:00+00:00";
