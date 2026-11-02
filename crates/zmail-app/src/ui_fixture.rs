@@ -122,6 +122,19 @@ pub(crate) enum FixtureView {
     /// the server's (changed on both sides) and with an identity the
     /// server no longer lists.
     SettingsAccountsIdentities,
+    /// Settings → Accounts with the identity editor open on a JMAP
+    /// identity linked to the server (its address fixed, Save and update
+    /// the server offered).
+    SettingsIdentityEdit,
+    /// Settings → Accounts with the identity editor open to add an
+    /// identity to a JMAP account.
+    SettingsIdentityAdd,
+    /// Settings → Accounts asking to remove a JMAP identity the server
+    /// lets the user delete (from Zmail, or from the server too).
+    SettingsIdentityRemove,
+    /// Settings → Accounts on a JMAP account with a server identity
+    /// removed from Zmail only, in the Hidden identities list.
+    SettingsIdentityHidden,
     /// The Settings window on Appearance.
     SettingsAppearance,
     /// The Settings window on Keyboard, with the Gmail keymap on.
@@ -197,6 +210,10 @@ impl FixtureView {
             "settings-accounts" => Self::SettingsAccounts,
             "settings-accounts-expired" => Self::SettingsAccountsExpired,
             "settings-accounts-identities" => Self::SettingsAccountsIdentities,
+            "settings-identity-edit" => Self::SettingsIdentityEdit,
+            "settings-identity-add" => Self::SettingsIdentityAdd,
+            "settings-identity-remove" => Self::SettingsIdentityRemove,
+            "settings-identity-hidden" => Self::SettingsIdentityHidden,
             "settings-appearance" => Self::SettingsAppearance,
             "settings-keyboard" => Self::SettingsKeyboard,
             "settings-privacy" => Self::SettingsPrivacy,
@@ -206,7 +223,7 @@ impl FixtureView {
             "unlock-keychain" => Self::Unlock(UnlockFixture::Keychain),
             "unlock-unreadable" => Self::Unlock(UnlockFixture::Unreadable),
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-accounts-identities, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-accounts-identities, settings-identity-edit, settings-identity-add, settings-identity-remove, settings-identity-hidden, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
             ),
         })
     }
@@ -368,6 +385,21 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         }
         FixtureView::SettingsAccountsIdentities => {
             InitialView::SettingsAccount(seed_jmap_identities(store)?)
+        }
+        FixtureView::SettingsIdentityHidden => {
+            let (account_id, help) = seed_identity_editor(store)?;
+            store.remove_identity(help)?;
+            InitialView::SettingsAccount(account_id)
+        }
+        FixtureView::SettingsIdentityEdit
+        | FixtureView::SettingsIdentityAdd
+        | FixtureView::SettingsIdentityRemove => {
+            let (account_id, help) = seed_identity_editor(store)?;
+            InitialView::SettingsIdentity {
+                account_id,
+                identity_id: (view != FixtureView::SettingsIdentityAdd).then_some(help),
+                remove: view == FixtureView::SettingsIdentityRemove,
+            }
         }
         FixtureView::SettingsAppearance => InitialView::Settings(SettingsSection::Appearance),
         FixtureView::SettingsKeyboard => {
@@ -791,6 +823,65 @@ fn seed_jmap_identities(store: &LocalStore) -> Result<i64> {
         &[server("i1", OWN_EMAIL, OWN_NAME, "Sent from the web")],
     )?;
     Ok(account_id)
+}
+
+/// A JMAP account whose identities are in step with the server: the
+/// user's, a help desk the user may delete on the server, and an alias
+/// added in Zmail only. Returns the account and the help desk's id.
+fn seed_identity_editor(store: &LocalStore) -> Result<(i64, i64)> {
+    use zmail_core::identity_sync::{IdentityValues, ServerIdentity};
+    let account_id = store.insert_account(&NewAccount {
+        display_name: "Fastmail".to_owned(),
+        protocol: ProtocolKind::Jmap,
+        endpoint: "https://api.fastmail.example/jmap/session".to_owned(),
+        outgoing: Some(OutgoingConfig::jmap_default()),
+        ..fixture_account()
+    })?;
+    let server =
+        |id: &str, email: &str, name: &str, reply_to: &str, signature: &str| ServerIdentity {
+            id: id.to_owned(),
+            email: email.to_owned(),
+            values: IdentityValues {
+                name: name.to_owned(),
+                reply_to: reply_to.to_owned(),
+                signature: signature.to_owned(),
+            },
+            may_delete: true,
+        };
+    store.merge_server_identities(
+        account_id,
+        &[
+            server(
+                "i1",
+                OWN_EMAIL,
+                OWN_NAME,
+                "",
+                &format!("Regards,\n{OWN_NAME}"),
+            ),
+            server(
+                "i2",
+                "help@example.com",
+                "Help desk",
+                "Tickets <tickets@example.com>",
+                "The help desk\nExample Ltd",
+            ),
+        ],
+    )?;
+    store.add_identity(
+        account_id,
+        "alias@example.com",
+        &IdentityValues {
+            name: OWN_NAME.to_owned(),
+            ..IdentityValues::default()
+        },
+    )?;
+    let help = store
+        .list_identities(account_id)?
+        .into_iter()
+        .find(|identity| identity.email_address == "help@example.com")
+        .context("the help desk identity is stored")?
+        .id;
+    Ok((account_id, help))
 }
 
 /// One message of a seeded thread: sender, minutes before now, read state,
@@ -1449,6 +1540,10 @@ mod tests {
             "settings-accounts",
             "settings-accounts-expired",
             "settings-accounts-identities",
+            "settings-identity-edit",
+            "settings-identity-add",
+            "settings-identity-remove",
+            "settings-identity-hidden",
             "onboarding-google-guide",
             "onboarding-google-guide-invalid",
             "settings-appearance",
@@ -1491,6 +1586,55 @@ mod tests {
                 IdentitySyncStatus::NotOnServer
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn the_identity_editor_states_open_on_a_linked_jmap_identity() -> Result<()> {
+        use zmail_core::identity_sync::IdentitySyncStatus;
+        for view in [
+            FixtureView::SettingsIdentityEdit,
+            FixtureView::SettingsIdentityAdd,
+            FixtureView::SettingsIdentityRemove,
+        ] {
+            let (store, initial_view) = seeded(view)?;
+            let InitialView::SettingsIdentity {
+                account_id,
+                identity_id,
+                remove,
+            } = initial_view
+            else {
+                bail!("expected the identity editor, got {initial_view:?}");
+            };
+            let identities = store.list_synced_identities(account_id)?;
+            assert_eq!(identities.len(), 3);
+            assert_eq!(remove, view == FixtureView::SettingsIdentityRemove);
+            assert_eq!(
+                identity_id.is_none(),
+                view == FixtureView::SettingsIdentityAdd
+            );
+            if let Some(identity_id) = identity_id {
+                let help = identities
+                    .iter()
+                    .find(|identity| identity.identity.id == identity_id)
+                    .context("listed")?;
+                assert_eq!(help.status, IdentitySyncStatus::InSync);
+                assert!(help.may_delete_on_server);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn settings_identity_hidden_has_a_hidden_server_identity() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::SettingsIdentityHidden)?;
+        let InitialView::SettingsAccount(account_id) = initial_view else {
+            bail!("expected Settings on an account, got {initial_view:?}");
+        };
+        let hidden = store.list_hidden_identities(account_id)?;
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].email, "help@example.com");
+        assert_eq!(store.list_identities(account_id)?.len(), 2);
         Ok(())
     }
 

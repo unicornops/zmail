@@ -184,6 +184,17 @@ pub enum InitialView {
     /// The inbox, with Settings → Accounts open on this account, as the
     /// sidebar's Fix… opens it.
     SettingsAccount(i64),
+    /// The inbox, with Settings → Accounts open on an account and its
+    /// identity editor open: on `identity_id`, or to add one when it is
+    /// `None`; with `remove`, the identity's remove confirmation instead.
+    SettingsIdentity {
+        /// The account.
+        account_id: i64,
+        /// The identity, or `None` to add one.
+        identity_id: Option<i64>,
+        /// Open the remove confirmation instead of the editor.
+        remove: bool,
+    },
 }
 
 /// Runs the native Phase 4 shell on an open store.

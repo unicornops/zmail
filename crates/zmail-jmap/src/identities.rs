@@ -1,6 +1,6 @@
 //! JMAP identities (RFC 8621 section 6): reading the server's for the
-//! sync (`zmail_core::identity_sync`) and for submission, and updating or
-//! creating one when the user chooses to send Zmail's values up.
+//! sync (`zmail_core::identity_sync`) and for submission, and updating,
+//! creating or destroying one when the user chooses to.
 //!
 //! Requests and answers go as plain JSON: `jmap-client`'s typed
 //! `Identity/get` sends no method call at all and refuses what some
@@ -251,6 +251,52 @@ fn created(method_response: Option<&Value>) -> Result<String> {
     }
 }
 
+/// Destroys server identity `server_id` (`Identity/set` destroy), when
+/// the user removes an identity from Zmail and the server too. A refusal
+/// (`notDestroyed`, say `forbidden` for one the server made) is the error,
+/// with the server's reason.
+pub async fn destroy_server_identity(
+    target: &SyncTarget,
+    secret: &str,
+    server_id: &str,
+) -> Result<()> {
+    let client = connect_client(&target.endpoint, &target.username, secret, target.auth).await?;
+    destroy_identity(&client, server_id).await
+}
+
+async fn destroy_identity(client: &Client, server_id: &str) -> Result<()> {
+    let mut request = client.build();
+    request.set_identity().destroy([server_id]);
+    request.add_capability(jmap_client::URI::Submission);
+    let response = client
+        .send::<Value>(&request)
+        .await
+        .map_err(|error| anyhow!("failed to delete the JMAP identity: {error}"))?;
+    destroyed(response.method_responses().first(), server_id)
+}
+
+/// Whether an `Identity/set` answer destroyed `server_id`, or why not.
+fn destroyed(method_response: Option<&Value>, server_id: &str) -> Result<()> {
+    let arguments = method_arguments(method_response, "Identity/set")?;
+    if arguments
+        .get("destroyed")
+        .and_then(Value::as_array)
+        .is_some_and(|destroyed| destroyed.iter().any(|id| id.as_str() == Some(server_id)))
+    {
+        return Ok(());
+    }
+    match arguments
+        .get("notDestroyed")
+        .and_then(|refused| refused.get(server_id))
+    {
+        Some(error) => bail!(
+            "the server refused to delete the identity: {}",
+            refusal_reason(error)
+        ),
+        None => bail!("the server did not say whether it deleted the identity"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -262,7 +308,7 @@ mod tests {
     use serde_json::{Value, json};
     use zmail_core::{AuthKind, identity_sync::IdentityValues};
 
-    use super::{created, reply_to_addresses, server_identities, updated};
+    use super::{created, destroyed, reply_to_addresses, server_identities, updated};
 
     #[test]
     fn server_identities_are_read_from_a_james_shaped_answer() {
@@ -427,6 +473,25 @@ mod tests {
                             }
                         }
                     }
+                    if let Some(destroys) = call[1]["destroy"].as_array() {
+                        let mut gone = Vec::new();
+                        for id in destroys.iter().filter_map(Value::as_str) {
+                            let index = identities.iter().position(|identity| identity["id"] == id);
+                            match index {
+                                Some(index) if identities[index]["mayDelete"] == true => {
+                                    identities.remove(index);
+                                    gone.push(id);
+                                }
+                                _ => {
+                                    answer["notDestroyed"][id] = json!({
+                                        "type": "forbidden",
+                                        "description": "this identity can't be deleted"
+                                    })
+                                }
+                            }
+                        }
+                        answer["destroyed"] = json!(gone);
+                    }
                     if let Some(creates) = call[1]["create"].as_object() {
                         for (create_id, identity) in creates {
                             let mut identity = identity.clone();
@@ -520,6 +585,32 @@ mod tests {
         assert_eq!(made.email, "help@example.com");
         assert_eq!(made.values, edited);
 
+        // Destroying: the one the user made goes; one the server made is
+        // refused, with the server's reason.
+        server
+            .identities
+            .lock()
+            .expect("the lock")
+            .last_mut()
+            .expect("made")["mayDelete"] = json!(true);
+        super::destroy_identity(&client, &id)
+            .await
+            .expect("destroyed");
+        let listed = super::fetch_server_identities(&client)
+            .await
+            .expect("the identities load");
+        assert!(
+            listed.iter().all(|identity| identity.id != id),
+            "{listed:?}"
+        );
+        let error = super::destroy_identity(&client, "i1")
+            .await
+            .expect_err("refused");
+        assert!(
+            error.to_string().contains("this identity can't be deleted"),
+            "{error}"
+        );
+
         let asked = server.submission_asked.lock().expect("the lock");
         assert!(
             !asked.is_empty() && asked.iter().all(|asked| *asked),
@@ -548,5 +639,13 @@ mod tests {
             json!(["Identity/set", {"notCreated": {"c0": {"type": "forbiddenFrom"}}}, "s0"]);
         let error = created(Some(&refused)).expect_err("refused");
         assert!(error.to_string().contains("forbiddenFrom"), "{error}");
+
+        let gone = json!(["Identity/set", {"destroyed": ["i1"]}, "s0"]);
+        destroyed(Some(&gone), "i1").expect("destroyed");
+        let refused =
+            json!(["Identity/set", {"notDestroyed": {"i1": {"type": "forbidden"}}}, "s0"]);
+        let error = destroyed(Some(&refused), "i1").expect_err("refused");
+        assert!(error.to_string().contains("forbidden"), "{error}");
+        assert!(destroyed(Some(&json!(["Identity/set", {}, "s0"])), "i1").is_err());
     }
 }

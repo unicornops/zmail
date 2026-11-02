@@ -28,7 +28,7 @@ use zmail_core::{
 use zmail_security::sanitize_html_for_display;
 use zmail_smtp::render_rfc822_message;
 
-pub use identities::{create_server_identity, update_server_identity};
+pub use identities::{create_server_identity, destroy_server_identity, update_server_identity};
 pub use push::{
     PUSH_PING_INTERVAL, PushEnd, PushEvent, PushPreference, PushTransport, watch_mail_changes,
 };

@@ -15,6 +15,7 @@ use crate::actions::ToggleDensity;
 use crate::components::{ComponentTheme, Select};
 use crate::layout::SinglePane;
 use crate::settings::{self, SettingsSection, SettingsWindow};
+use zmail_setup::identity_editor::IdentityField;
 
 /// The open Settings window's root, and a test context for that window.
 pub(super) fn settings_window(
@@ -665,8 +666,12 @@ fn identities_that_differ_from_the_server_offer_both_directions(cx: &mut TestApp
         &mut window_cx
     ));
 
-    // Remove from Zmail.
+    // Remove from Zmail, after asking.
     click_selector(&format!("identity-remove-{help}"), &mut window_cx);
+    assert!(root.read_with(&window_cx, |root, cx| {
+        root.accounts().read(cx).identity_removal_open()
+    }));
+    click_selector("identity-remove-confirm", &mut window_cx);
     assert_eq!(
         harness
             .store
@@ -676,6 +681,334 @@ fn identities_that_differ_from_the_server_offer_both_directions(cx: &mut TestApp
         1
     );
     assert!(!drawn(format!("identity-remove-{help}"), &mut window_cx));
+}
+
+/// Adds a JMAP account whose identity is linked to a server identity the
+/// user may delete, plus a second linked one, and a Proton account;
+/// returns the JMAP account and its two identities, and the Proton
+/// account.
+fn seed_jmap_and_proton_accounts(store: &LocalStore) -> (i64, i64, i64, i64) {
+    use zmail_core::{
+        AuthKind, CachePolicySummary, NewAccount, NewIdentity, ProtocolKind,
+        identity_sync::{IdentityValues, ServerIdentity},
+    };
+    let account = |name: &str, protocol: ProtocolKind, email: &str| NewAccount {
+        display_name: name.to_owned(),
+        protocol,
+        auth: AuthKind::Password,
+        endpoint: "https://mail.example.test".to_owned(),
+        username: email.to_owned(),
+        cache_policy: CachePolicySummary::performance_first(),
+        outgoing: None,
+        identities: vec![NewIdentity {
+            display_name: "Rob".to_owned(),
+            email_address: email.to_owned(),
+            signature: String::new(),
+            is_primary: true,
+        }],
+    };
+    let jmap = store
+        .insert_account(&account("Fastmail", ProtocolKind::Jmap, "rob@fast.test"))
+        .expect("stored");
+    let proton = store
+        .insert_account(&account("Proton", ProtocolKind::Proton, "rob@proton.test"))
+        .expect("stored");
+    let server = |id: &str, email: &str| ServerIdentity {
+        id: id.to_owned(),
+        email: email.to_owned(),
+        values: IdentityValues {
+            name: "Rob".to_owned(),
+            ..IdentityValues::default()
+        },
+        may_delete: true,
+    };
+    store
+        .merge_server_identities(
+            jmap,
+            &[
+                server("i1", "rob@fast.test"),
+                server("i2", "help@fast.test"),
+            ],
+        )
+        .expect("merged");
+    let identities = store.list_identities(jmap).expect("identities");
+    (jmap, identities[0].id, identities[1].id, proton)
+}
+
+fn accounts_section(
+    root: &Entity<SettingsWindow>,
+    cx: &mut VisualTestContext,
+) -> Entity<crate::settings::AccountsSettings> {
+    root.read_with(cx, |root, _| root.accounts().clone())
+}
+
+fn set_field(
+    accounts: &Entity<crate::settings::AccountsSettings>,
+    field: IdentityField,
+    text: &str,
+    cx: &mut VisualTestContext,
+) {
+    let input = accounts.read_with(cx, |accounts, _| accounts.identity_input(field));
+    input.update(cx, |input, cx| input.set_text(text, cx));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn an_identity_is_edited_and_a_server_set_address_stays_fixed(cx: &mut TestAppContext) {
+    use zmail_core::identity_sync::IdentitySyncStatus;
+
+    let mut seeded = (0, 0, 0, 0);
+    let (_view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Settings(SettingsSection::Accounts),
+        |store| seeded = seed_jmap_and_proton_accounts(store),
+    );
+    let (jmap, linked, _, proton) = seeded;
+    let imap = harness.store.list_accounts().expect("accounts")[0].id;
+    let mine = harness.store.list_identities(imap).expect("identities")[0].id;
+    let (root, mut window_cx) = settings_window(cx);
+    window_cx.simulate_resize(size(px(820.0), px(2400.0)));
+    window_cx.run_until_parked();
+    let accounts = accounts_section(&root, &mut window_cx);
+
+    // An IMAP identity: every field, the address too.
+    click_selector(&format!("identity-edit-{mine}"), &mut window_cx);
+    assert!(accounts.read_with(&window_cx, |accounts, _| accounts.identity_editor_open()));
+    let address = accounts.read_with(&window_cx, |accounts, _| {
+        accounts.identity_input(IdentityField::Address)
+    });
+    assert!(!address.read_with(&window_cx, |input, _| input.is_disabled()));
+    assert!(!drawn("identity-save-server".into(), &mut window_cx));
+
+    // A bad address keeps the dialog open, saying why.
+    set_field(
+        &accounts,
+        IdentityField::Address,
+        "not an address",
+        &mut window_cx,
+    );
+    click_selector("identity-save", &mut window_cx);
+    assert!(accounts.read_with(&window_cx, |accounts, _| accounts.identity_editor_open()));
+    assert_eq!(
+        accounts.read_with(&window_cx, |accounts, _| accounts
+            .identity_errors()
+            .into_iter()
+            .map(|(field, _)| field)
+            .collect::<Vec<_>>()),
+        [IdentityField::Address]
+    );
+    assert!(drawn("identity-error-Address".into(), &mut window_cx));
+
+    set_field(
+        &accounts,
+        IdentityField::Address,
+        "rob@example.test",
+        &mut window_cx,
+    );
+    set_field(
+        &accounts,
+        IdentityField::Name,
+        "Rob at work",
+        &mut window_cx,
+    );
+    set_field(
+        &accounts,
+        IdentityField::ReplyTo,
+        "team@example.test",
+        &mut window_cx,
+    );
+    set_field(
+        &accounts,
+        IdentityField::Signature,
+        "Regards,\nRob\nExample Ltd",
+        &mut window_cx,
+    );
+    click_selector("identity-save", &mut window_cx);
+    assert!(!accounts.read_with(&window_cx, |accounts, _| accounts.identity_editor_open()));
+    let saved = &harness
+        .store
+        .list_synced_identities(imap)
+        .expect("identities")[0];
+    assert_eq!(saved.identity.email_address, "rob@example.test");
+    assert_eq!(saved.local.name, "Rob at work");
+    assert_eq!(saved.local.reply_to, "team@example.test");
+    assert_eq!(saved.local.signature, "Regards,\nRob\nExample Ltd");
+    assert!(
+        root.read_with(&window_cx, |root, cx| root.toast_messages(cx))
+            .contains(&"Saved rob@example.test.".to_owned())
+    );
+
+    // A JMAP identity linked to the server: its address is the server's,
+    // and the edit can go up at once.
+    click_selector(&format!("identity-edit-{linked}"), &mut window_cx);
+    assert!(address.read_with(&window_cx, |input, _| input.is_disabled()));
+    assert!(drawn("identity-save-server".into(), &mut window_cx));
+    set_field(
+        &accounts,
+        IdentityField::Signature,
+        "-- Rob, from Zmail",
+        &mut window_cx,
+    );
+    // (Save and update the server runs on the sync runtime, which GPUI's
+    // test scheduler can't wait for; the live James test covers it.)
+    click_selector("identity-save", &mut window_cx);
+    let synced = &harness
+        .store
+        .list_synced_identities(jmap)
+        .expect("identities")[0];
+    assert_eq!(synced.local.signature, "-- Rob, from Zmail");
+    assert_eq!(synced.identity.email_address, "rob@fast.test");
+    assert_eq!(synced.status, IdentitySyncStatus::ChangedHere);
+    // Which the account's notice now offers to send up.
+    assert!(drawn(
+        format!("identity-update-server-{linked}"),
+        &mut window_cx
+    ));
+
+    // A Proton address is fixed, and Proton adds no identities.
+    let proton_identity = harness.store.list_identities(proton).expect("identities")[0].id;
+    assert!(!drawn(format!("identity-add-{proton}"), &mut window_cx));
+    click_selector(&format!("identity-edit-{proton_identity}"), &mut window_cx);
+    assert!(address.read_with(&window_cx, |input, _| input.is_disabled()));
+    assert!(!drawn("identity-save-server".into(), &mut window_cx));
+    click_selector("identity-cancel", &mut window_cx);
+    assert!(!accounts.read_with(&window_cx, |accounts, _| accounts.identity_editor_open()));
+}
+
+#[gpui::test]
+fn identities_are_added_made_primary_and_removed_after_asking(cx: &mut TestAppContext) {
+    let mut seeded = (0, 0, 0, 0);
+    let (_view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Settings(SettingsSection::Accounts),
+        |store| seeded = seed_jmap_and_proton_accounts(store),
+    );
+    let (jmap, _, help, _) = seeded;
+    let imap = harness.store.list_accounts().expect("accounts")[0].id;
+    let first = harness.store.list_identities(imap).expect("identities")[0].id;
+    let (root, mut window_cx) = settings_window(cx);
+    window_cx.simulate_resize(size(px(820.0), px(2400.0)));
+    window_cx.run_until_parked();
+    let accounts = accounts_section(&root, &mut window_cx);
+    // The only identity can't be removed.
+    assert!(!drawn(format!("identity-delete-{first}"), &mut window_cx));
+
+    // Add: IMAP keeps it in Zmail only.
+    click_selector(&format!("identity-add-{imap}"), &mut window_cx);
+    assert!(!drawn("identity-save-server".into(), &mut window_cx));
+    set_field(&accounts, IdentityField::Name, "Alerts", &mut window_cx);
+    set_field(
+        &accounts,
+        IdentityField::Address,
+        "ME@example.test",
+        &mut window_cx,
+    );
+    click_selector("identity-save", &mut window_cx);
+    assert!(
+        accounts.read_with(&window_cx, |accounts, _| accounts.identity_editor_open()),
+        "the account already has that address"
+    );
+    set_field(
+        &accounts,
+        IdentityField::Address,
+        "alerts@example.test",
+        &mut window_cx,
+    );
+    click_selector("identity-save", &mut window_cx);
+    let identities = harness.store.list_identities(imap).expect("identities");
+    assert_eq!(identities.len(), 2);
+    let added = identities[1].id;
+    assert_eq!(identities[1].email_address, "alerts@example.test");
+    assert!(!identities[1].is_primary);
+
+    // Make primary.
+    click_selector(&format!("identity-make-primary-{added}"), &mut window_cx);
+    let identities = harness.store.list_identities(imap).expect("identities");
+    assert_eq!(identities[0].id, added);
+    assert!(identities[0].is_primary);
+    assert!(!drawn(
+        format!("identity-make-primary-{added}"),
+        &mut window_cx
+    ));
+    assert!(!drawn(format!("identity-delete-{added}"), &mut window_cx));
+
+    // Remove the old one, after asking: Cancel keeps it.
+    click_selector(&format!("identity-delete-{first}"), &mut window_cx);
+    assert!(accounts.read_with(&window_cx, |accounts, _| accounts.identity_removal_open()));
+    assert!(!drawn("identity-remove-everywhere".into(), &mut window_cx));
+    click_selector("identity-remove-cancel", &mut window_cx);
+    assert_eq!(
+        harness
+            .store
+            .list_identities(imap)
+            .expect("identities")
+            .len(),
+        2
+    );
+    click_selector(&format!("identity-delete-{first}"), &mut window_cx);
+    click_selector("identity-remove-confirm", &mut window_cx);
+    assert_eq!(
+        harness
+            .store
+            .list_identities(imap)
+            .expect("identities")
+            .len(),
+        1
+    );
+    assert!(
+        root.read_with(&window_cx, |root, cx| root.toast_messages(cx))
+            .contains(&"Removed me@example.test from Zmail.".to_owned())
+    );
+
+    // A JMAP account adds with the choice to create it on the server, and
+    // removing an identity the server lets the user delete offers the
+    // server too.
+    click_selector(&format!("identity-add-{jmap}"), &mut window_cx);
+    assert!(drawn("identity-save-server".into(), &mut window_cx));
+    click_selector("identity-cancel", &mut window_cx);
+    click_selector(&format!("identity-delete-{help}"), &mut window_cx);
+    assert!(drawn("identity-remove-everywhere".into(), &mut window_cx));
+    click_selector("identity-remove-confirm", &mut window_cx);
+    assert_eq!(
+        harness
+            .store
+            .list_identities(jmap)
+            .expect("identities")
+            .len(),
+        1
+    );
+    // Removed from Zmail only while the server lists it: hidden, under
+    // the account's identities, with Bring back.
+    let hidden = harness.store.list_hidden_identities(jmap).expect("hidden");
+    assert_eq!(hidden.len(), 1);
+    assert_eq!(hidden[0].email, "help@fast.test");
+    assert!(drawn(format!("hidden-identities-{jmap}"), &mut window_cx));
+    click_selector(
+        &format!("identity-bring-back-{}", hidden[0].id),
+        &mut window_cx,
+    );
+    assert_eq!(
+        harness
+            .store
+            .list_identities(jmap)
+            .expect("identities")
+            .len(),
+        2
+    );
+    assert!(
+        harness
+            .store
+            .list_hidden_identities(jmap)
+            .expect("hidden")
+            .is_empty()
+    );
+    assert!(!drawn(format!("hidden-identities-{jmap}"), &mut window_cx));
+    assert!(
+        root.read_with(&window_cx, |root, cx| root.toast_messages(cx))
+            .contains(&"Brought back help@fast.test.".to_owned())
+    );
 }
 
 #[gpui::test]
