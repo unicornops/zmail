@@ -8,7 +8,7 @@
   The cache budget caps the downloaded bodies and attachments kept for this account; the oldest go first and download again when opened.
 
   Identities
-  Work <me@work.example>  (changed in Zmail and on the server)
+  Work <me@work.example>  (primary, changed in Zmail and on the server)
   Help desk <help@work.example>  (no longer on the server)
 
   me@work.example differs from the server
@@ -16,6 +16,7 @@
     name: Zmail has “Work”, the server “Work Server”
   U: Update the server   S: Use the server's
 
+  Ret/E: Edit   D: Remove   *: Make primary   A: Add Identity
 
 
 
@@ -43,6 +44,5 @@
 
 
 
-
-U UpdServer         P PrevRow           Esc Accounts
-S UseServer         N NextRow
+Ret [Edit]          D Remove            U UpdServer         P PrevRow           Esc Accounts
+A Add               * MkPrimary         S UseServer         N NextRow

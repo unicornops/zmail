@@ -1,0 +1,48 @@
+  ZMAIL 0.0.0-test                                                       CHANGE ACCOUNT                                                   Folder: Unified Inbox
+  Change Fastmail
+  Up and Down choose a row; Enter changes it.
+
+  New password :    (Enter saves it)
+  Cache budget : < No limit >
+
+  The cache budget caps the downloaded bodies and attachments kept for this account; the oldest go first and download again when opened.
+
+  Identities
+  Alias <alias@fast.example>  (primary)
+  Fastmail <me@fast.example>  (same as the server)
+
+  Ret/E: Edit   D: Remove   *: Make primary   A: Add Identity
+
+  Hidden identities
+  Removed from Zmail only: the server still has them, and syncs leave them out.
+  Help desk <help@fast.example>
+  Ret/B: Bring back
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                             [Removed help@fast.example from Zmail]
+B BringBack         N NextRow
+P PrevRow           Esc Accounts

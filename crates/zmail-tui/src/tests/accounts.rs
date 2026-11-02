@@ -24,8 +24,8 @@ use zmail_setup::check::CheckPart;
 use zmail_store::LocalStore;
 
 use super::{
-    assert_printable, assert_snapshot, control, draw, environment, key, keys, now, seeded_store,
-    text_of,
+    app_with, assert_printable, assert_snapshot, control, draw, environment, key, keys, now,
+    open_work_inbox, seeded_store, text_of,
 };
 use crate::{
     accounts::Step,
@@ -340,6 +340,339 @@ fn change_lists_identities_and_offers_both_directions_for_a_differing_one() {
         Some("Removed help@work.example from Zmail")
     );
     assert_eq!(app.edit.as_ref().expect("still changing").cursor, 2);
+}
+
+#[test]
+fn the_identity_form_edits_an_identity_and_new_mail_uses_it() {
+    let store = seeded_store();
+    let (mut app, _) = setup_app(store.clone(), environment(), true);
+    let work = app.accounts[0].id;
+    keys(&mut app, "sa");
+    keys(&mut app, "c");
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+
+    // Ret opens the form; ^C leaves it unchanged.
+    key(&mut app, KeyCode::Enter);
+    assert!(app.edit.as_ref().is_some_and(|edit| edit.form.is_some()));
+    assert!(screen(&mut app, 80, 24).contains("CHANGE IDENTITY"));
+    keys(&mut app, "zz");
+    control(&mut app, 'c');
+    assert_eq!(app.status.as_deref(), Some("Nothing changed"));
+    assert_eq!(
+        app.store.list_identities(work).expect("identities")[0].display_name,
+        "Work"
+    );
+
+    // A bad address keeps the form open, saying why under the field.
+    keys(&mut app, "e");
+    control(&mut app, 'u');
+    keys(&mut app, "Me at work");
+    key(&mut app, KeyCode::Tab);
+    control(&mut app, 'u');
+    keys(&mut app, "not an address");
+    control(&mut app, 'x');
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Address: Enter an address like name@example.com.")
+    );
+    for (width, height) in [(80, 24), (160, 48)] {
+        let text = screen(&mut app, width, height);
+        assert!(text.contains("Enter an address like"), "{text}");
+        assert_snapshot(
+            &format!("identity-form-error-{width}x{height}"),
+            &draw(&mut app, width, height),
+        );
+    }
+
+    // Fixed, with a reply-to and a two-line signature: saved in Zmail only
+    // (IMAP keeps identities locally).
+    control(&mut app, 'u');
+    keys(&mut app, "me@work.example");
+    key(&mut app, KeyCode::Down);
+    keys(&mut app, "team@work.example");
+    key(&mut app, KeyCode::Enter);
+    keys(&mut app, "Regards");
+    key(&mut app, KeyCode::Enter);
+    keys(&mut app, "Me");
+    control(&mut app, 'x');
+    assert!(app.prompt.is_none());
+    assert_eq!(app.status.as_deref(), Some("Saved me@work.example"));
+    let saved = &app.store.list_synced_identities(work).expect("identities")[0];
+    assert_eq!(saved.local.name, "Me at work");
+    assert_eq!(saved.local.reply_to, "team@work.example");
+    assert_eq!(saved.local.signature, "Regards\nMe");
+    assert!(app.edit.as_ref().is_some_and(|edit| edit.form.is_none()));
+
+    // A new message starts from the edited signature.
+    let mut app = app_with(store, environment());
+    open_work_inbox(&mut app, 80, 24);
+    keys(&mut app, "c");
+    let compose = app.compose.as_ref().expect("composing");
+    assert_eq!(compose.text(crate::compose::Field::Body), "\n\nRegards\nMe");
+}
+
+/// Adds a JMAP account, Fastmail, whose identity and help desk are linked
+/// to server identities the user may delete (the help desk's name is
+/// hostile), and a Proton account; returns their ids.
+fn seed_jmap_and_proton(store: &LocalStore) -> (i64, i64) {
+    use zmail_core::{
+        CachePolicySummary, NewAccount, NewIdentity,
+        identity_sync::{IdentityValues, ServerIdentity},
+    };
+    let account = |name: &str, protocol: ProtocolKind, email: &str| NewAccount {
+        display_name: name.to_owned(),
+        protocol,
+        auth: AuthKind::Password,
+        endpoint: "https://api.fast.example/jmap/session".to_owned(),
+        username: email.to_owned(),
+        cache_policy: CachePolicySummary::performance_first(),
+        outgoing: None,
+        identities: vec![NewIdentity {
+            display_name: name.to_owned(),
+            email_address: email.to_owned(),
+            signature: String::new(),
+            is_primary: true,
+        }],
+    };
+    let jmap = store
+        .insert_account(&account("Fastmail", ProtocolKind::Jmap, "me@fast.example"))
+        .expect("stored");
+    let proton = store
+        .insert_account(&account(
+            "Proton",
+            ProtocolKind::Proton,
+            "me@proton.example",
+        ))
+        .expect("stored");
+    let server = |id: &str, email: &str, name: &str| ServerIdentity {
+        id: id.to_owned(),
+        email: email.to_owned(),
+        values: IdentityValues {
+            name: name.to_owned(),
+            reply_to: String::new(),
+            signature: "-- sent\x1b]0;pwned\x07 from the server".to_owned(),
+        },
+        may_delete: true,
+    };
+    store
+        .merge_server_identities(
+            jmap,
+            &[
+                server("i1", "me@fast.example", "Fastmail"),
+                server("i2", "help@fast.example", "Help\x1b[2J \u{202E}desk"),
+            ],
+        )
+        .expect("merged");
+    (jmap, proton)
+}
+
+#[test]
+fn a_jmap_identity_keeps_its_address_and_the_server_is_offered_each_change() {
+    use zmail_core::identity_sync::IdentitySyncStatus;
+
+    let store = seeded_store();
+    let (jmap, proton) = seed_jmap_and_proton(&store);
+    let (mut app, _) = setup_app(store, environment(), true);
+    keys(&mut app, "sa");
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+    keys(&mut app, "c");
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+    for (width, height) in [(80, 24), (160, 48)] {
+        let text = screen(&mut app, width, height);
+        assert!(text.contains("(primary, same as the server)"), "{text}");
+        assert!(!text.contains("pwned\u{7}"), "{text}");
+        assert_snapshot(
+            &format!("identity-list-{width}x{height}"),
+            &draw(&mut app, width, height),
+        );
+    }
+
+    // The help desk: its address is the server's, drawn fixed, and the
+    // cursor skips it (Name, Reply-To, Signature).
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Enter);
+    for (width, height) in [(80, 24), (160, 48)] {
+        let text = screen(&mut app, width, height);
+        assert!(text.contains("The server sets this address"), "{text}");
+        assert!(text.contains("^X") && text.contains("Save"), "{text}");
+        assert!(!text.contains("pwned\u{7}"), "{text}");
+        assert_snapshot(
+            &format!("identity-form-{width}x{height}"),
+            &draw(&mut app, width, height),
+        );
+    }
+    key(&mut app, KeyCode::Tab);
+    key(&mut app, KeyCode::Tab);
+    control(&mut app, 'u');
+    keys(&mut app, "-- The help desk");
+    control(&mut app, 'x');
+    // Saved; the server can have it too.
+    assert!(matches!(
+        app.prompt,
+        Some(Prompt::IdentityToServer { create: false, .. })
+    ));
+    let help = app
+        .store
+        .list_synced_identities(jmap)
+        .expect("identities")
+        .into_iter()
+        .find(|identity| identity.identity.email_address == "help@fast.example")
+        .expect("listed");
+    assert_eq!(help.status, IdentitySyncStatus::ChangedHere);
+    assert_eq!(help.local.signature, "-- The help desk");
+    // The untouched name keeps its stored value, not the filtered one.
+    assert_eq!(help.local.name, "Help\x1b[2J \u{202E}desk");
+    assert!(
+        app.prompt_text()
+            .is_some_and(|text| text.contains("Update the server too?"))
+    );
+    // (Updating needs the sync service, which tests lack; the live James
+    // test covers it.)
+    keys(&mut app, "y");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("This Zmail can't reach the server right now")
+    );
+
+    // Add, and keep it in Zmail.
+    keys(&mut app, "a");
+    assert!(screen(&mut app, 80, 24).contains("ADD IDENTITY"));
+    keys(&mut app, "Alias");
+    key(&mut app, KeyCode::Tab);
+    keys(&mut app, "alias@fast.example");
+    control(&mut app, 'x');
+    assert!(matches!(
+        app.prompt,
+        Some(Prompt::IdentityToServer { create: true, .. })
+    ));
+    keys(&mut app, "n");
+    assert_eq!(app.status.as_deref(), Some("Added alias@fast.example"));
+    let identities = app.store.list_synced_identities(jmap).expect("identities");
+    assert_eq!(identities.len(), 3);
+    assert_eq!(identities[2].status, IdentitySyncStatus::Local);
+
+    // The cursor is on it: make it primary, and it lists first.
+    keys(&mut app, "*");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("New mail now starts from alias@fast.example")
+    );
+    let identities = app.store.list_identities(jmap).expect("identities");
+    assert_eq!(identities[0].email_address, "alias@fast.example");
+    assert!(identities[0].is_primary);
+    let edit = app.edit.as_ref().expect("changing");
+    assert_eq!(
+        edit.identity_at_cursor()
+            .map(|identity| identity.identity.id),
+        Some(identities[0].id)
+    );
+
+    // The primary stays.
+    keys(&mut app, "d");
+    assert!(app.prompt.is_none());
+    assert!(
+        app.status
+            .as_deref()
+            .is_some_and(|status| status.contains("primary identity, so it stays"))
+    );
+
+    // The help desk: removing it asks, offering the server too.
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Down);
+    keys(&mut app, "d");
+    assert!(matches!(
+        app.prompt,
+        Some(Prompt::RemoveIdentity {
+            everywhere: true,
+            ..
+        })
+    ));
+    assert!(
+        app.commands()
+            .iter()
+            .any(|entry| entry.label == "AndServer"),
+        "{:?}",
+        app.commands()
+    );
+    keys(&mut app, "n");
+    assert_eq!(app.status.as_deref(), Some("Nothing removed"));
+    keys(&mut app, "d");
+    keys(&mut app, "s");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("This Zmail can't reach the server right now")
+    );
+    keys(&mut app, "d");
+    keys(&mut app, "y");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Removed help@fast.example from Zmail")
+    );
+    assert_eq!(
+        app.store.list_identities(jmap).expect("identities").len(),
+        2
+    );
+
+    // The server still lists it, so it is hidden from later syncs, under
+    // Hidden identities; Ret brings it back.
+    let edit = app.edit.as_ref().expect("changing");
+    assert_eq!(edit.hidden.len(), 1);
+    let rows = edit.rows();
+    while app.edit.as_ref().is_some_and(|edit| edit.cursor + 1 < rows) {
+        key(&mut app, KeyCode::Down);
+    }
+    for (width, height) in [(80, 24), (160, 48)] {
+        let text = screen(&mut app, width, height);
+        assert!(text.contains("Hidden identities"), "{text}");
+        assert!(text.contains("BringBack"), "{text}");
+        assert!(!text.contains('\u{202E}'), "{text}");
+        assert_snapshot(
+            &format!("identity-hidden-{width}x{height}"),
+            &draw(&mut app, width, height),
+        );
+    }
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Brought back help@fast.example")
+    );
+    assert_eq!(
+        app.store.list_identities(jmap).expect("identities").len(),
+        3
+    );
+    assert!(
+        app.store
+            .list_hidden_identities(jmap)
+            .expect("hidden")
+            .is_empty()
+    );
+
+    // Proton: no adding, and the address is Proton's.
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Down);
+    keys(&mut app, "c");
+    // (On the first row, letters type the new password.)
+    key(&mut app, KeyCode::Down);
+    keys(&mut app, "a");
+    assert!(
+        app.status
+            .as_deref()
+            .is_some_and(|status| status.contains("Proton's settings")),
+        "{:?}",
+        app.status
+    );
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Enter);
+    let form = app
+        .edit
+        .as_ref()
+        .and_then(|edit| edit.form.as_ref())
+        .expect("the form is open");
+    assert!(!form.address_editable);
+    assert_eq!(app.edit.as_ref().map(|edit| edit.account.id), Some(proton));
 }
 
 #[test]

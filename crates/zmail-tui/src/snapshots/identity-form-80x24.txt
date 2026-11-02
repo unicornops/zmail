@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test              CHANGE IDENTITY           Folder: Unified Inbox
+  Edit help@fast.example
+
+Name     : Help desk
+Address  : help@fast.example  (The server sets this address.)
+Reply-To :
+Signature:
+-- sent from the server
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^X Save      Tab NextFld
+^C Cancel    ^U Clear

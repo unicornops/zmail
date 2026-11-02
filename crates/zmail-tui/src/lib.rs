@@ -31,6 +31,7 @@ mod clipboard;
 mod compose;
 mod data;
 mod editor;
+mod identities;
 mod links;
 mod message;
 mod notifier;

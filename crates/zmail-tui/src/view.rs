@@ -16,6 +16,7 @@ use zmail_core::{preferences::CopyClipboard, time::format_list_date};
 
 mod accounts;
 mod compose;
+mod identities;
 
 use crate::{
     app::{App, MENU_ITEMS, Prompt, SETUP_ROWS, Screen, SetupRow},
@@ -184,6 +185,9 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         }
         Screen::Accounts => accounts::draw_accounts(app, frame, theme, body),
         Screen::AddAccount => accounts::draw_add(app, frame, theme, body),
+        Screen::EditAccount if app.edit.as_ref().is_some_and(|edit| edit.form.is_some()) => {
+            identities::draw_identity_form(app, frame, theme, body)
+        }
         Screen::EditAccount => accounts::draw_edit(app, frame, theme, body),
     }
     if let Some(Prompt::Save(save)) = app.prompt.clone() {
@@ -346,7 +350,13 @@ fn draw_title(app: &App, frame: &mut Frame, theme: Theme, area: Rect) {
         Screen::Outbox => "OUTBOX",
         Screen::Accounts => "SETUP ACCOUNTS",
         Screen::AddAccount => "ADD ACCOUNT",
-        Screen::EditAccount => "CHANGE ACCOUNT",
+        Screen::EditAccount => match app.edit.as_ref().and_then(|edit| edit.form.as_ref()) {
+            Some(form) if form.mode == zmail_setup::identity_editor::FormMode::Add => {
+                "ADD IDENTITY"
+            }
+            Some(_) => "CHANGE IDENTITY",
+            None => "CHANGE ACCOUNT",
+        },
     };
     let detail = app.title_detail();
     let right = fit_right(

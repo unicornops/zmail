@@ -1,0 +1,48 @@
+  ZMAIL 0.0.0-test                                                      CHANGE IDENTITY                                                   Folder: Unified Inbox
+  Edit me@work.example
+
+Name     : Me at work
+Address  : not an address
+           Enter an address like name@example.com.
+Reply-To :
+Signature:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                       [Address: Enter an address like name@example.com.]
+^X Save             Tab NextFld
+^C Cancel           ^U Clear

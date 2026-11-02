@@ -265,12 +265,15 @@ pub(super) fn draw_edit(app: &mut App, frame: &mut Frame, theme: Theme, body: Re
         0,
     );
     let identity_lines = identity_lines(&mut out, edit);
+    identity_keys(&mut out, edit);
+    let hidden_lines = hidden_lines(&mut out, edit);
     if let Some(url) = &edit.sign_in_url {
         out.blank();
         browser_lines(&mut out, url, over_ssh);
     }
     let cursor = match edit.cursor.checked_sub(EDIT_ROWS) {
-        Some(index) => identity_lines + index,
+        Some(index) if index < edit.identities.len() => identity_lines + index,
+        Some(index) => hidden_lines + index - edit.identities.len(),
         None => first + edit.cursor,
     };
     let password_row = edit.cursor == 0 && edit.auth == AuthKind::Password;
@@ -302,11 +305,24 @@ fn identity_lines(out: &mut Lines, edit: &EditAccount) -> usize {
     out.line("Identities", theme.bold());
     let first = out.lines.len();
     for (index, identity) in edit.identities.iter().enumerate() {
-        let status = status_label(identity.status);
-        let text = if status.is_empty() {
+        let marks = [
+            identity
+                .identity
+                .is_primary
+                .then_some(zmail_setup::identity_editor::PRIMARY),
+            Some(status_label(identity.status)).filter(|status| !status.is_empty()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        let text = if marks.is_empty() {
             sanitize_line(&identity_line(identity))
         } else {
-            format!("{}  ({status})", sanitize_line(&identity_line(identity)))
+            format!(
+                "{}  ({})",
+                sanitize_line(&identity_line(identity)),
+                marks.join(", ")
+            )
         };
         let row = EDIT_ROWS + index;
         let style = if row == edit.cursor {
@@ -351,6 +367,61 @@ fn identity_lines(out: &mut Lines, edit: &EditAccount) -> usize {
     };
     out.para(&keys, theme.faint(), 0);
     first
+}
+
+/// The account's hidden server identities, each a row (after the
+/// identities' rows), under their heading. Returns the line the first is
+/// on. Addresses and names come from the server, so both are filtered.
+fn hidden_lines(out: &mut Lines, edit: &EditAccount) -> usize {
+    use zmail_setup::identity_editor::{BRING_BACK, HIDDEN_HEADING, HIDDEN_NOTE};
+    let theme = out.theme;
+    if edit.hidden.is_empty() {
+        return out.lines.len();
+    }
+    out.blank();
+    out.line(HIDDEN_HEADING, theme.bold());
+    out.para(HIDDEN_NOTE, theme.faint(), 0);
+    let first = out.lines.len();
+    for (index, hidden) in edit.hidden.iter().enumerate() {
+        let name = sanitize_line(hidden.values.name.trim());
+        let email = sanitize_line(&hidden.email);
+        let text = if name.is_empty() {
+            email
+        } else {
+            format!("{name} <{email}>")
+        };
+        let row = EDIT_ROWS + edit.identities.len() + index;
+        let style = if row == edit.cursor {
+            theme.reversed()
+        } else {
+            theme.faint()
+        };
+        out.lines.push(PaneLine {
+            target: Some(row),
+            ..PaneLine::new(Span::styled(
+                fit(&format!("{MARGIN}{text}"), out.width, theme.ellipsis()),
+                style,
+            ))
+        });
+    }
+    out.para(&format!("Ret/B: {BRING_BACK}"), theme.faint(), 0);
+    first
+}
+
+/// What the identities' keys do, under the list.
+fn identity_keys(out: &mut Lines, edit: &EditAccount) {
+    use zmail_setup::identity_editor::{ADD, EDIT, MAKE_PRIMARY};
+    let account = edit.account_identities();
+    let theme = out.theme;
+    let mut keys = format!("Ret/E: {EDIT}   D: Remove   *: {MAKE_PRIMARY}");
+    if account.can_add() {
+        keys.push_str(&format!("   A: {ADD}"));
+    }
+    out.blank();
+    out.para(&keys, theme.faint(), 0);
+    if let Some(note) = account.add_note() {
+        out.para(note, theme.faint(), 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
