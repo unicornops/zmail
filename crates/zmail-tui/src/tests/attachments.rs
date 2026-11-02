@@ -171,6 +171,16 @@ fn the_attachment_index_matches_its_snapshot_and_filters_names() {
     }
 }
 
+/// The path the prompt's field names, with `~` expanded: the field shows
+/// a folder under the home folder from `~` (Windows' temporary folder is
+/// one).
+fn field_path(app: &App) -> PathBuf {
+    match &app.prompt {
+        Some(Prompt::Path(prompt)) => prompt.field.path(),
+        other => panic!("no path prompt: {other:?}"),
+    }
+}
+
 /// `/` in `path` as this platform's separator after the first folder, as
 /// the field shows a folder it was given with `/`.
 fn slashes_back(path: &str) -> String {
@@ -199,10 +209,7 @@ fn saving_one_asks_before_replacing_and_goes_back_to_the_path_on_no() {
     let folder = scratch("one");
     let mut app = attachment_index(Some(folder.clone()), 80, 24);
     keys(&mut app, "s");
-    assert_eq!(
-        field(&app),
-        format!("{}{MAIN_SEPARATOR}contract.pdf", folder.display())
-    );
+    assert_eq!(field_path(&app), folder.join("contract.pdf"));
     key(&mut app, KeyCode::Enter);
     let saved = folder.join("contract.pdf");
     assert_eq!(std::fs::read(&saved).expect("saved"), b"%PDF signed");
@@ -241,8 +248,8 @@ fn saving_one_asks_before_replacing_and_goes_back_to_the_path_on_no() {
     // y replaces.
     keys(&mut app, "s");
     assert_eq!(
-        field(&app),
-        format!("{}{MAIN_SEPARATOR}contract.pdf", folder.display()),
+        field_path(&app),
+        folder.join("contract.pdf"),
         "the next save starts in the folder saved to"
     );
     key(&mut app, KeyCode::Enter);
@@ -289,7 +296,7 @@ fn save_all_numbers_taken_names_and_says_what_failed() {
     std::fs::write(folder.join("contract.pdf"), b"mine").expect("written");
     let mut app = attachment_index(Some(folder.clone()), 80, 24);
     keys(&mut app, "a");
-    assert_eq!(field(&app), format!("{}{MAIN_SEPARATOR}", folder.display()));
+    assert_eq!(field_path(&app), folder);
     let screen = text_of(&draw(&mut app, 160, 48));
     assert!(
         screen.contains("Save every attachment into the folder: "),
