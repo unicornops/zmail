@@ -1,0 +1,48 @@
+  ZMAIL 0.0.0-test                                                       MESSAGE INDEX                                               Folder: INBOX  Conv 1 of 4
+  COMMANDS ON THIS SCREEN
+  Type to narrow the list. Enter runs the one under the cursor, Esc closes.
+
+    E      Archive    Archive the conversation
+    W      WhereIs    Search: WhereIs
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+: arch
+Ret Run             Down Next
+Up Prev             Esc Cancel

@@ -44,5 +44,5 @@ Local
 
 
 
-? Help              > [ViewFldr]        N NextFldr          Spc NextPage        M Main Menu         C Compose
-< Main Menu         P PrevFldr          - PrevPage          W WhereIs           I Index             Q Quit
+? Help              > [ViewFldr]        N NextFldr          Spc NextPage        M Main Menu         C Compose           Q Quit
+< Main Menu         P PrevFldr          - PrevPage          W WhereIs           I Index             : Commands

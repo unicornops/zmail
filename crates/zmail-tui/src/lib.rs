@@ -37,6 +37,7 @@ mod links;
 mod message;
 mod notifier;
 mod outbox;
+mod palette;
 mod pane;
 mod paths;
 mod terminal;

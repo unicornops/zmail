@@ -44,5 +44,5 @@
 
 
 
-? Help              > [Change]          N Next              C Change            M Main Menu
-< Setup             P Prev              A Add               D Delete            Q Quit
+? Help              > [Change]          N Next              C Change            M Main Menu         Q Quit
+< Setup             P Prev              A Add               D Delete            : Commands

@@ -1784,6 +1784,7 @@ impl App {
                 entry("C", "Change", ChangeAccount),
                 entry("D", "Delete", DeleteAccount),
                 entry("M", "Main Menu", MainMenu),
+                entry(":", "Commands", Palette),
                 entry("Q", "Quit", Quit),
             ],
             Screen::EditAccount => {

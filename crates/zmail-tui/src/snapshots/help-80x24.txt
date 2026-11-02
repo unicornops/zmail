@@ -20,5 +20,5 @@
     /          list conversations or single messages
     V          the preview pane, beside the index in terminals 120 columns or
 
-< Back       Spc NextPage Q Quit
-- PrevPage   M Main Menu
+< Back       Spc NextPage : Commands
+- PrevPage   M Main Menu  Q Quit

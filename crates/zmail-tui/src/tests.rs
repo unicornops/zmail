@@ -32,6 +32,7 @@ use crate::{
 mod accounts;
 mod attachments;
 mod compose;
+mod palette;
 mod triage;
 mod warnings;
 

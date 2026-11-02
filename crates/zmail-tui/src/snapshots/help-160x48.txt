@@ -15,6 +15,8 @@
                find text in a message. The index follows as you type; Enter also asks the server for mail not downloaded yet.
     /          list conversations or single messages
     V          the preview pane, beside the index in terminals 120 columns or wider
+    :          the command palette: every command of the screen with its key; type a few letters of what you want (arch, folder, trash), Up and Down move, Enter
+               runs it, Esc closes. Not in Compose or the account forms, where : is text.
     Q          quit (Zmail asks first)
 
   Triage
@@ -42,7 +44,5 @@
     A there saves every attachment into a folder, numbering a name that is taken (report (1).pdf).
     Zmail never opens an attachment from the terminal: save it, then open it yourself.
 
-  Writing mail
-
-< Back              Spc NextPage        Q Quit
-- PrevPage          M Main Menu
+< Back              Spc NextPage        : Commands
+- PrevPage          M Main Menu         Q Quit

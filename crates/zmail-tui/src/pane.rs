@@ -43,6 +43,8 @@ pub enum PaneId {
     EditAccount,
     /// The Attachment Index.
     Attachments,
+    /// The command palette (`:`).
+    Palette,
 }
 
 /// A line a pane draws.

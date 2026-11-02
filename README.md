@@ -174,6 +174,7 @@ The screens work like Pine and Alpine: a title bar, the screen, a status line, a
 | `C` | compose (wherever `C` is free); `R` reply and `F` forward in the Message Index and Message Text |
 | `T` | the Outbox (from the Main Menu; also under Local in the Folder List) |
 | `S` | Setup (from the Main Menu); `A` there opens Accounts |
+| `:` | the command palette: every command of the screen with its key, filtered as you type (the desktop app's fuzzy matcher), Enter runs one; not in Compose or the account forms, where `:` is text |
 | `Q` | quit, after asking |
 
 **Triage** works in the Message Index on the message under the cursor and in Message Text on the open one. Each command acts on the whole conversation, as in the desktop app (also when the index lists single messages), and the status line says what it did with its undo key ("Conversation moved to Trash. U Undo").
