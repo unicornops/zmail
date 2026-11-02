@@ -237,6 +237,7 @@ fn submit_harness_attachment_message(
                 to: vec![MAIL_HARNESS_JMAP_ACCOUNT.to_owned()],
                 cc: Vec::new(),
                 bcc: Vec::new(),
+                reply_to: Vec::new(),
                 subject: subject.to_owned(),
                 text_body: body.to_owned(),
                 attachments: vec![OutgoingAttachment {
@@ -672,6 +673,7 @@ fn a_reply_from_zmail_threads_over_jmap() -> Result<()> {
                 ],
                 cc: Vec::new(),
                 bcc: Vec::new(),
+                reply_to: Vec::new(),
                 subject: subject.to_owned(),
                 text_body: "Launch on Monday?".to_owned(),
                 attachments: Vec::new(),
@@ -692,8 +694,16 @@ fn a_reply_from_zmail_threads_over_jmap() -> Result<()> {
     );
 
     // Reply to all, as both frontends start it: the harness sender, a
-    // local James user, gets a copy.
+    // local James user, gets a copy. The identity has a reply-to.
     let identities = store.list_identities(account_id)?;
+    store.update_identity(
+        identities[0].id,
+        &zmail_core::identity_sync::IdentityValues {
+            name: identities[0].display_name.clone(),
+            reply_to: "\"Desk, Phase 2b\" <desk@phase2b.test>, ops@phase2b.test".to_owned(),
+            signature: identities[0].signature.clone(),
+        },
+    )?;
     let start = zmail_actions::reply::reply(
         &view.subject,
         &view.mailbox_name,
@@ -740,12 +750,18 @@ fn a_reply_from_zmail_threads_over_jmap() -> Result<()> {
     let delivered = sender_store
         .thread_view(delivered)?
         .context("the delivered reply should load")?;
-    let headers = &delivered
+    let reply = delivered
         .messages
         .iter()
         .find(|message| message.subject == start.subject)
-        .context("the reply is in the thread")?
-        .headers;
+        .context("the reply is in the thread")?;
+    // James parsed the imported message's Reply-To into its addresses.
+    assert_eq!(
+        reply.reply_to.as_deref(),
+        Some("Desk, Phase 2b <desk@phase2b.test>, ops@phase2b.test"),
+        "Reply-To is the identity's"
+    );
+    let headers = &reply.headers;
     assert_eq!(
         headers.in_reply_to,
         ["launch-2@phase2b.test"],
