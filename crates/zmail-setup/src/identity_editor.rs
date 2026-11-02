@@ -528,6 +528,7 @@ mod tests {
                 display_name: local.name.clone(),
                 email_address: email.to_owned(),
                 signature: local.signature.clone(),
+                reply_to: local.reply_to.clone(),
                 is_primary: primary,
             },
             server: linked.then(|| local.clone()),

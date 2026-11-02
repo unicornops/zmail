@@ -204,6 +204,7 @@ fn syncs_attachments_and_saves_the_original_bytes() -> Result<()> {
                 to: vec![MAIL_HARNESS_RECIPIENT.to_owned()],
                 cc: Vec::new(),
                 bcc: Vec::new(),
+                reply_to: Vec::new(),
                 subject: "Phase 2b attachment roundtrip".to_owned(),
                 text_body: "This message carries an attachment.".to_owned(),
                 attachments: vec![OutgoingAttachment {
@@ -413,6 +414,7 @@ fn a_reply_from_zmail_threads_on_the_server() -> Result<()> {
                 to: vec![MAIL_HARNESS_RECIPIENT.to_owned()],
                 cc: Vec::new(),
                 bcc: Vec::new(),
+                reply_to: Vec::new(),
                 subject: subject.to_owned(),
                 text_body: "Shall we ship on Friday?".to_owned(),
                 attachments: Vec::new(),
@@ -438,8 +440,17 @@ fn a_reply_from_zmail_threads_on_the_server() -> Result<()> {
         Some("plan-2@sender.test")
     );
 
-    // Reply as both frontends do, and send through the outbox.
+    // Reply as both frontends do, from an identity with a reply-to, and
+    // send through the outbox.
     let identities = store.list_identities(account_id)?;
+    store.update_identity(
+        identities[0].id,
+        &zmail_core::identity_sync::IdentityValues {
+            name: identities[0].display_name.clone(),
+            reply_to: "Harness Desk <desk@example.test>, ops@example.test".to_owned(),
+            signature: identities[0].signature.clone(),
+        },
+    )?;
     let start = zmail_actions::reply::reply(
         &view.subject,
         &view.mailbox_name,
@@ -480,7 +491,7 @@ fn a_reply_from_zmail_threads_on_the_server() -> Result<()> {
     let headers = loop {
         sender.command("SELECT INBOX")?;
         if let Ok(transcript) = sender.command(
-            "FETCH 1:* (BODY.PEEK[HEADER.FIELDS (SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)])",
+            "FETCH 1:* (BODY.PEEK[HEADER.FIELDS (SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES REPLY-TO)])",
         ) {
             let transcript = unfolded(&transcript);
             if let Some(found) = transcript
@@ -507,6 +518,10 @@ fn a_reply_from_zmail_threads_on_the_server() -> Result<()> {
     assert!(
         headers.contains(&format!("Message-ID: <{sent_id}>")),
         "the Message-ID is the one the draft keeps: {headers}"
+    );
+    assert!(
+        headers.contains("Reply-To: \"Harness Desk\" <desk@example.test>, <ops@example.test>"),
+        "Reply-To is the identity's, each address apart from its name: {headers}"
     );
     Ok(())
 }
@@ -536,6 +551,7 @@ fn a_forward_from_zmail_arrives_with_the_attachment() -> Result<()> {
                 to: vec![MAIL_HARNESS_RECIPIENT.to_owned()],
                 cc: Vec::new(),
                 bcc: Vec::new(),
+                reply_to: Vec::new(),
                 subject: subject.to_owned(),
                 text_body: "Signed copy attached.".to_owned(),
                 attachments: vec![OutgoingAttachment {

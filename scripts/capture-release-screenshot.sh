@@ -83,6 +83,8 @@ MATRIX=(
   "compose-light compose light 760 680"
   "compose-invalid-dark compose-invalid dark 760 680"
   "compose-invalid-light compose-invalid light 760 680"
+  "compose-reply-to-dark compose-reply-to dark 760 680"
+  "compose-reply-to-light compose-reply-to light 760 680"
   "undo-send-dark undo-send dark 1440 920"
   "undo-send-light undo-send light 1440 920"
   "account-setup-dark account-setup dark 640 780"
@@ -232,6 +234,7 @@ window_title_for() {
   case "$1" in
     compose) echo "Re: Q4 roadmap review" ;;
     compose-invalid) echo "Offline search demo" ;;
+    compose-reply-to) echo "Your support request" ;;
     account-setup) echo "Add Account" ;;
     settings-*) echo "Settings" ;;
     *) echo "${WINDOW_TITLE}" ;;

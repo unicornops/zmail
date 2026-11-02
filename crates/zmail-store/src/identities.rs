@@ -524,6 +524,7 @@ impl LocalStore {
                         display_name: row.local.name.clone(),
                         email_address: row.email,
                         signature: row.local.signature.clone(),
+                        reply_to: row.local.reply_to.clone(),
                         is_primary: row.is_primary,
                     },
                     local: row.local,

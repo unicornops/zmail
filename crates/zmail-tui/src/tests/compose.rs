@@ -1114,6 +1114,99 @@ fn from_offers_the_accounts_identities() {
 }
 
 #[test]
+fn compose_shows_where_replies_go_under_from() {
+    use zmail_core::identity_sync::IdentityValues;
+
+    let store = seeded_store();
+    let (work, _) = accounts(&store);
+    let identity = store.list_identities(work).expect("identities")[0].clone();
+    let values = |reply_to: &str| IdentityValues {
+        name: identity.display_name.clone(),
+        reply_to: reply_to.to_owned(),
+        signature: String::new(),
+    };
+    store
+        .update_identity(
+            identity.id,
+            &values("Help\x1b[2J Desk <desk@work.example>, ops@work.example"),
+        )
+        .expect("the reply-to is stored");
+    store
+        .add_identity(work, "support@work.example", &values(""))
+        .expect("another identity");
+    let mut app = app_with(store, environment());
+    open_work_inbox(&mut app, 80, 24);
+    keys(&mut app, "c");
+    let screen = draw(&mut app, 80, 24);
+    assert_printable(&screen);
+    assert_snapshot("compose-reply-to-80x24", &screen);
+    assert_snapshot("compose-reply-to-160x48", &draw(&mut app, 160, 48));
+    assert!(
+        text_of(&screen).contains("Replies go to: Help Desk <desk@work.example>, ops@work.example"),
+        "{}",
+        text_of(&screen)
+    );
+
+    // An edit of the identity meanwhile leaves the open draft's; a new
+    // message takes the edited one.
+    let postponed = compose(&app).draft_id;
+    app.store
+        .update_identity(identity.id, &values("new@work.example"))
+        .expect("edited");
+    control(&mut app, 'o');
+    assert_eq!(
+        stored_draft_by_id(&app, postponed).identity_reply_to,
+        "Help\x1b[2J Desk <desk@work.example>, ops@work.example"
+    );
+    let fresh = app
+        .store
+        .create_draft(&zmail_core::NewDraft {
+            account_id: work,
+            identity_id: identity.id,
+            to: Vec::new(),
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: String::new(),
+            body: String::new(),
+            threading: Default::default(),
+        })
+        .expect("a new draft");
+    app.open_compose(fresh, true, Field::To);
+    assert!(text_of(&draw(&mut app, 80, 24)).contains("Replies go to: new@work.example"));
+    app.open_compose(postponed, false, Field::To);
+    assert!(
+        text_of(&draw(&mut app, 80, 24)).contains("Replies go to: Help Desk"),
+        "the open draft keeps its reply-to"
+    );
+
+    // Another identity without one: no line; back again: the identity's
+    // current one, as the store saves it.
+    key(&mut app, KeyCode::Up);
+    assert_eq!(compose(&app).focus, Field::From);
+    key(&mut app, KeyCode::Char(' '));
+    let screen = text_of(&draw(&mut app, 80, 24));
+    assert!(screen.contains("support@work.example"), "{screen}");
+    assert!(!screen.contains("Replies go to"), "{screen}");
+    control(&mut app, 'o');
+    assert_eq!(stored_draft_by_id(&app, postponed).identity_reply_to, "");
+    app.open_compose(postponed, false, Field::From);
+    key(&mut app, KeyCode::Char(' '));
+    assert_eq!(compose(&app).reply_to(), "new@work.example");
+    control(&mut app, 'o');
+    assert_eq!(
+        stored_draft_by_id(&app, postponed).identity_reply_to,
+        "new@work.example"
+    );
+}
+
+fn stored_draft_by_id(app: &App, draft_id: i64) -> zmail_core::DraftDetail {
+    app.store
+        .draft_detail(draft_id)
+        .expect("the draft loads")
+        .expect("the draft exists")
+}
+
+#[test]
 fn a_new_message_leaves_room_above_the_signature() {
     let store = seeded_store();
     let (work, _) = accounts(&store);

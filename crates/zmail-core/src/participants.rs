@@ -207,6 +207,17 @@ pub fn parse_address_list(value: &str) -> Vec<Participant> {
     participants
 }
 
+/// The mailboxes of an address list that name an address, each as
+/// drafts keep recipients (`Name <address>` or `address`): an identity's
+/// reply-to as the outbox sends it. Empty for an empty list.
+pub fn address_entries(value: &str) -> Vec<String> {
+    parse_address_list(value)
+        .into_iter()
+        .filter(|participant| participant.email.is_some())
+        .map(|participant| participant.to_header_value())
+        .collect()
+}
+
 /// Formats participants as an address list that [`parse_address_list`]
 /// reads back.
 pub fn format_address_list(participants: &[Participant]) -> String {
@@ -309,7 +320,7 @@ fn unquote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Participant, format_address_list, parse_address_list, participant_names,
+        Participant, address_entries, format_address_list, parse_address_list, participant_names,
         participant_summary, sender_display_name, sender_identity, thread_participants,
     };
     use crate::MessageSnapshot;
@@ -364,6 +375,15 @@ mod tests {
             sender_display_name("Grace Hopper <grace@example.com>"),
             "Grace Hopper"
         );
+    }
+
+    #[test]
+    fn address_entries_keep_the_mailboxes_that_name_an_address() {
+        assert_eq!(
+            address_entries("\"Tickets, Inc\" <tickets@example.com>, ops@example.com; Nobody"),
+            ["\"Tickets, Inc\" <tickets@example.com>", "ops@example.com"]
+        );
+        assert!(address_entries("  ").is_empty());
     }
 
     #[test]

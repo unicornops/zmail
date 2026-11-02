@@ -1,7 +1,8 @@
 //! Drawing the Compose screen, Pico's: a header field per row (From when
-//! the account has several identities, To, Cc, Bcc, Attchmnt with an
-//! attachment per row, Subject), the "Message Text" rule, then the body;
-//! and the postponed messages and the Outbox.
+//! the account has several identities, where replies go when the identity
+//! has a reply-to, To, Cc, Bcc, Attchmnt with an attachment per row,
+//! Subject), the "Message Text" rule, then the body; and the postponed
+//! messages and the Outbox.
 //!
 //! Draft text was filtered when the draft was opened or typed in
 //! (`compose.rs`), file and address names when they were listed.
@@ -42,6 +43,7 @@ pub(super) fn draw_compose(app: &mut App, frame: &mut Frame, theme: Theme, body:
     let bottom = body.y + body.height;
     let mut y = body.y;
     let field_width = width.saturating_sub(LABEL_WIDTH);
+    let reply_to = compose.reply_to();
     let cursor_style = |focused: bool| {
         if focused {
             theme.reversed()
@@ -52,6 +54,25 @@ pub(super) fn draw_compose(app: &mut App, frame: &mut Frame, theme: Theme, body:
     for field in compose.fields() {
         if field == Field::Body || y >= bottom {
             break;
+        }
+        // Where replies go, read-only, under From (filtered by
+        // `Compose::reply_to`).
+        if field == Field::To && !reply_to.is_empty() {
+            frame.buffer_mut().set_stringn(
+                LABEL_WIDTH,
+                y,
+                fit(
+                    &format!("Replies go to: {reply_to}"),
+                    usize::from(field_width),
+                    theme.ellipsis(),
+                ),
+                usize::from(field_width),
+                theme.faint(),
+            );
+            y += 1;
+            if y >= bottom {
+                break;
+            }
         }
         let focused = compose.focus == field;
         let label_style = if focused { theme.bold() } else { Style::new() };

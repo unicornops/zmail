@@ -247,6 +247,9 @@ pub struct Compose {
     pub identities: Vec<IdentitySummary>,
     /// The identity it is sent from.
     pub identity_id: i64,
+    /// The identity the stored draft is on and the reply-to it keeps from
+    /// it, which may predate an edit of the identity.
+    saved_reply_to: (i64, String),
     /// To, Cc, Bcc and Subject: one-line editors.
     pub to: TextArea<'static>,
     /// Cc.
@@ -469,6 +472,7 @@ impl Compose {
             draft_id: draft.id,
             identities,
             identity_id: draft.identity_id,
+            saved_reply_to: (draft.identity_id, draft.identity_reply_to),
             to: line_editor(&addresses(&draft.to)),
             cc: line_editor(&addresses(&draft.cc)),
             bcc: line_editor(&addresses(&draft.bcc)),
@@ -523,6 +527,28 @@ impl Compose {
     /// Whether anything changed since the draft was opened.
     pub fn changed(&self) -> bool {
         self.update() != self.initial.0 || self.attachment_ids() != self.initial.1
+    }
+
+    /// Where replies go, filtered for the terminal: the reply-to the draft
+    /// is sent with, the stored draft's while it stays on that identity,
+    /// else the chosen identity's. Empty for none.
+    pub fn reply_to(&self) -> String {
+        let (saved_identity, saved) = &self.saved_reply_to;
+        let reply_to = if *saved_identity == self.identity_id {
+            saved.as_str()
+        } else {
+            self.identities
+                .iter()
+                .find(|identity| identity.id == self.identity_id)
+                .map(|identity| identity.reply_to.as_str())
+                .unwrap_or_default()
+        };
+        sanitize_line(reply_to.trim())
+    }
+
+    /// Takes the reply-to the stored draft now keeps, after a save.
+    pub(crate) fn saved(&mut self, draft: &DraftDetail) {
+        self.saved_reply_to = (draft.identity_id, draft.identity_reply_to.clone());
     }
 
     /// The fields shown, in order: From only when the account has more
@@ -1734,7 +1760,13 @@ impl App {
         let update = compose.update();
         compose.dirty = false;
         let draft_id = compose.draft_id;
-        self.actions.save_draft(draft_id, &update, &mut |_| {})
+        self.actions.save_draft(draft_id, &update, &mut |_| {})?;
+        if let Ok(Some(draft)) = self.store.draft_detail(draft_id)
+            && let Some(compose) = self.compose.as_mut()
+        {
+            compose.saved(&draft);
+        }
+        Ok(())
     }
 
     /// Saves the draft once typing has paused for [`AUTOSAVE_DELAY`], as

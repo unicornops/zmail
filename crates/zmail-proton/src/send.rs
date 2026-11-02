@@ -37,6 +37,11 @@
 // delete after sending: Zmail's drafts are local, so its mail never
 // references a Proton draft. The addresses are always combined, so the
 // metadata lookups are not limited to the sending address.
+// Modified by UnicornOps on 2026-11-02: the sending identity's reply-to
+// goes in the MIME body as `Reply-To`, where Bridge finds an SMTP
+// client's. Like Bridge, the draft is created without `ReplyTos`
+// (go-proton-api's `DraftTemplate` has none), so only the MIME packages
+// (PGP/MIME and clear MIME recipients) carry it.
 
 //! Sending a message through Proton: Bridge's SMTP service.
 
@@ -242,11 +247,14 @@ async fn send_with_key(
         external_id: message.message_id.clone().unwrap_or_default(),
         ..DraftTemplate::default()
     };
+    // In the MIME only, as Bridge sends an SMTP client's Reply-To.
+    let reply_to: Vec<EmailAddress> = message.reply_to.iter().map(address).collect();
     let mime_body = build_mime_body(
         &MimeSource {
             from: &template.sender,
             to: &template.to_list,
             cc: &template.cc_list,
+            reply_to: &reply_to,
             subject: &template.subject,
             text: body,
             message_id: message.message_id.as_deref(),
@@ -674,6 +682,7 @@ mod tests {
             to: vec!["bob@example.com".to_owned()],
             cc: Vec::new(),
             bcc: Vec::new(),
+            reply_to: Vec::new(),
             subject: "Re: Hi".to_owned(),
             text_body: String::new(),
             attachments: Vec::new(),

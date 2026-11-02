@@ -83,6 +83,9 @@ pub(crate) struct ComposeState {
     pub(crate) account_id: i64,
     pub(crate) identity_id: i64,
     pub(crate) identity_email: String,
+    /// The reply-to the draft is sent with (its identity's), shown under
+    /// From; empty for none.
+    pub(crate) identity_reply_to: String,
     pub(crate) to: Entity<RecipientField>,
     pub(crate) cc: Entity<RecipientField>,
     pub(crate) bcc: Entity<RecipientField>,
@@ -116,6 +119,7 @@ impl ComposeState {
             account_id: draft.account_id,
             identity_id: draft.identity_id,
             identity_email: draft.identity_email,
+            identity_reply_to: draft.identity_reply_to,
             to: recipients("To", &draft.to, window, cx),
             cc: recipients("Cc", &draft.cc, window, cx),
             bcc: recipients("Bcc", &draft.bcc, window, cx),
@@ -155,6 +159,7 @@ impl ComposeState {
     pub(crate) fn update_from_draft(&mut self, draft: DraftDetail) {
         self.identity_id = draft.identity_id;
         self.identity_email = draft.identity_email;
+        self.identity_reply_to = draft.identity_reply_to;
         self.attachments = draft.attachments;
         self.state = draft.state;
         self.last_error_message = draft.last_error_message;
@@ -941,9 +946,10 @@ impl ComposeView {
 }
 
 /// The header fields, one row each, then the body: From (only when the
-/// account has more than one identity), To with the Cc and Bcc toggles, Cc
-/// and Bcc once shown, and Subject (not in the inline reply, which keeps
-/// the conversation's).
+/// account has more than one identity), where replies go when the identity
+/// has a reply-to (read-only), To with the Cc and Bcc toggles, Cc and Bcc
+/// once shown, and Subject (not in the inline reply, which keeps the
+/// conversation's).
 fn render_fields(
     compose: &ComposeState,
     from_menu: Option<&Entity<Select>>,
@@ -983,6 +989,9 @@ fn render_fields(
         .when_some(from_menu, |this, menu| {
             this.child(row("From").child(div().flex_1().min_w_0().child(menu.clone())))
         })
+        .when(!compose.identity_reply_to.trim().is_empty(), |this| {
+            this.child(render_reply_to(&compose.identity_reply_to, colors))
+        })
         .child(
             row("To")
                 .child(compose.to.clone())
@@ -1015,6 +1024,31 @@ fn render_fields(
             )
         })
         .child(div().pt(px(SPACE_3)).child(compose.body.clone()))
+}
+
+/// Where replies go: the identity's reply-to, which the message is sent
+/// with as `Reply-To`. Read-only; it changes with the identity (edited in
+/// Settings), and lines up with the fields.
+fn render_reply_to(reply_to: &str, colors: &UiColors) -> gpui::Div {
+    let text = format!("Replies go to: {}", reply_to.trim());
+    div()
+        .debug_selector(|| "compose-reply-to".into())
+        .flex()
+        .items_center()
+        .gap(px(SPACE_3))
+        .min_h(px(FIELD_ROW_HEIGHT))
+        .border_b_1()
+        .border_color(rgb(colors.border))
+        .child(div().flex_none().w(rems_from_px(FIELD_LABEL_WIDTH)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .type_style(TYPE_BODY)
+                .text_color(rgb(colors.muted))
+                .ellipsis()
+                .child(text),
+        )
 }
 
 /// The draft's attachments, as cards with a Remove button.

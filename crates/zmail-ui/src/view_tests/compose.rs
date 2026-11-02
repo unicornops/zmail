@@ -14,7 +14,7 @@ use super::{
     Harness, Setup, click, click_on, compose_inputs, compose_window, compose_window_toasts, cursor,
     focus, inline_reply, keys, open_workspace, text,
 };
-use crate::actions::{AddAttachment, SaveDraft, ShowBcc, ShowCc};
+use crate::actions::{AddAttachment, SaveDraft, SelectIdentity, ShowBcc, ShowCc};
 use crate::components::TextInput;
 use crate::compose::{AUTOSAVE_DELAY, ComposeState, ComposeView, RecipientField};
 use crate::{DetailMode, WorkspaceView};
@@ -470,6 +470,58 @@ fn the_from_menu_shows_only_with_more_than_one_identity(cx: &mut TestAppContext)
     // The shell's background refresh reaches the compose window too.
     wait(Duration::from_secs(6), cx);
     assert!(has_menu(cx));
+}
+
+#[gpui::test]
+fn compose_shows_where_replies_go_and_follows_the_identity(cx: &mut TestAppContext) {
+    use zmail_core::identity_sync::IdentityValues;
+
+    let (view, cx, harness) = open_workspace(cx, Setup::Account);
+    let account_id = harness.store.list_accounts().expect("accounts load")[0].id;
+    let primary = harness
+        .store
+        .list_identities(account_id)
+        .expect("identities")[0]
+        .clone();
+    let values = |reply_to: &str| IdentityValues {
+        name: primary.display_name.clone(),
+        reply_to: reply_to.to_owned(),
+        signature: String::new(),
+    };
+    harness
+        .store
+        .update_identity(primary.id, &values("Help Desk <desk@example.test>"))
+        .expect("the reply-to is stored");
+    let other = harness
+        .store
+        .add_identity(account_id, "other@example.test", &values(""))
+        .expect("another identity");
+
+    cx.update(|window, cx| view.update(cx, |view, cx| view.open_compose(window, cx)));
+    cx.run_until_parked();
+    let (compose, mut w) = compose_window(&view, cx);
+    let w = &mut w;
+    w.update(|window, _| window.activate_window());
+    w.run_until_parked();
+    let reply_to = |cx: &mut VisualTestContext| {
+        state(&compose, cx, |compose, _| compose.identity_reply_to.clone())
+    };
+    assert_eq!(reply_to(w), "Help Desk <desk@example.test>");
+    assert!(w.debug_bounds("compose-reply-to").is_some());
+
+    // Another identity without a reply-to: no line.
+    w.dispatch_action(SelectIdentity { identity_id: other });
+    w.run_until_parked();
+    assert_eq!(reply_to(w), "");
+    assert!(w.debug_bounds("compose-reply-to").is_none());
+
+    // Back again: the identity's current reply-to.
+    w.dispatch_action(SelectIdentity {
+        identity_id: primary.id,
+    });
+    w.run_until_parked();
+    assert_eq!(reply_to(w), "Help Desk <desk@example.test>");
+    assert!(w.debug_bounds("compose-reply-to").is_some());
 }
 
 /// Writes a small file to attach and returns its path.

@@ -105,6 +105,7 @@ pub async fn submit_text_message(
         to: message.recipients.clone(),
         cc: Vec::new(),
         bcc: Vec::new(),
+        reply_to: Vec::new(),
         subject: message.subject.clone(),
         text_body: message.text_body.clone(),
         attachments: Vec::new(),
@@ -285,6 +286,11 @@ pub fn render_rfc822_message(message: &OutgoingMessage) -> Result<Vec<u8>> {
     if !message.cc.is_empty() {
         builder = builder.cc(address_list(&message.cc));
     }
+    // The sending identity's reply-to (RFC 5322 section 3.6.2); none when
+    // it has none, so replies go to From.
+    if !message.reply_to.is_empty() {
+        builder = builder.reply_to(address_list(&message.reply_to));
+    }
     // Bcc recipients never appear in the message itself, or every
     // recipient would see them: they are only in the envelope (SMTP
     // `RCPT TO` here, the JMAP EmailSubmission envelope in zmail-jmap).
@@ -306,9 +312,9 @@ fn normalize_body(body: &str) -> String {
     body.replace("\r\n", "\n")
 }
 
-/// Recipients as an address header: each `Name <address>` (as drafts keep
-/// them, a reply's included) with its name and address apart, so the
-/// header names the address, not the whole entry.
+/// Recipients (or Reply-To addresses) as an address header: each `Name
+/// <address>` (as drafts keep them, a reply's included) with its name and
+/// address apart, so the header names the address, not the whole entry.
 fn address_list(recipients: &[String]) -> Address<'_> {
     Address::new_list(
         recipients
@@ -420,6 +426,7 @@ mod tests {
             to: vec!["recipient@localhost".to_owned()],
             cc: Vec::new(),
             bcc: Vec::new(),
+            reply_to: Vec::new(),
             subject: "Phase 2b".to_owned(),
             text_body: "Line one\nLine two".to_owned(),
             attachments: Vec::new(),
@@ -450,6 +457,7 @@ mod tests {
             to: vec!["recipient@localhost".to_owned()],
             cc: vec!["copy@localhost".to_owned()],
             bcc: vec!["blind@localhost".to_owned()],
+            reply_to: Vec::new(),
             subject: "Attachment".to_owned(),
             text_body: "Attachment body".to_owned(),
             attachments: vec![OutgoingAttachment {
@@ -486,6 +494,7 @@ mod tests {
             to: Vec::new(),
             cc: Vec::new(),
             bcc: vec!["Hidden Person <hidden@localhost>".to_owned()],
+            reply_to: Vec::new(),
             subject: "Only Bcc".to_owned(),
             text_body: "Body".to_owned(),
             attachments: Vec::new(),
@@ -511,6 +520,7 @@ mod tests {
             to: vec!["kai@example.com".to_owned()],
             cc: Vec::new(),
             bcc: Vec::new(),
+            reply_to: Vec::new(),
             subject: "Re: Plan".to_owned(),
             text_body: "Sounds good.".to_owned(),
             attachments: Vec::new(),
@@ -552,6 +562,7 @@ mod tests {
                 "bo@example.com".to_owned(),
             ],
             bcc: Vec::new(),
+            reply_to: Vec::new(),
             subject: "Re: Plan".to_owned(),
             text_body: "Yes.".to_owned(),
             attachments: Vec::new(),
@@ -575,6 +586,68 @@ mod tests {
         assert!(!rendered.contains("<Kai Santos"), "{rendered}");
     }
 
+    fn message_with_reply_to(reply_to: &[&str]) -> OutgoingMessage {
+        OutgoingMessage {
+            from_email: "me@work.example".to_owned(),
+            from_name: Some("Me".to_owned()),
+            to: vec!["kai@example.com".to_owned()],
+            cc: Vec::new(),
+            bcc: vec!["hidden@example.com".to_owned()],
+            reply_to: reply_to.iter().map(|&address| address.to_owned()).collect(),
+            subject: "Plan".to_owned(),
+            text_body: "Yes.".to_owned(),
+            attachments: Vec::new(),
+            message_id: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            reply_action: None,
+        }
+    }
+
+    fn rendered(message: &OutgoingMessage) -> String {
+        String::from_utf8(render_rfc822_message(message).expect("renders")).expect("utf-8")
+    }
+
+    #[test]
+    fn writes_the_identity_reply_to_with_the_address_apart() {
+        let rendered = rendered(&message_with_reply_to(&["Help Desk <desk@work.example>"]));
+        assert!(
+            rendered.contains("Reply-To: \"Help Desk\" <desk@work.example>\r\n"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("<Help Desk"), "{rendered}");
+        // The envelope is unchanged: Reply-To is not a recipient.
+        assert_eq!(
+            super::all_recipients(&message_with_reply_to(&["desk@work.example"])),
+            ["kai@example.com", "hidden@example.com"]
+        );
+        // Bcc still never appears in the message.
+        assert!(!rendered.contains("hidden@example.com"), "{rendered}");
+    }
+
+    #[test]
+    fn writes_every_reply_to_address() {
+        let rendered = rendered(&message_with_reply_to(&[
+            "\"Tickets, Inc\" <tickets@example.com>",
+            "ops@example.com",
+        ]));
+        assert!(
+            rendered.contains(
+                "Reply-To: \"Tickets, Inc\" <tickets@example.com>, <ops@example.com>\r\n"
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn writes_no_reply_to_when_the_identity_has_none() {
+        let rendered = rendered(&message_with_reply_to(&[]));
+        assert!(
+            !rendered.to_ascii_lowercase().contains("reply-to:"),
+            "{rendered}"
+        );
+    }
+
     #[test]
     fn legacy_submitted_message_shape_remains_usable() {
         let message = SubmittedMessage {
@@ -591,6 +664,7 @@ mod tests {
             to: message.recipients,
             cc: Vec::new(),
             bcc: Vec::new(),
+            reply_to: Vec::new(),
             subject: message.subject,
             text_body: message.text_body,
             attachments: Vec::new(),
