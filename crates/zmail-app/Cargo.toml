@@ -53,6 +53,11 @@ zmail-theme = { path = "../zmail-theme" }
 zmail-tui = { path = "../zmail-tui", optional = true }
 zmail-ui = { path = "../zmail-ui" }
 
+[dev-dependencies]
+# A fixed store key, so a second test process can open the same store (the
+# sync-lock test).
+zmail-security = { path = "../zmail-security", features = ["test-fixtures"] }
+
 [features]
 # Proton Mail accounts (docs/adr/0004-proton-native.md): the provider in the
 # add-account flow and Proton sync. On by default since the local store is

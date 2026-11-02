@@ -28,7 +28,8 @@ const ZED_UPSTREAM_COMMIT: &str = env!("ZMAIL_ZED_COMMIT");
 const GPUI_VERSION: &str = env!("ZMAIL_ZED_TAG");
 
 fn main() -> Result<()> {
-    match Command::from_env()? {
+    let (command, force) = Command::from_env()?;
+    match command {
         Command::Gui => launch_gui(),
         #[cfg(feature = "tui")]
         Command::Tui => launch_tui(),
@@ -46,17 +47,17 @@ fn main() -> Result<()> {
             theme,
             text_size,
         } => launch_ui_fixture(view, theme, text_size),
-        Command::AddImap => add_account(ProtocolKind::Imap),
-        Command::AddJmap => add_account(ProtocolKind::Jmap),
+        Command::AddImap => add_account(ProtocolKind::Imap, force),
+        Command::AddJmap => add_account(ProtocolKind::Jmap, force),
         Command::ListAccounts => list_accounts(),
-        Command::SyncAll => sync_accounts(None),
-        Command::SyncAccount(account_id) => sync_accounts(Some(account_id)),
+        Command::SyncAll => sync_accounts(None, force),
+        Command::SyncAccount(account_id) => sync_accounts(Some(account_id), force),
         Command::Search {
             account_id,
             query,
             server,
         } => search_threads(account_id, &query, server),
-        Command::IndexAccount(account_id) => index_account(account_id),
+        Command::IndexAccount(account_id) => index_account(account_id, force),
         Command::ReadThread(thread_id) => read_thread(thread_id),
         Command::ListAttachments(thread_id) => list_attachments(thread_id),
         Command::SaveAttachment {
@@ -68,15 +69,15 @@ fn main() -> Result<()> {
         Command::MoveThread(thread_id, mailbox_id) => move_thread(thread_id, mailbox_id),
         Command::ArchiveThread(thread_id) => archive_thread(thread_id),
         Command::DeleteThread(thread_id) => delete_thread(thread_id),
-        Command::Compose(account_id, identity_id) => compose_draft(account_id, identity_id),
+        Command::Compose(account_id, identity_id) => compose_draft(account_id, identity_id, force),
         Command::ListDrafts(account_id) => list_drafts(account_id),
         Command::ShowDraft(draft_id) => show_draft(draft_id),
-        Command::SendDraft(draft_id) => send_draft(draft_id),
+        Command::SendDraft(draft_id) => send_draft(draft_id, force),
         Command::ListOutbox(account_id) => list_outbox(account_id),
-        Command::RetryOutbox(job_id) => retry_outbox_job(job_id),
+        Command::RetryOutbox(job_id) => retry_outbox_job(job_id, force),
         Command::AddAttachment(draft_id, path) => add_attachment(draft_id, &path),
         Command::RemoveAttachment(attachment_id) => remove_attachment(attachment_id),
-        Command::ProcessOutbox(account_id) => process_outbox(account_id),
+        Command::ProcessOutbox(account_id) => process_outbox(account_id, force),
         Command::Backup { directory } => create_backup(directory.as_deref()),
         Command::ResetStore => reset_unreadable_store(),
         Command::RotateKey => rotate_store_key(),
@@ -84,7 +85,7 @@ fn main() -> Result<()> {
         Command::DeadOps { account_id } => list_dead_ops(account_id),
         Command::RetryOp(op_id) => retry_dead_op(op_id),
         Command::DiscardOp(op_id) => discard_dead_op(op_id),
-        Command::EmptyTrash(account_id) => empty_trash(account_id),
+        Command::EmptyTrash(account_id) => empty_trash(account_id, force),
         Command::CacheBudget {
             account_id,
             budget_mb,
@@ -168,8 +169,48 @@ enum Command {
 }
 
 impl Command {
-    fn from_env() -> Result<Self> {
-        let mut args = std::env::args().skip(1);
+    /// The command, and whether `--force` was given (anywhere after the
+    /// command's name).
+    fn from_env() -> Result<(Self, bool)> {
+        Self::parse(std::env::args().skip(1).collect())
+    }
+
+    fn parse(mut args: Vec<String>) -> Result<(Self, bool)> {
+        let force = args.len() > 1 && args[1..].iter().any(|arg| arg == "--force");
+        if force {
+            let name = args.remove(0);
+            args.retain(|arg| arg != "--force");
+            args.insert(0, name);
+        }
+        let command = Self::parse_args(args.into_iter())?;
+        if force && !command.syncs_or_sends() {
+            bail!(
+                "--force is for the commands that sync or send (sync, index, send, \
+                 retry-outbox, process-outbox, compose, add-imap, add-jmap, empty-trash)"
+            );
+        }
+        Ok((command, force))
+    }
+
+    /// Whether the command syncs, indexes or sends, and so needs the
+    /// store's sync lock (ADR 0007) or `--force`.
+    fn syncs_or_sends(&self) -> bool {
+        matches!(
+            self,
+            Self::AddImap
+                | Self::AddJmap
+                | Self::SyncAll
+                | Self::SyncAccount(_)
+                | Self::IndexAccount(_)
+                | Self::Compose(..)
+                | Self::SendDraft(_)
+                | Self::RetryOutbox(_)
+                | Self::ProcessOutbox(_)
+                | Self::EmptyTrash(_)
+        )
+    }
+
+    fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let Some(command) = args.next() else {
             return Ok(Self::Gui);
         };
@@ -769,7 +810,7 @@ fn fixture_bootstrap(
     Ok(bootstrap)
 }
 
-fn add_account(protocol: ProtocolKind) -> Result<()> {
+fn add_account(protocol: ProtocolKind, force: bool) -> Result<()> {
     let store = Arc::new(open_store().context("failed to open the local store")?);
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
     let (account, secret) = prompt_account(protocol)?;
@@ -787,7 +828,15 @@ fn add_account(protocol: ProtocolKind) -> Result<()> {
     }
 
     let runtime = BackgroundRuntime::start(4)?;
-    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
+    let sync_service = command_sync_service(&runtime, store.clone(), secrets, force)?;
+    if !sync_service.runs_sync() {
+        println!(
+            "Account {account_id} added: {} ({}). {SYNCED_ELSEWHERE}, and starts syncing it \
+             within seconds.",
+            account.display_name, account.protocol
+        );
+        return Ok(());
+    }
     match sync_service.sync_account_and_wait(account_id) {
         Ok(()) => {
             println!(
@@ -820,11 +869,22 @@ fn list_accounts() -> Result<()> {
     Ok(())
 }
 
-fn sync_accounts(account_id: Option<i64>) -> Result<()> {
+fn sync_accounts(account_id: Option<i64>, force: bool) -> Result<()> {
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(open_store().context("failed to open the local store")?);
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_accounts_in(&runtime, store, secrets, account_id, force)
+}
+
+/// `sync`, on an open store.
+fn sync_accounts_in(
+    runtime: &BackgroundRuntime,
+    store: Arc<LocalStore>,
+    secrets: Arc<dyn SecretStore>,
+    account_id: Option<i64>,
+    force: bool,
+) -> Result<()> {
+    let sync_service = syncing_service(runtime, store, secrets, force, "sync")?;
 
     if let Some(account_id) = account_id {
         sync_service.sync_account_and_wait(account_id)?;
@@ -837,11 +897,11 @@ fn sync_accounts(account_id: Option<i64>) -> Result<()> {
     Ok(())
 }
 
-fn index_account(account_id: i64) -> Result<()> {
+fn index_account(account_id: i64, force: bool) -> Result<()> {
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(open_store().context("failed to open the local store")?);
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    let sync_service = syncing_service(&runtime, store.clone(), secrets, force, "index")?;
 
     let report = sync_service.index_account_and_wait(account_id)?;
     let progress = store.index_progress(account_id)?;
@@ -867,7 +927,11 @@ fn search_threads(account_id: i64, query: &str, server: bool) -> Result<()> {
     if server {
         let runtime = BackgroundRuntime::start(2)?;
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-        let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+        // The server search only reads from the server, so it runs beside
+        // another Zmail that syncs; mail it finds that the store lacks is
+        // then left to that Zmail's sync.
+        let sync_service =
+            SyncService::for_command(runtime.handle().clone(), store.clone(), secrets)?;
         let report = runtime
             .handle()
             .block_on(sync_service.search_server_and_wait(account_id, query))?;
@@ -1022,7 +1086,7 @@ fn delete_thread(thread_id: i64) -> Result<()> {
     Ok(())
 }
 
-fn compose_draft(account_id: i64, identity_id: Option<i64>) -> Result<()> {
+fn compose_draft(account_id: i64, identity_id: Option<i64>, force: bool) -> Result<()> {
     let store = Arc::new(open_store().context("failed to open the local store")?);
     let identities = store
         .list_identities(account_id)
@@ -1109,11 +1173,10 @@ fn compose_draft(account_id: i64, identity_id: Option<i64>) -> Result<()> {
     if prompt_yes_no("Queue this draft for send now", false)? {
         let runtime = BackgroundRuntime::start(4)?;
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-        let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
-        let account_id = draft.account_id;
-        let job_id = sync_service.queue_draft_and_send(draft_id)?;
-        let _ = sync_service.process_outbox_and_wait(Some(account_id))?;
-        println!("Draft {draft_id} queued as outbox job {job_id}.");
+        println!(
+            "{}",
+            send_draft_in(&runtime, store, secrets, draft_id, force)?
+        );
     }
 
     Ok(())
@@ -1186,19 +1249,41 @@ fn show_draft(draft_id: i64) -> Result<()> {
     Ok(())
 }
 
-fn send_draft(draft_id: i64) -> Result<()> {
+fn send_draft(draft_id: i64, force: bool) -> Result<()> {
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(open_store().context("failed to open the local store")?);
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    println!(
+        "{}",
+        send_draft_in(&runtime, store, secrets, draft_id, force)?
+    );
+    Ok(())
+}
+
+/// Queues a draft and sends it now, or, while another Zmail syncs the
+/// store, leaves the sending to it (its outbox poll sends it within
+/// seconds). Returns what to tell the user.
+fn send_draft_in(
+    runtime: &BackgroundRuntime,
+    store: Arc<LocalStore>,
+    secrets: Arc<dyn SecretStore>,
+    draft_id: i64,
+    force: bool,
+) -> Result<String> {
     let account_id = store
         .draft_detail(draft_id)?
         .with_context(|| format!("draft {draft_id} does not exist"))?
         .account_id;
+    let sync_service = command_sync_service(runtime, store, secrets, force)?;
     let job_id = sync_service.queue_draft_and_send(draft_id)?;
+    if !sync_service.runs_sync() {
+        return Ok(format!(
+            "Draft {draft_id} queued as outbox job {job_id}. {SYNCED_ELSEWHERE}, and sends \
+             it within seconds."
+        ));
+    }
     let _ = sync_service.process_outbox_and_wait(Some(account_id))?;
-    println!("Draft {draft_id} queued as outbox job {job_id}.");
-    Ok(())
+    Ok(format!("Draft {draft_id} queued as outbox job {job_id}."))
 }
 
 fn list_outbox(account_id: Option<i64>) -> Result<()> {
@@ -1224,12 +1309,16 @@ fn list_outbox(account_id: Option<i64>) -> Result<()> {
     Ok(())
 }
 
-fn retry_outbox_job(job_id: i64) -> Result<()> {
+fn retry_outbox_job(job_id: i64, force: bool) -> Result<()> {
     let store = Arc::new(open_store().context("failed to open the local store")?);
     store.retry_outbox_job(job_id)?;
     let runtime = BackgroundRuntime::start(4)?;
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    let sync_service = command_sync_service(&runtime, store.clone(), secrets, force)?;
+    if !sync_service.runs_sync() {
+        println!("Outbox job {job_id} requeued. {SYNCED_ELSEWHERE}, and sends it within seconds.");
+        return Ok(());
+    }
     let processed = sync_service.process_outbox_and_wait(None)?;
     println!("Outbox job {job_id} requeued. Processed {processed} due job(s).");
     Ok(())
@@ -1252,14 +1341,25 @@ fn remove_attachment(attachment_id: i64) -> Result<()> {
     Ok(())
 }
 
-fn process_outbox(account_id: Option<i64>) -> Result<()> {
+fn process_outbox(account_id: Option<i64>, force: bool) -> Result<()> {
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(open_store().context("failed to open the local store")?);
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
-    let processed = sync_service.process_outbox_and_wait(account_id)?;
+    let processed = process_outbox_in(&runtime, store, secrets, account_id, force)?;
     println!("Processed {processed} due outbox job(s).");
     Ok(())
+}
+
+/// `process-outbox`, on an open store: how many jobs it sent or failed.
+fn process_outbox_in(
+    runtime: &BackgroundRuntime,
+    store: Arc<LocalStore>,
+    secrets: Arc<dyn SecretStore>,
+    account_id: Option<i64>,
+    force: bool,
+) -> Result<usize> {
+    syncing_service(runtime, store, secrets, force, "process-outbox")?
+        .process_outbox_and_wait(account_id)
 }
 
 fn list_dead_ops(account_id: Option<i64>) -> Result<()> {
@@ -1331,7 +1431,7 @@ fn set_cache_budget(account_id: i64, budget_mb: Option<u64>) -> Result<()> {
     Ok(())
 }
 
-fn empty_trash(account_id: i64) -> Result<()> {
+fn empty_trash(account_id: i64, force: bool) -> Result<()> {
     let store = Arc::new(open_store().context("failed to open the local store")?);
     let trash_name = store
         .mailbox_name_by_role(account_id, "trash")?
@@ -1347,7 +1447,7 @@ fn empty_trash(account_id: i64) -> Result<()> {
 
     let runtime = BackgroundRuntime::start(4)?;
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    let sync_service = command_sync_service(&runtime, store.clone(), secrets, force)?;
     let secret = runtime
         .handle()
         .block_on(sync_service.connect_secret(&target))
@@ -1357,6 +1457,13 @@ fn empty_trash(account_id: i64) -> Result<()> {
             .handle()
             .block_on(zmail_imap::empty_trash(&target, &secret, &trash_name))?;
 
+    if !sync_service.runs_sync() {
+        println!(
+            "Expunged {expunged} message(s) from {trash_name}. {SYNCED_ELSEWHERE}, and its \
+             next sync updates the local mirror."
+        );
+        return Ok(());
+    }
     println!("Expunged {expunged} message(s) from {trash_name}; syncing the local mirror.");
     let _ = sync_service.sync_account_and_wait(account_id);
     Ok(())
@@ -1901,6 +2008,59 @@ fn print_help() {
     println!("  zmail-app retry-op OPERATION");
     println!("  zmail-app discard-op OPERATION");
     println!("  zmail-app empty-trash ACCOUNT");
+    println!();
+    println!("Only one Zmail process syncs a store at a time. While the desktop app or");
+    println!("`zmail-app tui` syncs it, sync, index and process-outbox stop with an error,");
+    println!("and send, retry-outbox, compose, add-imap, add-jmap and empty-trash do their");
+    println!("part and leave the syncing and sending to that Zmail. --force runs them");
+    println!("here anyway, beside it.");
+}
+
+/// What a command that leaves sync or sending to another Zmail says: only
+/// one process syncs a store (ADR 0007).
+const SYNCED_ELSEWHERE: &str =
+    "Another Zmail (the desktop app or `zmail-app tui`) is syncing this mail store";
+
+/// The sync service for a command that syncs or sends. With the store's
+/// sync lock free, it takes the lock and holds it while the command runs,
+/// so a desktop app or terminal UI started meanwhile leaves sync to it.
+/// While another Zmail holds the lock, it leaves syncing and sending to
+/// that process (`runs_sync()` is false); with `force` it syncs here
+/// anyway, beside it (the store's outbox claims still keep a message from
+/// going out twice).
+fn command_sync_service(
+    runtime: &BackgroundRuntime,
+    store: Arc<LocalStore>,
+    secrets: Arc<dyn SecretStore>,
+    force: bool,
+) -> Result<SyncService> {
+    let handle = runtime.handle().clone();
+    let service = SyncService::for_command(handle.clone(), store.clone(), secrets.clone())?;
+    if service.runs_sync() || !force {
+        return Ok(service);
+    }
+    eprintln!("warning: {SYNCED_ELSEWHERE}; --force syncs here too.");
+    Ok(SyncService::new(handle, store, secrets))
+}
+
+/// The sync service for a command that does nothing but sync, index or
+/// send (`command`), or why it won't run: another Zmail syncs the store
+/// and `force` wasn't given.
+fn syncing_service(
+    runtime: &BackgroundRuntime,
+    store: Arc<LocalStore>,
+    secrets: Arc<dyn SecretStore>,
+    force: bool,
+    command: &str,
+) -> Result<SyncService> {
+    let service = command_sync_service(runtime, store, secrets, force)?;
+    if !service.runs_sync() {
+        bail!(
+            "{SYNCED_ELSEWHERE}, and only one process syncs a store at a time; it syncs and \
+             sends on its own. Pass --force to run `zmail-app {command}` beside it anyway."
+        );
+    }
+    Ok(service)
 }
 
 /// Opens the encrypted store with its key from the OS keychain (ADR 0005),
@@ -2328,6 +2488,137 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("failed to create the test directory");
         dir
+    }
+
+    fn args(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn force_is_taken_by_the_commands_that_sync_or_send_only() {
+        let (command, force) = Command::parse(args("sync --force all")).expect("it parses");
+        assert!(matches!(command, Command::SyncAll));
+        assert!(force);
+        let (command, force) = Command::parse(args("process-outbox 3 --force")).expect("parses");
+        assert!(matches!(command, Command::ProcessOutbox(Some(3))));
+        assert!(force);
+        let (command, force) = Command::parse(args("sync 2")).expect("it parses");
+        assert!(matches!(command, Command::SyncAccount(2)));
+        assert!(!force);
+        // Reading the store needs no lock, so there is nothing to force.
+        let error = Command::parse(args("list-accounts --force"))
+            .err()
+            .expect("refused");
+        assert!(format!("{error:#}").contains("--force is for the commands"));
+        assert!(Command::parse(args("search 1 --force invoice")).is_err());
+    }
+
+    /// Set in the child process that
+    /// `a_command_beside_a_zmail_that_syncs_stops_or_leaves_it_the_work`
+    /// starts: the store it opens.
+    const CHILD_STORE: &str = "ZMAIL_APP_SYNC_LOCK_CHILD_STORE";
+
+    /// The fixed key both processes open the store with.
+    fn fixture_key() -> zmail_security::vault::StoreKey {
+        zmail_security::vault::StoreKey::from_fixture(
+            zmail_security::vault::KeyId::from_bytes([9; 16]),
+            [24; 32],
+        )
+    }
+
+    #[test]
+    fn a_command_beside_a_zmail_that_syncs_stops_or_leaves_it_the_work() {
+        let directory = temp_dir("sync-lock");
+        let path = directory.join(STORE_FILE_NAME);
+        let store = LocalStore::open(&path, fixture_key()).expect("the store opens");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("an account");
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id,
+                to: vec!["ada@example.com".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Lunch".to_owned(),
+                body: "Noon?".to_owned(),
+                threading: Default::default(),
+            })
+            .expect("a draft");
+        // This process stands in for the desktop app: it holds the lock.
+        let held = store
+            .try_sync_lock()
+            .expect("the lock file opens")
+            .expect("the lock is free");
+
+        let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args(["--exact", "tests::sync_lock_child", "--nocapture"])
+            .env(CHILD_STORE, &path)
+            .env("ZMAIL_TEST_DRAFT", draft_id.to_string())
+            .output()
+            .expect("the child runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "child failed: {stdout}");
+        for expected in [
+            "child: sync refused: Another Zmail (the desktop app or `zmail-app tui`) is \
+             syncing this mail store, and only one process syncs a store at a time; it syncs \
+             and sends on its own. Pass --force to run `zmail-app sync` beside it anyway.",
+            "child: process-outbox refused: Another Zmail",
+            "Pass --force to run `zmail-app process-outbox` beside it anyway.",
+            "child: process-outbox --force: 0",
+            "child: send: Draft",
+            "Another Zmail (the desktop app or `zmail-app tui`) is syncing this mail store, \
+             and sends it within seconds.",
+        ] {
+            assert!(stdout.contains(expected), "{expected:?} in {stdout}");
+        }
+        // The message waits in the store for the Zmail that syncs.
+        let jobs = store.list_outbox_jobs(None).expect("the outbox");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].draft_id, draft_id);
+        assert_eq!(jobs[0].state, zmail_core::OutboxJobState::Queued);
+        assert_eq!(jobs[0].attempt_count, 0, "the child sent nothing");
+        drop(held);
+        drop(store);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// The child half of
+    /// `a_command_beside_a_zmail_that_syncs_stops_or_leaves_it_the_work`;
+    /// does nothing in a normal test run.
+    #[test]
+    fn sync_lock_child() {
+        let Some(path) = std::env::var_os(CHILD_STORE) else {
+            return;
+        };
+        let draft_id = std::env::var("ZMAIL_TEST_DRAFT")
+            .expect("the draft")
+            .parse::<i64>()
+            .expect("a draft id");
+        let store = Arc::new(
+            LocalStore::open(std::path::Path::new(&path), fixture_key()).expect("the store opens"),
+        );
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        let runtime = BackgroundRuntime::start(1).expect("a runtime");
+        match sync_accounts_in(&runtime, store.clone(), secrets.clone(), None, false) {
+            Ok(()) => println!("child: sync ran"),
+            Err(error) => println!("child: sync refused: {error:#}"),
+        }
+        match process_outbox_in(&runtime, store.clone(), secrets.clone(), None, false) {
+            Ok(count) => println!("child: process-outbox ran: {count}"),
+            Err(error) => println!("child: process-outbox refused: {error:#}"),
+        }
+        // Nothing is due yet, so the forced pass sends nothing.
+        match process_outbox_in(&runtime, store.clone(), secrets.clone(), None, true) {
+            Ok(count) => println!("child: process-outbox --force: {count}"),
+            Err(error) => println!("child: process-outbox --force failed: {error:#}"),
+        }
+        match send_draft_in(&runtime, store, secrets, draft_id, false) {
+            Ok(said) => println!("child: send: {said}"),
+            Err(error) => println!("child: send failed: {error:#}"),
+        }
     }
 
     #[test]

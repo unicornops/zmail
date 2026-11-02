@@ -125,6 +125,16 @@ Progress:
   (`live_tui_setup`: Add against the harness's IMAP and SMTP, the
   connection test, the first sync) runs in CI's quality job only. Phase
   4 is done, and with it the plan of this ADR.
+- Phase 5 (#374, the items the phases above left out, and one sync
+  gap): the CLI respects the sync lock. Its commands that sync or send
+  build `SyncService::for_command`, which holds the lock while the
+  command runs and never takes it over. While the GUI or the TUI holds
+  it, `sync`, `index` and `process-outbox` say so and exit non-zero;
+  `send`, `retry-outbox`, `compose`, `add-imap`/`add-jmap` and
+  `empty-trash` do their store or server part and leave syncing and
+  sending to the holder; `--force` runs them beside it anyway (tested
+  with a second process). Commands that only read the store never touch
+  the lock.
 
 ## Context
 
