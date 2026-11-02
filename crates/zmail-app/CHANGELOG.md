@@ -5,6 +5,7 @@
 
 ### Features
 
+* **tui:** edit, add, remove and choose the primary identity ([#368](https://github.com/unicornops/zmail/issues/368)) ([12f7225](https://github.com/unicornops/zmail/commit/12f722566ef3e30db94a93f350ae7290246a5ac4))
 * **ui:** edit, add, remove and choose the primary identity in Settings ([#367](https://github.com/unicornops/zmail/issues/367)) ([4220c65](https://github.com/unicornops/zmail/commit/4220c654dd1ad0129c03e343688dbd1569e7a728))
 
 ## [0.29.0](https://github.com/unicornops/zmail/compare/v0.28.0...v0.29.0) (2026-11-01)
