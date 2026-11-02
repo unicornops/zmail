@@ -86,6 +86,8 @@ cargo run -p zmail-app -- sync all
 cargo run -p zmail-app -- sync 1
 ```
 
+Only one Zmail process syncs a store at a time (see "Terminal UI" below). While the desktop app or `zmail-app tui` syncs it, `sync`, `index` and `process-outbox` say so and exit with an error, and `send`, `retry-outbox`, `compose`, `add-imap`, `add-jmap` and `empty-trash` do their part (queue the message, store the account, empty the Trash on the server) and leave the syncing and sending to that Zmail, which does it within seconds. `--force` runs them here anyway, beside it. Commands that only read the store, such as `list-accounts`, `search` and `read`, work regardless; `search --server` asks the server too, and leaves fetching what it finds to the Zmail that syncs.
+
 Search or operate on locally mirrored mail:
 
 ```bash
@@ -225,7 +227,7 @@ The mouse works too: a click opens what it is on (a click on the index's first c
 
 **Copy and paste** work as in Zellij. Drag to select text inside one pane (the preview pane and the index are separate); it is copied when you let go. Double-click selects a word, triple-click a line, and dragging past the top or bottom scrolls. Wrapped lines are copied as the line they came from. Without a mouse, `Ctrl-Space` sets a mark in Message Text, the arrow keys select, and `y` or `Ctrl-C` copies. Copies go to the clipboard with OSC 52 (iTerm2, kitty, WezTerm, Alacritty, foot, Windows Terminal; tmux needs `set-clipboard on`); on a Mac outside SSH they go through `pbcopy`, since Terminal.app has no OSC 52. Setup can set a copy command instead (`wl-copy`, `xclip -selection clipboard`; run without a shell), send OSC 52 to the primary selection, or turn the mouse off. Hold Shift while dragging to use the terminal's own selection. Pastes (bracketed paste) go only into text fields such as WhereIs and Compose's fields, as text (a list pasted into To, one address per line, becomes a comma list); anywhere else they are ignored, so pasted text never runs commands.
 
-Only one Zmail process syncs a store at a time, through a lock beside it (`<store>.sync.lock`). When the desktop app is already open, the terminal UI shows what it syncs, says "Sync runs in another Zmail window", and takes sync over if the window closes first; the same holds the other way round. New mail shows in the status line and rings the terminal bell (Setup turns the bell off).
+Only one Zmail process syncs a store at a time, through a lock beside it (`<store>.sync.lock`). When the desktop app is already open, the terminal UI shows what it syncs, says "Sync runs in another Zmail window", and takes sync over if the window closes first; the same holds the other way round. The command-line commands that sync or send respect the lock too (see above). New mail shows in the status line and rings the terminal bell (Setup turns the bell off).
 
 ## Mail Harness
 

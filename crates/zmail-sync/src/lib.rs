@@ -290,6 +290,34 @@ impl SyncService {
         Ok(service)
     }
 
+    /// Creates a sync service for a one-off command (the CLI's `sync`,
+    /// `send`, `process-outbox`…) that syncs only if this process gets the
+    /// store's sync lock now, and then holds it until the service is
+    /// dropped, so a frontend started meanwhile leaves sync to it.
+    ///
+    /// When another Zmail process holds the lock,
+    /// [`runs_sync`](Self::runs_sync) is `false` and the service behaves as
+    /// [`SyncService::with_sync_lock`]'s does without it (store writes,
+    /// queued sends, the server search and body fetches still work), but it
+    /// never takes sync over: a command is over before that would help.
+    pub fn for_command(
+        handle: Handle,
+        store: Arc<LocalStore>,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Result<Self> {
+        let lock = store.try_sync_lock()?;
+        let service = Self::build(handle, store, secrets, lock.is_some());
+        if let Some(lock) = lock {
+            *service
+                .inner
+                .sync_lock
+                .lock()
+                .expect("sync lock mutex should not be poisoned") = Some(lock);
+            service.start_outbox_supervisor();
+        }
+        Ok(service)
+    }
+
     fn build(
         handle: Handle,
         store: Arc<LocalStore>,
@@ -2016,6 +2044,47 @@ mod tests {
                     account.id == account_id && account.sync_status.phase != SyncPhase::Idle
                 })
         }));
+    }
+
+    #[test]
+    fn a_command_syncs_only_with_the_sync_lock_and_holds_it_until_dropped() {
+        let runtime = BackgroundRuntime::start(2).expect("runtime should start");
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+
+        // The command runs on a runtime of its own, as in its own process.
+        let command_runtime = BackgroundRuntime::start(1).expect("runtime should start");
+        let command = SyncService::for_command(
+            command_runtime.handle().clone(),
+            store.clone(),
+            secrets.clone(),
+        )
+        .expect("the service starts");
+        assert!(command.runs_sync(), "the lock was free");
+        // A frontend started meanwhile leaves sync to the command…
+        let frontend =
+            SyncService::with_sync_lock(runtime.handle().clone(), store.clone(), secrets.clone())
+                .expect("the frontend's service starts");
+        assert!(!frontend.runs_sync());
+        // …and a second command finds the lock taken, and never takes it.
+        let second =
+            SyncService::for_command(runtime.handle().clone(), store.clone(), secrets.clone())
+                .expect("the second service starts");
+        assert!(!second.runs_sync());
+        assert!(second.sync_account_and_wait(account_id).is_err());
+        assert!(second.process_outbox_and_wait(None).is_err());
+        // The command ends: its runtime goes, and the service with it.
+        drop(command);
+        drop(command_runtime);
+        assert!(
+            eventually(|| frontend.runs_sync()),
+            "the frontend takes sync over once the command is gone"
+        );
+        std::thread::sleep(super::SYNC_LOCK_INTERVAL * 4);
+        assert!(!second.runs_sync(), "a command never takes sync over");
     }
 
     #[test]
