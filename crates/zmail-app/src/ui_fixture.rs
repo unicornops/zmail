@@ -73,6 +73,9 @@ pub(crate) enum FixtureView {
     /// A new message whose recipients include addresses that are not
     /// valid, highlighted as chips to fix.
     ComposeInvalid,
+    /// A message from a help desk identity with a reply-to, shown under
+    /// From.
+    ComposeReplyTo,
     /// A reply just sent, with the Undo Send toast showing.
     UndoSend,
     /// The Add Account window, opened over the seeded inbox.
@@ -181,6 +184,7 @@ impl FixtureView {
             "reader-html-scrolled" => Self::ReaderHtmlScrolled,
             "compose" => Self::Compose,
             "compose-invalid" => Self::ComposeInvalid,
+            "compose-reply-to" => Self::ComposeReplyTo,
             "undo-send" => Self::UndoSend,
             "account-setup" => Self::AccountSetup,
             "onboarding-provider" => Self::Onboarding(OnboardingStep::Provider),
@@ -223,7 +227,7 @@ impl FixtureView {
             "unlock-keychain" => Self::Unlock(UnlockFixture::Keychain),
             "unlock-unreadable" => Self::Unlock(UnlockFixture::Unreadable),
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-accounts-identities, settings-identity-edit, settings-identity-add, settings-identity-remove, settings-identity-hidden, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, compose-reply-to, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-accounts-identities, settings-identity-edit, settings-identity-add, settings-identity-remove, settings-identity-hidden, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
             ),
         })
     }
@@ -529,6 +533,30 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
                 bcc: Vec::new(),
                 subject: "Offline search demo".to_owned(),
                 body: "Hi all,\n\nThe offline search build is ready to try.\n\nSam".to_owned(),
+                threading: Default::default(),
+            })?;
+            InitialView::Draft(draft_id)
+        }
+        FixtureView::ComposeReplyTo => {
+            let identity_id = store.add_identity(
+                account_id,
+                "help@example.com",
+                &zmail_core::identity_sync::IdentityValues {
+                    name: "Help desk".to_owned(),
+                    reply_to: "Tickets <tickets@example.com>".to_owned(),
+                    signature: "The help desk".to_owned(),
+                },
+            )?;
+            let draft_id = store.create_draft(&NewDraft {
+                account_id,
+                identity_id,
+                to: vec!["Priya Raman <priya.raman@example.org>".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Your support request".to_owned(),
+                body: "Hi Priya,\n\nWe've had a look at the sync error and have a fix \
+                       ready for the next release.\n\n"
+                    .to_owned(),
                 threading: Default::default(),
             })?;
             InitialView::Draft(draft_id)
@@ -1524,6 +1552,7 @@ mod tests {
             "reader-html-scrolled",
             "compose",
             "compose-invalid",
+            "compose-reply-to",
             "undo-send",
             "account-setup",
             "sidebar",
@@ -1908,6 +1937,20 @@ mod tests {
             .draft_detail(draft_id)?
             .context("draft should exist")?;
         assert_eq!(draft.subject, "Re: Q4 roadmap review");
+        Ok(())
+    }
+
+    #[test]
+    fn compose_reply_to_opens_a_draft_from_an_identity_with_a_reply_to() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::ComposeReplyTo)?;
+        let InitialView::Draft(draft_id) = initial_view else {
+            bail!("the compose fixture should open a draft, not {initial_view:?}");
+        };
+        let draft = store
+            .draft_detail(draft_id)?
+            .context("draft should exist")?;
+        assert_eq!(draft.identity_reply_to, "Tickets <tickets@example.com>");
+        assert_eq!(store.list_identities(draft.account_id)?.len(), 2);
         Ok(())
     }
 
