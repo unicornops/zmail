@@ -4,8 +4,8 @@
 //! Bridge sends those recipients the MIME message its SMTP client handed
 //! over (`MIMEBody`). Zmail's outbox holds a composed message instead, so
 //! this writes the MIME an SMTP client would send: the From, To, Cc,
-//! Subject, Date, Message-ID, In-Reply-To and References headers (never
-//! Bcc), the text as quoted-printable
+//! Reply-To, Subject, Date, Message-ID, In-Reply-To and References headers
+//! (never Bcc), the text as quoted-printable
 //! UTF-8, and the attachments as base64 parts of a `multipart/mixed`
 //! message. Zmail's own code, written with the MIME helpers of the
 //! `message.rs` port.
@@ -34,6 +34,8 @@ pub(crate) struct MimeSource<'a> {
     pub(crate) from: &'a EmailAddress,
     pub(crate) to: &'a [EmailAddress],
     pub(crate) cc: &'a [EmailAddress],
+    /// The sending identity's reply-to; empty for no `Reply-To`.
+    pub(crate) reply_to: &'a [EmailAddress],
     pub(crate) subject: &'a str,
     pub(crate) text: &'a str,
     /// The Message-ID, without angle brackets.
@@ -53,6 +55,9 @@ pub(crate) fn build_mime_body(source: &MimeSource<'_>, attachments: &[OutgoingFi
     }
     if !source.cc.is_empty() {
         header.set("Cc", &address_list(source.cc));
+    }
+    if !source.reply_to.is_empty() {
+        header.set("Reply-To", &address_list(source.reply_to));
     }
     header.set("Subject", &q_encode(source.subject));
     header.set("Date", &rfc1123z(Utc::now()));
@@ -132,6 +137,10 @@ mod tests {
                 from: &from,
                 to: &to,
                 cc: &[],
+                reply_to: &[
+                    address("Help, Desk", "desk@proton.me"),
+                    address("", "ops@example.com"),
+                ],
                 subject: "Grüße",
                 text: "Hello\nsecond line",
                 message_id: Some("m1@proton.me"),
@@ -164,6 +173,19 @@ mod tests {
             message.body_text(0).as_deref(),
             Some("Hello\r\nsecond line")
         );
+        let reply_to = message
+            .reply_to()
+            .expect("a Reply-To")
+            .iter()
+            .map(|address| (address.name(), address.address()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reply_to,
+            [
+                (Some("Help, Desk"), Some("desk@proton.me")),
+                (None, Some("ops@example.com")),
+            ]
+        );
         assert_eq!(message.message_id(), Some("m1@proton.me"));
         assert_eq!(message.in_reply_to().as_text(), Some("parent@example.com"));
         assert_eq!(
@@ -185,6 +207,7 @@ mod tests {
                 from: &from,
                 to: &[],
                 cc: &[address("", "carol@example.com")],
+                reply_to: &[],
                 subject: "Hi",
                 text: "Plain",
                 message_id: None,
@@ -196,6 +219,7 @@ mod tests {
         assert!(body.contains("Content-Type: text/plain; charset=\"utf-8\"\r\n"));
         assert!(body.contains("Cc: <carol@example.com>\r\n"));
         assert!(!body.contains("To:"));
+        assert!(!body.contains("Reply-To"));
         assert!(!body.contains("Message-ID") && !body.contains("In-Reply-To"));
         assert!(body.ends_with("\r\n\r\nPlain"));
     }
