@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.32.0](https://github.com/unicornops/zmail/compare/v0.31.1...v0.32.0) (2026-11-03)
+
+
+### Features
+
+* **tui:** rebind keys with a user keymap file ([#381](https://github.com/unicornops/zmail/issues/381)) ([da2166a](https://github.com/unicornops/zmail/commit/da2166a39c5e1dce9e72012fe5d388677fb87bcd))
+* **tui:** save attachments from Message Text ([#378](https://github.com/unicornops/zmail/issues/378)) ([1cdd91e](https://github.com/unicornops/zmail/commit/1cdd91eff94653511b377098ecd4ad977eadc8fe))
+
 ## [0.31.1](https://github.com/unicornops/zmail/compare/v0.31.0...v0.31.1) (2026-11-02)
 
 
