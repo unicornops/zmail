@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.1](https://github.com/unicornops/zmail/compare/v0.32.0...v0.32.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **store:** stop starting processes from keeping dropped store locks ([#386](https://github.com/unicornops/zmail/issues/386)) ([428e25c](https://github.com/unicornops/zmail/commit/428e25c1b78d7318dd9f46b776e65147f4cb453b))
+
 ## [0.32.0](https://github.com/unicornops/zmail/compare/v0.31.1...v0.32.0) (2026-11-03)
 
 
