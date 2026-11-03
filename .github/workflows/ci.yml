@@ -59,9 +59,10 @@ jobs:
                         ;;
                     esac
 
-                    # UI changes get the screenshot matrix (ui_screenshots).
+                    # UI changes get the screenshot matrix (ui_screenshots),
+                    # as do changes to its script or to this workflow.
                     case "$file" in
-                      crates/zmail-ui/*|crates/zmail-theme/*|crates/zmail-assets/*|themes/*|assets/icons/*|crates/zmail-app/src/ui_fixture.rs|scripts/capture-release-screenshot.sh)
+                      crates/zmail-ui/*|crates/zmail-theme/*|crates/zmail-assets/*|themes/*|assets/icons/*|crates/zmail-app/src/ui_fixture.rs|scripts/capture-release-screenshot.sh|scripts/x11-capture-session.sh|.github/workflows/ci.yml)
                         if [[ "$file" != *.md ]]; then
                           ui=true
                         fi
@@ -95,6 +96,10 @@ jobs:
                         ;;
                       about.toml|deny.toml|scripts/mail-harness.sh|scripts/proton-harness.sh)
                         workspace_checks=true
+                        ;;
+                      # The Linux web renderer job's screenshots.
+                      scripts/capture-linux-web-screenshots.sh|scripts/x11-capture-session.sh)
+                        app_code=true
                         ;;
                     esac
                   done < <(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")

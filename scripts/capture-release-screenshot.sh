@@ -26,6 +26,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=scripts/x11-capture-session.sh
+source "${SCRIPT_DIR}/x11-capture-session.sh"
 APP_BINARY="${ZMAIL_APP_BINARY:-${REPO_ROOT}/target/release/zmail-app}"
 WINDOW_TITLE="Zmail"
 LOG_DIR="${ZMAIL_CAPTURE_LOG_DIR:-${TMPDIR:-/tmp}}"
@@ -243,7 +245,7 @@ window_title_for() {
 
 # Prints the id of the app's visible window titled $1 (default: the main
 # window) once it is mapped, waiting up to 90 seconds; fails if the app
-# exits first.
+# or the window manager exits first.
 wait_for_window() {
   local title="${1:-${WINDOW_TITLE}}"
   local window_id=""
@@ -251,6 +253,11 @@ wait_for_window() {
     if ! kill -0 "${APP_PID}" 2>/dev/null; then
       echo "zmail-app exited before its window appeared" >&2
       cat "${APP_LOG}" >&2
+      return 1
+    fi
+    if ! kill -0 "${OPENBOX_PID}" 2>/dev/null; then
+      echo "openbox exited, so no window can be mapped" >&2
+      cat "${OPENBOX_LOG}" >&2
       return 1
     fi
 
@@ -269,14 +276,21 @@ wait_for_window() {
   return 1
 }
 
-# After a window wait times out (#186): the windows that are mapped,
-# under any title, and every thread's stack, to tell a slow cold start
-# from a hang. Needs gdb; ptrace needs root on most runners.
+# After a window wait times out (#186): every named window, whether or
+# not it is viewable, and every thread's stack, to tell a slow cold start
+# from a hang or a window that was never mapped (#345). Needs gdb; ptrace
+# needs root on most runners.
 dump_app_state() {
-  echo "--- mapped windows"
+  local visible
+  visible="$(xdotool search --onlyvisible --name . 2>/dev/null || true)"
+  echo "--- named windows"
   xdotool search --name . 2>/dev/null | while read -r id; do
-    echo "${id} $(xdotool getwindowname "${id}" 2>/dev/null || true)"
+    local state="not viewable"
+    grep -qx "${id}" <<< "${visible}" && state="viewable"
+    echo "${id} (${state}) $(xdotool getwindowname "${id}" 2>/dev/null || true)"
   done
+  echo "--- openbox log"
+  cat "${OPENBOX_LOG}"
   echo "--- zmail-app threads (pid ${APP_PID})"
   if command -v gdb >/dev/null 2>&1; then
     local gdb=(gdb)
@@ -303,6 +317,17 @@ start_session() {
 
   openbox >"${OPENBOX_LOG}" 2>&1 &
   OPENBOX_PID=$!
+  wait_for_openbox "${OPENBOX_PID}" "${OPENBOX_LOG}"
+}
+
+# Fails if the capture at $1 is one flat colour: a window that is mapped
+# but never drew a frame.
+check_capture() {
+  if [[ "$(identify -format '%k' "$1")" -lt 2 ]]; then
+    echo "$1 is blank (one flat colour): the window drew nothing" >&2
+    cat "${APP_LOG}" >&2
+    return 1
+  fi
 }
 
 capture_release() {
@@ -326,6 +351,7 @@ capture_release() {
   xdotool windowactivate "${window_id}" >/dev/null 2>&1 || true
   sleep 3
   import -window "${window_id}" "${output_path}"
+  check_capture "${output_path}"
 }
 
 # Captures one matrix state into OUTPUT_DIR/NAME.png.
@@ -369,6 +395,7 @@ capture_state() {
   sleep 3
 
   import -window "${window_id}" "${output_path}"
+  check_capture "${output_path}"
   if [[ -n "${pointer_x}" ]]; then
     # Park the pointer so it does not hover the next state.
     xdotool mousemove 2500 1400

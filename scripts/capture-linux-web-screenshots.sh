@@ -32,6 +32,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=scripts/x11-capture-session.sh
+source "${SCRIPT_DIR}/x11-capture-session.sh"
 APP_BINARY="${ZMAIL_APP_BINARY:-${REPO_ROOT}/target/debug/zmail-app}"
 WAYLAND=0
 if [[ "${1:-}" == "--wayland" ]]; then
@@ -85,6 +87,7 @@ else
   unset WAYLAND_DISPLAY
   openbox > "${OUTPUT_DIR}/openbox.log" 2>&1 &
   session_pid=$!
+  wait_for_openbox "$session_pid" "${OUTPUT_DIR}/openbox.log"
 fi
 app_pid=""
 cleanup() {
