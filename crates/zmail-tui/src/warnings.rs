@@ -4,7 +4,7 @@
 //! warning itself is part of the conversation (`message.rs`).
 
 use crate::{
-    app::{App, Screen},
+    app::{App, Cmd, Screen},
     pane::PaneId,
 };
 
@@ -12,9 +12,10 @@ use crate::{
 pub const LOOKS_SAFE_KEY: &str = "X";
 
 impl App {
-    /// The key shown on a warning's "Looks safe" line.
+    /// The key shown on a warning's "Looks safe" line: the user's, if the
+    /// keymap file binds one; empty when it took `X` away.
     pub(crate) fn looks_safe_key(&self) -> String {
-        LOOKS_SAFE_KEY.to_owned()
+        self.key_label(Screen::Message, Cmd::LooksSafe, LOOKS_SAFE_KEY)
     }
 
     /// Whether the open conversation shows a sender-safety warning.

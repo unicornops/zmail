@@ -13,7 +13,7 @@ use ratatui::{
     text::{Line, Span},
 };
 use zmail_core::{preferences::CopyClipboard, time::format_list_date};
-use zmail_security::sender_safety::SafetyTier;
+use zmail_security::{sender_safety::SafetyTier, terminal::sanitize_line};
 
 mod accounts;
 mod compose;
@@ -23,6 +23,7 @@ use crate::{
     app::{App, MENU_ITEMS, Prompt, SETUP_ROWS, Screen, SetupRow},
     clipboard::{CopyTarget, copy_target},
     data::{FolderRow, LocalFolder},
+    keymap,
     message::{Conversation, DocLine},
     palette::Palette,
     pane::{DrawnPane, PaneId, PaneLine},
@@ -181,7 +182,7 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
             draw_pane(app, frame, PaneId::Setup, body, lines, Some(cursor));
         }
         Screen::Help => {
-            let lines = help_lines(width);
+            let lines = help_lines(&help_text(app), width);
             // Compose's ^G opens on its section.
             if let Some(topic) = app.help_topic.take()
                 && let Some(line) = lines.iter().position(|line| line.text().trim() == topic)
@@ -543,7 +544,7 @@ fn draw_commands(app: &mut App, frame: &mut Frame, theme: Theme, area: Rect) {
         let x = area.x + ((index / 2) * slot) as u16;
         let y = area.y + (index % 2) as u16;
         let buffer = frame.buffer_mut();
-        let key = fit(entry.key, entry.key.len(), "");
+        let key = fit(&entry.key, entry.key.len(), "");
         buffer.set_stringn(x, y, &key, slot, theme.reversed());
         let label = fit(
             entry.label,
@@ -560,7 +561,8 @@ fn menu_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
     let width = usize::from(width);
     let margin = " ".repeat(width.saturating_sub(70) / 2 + 2);
     let mut lines = vec![PaneLine::default(), PaneLine::default()];
-    for (index, (key, name, description, _)) in MENU_ITEMS.iter().enumerate() {
+    for (index, (key, name, description, cmd)) in MENU_ITEMS.iter().enumerate() {
+        let key = app.key_label(Screen::MainMenu, *cmd, key);
         let row = fit(
             &format!("{margin}{key:<6}{name:<19}-  {description}"),
             width,
@@ -878,7 +880,18 @@ pub(crate) fn message_lines(
                 }
             }
             DocLine::LooksSafe => {
-                if let Some(key) = looks_safe {
+                // The user's keymap took the key away: the palette has it.
+                if looks_safe == Some("") {
+                    lines.push(PaneLine::new(Span::styled(
+                        fit(
+                            "  Looks safe, in the command palette (:), hides this warning \
+                             for this message",
+                            width,
+                            theme.ellipsis(),
+                        ),
+                        theme.faint(),
+                    )));
+                } else if let Some(key) = looks_safe {
                     lines.push(PaneLine {
                         spans: vec![
                             Span::raw("  "),
@@ -1307,11 +1320,47 @@ Sync
   One Zmail syncs your mail at a time. When another Zmail window already \
 does, this one shows the mail it syncs, and the status line says so.";
 
-fn help_lines(width: u16) -> Vec<PaneLine> {
+/// Help's text: [`HELP`], with the user's keymap after its first
+/// paragraph: where the file is, whether it is used, and what it binds.
+fn help_text(app: &App) -> String {
+    let keymap = &app.keymap;
+    let Some(path) = &keymap.path else {
+        return HELP.to_owned();
+    };
+    let mut section = vec![
+        "Your keys".to_owned(),
+        format!(
+            "  The keymap file, {}, rebinds keys on each screen; the README \
+             says how to write one.",
+            sanitize_line(&path.display().to_string())
+        ),
+    ];
+    if let Some(error) = &keymap.error {
+        section.push(format!(
+            "  It isn't used: {}. Zmail's own keys work meanwhile.",
+            sanitize_line(error)
+        ));
+    } else if keymap.bindings.is_empty() {
+        section.push("  There is none yet, so the keys are Zmail's own.".to_owned());
+    } else {
+        for binding in &keymap.bindings {
+            let screen = binding
+                .screen
+                .and_then(keymap::context_name)
+                .unwrap_or("every screen");
+            let does = binding.cmd.map_or("nothing", |cmd| cmd.description());
+            section.push(format!("  {:<10} {does} ({screen})", binding.key.label()));
+        }
+    }
+    let (intro, rest) = HELP.split_once("\n\nMoving around").unwrap_or((HELP, ""));
+    format!("{intro}\n\n{}\n\nMoving around{rest}", section.join("\n"))
+}
+
+fn help_lines(help: &str, width: u16) -> Vec<PaneLine> {
     let margin = "  ";
     let width = usize::from(width).saturating_sub(margin.len()).max(20);
     let mut lines = Vec::new();
-    for line in HELP.split('\n') {
+    for line in help.split('\n') {
         // A key's description wraps under itself: "  W          WhereIs…".
         let hang = line
             .strip_prefix("  ")

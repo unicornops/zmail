@@ -10801,6 +10801,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "ratatui-textarea",
+ "serde_json",
  "tokio",
  "unicode-width",
  "url",

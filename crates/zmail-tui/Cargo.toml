@@ -14,6 +14,8 @@ chrono.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 ratatui-textarea.workspace = true
+# The user's keymap file, in the desktop app's JSON keymap format.
+serde_json.workspace = true
 tokio.workspace = true
 unicode-width.workspace = true
 url.workspace = true

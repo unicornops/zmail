@@ -32,7 +32,7 @@ Progress:
   store, changed on the Setup screen. Not done in phase 1: the command
   palette (`:`), a user keymap file, attachments (listed, not saved),
   sender-safety warnings, and the manual check in a real terminal on macOS
-  and Windows.
+  and Windows (all but the manual check done in phase 5).
 - Phase 2: `zmail-actions`, the GPUI-free crate with the undoable mail
   actions (archive, move, delete, flag, read, the undo stack, and the
   draft and outbox changes), moved out of `zmail-ui`'s `mail_actions.rs`
@@ -158,6 +158,20 @@ Progress:
   each does, filtered as you type by the GUI palette's fuzzy matcher,
   moved from `zmail-ui` to `zmail_core::fuzzy`; Enter or a click runs
   one. Built from the command bar's own table, so the two can't disagree.
+- Phase 5: the user keymap file, `tui-keymap.json` in the data directory
+  beside the store (so `ZMAIL_DATA_DIR` moves it), read at start. Its
+  format is the GUI keymap's JSON (Zed's): sections with a `context` (a
+  screen: `MessageIndex`, `MessageText`, …; none means every command
+  screen) and `bindings` from Zed-style keys to command names, `null`
+  unbinding. A user binding replaces the built-in key on that screen; the
+  command bar, the Main Menu, Help (which also shows the file's path and
+  bindings) and the palette show the user's key, and a command whose only
+  key was taken leaves the bar but stays in the palette. A file with any
+  error (JSON, unknown screen, key or command; Esc and Ctrl-L are
+  reserved) is ignored whole, with the reason in the status line and
+  Help. Compose and the account forms aren't keymapped. Phase 5 is done:
+  everything section 2 lists is built. Left to Rob: the manual check in
+  real macOS and Windows terminals.
 
 ## Context
 

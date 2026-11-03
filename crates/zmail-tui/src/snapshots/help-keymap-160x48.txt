@@ -1,0 +1,48 @@
+  ZMAIL 0.0.0-test                                                            HELP                                                                Folder: INBOX
+  ZMAIL IN THE TERMINAL
+
+  Zmail's terminal screens work like Pine and Alpine: the keys that work on a screen are always listed at the bottom, and O shows more of them. Letters work in
+  either case.
+
+  Your keys
+    The keymap file, /home/ada/.local/share/zmail/tui-keymap.json, rebinds keys on each screen; the README says how to write one.
+    D          nothing (MessageIndex)
+    X          Delete: move to the Trash (MessageIndex)
+    W          Write a new message (MainMenu)
+    ^P         Every command of this screen, searchable (every screen)
+
+  Moving around
+    M          Main Menu, from anywhere
+    L          Folder List: each account is a collection of folders
+    I          Message Index of the current folder
+    < or Left  up a level;  > Enter or Right  open what the cursor is on
+    P N        previous and next item (Up and Down work too)
+    - Space    previous and next page;  Home End  first and last
+    W          WhereIs: search the Message Index with the search language (from:, to:, subject:, has:attachment, is:unread, before:, after:), find a folder, or
+               find text in a message. The index follows as you type; Enter also asks the server for mail not downloaded yet.
+    /          list conversations or single messages
+    V          the preview pane, beside the index in terminals 120 columns or wider
+    :          the command palette: every command of the screen with its key; type a few letters of what you want (arch, folder, trash), Up and Down move, Enter
+               runs it, Esc closes. Not in Compose or the account forms, where : is text.
+    Q          quit (Zmail asks first)
+
+  Triage
+    These work in the Message Index on the message under the cursor, and in Message Text on the open one. A command acts on the whole conversation, as in the
+  Zmail window, also when the index lists single messages.
+    D          delete: to the Trash (for good when the account has none)
+    E          archive
+    S          save to a folder. Tab completes the folder's name, again to go through the matches; Ctrl-T lists the folders to pick from.
+    *          flag, or unflag
+    K          mark read, or unread
+    U or Z     undo the last of these, wherever it was done; the status line says what each did
+    ;          select the message under the cursor, or not (X in the first column; a click there does it too)
+    A          apply the next command (D, E, S, * or K) to every selected message; ; there unselects them all
+    A message stays unread in Message Text until it has been open for a moment.
+
+  Reading
+    Message Text shows the text of each message. Links are numbered, like [3]; Tab and Shift-Tab move between them, and Enter (or a click) shows the real
+  address before anything opens it. Remote images and HTML formatting are not shown in the terminal.
+    A message whose sender looks suspicious gets the Zmail window's warning above its text: a sender's domain that imitates a well-known one, or replies that go
+
+< Back              Spc NextPage        ^P Commands
+- PrevPage          M Main Menu         Q Quit
