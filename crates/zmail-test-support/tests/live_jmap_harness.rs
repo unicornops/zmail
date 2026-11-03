@@ -54,7 +54,6 @@ fn syncs_mail_from_a_live_jmap_server() -> Result<()> {
         &store,
         account_id,
         "Phase 2b JMAP initial sync",
-        12,
     )?;
     let inbox_mailbox_id = inbox_id(&store, account_id)?;
     let initial_message_count = store.stats()?.message_count;
@@ -76,7 +75,6 @@ fn syncs_mail_from_a_live_jmap_server() -> Result<()> {
         &store,
         account_id,
         "Phase 2b JMAP incremental sync",
-        12,
     )?;
     assert!(
         store.stats()?.message_count > initial_message_count,
@@ -185,7 +183,6 @@ fn downloads_jmap_attachment_blobs_into_the_store() -> Result<()> {
         &store,
         account_id,
         "Phase 2b JMAP attachment",
-        12,
     )?;
     let view = store
         .thread_view(thread_id)?
@@ -333,8 +330,7 @@ fn assert_push_reports_new_mail(
                 "was still open".to_owned()
             };
             let delivered =
-                sync_until_subject(&sync_service, &store, account_id, "Phase 2b JMAP push", 4)
-                    .is_ok();
+                sync_until_subject(&sync_service, &store, account_id, "Phase 2b JMAP push").is_ok();
             bail!(
                 "no {transport:?} push arrived within 20s of delivery; the session {session}, \
                  and the message was {}delivered",
@@ -368,7 +364,6 @@ fn mail_watcher_applies_pushed_changes_incrementally() -> Result<()> {
         &store,
         account_id,
         "Phase 2b JMAP before push",
-        12,
     )?;
 
     // The poll interval is far beyond the test, so only push can bring the
@@ -380,6 +375,9 @@ fn mail_watcher_applies_pushed_changes_incrementally() -> Result<()> {
         "Phase 2b JMAP pushed",
         "Delivered while the watcher listens.",
     )?;
+    James::for_account(&store, account_id)?.wait_for_email("the pushed message", |email| {
+        email["subject"] == "Phase 2b JMAP pushed"
+    })?;
     let thread_id = wait_for_subject(&store, account_id, "Phase 2b JMAP pushed", 30)?;
     // A full sync records the query state; Email/changes clears it. A
     // fallback to the full sync after the push would show up here.
@@ -517,13 +515,8 @@ fn syncs_html_only_mail_through_the_sanitizer() -> Result<()> {
         "<tr><td>Starter</td><td>EUR 9</td></tr></table></body></html>\r\n",
     ))?;
 
-    let thread_id = sync_until_subject(
-        &sync_service,
-        &store,
-        account_id,
-        "Phase 2b JMAP HTML-only",
-        12,
-    )?;
+    let thread_id =
+        sync_until_subject(&sync_service, &store, account_id, "Phase 2b JMAP HTML-only")?;
     let view = store
         .thread_view(thread_id)?
         .context("the HTML-only thread should load")?;
@@ -584,7 +577,6 @@ fn server_search_finds_jmap_mail_the_local_index_lacks() -> Result<()> {
         &store,
         account_id,
         "Server search JMAP indexed",
-        12,
     )?;
     // JMAP syncs bodies, so drop them the way a full disk budget does.
     store.evict_account_blobs(account_id, 0)?;
@@ -623,7 +615,8 @@ fn server_search_until_found(
     account_id: i64,
     query: &str,
 ) -> Result<Vec<zmail_core::SearchHit>> {
-    for _ in 0..15 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
         let report = runtime
             .handle()
             .block_on(sync_service.search_server_and_wait(account_id, query))?;
@@ -634,7 +627,7 @@ fn server_search_until_found(
         }
         thread::sleep(Duration::from_secs(1));
     }
-    bail!("the server search never found {query:?}")
+    bail!("the server search did not find {query:?} within 30s")
 }
 
 #[test]
@@ -683,7 +676,7 @@ fn a_reply_from_zmail_threads_over_jmap() -> Result<()> {
                 reply_action: None,
             },
         ))?;
-    let thread_id = sync_until_subject(&sync_service, &store, account_id, subject, 12)?;
+    let thread_id = sync_until_subject(&sync_service, &store, account_id, subject)?;
     let view = store
         .thread_view(thread_id)?
         .context("the thread should load")?;
@@ -738,23 +731,51 @@ fn a_reply_from_zmail_threads_over_jmap() -> Result<()> {
         .message_id
         .context("the sent draft should keep its Message-ID")?;
 
+    // James delivers the submission through its mail queue, after
+    // EmailSubmission/set has answered: wait for the copy to reach the
+    // harness sender's mailbox before Zmail syncs it.
+    let james = James::connect(MAIL_HARNESS_SENDER, MAIL_HARNESS_SENDER_PASSWORD)?;
+    let delivered_after = Instant::now();
+    let reply_on_server = james.wait_for_email(&format!("the reply <{sent_id}>"), |email| {
+        has_message_id(email, &sent_id)
+    })?;
+    let original_on_server = james
+        .wait_for_email("the original <launch-2@phase2b.test>", |email| {
+            has_message_id(email, "launch-2@phase2b.test")
+        })?;
+    eprintln!(
+        "James delivered the reply {:?} after it was sent; the reply {reply_on_server}, \
+         the original {original_on_server}",
+        delivered_after.elapsed()
+    );
+
     // The delivered copy, read from the harness sender's account over JMAP.
     let (sender_store, sender_account, sender_sync) = harness_sender_account(&runtime)?;
-    let delivered = sync_until_subject(
+    let delivered = sync_until(
         &sender_sync,
         &sender_store,
         sender_account,
-        &start.subject,
-        60,
+        &format!("the reply <{sent_id}>"),
+        |store| {
+            for thread in store.list_threads(inbox_id(store, sender_account)?, 0..50)? {
+                let view = store.thread_view(thread.id)?;
+                if let Some(view) = view.filter(|view| {
+                    view.messages.iter().any(|message| {
+                        message.headers.message_id.as_deref() == Some(sent_id.as_str())
+                    })
+                }) {
+                    return Ok(Some(view));
+                }
+            }
+            Ok(None)
+        },
     )?;
-    let delivered = sender_store
-        .thread_view(delivered)?
-        .context("the delivered reply should load")?;
     let reply = delivered
         .messages
         .iter()
-        .find(|message| message.subject == start.subject)
+        .find(|message| message.headers.message_id.as_deref() == Some(sent_id.as_str()))
         .context("the reply is in the thread")?;
+    assert_eq!(reply.subject, start.subject);
     // James parsed the imported message's Reply-To into its addresses.
     assert_eq!(
         reply.reply_to.as_deref(),
@@ -773,6 +794,34 @@ fn a_reply_from_zmail_threads_over_jmap() -> Result<()> {
         "References extends the conversation: {headers:?}"
     );
     assert_eq!(headers.message_id.as_deref(), Some(sent_id.as_str()));
+    // One conversation on James and in Zmail, named after its newest
+    // message, the reply, even when both arrived in the same second.
+    assert_eq!(
+        reply_on_server["threadId"], original_on_server["threadId"],
+        "James threads the reply with the original"
+    );
+    let in_thread = delivered
+        .messages
+        .iter()
+        .map(|message| {
+            (
+                message.subject.as_str(),
+                message.headers.message_id.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        in_thread,
+        [
+            ("Threading over JMAP", Some("launch-2@phase2b.test")),
+            (start.subject.as_str(), Some(sent_id.as_str())),
+        ],
+        "the reply follows the original in one thread"
+    );
+    assert_eq!(
+        delivered.subject, start.subject,
+        "the reply names the thread"
+    );
     Ok(())
 }
 
@@ -793,7 +842,7 @@ fn a_forward_over_jmap_arrives_with_the_attachment() -> Result<()> {
     // which is not what this checks.
     let bytes = b"minutes of the meeting".to_vec();
     submit_harness_attachment_message(subject, "Minutes attached.", "minutes.txt", bytes.clone())?;
-    let thread_id = sync_until_subject(&sync_service, &store, account_id, subject, 12)?;
+    let thread_id = sync_until_subject(&sync_service, &store, account_id, subject)?;
     let view = store
         .thread_view(thread_id)?
         .context("the thread should load")?;
@@ -816,13 +865,8 @@ fn a_forward_over_jmap_arrives_with_the_attachment() -> Result<()> {
     wait_until_sent(&store, &sync_service, account_id)?;
 
     let (sender_store, sender_account, sender_sync) = harness_sender_account(&runtime)?;
-    let delivered = sync_until_subject(
-        &sender_sync,
-        &sender_store,
-        sender_account,
-        &start.subject,
-        60,
-    )?;
+    let delivered =
+        sync_until_subject(&sender_sync, &sender_store, sender_account, &start.subject)?;
     let delivered = sender_store
         .thread_view(delivered)?
         .context("the forward should load")?;
@@ -954,56 +998,233 @@ fn expect_smtp_reply(reader: &mut impl BufRead, code: &str) -> Result<()> {
     }
 }
 
+/// How long James may take to deliver a message into a mailbox. Delivery
+/// goes through its mail queue, after the SMTP or `EmailSubmission` call
+/// that hands the message over has returned.
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long Zmail's syncs may take to show a message James has delivered.
+const ZMAIL_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Waits until James has delivered a message with `subject` to the
+/// account, then syncs until the subject names a thread in the INBOX.
 fn sync_until_subject(
     sync_service: &SyncService,
     store: &LocalStore,
     account_id: i64,
     subject: &str,
-    attempts: usize,
 ) -> Result<i64> {
-    for _ in 0..attempts {
+    James::for_account(store, account_id)?
+        .wait_for_email(&format!("a message with subject {subject:?}"), |email| {
+            email["subject"] == subject
+        })?;
+    sync_until(
+        sync_service,
+        store,
+        account_id,
+        &format!("a thread with subject {subject:?}"),
+        |store| {
+            let threads = store.list_threads(inbox_id(store, account_id)?, 0..50)?;
+            Ok(threads
+                .iter()
+                .find(|thread| thread.subject == subject)
+                .map(|thread| thread.id))
+        },
+    )
+}
+
+/// Syncs the account until `find` finds `what` in the store. Callers wait
+/// for James to deliver first, so a timeout here is Zmail's: it names what
+/// the store holds instead.
+fn sync_until<T>(
+    sync_service: &SyncService,
+    store: &LocalStore,
+    account_id: i64,
+    what: &str,
+    mut find: impl FnMut(&LocalStore) -> Result<Option<T>>,
+) -> Result<T> {
+    let started = Instant::now();
+    let mut syncs = 0;
+    loop {
         sync_service.sync_account_and_wait(account_id)?;
-        let inbox_mailbox_id = inbox_id(store, account_id)?;
-        let threads = store.list_threads(inbox_mailbox_id, 0..50)?;
-        if let Some(thread) = threads.iter().find(|thread| thread.subject == subject) {
-            return Ok(thread.id);
+        syncs += 1;
+        if let Some(found) = find(store)? {
+            return Ok(found);
+        }
+        if started.elapsed() > ZMAIL_SYNC_TIMEOUT {
+            bail!(
+                "James had delivered it, but Zmail did not show {what} after {syncs} syncs \
+                 over {:?}; the store's INBOX holds {}; its checkpoint is {:?}",
+                started.elapsed(),
+                stored_inbox(store, account_id),
+                sync_checkpoint(store, account_id).ok()
+            );
         }
         thread::sleep(Duration::from_millis(500));
     }
-
-    bail!("subject {subject:?} was not visible after repeated JMAP sync attempts")
 }
 
-/// One JMAP method call against the harness's James as the JMAP account,
-/// with the submission capability identities need; returns the method's
-/// answer (`[name, arguments, call id]`).
+/// The INBOX threads in the store and their messages, for a failure.
+fn stored_inbox(store: &LocalStore, account_id: i64) -> String {
+    let describe = || -> Result<Vec<String>> {
+        let mut threads = Vec::new();
+        for thread in store.list_threads(inbox_id(store, account_id)?, 0..50)? {
+            let messages = store
+                .thread_view(thread.id)?
+                .map(|view| {
+                    view.messages
+                        .iter()
+                        .map(|message| {
+                            format!("{:?} {:?}", message.subject, message.headers.message_id)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            threads.push(format!("{:?}: {messages:?}", thread.subject));
+        }
+        Ok(threads)
+    };
+    match describe() {
+        Ok(threads) => format!("{threads:?}"),
+        Err(error) => format!("nothing readable ({error:#})"),
+    }
+}
+
+/// One user's account on the harness's James, read over plain JMAP rather
+/// than through Zmail, so a test can wait for the server's side of an
+/// event and a failure can say which side did not happen.
+struct James {
+    client: reqwest::blocking::Client,
+    user: &'static str,
+    password: &'static str,
+    api_url: String,
+    account_id: String,
+}
+
+impl James {
+    fn connect(user: &'static str, password: &'static str) -> Result<Self> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()?;
+        let session: serde_json::Value = client
+            .get(format!("{MAIL_HARNESS_JMAP_ENDPOINT}/.well-known/jmap"))
+            .basic_auth(user, Some(password))
+            .send()?
+            .error_for_status()?
+            .json()?;
+        let api_url = session["apiUrl"]
+            .as_str()
+            .context("the session names its API URL")?
+            .to_owned();
+        let account_id = session["primaryAccounts"]["urn:ietf:params:jmap:mail"]
+            .as_str()
+            .context("the session names the mail account")?
+            .to_owned();
+        Ok(Self {
+            client,
+            user,
+            password,
+            api_url,
+            account_id,
+        })
+    }
+
+    /// The James account a harness account in the store signs in to.
+    fn for_account(store: &LocalStore, account_id: i64) -> Result<Self> {
+        let target = store
+            .sync_target(account_id)?
+            .context("the JMAP account should have a sync target")?;
+        match target.username.as_str() {
+            MAIL_HARNESS_JMAP_ACCOUNT => {
+                Self::connect(MAIL_HARNESS_JMAP_ACCOUNT, MAIL_HARNESS_JMAP_PASSWORD)
+            }
+            MAIL_HARNESS_SENDER => Self::connect(MAIL_HARNESS_SENDER, MAIL_HARNESS_SENDER_PASSWORD),
+            other => bail!("{other} is not a harness JMAP account"),
+        }
+    }
+
+    /// One method call, with the account filled in; returns its answer
+    /// (`[name, arguments, call id]`), failing on a method error.
+    fn call(&self, method: &str, mut arguments: serde_json::Value) -> Result<serde_json::Value> {
+        arguments["accountId"] = serde_json::json!(self.account_id);
+        let answer: serde_json::Value = self
+            .client
+            .post(&self.api_url)
+            .basic_auth(self.user, Some(self.password))
+            .json(&serde_json::json!({
+                "using": [
+                    "urn:ietf:params:jmap:core",
+                    "urn:ietf:params:jmap:mail",
+                    "urn:ietf:params:jmap:submission",
+                ],
+                "methodCalls": [[method, arguments, "c1"]],
+            }))
+            .send()?
+            .error_for_status()?
+            .json()?;
+        let response = answer["methodResponses"][0].clone();
+        if response[0] == "error" {
+            bail!("James answered {method} with {response}");
+        }
+        Ok(response)
+    }
+
+    /// Every email in the account, oldest first, with the properties the
+    /// waits match on and a failure prints.
+    fn emails(&self) -> Result<Vec<serde_json::Value>> {
+        let query = self.call(
+            "Email/query",
+            serde_json::json!({"sort": [{"property": "receivedAt"}]}),
+        )?;
+        let got = self.call(
+            "Email/get",
+            serde_json::json!({
+                "ids": query[1]["ids"],
+                "properties": ["id", "threadId", "mailboxIds", "subject", "messageId", "receivedAt"],
+            }),
+        )?;
+        got[1]["list"]
+            .as_array()
+            .cloned()
+            .with_context(|| format!("James lists the emails: {got}"))
+    }
+
+    /// Waits until James lists an email `matches` accepts in the account,
+    /// and returns it.
+    fn wait_for_email(
+        &self,
+        what: &str,
+        matches: impl Fn(&serde_json::Value) -> bool,
+    ) -> Result<serde_json::Value> {
+        let started = Instant::now();
+        loop {
+            let emails = self.emails()?;
+            if let Some(email) = emails.iter().find(|email| matches(email)) {
+                return Ok(email.clone());
+            }
+            if started.elapsed() > DELIVERY_TIMEOUT {
+                bail!(
+                    "James had not delivered {what} to {} within {:?}; the account holds {}",
+                    self.user,
+                    started.elapsed(),
+                    serde_json::Value::Array(emails)
+                );
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+    }
+}
+
+/// Whether a James email (see [`James::emails`]) has `message_id`.
+fn has_message_id(email: &serde_json::Value, message_id: &str) -> bool {
+    email["messageId"]
+        .as_array()
+        .is_some_and(|ids| ids.iter().any(|id| id == message_id))
+}
+
+/// One JMAP method call against the harness's James as the JMAP account;
+/// returns the method's answer (`[name, arguments, call id]`).
 fn jmap_call(method: &str, arguments: serde_json::Value) -> Result<serde_json::Value> {
-    let client = reqwest::blocking::Client::new();
-    let session: serde_json::Value = client
-        .get(format!("{MAIL_HARNESS_JMAP_ENDPOINT}/.well-known/jmap"))
-        .basic_auth(MAIL_HARNESS_JMAP_ACCOUNT, Some(MAIL_HARNESS_JMAP_PASSWORD))
-        .send()?
-        .error_for_status()?
-        .json()?;
-    let api_url = session["apiUrl"]
-        .as_str()
-        .context("the session names its API URL")?;
-    let account_id = session["primaryAccounts"]["urn:ietf:params:jmap:mail"]
-        .as_str()
-        .context("the session names the mail account")?;
-    let mut arguments = arguments;
-    arguments["accountId"] = serde_json::json!(account_id);
-    let answer: serde_json::Value = client
-        .post(api_url)
-        .basic_auth(MAIL_HARNESS_JMAP_ACCOUNT, Some(MAIL_HARNESS_JMAP_PASSWORD))
-        .json(&serde_json::json!({
-            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:submission"],
-            "methodCalls": [[method, arguments, "c1"]],
-        }))
-        .send()?
-        .error_for_status()?
-        .json()?;
-    Ok(answer["methodResponses"][0].clone())
+    James::connect(MAIL_HARNESS_JMAP_ACCOUNT, MAIL_HARNESS_JMAP_PASSWORD)?.call(method, arguments)
 }
 
 /// The identity with `email` in the store, and how it stands.
