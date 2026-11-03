@@ -26,6 +26,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=scripts/x11-capture-session.sh
+source "${SCRIPT_DIR}/x11-capture-session.sh"
 APP_BINARY="${ZMAIL_APP_BINARY:-${REPO_ROOT}/target/release/zmail-app}"
 WINDOW_TITLE="Zmail"
 LOG_DIR="${ZMAIL_CAPTURE_LOG_DIR:-${TMPDIR:-/tmp}}"
@@ -315,36 +317,14 @@ start_session() {
 
   openbox >"${OPENBOX_LOG}" 2>&1 &
   OPENBOX_PID=$!
-  wait_for_window_manager
-}
-
-# Waits up to 30 seconds for openbox to take over the screen. A window the
-# app maps while openbox is still starting can be lost: openbox never maps
-# it, so the first state timed out with its window unmapped (#345). Openbox
-# publishes _NET_NUMBER_OF_DESKTOPS late in its start-up, so once
-# `xdotool get_num_desktops` answers it is managing new windows.
-wait_for_window_manager() {
-  for _ in $(seq 1 150); do
-    if ! kill -0 "${OPENBOX_PID}" 2>/dev/null; then
-      echo "openbox exited during start-up" >&2
-      cat "${OPENBOX_LOG}" >&2
-      return 1
-    fi
-    xdotool get_num_desktops >/dev/null 2>&1 && return 0
-    sleep 0.2
-  done
-  echo "timed out waiting for openbox to manage the screen" >&2
-  cat "${OPENBOX_LOG}" >&2
-  return 1
+  wait_for_openbox "${OPENBOX_PID}" "${OPENBOX_LOG}"
 }
 
 # Fails if the capture at $1 is one flat colour: a window that is mapped
 # but never drew a frame.
 check_capture() {
-  local colours
-  colours="$(identify -format '%k' "$1")"
-  if [[ "${colours}" -lt 2 ]]; then
-    echo "$1 is blank (${colours} colour): the window drew nothing" >&2
+  if [[ "$(identify -format '%k' "$1")" -lt 2 ]]; then
+    echo "$1 is blank (one flat colour): the window drew nothing" >&2
     cat "${APP_LOG}" >&2
     return 1
   fi
