@@ -25,7 +25,7 @@ use crate::encryption::suffixed;
 /// A held lock on a store; released when dropped.
 #[derive(Debug)]
 pub(crate) struct StoreLock {
-    _file: fs::File,
+    file: fs::File,
 }
 
 impl StoreLock {
@@ -33,11 +33,8 @@ impl StoreLock {
     pub(crate) fn shared(database: &Path) -> Result<Self> {
         let file = open(&path(database))?;
         match file.try_lock_shared() {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(fs::TryLockError::WouldBlock) => Err(anyhow!(
-                "another Zmail is encrypting this mail store or changing its key; try again \
-                 when it has finished"
-            )),
+            Ok(()) => Ok(Self { file }),
+            Err(fs::TryLockError::WouldBlock) => Err(rewriting()),
             Err(fs::TryLockError::Error(error)) => {
                 Err(error).with_context(|| format!("failed to lock {}", path(database).display()))
             }
@@ -47,8 +44,44 @@ impl StoreLock {
     /// The exclusive lock for rewriting the store's files, or `None` when
     /// another store has it open (in this process or another).
     pub(crate) fn exclusive(database: &Path) -> Result<Option<Self>> {
-        Ok(try_lock_exclusive(&path(database))?.map(|file| Self { _file: file }))
+        Ok(try_lock_exclusive(&path(database))?.map(|file| Self { file }))
     }
+
+    /// Turns an exclusive lock into the shared lock an open store holds,
+    /// on the same open file rather than by dropping it and locking the
+    /// file again.
+    ///
+    /// A lock belongs to the open file, and a process this one starts (a
+    /// browser opening a link, any subprocess) gets copies of all its
+    /// descriptors until it runs its program. Dropping the lock while
+    /// another thread is starting one leaves that copy holding it for a
+    /// moment, and the shared lock taken next would be refused as if
+    /// another Zmail were rewriting the store. Unlocking here releases the
+    /// lock however many copies of the descriptor there are.
+    ///
+    /// Like dropping and locking again, this is not atomic: another
+    /// process can take the exclusive lock in between, and then the store
+    /// does not open.
+    pub(crate) fn downgrade(&self) -> Result<()> {
+        self.file
+            .unlock()
+            .context("failed to release the store's exclusive lock")?;
+        match self.file.try_lock_shared() {
+            Ok(()) => Ok(()),
+            Err(fs::TryLockError::WouldBlock) => Err(rewriting()),
+            Err(fs::TryLockError::Error(error)) => {
+                Err(error).context("failed to share the store's lock")
+            }
+        }
+    }
+}
+
+/// Why a shared lock was refused: another process holds it exclusively.
+fn rewriting() -> anyhow::Error {
+    anyhow!(
+        "another Zmail is encrypting this mail store or changing its key; try again when it \
+         has finished"
+    )
 }
 
 /// The lock that lets one process sync the store (ADR 0007): an exclusive
@@ -212,6 +245,36 @@ mod tests {
             .expect("no store is open");
         drop(exclusive);
         drop(sync);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_downgraded_lock_lets_other_stores_open_but_not_rewrite() {
+        let (path, directory) = database("downgrade");
+        std::fs::create_dir_all(&directory).expect("temp dir");
+        let lock = StoreLock::exclusive(&path)
+            .expect("the lock file opens")
+            .expect("no store is open");
+        assert!(
+            StoreLock::shared(&path).is_err(),
+            "no store opens while the lock is exclusive"
+        );
+        lock.downgrade().expect("the lock becomes shared");
+        let other = StoreLock::shared(&path).expect("another store opens beside it");
+        assert!(
+            StoreLock::exclusive(&path)
+                .expect("the lock file opens")
+                .is_none(),
+            "nothing rewrites the store while it is open"
+        );
+        drop(other);
+        drop(lock);
+        assert!(
+            StoreLock::exclusive(&path)
+                .expect("the lock file opens")
+                .is_some(),
+            "the lock is free once both are gone"
+        );
         let _ = std::fs::remove_dir_all(directory);
     }
 }

@@ -164,9 +164,17 @@ impl LocalStore {
         // Encrypting and finishing a key rotation rewrite the store's files,
         // so they run only when no other process has the store open. One
         // that has it open has already done them.
-        let report = match StoreLock::exclusive(path)? {
-            Some(lock) => Self::prepare(path, keychain, progress, Arc::new(lock))?,
-            None => None,
+        let (lock, report) = match StoreLock::exclusive(path)? {
+            Some(lock) => {
+                let lock = Arc::new(lock);
+                let report = Self::prepare(path, keychain, progress, lock.clone())?;
+                // The store opens under the same lock, now shared (see
+                // `StoreLock::downgrade` for why it isn't dropped and taken
+                // again).
+                lock.downgrade()?;
+                (Some(lock), report)
+            }
+            None => (None, None),
         };
         let record = StoreKeyRecord::path_for(path);
         let key = match vault::load_store_key(keychain, &record)? {
@@ -180,7 +188,10 @@ impl LocalStore {
                 )));
             }
         };
-        let store = Self::open(path, key)?;
+        let store = match lock {
+            Some(lock) => Self::open_with_lock(path.to_owned(), key, lock)?,
+            None => Self::open(path, key)?,
+        };
         Ok((store, report))
     }
 
