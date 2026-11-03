@@ -60,9 +60,8 @@ RustCrypto 0.14 stack (`crypto-bigint` 0.7.6, `elliptic-curve` 0.14,
 `[patch.crates-io]` for `rsa` does not apply to Zmail, which builds with
 crates.io `rsa` 0.10.0-rc.19. `deny.toml` allows the fork's git source.
 
-Zmail hands rPGP (and the proton-srp fork below) a `rand` 0.10 RNG
-through the `rand_pgp` workspace dependency; the rest of Zmail keeps
-`rand` 0.8.
+Zmail hands rPGP (and the proton-srp fork below) a `rand` 0.10 RNG;
+the workspace `rand` is 0.10 throughout.
 
 To move back once a `pgp` release on crates.io contains #573:
 
@@ -70,8 +69,7 @@ To move back once a `pgp` release on crates.io contains #573:
    the root `Cargo.toml` and run `cargo update -p pgp`.
 2. Remove `https://github.com/lazzurs/rpgp` from `allow-git` in
    `deny.toml`.
-3. Keep `rand_pgp` while that release takes `rand` 0.10; drop it if it
-   matches the workspace `rand` again.
+3. Check that release still takes `rand` 0.10, the workspace `rand`.
 4. Run the workspace tests (the key, unlock, sign, encrypt and send
    package tests in `zmail-proton-api`) and the Proton harness, then
    remove this section and update ADR 0004's crypto section.

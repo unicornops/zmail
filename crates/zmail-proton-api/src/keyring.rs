@@ -226,7 +226,7 @@ const PROBE: &[u8] = b"zmail key check";
 
 fn check_signing(secret: &impl SigningKey, public: &impl VerifyingKey) -> Result<(), Error> {
     DetachedSignature::sign_binary_data(
-        &mut rand_pgp::rng(),
+        &mut rand::rng(),
         secret,
         &Password::empty(),
         HashAlgorithm::Sha256,
@@ -237,7 +237,7 @@ fn check_signing(secret: &impl SigningKey, public: &impl VerifyingKey) -> Result
 }
 
 fn check_encryption(key: &SignedSecretKey, public: &impl EncryptionKey) -> Result<(), Error> {
-    let mut rng = rand_pgp::rng();
+    let mut rng = rand::rng();
     let mut builder = MessageBuilder::from_bytes("", PROBE.to_vec())
         .seipd_v1(&mut rng, SymmetricKeyAlgorithm::AES256);
     builder

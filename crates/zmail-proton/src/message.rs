@@ -19,7 +19,7 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, TimeZone, Utc};
-use rand::RngCore;
+use rand::Rng;
 use zeroize::Zeroizing;
 use zmail_proton_api::{Attachment, EmailAddress, Headers, KeyRing, Message};
 
@@ -553,7 +553,7 @@ pub(crate) fn write_multipart(out: &mut Vec<u8>, boundary: &str, parts: &[(PartH
 /// `newBoundary`: 64 random hex characters.
 pub(crate) fn new_boundary() -> String {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

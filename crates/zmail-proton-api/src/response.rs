@@ -12,7 +12,7 @@
 
 use std::{fmt, time::Duration};
 
-use rand::Rng;
+use rand::RngExt;
 use reqwest::StatusCode;
 use serde::Deserialize;
 
@@ -362,7 +362,7 @@ fn random_up_to(limit: Duration) -> Duration {
         return Duration::ZERO;
     }
     let millis = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX);
-    Duration::from_millis(rand::thread_rng().gen_range(0..=millis))
+    Duration::from_millis(rand::rng().random_range(0..=millis))
 }
 
 #[cfg(test)]

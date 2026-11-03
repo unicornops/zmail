@@ -8,7 +8,7 @@
 //! bidirectional or zero-width character, and (for the corpus) none of
 //! the payloads the attacks carry.
 
-use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
+use rand::{RngExt, SeedableRng, rngs::StdRng, seq::IndexedRandom};
 use zmail_security::terminal::{sanitize, sanitize_line};
 
 /// One attack: a label, the hostile text, and what must be left of it.
@@ -338,7 +338,7 @@ fn mutated_hostile_text_comes_out_safe() {
     let mut rng = StdRng::seed_from_u64(seed);
     for iteration in 0..iterations {
         let mut mutated = (*corpus.choose(&mut rng).expect("a corpus entry")).to_owned();
-        for _ in 0..rng.gen_range(1..=8) {
+        for _ in 0..rng.random_range(1..=8) {
             mutate(&mut mutated, &corpus, &mut rng);
         }
         assert_safe(&format!("mutation {iteration} of seed {seed}"), &mutated);
@@ -349,14 +349,14 @@ fn mutated_hostile_text_comes_out_safe() {
 fn random_text_comes_out_safe() {
     let mut rng = StdRng::seed_from_u64(0x0007_0000_7261_6e64);
     for iteration in 0..2_000 {
-        let length = rng.gen_range(0..64);
+        let length = rng.random_range(0..64);
         let text: String = (0..length)
-            .map(|_| match rng.gen_range(0..4) {
+            .map(|_| match rng.random_range(0..4) {
                 // Mostly the ranges that matter: ASCII with its controls,
                 // and C1 with Latin-1.
-                0 | 1 => char::from(rng.gen_range(0..0x80_u8)),
-                2 => char::from_u32(rng.gen_range(0x80..0x100)).expect("Latin-1"),
-                _ => rng.r#gen::<char>(),
+                0 | 1 => char::from(rng.random_range(0..0x80_u8)),
+                2 => char::from_u32(rng.random_range(0x80..0x100)).expect("Latin-1"),
+                _ => rng.random::<char>(),
             })
             .collect();
         let output = sanitize(&text);
@@ -376,10 +376,10 @@ fn random_text_comes_out_safe() {
 
 fn mutate(input: &mut String, corpus: &[&str], rng: &mut StdRng) {
     let boundary = |input: &str, rng: &mut StdRng| {
-        let at = rng.gen_range(0..=input.len());
+        let at = rng.random_range(0..=input.len());
         input.floor_char_boundary(at)
     };
-    match rng.gen_range(0..4) {
+    match rng.random_range(0..4) {
         0 | 1 => {
             let at = boundary(input, rng);
             let piece = PIECES.choose(rng).expect("a piece");
@@ -387,15 +387,15 @@ fn mutate(input: &mut String, corpus: &[&str], rng: &mut StdRng) {
         }
         2 => {
             let start = boundary(input, rng);
-            let end =
-                input.floor_char_boundary(start + input[start..].len().min(rng.gen_range(0..16)));
+            let end = input
+                .floor_char_boundary(start + input[start..].len().min(rng.random_range(0..16)));
             input.replace_range(start..end, "");
         }
         _ => {
             let other = corpus.choose(rng).expect("a corpus entry");
             let from = boundary(other, rng);
             let to =
-                other.floor_char_boundary(from + other[from..].len().min(rng.gen_range(0..32)));
+                other.floor_char_boundary(from + other[from..].len().min(rng.random_range(0..32)));
             let at = boundary(input, rng);
             input.insert_str(at, &other[from..to]);
         }
