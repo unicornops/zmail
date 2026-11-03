@@ -1983,21 +1983,28 @@ mod tests {
             eventually(|| second.runs_sync()),
             "the second frontend takes the sync over"
         );
+        // The takeover says it syncs before it starts the deferred work (so
+        // a request made meanwhile runs rather than being deferred again),
+        // and starts that work on the supervisor's thread, so wait for it.
         assert!(
-            second
+            eventually(|| second
                 .inner
                 .outbox_supervisor_started
-                .load(Ordering::SeqCst)
+                .load(Ordering::SeqCst)),
+            "the outbox poll started"
         );
-        assert!(second.inner.indexer_started.load(Ordering::SeqCst));
         assert!(
-            second
+            eventually(|| second
                 .inner
                 .watched_accounts
                 .lock()
                 .expect("watched accounts")
-                .contains(&account_id),
+                .contains(&account_id)),
             "the deferred watcher started"
+        );
+        assert!(
+            eventually(|| second.inner.indexer_started.load(Ordering::SeqCst)),
+            "the deferred indexing started"
         );
         // A third frontend now finds the lock taken.
         let third =
