@@ -15,8 +15,9 @@ use async_imap::{
     types::{Fetch, Flag, Mailbox, Name, NameAttribute},
 };
 use futures_util::TryStreamExt;
-use mail_parser::{Address, MessageParser, MimeHeaders, PartType};
+use mail_parser::{AddressList, MessageParser, PartKind};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
@@ -27,7 +28,7 @@ use tokio_rustls::{
     rustls::{ClientConfig, RootCertStore, pki_types::ServerName},
 };
 use url::Url;
-use zmail_core::threading::{bare_message_id, parse_message_ids};
+use zmail_core::threading::bare_message_id;
 use zmail_core::{
     AccountSyncSnapshot, AuthKind, BlobStore, HydratedBody, MailboxSnapshot, MessageAttachment,
     MessageHeaders, MessageSnapshot, OpApplyReport, PendingOp, PendingOpKind, ProtocolKind,
@@ -395,7 +396,7 @@ pub fn hydrated_body_from_rfc822(
     remote_id: &str,
     blobs: &BlobStore,
 ) -> Option<HydratedBody> {
-    let message = MessageParser::default().parse(raw)?;
+    let message = parse_message(raw)?;
     let (body_text, sanitized_html, has_remote_content, preview_source) = hydrate_bodies(&message);
     let attachments = persist_attachments(&message, mailbox_name, remote_id, blobs);
     Some(HydratedBody {
@@ -409,15 +410,30 @@ pub fn hydrated_body_from_rfc822(
     })
 }
 
+/// Parses one fetched message. mail-parser 1.0 returns `None` for input
+/// with no header field and no blank line, where 0.11 returned a message
+/// with no headers and no body; such mail is still stored (as an
+/// "Unknown sender" with "(no subject)") rather than dropped, so it falls
+/// back to that empty message. Empty input stays `None`.
+fn parse_message(raw: &[u8]) -> Option<mail_parser::Message<'_>> {
+    let parser = MessageParser::default();
+    parser
+        .parse(raw)
+        .or_else(|| (!raw.is_empty()).then(|| parser.parse(b"\r\n")).flatten())
+}
+
 /// The headers a reply is worked out from, read from a parsed message
 /// (its full header, so a header-only fetch has them all).
 pub fn message_headers(message: &mail_parser::Message<'_>) -> MessageHeaders {
     let delivered_to = message
-        .headers_raw()
-        .filter(|(name, _)| {
+        .headers()
+        .iter()
+        .filter(|header| {
+            let name = header.raw_name();
             name.eq_ignore_ascii_case("Delivered-To") || name.eq_ignore_ascii_case("X-Original-To")
         })
-        .filter_map(|(_, value)| {
+        .filter_map(|header| {
+            let value = String::from_utf8_lossy(header.raw_value());
             let address = value.trim().trim_start_matches('<').trim_end_matches('>');
             (address.contains('@') && !address.contains(char::is_whitespace))
                 .then(|| address.to_owned())
@@ -442,12 +458,10 @@ pub fn message_headers(message: &mail_parser::Message<'_>) -> MessageHeaders {
 }
 
 /// The message ids of a parsed `In-Reply-To` or `References` header.
-fn message_ids(value: &mail_parser::HeaderValue<'_>) -> Vec<String> {
-    match (value.as_text_list(), value.as_text()) {
-        (Some(ids), _) => ids.iter().filter_map(|id| bare_message_id(id)).collect(),
-        (None, Some(id)) => parse_message_ids(id),
-        (None, None) => Vec::new(),
-    }
+fn message_ids(value: Option<mail_parser::TextList<'_>>) -> Vec<String> {
+    value
+        .map(|ids| ids.iter().filter_map(bare_message_id).collect())
+        .unwrap_or_default()
 }
 
 /// Bodies fetched for background indexing from one mailbox.
@@ -1448,22 +1462,17 @@ impl ImapThreadAccumulator {
 /// all stay standalone, keyed by their UID (the pre-conversation
 /// behavior).
 fn conversation_key(message: &mail_parser::Message<'_>, uid: Option<u32>) -> String {
-    if let Some(references) = message.references().as_text_list()
+    if let Some(references) = message.references()
         && let Some(root) = references.first()
         && !root.trim().is_empty()
     {
         return root.trim().to_owned();
     }
-    if let Some(in_reply_to) = message.in_reply_to().as_text_list()
+    if let Some(in_reply_to) = message.in_reply_to()
         && let Some(parent) = in_reply_to.first()
         && !parent.trim().is_empty()
     {
         return parent.trim().to_owned();
-    }
-    if let Some(in_reply_to) = message.in_reply_to().as_text()
-        && !in_reply_to.trim().is_empty()
-    {
-        return in_reply_to.trim().to_owned();
     }
     if let Some(message_id) = message.message_id().filter(|id| !id.trim().is_empty()) {
         return message_id.trim().to_owned();
@@ -1485,7 +1494,7 @@ fn accumulate_fetch(
         Some(raw) => raw,
         None => return,
     };
-    let message = match MessageParser::default().parse(raw) {
+    let message = match parse_message(raw) {
         Some(message) => message,
         None => return,
     };
@@ -1499,7 +1508,7 @@ fn accumulate_fetch(
     let recipients = format_recipients(message.to(), identity_email);
     let (body_text, sanitized_html, has_remote_content, preview_source) = hydrate_bodies(&message);
     let preview = excerpt(&preview_source, 180);
-    let has_attachments = message.attachment_count() > 0;
+    let has_attachments = attachment_parts(&message).next().is_some();
     let remote_stub = fetch.uid.map(|uid| uid.to_string()).unwrap_or_default();
     let attachments = persist_attachments(&message, mailbox_name, &remote_stub, blobs);
     let received_at = fetch
@@ -1566,17 +1575,17 @@ fn persist_attachments(
     let mut attachments = Vec::new();
     let mut kept_parts = Vec::new();
 
-    for (index, &part_id) in message.attachments.iter().enumerate() {
+    for (index, part) in attachment_parts(message).enumerate() {
         if attachments.len() >= MAX_ATTACHMENTS_PER_MESSAGE {
             break;
         }
-        let Some(part) = message.parts.get(part_id as usize) else {
-            continue;
-        };
-        let contents = part.contents();
-        if contents.len() > MAX_ATTACHMENT_BYTES {
+        let part_id = part.id();
+        if kept_parts.contains(&part_id) {
             continue;
         }
+        let Some(contents) = part_contents(part) else {
+            continue;
+        };
         let Some(filename) = part.attachment_name().map(str::to_owned) else {
             continue;
         };
@@ -1590,7 +1599,7 @@ fn persist_attachments(
         );
         // Without a writable blob store the sync must not fail: the
         // message still stores, the attachment part is simply not kept.
-        let Ok(storage_path) = blobs.write(&storage_name, contents) else {
+        let Ok(storage_path) = blobs.write(&storage_name, &contents) else {
             continue;
         };
         kept_parts.push(part_id);
@@ -1607,27 +1616,27 @@ fn persist_attachments(
     // Inline parts the HTML shows through `cid:` (images without a file
     // name, or in the body's multipart/related): kept for renderers, not
     // listed as attachments (ADR 0006).
-    for (part_id, part) in message.parts.iter().enumerate() {
+    for part in message.root().parts() {
         if attachments.len() >= MAX_ATTACHMENTS_PER_MESSAGE {
             break;
         }
-        if kept_parts.contains(&(part_id as u32))
-            || !matches!(part.body, PartType::Binary(_) | PartType::InlineBinary(_))
+        let part_id = part.id();
+        if kept_parts.contains(&part_id)
+            || !matches!(part.kind(), PartKind::Binary | PartKind::InlineBinary)
         {
             continue;
         }
         let Some(content_id) = content_id_of(part) else {
             continue;
         };
-        let contents = part.contents();
-        if contents.len() > MAX_ATTACHMENT_BYTES {
+        let Some(contents) = part_contents(part) else {
             continue;
-        }
+        };
         let storage_name = format!(
             "incoming-{}-{remote_id}-cid-{part_id}",
             sanitize_component(mailbox_name),
         );
-        let Ok(storage_path) = blobs.write(&storage_name, contents) else {
+        let Ok(storage_path) = blobs.write(&storage_name, &contents) else {
             continue;
         };
         attachments.push(MessageAttachment {
@@ -1646,8 +1655,36 @@ fn persist_attachments(
     attachments
 }
 
+/// The attachments of a message. mail-parser 1.0 follows RFC 8621: an
+/// image shown inline in both body lists is a body part, not an attachment
+/// (0.11 listed it as one). Such a part is still an attachment here, so
+/// mail with a named inline image between its text parts loses nothing.
+fn attachment_parts<'m>(
+    message: &'m mail_parser::Message<'_>,
+) -> impl Iterator<Item = mail_parser::MessagePart<'m>> {
+    let inline_media = message
+        .text_body()
+        .filter(|part| matches!(part.kind(), PartKind::Binary | PartKind::InlineBinary));
+    message.attachments().chain(inline_media)
+}
+
+/// A part's content within `MAX_ATTACHMENT_BYTES`: transfer-decoded, and
+/// for a text or HTML part also converted to UTF-8, as mail-parser 0.11
+/// stored it. `None` for a larger one, measured before it is decoded.
+fn part_contents<'m>(part: mail_parser::MessagePart<'m>) -> Option<Cow<'m, [u8]>> {
+    if part.decoded_len() > MAX_ATTACHMENT_BYTES {
+        return None;
+    }
+    let contents = match part.text() {
+        Some(Cow::Borrowed(text)) => Cow::Borrowed(text.as_bytes()),
+        Some(Cow::Owned(text)) => Cow::Owned(text.into_bytes()),
+        None => part.decoded(),
+    };
+    (contents.len() <= MAX_ATTACHMENT_BYTES).then_some(contents)
+}
+
 /// A part's media type, `application/octet-stream` when it has none.
-fn part_content_type(part: &mail_parser::MessagePart<'_>) -> String {
+fn part_content_type(part: mail_parser::MessagePart<'_>) -> String {
     part.content_type()
         .map(|content_type| match content_type.subtype() {
             Some(subtype) => format!("{}/{}", content_type.ctype(), subtype),
@@ -1657,7 +1694,7 @@ fn part_content_type(part: &mail_parser::MessagePart<'_>) -> String {
 }
 
 /// A part's Content-ID without its angle brackets.
-fn content_id_of(part: &mail_parser::MessagePart<'_>) -> Option<String> {
+fn content_id_of(part: mail_parser::MessagePart<'_>) -> Option<String> {
     let content_id = part
         .content_id()?
         .trim()
@@ -1671,8 +1708,12 @@ fn content_id_of(part: &mail_parser::MessagePart<'_>) -> Option<String> {
 /// even when the message also has a plain-text part. `None` for the empty
 /// shell mail-parser gives a header-only parse.
 fn raw_html_part(message: &mail_parser::Message<'_>) -> Option<String> {
-    match message.html_part(0).map(|part| &part.body) {
-        Some(PartType::Html(html)) if html_has_visible_text(html) => Some(html.to_string()),
+    let part = message.html_body().next()?;
+    match part.kind() {
+        PartKind::Html => part
+            .text()
+            .filter(|html| html_has_visible_text(html))
+            .map(Cow::into_owned),
         _ => None,
     }
 }
@@ -1707,14 +1748,14 @@ impl ImapThreadAccumulator {
     }
 }
 
-fn first_address(addresses: Option<&Address<'_>>) -> Option<String> {
+fn first_address(addresses: Option<AddressList<'_>>) -> Option<String> {
     collect_addresses(addresses)
         .into_iter()
         .next()
         .filter(|value| !value.trim().is_empty())
 }
 
-fn format_recipients(addresses: Option<&Address<'_>>, fallback: &str) -> String {
+fn format_recipients(addresses: Option<AddressList<'_>>, fallback: &str) -> String {
     let recipients = collect_addresses(addresses);
     if recipients.is_empty() {
         fallback.to_owned()
@@ -1723,25 +1764,17 @@ fn format_recipients(addresses: Option<&Address<'_>>, fallback: &str) -> String 
     }
 }
 
-fn collect_addresses(addresses: Option<&Address<'_>>) -> Vec<String> {
-    match addresses {
-        Some(Address::List(items)) => items
-            .iter()
-            .map(format_addr)
-            .filter(|value| !value.trim().is_empty())
-            .collect(),
-        Some(Address::Group(groups)) => groups
-            .iter()
-            .flat_map(|group| group.addresses.iter())
-            .map(format_addr)
-            .filter(|value| !value.trim().is_empty())
-            .collect(),
-        None => Vec::new(),
-    }
+fn collect_addresses(addresses: Option<AddressList<'_>>) -> Vec<String> {
+    addresses
+        .into_iter()
+        .flat_map(|list| list.mailboxes())
+        .map(format_addr)
+        .filter(|value| !value.trim().is_empty())
+        .collect()
 }
 
-fn format_addr(address: &mail_parser::Addr<'_>) -> String {
-    match (address.name.as_deref(), address.address.as_deref()) {
+fn format_addr(address: mail_parser::Mailbox<'_>) -> String {
+    match (address.name(), address.address()) {
         (Some(name), Some(email)) if !name.trim().is_empty() => format!("{name} <{email}>"),
         (_, Some(email)) => email.to_owned(),
         (Some(name), None) => name.to_owned(),
@@ -1760,28 +1793,30 @@ fn format_addr(address: &mail_parser::Addr<'_>) -> String {
 fn hydrate_bodies(
     message: &mail_parser::Message<'_>,
 ) -> (Option<String>, Option<String>, bool, String) {
-    let body_text = match message.text_part(0).map(|part| &part.body) {
-        Some(PartType::Text(text)) => Some(text.as_ref()),
-        _ => None,
-    }
-    .filter(|value| !value.trim().is_empty());
+    let body_text = message
+        .text_body()
+        .next()
+        .filter(|part| matches!(part.kind(), PartKind::Text))
+        .and_then(|part| part.text())
+        .filter(|value| !value.trim().is_empty());
     // Header-only parses get a synthesized "<html><body></body></html>"
     // shell from mail-parser; it carries no visible text and must surface as
     // an un-hydrated message rather than as an (empty) HTML body.
-    let html = match message.html_part(0).map(|part| &part.body) {
-        Some(PartType::Html(html)) => Some(html.as_ref()),
-        _ => None,
-    }
-    .filter(|value| html_has_visible_text(value));
+    let html = message
+        .html_body()
+        .next()
+        .filter(|part| matches!(part.kind(), PartKind::Html))
+        .and_then(|part| part.text())
+        .filter(|value| html_has_visible_text(value));
 
     if let Some(body_text) = body_text {
-        let normalized = normalize_body_text(body_text);
+        let normalized = normalize_body_text(&body_text);
         // multipart/alternative: the plain-text alternative is displayed,
         // but the HTML alternative still decides whether the message
         // references remote content. Like the JMAP adapter, only the
         // displayed alternative is stored.
         let has_remote_content =
-            html.is_some_and(|html| sanitize_html_for_display(html).has_remote_content);
+            html.is_some_and(|html| sanitize_html_for_display(&html).has_remote_content);
         return (
             Some(normalized.clone()),
             None,
@@ -1791,7 +1826,7 @@ fn hydrate_bodies(
     }
 
     if let Some(html) = html {
-        let sanitized = sanitize_html_for_display(html);
+        let sanitized = sanitize_html_for_display(&html);
         return (
             None,
             Some(sanitized.html),
@@ -1963,10 +1998,11 @@ mod tests {
     use async_imap::types::NameAttribute;
 
     use super::{
-        ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, conversation_key, excerpt, guess_role,
-        hydrate_bodies, hydrated_body_from_rfc822, mailbox_roles, message_headers, parent_name,
-        parse_endpoint, persist_attachments, recompute_thread_aggregates, resume_uid,
-        special_use_role, xoauth2_response,
+        ImapCheckpoint, ImapMailboxCheckpoint, ImapSecurity, attachment_parts, conversation_key,
+        excerpt, guess_role, hydrate_bodies, hydrated_body_from_rfc822, mailbox_roles,
+        message_headers, parent_name, parse_endpoint, parse_message, part_contents,
+        persist_attachments, recompute_thread_aggregates, resume_uid, special_use_role,
+        xoauth2_response,
     };
     use zmail_core::{MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
 
@@ -2245,6 +2281,36 @@ mod tests {
                 .any(|part| part.filename == "report.csv" && !part.inline_only)
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_named_inline_image_between_text_parts_is_still_an_attachment() {
+        // mail-parser 1.0 puts an inline image shown in both bodies in the
+        // body lists, not `attachments()` (RFC 8621); 0.11 listed it.
+        let raw = concat!(
+            "From: a@example.test\r\n",
+            "Content-Type: multipart/mixed; boundary=\"o\"\r\n",
+            "\r\n",
+            "--o\r\nContent-Type: text/plain\r\n\r\nsee\r\n",
+            "--o\r\nContent-Type: image/jpeg; name=\"p.jpg\"\r\n",
+            "Content-Disposition: inline; filename=\"p.jpg\"\r\n\r\nJPG\r\n",
+            "--o\r\nContent-Type: text/plain\r\n\r\nafter\r\n",
+            "--o--\r\n",
+        );
+        let message = parse_raw(raw.as_bytes());
+        assert_eq!(attachment_parts(&message).count(), 1);
+        let part = attachment_parts(&message).next().expect("the image");
+        assert_eq!(part.attachment_name(), Some("p.jpg"));
+        assert_eq!(part_contents(part).as_deref(), Some(b"JPG".as_slice()));
+    }
+
+    #[test]
+    fn mail_without_any_header_is_still_parsed_as_an_empty_message() {
+        // 0.11 gave such input an empty message; 1.0's `parse` returns None.
+        let message = parse_message(b"just some text with no headers").expect("an empty message");
+        assert_eq!(message.subject(), None);
+        assert!(message.from().is_none());
+        assert!(parse_message(b"").is_none());
     }
 
     #[test]
