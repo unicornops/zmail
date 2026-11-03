@@ -243,7 +243,7 @@ window_title_for() {
 
 # Prints the id of the app's visible window titled $1 (default: the main
 # window) once it is mapped, waiting up to 90 seconds; fails if the app
-# exits first.
+# or the window manager exits first.
 wait_for_window() {
   local title="${1:-${WINDOW_TITLE}}"
   local window_id=""
@@ -251,6 +251,11 @@ wait_for_window() {
     if ! kill -0 "${APP_PID}" 2>/dev/null; then
       echo "zmail-app exited before its window appeared" >&2
       cat "${APP_LOG}" >&2
+      return 1
+    fi
+    if ! kill -0 "${OPENBOX_PID}" 2>/dev/null; then
+      echo "openbox exited, so no window can be mapped" >&2
+      cat "${OPENBOX_LOG}" >&2
       return 1
     fi
 
@@ -269,14 +274,21 @@ wait_for_window() {
   return 1
 }
 
-# After a window wait times out (#186): the windows that are mapped,
-# under any title, and every thread's stack, to tell a slow cold start
-# from a hang. Needs gdb; ptrace needs root on most runners.
+# After a window wait times out (#186): every named window, whether or
+# not it is viewable, and every thread's stack, to tell a slow cold start
+# from a hang or a window that was never mapped (#345). Needs gdb; ptrace
+# needs root on most runners.
 dump_app_state() {
-  echo "--- mapped windows"
+  local visible
+  visible="$(xdotool search --onlyvisible --name . 2>/dev/null || true)"
+  echo "--- named windows"
   xdotool search --name . 2>/dev/null | while read -r id; do
-    echo "${id} $(xdotool getwindowname "${id}" 2>/dev/null || true)"
+    local state="not viewable"
+    grep -qx "${id}" <<< "${visible}" && state="viewable"
+    echo "${id} (${state}) $(xdotool getwindowname "${id}" 2>/dev/null || true)"
   done
+  echo "--- openbox log"
+  cat "${OPENBOX_LOG}"
   echo "--- zmail-app threads (pid ${APP_PID})"
   if command -v gdb >/dev/null 2>&1; then
     local gdb=(gdb)
@@ -303,6 +315,39 @@ start_session() {
 
   openbox >"${OPENBOX_LOG}" 2>&1 &
   OPENBOX_PID=$!
+  wait_for_window_manager
+}
+
+# Waits up to 30 seconds for openbox to take over the screen. A window the
+# app maps while openbox is still starting can be lost: openbox never maps
+# it, so the first state timed out with its window unmapped (#345). Openbox
+# publishes _NET_NUMBER_OF_DESKTOPS late in its start-up, so once
+# `xdotool get_num_desktops` answers it is managing new windows.
+wait_for_window_manager() {
+  for _ in $(seq 1 150); do
+    if ! kill -0 "${OPENBOX_PID}" 2>/dev/null; then
+      echo "openbox exited during start-up" >&2
+      cat "${OPENBOX_LOG}" >&2
+      return 1
+    fi
+    xdotool get_num_desktops >/dev/null 2>&1 && return 0
+    sleep 0.2
+  done
+  echo "timed out waiting for openbox to manage the screen" >&2
+  cat "${OPENBOX_LOG}" >&2
+  return 1
+}
+
+# Fails if the capture at $1 is one flat colour: a window that is mapped
+# but never drew a frame.
+check_capture() {
+  local colours
+  colours="$(identify -format '%k' "$1")"
+  if [[ "${colours}" -lt 2 ]]; then
+    echo "$1 is blank (${colours} colour): the window drew nothing" >&2
+    cat "${APP_LOG}" >&2
+    return 1
+  fi
 }
 
 capture_release() {
@@ -326,6 +371,7 @@ capture_release() {
   xdotool windowactivate "${window_id}" >/dev/null 2>&1 || true
   sleep 3
   import -window "${window_id}" "${output_path}"
+  check_capture "${output_path}"
 }
 
 # Captures one matrix state into OUTPUT_DIR/NAME.png.
@@ -369,6 +415,7 @@ capture_state() {
   sleep 3
 
   import -window "${window_id}" "${output_path}"
+  check_capture "${output_path}"
   if [[ -n "${pointer_x}" ]]; then
     # Park the pointer so it does not hover the next state.
     xdotool mousemove 2500 1400
