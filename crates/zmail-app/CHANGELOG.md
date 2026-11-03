@@ -5,6 +5,7 @@
 
 ### Bug Fixes
 
+* **jmap:** name a thread after its reply when both arrive in one second; wait on James in the JMAP harness ([#384](https://github.com/unicornops/zmail/issues/384)) ([8343f26](https://github.com/unicornops/zmail/commit/8343f260cf5ac86780c87c7acf49dbfce121f51f))
 * **store:** stop starting processes from keeping dropped store locks ([#386](https://github.com/unicornops/zmail/issues/386)) ([428e25c](https://github.com/unicornops/zmail/commit/428e25c1b78d7318dd9f46b776e65147f4cb453b))
 
 ## [0.32.0](https://github.com/unicornops/zmail/compare/v0.31.1...v0.32.0) (2026-11-03)
