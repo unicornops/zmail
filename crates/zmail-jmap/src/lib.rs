@@ -1006,24 +1006,18 @@ fn group_mailboxes(
             let entry = mailbox
                 .threads
                 .entry(email.thread_id.clone())
-                .or_insert_with(|| ThreadAccumulator {
+                .or_insert_with(|| ThreadSnapshot {
                     remote_thread_id: email.thread_id.clone(),
-                    subject: email.subject.clone(),
-                    preview: email.preview.clone(),
+                    subject: String::new(),
+                    participants: String::new(),
+                    preview: String::new(),
                     is_flagged: false,
                     has_attachments: false,
                     unread_count: 0,
-                    latest_message_at: email.received_at.clone(),
+                    latest_message_at: String::new(),
                     messages: Vec::new(),
                 });
-            if email.received_at > entry.latest_message_at {
-                entry.latest_message_at = email.received_at.clone();
-                entry.preview = email.preview.clone();
-                entry.subject = email.subject.clone();
-            }
-            entry.is_flagged |= email.flagged;
             entry.has_attachments |= email.has_attachments;
-            entry.unread_count += usize::from(email.unread);
             entry
                 .messages
                 .push(message_snapshot(&email, primary_identity));
@@ -1037,22 +1031,8 @@ fn group_mailboxes(
                 .threads
                 .into_values()
                 .map(|mut thread| {
+                    changes::recompute_thread(&mut thread);
                     thread
-                        .messages
-                        .sort_by(|left, right| left.received_at.cmp(&right.received_at));
-                    ThreadSnapshot {
-                        remote_thread_id: thread.remote_thread_id,
-                        subject: thread.subject,
-                        participants: zmail_core::participants::thread_participants(
-                            &thread.messages,
-                        ),
-                        preview: thread.preview,
-                        is_flagged: thread.is_flagged,
-                        has_attachments: thread.has_attachments,
-                        unread_count: thread.unread_count,
-                        latest_message_at: thread.latest_message_at,
-                        messages: thread.messages,
-                    }
                 })
                 .collect::<Vec<_>>();
             threads.sort_by(|left, right| right.latest_message_at.cmp(&left.latest_message_at));
@@ -1115,19 +1095,7 @@ struct MailboxAccumulator {
     role: Option<String>,
     parent: Option<String>,
     sort_order: u32,
-    threads: BTreeMap<String, ThreadAccumulator>,
-}
-
-#[derive(Debug)]
-struct ThreadAccumulator {
-    remote_thread_id: String,
-    subject: String,
-    preview: String,
-    is_flagged: bool,
-    has_attachments: bool,
-    unread_count: usize,
-    latest_message_at: String,
-    messages: Vec<MessageSnapshot>,
+    threads: BTreeMap<String, ThreadSnapshot>,
 }
 
 /// Splits a JMAP email into the stored body fields.
@@ -1289,11 +1257,11 @@ fn timestamp_to_rfc3339(timestamp: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        JmapCheckpoint, extract_renderable_bodies, format_jmap_addresses, jmap_credentials,
-        raw_html_body, sanitize_component, timestamp_to_rfc3339,
+        JmapCheckpoint, JmapEmail, JmapMailbox, extract_renderable_bodies, format_jmap_addresses,
+        group_mailboxes, jmap_credentials, raw_html_body, sanitize_component, timestamp_to_rfc3339,
     };
     use serde_json::json;
-    use zmail_core::AuthKind;
+    use zmail_core::{AuthKind, threading::MessageHeaders};
 
     #[test]
     fn jmap_credentials_follow_the_auth_kind() {
@@ -1714,5 +1682,87 @@ mod tests {
     #[test]
     fn empty_address_lists_render_cleanly() {
         assert_eq!(format_jmap_addresses(None), "Unknown");
+    }
+
+    /// An email in thread T1 of the inbox, received at `received_at`.
+    fn threaded_email(id: &str, subject: &str, received_at: &str, parents: &[&str]) -> JmapEmail {
+        JmapEmail {
+            id: id.to_owned(),
+            thread_id: "T1".to_owned(),
+            mailbox_ids: vec!["inbox".to_owned()],
+            from: "Ada <ada@example.test>".to_owned(),
+            reply_to: None,
+            recipients: "me@example.test".to_owned(),
+            subject: subject.to_owned(),
+            preview: format!("Preview {id}"),
+            body_text: None,
+            sanitized_html: None,
+            raw_html: None,
+            received_at: received_at.to_owned(),
+            unread: true,
+            flagged: false,
+            has_attachments: false,
+            has_remote_content: false,
+            identity_email: String::new(),
+            attachments: Vec::new(),
+            headers: MessageHeaders {
+                captured: true,
+                message_id: Some(format!("{id}@example.test")),
+                in_reply_to: parents
+                    .last()
+                    .map(|id| (*id).to_owned())
+                    .into_iter()
+                    .collect(),
+                references: parents.iter().map(|id| (*id).to_owned()).collect(),
+                ..MessageHeaders::default()
+            },
+        }
+    }
+
+    #[test]
+    fn a_reply_received_in_its_parents_second_names_the_thread() {
+        // receivedAt is to the second, and the server lists a tie in
+        // either order.
+        let at = "2026-11-03T16:15:05Z";
+        for reply_first in [false, true] {
+            let parent = threaded_email("e1", "Plans", at, &["e0@example.test"]);
+            let reply = threaded_email(
+                "e2",
+                "Re: Plans",
+                at,
+                &["e0@example.test", "e1@example.test"],
+            );
+            let emails = if reply_first {
+                vec![reply, parent]
+            } else {
+                vec![parent, reply]
+            };
+            let mailboxes = group_mailboxes(
+                vec![JmapMailbox {
+                    id: "inbox".to_owned(),
+                    name: "Inbox".to_owned(),
+                    role: Some("inbox".to_owned()),
+                    sort_order: 0,
+                    parent: None,
+                }],
+                emails,
+                &[],
+                "me@example.test",
+            );
+
+            let thread = &mailboxes[0].threads[0];
+            assert_eq!(
+                thread.subject, "Re: Plans",
+                "reply listed first: {reply_first}"
+            );
+            assert_eq!(thread.preview, "Preview e2");
+            let order = thread
+                .messages
+                .iter()
+                .map(|message| message.remote_id.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(order, ["e1", "e2"], "the reply is the newest message");
+            assert_eq!(thread.unread_count, 2);
+        }
     }
 }

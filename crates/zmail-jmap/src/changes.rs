@@ -352,12 +352,27 @@ pub(crate) fn apply_email_changes(
     mailboxes
 }
 
-/// Recomputes a thread's aggregate fields from its messages, matching the
-/// full sync's grouping: the newest message names the thread.
-fn recompute_thread(thread: &mut ThreadSnapshot) {
-    thread
-        .messages
-        .sort_by(|left, right| left.received_at.cmp(&right.received_at));
+/// Recomputes a thread's aggregate fields from its messages, for the full
+/// sync and `Email/changes` alike: the newest message names the thread.
+///
+/// `receivedAt` is to the second, so a reply can arrive in the second its
+/// parent did (a reply to oneself, sent and delivered at once). The
+/// server's order for such a tie is arbitrary (Apache James lists them
+/// either way round), so the one further down the conversation, with more
+/// `References`, counts as newer, as it answers the other.
+pub(crate) fn recompute_thread(thread: &mut ThreadSnapshot) {
+    let depth = |message: &MessageSnapshot| {
+        message
+            .headers
+            .references
+            .len()
+            .max(message.headers.in_reply_to.len())
+    };
+    thread.messages.sort_by(|left, right| {
+        left.received_at
+            .cmp(&right.received_at)
+            .then_with(|| depth(left).cmp(&depth(right)))
+    });
     if let Some(newest) = thread.messages.last() {
         thread.latest_message_at = newest.received_at.clone();
         thread.subject = newest.subject.clone();
@@ -485,6 +500,37 @@ mod tests {
         assert_eq!(thread.latest_message_at, "2026-10-02T10:00:00Z");
         assert_eq!(thread.unread_count, 1);
         assert!(thread.has_attachments);
+    }
+
+    #[test]
+    fn a_parent_arriving_after_its_reply_in_the_same_second_does_not_rename_it() {
+        let at = "2026-10-02T10:00:00Z";
+        let mut reply = message("e2", at, false);
+        reply.headers.in_reply_to = vec!["e1@example.test".to_owned()];
+        reply.headers.references = vec!["e1@example.test".to_owned()];
+        let details = [detail("m1", "Inbox", Some("inbox"))];
+        let existing = by_id(vec![(
+            "m1",
+            mailbox("Inbox", vec![thread("t1", vec![reply])]),
+        )]);
+        let mailboxes = apply_email_changes(
+            &details,
+            existing,
+            &ids(&["e1"]),
+            vec![PlacedEmail {
+                thread_id: "t1".to_owned(),
+                mailbox_ids: vec!["m1".to_owned()],
+                has_attachments: false,
+                message: message("e1", at, true),
+            }],
+        );
+
+        let thread = &mailboxes[0].threads[0];
+        assert_eq!(
+            thread.subject, "Subject e2",
+            "the reply is still the newest"
+        );
+        assert_eq!(thread.messages[1].remote_id, "e2");
     }
 
     #[test]
