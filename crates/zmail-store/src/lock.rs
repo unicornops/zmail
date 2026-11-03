@@ -144,6 +144,10 @@ fn open(path: &Path) -> Result<fs::File> {
         .with_context(|| format!("failed to open {}", path.display()))
 }
 
+// No test in this crate's library may start a process: the child gets
+// copies of every descriptor until it runs its program, so it keeps locks
+// other tests have just dropped (#345). Tests that need a second process
+// have a test binary of their own (`tests/sync_lock_process.rs`).
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -181,53 +185,6 @@ mod tests {
         assert!(path.with_extension("sqlite3.sync.lock").exists());
         drop(again);
         let _ = std::fs::remove_dir_all(directory);
-    }
-
-    /// Set in the child process `a_second_process_is_refused_the_sync_lock`
-    /// starts: the database whose sync lock the child tries.
-    const CHILD_DATABASE: &str = "ZMAIL_SYNC_LOCK_CHILD_DATABASE";
-
-    #[test]
-    fn a_second_process_is_refused_the_sync_lock() {
-        let (path, directory) = database("process");
-        let held = SyncLock::try_acquire(&path)
-            .expect("the lock file opens")
-            .expect("the lock is free");
-        let child = |path: &std::path::Path| {
-            std::process::Command::new(std::env::current_exe().expect("the test binary"))
-                .args(["--exact", "lock::tests::sync_lock_child", "--nocapture"])
-                .env(CHILD_DATABASE, path)
-                .output()
-                .expect("the child runs")
-        };
-        let output = child(&path);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(output.status.success(), "child failed: {stdout}");
-        assert!(
-            stdout.contains("sync lock: refused"),
-            "child output: {stdout}"
-        );
-        drop(held);
-        let output = child(&path);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("sync lock: acquired"),
-            "child output: {stdout}"
-        );
-        let _ = std::fs::remove_dir_all(directory);
-    }
-
-    /// The child half of `a_second_process_is_refused_the_sync_lock`; does
-    /// nothing in a normal test run.
-    #[test]
-    fn sync_lock_child() {
-        let Some(path) = std::env::var_os(CHILD_DATABASE) else {
-            return;
-        };
-        match SyncLock::try_acquire(std::path::Path::new(&path)).expect("the lock file opens") {
-            Some(_) => println!("sync lock: acquired"),
-            None => println!("sync lock: refused"),
-        }
     }
 
     #[test]
