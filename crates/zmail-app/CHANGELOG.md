@@ -6,6 +6,8 @@
 ### Features
 
 * **tui:** rebind keys with a user keymap file ([#381](https://github.com/unicornops/zmail/issues/381)) ([da2166a](https://github.com/unicornops/zmail/commit/da2166a39c5e1dce9e72012fe5d388677fb87bcd))
+* **tui:** add the command palette on `:` ([#380](https://github.com/unicornops/zmail/issues/380)) ([b66f217](https://github.com/unicornops/zmail/commit/b66f21745c884dd1d9182c2ee492703fbfb3b382))
+* **tui:** show sender-safety warnings in Message Text ([#379](https://github.com/unicornops/zmail/issues/379)) ([b7bffb6](https://github.com/unicornops/zmail/commit/b7bffb6af98ce1f94ac91aeb60df9717dcd3c7d2))
 * **tui:** save attachments from Message Text ([#378](https://github.com/unicornops/zmail/issues/378)) ([1cdd91e](https://github.com/unicornops/zmail/commit/1cdd91eff94653511b377098ecd4ad977eadc8fe))
 
 ## [0.31.1](https://github.com/unicornops/zmail/compare/v0.31.0...v0.31.1) (2026-11-02)
