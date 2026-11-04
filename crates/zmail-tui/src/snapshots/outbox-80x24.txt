@@ -3,12 +3,12 @@
 
   Waiting to send
     To ada@example.com  Waiting
+  Sending interrupted — check Sent: Zmail stopped while sending this message, s…
+    To di@example.com  Interrupted
   Sign in again to send (in the Zmail window)
     To cy@example.com  Refused
   Couldn’t send: 550 mailbox unavailable
     To bo@example.com  Failed
-
-
 
 
 

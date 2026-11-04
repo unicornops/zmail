@@ -275,6 +275,61 @@ impl SyncService {
         }
     }
 
+    /// Looks for the message an interrupted send was sending on a Proton
+    /// account, by its Message-ID (see [`crate::interrupted`]).
+    pub(crate) async fn find_interrupted_proton_send(
+        &self,
+        target: &SyncTarget,
+        message_id: &str,
+    ) -> Result<crate::interrupted::InterruptedSend> {
+        #[cfg(feature = "proton")]
+        {
+            use crate::interrupted::{InterruptedSend, ResumeSend};
+
+            let Credentials::Proton(session) = self.connect_proton(target).await? else {
+                anyhow::bail!("Proton accounts need a Proton session");
+            };
+            Ok(
+                match zmail_proton::find_outgoing_message(&session, message_id).await? {
+                    zmail_proton::OutgoingTrace::Sent => InterruptedSend::Sent,
+                    zmail_proton::OutgoingTrace::Draft(draft_id) => {
+                        InterruptedSend::Resume(ResumeSend::ProtonDraft(draft_id))
+                    }
+                    zmail_proton::OutgoingTrace::None => InterruptedSend::NotSent,
+                },
+            )
+        }
+        #[cfg(not(feature = "proton"))]
+        {
+            let _ = message_id;
+            self.connect_proton(target).await?;
+            anyhow::bail!("this build of Zmail has no Proton Mail support")
+        }
+    }
+
+    /// Sends the draft an interrupted send left on a Proton account, as
+    /// [`Self::deliver_proton`] would have sent the message.
+    pub(crate) async fn resume_proton_send(
+        &self,
+        target: &SyncTarget,
+        draft_id: &str,
+        message: &OutgoingMessage,
+    ) -> Result<()> {
+        #[cfg(feature = "proton")]
+        {
+            let Credentials::Proton(session) = self.connect_proton(target).await? else {
+                anyhow::bail!("Proton accounts need a Proton session");
+            };
+            let trusted = self.inner.store.trusted_recipient_keys(target.id)?;
+            zmail_proton::send_existing_draft(&session, draft_id, message, &trusted).await
+        }
+        #[cfg(not(feature = "proton"))]
+        {
+            let _ = (draft_id, message);
+            self.connect_proton(target).await.map(|_| ())
+        }
+    }
+
     /// Whether a Proton account has a session to resume (and this build
     /// can resume it).
     pub(crate) fn has_proton_session(&self, account_id: i64) -> bool {

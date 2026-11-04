@@ -22,7 +22,7 @@ use std::sync::Arc;
 use zmail_actions::reply;
 use zmail_core::{
     AccountSummary, AppBootstrap, MailboxRole, MailboxSelection, MailboxSummary, NewDraft,
-    OutboxJobState, SyncPhase, ThemeAppearance, ThreadView, VirtualMailbox,
+    OutboxJobState, SyncPhase, ThemeAppearance, ThreadView, VirtualMailbox, is_interrupted_send,
     preferences::ReadingPanePosition,
     text::count_noun,
     time::{HourCycle, format_full_date, next_local_midnight},
@@ -1941,15 +1941,29 @@ impl WorkspaceView {
         Ok(started.draft_id)
     }
 
-    /// Sends every failed outbox message again (the sidebar's Retry).
+    /// Sends every failed outbox message again (the sidebar's Retry),
+    /// except interrupted sends: they may have gone out, so each waits
+    /// for the user to check Sent and retry it from its row.
     pub(crate) fn retry_failed_outbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let failed = self
+        let (interrupted, failed): (Vec<_>, Vec<_>) = self
             .outbox_jobs
             .iter()
             .filter(|job| is_retryable(job.state))
-            .map(|job| job.id)
-            .collect::<Vec<_>>();
+            .partition(|job| {
+                job.last_error_message
+                    .as_deref()
+                    .is_some_and(is_interrupted_send)
+            });
+        let failed = failed.into_iter().map(|job| job.id).collect::<Vec<_>>();
         if failed.is_empty() {
+            if !interrupted.is_empty() {
+                self.show_status(
+                    "Check your Sent folder first, then retry an interrupted message from \
+                     its row in the Outbox."
+                        .to_owned(),
+                    cx,
+                );
+            }
             return;
         }
         for job_id in &failed {

@@ -3,6 +3,7 @@
 mod backoff;
 mod identities;
 mod imap_watch;
+mod interrupted;
 mod proton;
 #[cfg(feature = "proton")]
 pub use proton::proton_production_config;
@@ -52,6 +53,14 @@ const MAX_OUTBOX_ATTEMPTS: usize = 3;
 /// How long [`SyncService::process_outbox_and_wait`] waits for the messages
 /// another outbox pass in this process is sending.
 const OUTBOX_WAIT_LIMIT: Duration = Duration::from_secs(300);
+/// How often a process sending an outbox message renews its claim on the
+/// job ([`LocalStore::renew_outbox_claim`]), so the process that syncs
+/// never takes a long send for an interrupted one.
+const OUTBOX_HEARTBEAT_INTERVAL: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(15)
+};
 const MAIL_WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_PENDING_OP_ATTEMPTS: i64 = 5;
 /// How often a service built with [`SyncService::with_sync_lock`] tries the
@@ -188,6 +197,12 @@ struct SyncServiceInner {
     outbox_sending: Mutex<HashMap<i64, i64>>,
     /// Woken whenever a job leaves `outbox_sending`.
     outbox_settled: tokio::sync::Notify,
+    /// How long a `Sending` job's sender may stay silent before the job
+    /// counts as an interrupted send (see [`interrupted`]).
+    interrupted_send_after: Mutex<Duration>,
+    /// Interrupted sends whose check failed (the server could not be
+    /// asked), and when to check each again.
+    interrupted_rechecks: Mutex<HashMap<i64, Instant>>,
     watched_accounts: Mutex<HashSet<i64>>,
     watcher_poll_interval: Mutex<Option<Duration>>,
     notifier: Mutex<Option<Arc<dyn Notifier>>>,
@@ -361,6 +376,8 @@ impl SyncService {
                 outbox_supervisor_started: AtomicBool::new(false),
                 outbox_sending: Mutex::new(HashMap::new()),
                 outbox_settled: tokio::sync::Notify::new(),
+                interrupted_send_after: Mutex::new(interrupted::INTERRUPTED_SEND_AFTER),
+                interrupted_rechecks: Mutex::new(HashMap::new()),
                 watched_accounts: Mutex::new(HashSet::new()),
                 watcher_poll_interval: Mutex::new(None),
                 notifier: Mutex::new(None),
@@ -387,6 +404,17 @@ impl SyncService {
     /// when frontends say so with [`SYNCS_ELSEWHERE`].
     pub fn runs_sync(&self) -> bool {
         self.inner.syncs.load(Ordering::SeqCst)
+    }
+
+    /// Whether this process holds the store's sync lock: not just syncing,
+    /// as [`SyncService::new`] does beside the holder, but the only process
+    /// that does by rights.
+    fn holds_sync_lock(&self) -> bool {
+        self.inner
+            .sync_lock
+            .lock()
+            .expect("sync lock mutex should not be poisoned")
+            .is_some()
     }
 
     /// `true` when this service syncs; otherwise records `defer` for the
@@ -1075,6 +1103,10 @@ impl SyncService {
     /// (the outbox poll, a finished sync's, [`Self::queue_draft_and_send`]'s)
     /// claimed first and is still sending. Returns how many were tried.
     ///
+    /// The process that holds the sync lock first settles the sends that
+    /// were interrupted (see [`interrupted`]), as its outbox poll does, and
+    /// counts the ones it settled.
+    ///
     /// Gives up with an error after [`OUTBOX_WAIT_LIMIT`]. A job another
     /// process is sending (only with [`SyncService::new`], which syncs
     /// whatever holds the sync lock) is not waited for.
@@ -1086,6 +1118,7 @@ impl SyncService {
         let (tx, rx) = mpsc::sync_channel(1);
         self.inner.handle.spawn(async move {
             let result = async {
+                let recovered = service.recover_interrupted_sends(account_id).await?;
                 let processed = service.process_due_outbox_jobs(account_id).await?;
                 let waited = tokio::time::timeout(
                     OUTBOX_WAIT_LIMIT,
@@ -1098,7 +1131,7 @@ impl SyncService {
                         OUTBOX_WAIT_LIMIT.as_secs()
                     )
                 })?;
-                anyhow::Ok(processed + waited)
+                anyhow::Ok(recovered + processed + waited)
             }
             .await;
             let _ = tx.send(result.map_err(|error| error.to_string()));
@@ -1233,6 +1266,9 @@ impl SyncService {
         let service = self.clone();
         self.inner.handle.spawn(async move {
             loop {
+                // Before the first pass, so a send interrupted before this
+                // process took the sync lock is settled at once.
+                let _ = service.recover_interrupted_sends(None).await;
                 let _ = service.process_due_outbox_jobs(None).await;
                 sleep(OUTBOX_POLL_INTERVAL).await;
             }
@@ -1579,40 +1615,64 @@ impl SyncService {
             };
             processed += 1;
 
-            match self.deliver_outbox_job(&job).await {
-                Ok(()) => self.inner.store.record_outbox_sent(job.job_id)?,
-                Err(error) => {
-                    // A refused sign-in fails at once: retrying the same
-                    // credentials cannot work, and the stored message
-                    // tells the shell to offer Re-authenticate. So does a
-                    // recipient key that no longer matches the contact
-                    // card: only the user can decide to trust it.
-                    if let Some(reauth) = reauth_required(&error) {
-                        self.inner
-                            .store
-                            .record_outbox_failure(job.job_id, reauth.to_string())?;
-                    } else if let Some(changed) = pinned_key_changed(&error) {
-                        self.inner
-                            .store
-                            .record_outbox_failure(job.job_id, changed.to_string())?;
-                    } else if job.attempt_count >= MAX_OUTBOX_ATTEMPTS {
-                        self.inner
-                            .store
-                            .record_outbox_failure(job.job_id, error.to_string())?;
-                    } else {
-                        let retry_after =
-                            OUTBOX_RETRY_BASE_DELAY.saturating_mul(job.attempt_count as u32);
-                        self.inner.store.record_outbox_retry(
-                            job.job_id,
-                            error.to_string(),
-                            retry_after,
-                        )?;
-                    }
-                }
-            }
+            let delivered = self
+                .renewing_claim(job.job_id, self.deliver_outbox_job(&job))
+                .await;
+            self.record_attempt(&job, delivered)?;
         }
 
         Ok(processed)
+    }
+
+    /// Records how a delivery attempt of `job` went.
+    fn record_attempt(&self, job: &PendingOutboxJob, delivered: Result<()>) -> Result<()> {
+        let Err(error) = delivered else {
+            return self.inner.store.record_outbox_sent(job.job_id);
+        };
+        // A refused sign-in fails at once: retrying the same credentials
+        // cannot work, and the stored message tells the shell to offer
+        // Re-authenticate. So does a recipient key that no longer matches
+        // the contact card: only the user can decide to trust it.
+        if let Some(reauth) = reauth_required(&error) {
+            self.inner
+                .store
+                .record_outbox_failure(job.job_id, reauth.to_string())
+        } else if let Some(changed) = pinned_key_changed(&error) {
+            self.inner
+                .store
+                .record_outbox_failure(job.job_id, changed.to_string())
+        } else if job.attempt_count >= MAX_OUTBOX_ATTEMPTS {
+            self.inner
+                .store
+                .record_outbox_failure(job.job_id, error.to_string())
+        } else {
+            let retry_after = OUTBOX_RETRY_BASE_DELAY.saturating_mul(job.attempt_count as u32);
+            self.inner
+                .store
+                .record_outbox_retry(job.job_id, error.to_string(), retry_after)
+        }
+    }
+
+    /// Runs `work` on outbox job `job_id`, renewing this process's claim
+    /// on the job every [`OUTBOX_HEARTBEAT_INTERVAL`] until it ends, so
+    /// however long a send takes, the process that syncs knows it is still
+    /// going (see [`interrupted`]).
+    async fn renewing_claim<T>(&self, job_id: i64, work: impl Future<Output = T>) -> T {
+        let mut work = std::pin::pin!(work);
+        let mut heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + OUTBOX_HEARTBEAT_INTERVAL,
+            OUTBOX_HEARTBEAT_INTERVAL,
+        );
+        loop {
+            tokio::select! {
+                output = &mut work => return output,
+                _ = heartbeat.tick() => {
+                    // A missed renewal only risks an early check, which
+                    // the next one makes up for.
+                    let _ = self.inner.store.renew_outbox_claim(job_id);
+                }
+            }
+        }
     }
 
     /// Reads the headers of the message a draft answers when they had not
@@ -1645,28 +1705,11 @@ impl SyncService {
         } else {
             job
         };
-        // The full sync target carries the auth kind and OAuth2 client
-        // config, so OAuth2 accounts deliver with a freshly refreshed access
-        // token (`connect_secret`) instead of the empty password slot.
-        let target = self
-            .inner
-            .store
-            .sync_target(job.target.account_id)?
-            .with_context(|| {
-                format!(
-                    "account {} for outbox job {} no longer exists",
-                    job.target.account_id, job.job_id
-                )
-            })?;
+        let target = self.outbox_account(job)?;
         if job.target.outgoing.kind == SubmissionKind::Proton {
             return self.deliver_proton(&target, &job.message).await;
         }
-        let secret = self.connect_secret(&target).await.with_context(|| {
-            format!(
-                "missing or inaccessible credentials for account {}",
-                job.target.account_id
-            )
-        })?;
+        let secret = self.outbox_secret(job, &target).await?;
 
         match job.target.outgoing.kind {
             SubmissionKind::Smtp => {
@@ -1711,6 +1754,32 @@ impl SyncService {
             }
             SubmissionKind::Proton => unreachable!("Proton submission is delivered above"),
         }
+    }
+
+    /// The account outbox job `job` sends from. The full sync target
+    /// carries the auth kind and OAuth2 client config, so OAuth2 accounts
+    /// deliver with a freshly refreshed access token (`connect_secret`)
+    /// instead of the empty password slot.
+    fn outbox_account(&self, job: &PendingOutboxJob) -> Result<SyncTarget> {
+        self.inner
+            .store
+            .sync_target(job.target.account_id)?
+            .with_context(|| {
+                format!(
+                    "account {} for outbox job {} no longer exists",
+                    job.target.account_id, job.job_id
+                )
+            })
+    }
+
+    /// The password or access token outbox job `job` sends with.
+    async fn outbox_secret(&self, job: &PendingOutboxJob, target: &SyncTarget) -> Result<String> {
+        self.connect_secret(target).await.with_context(|| {
+            format!(
+                "missing or inaccessible credentials for account {}",
+                job.target.account_id
+            )
+        })
     }
 }
 

@@ -47,7 +47,7 @@ pub(crate) fn method_arguments<'a>(
 }
 
 /// A method error's or set error's description, else its type.
-fn refusal_reason(error: &Value) -> &str {
+pub(crate) fn refusal_reason(error: &Value) -> &str {
     error
         .get("description")
         .or_else(|| error.get("type"))

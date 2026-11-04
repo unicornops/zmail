@@ -748,6 +748,21 @@ impl fmt::Display for DraftState {
     }
 }
 
+/// What an outbox job records when a send was interrupted (Zmail stopped
+/// mid-send: a crash, a killed command, a force-quit app) and the server
+/// cannot say whether the message went out, as over SMTP. The job is
+/// failed rather than sent again, so a message never goes out twice
+/// unasked; the user checks Sent and retries if it is not there. Changing
+/// the text orphans messages already stored, which then read as ordinary
+/// errors.
+pub const INTERRUPTED_SEND_MESSAGE: &str = "Zmail stopped while sending this message, so it may or \
+     may not have been sent. Check your Sent folder before you send it again.";
+
+/// Whether a stored outbox error is [`INTERRUPTED_SEND_MESSAGE`].
+pub fn is_interrupted_send(message: &str) -> bool {
+    message.starts_with(INTERRUPTED_SEND_MESSAGE)
+}
+
 /// Persisted state of a queued outbox job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutboxJobState {

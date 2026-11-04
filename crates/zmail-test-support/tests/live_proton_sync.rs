@@ -781,6 +781,253 @@ fn sends_to_outside_recipients_by_their_contact_settings() -> Result<()> {
     Ok(())
 }
 
+/// How many messages the harness was asked to send
+/// (`POST /mail/v4/messages/{draft ID}`) in its log.
+fn send_requests(log: &str) -> Vec<String> {
+    log.lines()
+        .filter(|line| line.contains("| POST"))
+        .filter_map(|line| {
+            let path = line.split('"').nth(1)?;
+            let id = path.strip_prefix("/mail/v4/messages/")?;
+            (!id.contains('/')
+                && ![
+                    "import",
+                    "read",
+                    "unread",
+                    "delete",
+                    "label",
+                    "unlabel",
+                    "undoactions",
+                ]
+                .contains(&id))
+            .then(|| id.to_owned())
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn interrupted_sends_are_settled_from_what_proton_shows() -> Result<()> {
+    use std::time::Duration;
+
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, secrets.as_ref(), account_id)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    // The process that holds the sync lock, as the desktop app does.
+    let sync_service =
+        SyncService::for_command(runtime.handle().clone(), store.clone(), secrets.clone())?;
+    ensure!(sync_service.runs_sync());
+    sync_service.configure_proton(harness_config(&harness)?)?;
+    // Nothing counts as interrupted while each case is set up.
+    sync_service.set_interrupted_send_after(Duration::from_secs(3600));
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
+    let identity_id = store
+        .list_identities(account_id)?
+        .into_iter()
+        .find(|identity| identity.email_address == PROTON_HARNESS_PRIMARY_ADDRESS)
+        .context("no identity for the primary address")?
+        .id;
+
+    // The stopped process's view of the account: a sign-in of its own,
+    // so the two never refresh one session's tokens from under each other.
+    let stopped_secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, stopped_secrets.as_ref(), account_id)?;
+    let sessions = zmail_proton::ProtonSessions::new(harness_config(&harness)?, stopped_secrets)?;
+    let session = runtime.handle().block_on(sessions.session(account_id))?;
+
+    // A message to the alias, claimed for sending as a pass claims it;
+    // the process then stops without recording anything.
+    let scratch = std::env::temp_dir().join(format!("zmail-proton-stop-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    let claim = |subject: &str, attach: bool| -> Result<zmail_core::PendingOutboxJob> {
+        let draft_id = store.create_draft(&NewDraft {
+            account_id,
+            identity_id,
+            to: vec![PROTON_HARNESS_ALIAS_ADDRESS.to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: subject.to_owned(),
+            body: format!("{subject}, sent once."),
+            threading: Default::default(),
+        })?;
+        if attach {
+            let notes = scratch.join("notes.txt");
+            std::fs::write(&notes, b"line one\n")?;
+            store.add_draft_attachment(draft_id, &notes)?;
+        }
+        store.queue_draft(draft_id)?;
+        store
+            .claim_due_outbox_job(Some(account_id))?
+            .context("the job is due")
+    };
+    // Zmail starts again: the holder settles what was interrupted.
+    let settle = || -> Result<()> {
+        sync_service.set_interrupted_send_after(Duration::ZERO);
+        sync_service
+            .process_outbox_and_wait(Some(account_id))
+            .with_context(|| format!("server log:\n{}", harness.logs()))?;
+        sync_service.set_interrupted_send_after(Duration::from_secs(3600));
+        Ok(())
+    };
+    let state = |job_id: i64| -> Result<zmail_core::OutboxJobSummary> {
+        store
+            .list_outbox_jobs(Some(account_id))?
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .context("the job is kept")
+    };
+    // What the account holds with the message's Message-ID: sent copies,
+    // received copies (the alias's) and drafts.
+    let held = |message_id: &str| -> Result<(usize, usize, usize, i64)> {
+        let metadata = runtime
+            .handle()
+            .block_on(session.client().get_message_metadata(&MessageFilter {
+                external_id: message_id.to_owned(),
+                ..MessageFilter::default()
+            }))?;
+        let sent = metadata
+            .iter()
+            .filter(|message| message.flags.has(zmail_proton_api::MessageFlags::SENT))
+            .collect::<Vec<_>>();
+        let received = metadata
+            .iter()
+            .filter(|message| message.flags.has(zmail_proton_api::MessageFlags::RECEIVED))
+            .count();
+        let drafts = metadata.iter().filter(|message| message.is_draft()).count();
+        Ok((
+            sent.len(),
+            received,
+            drafts,
+            sent.first().map_or(-1, |message| message.num_attachments),
+        ))
+    };
+
+    // 1. It had sent the message when it stopped: the job is Sent, and
+    // nothing is sent again.
+    let job = claim("Stopped after sending", false)?;
+    runtime
+        .handle()
+        .block_on(zmail_proton::submit_outgoing_message(
+            &session,
+            &job.message,
+            &[],
+        ))
+        .with_context(|| format!("the first send; server log:\n{}", harness.logs()))?;
+    let message_id = job.message.message_id.clone().context("a Message-ID")?;
+    let before = send_requests(&harness.logs()).len();
+    ensure!(state(job.job_id)?.state == OutboxJobState::Sending);
+    settle()?;
+    let after = state(job.job_id)?;
+    ensure!(after.state == OutboxJobState::Sent, "{after:?}");
+    ensure!(after.attempt_count == 1, "{after:?}");
+    ensure!(
+        send_requests(&harness.logs()).len() == before,
+        "sent again; server log:\n{}",
+        harness.logs()
+    );
+    let (sent, received, drafts, _) = held(&message_id)?;
+    ensure!(
+        (sent, received, drafts) == (1, 1, 0),
+        "{sent} sent, {received} received, {drafts} drafts"
+    );
+
+    // 2. It had created the draft, and stopped before sending it: that
+    // draft is sent, once, with the attachment the stopped process never
+    // uploaded.
+    let job = claim("Stopped with a draft", true)?;
+    let message_id = job.message.message_id.clone().context("a Message-ID")?;
+    let draft_id = runtime.handle().block_on(async {
+        let client = session.client();
+        let user = client.get_user().await?;
+        let addresses = client.get_addresses().await?;
+        let key_pass = client.salted_key_pass(&user, harness.password()).await?;
+        let keys = zmail_proton_api::unlock(&user, &addresses, &key_pass)?;
+        let address = addresses
+            .iter()
+            .find(|address| address.email == PROTON_HARNESS_PRIMARY_ADDRESS)
+            .context("the primary address")?;
+        let key = keys
+            .addresses
+            .get(&address.id)
+            .and_then(|ring| ring.first())
+            .context("the address key")?;
+        let draft = client
+            .create_draft(
+                key,
+                zmail_proton_api::CreateDraftReq {
+                    message: zmail_proton_api::DraftTemplate {
+                        subject: job.message.subject.clone(),
+                        body: job.message.text_body.clone(),
+                        mime_type: "text/plain".to_owned(),
+                        sender: zmail_proton_api::EmailAddress {
+                            name: String::new(),
+                            address: PROTON_HARNESS_PRIMARY_ADDRESS.to_owned(),
+                        },
+                        to_list: vec![zmail_proton_api::EmailAddress {
+                            name: String::new(),
+                            address: PROTON_HARNESS_ALIAS_ADDRESS.to_owned(),
+                        }],
+                        external_id: message_id.clone(),
+                        ..zmail_proton_api::DraftTemplate::default()
+                    },
+                    ..zmail_proton_api::CreateDraftReq::default()
+                },
+            )
+            .await?;
+        anyhow::Ok(draft.metadata.id)
+    })?;
+    let before = send_requests(&harness.logs()).len();
+    settle()?;
+    let after = state(job.job_id)?;
+    ensure!(
+        after.state == OutboxJobState::Sent,
+        "{after:?}; server log:\n{}",
+        harness.logs()
+    );
+    let sends = send_requests(&harness.logs());
+    ensure!(
+        sends[before..] == [draft_id.clone()],
+        "sends {:?}, the draft {draft_id}",
+        &sends[before..]
+    );
+    let (sent, received, drafts, attachments) = held(&message_id)?;
+    ensure!(
+        (sent, received, drafts, attachments) == (1, 1, 0, 1),
+        "{sent} sent, {received} received, {drafts} drafts, {attachments} attachments"
+    );
+
+    // 3. It stopped before the draft: no trace, so it goes back in the
+    // queue and is sent once.
+    let job = claim("Stopped before the draft", false)?;
+    let message_id = job.message.message_id.clone().context("a Message-ID")?;
+    let before = send_requests(&harness.logs()).len();
+    settle()?;
+    let after = state(job.job_id)?;
+    ensure!(
+        after.state == OutboxJobState::Sent,
+        "{after:?}; server log:\n{}",
+        harness.logs()
+    );
+    ensure!(
+        after.attempt_count == 2,
+        "the interrupted attempt counts: {after:?}"
+    );
+    ensure!(send_requests(&harness.logs()).len() == before + 1);
+    let (sent, received, drafts, _) = held(&message_id)?;
+    ensure!(
+        (sent, received, drafts) == (1, 1, 0),
+        "{sent} sent, {received} received, {drafts} drafts"
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+    Ok(())
+}
+
 #[test]
 #[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
 fn a_reply_is_created_with_its_parent_and_threads() -> Result<()> {

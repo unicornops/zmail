@@ -204,7 +204,10 @@ What already works without the GUI:
 - **Safe concurrent use.** Every open store holds a shared advisory lock,
   so a GUI and a TUI can have the same store open at once. Outbox jobs are
   claimed atomically (`claim_due_outbox_job`), so two processes cannot
-  send the same message twice.
+  send the same message twice. A sender renews its claim while the send
+  runs; a job whose claim goes silent (its process stopped mid-send) is
+  settled by the sync lock holder alone, from what the server shows, or
+  failed for the user to check Sent where the server can't say (#403).
 
 What lives only in the GUI crate today:
 

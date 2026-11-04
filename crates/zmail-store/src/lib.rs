@@ -150,6 +150,17 @@ pub struct AccountRemovalImpact {
     pub drafts: usize,
 }
 
+/// An outbox job a send was interrupted on, claimed to find out what became
+/// of it (see [`LocalStore::claim_interrupted_outbox_job`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedOutboxJob {
+    /// The job and its message, as a send would have them.
+    pub job: PendingOutboxJob,
+    /// When the interrupted attempt claimed the job (UTC, `YYYY-MM-DDTHH:MM:SSZ`):
+    /// the message cannot have reached a server before then.
+    pub claimed_at: Option<String>,
+}
+
 /// The storage stance recorded during Phase 2.
 pub const STORAGE_MODEL: &str =
     "SQLite metadata plus content-addressed blobs, optimized for large offline-first mailboxes.";
@@ -203,6 +214,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0030_draft_identity_reply_to",
         DRAFT_IDENTITY_REPLY_TO_SCHEMA,
     ),
+    ("0031_outbox_heartbeat", OUTBOX_HEARTBEAT_SCHEMA),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -544,6 +556,13 @@ UPDATE drafts SET identity_reply_to = COALESCE(
     (SELECT reply_to FROM identities WHERE identities.id = drafts.identity_id),
     ''
 );
+"#;
+
+/// When the process sending an outbox job last said it still was (see
+/// [`LocalStore::renew_outbox_claim`]). Jobs claimed before this column
+/// existed fall back to their claim time, `last_attempt_at`.
+const OUTBOX_HEARTBEAT_SCHEMA: &str = r#"
+ALTER TABLE outbox_jobs ADD COLUMN heartbeat_at TEXT;
 "#;
 
 /// App-wide settings as one JSON document per key (for example the UI
@@ -4748,6 +4767,7 @@ impl LocalStore {
                 state = ?2,
                 attempt_count = attempt_count + 1,
                 last_attempt_at = ?3,
+                heartbeat_at = ?3,
                 updated_at = ?4
             WHERE id = ?1
             "#,
@@ -4779,6 +4799,138 @@ impl LocalStore {
             .commit()
             .context("failed to commit the outbox claim transaction")?;
         self.pending_outbox_job(job_id)
+    }
+
+    /// Records that this process is still sending outbox job `job_id`, so
+    /// the process that syncs leaves it alone (see
+    /// [`Self::claim_interrupted_outbox_job`]). A sender calls it every few
+    /// seconds while a send runs; it does nothing once the job has left
+    /// `Sending`.
+    pub fn renew_outbox_claim(&self, job_id: i64) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE outbox_jobs SET heartbeat_at = ?2 WHERE id = ?1 AND state = ?3",
+            params![
+                job_id,
+                utc_now_timestamp(),
+                OutboxJobState::Sending.as_str()
+            ],
+        )
+        .context("failed to renew the outbox claim")?;
+        Ok(())
+    }
+
+    /// Claims an outbox job a send was interrupted on: one still `Sending`
+    /// whose sender has not renewed its claim
+    /// ([`Self::renew_outbox_claim`]) for `silent_for`, because the process
+    /// stopped (a crash, a killed command, a force-quit app). Jobs in
+    /// `skip` (the ones this process is sending, and ones it checked
+    /// lately) are left alone.
+    ///
+    /// The claim is renewed in the same transaction, so the job is not
+    /// taken twice while it is checked. Its state stays `Sending` until the
+    /// caller knows what became of the send and records it
+    /// ([`Self::record_outbox_sent`], [`Self::requeue_interrupted_outbox_job`],
+    /// [`Self::record_outbox_failure`]).
+    pub fn claim_interrupted_outbox_job(
+        &self,
+        account_id: Option<i64>,
+        silent_for: Duration,
+        skip: &[i64],
+    ) -> Result<Option<InterruptedOutboxJob>> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin the interrupted outbox claim transaction")?;
+        let silent_since = utc_timestamp_before(silent_for);
+        let candidates = {
+            let mut statement = transaction.prepare(
+                r#"
+                SELECT id, last_attempt_at
+                FROM outbox_jobs
+                WHERE (?1 IS NULL OR account_id = ?1)
+                  AND state = ?2
+                  AND COALESCE(heartbeat_at, last_attempt_at, updated_at) <= ?3
+                ORDER BY id ASC
+                "#,
+            )?;
+            let rows = statement.query_map(
+                params![account_id, OutboxJobState::Sending.as_str(), silent_since],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to list interrupted outbox jobs")?
+        };
+        let Some((job_id, claimed_at)) = candidates
+            .into_iter()
+            .find(|(job_id, _)| !skip.contains(job_id))
+        else {
+            return Ok(None);
+        };
+        transaction.execute(
+            "UPDATE outbox_jobs SET heartbeat_at = ?2 WHERE id = ?1",
+            params![job_id, utc_now_timestamp()],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the interrupted outbox claim transaction")?;
+        Ok(self
+            .pending_outbox_job(job_id)?
+            .map(|job| InterruptedOutboxJob { job, claimed_at }))
+    }
+
+    /// Puts an interrupted job ([`Self::claim_interrupted_outbox_job`]) back
+    /// in the queue, once the server has shown the message never reached
+    /// it. The interrupted attempt still counts.
+    pub fn requeue_interrupted_outbox_job(&self, job_id: i64) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin the outbox requeue transaction")?;
+        let (draft_id, state) = transaction
+            .query_row(
+                "SELECT draft_id, state FROM outbox_jobs WHERE id = ?1",
+                params![job_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        outbox_job_state_from_db(row.get::<_, String>(1)?)?,
+                    ))
+                },
+            )
+            .optional()?
+            .with_context(|| format!("outbox job {job_id} does not exist"))?;
+        if state != OutboxJobState::Sending {
+            bail!("outbox job {job_id} is {state}, not an interrupted send");
+        }
+        let now = utc_now_timestamp();
+        transaction.execute(
+            r#"
+            UPDATE outbox_jobs
+            SET
+                state = ?2,
+                next_attempt_at = ?3,
+                heartbeat_at = NULL,
+                last_error_message = NULL,
+                updated_at = ?3
+            WHERE id = ?1
+            "#,
+            params![job_id, OutboxJobState::Queued.as_str(), now],
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE drafts
+            SET
+                state = ?2,
+                last_error_message = NULL,
+                updated_at = ?3
+            WHERE id = ?1
+            "#,
+            params![draft_id, DraftState::Queued.as_str(), now],
+        )?;
+        transaction
+            .commit()
+            .context("failed to commit the outbox requeue transaction")
     }
 
     /// The conversation holding the message draft `draft_id` answers, when
@@ -5827,6 +5979,15 @@ fn utc_timestamp_at_least(duration: Duration) -> String {
         .unwrap_or_default()
         .saturating_add(duration);
     let seconds = at.as_secs() + u64::from(at.subsec_nanos() > 0);
+    utc_timestamp_from_epoch(seconds)
+}
+
+fn utc_timestamp_before(duration: Duration) -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(duration.as_secs());
     utc_timestamp_from_epoch(seconds)
 }
 
@@ -11220,6 +11381,172 @@ mod tests {
             .expect("draft should exist");
         assert_eq!(sent.state, DraftState::Sent);
         assert!(sent.sent_at.is_some());
+    }
+
+    #[test]
+    fn an_interrupted_send_is_claimed_only_once_its_sender_falls_silent() {
+        use super::utc_now_timestamp;
+        use rusqlite::params;
+        use zmail_core::OutboxJobState;
+
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let new_job = |subject: &str| {
+            let draft_id = store
+                .create_draft(&NewDraft {
+                    account_id,
+                    identity_id,
+                    to: vec!["recipient@example.test".to_owned()],
+                    cc: Vec::new(),
+                    bcc: Vec::new(),
+                    subject: subject.to_owned(),
+                    body: "Body".to_owned(),
+                    threading: Default::default(),
+                })
+                .expect("draft should be created");
+            store.queue_draft(draft_id).expect("draft should queue")
+        };
+        let silent = |job_id: i64, column: &str, ago: &str| {
+            store
+                .connection()
+                .expect("connection")
+                .execute(
+                    &format!(
+                        "UPDATE outbox_jobs SET {column} = \
+                         strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?2) WHERE id = ?1"
+                    ),
+                    params![job_id, ago],
+                )
+                .expect("the clock moves");
+        };
+        let limit = Duration::from_secs(90);
+
+        // A job still waiting to send is not interrupted.
+        let waiting = new_job("Waiting");
+        silent(waiting, "updated_at", "-1 hour");
+        assert_eq!(
+            store
+                .claim_interrupted_outbox_job(None, Duration::ZERO, &[])
+                .expect("claim runs"),
+            None
+        );
+
+        // A sender that renews its claim is left alone, however long the
+        // send takes.
+        let job_id = store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("claim runs")
+            .expect("a job is due")
+            .job_id;
+        assert_eq!(job_id, waiting);
+        silent(job_id, "last_attempt_at", "-1 hour");
+        assert!(
+            store
+                .claim_interrupted_outbox_job(None, limit, &[])
+                .expect("claim runs")
+                .is_none(),
+            "the sender renewed its claim when it claimed the job"
+        );
+        silent(job_id, "heartbeat_at", "-1 hour");
+        store.renew_outbox_claim(job_id).expect("renewed");
+        assert!(
+            store
+                .claim_interrupted_outbox_job(None, limit, &[])
+                .expect("claim runs")
+                .is_none(),
+            "the sender is still at it"
+        );
+
+        // Once it falls silent, the job is interrupted, except to a
+        // process that is sending it itself (or checked it lately).
+        silent(job_id, "heartbeat_at", "-91 seconds");
+        assert!(
+            store
+                .claim_interrupted_outbox_job(None, limit, &[job_id])
+                .expect("claim runs")
+                .is_none()
+        );
+        assert!(
+            store
+                .claim_interrupted_outbox_job(Some(account_id + 1), limit, &[])
+                .expect("claim runs")
+                .is_none(),
+            "another account's"
+        );
+        let interrupted = store
+            .claim_interrupted_outbox_job(Some(account_id), limit, &[])
+            .expect("claim runs")
+            .expect("the job is interrupted");
+        assert_eq!(interrupted.job.job_id, job_id);
+        assert_eq!(interrupted.job.attempt_count, 1);
+        assert_eq!(interrupted.job.message.subject, "Waiting");
+        assert!(
+            interrupted.job.message.message_id.is_some(),
+            "the interrupted attempt's Message-ID is what the server knows it by"
+        );
+        let claimed_at = interrupted.claimed_at.expect("the claim time");
+        assert!(claimed_at < utc_now_timestamp(), "{claimed_at}");
+        // Claiming it renewed the claim: it is not handed out twice.
+        assert!(
+            store
+                .claim_interrupted_outbox_job(None, limit, &[])
+                .expect("claim runs")
+                .is_none()
+        );
+        let jobs = store.list_outbox_jobs(None).expect("jobs");
+        assert_eq!(
+            jobs[0].state,
+            OutboxJobState::Sending,
+            "nothing decided yet"
+        );
+
+        // Requeued, it sends again with the same Message-ID, and the
+        // interrupted attempt counts.
+        store
+            .requeue_interrupted_outbox_job(job_id)
+            .expect("requeued");
+        assert!(store.requeue_interrupted_outbox_job(job_id).is_err());
+        let jobs = store.list_outbox_jobs(None).expect("jobs");
+        assert_eq!(jobs[0].state, OutboxJobState::Queued);
+        assert_eq!(jobs[0].last_error_message, None);
+        let again = store
+            .claim_due_outbox_job(None)
+            .expect("claim runs")
+            .expect("due again");
+        assert_eq!(again.job_id, job_id);
+        assert_eq!(again.attempt_count, 2);
+        assert_eq!(again.message.message_id, interrupted.job.message.message_id);
+
+        // A job claimed before the heartbeat existed counts from its
+        // claim.
+        silent(job_id, "last_attempt_at", "-2 minutes");
+        store
+            .connection()
+            .expect("connection")
+            .execute(
+                "UPDATE outbox_jobs SET heartbeat_at = NULL WHERE id = ?1",
+                params![job_id],
+            )
+            .expect("an older store's job");
+        let older = store
+            .claim_interrupted_outbox_job(None, limit, &[])
+            .expect("claim runs")
+            .expect("interrupted");
+        assert_eq!(older.job.job_id, job_id);
+        store
+            .record_outbox_failure(job_id, "stopped")
+            .expect("failed");
+        let draft = store
+            .draft_detail(interrupted.job.target.draft_id)
+            .expect("draft")
+            .expect("exists");
+        assert_eq!(draft.state, DraftState::Failed);
+        store
+            .retry_outbox_job(job_id)
+            .expect("a failed job can be retried");
     }
 
     #[test]
