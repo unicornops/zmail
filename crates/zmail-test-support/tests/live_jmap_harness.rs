@@ -887,6 +887,107 @@ fn a_forward_over_jmap_arrives_with_the_attachment() -> Result<()> {
     Ok(())
 }
 
+/// Apache James returns at most five emails with their bodies per
+/// `Email/get` (its `email.get.full.max.size`) and does not advertise it,
+/// so a sync asking for more is refused with `requestTooLarge` (#389).
+/// More than that many emails arrive through the full sync, and through
+/// `Email/changes` after it.
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn syncs_more_emails_than_james_returns_in_one_get() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_JMAP_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    let james = James::connect(MAIL_HARNESS_JMAP_ACCOUNT, MAIL_HARNESS_JMAP_PASSWORD)?;
+
+    let full_sync = deliver_numbered(&james, "Get limit full sync", 12)?;
+    // James's side: one Email/get of every email with its body is too large.
+    let ids = james
+        .emails()?
+        .iter()
+        .map(|email| email["id"].clone())
+        .collect::<Vec<_>>();
+    let refused = james
+        .call(
+            "Email/get",
+            serde_json::json!({
+                "ids": ids,
+                "properties": ["id", "bodyValues", "textBody", "htmlBody"],
+                "fetchAllBodyValues": true,
+            }),
+        )
+        .expect_err("James should refuse a full Email/get of 12 emails");
+    println!("James's answer to a full Email/get of 12 emails: {refused:#}");
+    assert!(
+        refused.to_string().contains("requestTooLarge"),
+        "James refuses it as too large: {refused:#}"
+    );
+
+    sync_until(
+        &sync_service,
+        &store,
+        account_id,
+        "every email of the full sync",
+        |store| inbox_holds(store, account_id, &full_sync),
+    )?;
+    assert!(
+        !sync_checkpoint(&store, account_id)?["email_query_state"].is_null(),
+        "the first sync of the account is a full sync"
+    );
+
+    let changes = deliver_numbered(&james, "Get limit email changes", 7)?;
+    sync_until(
+        &sync_service,
+        &store,
+        account_id,
+        "every email of Email/changes",
+        |store| inbox_holds(store, account_id, &changes),
+    )?;
+    assert!(
+        sync_checkpoint(&store, account_id)?["email_query_state"].is_null(),
+        "the second sync applies Email/changes"
+    );
+    assert!(
+        inbox_holds(&store, account_id, &full_sync)?.is_some(),
+        "the full sync's emails stay"
+    );
+    Ok(())
+}
+
+/// Sends `count` messages with numbered subjects starting with `prefix`
+/// and waits until James has delivered each; returns the subjects.
+fn deliver_numbered(james: &James, prefix: &str, count: usize) -> Result<Vec<String>> {
+    let subjects = (1..=count)
+        .map(|number| format!("{prefix} {number:02}"))
+        .collect::<Vec<_>>();
+    for subject in &subjects {
+        submit_harness_message(subject, "One of more emails than one Email/get returns.")?;
+    }
+    for subject in &subjects {
+        james.wait_for_email(&format!("a message with subject {subject:?}"), |email| {
+            email["subject"] == subject.as_str()
+        })?;
+    }
+    Ok(subjects)
+}
+
+/// `Some` once the store's INBOX has a thread for every subject.
+fn inbox_holds(store: &LocalStore, account_id: i64, subjects: &[String]) -> Result<Option<()>> {
+    let Ok(inbox) = inbox_id(store, account_id) else {
+        return Ok(None);
+    };
+    let threads = store.list_threads(inbox, 0..100)?;
+    Ok(subjects
+        .iter()
+        .all(|subject| threads.iter().any(|thread| &thread.subject == subject))
+        .then_some(()))
+}
+
 /// The harness sender's JMAP account, in a store of its own.
 fn harness_sender_account(
     runtime: &BackgroundRuntime,
