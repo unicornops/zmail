@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use tokio::runtime::Builder;
 use zmail_core::{
     AuthKind, CachePolicySummary, NewAccount, NewDraft, NewIdentity, OutboxJobState,
@@ -658,23 +658,16 @@ fn a_forward_from_zmail_arrives_with_the_attachment() -> Result<()> {
     Ok(())
 }
 
-/// Waits until the account's outbox has sent everything, running passes.
+/// Runs an outbox pass, which also waits for the send `queue_draft_and_send`
+/// started, and requires everything in the account's outbox to be sent.
 fn wait_until_sent(store: &LocalStore, sync_service: &SyncService, account_id: i64) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let _ = sync_service.process_outbox_and_wait(Some(account_id));
-        let jobs = store.list_outbox_jobs(Some(account_id))?;
-        if let Some(failed) = jobs.iter().find(|job| job.state == OutboxJobState::Failed) {
-            bail!("delivery failed: {:?}", failed.last_error_message);
-        }
-        if !jobs.is_empty() && jobs.iter().all(|job| job.state == OutboxJobState::Sent) {
-            return Ok(());
-        }
-        if Instant::now() > deadline {
-            bail!("not sent in time: {jobs:?}");
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
+    sync_service.process_outbox_and_wait(Some(account_id))?;
+    let jobs = store.list_outbox_jobs(Some(account_id))?;
+    ensure!(
+        !jobs.is_empty() && jobs.iter().all(|job| job.state == OutboxJobState::Sent),
+        "not sent: {jobs:?}"
+    );
+    Ok(())
 }
 
 /// A header block with folded lines joined, as RFC 5322 reads it.

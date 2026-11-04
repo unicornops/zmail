@@ -9,7 +9,7 @@ pub use proton::proton_production_config;
 mod wake;
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use backoff::Backoff;
 use proton::Credentials;
 use tokio::{
@@ -49,6 +49,9 @@ pub use server_search::{SEARCH_SYNC_COOLDOWN, SERVER_SEARCH_MAX_HITS, ServerSear
 const OUTBOX_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const OUTBOX_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
 const MAX_OUTBOX_ATTEMPTS: usize = 3;
+/// How long [`SyncService::process_outbox_and_wait`] waits for the messages
+/// another outbox pass in this process is sending.
+const OUTBOX_WAIT_LIMIT: Duration = Duration::from_secs(300);
 const MAIL_WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_PENDING_OP_ATTEMPTS: i64 = 5;
 /// How often a service built with [`SyncService::with_sync_lock`] tries the
@@ -178,6 +181,13 @@ struct SyncServiceInner {
     /// `active_accounts`.
     resync_requested: Mutex<HashSet<i64>>,
     outbox_supervisor_started: AtomicBool,
+    /// The outbox jobs an outbox pass in this process has claimed and not
+    /// finished trying, with their accounts. A job is added in the same
+    /// step as its claim, so a pass that finds nothing left to claim sees
+    /// every job another pass is still sending.
+    outbox_sending: Mutex<HashMap<i64, i64>>,
+    /// Woken whenever a job leaves `outbox_sending`.
+    outbox_settled: tokio::sync::Notify,
     watched_accounts: Mutex<HashSet<i64>>,
     watcher_poll_interval: Mutex<Option<Duration>>,
     notifier: Mutex<Option<Arc<dyn Notifier>>>,
@@ -217,6 +227,23 @@ struct Deferred {
     bootstrap: bool,
     watchers: bool,
     indexing: bool,
+}
+
+/// An outbox job a pass in this process is sending: taken off
+/// [`SyncServiceInner::outbox_sending`] when dropped, once the attempt is
+/// recorded or the pass ends early.
+struct SendingJob<'a> {
+    inner: &'a SyncServiceInner,
+    job_id: i64,
+}
+
+impl Drop for SendingJob<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut sending) = self.inner.outbox_sending.lock() {
+            sending.remove(&self.job_id);
+        }
+        self.inner.outbox_settled.notify_waiters();
+    }
 }
 
 impl std::fmt::Debug for SyncService {
@@ -332,6 +359,8 @@ impl SyncService {
                 active_accounts: Mutex::new(HashSet::new()),
                 resync_requested: Mutex::new(HashSet::new()),
                 outbox_supervisor_started: AtomicBool::new(false),
+                outbox_sending: Mutex::new(HashMap::new()),
+                outbox_settled: tokio::sync::Notify::new(),
                 watched_accounts: Mutex::new(HashSet::new()),
                 watcher_poll_interval: Mutex::new(None),
                 notifier: Mutex::new(None),
@@ -1041,7 +1070,14 @@ impl SyncService {
         Ok(())
     }
 
-    /// Processes due outbox jobs and blocks until the current pass completes.
+    /// Processes due outbox jobs and blocks until every one has been tried:
+    /// the ones this pass claims, and the ones another pass in this process
+    /// (the outbox poll, a finished sync's, [`Self::queue_draft_and_send`]'s)
+    /// claimed first and is still sending. Returns how many were tried.
+    ///
+    /// Gives up with an error after [`OUTBOX_WAIT_LIMIT`]. A job another
+    /// process is sending (only with [`SyncService::new`], which syncs
+    /// whatever holds the sync lock) is not waited for.
     pub fn process_outbox_and_wait(&self, account_id: Option<i64>) -> Result<usize> {
         if !self.runs_sync() {
             bail!("{SYNCS_ELSEWHERE}");
@@ -1049,7 +1085,22 @@ impl SyncService {
         let service = self.clone();
         let (tx, rx) = mpsc::sync_channel(1);
         self.inner.handle.spawn(async move {
-            let result = service.process_due_outbox_jobs(account_id).await;
+            let result = async {
+                let processed = service.process_due_outbox_jobs(account_id).await?;
+                let waited = tokio::time::timeout(
+                    OUTBOX_WAIT_LIMIT,
+                    service.wait_for_outbox_sends(account_id),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "outbox messages were still sending after {} seconds",
+                        OUTBOX_WAIT_LIMIT.as_secs()
+                    )
+                })?;
+                anyhow::Ok(processed + waited)
+            }
+            .await;
             let _ = tx.send(result.map_err(|error| error.to_string()));
         });
 
@@ -1470,11 +1521,60 @@ impl SyncService {
         notify_with(notifier.as_ref(), target, arrivals);
     }
 
+    /// Claims the next due outbox job, and marks it as being sent by this
+    /// process until the returned guard is dropped.
+    fn claim_due_outbox_job(
+        &self,
+        account_id: Option<i64>,
+    ) -> Result<Option<(PendingOutboxJob, SendingJob<'_>)>> {
+        let mut sending = self
+            .inner
+            .outbox_sending
+            .lock()
+            .expect("outbox sending mutex should not be poisoned");
+        let Some(job) = self.inner.store.claim_due_outbox_job(account_id)? else {
+            return Ok(None);
+        };
+        sending.insert(job.job_id, job.target.account_id);
+        let guard = SendingJob {
+            inner: &self.inner,
+            job_id: job.job_id,
+        };
+        Ok(Some((job, guard)))
+    }
+
+    /// Waits until no outbox job of `account_id` (of every account for
+    /// `None`) is being sent by a pass in this process, and returns how
+    /// many it waited for.
+    async fn wait_for_outbox_sends(&self, account_id: Option<i64>) -> usize {
+        let mut waited = HashSet::new();
+        loop {
+            // Registered before looking, so a job settling in between
+            // still wakes this wait.
+            let mut settled = std::pin::pin!(self.inner.outbox_settled.notified());
+            settled.as_mut().enable();
+            let sending = self
+                .inner
+                .outbox_sending
+                .lock()
+                .expect("outbox sending mutex should not be poisoned")
+                .iter()
+                .filter(|(_, account)| account_id.is_none_or(|id| id == **account))
+                .map(|(job_id, _)| *job_id)
+                .collect::<Vec<_>>();
+            if sending.is_empty() {
+                return waited.len();
+            }
+            waited.extend(sending);
+            settled.await;
+        }
+    }
+
     async fn process_due_outbox_jobs(&self, account_id: Option<i64>) -> Result<usize> {
         let mut processed = 0;
 
         loop {
-            let Some(job) = self.inner.store.claim_due_outbox_job(account_id)? else {
+            let Some((job, _sending)) = self.claim_due_outbox_job(account_id)? else {
                 break;
             };
             processed += 1;
@@ -1830,7 +1930,7 @@ mod tests {
     use anyhow::{Result, anyhow};
     use zmail_core::{
         AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxSnapshot, MessageSnapshot,
-        NewAccount, NewIdentity, ProtocolKind, SyncPhase, ThreadSnapshot,
+        NewAccount, NewIdentity, OutboxJobState, ProtocolKind, SyncPhase, ThreadSnapshot,
     };
     use zmail_security::{InMemorySecretStore, SecretSlot, SecretStore};
     use zmail_store::LocalStore;
@@ -2318,6 +2418,51 @@ mod tests {
             started_at.elapsed() < Duration::from_millis(250),
             "scheduling outbox processing should stay non-blocking for the caller"
         );
+    }
+
+    #[test]
+    fn process_outbox_and_wait_waits_for_a_job_another_pass_is_sending() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("the runtime starts");
+        let (store, account_id, draft_id) = store_with_draft();
+        // Each delivery attempt stalls on the secret for a second before
+        // failing.
+        let service = SyncService::new(
+            runtime.handle().clone(),
+            store.clone(),
+            Arc::new(SlowSecretStore {
+                delay: Duration::from_secs(1),
+            }),
+        );
+        // Send's own pass (or the outbox poll) claims the job.
+        let job_id = service
+            .queue_draft_and_send(draft_id)
+            .expect("the draft queues");
+        let state = |store: &LocalStore| {
+            store
+                .list_outbox_jobs(None)
+                .expect("jobs load")
+                .into_iter()
+                .find(|job| job.id == job_id)
+                .expect("the job exists")
+                .state
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state(&store) != OutboxJobState::Sending {
+            assert!(Instant::now() < deadline, "no pass claimed the job");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        // Nothing is left to claim, but the pass waits for that attempt.
+        let tried = service
+            .process_outbox_and_wait(Some(account_id))
+            .expect("the pass runs");
+        assert_eq!(tried, 1, "the job another pass was sending counts");
+        assert_eq!(state(&store), OutboxJobState::Retrying);
+        assert_eq!(attempts(&store, job_id), 1, "the job was tried once");
     }
 
     /// A demo account with one draft, and the draft's id.
@@ -2865,7 +3010,6 @@ mod outbox_reauth_tests {
         net::TcpListener,
         sync::Arc,
         thread,
-        time::{Duration, Instant},
     };
 
     use zmail_core::{
@@ -2986,9 +3130,8 @@ mod outbox_reauth_tests {
         store.queue_draft(draft_id).expect("draft should queue");
 
         let service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
-        // The service's own outbox poll may take the job first; either
-        // way one pass tries it once it is due (the store rounds the due
-        // time up to the next whole second).
+        // The service's own outbox poll may take the job first; the pass
+        // waits for that attempt either way.
         let job = |store: &LocalStore| {
             store
                 .list_outbox_jobs(Some(account_id))
@@ -2997,15 +3140,19 @@ mod outbox_reauth_tests {
                 .next()
                 .expect("the job is kept")
         };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while matches!(
-            job(&store).state,
-            OutboxJobState::Queued | OutboxJobState::Sending
-        ) {
-            assert!(Instant::now() < deadline, "the job was never tried");
-            let _ = service.process_outbox_and_wait(Some(account_id));
-            thread::sleep(Duration::from_millis(100));
-        }
+        assert_eq!(
+            service
+                .process_outbox_and_wait(Some(account_id))
+                .expect("the pass runs"),
+            1
+        );
+        assert!(
+            !matches!(
+                job(&store).state,
+                OutboxJobState::Queued | OutboxJobState::Sending
+            ),
+            "the job was never tried"
+        );
         let commands = server.join().expect("the mock finishes");
         let failed = job(&store);
 

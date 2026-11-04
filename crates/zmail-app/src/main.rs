@@ -2516,6 +2516,116 @@ mod tests {
         assert!(Command::parse(args("search 1 --force invoice")).is_err());
     }
 
+    /// A one-connection SMTP server that takes a message, slowly (half a
+    /// second before it answers the message's end), and returns the
+    /// commands and message lines it was sent.
+    fn slow_smtp_server() -> (u16, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, BufReader};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("the mock binds");
+        let port = listener.local_addr().expect("the mock has a port").port();
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let Ok((stream, _)) = listener.accept() else {
+                return seen;
+            };
+            let mut writer = stream.try_clone().expect("the stream clones");
+            let mut reader = BufReader::new(stream);
+            let _ = writer.write_all(b"220 mock.example.test ESMTP\r\n");
+            let mut in_data = false;
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|read| read > 0) {
+                let text = line.trim_end().to_owned();
+                line.clear();
+                let upper = text.to_ascii_uppercase();
+                let reply: &[u8] = if in_data {
+                    if text != "." {
+                        seen.push(text);
+                        continue;
+                    }
+                    in_data = false;
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    b"250 2.0.0 queued\r\n"
+                } else if upper.starts_with("EHLO") {
+                    b"250-mock.example.test\r\n250 AUTH PLAIN\r\n"
+                } else if upper.starts_with("AUTH") {
+                    b"235 2.7.0 accepted\r\n"
+                } else if upper.starts_with("DATA") {
+                    in_data = true;
+                    b"354 go ahead\r\n"
+                } else if upper.starts_with("QUIT") {
+                    b"221 bye\r\n"
+                } else {
+                    b"250 ok\r\n"
+                };
+                seen.push(text);
+                if writer.write_all(reply).is_err() || upper.starts_with("QUIT") {
+                    break;
+                }
+            }
+            seen
+        });
+        (port, server)
+    }
+
+    #[test]
+    fn send_returns_once_the_message_has_gone_out() {
+        let (port, server) = slow_smtp_server();
+        let store = Arc::new(LocalStore::open_ephemeral().expect("the store opens"));
+        let account_id = store
+            .insert_account(&NewAccount {
+                display_name: "Test Account".to_owned(),
+                protocol: ProtocolKind::Imap,
+                auth: AuthKind::Password,
+                endpoint: "imaps://mail.example.test:993".to_owned(),
+                username: "user@example.test".to_owned(),
+                cache_policy: CachePolicySummary::performance_first(),
+                outgoing: Some(OutgoingConfig {
+                    kind: zmail_core::SubmissionKind::Smtp,
+                    host: Some("127.0.0.1".to_owned()),
+                    port: Some(port),
+                    username: Some("user@example.test".to_owned()),
+                    security: Some(SubmissionSecurity::Plain),
+                    hello_name: "localhost".to_owned(),
+                }),
+                identities: vec![NewIdentity {
+                    display_name: "Test Account".to_owned(),
+                    email_address: "user@example.test".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }],
+            })
+            .expect("an account");
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        secrets
+            .set_account_secret(account_id, "password")
+            .expect("the password stores");
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id,
+                to: vec!["ada@example.com".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Lunch".to_owned(),
+                body: "Noon?".to_owned(),
+                threading: Default::default(),
+            })
+            .expect("a draft");
+
+        let runtime = BackgroundRuntime::start(2).expect("a runtime");
+        send_draft_in(&runtime, store.clone(), secrets, draft_id, false).expect("send runs");
+        // The command exits (dropping the runtime) as soon as it returns,
+        // so the message must be out by then, whichever pass sent it.
+        let jobs = store.list_outbox_jobs(None).expect("the outbox");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].state, zmail_core::OutboxJobState::Sent, "{jobs:?}");
+        drop(runtime);
+        let seen = server.join().expect("the mock finishes");
+        assert!(seen.iter().any(|line| line == "Noon?"), "{seen:?}");
+    }
+
     /// Set in the child process that
     /// `a_command_beside_a_zmail_that_syncs_stops_or_leaves_it_the_work`
     /// starts: the store it opens.
