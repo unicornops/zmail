@@ -41,7 +41,7 @@ aes-gcm = { version = "0.10.3", features = ["stream"] }
 # allowlist, iterative so deep nesting cannot overflow the stack.
 ammonia = "4.2.4"
 anyhow = "1"
-async-imap = { version = "0.11.2", default-features = false, features = ["runtime-tokio"] }
+async-imap = { version = "0.12.0", default-features = false, features = ["runtime-tokio"] }
 base64 = "0.22.1"
 chrono = "0.4"
 # The terminal UI's terminal layer (ADR 0007): raw mode, the alternate
