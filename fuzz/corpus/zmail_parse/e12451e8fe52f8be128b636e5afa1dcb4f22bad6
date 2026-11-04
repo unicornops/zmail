@@ -1,0 +1,25 @@
+Content-Transfer-Encodit-¨çûïsngiàãure
+Message-ID: <hostile-1@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain
+
+plain
+--b1
+Content-Type: text/html
+Content-Transfer-Encoding: base64
+
+PHN2ZyB3aWR0aD0iMTAiIGhlaWdoiso-8859-1'en'dD0iMTAiPjxpbWFnZSBocmVmPSJmaWxlOi8vL2V0Yy9wYXNz
+d2QiIHdpZHRoPSIxMCIgaGVpZ2h0PSIxMCIvPjwvc3ZnPgo8c3ZnPjx1c2UgeGxpbmsSJGSUxFOi8vL2V0Yy9ob3N0cyIContent-ID: +Cjxp
+bWcgc3JjPSJcXGF0dGFja2VyLmV4YW1wbGVcc2hhcmVccGl4ZWwuc¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶¶G5nIj4KPGltZyBzcmM9Ii8v
+YXR0YWNrZXIuZXho@examplea@etSTAhbXBsZS9zaGFyZS9waXTUS probe
+
+PhlbC5wbmciPgo8aW1nIHNyYz0ic21iOi8vYXR0YWNr
+ZXIuZXhhbXBsZS9zaGFyZS94LnBuZyI+CjxhIGhyZWY9ImZpbGU6Lú9zZXJ2ZXIvc2hhcmUvZG9j;
+LnBkZiI+ZmlsZSBsaW5rPC9hPgo8YSBocmVmPSJcXHNlcnZlclxzaGFyZVxkb2MucGRmIj51bmMg
+bGluazwvYT

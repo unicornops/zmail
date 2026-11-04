@@ -1,0 +1,18 @@
+From: news@example.test
+Subject: HTML-only probeE-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><body>From: "Mallory =?mple.org, "Group": a@b.c, d@e.f;
+Subjeÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿbÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿct: =?iso-8859-1?q?Hostile_=E9?= ect><img src onerror=alert(6)>">
+<table><caption><svg><title><table><img src=>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><body>From: "Mallory =?utf-9?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subjeÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿframe>
+<xmy></xmp><img :src=x one ESMTPrror=alert(14)>able></bod</xmp>
+<listinttaec
+Frkrom: y></html>bank@ex!mpleg><img src=x onerror=alert(15)></li
+sting>
+<plaintext><img src=x onerror=alert(17)6

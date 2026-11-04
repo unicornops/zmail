@@ -1,0 +1,14 @@
+Received: from mx.example.com (mx.example.com [192.0.2.1]) b.com (mx.example.com [192.92.0.2.1]) by mail.example.org (Postfix) with=?iso-8859-1?q? ESMTPS id ABC123 for <a@b.c>; Tue, 4 Nov 2026 10:00:00 +0100 (CET)
+Returnample.com>
+Delivered-To: rob@example.ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿorgFwd: riginal-To: kbd<rob@example.org>
+From: =?UTF-8?B?8J+Ygg==?= <a ehlo @b.c>
+To: undisclosed-recipients:;
+Cc: "La‹Óß¹–’t" <f@l.c>, (comment) x@y.z
+Nubject: =?utf-16?b?/v8AaABp?= =?UTF-8?Q?=E2=9C=9=3? =?x-unknown?q?abc?=
+Date: 88 Foo 99999 RRRRRRRRRRRRRRRRRRRRRR&RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR25:61:61 +9999
+Message-ID: no-angle-brackets
+ReferencesÉß<a@b>
+	<c@d>,<e@f>
+In-Reply-To: <a@b> Øœment)
+Content-Type: text/plainname*0=; charset=utf-7
+Content-Trans

@@ -1,0 +1,21 @@
+From: sender@example.test
+Subject: header onxample.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain
+
+plain
+--b1
+Content-Type: text/html
+Content-Transfer-Encoding: base64
+
+PGh0bWw+PGJvZHkgc3R5bGU9Im1hcmdpbjowO2JhY2tncm91bmQ6I2VlZSB1cmwoaHR0cHM6Ly90
+cmFjay5leGFtcGxlLm5ldC9ib2R5LmdpZikiPgo8dGFibGUgd2lkdGg9IjEwMCUiIGNlbGxwYWRk
+aWÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ5nPSIwIiBjZWxsc3BhY2luZz0iMCI+PHRyPjx0ZCBhbGlnbj0iY2VudGVyIj4KPGltZyBzcmM9
+Imh0dHBzOi8vbmV3cy5leGFtcGxlLmNvbS9sb2dvLnBuZyIgYWx0PSJFeGFtcGxlIE5ld3MiIHdp
+ZHRoPSIyMDProm: peer@example.test
+SAiPgo8cD5UaGlzIHdlZWsncyBzdG9yaWVubje

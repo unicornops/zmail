@@ -1,0 +1,26 @@
+Receivd@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-4@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain
+
+plain
+--b1
+Content-Type: text/html
+Content-Transfer-Encoding: base64
+
+PGReferences: 4KPGEEUuTkVUL09QRU4yIiB3aWRy-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-T××××××××××××××××××I+PC9hPgo8L3RkPjwvdHI+PC90YWJsZT4KPGRpdiBz
+dHlsZT0iYmFj)a2dyb3VuZC1pbWFnZTp1cmwoJ2h0dHBzOi8vdHJhY2suZXhhbXBsZS5uZXQvZGl2
+LmdpZicpIj4mbmJzcDs8L2Rpdj4KPHRhYmxlPjx0cj48dGQgYmFja2dyb3VuZD0ia[[[[[[[[[[[[[[[[[[[[[[[[[[Content-Language: [[[
+euc-konCrtent--Type: iHR0cHM6Ly90
+cmFjay5leGFtcGxlLm5ldC90ZC5naWYiIGJnY29sb3I9IiNmZmZmZmYiPng8L3Red:nam*e0=ive#d: d:

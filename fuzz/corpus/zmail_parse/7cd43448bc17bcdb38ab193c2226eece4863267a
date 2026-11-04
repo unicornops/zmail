@@ -1,0 +1,24 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@exaQmple.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-1@example.com>
+In-Reply-To: <parent@eme=tacker
+FroCon~ent-T=pe: te xt/bsvFrom: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-0@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<html><head><style>
+@charset "utf-8";
+@import url("https://evil.example◊ñíèêçã—css");
+ME-Version: 1.0
+Content-T.example/ns);
+@media screen { @import url(https://evil.example/nested-import.css); .m { b=
+ackground: um: 2ank@ex!mp.*lcrl(https://evil.example/media.png) } }
+@supports (display:grid) { .s { list-style-image: url(https://evil.exam

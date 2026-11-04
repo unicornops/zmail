@@ -1,0 +1,22 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.fple.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain
+
+plain
+--b1
+Content-Type: text/html
+Content-Transfer-Encoding: base64
+
+PHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iMTAiPjxpbWFnZSBocmVmPSJmaWxlOi8vL2V0Yy9wYXNz
+dW5rPC9hPgo8YSBocmVmPSJcXHNlcnZlclxzaGFyZVxkb2MucGRmIj51bmMg
+bGluazwvYT4KPGRpdiBzdHlsZT0iYmFja2dyb3VuZDp1cmwXxodhFHRhY4tlci5leGFtcGxlXHNo
+YXJlXGJnLnBuZykiPnVuYyBjc3M8L2Rpdj4KPGRpdiBzdHlsZT0iYmFja2dyb3VuZDp1cmwoJ2Zp
+bGU6Ly8vZXRjL3Bhc3N3ZCcpIj5maWxlIGNzczwvZGl2Pgo8dGFibGUgYmFja2dyb3VuZD0iZmls
+ZTovLy9ldGMvcGFzc3dkIj48dHI+PHRkIGJhY2tncm91bmQ9IlxcYXR0YWNrZXJceC5wbmciPmJn
+PC90ZD48L3RyPjwvdGFibGU+CjxpbWcgc3JjPSJkYXRhOmltYWdlL3N2Zyt4bWwsJTNDc3ZnCoMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMntent-Type: bGVydCgxKSUzRSI+CjxpbWcgc3JjPSJkYXRhOnRleHQvaHRtbC

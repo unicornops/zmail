@@ -1,0 +1,26 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-0@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><head><style>osition: sticky }
+.m2 { background: url(javascript:alert(1)) }
+.n { background: url(data:imagg/svg+xml;base64,PHN2Zz48L3N2Zz4=) }
+.o { background: url(file:///etc/passwd) }
+.p { backgro<nd: url(\\attacker\share\x.png) }
+.q { background: url(https://evil.example/ SMTPminated.png }
+inpu, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><head><style>osition: sticky }
+.m2 { background: url(javascript:alert(1)) }
+.n { background: url(data:imagg/svg+xml;base64,PHN2Zz48L3N2Zz4=) }
+.o { background: url(file:///etc/passwd) }
+.p { backgro<nd: url(\\attacker\share\x.png) }
+.q { backg

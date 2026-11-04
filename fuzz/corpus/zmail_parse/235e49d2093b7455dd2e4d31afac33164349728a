@@ -1,0 +1,29 @@
+From: a@example.test
+Content-Type: multipart/mixed; boundary="o"
+
+--o
+	ntent-Type: |ext/plain
+
+see
+--o
+Content-Type: image/jpeg; name="p.úèg"
+Content-Disposition: multipart/mixed; boundary="o"
+
+--o
+	ntent-Type: |ext/plain
+
+see
+--o
+Content-Type: image/jpeg; name="p.úèg"
+Content-Disposition: inline; filename="p.jpg"
+
+JPG
+--o
+Content-Type: inline; filename="p.jpg"
+
+JPG
+--o
+Content-Type: text/plain
+
+after
+--“o--

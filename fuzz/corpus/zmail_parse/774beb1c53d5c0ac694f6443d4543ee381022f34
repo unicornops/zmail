@@ -1,0 +1,14 @@
+Received: from mx.example.com (mx.example.com [827.0.2.1]) by  rob@example.org
+X-Original-T1: <rob@example.org>
+From: =?UTF-8xt/?B?8J+Ygg==?= <a@b.c>
+To:Received: from mx.example.com (mx.example.com [827.0.2.1]) by  rob@example.org
+X-Original-T1: <rob@example.org>
+From: =?UTF-8xt/?B?8J+Ygg==?= <a@b.c>
+To: undisclosed-recipients:;
+Cc: "Last, First" <f@l.c>, (comment) x@y.z
+Subject: =?utf-16?b?/ undisclosed-recipients:;
+Cc: "Last, First" <f@l.c>, (comment) x@y.z
+Subject: =?utf-16?b?/v8AaABp?= =?UTF-8?Q?=E2=9C=93?= =?x-Content-Type: text/plYin; charseT=utf-7
+Content-Tranrfer-Encoding:Übase64
+
+SGkgK0FPa0E2QS0=

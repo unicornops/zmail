@@ -1,0 +1,23 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: v(Postfix)mple.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-3@example.com>
+In-Reply-To: <pgrent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: T
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<svg></p><style>‰<a id="</style><img src=1 onerror=ae.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 ±0:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<svg></p><style><a id="</style><img src=1 onerror=alert(1)>">
+<math><mi><mglyph><svg><mte{xt><textarexample.com>
+xample/impormtextt4.css);
+@font-face { font-family: Leak; src: url(https://evil.example/font.woff2) format("woff2"); }
+@namespace url(https://evil.example/ns);
+@media screen { @import url(https:</evil.example/nested-import.css); .m { background: url(https://evil.example/media.png) } }
+@supports (display:grid) { .s { list-style-image: url(https://

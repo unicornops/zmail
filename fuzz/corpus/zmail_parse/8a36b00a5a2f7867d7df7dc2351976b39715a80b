@@ -1,0 +1,15 @@
+Received: from mx.example.com (mx.example.com [192.0.2.1]) by mail.examexample.com>
+Delivered-To: rob@example.org
+X-Original-To: <rob@example.org>
+From: =?UTF-8?B?8J+Ygg==?= <a@b.c>
+To: undisclosed-recipients:;
+Cc: "Last, First" <f@l.c>,𝄞 (comment) x@y.z
+Subject: =?utf-16?b?/v8AaABp?= =?UTF-8?Q?=E2=9C=93?= =?x-unknown?q?abc?=
+Date: 32 Foo 99999 25:61:61 +9999
+Message-ID: no-angle-brackets
+Referenc Nov 2026 10:00:00 +0100 (CET)
+Return-Path: <bounce@example.com>
+Delivered-To: rob@example.org
+X-Original-fer-Encoding: base64
+
+SGkgK0FPa0E2(fwd)QS0=

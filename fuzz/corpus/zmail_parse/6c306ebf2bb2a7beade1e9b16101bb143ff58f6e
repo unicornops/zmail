@@ -1,0 +1,28 @@
+Content-Transfer-Encodit-Transngixture
+Message-ID: <hostile-1@example.com>
+In-Reply-To: <parent@example.com>
+References: <rooaxemt@ple.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain
+
+plain
+--b1
+Content-Type: text/html
+Content-Transfer-Encoding: base64
+
+PHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iMTAiPjxpbWFnZSBocmVmPSJmaWxlOi8vH2V0Yy9wYXNz
+d2QiIHdpZHRoPS~xMCIgaGVpZ2h0PSIxMCIvPjwvc3ZnPgo8c3ZnPjx1c2UgeGxpbms6aHJlZj0i
+ZmlsZTovLy9DOi9XaW5kb3dzan Example <dan@example.com>
+To: zmail@proton.loca”òõ±ubject: Dinner on Sunday
+Date: Tue, 20 Oct 20=6 12:00:00 +0000
+Message-ID: <dinner@example.com>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<p>Dinner atL3dpbi5pbmkjeCIvPjwvc3ZnPgo8c3ZnPjxpbWFnZSB4bGluazpo
+cmVmPSJodHRwczovL2V2aWwuZXhhbXBsZS9zdmcucG5nIi8+PC9zdmc+CjxpbW.gc3JjPSJmaWxl
+Oi8vL0M6L1dpbmRvd3Mvd2luLmluaSI+CjxpbWcgc3JjPSJGSUxFOi8vL2V0<meta http-equiv="Content-Type" content

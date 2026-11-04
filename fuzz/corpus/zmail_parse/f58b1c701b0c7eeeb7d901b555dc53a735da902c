@@ -1,0 +1,27 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+Tv :iotcim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+eMssage-ID: <h
+--ostile-0@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000M
+IME-Verscom>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-0@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000M
+IME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><head><style>
+@charset "utf-8";
+@import url("https://evil.example/import.css");
+@import 'https://evil.exaÿÿÿÿÿÿÿÿort1.css';
+@IMPORT url(https://evil.example/import3.css);
+@\34mport url(https://evil.example/import4.css);
+@font-face { font-family: Leak; src2 url(https://evil.example/font.woff2) format("woff2"); }
+@namespace url(https://evil.example/ns);
+@media

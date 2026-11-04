@@ -139,7 +139,15 @@ cargo deny check licenses advisories bans sources
 cargo audit
 ```
 
-Dependabot (`.github/dependabot.yml`) opens weekly update pull requests for Cargo (`fix(deps)`, minor and patch grouped) and GitHub Actions (`ci(deps)`), plus security updates for Dependabot alerts. It skips the GPUI pin and the `pgp` and `proton-srp` forks; move those by hand.
+Dependabot (`.github/dependabot.yml`) opens weekly update pull requests for Cargo (`fix(deps)`, minor and patch grouped) and GitHub Actions (`ci(deps)`), plus security updates for Dependabot alerts. It skips the GPUI pin and the `pgp` and `proton-srp` forks; move those by hand. The fuzz crate's own lockfile gets one grouped `test(deps)` pull request a month.
+
+Fuzzing (nightly, `cargo install cargo-fuzz`; see `fuzz/README.md` for the SIMD tiers and findings):
+
+```bash
+cd fuzz && cargo +nightly fuzz run -O -a zmail_parse corpus/zmail_parse -- -runs=0
+```
+
+`fuzz/` is a cargo-fuzz crate outside the workspace with its own `Cargo.lock`: `zmail_parse` drives `zmail_imap::hydrated_body_from_rfc822` and mail-parser on hostile mail, `encodify_decoders` the decoders below it. The `Fuzz` workflow (`.github/workflows/fuzz.yml`) builds them, replays `fuzz/corpus` and fuzzes for five minutes when `fuzz/`, zmail-imap, zmail-core, zmail-security or the mail-parser, encodify or simdutf8 versions change, and weekly.
 
 Linux CI packages:
 

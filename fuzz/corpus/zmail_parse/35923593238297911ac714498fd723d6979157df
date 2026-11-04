@@ -1,0 +1,28 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-4@example.com>
+In-Reply-To: <parent@example.com>From: fromX news@example.test
+Subjecå≈ˇ∑´≤≥‘only probe
+TBzdH0ZmYsilTFja4dyb3st/open.gif"><er@example.test
+Messae: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<html><head><style>
+@charset "utf-8";
+@import url("https://evil.example◊ñíèêçã—css");
+@import 'https://evil.example/import1.css';
+@IMPORT url(https://evil.example/import3.css);
+@\69mporHkgc3R5bGU9Im1hcmdpbjowO2JhY2tncm91bmQ6I2VlZSB0cmwoaHR0cHM6Ly90
+cmFjay5leGFtcGxlLm5ldC9ib2R5LmdpZikiPgo8dGFibGUgd2lkdGg9IjEwMCUiIGNlbGxwYWRk
+aW5nPSIwIiBjZWxsc3BhY2luZz0iMCI+PHRyPjx0ZCBhbGve; boundary="b1"
+
+--b1
+Content-Type: text/plain
+
+plain
+--b1
+Content-multipart/digestnt-family: Leak; src: url(e: text/html
+Content-Transfer-Encoding: base

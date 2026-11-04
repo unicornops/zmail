@@ -1,0 +1,23 @@
+Message-ID~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~: attacker[2AFrom: "Mallo[2KFrom: ubject: =?iso-8859-1?q?Hostile_From: render@example.test
+To: rcpt@example.tes=E9?= fixture
+Message-Itext/htmlD: <hostile-4`example.com>
+In-R@ly-To:t
+Subject: html=?utf-8?q?parent@example.comиииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииии0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="refresh" content="0;url=https://evil.example/refresh">
+<meta http-equiv="Content-Security-Policy" content="def÷┼⌠▀р▄█  *">
+<base href="https:/жevil.example/">
+<link rel="stylesheet" href="https://evil.example/x.)</script>
+<script src="https://evil.example/x.js"></script>
+</head>
+<body onload="alert('body')" onpageshow=alert(1)>
+<p>Before</p>
+<img src=x onerror=alert(1)>
+<img src="https://evil.example/a.png" ONERROR="alert(1)" OnLoad = 'alert(2)'>
+<img/src="x"/onerror=alert(3)>
+<img src="x" onerror&#x3d;alert(4)>
+<svg onlo

@@ -1,0 +1,29 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Mess
+injPHzPMpu1TcQZNUtlBKGyAUFNkreBF04OzkEixBQPYr1Bwte8MjXDmVmotwGkm6BfZWbzxUNA2
+qxcgARyiakBnLQdAgRc/3b0aFKQPLkmgHZnpUN2QphBCXm>
+In-Reply-To: <parent@e(xample.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2027 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="inner"
+
+--inner
+Content-Type: text/plain; charset=utf-7
+
+Hi +AOkA6A-
+--iner
+Content:Type: text/plain; charset=shift_jis
+Content-Transfer-Encoding: base64
+
+grGC8YLJgr+CzQ==
+--inner
+Content-Type: message/rfc822
+Content-Transfer-Encoding: base64
+dtL1lHePOVs/wwwVeq9zHBuvyRX8cgQiIcdaz+fBSM4ggWjm0fhg
+XwJ1JlUUabHMlU5NUAZbQlz/5cAorXrhlpC53vJcWD0yGgkOgyuS1C8FUYK7W9y/b31CRwb7kDSB
+c9AV3qxirWQ8TcG9qcBPkT9Hwa9hYzbOm4AZ2rSbXtfMtwVtmC3qtnDlDLfl9sB+9LKzaaKdUHLh
+nY6fK9/yO89viik4raZ26AcYyQWMilt8OGvbeiWKqS5/KfTPevRcCa6JgJVv676J44eS8o7PJb4W
+fO
