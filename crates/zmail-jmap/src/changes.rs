@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use jmap_client::{client::Client, core::response::EmailGetResponse, email::Property};
 use zmail_core::{BlobStore, MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
 
-use crate::{JmapMailbox, QUERY_PAGE_SIZE, fetch_emails, message_snapshot};
+use crate::{JmapMailbox, batches::GetBatches, fetch_emails, message_snapshot};
 
 /// Changes requested per `Email/changes` call.
 const MAX_CHANGES_PER_CALL: usize = 500;
@@ -185,14 +185,18 @@ async fn fetch_email_updates(client: &Client, ids: &[String]) -> Result<Vec<Emai
         Property::HasAttachment,
     ];
     let mut updates = Vec::with_capacity(ids.len());
-    for chunk in ids.chunks(QUERY_PAGE_SIZE) {
-        let mut request = client.build();
-        request
-            .get_email()
-            .ids(chunk.iter())
-            .properties(properties.clone());
-        let mut response: EmailGetResponse = request
-            .send_get_email()
+    let mut batches = GetBatches::new(client, "changed email");
+    let mut pending = ids;
+    while !pending.is_empty() {
+        let mut response: EmailGetResponse = batches
+            .next(&mut pending, |batch| {
+                let mut request = client.build();
+                request
+                    .get_email()
+                    .ids(batch.iter())
+                    .properties(properties.clone());
+                request.send_get_email()
+            })
             .await
             .context("failed to fetch changed JMAP emails")?;
         updates.extend(response.take_list().into_iter().filter_map(|email| {

@@ -1,5 +1,6 @@
 //! Real JMAP adapter for Phase 2.
 
+mod batches;
 mod changes;
 mod identities;
 mod push;
@@ -725,13 +726,17 @@ pub(crate) async fn fetch_emails(
     ];
     properties.extend(header_properties());
 
-    for chunk in ids.chunks(QUERY_PAGE_SIZE) {
-        let mut request = client.build();
-        let get_request = request.get_email();
-        get_request.ids(chunk.iter()).properties(properties.clone());
-        get_request.arguments().fetch_all_body_values(true);
-        let mut response: EmailGetResponse = request
-            .send_get_email()
+    let mut batches = batches::GetBatches::new(client, "email with its body");
+    let mut pending = ids;
+    while !pending.is_empty() {
+        let mut response: EmailGetResponse = batches
+            .next(&mut pending, |batch| {
+                let mut request = client.build();
+                let get_request = request.get_email();
+                get_request.ids(batch.iter()).properties(properties.clone());
+                get_request.arguments().fetch_all_body_values(true);
+                request.send_get_email()
+            })
             .await
             .context("failed to fetch JMAP email details")?;
 
@@ -864,14 +869,18 @@ pub async fn fetch_message_headers(
     let mut properties = vec![Property::Id];
     properties.extend(header_properties());
     let mut headers = Vec::with_capacity(ids.len());
-    for chunk in ids.chunks(QUERY_PAGE_SIZE) {
-        let mut request = client.build();
-        request
-            .get_email()
-            .ids(chunk.iter())
-            .properties(properties.clone());
-        let mut response: EmailGetResponse = request
-            .send_get_email()
+    let mut batches = batches::GetBatches::new(&client, "email's headers");
+    let mut pending = ids;
+    while !pending.is_empty() {
+        let mut response: EmailGetResponse = batches
+            .next(&mut pending, |batch| {
+                let mut request = client.build();
+                request
+                    .get_email()
+                    .ids(batch.iter())
+                    .properties(properties.clone());
+                request.send_get_email()
+            })
             .await
             .context("failed to fetch JMAP email headers")?;
         for email in response.take_list() {
