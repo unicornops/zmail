@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.32.2](https://github.com/unicornops/zmail/compare/v0.32.1...v0.32.2) (2026-11-04)
+
+
+### Bug Fixes
+
+* **deps:** bump sha2 to 0.11, hmac to 0.13, hkdf to 0.13 and rand to 0.10 ([#326](https://github.com/unicornops/zmail/issues/326)) ([390e7c3](https://github.com/unicornops/zmail/commit/390e7c3f9adf0a66f47fd628fe86cc31988e4f53))
+* **deps:** Bump unicode-width ([#369](https://github.com/unicornops/zmail/issues/369)) ([604d17c](https://github.com/unicornops/zmail/commit/604d17cc5618fa4b09cceb58eca1b1909b6b2356))
+
 ## [0.32.1](https://github.com/unicornops/zmail/compare/v0.32.0...v0.32.1) (2026-11-03)
 
 
