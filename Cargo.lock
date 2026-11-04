@@ -4575,11 +4575,13 @@ dependencies = [
 
 [[package]]
 name = "mail-builder"
-version = "0.5.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c942e8a4b83f9351236c1e531ea9fa0237913d63c7fc36818430e0128a1ddf3"
+checksum = "aca3ad941e4c466402151719d6b4cea4bdfcb212b11e5970afa75e7d28c6502a"
 dependencies = [
+ "encodify",
  "gethostname",
+ "web-time",
 ]
 
 [[package]]
@@ -4596,11 +4598,11 @@ dependencies = [
 
 [[package]]
 name = "mail-send"
-version = "0.6.2"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8355326d14f08c9de5e9badfe606d9ba8fea2febb60fe4318ecbac33cfb7b41e"
+checksum = "1a428956cced7e5493be6631590e009825635f6ffc3f19edbbf9e07418f8f2e2"
 dependencies = [
- "base64 0.23.1",
+ "encodify",
  "gethostname",
  "mail-builder",
  "md5",
