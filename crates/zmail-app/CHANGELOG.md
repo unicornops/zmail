@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.4](https://github.com/unicornops/zmail/compare/v0.32.3...v0.32.4) (2026-11-04)
+
+
+### Bug Fixes
+
+* **deps:** Bump mail-parser from 0.11.9 to 1.0.0 ([#370](https://github.com/unicornops/zmail/issues/370)) ([c5e3780](https://github.com/unicornops/zmail/commit/c5e3780254be25fa0722568aeab5ae4b9c529a2f))
+
 ## [0.32.3](https://github.com/unicornops/zmail/compare/v0.32.2...v0.32.3) (2026-11-04)
 
 
