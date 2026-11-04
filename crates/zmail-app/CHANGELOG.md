@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.3](https://github.com/unicornops/zmail/compare/v0.32.2...v0.32.3) (2026-11-04)
+
+
+### Bug Fixes
+
+* **jmap:** batch Email/get within the server's limits ([#391](https://github.com/unicornops/zmail/issues/391)) ([73ad36b](https://github.com/unicornops/zmail/commit/73ad36b0693d21548632659a1c110790c6d23a20))
+
 ## [0.32.2](https://github.com/unicornops/zmail/compare/v0.32.1...v0.32.2) (2026-11-04)
 
 
