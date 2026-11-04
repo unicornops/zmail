@@ -303,7 +303,7 @@ mod tests {
     fn signed(card: &str, kr: &KeyRing) -> Card {
         let key = kr.first().expect("key").secret_key();
         let signature = pgp::composed::DetachedSignature::sign_binary_data(
-            &mut rand_pgp::rng(),
+            &mut rand::rng(),
             &key.primary_key,
             &pgp::types::Password::empty(),
             pgp::crypto::hash::HashAlgorithm::Sha256,

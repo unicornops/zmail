@@ -20,7 +20,7 @@ use base64::{
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
 };
 use proton_srp::{SRPAuth, SRPProof, SrpHashVersion};
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -287,7 +287,7 @@ impl Manager {
         access_token: &str,
     ) -> Result<Auth, Error> {
         let mut state = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut state);
+        rand::rng().fill_bytes(&mut state);
         let request = Request::post("/auth/v4/refresh").json(&AuthRefreshReq {
             uid,
             refresh_token,

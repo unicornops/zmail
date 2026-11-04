@@ -19,7 +19,6 @@ futures-util.workspace = true
 pgp.workspace = true
 proton-srp.workspace = true
 rand.workspace = true
-rand_pgp.workspace = true
 reqwest.workspace = true
 rustls-native-certs.workspace = true
 rustls-webpki.workspace = true

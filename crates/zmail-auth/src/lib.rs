@@ -12,7 +12,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use rand::RngCore;
+use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
 use sha2::{Digest, Sha256};
 
 /// A one-shot OAuth2 token exchange result.
@@ -200,7 +200,7 @@ impl Pkce {
     /// Generates a random PKCE pair.
     pub fn generate() -> Self {
         let mut bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        UnwrapErr(SysRng).fill_bytes(&mut bytes);
         let verifier = base64url(&bytes);
         let challenge = base64url(&Sha256::digest(verifier.as_bytes()));
         Self {
@@ -252,7 +252,7 @@ impl OAuth2Client {
     pub fn authorization_request(&self) -> AuthorizationRequest {
         let pkce = Pkce::generate();
         let mut state_bytes = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut state_bytes);
+        UnwrapErr(SysRng).fill_bytes(&mut state_bytes);
         let state = base64url(&state_bytes);
 
         let mut url = format!(

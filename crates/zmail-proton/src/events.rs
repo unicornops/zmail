@@ -22,7 +22,7 @@ use std::{
 };
 
 use anyhow::Result;
-use rand::Rng;
+use rand::RngExt;
 use zmail_core::MailDelta;
 use zmail_proton_api::{Client, Event, EventAction, Label, MessageEvent, MessageMetadata};
 
@@ -40,7 +40,7 @@ pub const EVENT_JITTER: Duration = Duration::from_secs(20);
 /// like Bridge's ticker.
 pub fn event_poll_delay() -> Duration {
     let jitter_ms = u64::try_from(EVENT_JITTER.as_millis()).unwrap_or(u64::MAX);
-    EVENT_PERIOD + Duration::from_millis(rand::thread_rng().gen_range(0..=jitter_ms))
+    EVENT_PERIOD + Duration::from_millis(rand::rng().random_range(0..=jitter_ms))
 }
 
 /// Whether anything Zmail mirrors changed after the stored `checkpoint`

@@ -66,13 +66,13 @@ gpui_platform = { git = "https://github.com/huacnlee/zed", rev = "840e095adddab3
 hickory-resolver = { version = "0.26.3", default-features = false, features = ["system-config", "tokio"] }
 # HKDF-SHA256 for the store key's subkeys (ADR 0005); already in the tree
 # through pgp.
-hkdf = "0.12.4"
+hkdf = "0.13.0"
 # The HTML tokenizer the sanitiser's pre-pass and text derivation use
 # (ADR 0006); the same release ammonia parses with.
 html5ever = "0.40.1"
 # HMAC-SHA256 for the store's opaque attachment file names (ADR 0005);
 # already in the tree through pgp.
-hmac = "0.12.1"
+hmac = "0.13.0"
 # Exactly 0.4.1: 0.4.2 and later put every capability jmap-client knows
 # (contacts, calendars, Sieve, quota, principals...) in each request's
 # `using`, which RFC 8620 section 3.6.1 has servers reject
@@ -101,7 +101,10 @@ pgp = { git = "https://github.com/lazzurs/rpgp", rev = "696fe2f437e401f21cac8a1f
 # `zmail/crypto-bigint-0.7`). Back to crates.io once a proton-srp release
 # moves off crypto-bigint 0.5; see docs/upstream/proton.md.
 proton-srp = { git = "https://github.com/lazzurs/proton-crypto-rs", rev = "95455e84a43b12124dfd6febac3875d212797038", default-features = false }
-rand = "0.8"
+# rand 0.10: its RNG traits (rand_core 0.10) are also the ones `pgp` (since
+# rpgp/rpgp#573) and the proton-srp fork take. Security-sensitive bytes come
+# from the OS (`SysRng`) or the thread-local CSPRNG (`rand::rng()`).
+rand = "0.10"
 # The terminal UI's drawing (ADR 0007), on its crossterm backend; no
 # optional widgets or macros.
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
@@ -109,15 +112,11 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 # organisation's maintained successor to tui-textarea, on the same
 # crossterm backend; no search (regex) or serde.
 ratatui-textarea = { version = "0.9.4", default-features = false, features = ["crossterm"] }
-# The RNG traits (rand_core 0.10) that `pgp` (since rpgp/rpgp#573) and the
-# proton-srp fork take, used only where Zmail hands an RNG to either; already
-# in the tree through pgp.
-rand_pgp = { package = "rand", version = "0.10", default-features = false, features = ["thread_rng"] }
 # Autoconfig XML. Already in the tree through GPUI (usvg); it never fetches
 # external entities, and zmail-autodiscover also turns DTDs off.
 roxmltree = "0.21.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-sha2 = "0.10"
+sha2 = "0.11"
 rpassword = "7.4.0"
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }

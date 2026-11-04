@@ -12,7 +12,7 @@
 
 //! Message attachments.
 
-use rand::Rng;
+use rand::RngExt;
 use serde::Deserialize;
 
 use crate::{
@@ -144,7 +144,7 @@ impl Client {
 fn multipart_form(fields: &[(&str, &[u8])], blobs: &[(&str, &[u8])]) -> (String, Vec<u8>) {
     let boundary = loop {
         let candidate: String = (0..30)
-            .map(|_| format!("{:x}", rand::thread_rng().gen_range(0..16u8)))
+            .map(|_| format!("{:x}", rand::rng().random_range(0..16u8)))
             .collect();
         let used = fields
             .iter()

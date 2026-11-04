@@ -134,7 +134,7 @@ impl RecipientKey {
 
 fn session_key_packet(session: &SessionKey, key: &impl EncryptionKey) -> Result<Vec<u8>, Error> {
     let packet = PublicKeyEncryptedSessionKey::from_session_key_v3(
-        &mut rand_pgp::rng(),
+        &mut rand::rng(),
         &session.key,
         session.algorithm,
         key,
@@ -184,7 +184,7 @@ impl UnlockedKey {
     /// Encrypts text to this key, unsigned, armored: go-proton-api's draft
     /// body encryption (`kr.Encrypt(NewPlainMessageFromString(body), nil)`).
     pub fn encrypt_text_armored(&self, text: &str) -> Result<String, Error> {
-        let mut rng = rand_pgp::rng();
+        let mut rng = rand::rng();
         let mut builder = MessageBuilder::from_bytes("", canonicalize(text).into_bytes())
             .seipd_v1(&mut rng, SYMMETRIC);
         builder.data_mode(DataMode::Utf8).map_err(key_error)?;
@@ -205,7 +205,7 @@ impl UnlockedKey {
     /// result: go-proton-api's `encSplit` (`kr.Encrypt(msg, kr)` then
     /// `SplitMessage`), which send packages carry.
     pub fn encrypt_text_split(&self, text: &str) -> Result<Split, Error> {
-        let mut rng = rand_pgp::rng();
+        let mut rng = rand::rng();
         let key = self.secret_key();
         let signer: &dyn SigningKey = match signing_key(key)? {
             Selected::Subkey(subkey) => &subkey.key,
@@ -223,7 +223,7 @@ impl UnlockedKey {
     /// Encrypts an attachment with a fresh session key, unsigned, and
     /// splits the result (`EncryptAttachment`).
     pub fn encrypt_attachment(&self, data: &[u8], file_name: &str) -> Result<Split, Error> {
-        let mut rng = rand_pgp::rng();
+        let mut rng = rand::rng();
         let builder = MessageBuilder::from_bytes(file_name.to_owned(), data.to_vec())
             .seipd_v1(&mut rng, SYMMETRIC);
         split(builder.session_key().clone(), builder.to_vec(&mut rng))
@@ -239,7 +239,7 @@ impl UnlockedKey {
     pub fn sign_detached(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         fn sign(key: &impl SigningKey, data: &[u8]) -> Result<Vec<u8>, Error> {
             DetachedSignature::sign_binary_data(
-                &mut rand_pgp::rng(),
+                &mut rand::rng(),
                 key,
                 &Password::empty(),
                 HashAlgorithm::Sha256,
@@ -671,7 +671,7 @@ mod tests {
 
             fn armored(signer: &impl SigningKey) -> String {
                 DetachedSignature::sign_binary_data(
-                    &mut rand_pgp::rng(),
+                    &mut rand::rng(),
                     signer,
                     &Password::empty(),
                     HashAlgorithm::Sha256,

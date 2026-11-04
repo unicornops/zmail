@@ -37,7 +37,7 @@ use aes_gcm::{
 use anyhow::{Context, Result, bail};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use rand::{RngCore, rngs::OsRng};
+use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -112,7 +112,7 @@ impl BlobVault {
 
     /// The opaque file name for `logical_name`: 32 hex digits.
     pub fn storage_name(&self, logical_name: &str) -> String {
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.inner.name_key.as_ref())
+        let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.inner.name_key.as_ref())
             .expect("HMAC takes a key of any length");
         mac.update(logical_name.as_bytes());
         hex(&mac.finalize().into_bytes()[..16])
@@ -145,7 +145,7 @@ impl BlobVault {
         fs::create_dir_all(&self.inner.directory)
             .with_context(|| format!("failed to create {}", self.inner.directory.display()))?;
         let mut suffix = [0; 8];
-        OsRng.fill_bytes(&mut suffix);
+        UnwrapErr(SysRng).fill_bytes(&mut suffix);
         let temporary = self
             .inner
             .directory
@@ -176,7 +176,7 @@ impl BlobVault {
     /// Writes the header and the sealed chunks of `reader` to `out`.
     fn seal(&self, reader: &mut dyn Read, out: &mut dyn Write) -> Result<u64> {
         let mut salt = [0; SALT_LEN];
-        OsRng.fill_bytes(&mut salt);
+        UnwrapErr(SysRng).fill_bytes(&mut salt);
         let header = header(self.inner.key_id, &salt);
         out.write_all(&header).context("failed to write")?;
         let mut encryptor = EncryptorBE32::from_aead(

@@ -24,7 +24,7 @@ mod blob;
 
 pub use blob::{BlobReader, BlobVault, file_key_id, is_encrypted_file};
 use hkdf::Hkdf;
-use rand::{RngCore, rngs::OsRng};
+use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -52,7 +52,7 @@ impl KeyId {
     /// A fresh random key id.
     fn generate() -> Self {
         let mut bytes = [0; KEY_ID_LEN];
-        OsRng.fill_bytes(&mut bytes);
+        UnwrapErr(SysRng).fill_bytes(&mut bytes);
         Self(bytes)
     }
 
@@ -126,7 +126,7 @@ impl StoreKey {
     /// A new random key with a new id, from the OS's random source.
     pub fn generate() -> Self {
         let mut secret = Zeroizing::new([0; KEY_LEN]);
-        OsRng.fill_bytes(secret.as_mut());
+        UnwrapErr(SysRng).fill_bytes(secret.as_mut());
         Self {
             id: KeyId::generate(),
             secret: Arc::new(secret),
@@ -460,7 +460,7 @@ pub fn sync_parent_dir(path: &Path) {
 /// not be guessable, such as the open cache's directories.
 pub fn random_hex(count: usize) -> String {
     let mut bytes = vec![0; count];
-    OsRng.fill_bytes(&mut bytes);
+    UnwrapErr(SysRng).fill_bytes(&mut bytes);
     hex(&bytes)
 }
 

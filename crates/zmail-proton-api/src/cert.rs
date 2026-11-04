@@ -548,7 +548,7 @@ pub(crate) mod fixtures {
         builder
             .build()
             .expect("key params")
-            .generate(&mut rand_pgp::rng())
+            .generate(&mut rand::rng())
             .expect("key")
     }
 

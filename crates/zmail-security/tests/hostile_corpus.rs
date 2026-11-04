@@ -18,7 +18,7 @@ use html5ever::{
         states::RawKind,
     },
 };
-use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
+use rand::{RngExt, SeedableRng, rngs::StdRng, seq::IndexedRandom};
 use zmail_security::html::{
     MAX_DEPTH, MAX_ELEMENTS, MAX_HTML_BYTES, MAX_STYLE_BYTES, SanitizeOptions, SanitizedDocument,
     is_public_remote_url, sanitize_html, sanitize_html_for_storage, text_of_stored_html,
@@ -688,7 +688,7 @@ fn mutated_hostile_mail_comes_out_safe() {
     for iteration in 0..iterations {
         let base = corpus.choose(&mut rng).expect("a corpus entry");
         let mut mutated = base.clone();
-        for _ in 0..rng.gen_range(1..=6) {
+        for _ in 0..rng.random_range(1..=6) {
             mutate(&mut mutated, &corpus, &mut rng);
         }
         // Keep inputs small enough that the loop stays fast.
@@ -702,10 +702,10 @@ fn mutated_hostile_mail_comes_out_safe() {
 
 fn mutate(input: &mut String, corpus: &[String], rng: &mut StdRng) {
     let boundary = |input: &str, rng: &mut StdRng| {
-        let at = rng.gen_range(0..=input.len());
+        let at = rng.random_range(0..=input.len());
         input.floor_char_boundary(at)
     };
-    match rng.gen_range(0..6) {
+    match rng.random_range(0..6) {
         0 | 1 => {
             let at = boundary(input, rng);
             let piece = DANGEROUS_PIECES.choose(rng).expect("a piece");
@@ -713,14 +713,14 @@ fn mutate(input: &mut String, corpus: &[String], rng: &mut StdRng) {
         }
         2 => {
             let start = boundary(input, rng);
-            let end = start + input[start..].len().min(rng.gen_range(0..64));
+            let end = start + input[start..].len().min(rng.random_range(0..64));
             let end = input.floor_char_boundary(end);
             input.replace_range(start..end, "");
         }
         3 => {
             let start = boundary(input, rng);
-            let end =
-                input.floor_char_boundary(start + input[start..].len().min(rng.gen_range(0..128)));
+            let end = input
+                .floor_char_boundary(start + input[start..].len().min(rng.random_range(0..128)));
             let copy = input[start..end].to_owned();
             let at = boundary(input, rng);
             input.insert_str(at, &copy);
@@ -729,14 +729,14 @@ fn mutate(input: &mut String, corpus: &[String], rng: &mut StdRng) {
             let other = corpus.choose(rng).expect("a corpus entry");
             let from = boundary(other, rng);
             let to =
-                other.floor_char_boundary(from + other[from..].len().min(rng.gen_range(0..256)));
+                other.floor_char_boundary(from + other[from..].len().min(rng.random_range(0..256)));
             let at = boundary(input, rng);
             input.insert_str(at, &other[from..to]);
         }
         _ => {
             let start = boundary(input, rng);
-            let end =
-                input.floor_char_boundary(start + input[start..].len().min(rng.gen_range(0..32)));
+            let end = input
+                .floor_char_boundary(start + input[start..].len().min(rng.random_range(0..32)));
             let flipped: String = input[start..end]
                 .chars()
                 .map(|ch| {
