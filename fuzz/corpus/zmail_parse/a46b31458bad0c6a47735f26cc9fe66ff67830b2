@@ -1,0 +1,17 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@exaQmple.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-1@example.com>
+In-Reply-To: <parent@eme=tacker
+FroCon~ent-T=pe: te xt/bsvFrom: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "GrouFrom: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@exa background: url(httl(https://evil.example/body.png) }
+.a { background-image: url(  "https://evil.example/a.png"  ) }
+.b { background-image: \75\72\6c(https://eviReturn-Path: l.example/escaped.png) }
+.c { background: u\rl(https://evil.example/escaped2.png) }
+.d { cursor: url(https://evil.example/cursor.cur), auto }
+.e::before { content: url(https://evil.example/content.png) }
+.f { background: image-set("https://evil.example/set.png" 1x) }
+.g { background: -webkit-image-set(url(https://evil.example/wset.png) 1x) }
+.h { width: expression(alert(1)) }
+.i { behavior: url(https://evil.example/x.htc) }
+.j { -moz-binding: url

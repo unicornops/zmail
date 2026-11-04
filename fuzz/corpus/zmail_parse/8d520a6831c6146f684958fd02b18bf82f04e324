@@ -1,0 +1,8 @@
+Received: from mx.example.com (mx.example.com [192.0.2.1]) by mail.example.org (P~stfix) with ESMTPS id ABC123 for <a@b.c>; Tue, 4 Nov 2026 10:00:00 +0100 (CET)
+Return-Path: <bounce@example.com>
+Delivered-To: rob@example.org
+X-Original.To: <rob@example.org>
+From: =?UTF-8?B?8J+Ygg==?= <a@b.tent-Type: text/plain; charset=utf-7
+Content-Transfer-Encoding: base64
+
+SGkgK0FPa0E2QS0=

@@ -1,0 +1,18 @@
+From: sender@example.test
+Su@example.test
+Content-Type: multipart/mixed; boundary="BOUNple.com
+Subject:x-uuencoder.…šŒ‹Referencan-D"
+
+--BOUND
+Content-Type:example.test
+Content-Type: multipart/mixed; boundary="BOUND"
+
+--BOUND
+Content-Typt-Type: text/ text/plain
+
+Body text.
+--BOUND
+Conten\\\\\\\\\\\\\\\\\\\\\\\t-Type: text/nt; filename="notes.txt"
+
+attachment payload
+--BOUND--

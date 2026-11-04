@@ -1,0 +1,24 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-4@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-VersioiaHR0c(M6Ly9uZXdz
+LmV4YW1wbGUuY29tL3N0b3J5P3V0bT0xIj48aW1nIHNyYz0iaHR0cHM6LyyuZXdzLmV5Ye.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain
+
+plain
+--b1
+Content-iaHR0cHM6Ly90
+cmFjay5leGFtcGxlLm5ldC90ZC5naWYiIGJnY29sb3I9IiNmZmZmZmYiPng8L3RkPjwvdHI+PC90
+YWJsZT4KPC9ib2R5PjwvaHRtbD4K
+ 
+--b1--

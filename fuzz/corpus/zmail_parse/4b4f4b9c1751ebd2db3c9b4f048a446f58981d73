@@ -1,0 +1,23 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-4@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<html><body style=3D"margin:0;background:#eee url(https://traAk.example.net=
+/body.gif)">
+<table width=3D"100%" cellpadding=3D"0" cellspacing=3D"0"><tr><td align=3D"=
+center">
+<img src=3D"https://news.example.com/logo.png" alt=3D"Example News" width=
+=3D"200">
+<p>This week's stories</p>
+<img src=3D"http://track.example.net/open?u=3D123&amp;c=3D9" width=3D"1" he=
+ight=3D"1" border=3D"0" style=3D"display:block">
+<img src=3D"HTTPS://TRACK.EXAMPLE.NET/OPEN2" width=3D"1" height=3D"1">
+<img src=3D"//track.example.net/protocol-relative.gif">
+<img src=3D"https://track.example.net:8443/port

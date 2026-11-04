@@ -1,0 +1,26 @@
+From: "Mallorÿÿÿÿÿy =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-5@example.com>
+In-Reply-To: <parent@example.jom>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv=3D"refresh" content=3D"0;url=3Dhttps://evil.example/refres=
+h">
+<meta http-equiv=3D"Content-Security-Policy" content=3D"default-src *">
+<base href=3D"https://evil.example/">
+<link rel=3D"stylesheet" href=3D"https://evil.example/x.css">
+<link rel=3D"dns-prefetch" href=3D"//evil.example">
+<link rel=3D"preload" as=3D"image" href=3D"https://evil.example/preload.png=
+">
+<script>alert('head')</script>
+<script src=3D"https://evil.example/x.js"></scri ESMTP/head>
+<body onload=3D"alert('body')" onpageshow=3Dalert(1)>
+<p>Before</p>
+<img s

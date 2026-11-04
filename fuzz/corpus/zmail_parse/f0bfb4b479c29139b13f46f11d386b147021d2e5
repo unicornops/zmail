@@ -1,0 +1,21 @@
+From: "Mallory =?utContent-Language: <mallory@example.com>
+To: victim@example.org, %Group": a@b.c, d@e.f;
+Subject: =?i½o-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-2@example.com>tContent-Language: <mallory@example.com>
+To: victim@example.org, %Group": a@b.c, d@e.f;
+Subject: =?i½o-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-2@example.com>
+In-Rfply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+D,te: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-0
+Content!Transfer-Encoding: base64
+
+PG1ldGEgaHR0cC1lcXVpdj1yZWZyZXNoIGNvbnRlbnQ9IjA7IHVybD1odHRwczovL2V2aWwuZXhh
+bXBsZS9yMSI+CjxNRVRBIEhUVFAtRVFVSVY9IlJlZiclng2JIENPTlRFTlQ9IjU7VVJMPWphdmFz
+Y3JpcHQ6YWxlcnQoMSkiPgo8YmFzZSBoc<script>mVmPSJodHRwczovL2V2aWwuZXhhbXBsZS8iPjxiYXN<!--l
+IHRhcmdldD0iX3RvcCI+CjxwPjxhIGhyZWY9InJlbGF0aXZlL3BhdGgiPnJlbGF0aXZlPC9hPiA8
+aW1nIHNyYz0icmVsYXRpdmUucG5nIj48L3A+CjxtZXRhIG5hbWU9ImNvbG9yLXNjaGVtZSIgY29u
+dGVudD0ibGlnaHQgK
+LmcgeyBiYWNrZ3J

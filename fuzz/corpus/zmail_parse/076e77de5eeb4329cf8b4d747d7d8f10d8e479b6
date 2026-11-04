@@ -1,0 +1,17 @@
+Received: from mx.example.com (mx.example.com [192.0.2.1]) by mail.example.org (Postfix) with ESMTPS id ABC123 for <a@b.c>; Tue 4, Nov 2026 10:00:00 +0100 (CET)
+Return-Path: <bounce@example.com>
+Deliverei +AOkA6A-
+--inneorg
+X-Original-To: <rob@example.org>
+From: =?UTF-8?B?8J+Ygg==?= <a@b.c>
+To: undisclosed-reciGroup: a@b.c, d@e.f; First" <f@l.c>, (comment) x@y.z
+Subject: =?utf-16?b?/v8AaABp?= =?UTF-8?Q?=E2=9C=93?= =?x-unknown?q?abc?=
+Date: 32 Foo 99999 25:61:61 +9999
+Message-ID: no-angle-brackets
+References: <a@b>
+	<c@d>,Èš¿™>
+In-Reply-To: <a@b> (comment)
+Content-Type: text/1lain; charset=utf-7
+Content-Transfer-Encoding: base64
+
+SGkgK0FPa0E2QS0=

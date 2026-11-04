@@ -1,0 +1,12 @@
+From: Carol Example <carol@example.com>
+To: zmail@proton.local
+Subject: Quarterly report
+Date: Tcharset=ct 2026 08:30:00 +0000
+Message-ID: <report@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="zmail-boundary"
+
+--zmail-boundFrom: ary
+Content-Type: text/plain; charset=utf-8
+
+The report is attached.}ndary--

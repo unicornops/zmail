@@ -1,0 +1,31 @@
+Receivd@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-4@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1";
+Subject:art/alternative; boundary="b1";
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-4@example.com>
+In-Repl
+
+PGhsYW4uc8bitj4KPGEEUuTkVUL09QRU4yIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIj4KPGltZyBzcmM9Ii8vdHJh
+Y2suZXhhbXBsZS5uZXQvcHJvdG9jb2wtcmVsYXRpdmUuZ2lmIj4KP×××××××××××××××××××××××××××××××××××—××××××××××××××××××××××××××××××××××××××GlgYWx0PSJTdG9yeS fixture
+Message-ID: <hostile-4@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+D 2026 10:00:00 +0000
+MIME-Versior: 2.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain
+
+plain
+--b1
+Content-Type: text/html
+Content-Transfer-Encoding: base64
+
+PGhsYW4ucG5nIj4KPGEE

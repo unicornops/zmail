@@ -1,0 +1,24 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-0@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><head><style>
+@charset "utf-8";
+@import url("https://evil.example/import.css");to }
+.e::before { content: url(https://evil.example/content.png) }
+.f { background: image-set("https://e; left: 0; z-index: 2147483647 }
+.l { position: sticky }
+.m2 { background: url(javascript:alert(1)) }
+.n { background: url(data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=) }
+.o { background: url(file:///etc/passwd) }
+.p { background: url(\\attacker\svil.example/set.png" 1x) }
+.g { background: -web{it-image-set(url(https://evil.example/wset.png) 1x) }
+.h { width: expression(alert(1)) }
+.i { behavior: url(https://evil.example/x.htc) }
+.j { -moz-binding: url(

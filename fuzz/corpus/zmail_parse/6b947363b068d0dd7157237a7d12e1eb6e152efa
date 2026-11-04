@@ -1,0 +1,15 @@
+Received: from mx.example.com (mx.example.com [192.0.2.1]) bom mx.example.com (mx.eJ+Ygg==?= <a@b.c>
+To: undisclosed-recipicom (mx.example.com [192.0.2.1]) ESMTPS id ABC123 for <a@b.c>; Tue, 4 Nov 20'6 10:00:00 +0100 (CET)
+Return-Path: <bounce@example.com>
+Delivered-To: rob@example.ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÆÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿýÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿorg
+X-Original-To: <rob@example.org>
+From: =?UTF-8?B?8J+Ygg==?= <a@b.c>
+To: undisclosed-recipicom (mx.example.com [192.0.2.1]) bom mx.example.com (mx.example.com [192.0.2.1]) by mail.example.org (Postfix) with=?iso-8859-1?q? ESMTPS id ABC123 for <a@b.c>; Tue, 4 Nov 20'6 10:00:00 +0100 (CET)
+Return-Path: <bounce@example.com>
+Delivered-To: rob@example.ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÆÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿýÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿorg
+X1-Original-To: <rob@example.org>
+From: =?UTF-8?B?8J+Ygg==?= <a@b.c>
+To: undisclosed-recipients:;
+Cc: "Last, First" <f@l.c>, (comment) x@y.z
+Subject: n-Path: <bounce@example.com>
+Delivered-To: rob@example.ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÆÿÿÿ

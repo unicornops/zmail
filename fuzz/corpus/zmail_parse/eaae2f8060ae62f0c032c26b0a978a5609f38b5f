@@ -1,0 +1,41 @@
+From: sender@example.test
+Subject: newsletter
+To: rcpt@example.test
+Content-Type: multipart/mixed; boundary="MIX"
+
+--MIX
+Content-Type: multipart/alternative; boundary="ALT"
+
+--ALT
+Content-Type: text/plain; charset=utf-8
+
+Hello in text.
+--ALT
+Content-Type: multipart/related; boundary="REL"
+
+--REL
+Content-Type: text/html; charset=utf-8
+
+<p>Hello <img src="cid:logo@example.test"> <img src="cid:photo@example.test"></p>
+--REL
+Content-Type: image/png
+Content-ID: <logo@example.test>
+Content-Disposition: inline
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgo=
+--REL
+Content-Type: image/jpeg; name="photo.jpg"
+Content-ID: <photo@example.test>
+Content-Disposition: inline; filename="photo.jpg"
+Content-Transfer-Encoding: base64
+
+/9j/4AAQ
+--REL--
+--ALT--
+--MIX
+Content-Type: text/csv; name="report.csv"
+Content-Disposition: attachment; filename="report.csv"
+
+a,b
+--MIX--

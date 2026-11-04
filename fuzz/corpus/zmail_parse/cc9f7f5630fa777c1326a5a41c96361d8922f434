@@ -1,0 +1,14 @@
+Received: r1
+ved: rL3A+PHN0eWxlPjxhIGlkPSI8L3From: "Mallory =?utf-8?b?w4lsw6g=?=" <mal|ory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E4?= fixture
+Message-ID: <hostile-2@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-EnclPjxpbWcgùÃJjPTEgb25lcnJvcj1hbGVoding: base64
+
+PG1ldGydCgx
+KE

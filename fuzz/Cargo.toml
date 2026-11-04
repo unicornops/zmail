@@ -1,0 +1,42 @@
+# Fuzz targets for zmail's mail parsing (cargo-fuzz). Not a workspace member:
+# it builds on nightly with sanitizers and has its own Cargo.lock. See
+# README.md.
+[package]
+name = "zmail-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Keeps the crate out of the zmail workspace one directory up.
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+# zmail's own parsing path: hydrated_body_from_rfc822 and its BlobStore.
+zmail-core = { path = "../crates/zmail-core" }
+zmail-imap = { path = "../crates/zmail-imap" }
+# The versions in the app's Cargo.lock (the fuzz workflow keeps them in step).
+mail-parser = "1.0.1"
+encodify = "1.0.2"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "zmail_parse"
+path = "fuzz_targets/zmail_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encodify_decoders"
+path = "fuzz_targets/encodify_decoders.rs"
+test = false
+doc = false
+bench = false

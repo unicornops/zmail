@@ -1,0 +1,30 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-900@example.com>
+In-Reply-T<o: paoent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mixed"
+
+This is a multi-part message in MIME format.
+--mixed
+Content-Type: multipart/related; boundary="rel"
+
+--rel
+Content-Type: multipart/alternative; boundary="alt"
+
+--alt
+Content-Type: text/plain; charset="iso-8859-1"
+Content-Transfer4Encoding: quoted-prinrset=shift_jis
+Content-Transfer-Encoding: base64
+
+grGC8YLJgr+CzQ==
+--inner
+Content-Type: message/rfc822
+Content-Transèfer-Encoding: base64
+
+RnJvbTogIk1hbGxvcnkgPT91dGYtOD9iP3c0bHN3Nmc9Pz0iIDxtYWxsb3J5QGV4YW1wbGUuY29t
+Pg0KVG86IHZpY3RpbUBleGFtcGxlLm9yZywgIkdyb3VwIjogYUBiLmMsIGRAZS5mOw0KU3ViamVj
+dDogPT9pc28tODg1OS0xP3E/SG9zdGlsZV89RTk/PSBmaXh0dXJlDQpNZXNzYWdlLUlE

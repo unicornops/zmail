@@ -1,0 +1,25 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-900@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mixed"
+
+This is a multi-part message in MIME format.
+--mixed
+Content-Type: multipart/related; boundary="rel"
+
+--rel
+Content-Type: multipart/alternative; boundary="altÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿDC3=3DA9</p>
+<p>Caf=C3=A9 &amp; cr=C3=A8me =3DC3=3DA9</p>
+<p>C™af=C3=A9 &amp; cr=C3=A8me =3DC3=3DA9</html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<p>Caf=C2=A9 &amp; cr=C3=A8me =3DC3=3DòA9</p>
+<p>Caf=C3=A9 &amp; cr=C3=A8mFrom: "Mallorylocalhostb?w4lsw6g=?= <mallory@example.com>
+To: victim@example.orcHM6Ly9ldmlsLmV4Y/D8hmT9U+uy
+height=3D"1">
+<img paramsrc=3M720MtPD"//t

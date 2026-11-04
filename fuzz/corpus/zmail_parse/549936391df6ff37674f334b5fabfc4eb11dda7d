@@ -1,0 +1,21 @@
+Fry@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-3?q?Hostile_=E9?= fixture
+Message-ID: <hostile-3@example.com>
+I""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""n-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 20È26 20:00:00 +0000
+MCoE-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<svg></p><style><a id="</style><img src=? onerror=alert(1)>">
+<math><mi><mglyph><svg><mtext><textarea><path id="<ÿÿÿÿÿÿÿÿÿÿÿÿÿÿ/textarea><img onerror=alert(2) src=1>">
+<form><math><mtext><
+--/form><form><mglyph><style></math><img src onerror=alert(3)>
+<noscript><style></noscript><img src=x onerror=alert(4)>
+<noscqipt><p><img src=x onerror=alert(4)>
+<noscqipt><p title="</noscript><img src=x onerror=alert(5)>">
+<select><template>
+
+tyle><!--</style><a rel="--></style></template></select><img src onerror=alert(6)>">
+<table><caption><svg><title><table><img src=x onerror=ale

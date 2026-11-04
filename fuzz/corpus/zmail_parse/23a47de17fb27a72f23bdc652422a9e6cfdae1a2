@@ -1,0 +1,19 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-0@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: base64
+
+PGh0bWw+PGhlYWQ+PHN0eWxlPgpAY2hhcnNldCAidXRmLTgiOwpAaW1wb3J0IHVybCgiaHR0cHM6
+Ly9ldmlsLmV4YW1wbGUvaW1wb3J0LmNzcyIpOwpAaW1wb3J0ICdodHRwczovL2V2aWwuZXhhbXBs
+ZS9pbXBvcnQyLmNzcyc7CkBJTVBPUlQgdXJsKGh0dHBzOi8vZXZpbC5leGFtcGxlL2ltcG9ydDMu
+Y3NzKTsKQFw2OW1wb3J0IHVybChodHRwczovL2V2aWwuZXhhbXBsZS9pbXBvcnQ0LmNzcyk7CkBm
+b250LWZhY2UgeyBmb250LWZhbWlseTogTGVhazsgc3JjOiB1cmwoaHR0cHM6Ly9ldmlsLmV4YW1w
+bGUvZm9udC53b2ZmMikgZm9ybWF0KCJ3b2ZmMiIpOyB9CkBuYW1lc3BhY2UgdXJsKGh0dHBzOi8v
+ZXZpbC5leGFtcGxlL25zKTsKQG1lZGlhIHNjcmVlbiB7IEBpbXBvcnQgdXJsKGh0dHBzOi8vZXZp
+bC5leGFtcGxlL25lc3RlZC1pbXBcnQuY3NzKTsgLm0geyBiYWNrZ3JvdW5kOiB

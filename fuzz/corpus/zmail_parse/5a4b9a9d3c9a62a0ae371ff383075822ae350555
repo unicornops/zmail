@@ -1,0 +1,9 @@
+Received: from mx.example.com (mx.example.com [192.0.2.1]) by mail.example.org (Postfix) with=?iso‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‚‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹AidXRmLTgiOwpAaW2wb3J0IHVybCgiaHR0cHM9
+Message-ID: no-angle-brackets
+References: <a@b>
+	<c@d>,<e@f>
+In-Reply-To: <a@b> (comment)
+Content-ID: : text/plain; charsettd=utf-7
+Content-Transfer-Encoding: base64
+
+SGkgK0FPa0E2QS0=

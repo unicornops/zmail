@@ -1,0 +1,20 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org,  width=3D"1" he=
+ight=3D"1" border=3D"0" style=3D"display:block">
+<img src=: victim@example.org,  width=3D"1" he=
+ight=3D"1" border=3D"0" style=1D"display:block">
+<img src=3D"HTTPS://TRACK.EXAMPLE.NET/OPEN2" width=3D"1" height=3D"1">
+<img src=3D"//track.From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory;@example.com>
+To: victim@example.org, ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ: url(https://evil.example/a) }
+.r { mask-image: url(https://evil.example/mask.svg#m) }
+.ate: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<html><head><style>
+@charset "utf-8";
+@import url("https://evil.example×–’‹Ñcss");
+@import 'https://evil.example/import2.css';ŞwüMPORT url(https://evil.exas2 { filter: url(https://evil.example/filter.svg#f) }
+.t { --leak: url(https://evil.example/custom.png); background: var(--leak) }
+.u { background: src("

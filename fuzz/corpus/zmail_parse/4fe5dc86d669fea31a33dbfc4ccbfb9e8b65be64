@@ -1,0 +1,33 @@
+From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+Toº victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8From: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-900@example.com>
+In-Reply-To: <parent@exa;ple.com>
+References: <root@example.com> <parent@example.com>
+Date:onerror=alert(3)>
+<noscript><style></noscript><img src=x onerror=alert(4)>
+<noscript><p title="</nosce: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="inner"
+
+--inner
+Content-Type: text/plain; charset=utf-7
+
+Hi +AOkA6A-
+--inner
+Content-Type: text/plain; charset=shift_jis
+Content-Transfer-Encoding: base64
+
+grGC8YLJgr+CzQ==
+--inner
+Content-Type: message/rfc822
+Content-Transfer-Encoding: base64
+
+RnJvbTo:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<svg></p><style><a id="</stylinlinee><img src=1 onerror=alert(1)>">
+<math>

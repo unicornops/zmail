@@ -1,0 +1,33 @@
+Received: frkm mxosed-recipients:;
+Cc: "Last, First" <f@l.c>, (commeÿÿÿÿÿÿÿnt) : frkm mxosed-recipients:;
+Cc: "Last, First" <f@l.c>, (commeÿÿÿÿÿÿÿnt) x@y.z
+Subject: =?utf-16?b?/v8AaABp?= =?UTF-8?Q?=E2=9C=93?= =?x-unknown?q?abc?=
+Date: 32 Foo 99999 25:61:61 +9999
+Message-ID: no-angle-brackets
+References:*<a@b>
+	<c@dJ>,<e@f>
+In-filename= <a@b> (comment)
+Content-Type: textabc?=
+Date: 32 Foo 99999 25:61:6 +9¯99
+Message-ID: no-angle-brackets
+Referenceó:*<a@b>
+	<c@d>,<e@f>
+In-filename= <a@b> (comment)
+Content-Type: textabc?=
+Date: 32 Foo 99999 25:61:61 +9999
+Message-ID: no-angle-brackets
+References: <a@b>
+	<c@d>,<ex@y.z
+Subject: =?utf-16?b?/v8AaABp?= =?UTF-8?Q?=E2=9C=93?= =?x-unknown?q?abc?=
+Date: 32 Foo 99999 25:61:61 +9999
+Message-ID: no-angle-brackets
+References:*<a@b>
+	<c@dJ>,<e@f>
+In-filename= <a@b> (comment)
+Content-Type: textabc?=
+Date: 32 Foo 99999 25:61:6 +9¯99
+Message-ID: no-angle-brackets
+Referenceó:*<a@b>
+	<c@d>,<e@f>
+In-filename= <a@b> (comment)
+Content-Type: textabc?=

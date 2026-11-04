@@ -1,0 +1,24 @@
+From: "Mallory =?ug=?=" <mallory@example.com>
+To: victim@exaQmple.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-1@example.com>
+In-Reply-To: <parent@eme=tacker
+FroCon~ent-T=pe: te xt/bsvFrom: "Mallory =?utf-8?b?w4lsw6g=?=" <mallory@example.com>
+To: victim@example.org, "Group": a@b.c, d@e.f;
+Subject: =?iso-8859-1?q?Hostile_=E9?= fixture
+Message-ID: <hostile-0@example.com>
+In-Reply-To: <parent@example.com>
+References: <root@example.com> <parent@example.com>
+Date: Tue, 04 Nov 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<html><head><style>
+@charset "utf-8";</style>t url("https://evil.example◊ñíèêçã—css");
+@import 'https://evil.example/import2.css';
+@IMPORT url(https://evil.example/import3.css);
+@\69mport url(https://evil.example/import4.css);
+@font-face { font-family: Leak; src: url(https://evil.example/font.woff2) f=
+ormat("woff2"); }
+@namespace url(https://evil.exam
