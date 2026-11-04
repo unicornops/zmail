@@ -47,7 +47,7 @@ windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_
 # raw-window-handle reads the X11 window of GPUI's native surface.
 [target.'cfg(target_os = "linux")'.dependencies]
 futures-channel = "0.3.34"
-libloading = "0.8.9"
+libloading = "0.9.0"
 raw-window-handle = "0.6.2"
 
 [dev-dependencies]
