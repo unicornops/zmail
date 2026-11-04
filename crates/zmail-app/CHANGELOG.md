@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.5](https://github.com/unicornops/zmail/compare/v0.32.4...v0.32.5) (2026-11-04)
+
+
+### Bug Fixes
+
+* **outbox:** make process_outbox_and_wait wait for sends other passes started ([#395](https://github.com/unicornops/zmail/issues/395)) ([33befa0](https://github.com/unicornops/zmail/commit/33befa07f16e6f5e66bae3366ba99dd69a6ec15d))
+
 ## [0.32.4](https://github.com/unicornops/zmail/compare/v0.32.3...v0.32.4) (2026-11-04)
 
 
