@@ -117,7 +117,7 @@ fn attachment_part(attachment: &OutgoingFile) -> (PartHeader, Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
-    use mail_parser::{MessageParser, MimeHeaders};
+    use mail_parser::MessageParser;
 
     use super::*;
 
@@ -176,7 +176,7 @@ mod tests {
         let reply_to = message
             .reply_to()
             .expect("a Reply-To")
-            .iter()
+            .mailboxes()
             .map(|address| (address.name(), address.address()))
             .collect::<Vec<_>>();
         assert_eq!(
@@ -187,16 +187,19 @@ mod tests {
             ]
         );
         assert_eq!(message.message_id(), Some("m1@proton.me"));
-        assert_eq!(message.in_reply_to().as_text(), Some("parent@example.com"));
         assert_eq!(
-            message.references().as_text_list().map(<[_]>::len),
+            message.in_reply_to().and_then(|ids| ids.last()),
+            Some("parent@example.com")
+        );
+        assert_eq!(
+            message.references().map(|ids| ids.len()),
             Some(2),
             "References: {:?}",
             message.references()
         );
-        let attachment = message.attachment(0).expect("attachment");
+        let attachment = message.attachments().next().expect("attachment");
         assert_eq!(attachment.attachment_name(), Some("notes.txt"));
-        assert_eq!(attachment.contents(), b"a,b\n1,2\n");
+        assert_eq!(attachment.decoded().as_ref(), b"a,b\n1,2\n");
     }
 
     #[test]

@@ -736,8 +736,6 @@ pub(crate) fn address_list(addresses: &[EmailAddress]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use mail_parser::MimeHeaders;
-
     use super::*;
 
     fn message(json: serde_json::Value) -> Message {
@@ -840,7 +838,7 @@ mod tests {
             .attachments()
             .find(|part| part.attachment_name() == Some("report.csv"))
             .expect("csv");
-        assert_eq!(csv.contents(), b"a,b\n1,2\n");
+        assert_eq!(csv.decoded().as_ref(), b"a,b\n1,2\n");
         assert!(String::from_utf8_lossy(&raw).contains("multipart/related"));
     }
 
@@ -914,7 +912,8 @@ mod tests {
         );
         let attachment = parsed.attachments().next().expect("attachment");
         assert_eq!(attachment.attachment_name(), Some("secret.pdf.pgp"));
-        let armored = String::from_utf8_lossy(attachment.contents());
+        let decoded = attachment.decoded();
+        let armored = String::from_utf8_lossy(&decoded);
         assert!(
             armored.contains("This attachment could not be decrypted"),
             "{armored}"
