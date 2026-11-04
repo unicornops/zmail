@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.2](https://github.com/unicornops/zmail/compare/v0.32.1...v0.32.2) (2026-11-04)
+
+
+### Bug Fixes
+
+* **deps:** Bump unicode-width ([#369](https://github.com/unicornops/zmail/issues/369)) ([604d17c](https://github.com/unicornops/zmail/commit/604d17cc5618fa4b09cceb58eca1b1909b6b2356))
+
 ## [0.32.1](https://github.com/unicornops/zmail/compare/v0.32.0...v0.32.1) (2026-11-03)
 
 
