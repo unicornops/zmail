@@ -5,7 +5,7 @@
 
 ### Bug Fixes
 
-* **outbox:** settle sends a stopped process left in Sending ([#404](https://github.com/unicornops/zmail/issues/404)) ([e52e1e8](https://github.com/unicornops/zmail/commit/e52e1e8083cbcf0fc092ea3da39d9e64cfd9d73c)), closes [#403](https://github.com/unicornops/zmail/issues/403)
+* **outbox:** settle sends a stopped process left in Sending ([#404](https://github.com/unicornops/zmail/issues/404)) ([e52e1e8](https://github.com/unicornops/zmail/commit/e52e1e8083cbcf0fc092ea3da39d9e64cfd9d73c))
 
 ## [0.32.5](https://github.com/unicornops/zmail/compare/v0.32.4...v0.32.5) (2026-11-04)
 
