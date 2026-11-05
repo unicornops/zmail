@@ -351,7 +351,7 @@ where
 fn notified_mailbox(response: &Response<'_>) -> Option<String> {
     match response {
         Response::MailboxData(MailboxDatum::Status { mailbox, .. }) => Some(mailbox.to_string()),
-        Response::MailboxData(MailboxDatum::List { name, .. }) => Some(name.to_string()),
+        Response::MailboxData(MailboxDatum::List(list)) => Some(list.name.to_string()),
         _ => None,
     }
 }
@@ -359,7 +359,11 @@ fn notified_mailbox(response: &Response<'_>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_imap::imap_proto::parser::parse_response;
+    // imap-proto 0.17 dropped the `parser` module; `Response::parse` is its
+    // `parse_response`.
+    fn parse_response(line: &[u8]) -> async_imap::imap_proto::ParseResult<'_> {
+        Response::parse(line)
+    }
 
     fn mailboxes(entries: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
         entries
