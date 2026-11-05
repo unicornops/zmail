@@ -32,6 +32,7 @@ use zmail_proton_api::{Address, AddressStatus};
 pub use checkpoint::ProtonCheckpoint;
 pub use events::{EVENT_JITTER, EVENT_PERIOD, event_poll_delay, has_new_events};
 pub use hydrate::fetch_message_bodies;
+pub use send::OutgoingTrace;
 pub use session::{ProtonSession, ProtonSessions, delete_session, has_session, store_new_session};
 pub use signin::{ProtonSignIn, SignInStep, SignedInAccount};
 pub use sync::SyncPaging;
@@ -384,6 +385,28 @@ pub async fn submit_outgoing_message(
     trusted: &[zmail_core::key_change::KeyTrust],
 ) -> Result<()> {
     send::send_message(session, message, trusted).await
+}
+
+/// Looks for the message an interrupted send was sending (Zmail stopped
+/// mid-send), by its Message-ID: sent, only its draft, or nothing. An
+/// error means the lookup failed, which says nothing about the message.
+pub async fn find_outgoing_message(
+    session: &ProtonSession,
+    message_id: &str,
+) -> Result<OutgoingTrace> {
+    send::find_outgoing_message(session, message_id).await
+}
+
+/// Sends the draft an interrupted send left
+/// ([`OutgoingTrace::Draft`]), as [`submit_outgoing_message`] would have
+/// sent the message.
+pub async fn send_existing_draft(
+    session: &ProtonSession,
+    draft_id: &str,
+    message: &OutgoingMessage,
+    trusted: &[zmail_core::key_change::KeyTrust],
+) -> Result<()> {
+    send::send_existing_draft(session, draft_id, message, trusted).await
 }
 
 #[cfg(test)]

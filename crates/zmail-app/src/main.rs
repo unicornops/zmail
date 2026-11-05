@@ -1314,17 +1314,35 @@ fn list_outbox(account_id: Option<i64>) -> Result<()> {
 
 fn retry_outbox_job(job_id: i64, force: bool) -> Result<()> {
     let store = Arc::new(open_store().context("failed to open the local store")?);
-    store.retry_outbox_job(job_id)?;
     let runtime = BackgroundRuntime::start(4)?;
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-    let sync_service = command_sync_service(&runtime, store.clone(), secrets, force)?;
+    println!(
+        "{}",
+        retry_outbox_job_in(&runtime, store, secrets, job_id, force)?
+    );
+    Ok(())
+}
+
+/// `retry-outbox`, on an open store: requeues a failed job and, when this
+/// process syncs, sends it.
+fn retry_outbox_job_in(
+    runtime: &BackgroundRuntime,
+    store: Arc<LocalStore>,
+    secrets: Arc<dyn SecretStore>,
+    job_id: i64,
+    force: bool,
+) -> Result<String> {
+    store.retry_outbox_job(job_id)?;
+    let sync_service = command_sync_service(runtime, store, secrets, force)?;
     if !sync_service.runs_sync() {
-        println!("Outbox job {job_id} requeued. {SYNCED_ELSEWHERE}, and sends it within seconds.");
-        return Ok(());
+        return Ok(format!(
+            "Outbox job {job_id} requeued. {SYNCED_ELSEWHERE}, and sends it within seconds."
+        ));
     }
     let processed = sync_service.process_outbox_and_wait(None)?;
-    println!("Outbox job {job_id} requeued. Processed {processed} due job(s).");
-    Ok(())
+    Ok(format!(
+        "Outbox job {job_id} requeued. Processed {processed} due job(s)."
+    ))
 }
 
 fn add_attachment(draft_id: i64, path: &std::path::Path) -> Result<()> {
@@ -2624,6 +2642,81 @@ mod tests {
         drop(runtime);
         let seen = server.join().expect("the mock finishes");
         assert!(seen.iter().any(|line| line == "Noon?"), "{seen:?}");
+    }
+
+    #[test]
+    fn retry_outbox_sends_an_interrupted_message_once() {
+        let (port, server) = slow_smtp_server();
+        let store = Arc::new(LocalStore::open_ephemeral().expect("the store opens"));
+        let account_id = store
+            .insert_account(&NewAccount {
+                display_name: "Test Account".to_owned(),
+                protocol: ProtocolKind::Imap,
+                auth: AuthKind::Password,
+                endpoint: "imaps://mail.example.test:993".to_owned(),
+                username: "user@example.test".to_owned(),
+                cache_policy: CachePolicySummary::performance_first(),
+                outgoing: Some(OutgoingConfig {
+                    kind: zmail_core::SubmissionKind::Smtp,
+                    host: Some("127.0.0.1".to_owned()),
+                    port: Some(port),
+                    username: Some("user@example.test".to_owned()),
+                    security: Some(SubmissionSecurity::Plain),
+                    hello_name: "localhost".to_owned(),
+                }),
+                identities: vec![NewIdentity {
+                    display_name: "Test Account".to_owned(),
+                    email_address: "user@example.test".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }],
+            })
+            .expect("an account");
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        secrets
+            .set_account_secret(account_id, "password")
+            .expect("the password stores");
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id,
+                to: vec!["ada@example.com".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Lunch".to_owned(),
+                body: "Noon?".to_owned(),
+                threading: Default::default(),
+            })
+            .expect("a draft");
+        // A send Zmail stopped in the middle of, as the process that syncs
+        // records it for an SMTP account.
+        let job_id = store.queue_draft(draft_id).expect("queued");
+        store
+            .claim_due_outbox_job(None)
+            .expect("the claim runs")
+            .expect("due");
+        store
+            .record_outbox_failure(job_id, zmail_core::INTERRUPTED_SEND_MESSAGE)
+            .expect("failed");
+
+        let runtime = BackgroundRuntime::start(2).expect("a runtime");
+        let said = retry_outbox_job_in(&runtime, store.clone(), secrets, job_id, false)
+            .expect("retry-outbox runs");
+        assert!(
+            said.starts_with(&format!("Outbox job {job_id} requeued. Processed ")),
+            "{said}"
+        );
+        let jobs = store.list_outbox_jobs(None).expect("the outbox");
+        assert_eq!(jobs[0].state, zmail_core::OutboxJobState::Sent, "{jobs:?}");
+        assert_eq!(jobs[0].attempt_count, 2);
+        drop(runtime);
+        let seen = server.join().expect("the mock finishes");
+        assert_eq!(
+            seen.iter().filter(|line| *line == "Noon?").count(),
+            1,
+            "{seen:?}"
+        );
     }
 
     /// Set in the child process that

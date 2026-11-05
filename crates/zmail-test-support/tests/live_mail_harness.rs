@@ -658,6 +658,97 @@ fn a_forward_from_zmail_arrives_with_the_attachment() -> Result<()> {
     Ok(())
 }
 
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn an_interrupted_smtp_send_fails_asking_to_check_sent_and_a_retry_sends_it_once() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&sending_imap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_RECIPIENT_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    // The process that holds the sync lock, as the desktop app does.
+    let sync_service = SyncService::for_command(runtime.handle().clone(), store.clone(), secrets)?;
+    ensure!(sync_service.runs_sync());
+
+    // A message claimed for sending by a process that then stopped.
+    let subject = format!(
+        "Interrupted over SMTP {}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    let identity_id = store.list_identities(account_id)?[0].id;
+    let draft_id = store.create_draft(&NewDraft {
+        account_id,
+        identity_id,
+        to: vec![MAIL_HARNESS_SENDER.to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: subject.clone(),
+        body: "Sent once, after a look in Sent.".to_owned(),
+        threading: Default::default(),
+    })?;
+    let job_id = store.queue_draft(draft_id)?;
+    store
+        .claim_due_outbox_job(Some(account_id))?
+        .context("the job is due")?;
+
+    // How many copies the recipient's mailbox holds.
+    let mut recipient = RawImap::connect(
+        3143,
+        MAIL_HARNESS_SENDER_LOGIN,
+        MAIL_HARNESS_SENDER_PASSWORD,
+    )?;
+    let mut delivered = || -> Result<usize> {
+        recipient.command("SELECT INBOX")?;
+        let transcript = recipient.command(&format!("UID SEARCH SUBJECT \"{subject}\""))?;
+        Ok(transcript
+            .lines()
+            .filter(|line| line.starts_with("* SEARCH"))
+            .flat_map(|line| line.split_whitespace().skip(2))
+            .count())
+    };
+
+    // Zmail starts again: SMTP keeps nothing to ask, so the job fails with
+    // the message, and nothing is sent unasked.
+    sync_service.set_interrupted_send_after(Duration::ZERO);
+    sync_service.process_outbox_and_wait(Some(account_id))?;
+    let job = |store: &LocalStore| -> Result<zmail_core::OutboxJobSummary> {
+        store
+            .list_outbox_jobs(Some(account_id))?
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .context("the job is kept")
+    };
+    let failed = job(&store)?;
+    ensure!(failed.state == OutboxJobState::Failed, "{failed:?}");
+    ensure!(
+        failed.last_error_message.as_deref() == Some(zmail_core::INTERRUPTED_SEND_MESSAGE),
+        "{failed:?}"
+    );
+    thread::sleep(Duration::from_secs(3));
+    ensure!(delivered()? == 0, "sent without being asked");
+
+    // The user checked Sent and retries: it goes, once.
+    store.retry_outbox_job(job_id)?;
+    sync_service.process_outbox_and_wait(Some(account_id))?;
+    let sent = job(&store)?;
+    ensure!(
+        sent.state == OutboxJobState::Sent && sent.attempt_count == 2,
+        "{sent:?}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while delivered()? == 0 {
+        ensure!(Instant::now() < deadline, "the retry never arrived");
+        thread::sleep(Duration::from_millis(500));
+    }
+    thread::sleep(Duration::from_secs(3));
+    ensure!(delivered()? == 1, "delivered more than once");
+    Ok(())
+}
+
 /// Runs an outbox pass, which also waits for the send `queue_draft_and_send`
 /// started, and requires everything in the account's outbox to be sent.
 fn wait_until_sent(store: &LocalStore, sync_service: &SyncService, account_id: i64) -> Result<()> {

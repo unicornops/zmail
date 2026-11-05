@@ -15,8 +15,8 @@
 
 use chrono::{DateTime, FixedOffset};
 use zmail_core::{
-    DraftSummary, OutboxJobState, OutboxJobSummary, key_change::PinnedKeyChanged,
-    reauth::ReauthReason, text::count_noun, time::parse_timestamp,
+    DraftSummary, OutboxJobState, OutboxJobSummary, is_interrupted_send,
+    key_change::PinnedKeyChanged, reauth::ReauthReason, text::count_noun, time::parse_timestamp,
 };
 use zmail_security::terminal::sanitize_line;
 
@@ -105,6 +105,19 @@ fn status(job: &OutboxJobSummary, now: &DateTime<FixedOffset>) -> (String, bool,
         },
         OutboxJobState::Sending => ("Sending\u{2026}".to_owned(), false, false, false),
         OutboxJobState::Sent => ("Sent".to_owned(), false, false, false),
+        OutboxJobState::Failed
+            if job
+                .last_error_message
+                .as_deref()
+                .is_some_and(is_interrupted_send) =>
+        {
+            (
+                "Sending interrupted \u{2014} check Sent".to_owned(),
+                true,
+                true,
+                false,
+            )
+        }
         OutboxJobState::Failed => ("Couldn\u{2019}t send".to_owned(), true, true, false),
         OutboxJobState::Retrying => {
             let wait = job

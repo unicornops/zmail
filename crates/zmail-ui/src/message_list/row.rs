@@ -26,7 +26,7 @@ use gpui::{
 };
 use zmail_core::{
     AccountColor, DraftState, DraftSummary, OutboxJobState, OutboxJobSummary, SearchHit,
-    ThreadSummary,
+    ThreadSummary, is_interrupted_send,
     key_change::PinnedKeyChanged,
     participants::{parse_address_list, participant_names, sender_identity},
     reauth::ReauthReason,
@@ -433,6 +433,16 @@ pub(super) fn outbox_status(
         OutboxJobState::Queued => status("Waiting to send", false, false),
         OutboxJobState::Sending => status("Sending\u{2026}", false, false),
         OutboxJobState::Sent => status("Sent", false, false),
+        // Zmail stopped mid-send and the server can't say whether it went:
+        // the tooltip says to check Sent before Retry.
+        OutboxJobState::Failed
+            if job
+                .last_error_message
+                .as_deref()
+                .is_some_and(is_interrupted_send) =>
+        {
+            status("Sending interrupted \u{2014} check Sent", true, true)
+        }
         OutboxJobState::Failed => status("Couldn\u{2019}t send", true, true),
         OutboxJobState::Retrying => {
             let wait = job
@@ -1154,6 +1164,25 @@ mod tests {
         assert_eq!(status.text, "Sign in again to send");
         assert!(status.failed && status.needs_reauth);
         assert!(!status.can_retry, "retrying the same sign-in cannot help");
+    }
+
+    #[test]
+    fn an_interrupted_send_asks_to_check_sent_and_can_be_retried() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-18T10:00:00Z")
+            .expect("a timestamp")
+            .with_timezone(&chrono::Local);
+        let mut interrupted = job(OutboxJobState::Failed, None);
+        interrupted.last_error_message = Some(zmail_core::INTERRUPTED_SEND_MESSAGE.to_owned());
+        let status = outbox_status(&interrupted, &now);
+        assert_eq!(status.text, "Sending interrupted \u{2014} check Sent");
+        assert!(status.failed && status.can_retry);
+        assert!(!status.needs_reauth && status.key_change.is_none());
+        let row = MessageRow::outbox_job("row".into(), &interrupted, None, &now, HourCycle::H24);
+        assert_eq!(
+            row.date_tooltip,
+            zmail_core::INTERRUPTED_SEND_MESSAGE,
+            "the whole sentence is a hover away"
+        );
     }
 
     #[test]

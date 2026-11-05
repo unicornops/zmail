@@ -1191,6 +1191,7 @@ struct James {
     user: &'static str,
     password: &'static str,
     api_url: String,
+    upload_url: String,
     account_id: String,
 }
 
@@ -1213,11 +1214,16 @@ impl James {
             .as_str()
             .context("the session names the mail account")?
             .to_owned();
+        let upload_url = session["uploadUrl"]
+            .as_str()
+            .context("the session names its upload URL")?
+            .replace("{accountId}", &account_id);
         Ok(Self {
             client,
             user,
             password,
             api_url,
+            upload_url,
             account_id,
         })
     }
@@ -1273,13 +1279,59 @@ impl James {
             "Email/get",
             serde_json::json!({
                 "ids": query[1]["ids"],
-                "properties": ["id", "threadId", "mailboxIds", "subject", "messageId", "receivedAt"],
+                "properties": ["id", "threadId", "mailboxIds", "subject", "messageId", "receivedAt",
+                               "keywords"],
             }),
         )?;
         got[1]["list"]
             .as_array()
             .cloned()
             .with_context(|| format!("James lists the emails: {got}"))
+    }
+
+    /// Imports `raw` into the account's Sent mailbox with `keywords`, as
+    /// Zmail's JMAP send does first, and returns the email's id.
+    fn import_into_sent(&self, raw: Vec<u8>, keywords: serde_json::Value) -> Result<String> {
+        let uploaded: serde_json::Value = self
+            .client
+            .post(&self.upload_url)
+            .basic_auth(self.user, Some(self.password))
+            .header("Content-Type", "message/rfc822")
+            .body(raw)
+            .send()?
+            .error_for_status()?
+            .json()?;
+        let mailboxes = self.call("Mailbox/get", serde_json::json!({"ids": null}))?;
+        let sent = mailboxes[1]["list"]
+            .as_array()
+            .and_then(|list| list.iter().find(|mailbox| mailbox["role"] == "sent"))
+            .and_then(|mailbox| mailbox["id"].as_str())
+            .with_context(|| format!("James has a Sent mailbox: {mailboxes}"))?
+            .to_owned();
+        let imported = self.call(
+            "Email/import",
+            serde_json::json!({"emails": {"copy": {
+                "blobId": uploaded["blobId"],
+                "mailboxIds": {sent: true},
+                "keywords": keywords,
+            }}}),
+        )?;
+        imported[1]["created"]["copy"]["id"]
+            .as_str()
+            .map(str::to_owned)
+            .with_context(|| format!("James imported the copy: {imported}"))
+    }
+
+    /// The account's emails with `message_id`, once James has had time to
+    /// deliver any second copy: it delivers through its mail queue, after
+    /// the submission has answered.
+    fn settled_copies(&self, message_id: &str) -> Result<Vec<serde_json::Value>> {
+        thread::sleep(Duration::from_secs(5));
+        Ok(self
+            .emails()?
+            .into_iter()
+            .filter(|email| has_message_id(email, message_id))
+            .collect())
     }
 
     /// Waits until James lists an email `matches` accepts in the account,
@@ -1306,6 +1358,152 @@ impl James {
             thread::sleep(Duration::from_millis(250));
         }
     }
+}
+
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn interrupted_jmap_sends_are_settled_from_the_copys_keywords() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_JMAP_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    // The process that holds the sync lock, as the desktop app does.
+    let sync_service =
+        SyncService::for_command(runtime.handle().clone(), store.clone(), secrets.clone())?;
+    ensure!(sync_service.runs_sync());
+    // Nothing counts as interrupted while each case is set up.
+    sync_service.set_interrupted_send_after(Duration::from_secs(3600));
+    let identity_id = store.list_identities(account_id)?[0].id;
+    let account_side = James::connect(MAIL_HARNESS_JMAP_ACCOUNT, MAIL_HARNESS_JMAP_PASSWORD)?;
+    let recipient = James::connect(MAIL_HARNESS_SENDER, MAIL_HARNESS_SENDER_PASSWORD)?;
+
+    // A message to a James user, claimed for sending as a pass claims it;
+    // the process then stops without recording anything.
+    let claim = |subject: &str| -> Result<(zmail_core::PendingOutboxJob, String)> {
+        let draft_id = store.create_draft(&NewDraft {
+            account_id,
+            identity_id,
+            to: vec![MAIL_HARNESS_SENDER.to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: subject.to_owned(),
+            body: format!("{subject}, delivered once."),
+            threading: Default::default(),
+        })?;
+        store.queue_draft(draft_id)?;
+        let job = store
+            .claim_due_outbox_job(Some(account_id))?
+            .context("the job is due")?;
+        let message_id = job.message.message_id.clone().context("a Message-ID")?;
+        Ok((job, message_id))
+    };
+    // Zmail starts again: the holder settles what was interrupted.
+    let settle = |job_id: i64| -> Result<zmail_core::OutboxJobSummary> {
+        sync_service.set_interrupted_send_after(Duration::ZERO);
+        sync_service.process_outbox_and_wait(Some(account_id))?;
+        sync_service.set_interrupted_send_after(Duration::from_secs(3600));
+        store
+            .list_outbox_jobs(Some(account_id))?
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .context("the job is kept")
+    };
+    // The account's copies of the message in Sent: how many, and whether
+    // each says it was submitted.
+    let sent_copies = |message_id: &str| -> Result<Vec<bool>> {
+        Ok(account_side
+            .settled_copies(message_id)?
+            .iter()
+            .map(|email| {
+                email["keywords"].as_object().is_some_and(|keywords| {
+                    keywords
+                        .keys()
+                        .any(|keyword| keyword.eq_ignore_ascii_case("$submitted"))
+                })
+            })
+            .collect())
+    };
+
+    // 1. It had submitted the message when it stopped: the job is Sent,
+    // and the recipient has one copy.
+    let (job, message_id) = claim("JMAP stopped after submitting")?;
+    Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(zmail_jmap::submit_outgoing_message(
+            MAIL_HARNESS_JMAP_ENDPOINT,
+            MAIL_HARNESS_JMAP_ACCOUNT,
+            MAIL_HARNESS_JMAP_PASSWORD,
+            AuthKind::Password,
+            MAIL_HARNESS_JMAP_ACCOUNT,
+            &job.message,
+        ))?;
+    recipient.wait_for_email("the first submission", |email| {
+        has_message_id(email, &message_id)
+    })?;
+    let after = settle(job.job_id)?;
+    ensure!(
+        after.state == OutboxJobState::Sent && after.attempt_count == 1,
+        "{after:?}"
+    );
+    let delivered = recipient.settled_copies(&message_id)?;
+    ensure!(delivered.len() == 1, "delivered {delivered:?}");
+    ensure!(sent_copies(&message_id)? == [true]);
+
+    // 2. It had imported the copy and stopped before submitting it: that
+    // copy is submitted, once.
+    let (job, message_id) = claim("JMAP stopped before submitting")?;
+    account_side.import_into_sent(
+        zmail_smtp::render_rfc822_message(&job.message)?,
+        serde_json::json!({"$submitpending": true}),
+    )?;
+    let after = settle(job.job_id)?;
+    ensure!(after.state == OutboxJobState::Sent, "{after:?}");
+    recipient.wait_for_email("the resumed submission", |email| {
+        has_message_id(email, &message_id)
+    })?;
+    let delivered = recipient.settled_copies(&message_id)?;
+    ensure!(delivered.len() == 1, "delivered {delivered:?}");
+    ensure!(
+        sent_copies(&message_id)? == [true],
+        "one copy in Sent, now marked submitted"
+    );
+
+    // 3. It stopped before importing: no trace, so it goes back in the
+    // queue and is sent once.
+    let (job, message_id) = claim("JMAP stopped before importing")?;
+    let after = settle(job.job_id)?;
+    ensure!(
+        after.state == OutboxJobState::Sent && after.attempt_count == 2,
+        "{after:?}"
+    );
+    recipient.wait_for_email("the requeued send", |email| {
+        has_message_id(email, &message_id)
+    })?;
+    let delivered = recipient.settled_copies(&message_id)?;
+    ensure!(delivered.len() == 1, "delivered {delivered:?}");
+    ensure!(sent_copies(&message_id)? == [true]);
+
+    // 4. A copy without Zmail's marks (an older Zmail imported it) cannot
+    // say whether it went: the job fails asking the user to check Sent,
+    // and nothing is sent.
+    let (job, message_id) = claim("JMAP copy without marks")?;
+    account_side.import_into_sent(
+        zmail_smtp::render_rfc822_message(&job.message)?,
+        serde_json::json!({}),
+    )?;
+    let after = settle(job.job_id)?;
+    ensure!(after.state == OutboxJobState::Failed, "{after:?}");
+    ensure!(
+        after.last_error_message.as_deref() == Some(zmail_core::INTERRUPTED_SEND_MESSAGE),
+        "{after:?}"
+    );
+    let delivered = recipient.settled_copies(&message_id)?;
+    ensure!(delivered.is_empty(), "delivered {delivered:?}");
+    Ok(())
 }
 
 /// Whether a James email (see [`James::emails`]) has `message_id`.

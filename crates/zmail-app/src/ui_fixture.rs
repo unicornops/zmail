@@ -42,9 +42,10 @@ pub(crate) enum FixtureView {
     InboxHighContrast,
     /// An account in its first sync: skeleton rows.
     Syncing,
-    /// The outbox with a message sending, one waiting for a retry and one
-    /// that failed. (A queued message would be sent, and fail, as soon as
-    /// the window opens.)
+    /// The outbox with a message sending, one waiting for a retry, one
+    /// that failed, one stopped by a recipient's key change and one whose
+    /// send was interrupted. (A queued message would be sent, and fail, as
+    /// soon as the window opens.)
     Outbox,
     /// The reader on a longer conversation with an attachment: the read
     /// messages collapsed, the unread one expanded.
@@ -784,6 +785,9 @@ fn seed_outbox(store: &LocalStore, account_id: i64) -> Result<()> {
         ["B81D47E2A6C093F5D2E8417A0C9B6F3E5D2A7C18".to_owned()],
     );
     store.record_outbox_failure(key_changed, change.to_string())?;
+    // Zmail stopped while sending it over SMTP, so it may have gone.
+    let interrupted = queue("Dana Whitfield <dana@example.com>", "Invoice for October")?;
+    store.record_outbox_failure(interrupted, zmail_core::INTERRUPTED_SEND_MESSAGE)?;
     Ok(())
 }
 
@@ -1842,7 +1846,10 @@ mod tests {
             .map(|job| job.state.as_str())
             .collect::<Vec<_>>();
         states.sort_unstable();
-        assert_eq!(states, ["failed", "failed", "retrying", "sending"]);
+        assert_eq!(
+            states,
+            ["failed", "failed", "failed", "retrying", "sending"]
+        );
         Ok(())
     }
 

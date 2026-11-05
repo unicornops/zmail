@@ -937,7 +937,8 @@ fn the_outbox_shows_queued_failed_and_refused_messages() {
     };
     let failed = queue("Failed", "bo@example.com");
     let refused = queue("Refused", "cy@example.com");
-    // A send attempt claims both.
+    let interrupted = queue("Interrupted", "di@example.com");
+    // A send attempt claims them.
     while store.claim_due_outbox_job(None).expect("claim").is_some() {}
     let waiting = queue("Waiting", "ada@example.com");
     store
@@ -949,10 +950,14 @@ fn the_outbox_shows_queued_failed_and_refused_messages() {
             ReauthRequired::new(ReauthReason::SendRefused, "535 auth").to_string(),
         )
         .expect("refusal");
+    // Zmail stopped mid-send over SMTP.
+    store
+        .record_outbox_failure(interrupted, zmail_core::INTERRUPTED_SEND_MESSAGE)
+        .expect("interrupted");
     let mut app = app_with(store.clone(), environment());
     keys(&mut app, "t");
     assert_eq!(app.screen, Screen::Outbox);
-    assert_eq!(app.outbox.len(), 3);
+    assert_eq!(app.outbox.len(), 4);
     let buffer = draw(&mut app, 80, 24);
     assert_printable(&buffer);
     assert_snapshot("outbox-80x24", &buffer);
@@ -983,6 +988,23 @@ fn the_outbox_shows_queued_failed_and_refused_messages() {
     };
     assert_eq!(
         job(failed).expect("still there").state,
+        OutboxJobState::Queued
+    );
+    // So does R on an interrupted one, once the user has checked Sent.
+    app.outbox_cursor = row(&app, "Interrupted");
+    assert_eq!(
+        app.outbox[app.outbox_cursor].status,
+        "Sending interrupted \u{2014} check Sent"
+    );
+    app.outbox_details();
+    assert!(
+        status(&app).ends_with("Check your Sent folder before you send it again."),
+        "{}",
+        status(&app)
+    );
+    keys(&mut app, "r");
+    assert_eq!(
+        job(interrupted).expect("still there").state,
         OutboxJobState::Queued
     );
     // D takes back one that hasn't started sending: it is postponed again.

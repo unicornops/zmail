@@ -42,6 +42,12 @@
 // client's. Like Bridge, the draft is created without `ReplyTos`
 // (go-proton-api's `DraftTemplate` has none), so only the MIME packages
 // (PGP/MIME and clear MIME recipients) carry it.
+// Modified by UnicornOps on 2026-11-04: a send that was interrupted (Zmail
+// stopped mid-send) is found again by its ExternalID, as `getParentID`
+// looks messages up. A sent message settles it; a draft that was never
+// sent is sent as it is, unless attachments had been uploaded to it (their
+// session keys went with the stopped process), in which case it is deleted
+// and the message is sent from a new draft.
 
 //! Sending a message through Proton: Bridge's SMTP service.
 
@@ -84,6 +90,72 @@ pub(crate) async fn send_message(
     session: &ProtonSession,
     message: &OutgoingMessage,
     trusted: &[KeyTrust],
+) -> Result<()> {
+    send(session, message, trusted, None).await
+}
+
+/// What the account's mail shows of a message whose send was interrupted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutgoingTrace {
+    /// It was sent.
+    Sent,
+    /// Only its draft, which was never sent: its ID.
+    Draft(String),
+    /// Nothing: the send stopped before it created the draft.
+    None,
+}
+
+/// Looks for the message an interrupted send was sending by its
+/// Message-ID, the ExternalID its draft was created with, with the
+/// metadata lookup `getParentID` makes.
+pub(crate) async fn find_outgoing_message(
+    session: &ProtonSession,
+    message_id: &str,
+) -> Result<OutgoingTrace> {
+    if message_id.is_empty() {
+        bail!("an outgoing message without a Message-ID cannot be looked up");
+    }
+    let metadata = session
+        .client()
+        .get_message_metadata(&MessageFilter {
+            external_id: message_id.to_owned(),
+            ..MessageFilter::default()
+        })
+        .await
+        .context("failed to look the message up")?;
+    if metadata
+        .iter()
+        .any(|metadata| metadata.flags.has(MessageFlags::SENT))
+    {
+        return Ok(OutgoingTrace::Sent);
+    }
+    // Listed by ID, oldest first; the newest draft is the last attempt's.
+    Ok(metadata
+        .iter()
+        .rev()
+        .find(|metadata| metadata.is_draft())
+        .map_or(OutgoingTrace::None, |draft| {
+            OutgoingTrace::Draft(draft.id.clone())
+        }))
+}
+
+/// Sends the draft `draft_id` an interrupted send created
+/// ([`find_outgoing_message`]), as [`send_message`] would have.
+pub(crate) async fn send_existing_draft(
+    session: &ProtonSession,
+    draft_id: &str,
+    message: &OutgoingMessage,
+    trusted: &[KeyTrust],
+) -> Result<()> {
+    send(session, message, trusted, Some(draft_id)).await
+}
+
+/// [`send_message`], from a new draft or the existing `draft_id`.
+async fn send(
+    session: &ProtonSession,
+    message: &OutgoingMessage,
+    trusted: &[KeyTrust],
+    draft_id: Option<&str>,
 ) -> Result<()> {
     let client = session.client();
     let mut addresses = client.get_addresses().await?;
@@ -163,6 +235,7 @@ pub(crate) async fn send_message(
         },
         message,
         &attachments,
+        draft_id,
     )
     .await
     .context("failed to send the message through Proton")
@@ -204,12 +277,14 @@ struct SendContext<'a> {
     trusted: &'a [KeyTrust],
 }
 
-/// Sends the message with the given address key (`sendWithKey`).
+/// Sends the message with the given address key (`sendWithKey`), from a
+/// new draft or, resuming an interrupted send, the existing `draft_id`.
 async fn send_with_key(
     client: &Client,
     context: &SendContext<'_>,
     message: &OutgoingMessage,
     attachments: &[OutgoingFile],
+    draft_id: Option<&str>,
 ) -> Result<()> {
     let SendContext {
         settings,
@@ -264,21 +339,30 @@ async fn send_with_key(
         attachments,
     );
 
-    let mut references = message.references.clone();
-    if let Some(in_reply_to) = &message.in_reply_to {
-        references.push(in_reply_to.clone());
-    }
-    // A parent that cannot be found leaves the message unthreaded at
-    // Proton, never unsent.
-    let parent_id = get_parent_id(client, &references).await.unwrap_or_default();
-    let action = draft_action(message);
+    let existing = match draft_id {
+        Some(draft_id) => resumable_draft(client, draft_id).await?,
+        None => None,
+    };
+    let draft = match existing {
+        Some(draft) => draft,
+        None => {
+            let mut references = message.references.clone();
+            if let Some(in_reply_to) = &message.in_reply_to {
+                references.push(in_reply_to.clone());
+            }
+            // A parent that cannot be found leaves the message unthreaded
+            // at Proton, never unsent.
+            let parent_id = get_parent_id(client, &references).await.unwrap_or_default();
+            let action = draft_action(message);
 
-    let draft = create_draft(
-        client, addr_key, emails, from, to, &parent_id, action, template,
-    )
-    .await
-    .map_err(|error| draft_error(&error).unwrap_or_else(|| anyhow!(error)))
-    .context("failed to create draft")?;
+            create_draft(
+                client, addr_key, emails, from, to, &parent_id, action, template,
+            )
+            .await
+            .map_err(|error| draft_error(&error).unwrap_or_else(|| anyhow!(error)))
+            .context("failed to create draft")?
+        }
+    };
 
     let prepared = async {
         let att_keys = create_attachments(client, addr_key, &draft.metadata.id, attachments)
@@ -307,6 +391,26 @@ async fn send_with_key(
         .await
         .context("failed to send draft")?;
     Ok(())
+}
+
+/// The draft an interrupted send created, to send as it is: created with
+/// the message's recipients, parent and ExternalID. When attachments had
+/// been uploaded to it, it is deleted instead (`None`): their session
+/// keys went with the stopped process, and a send decrypts nothing the
+/// server supplies, so the message goes from a new draft.
+async fn resumable_draft(client: &Client, draft_id: &str) -> Result<Option<Message>> {
+    let draft = client
+        .get_message(draft_id)
+        .await
+        .context("failed to get the draft")?;
+    if draft.metadata.num_attachments == 0 {
+        return Ok(Some(draft));
+    }
+    client
+        .delete_messages(&[draft_id.to_owned()])
+        .await
+        .context("failed to delete the draft")?;
+    Ok(None)
 }
 
 /// Bridge's typed errors for draft creation.

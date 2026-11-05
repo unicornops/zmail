@@ -2407,6 +2407,45 @@ fn the_outbox_row_counts_waiting_mail_and_retries_failures(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn an_interrupted_send_is_retried_from_its_row_only(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let job = queue_test_message(&harness.store, "Maybe sent");
+    harness
+        .store
+        .record_outbox_failure(job, zmail_core::INTERRUPTED_SEND_MESSAGE)
+        .expect("the failure is recorded");
+    cx.dispatch_action(crate::actions::ShowOutbox);
+    view.update(cx, |view, cx| {
+        view.refresh_from_store(cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let state = || harness.store.list_outbox_jobs(None).expect("the outbox")[0].state;
+
+    // It may have gone out: Retry all leaves it for the user to check.
+    click("sidebar-outbox-retry", cx);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.status_message.clone()),
+        Some(
+            "Check your Sent folder first, then retry an interrupted message from its row in \
+             the Outbox."
+                .to_owned()
+        )
+    );
+    assert_eq!(state(), zmail_core::OutboxJobState::Failed);
+
+    // Its own row retries it (the demo account's send then fails again,
+    // on a schedule).
+    click_on(format!("outbox-row-{job}-retry"), cx);
+    cx.run_until_parked();
+    assert_ne!(state(), zmail_core::OutboxJobState::Failed);
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.status_message.clone()),
+        Some("Message queued for another send attempt.".to_owned())
+    );
+}
+
+#[gpui::test]
 fn a_changed_recipient_key_offers_to_trust_exactly_the_new_key(cx: &mut TestAppContext) {
     use zmail_core::key_change::{KeyTrust, PinnedKeyChanged};
 
