@@ -146,6 +146,8 @@ pub async fn submit_outgoing_message(
             smtp_message.to(recipient.as_str())
         });
 
+    // mail-send 0.7 returns the server's final reply (with the queue ID);
+    // an error status is already an `Err`, and nothing here uses the text.
     match config.security {
         SubmissionSecurity::Plain => builder
             .connect_plain()
@@ -181,7 +183,7 @@ pub async fn submit_outgoing_message(
             .send(smtp_message)
             .await
             .context("failed to submit the SMTP message")?,
-    }
+    };
 
     Ok(())
 }
