@@ -763,6 +763,23 @@ pub fn is_interrupted_send(message: &str) -> bool {
     message.starts_with(INTERRUPTED_SEND_MESSAGE)
 }
 
+/// Marks a failed send that the server may still have carried out: the
+/// request to send reached it, or may have, and no clear answer came back
+/// (a timeout, a dropped connection, a server error). Adapters attach it
+/// as context to such errors. The outbox then never sends the message
+/// again blind: every later attempt first asks the server what became of
+/// it, as for an interrupted send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnconfirmedSend;
+
+impl fmt::Display for UnconfirmedSend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the server may have sent the message")
+    }
+}
+
+impl std::error::Error for UnconfirmedSend {}
+
 /// Persisted state of a queued outbox job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutboxJobState {
@@ -1075,6 +1092,9 @@ pub struct PendingOutboxJob {
     /// In-Reply-To and References out again first
     /// (`LocalStore::complete_draft_threading`).
     pub threading_pending: bool,
+    /// An earlier attempt failed in a way that may still have sent the
+    /// message ([`UnconfirmedSend`]), so this one asks the server first.
+    pub send_unconfirmed: bool,
 }
 
 /// Mailbox metadata shown in the left pane.

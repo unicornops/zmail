@@ -275,6 +275,28 @@ impl Error {
     pub fn is_network(&self) -> bool {
         matches!(self, Self::Network(_))
     }
+
+    /// Returns whether a request that changes something (sending a
+    /// message) may have been carried out although it failed: it may have
+    /// reached the server, and no answer said it was refused.
+    ///
+    /// - Yes: no answer after the connection was made (a timeout, a reset
+    ///   or dropped connection, a body cut short), a server error (5xx) or
+    ///   rate limiting (429) still there after the retries, and a success
+    ///   answer that could not be read.
+    /// - No: the connection or the TLS handshake never completed (nothing
+    ///   was sent), any other error answer (4xx), a session Proton signed
+    ///   out, and errors raised before any request.
+    pub fn may_have_been_carried_out(&self) -> bool {
+        match self {
+            Self::Network(error) => !error.is_connect(),
+            Self::Decode(_) => true,
+            Self::Deauthenticated(_) => false,
+            _ => self
+                .status()
+                .is_some_and(|status| status == 429 || status >= 500),
+        }
+    }
 }
 
 /// Finds the rustls certificate error behind a transport error, if any.

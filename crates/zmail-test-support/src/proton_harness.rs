@@ -221,6 +221,14 @@ impl ProtonHarness {
             .with_context(|| format!("failed to read {}", self.state.ca_pem_path.display()))
     }
 
+    /// The harness server's certificate and private key (PEM files), for a
+    /// test that stands a proxy of its own in front of the harness. The
+    /// certificate names `127.0.0.1`, so it serves on any loopback port.
+    pub fn server_certificate_paths(&self) -> (PathBuf, PathBuf) {
+        let tls = self.state_dir.join("tls");
+        (tls.join("server.pem"), tls.join("server-key.pem"))
+    }
+
     /// Login name of the seeded account.
     pub fn username(&self) -> &str {
         &self.state.username

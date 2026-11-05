@@ -215,6 +215,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         DRAFT_IDENTITY_REPLY_TO_SCHEMA,
     ),
     ("0031_outbox_heartbeat", OUTBOX_HEARTBEAT_SCHEMA),
+    (
+        "0032_outbox_send_unconfirmed",
+        OUTBOX_SEND_UNCONFIRMED_SCHEMA,
+    ),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -563,6 +567,12 @@ UPDATE drafts SET identity_reply_to = COALESCE(
 /// existed fall back to their claim time, `last_attempt_at`.
 const OUTBOX_HEARTBEAT_SCHEMA: &str = r#"
 ALTER TABLE outbox_jobs ADD COLUMN heartbeat_at TEXT;
+"#;
+
+/// Whether an attempt of an outbox job failed in a way that may still have
+/// sent the message (see [`LocalStore::mark_outbox_send_unconfirmed`]).
+const OUTBOX_SEND_UNCONFIRMED_SCHEMA: &str = r#"
+ALTER TABLE outbox_jobs ADD COLUMN send_unconfirmed INTEGER NOT NULL DEFAULT 0;
 "#;
 
 /// App-wide settings as one JSON document per key (for example the UI
@@ -4879,6 +4889,21 @@ impl LocalStore {
             .map(|job| InterruptedOutboxJob { job, claimed_at }))
     }
 
+    /// Records that an attempt of outbox job `job_id` failed in a way that
+    /// may still have sent the message (`zmail_core::UnconfirmedSend`).
+    /// It stays so for the rest of the job's life, through retries, a
+    /// failure and a manual retry, so every later attempt asks the server
+    /// what became of the message before sending it.
+    pub fn mark_outbox_send_unconfirmed(&self, job_id: i64) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE outbox_jobs SET send_unconfirmed = 1 WHERE id = ?1",
+            params![job_id],
+        )
+        .context("failed to mark the outbox send as unconfirmed")?;
+        Ok(())
+    }
+
     /// Puts an interrupted job ([`Self::claim_interrupted_outbox_job`]) back
     /// in the queue, once the server has shown the message never reached
     /// it. The interrupted attempt still counts.
@@ -5386,7 +5411,8 @@ impl LocalStore {
                     drafts.parent_mailbox,
                     drafts.parent_remote_id,
                     drafts.threading_pending,
-                    drafts.identity_reply_to
+                    drafts.identity_reply_to,
+                    outbox_jobs.send_unconfirmed
                 FROM outbox_jobs
                 JOIN drafts ON drafts.id = outbox_jobs.draft_id
                 JOIN accounts ON accounts.id = outbox_jobs.account_id
@@ -5439,6 +5465,7 @@ impl LocalStore {
                         row.get::<_, Option<String>>(22)?,
                         threading_from_row(row, 23)?,
                         row.get::<_, String>(29)?,
+                        row.get::<_, bool>(30)?,
                     ))
                 },
             )
@@ -5456,6 +5483,7 @@ impl LocalStore {
             message_id,
             threading,
             reply_to,
+            send_unconfirmed,
         )) = row
         else {
             return Ok(None);
@@ -5498,6 +5526,7 @@ impl LocalStore {
                 reply_action: threading.action,
             },
             threading_pending: threading.pending,
+            send_unconfirmed,
         }))
     }
 }
@@ -11381,6 +11410,64 @@ mod tests {
             .expect("draft should exist");
         assert_eq!(sent.state, DraftState::Sent);
         assert!(sent.sent_at.is_some());
+    }
+
+    #[test]
+    fn an_unconfirmed_send_stays_marked_through_retries_and_failures() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let queue = |subject: &str| {
+            let draft_id = store
+                .create_draft(&NewDraft {
+                    account_id,
+                    identity_id,
+                    to: vec!["recipient@example.test".to_owned()],
+                    cc: Vec::new(),
+                    bcc: Vec::new(),
+                    subject: subject.to_owned(),
+                    body: "Body".to_owned(),
+                    threading: Default::default(),
+                })
+                .expect("draft should be created");
+            store.queue_draft(draft_id).expect("draft should queue")
+        };
+        let claim = || {
+            store
+                .claim_due_outbox_job(Some(account_id))
+                .expect("claim runs")
+                .expect("a job is due")
+        };
+
+        let job_id = queue("Timed out");
+        let first = claim();
+        assert!(!first.send_unconfirmed, "a new job has had no attempt");
+        store
+            .mark_outbox_send_unconfirmed(job_id)
+            .expect("the mark is recorded");
+        store
+            .record_outbox_retry(job_id, "timed out", Duration::ZERO)
+            .expect("retry should record");
+        let second = claim();
+        assert_eq!(second.job_id, job_id);
+        assert!(second.send_unconfirmed);
+        // The same Message-ID, which the lookup goes by.
+        assert_eq!(second.message.message_id, first.message.message_id);
+
+        // A later definite failure, then the user's Retry, keep the mark:
+        // any attempt may have been the one that sent it.
+        store
+            .record_outbox_failure(job_id, "refused")
+            .expect("failure should record");
+        store.retry_outbox_job(job_id).expect("retry requeues");
+        assert!(claim().send_unconfirmed);
+
+        // Another job is not marked by it.
+        store.record_outbox_sent(job_id).expect("sent");
+        queue("Another");
+        assert!(!claim().send_unconfirmed);
     }
 
     #[test]
