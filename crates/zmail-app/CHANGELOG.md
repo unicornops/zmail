@@ -5,6 +5,7 @@
 
 ### Bug Fixes
 
+* **deps:** Bump base64 from 0.22.1 to 0.23.1 ([#399](https://github.com/unicornops/zmail/issues/399)) ([65386e6](https://github.com/unicornops/zmail/commit/65386e6d1ed6a707356cb807264ac602b7c6a138))
 * **deps:** Bump async-imap from 0.11.2 to 0.12.0 ([#401](https://github.com/unicornops/zmail/issues/401)) ([3238f52](https://github.com/unicornops/zmail/commit/3238f52e95195e61f7f6aa98ae660131760adbb3))
 
 ## [0.32.8](https://github.com/unicornops/zmail/compare/v0.32.7...v0.32.8) (2026-11-05)
