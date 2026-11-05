@@ -679,6 +679,66 @@ fn drafts_and_the_outbox_reuse_the_message_row(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_selected_failed_outbox_row_keeps_its_alert_icon(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let account = first_account(&harness.store);
+    let identity = harness
+        .store
+        .list_identities(account)
+        .expect("the identities load")[0]
+        .id;
+    let draft = harness
+        .store
+        .create_draft(&NewDraft {
+            account_id: account,
+            identity_id: identity,
+            to: vec!["Dana Whitfield <dana@example.test>".to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Invoice for October".to_owned(),
+            body: "Attached.".to_owned(),
+            threading: Default::default(),
+        })
+        .expect("the draft is stored");
+    refresh(&view, cx);
+    cx.dispatch_action(ShowDrafts);
+    cx.run_until_parked();
+    assert!(
+        !drawn(format!("draft-row-{draft}-alert"), cx),
+        "a draft being written is not an error"
+    );
+
+    let job = harness
+        .store
+        .queue_draft(draft)
+        .expect("the draft is queued");
+    harness
+        .store
+        .record_outbox_failure(job, zmail_core::INTERRUPTED_SEND_MESSAGE)
+        .expect("the failure is recorded");
+    cx.dispatch_action(ShowOutbox);
+    cx.run_until_parked();
+    refresh(&view, cx);
+    cx.run_until_parked();
+    // The only job is selected and the list has focus, so the row is on
+    // the accent fill, where its status takes the selection foreground
+    // (#407); the icon still says it failed.
+    assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.selected_outbox_job_id),
+        Some(job)
+    );
+    assert!(drawn(format!("outbox-row-{job}-alert"), cx));
+
+    cx.dispatch_action(ToggleDensity);
+    cx.run_until_parked();
+    assert!(
+        drawn(format!("outbox-row-{job}-alert"), cx),
+        "compact rows show it too"
+    );
+}
+
+#[gpui::test]
 fn the_sidebar_follows_the_row_density(cx: &mut TestAppContext) {
     let (_view, cx, harness) = open_workspace(cx, Setup::Mail);
     let height = |cx: &mut VisualTestContext| {

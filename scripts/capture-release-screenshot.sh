@@ -67,6 +67,8 @@ MATRIX=(
   "syncing-light syncing light 1440 920"
   "outbox-dark outbox dark 1440 920"
   "outbox-light outbox light 1440 920"
+  "outbox-compact-dark outbox-compact dark 1440 920"
+  "outbox-compact-light outbox-compact light 1440 920"
   "reader-dark reader dark 1440 920"
   "reader-light reader light 1440 920"
   "reader-expanded-dark reader-expanded dark 1440 920"

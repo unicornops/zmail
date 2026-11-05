@@ -45,8 +45,11 @@ pub(crate) enum FixtureView {
     /// The outbox with a message sending, one waiting for a retry, one
     /// that failed, one stopped by a recipient's key change and one whose
     /// send was interrupted. (A queued message would be sent, and fail, as
-    /// soon as the window opens.)
+    /// soon as the window opens.) The interrupted one lists first, so it
+    /// is the row selected on the focused list's accent fill (#407).
     Outbox,
+    /// The same outbox with compact (one-line) rows.
+    OutboxCompact,
     /// The reader on a longer conversation with an attachment: the read
     /// messages collapsed, the unread one expanded.
     Reader,
@@ -174,6 +177,7 @@ impl FixtureView {
             "inbox-high-contrast" => Self::InboxHighContrast,
             "syncing" => Self::Syncing,
             "outbox" => Self::Outbox,
+            "outbox-compact" => Self::OutboxCompact,
             "reader" => Self::Reader,
             "reader-expanded" => Self::ReaderExpanded,
             "reader-long" => Self::ReaderLong,
@@ -228,7 +232,7 @@ impl FixtureView {
             "unlock-keychain" => Self::Unlock(UnlockFixture::Keychain),
             "unlock-unreadable" => Self::Unlock(UnlockFixture::Unreadable),
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, compose-reply-to, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-accounts-identities, settings-identity-edit, settings-identity-add, settings-identity-remove, settings-identity-hidden, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, outbox-compact, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, compose-reply-to, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-accounts-identities, settings-identity-edit, settings-identity-add, settings-identity-remove, settings-identity-hidden, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain or unlock-unreadable"
             ),
         })
     }
@@ -338,6 +342,13 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         | FixtureView::Syncing => InitialView::Inbox,
         FixtureView::Outbox => {
             seed_outbox(store, account_id)?;
+            InitialView::Outbox
+        }
+        FixtureView::OutboxCompact => {
+            seed_outbox(store, account_id)?;
+            store
+                .update_ui_preferences(|preferences| preferences.density = Density::Compact)
+                .context("failed to save the fixture density")?;
             InitialView::Outbox
         }
         FixtureView::InboxCompact => {
@@ -1575,6 +1586,7 @@ mod tests {
             "inbox-high-contrast",
             "syncing",
             "outbox",
+            "outbox-compact",
             "reader",
             "reader-expanded",
             "reader-long",
@@ -1849,6 +1861,18 @@ mod tests {
         assert_eq!(
             states,
             ["failed", "failed", "failed", "retrying", "sending"]
+        );
+        // The list opens with its first job selected: the interrupted
+        // send, a failed row on the selection's accent fill (#407).
+        let first = store
+            .list_outbox_jobs(None)?
+            .into_iter()
+            .next()
+            .context("the outbox has jobs")?;
+        assert_eq!(first.state.as_str(), "failed");
+        assert_eq!(
+            first.last_error_message.as_deref(),
+            Some(zmail_core::INTERRUPTED_SEND_MESSAGE)
         );
         Ok(())
     }
