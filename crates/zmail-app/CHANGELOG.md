@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.32.9](https://github.com/unicornops/zmail/compare/v0.32.8...v0.32.9) (2026-11-05)
+
+
+### Bug Fixes
+
+* **deps:** Bump libloading from 0.8.9 to 0.9.0 ([#400](https://github.com/unicornops/zmail/issues/400)) ([a74e14d](https://github.com/unicornops/zmail/commit/a74e14df94fde420b7cc6a65b0219e6acad633f6))
+* **deps:** Bump mail-send from 0.6.2 to 0.7.0 ([#398](https://github.com/unicornops/zmail/issues/398)) ([d6ee60e](https://github.com/unicornops/zmail/commit/d6ee60e3251e7e60ae4a2f5c20c6e3c6e6c0db4f))
+* **deps:** Bump base64 from 0.22.1 to 0.23.1 ([#399](https://github.com/unicornops/zmail/issues/399)) ([65386e6](https://github.com/unicornops/zmail/commit/65386e6d1ed6a707356cb807264ac602b7c6a138))
+* **deps:** Bump async-imap from 0.11.2 to 0.12.0 ([#401](https://github.com/unicornops/zmail/issues/401)) ([3238f52](https://github.com/unicornops/zmail/commit/3238f52e95195e61f7f6aa98ae660131760adbb3))
+
 ## [0.32.8](https://github.com/unicornops/zmail/compare/v0.32.7...v0.32.8) (2026-11-05)
 
 
