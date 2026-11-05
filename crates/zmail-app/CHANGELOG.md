@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.7](https://github.com/unicornops/zmail/compare/v0.32.6...v0.32.7) (2026-11-05)
+
+
+### Bug Fixes
+
+* **proton:** look a send up before retrying one that may have gone out ([#410](https://github.com/unicornops/zmail/issues/410)) ([b83c032](https://github.com/unicornops/zmail/commit/b83c0328baa0aa357bf1a701424319f201acc921))
+
 ## [0.32.6](https://github.com/unicornops/zmail/compare/v0.32.5...v0.32.6) (2026-11-05)
 
 
