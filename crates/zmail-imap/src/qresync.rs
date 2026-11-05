@@ -12,7 +12,7 @@ use std::{collections::BTreeMap, ops::RangeInclusive};
 use anyhow::{Context, Result, anyhow, bail};
 use async_imap::{
     Session,
-    imap_proto::{AttributeValue, MailboxDatum, Response, ResponseCode, Status},
+    imap_proto::{AttributeValue, MailboxDatum, Outcome, Response, ResponseCode, Status},
     types::{Flag, Mailbox},
 };
 
@@ -95,19 +95,20 @@ fn apply_response(delta: &mut QresyncDelta, response: &Response<'_>, tag: &str) 
         Response::Done {
             tag: done_tag,
             status,
-            information,
+            outcome,
             ..
         } if done_tag.0 == tag => match status {
             Status::Ok => return Ok(true),
             _ => bail!(
                 "the IMAP server rejected the QRESYNC EXAMINE: {}",
-                information.as_deref().unwrap_or("no detail")
+                outcome.information.as_deref().unwrap_or("no detail")
             ),
         },
         Response::Data {
             status: Status::Ok,
-            code: Some(code),
-            ..
+            outcome: Outcome {
+                code: Some(code), ..
+            },
         } => match code {
             ResponseCode::UidValidity(value) => delta.status.uid_validity = Some(*value),
             ResponseCode::UidNext(value) => delta.status.uid_next = Some(*value),
@@ -222,7 +223,11 @@ fn quote_mailbox(name: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_imap::imap_proto::parser::parse_response;
+    // imap-proto 0.17 dropped the `parser` module; `Response::parse` is its
+    // `parse_response`.
+    fn parse_response(line: &[u8]) -> async_imap::imap_proto::ParseResult<'_> {
+        Response::parse(line)
+    }
 
     fn parse(line: &str) -> Response<'_> {
         let (rest, response) = parse_response(line.as_bytes()).expect("valid IMAP response");
