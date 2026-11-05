@@ -781,27 +781,30 @@ fn sends_to_outside_recipients_by_their_contact_settings() -> Result<()> {
     Ok(())
 }
 
+/// The draft a request sends, if it is a send
+/// (`POST /mail/v4/messages/{draft ID}`).
+fn sent_draft_id(path: &str) -> Option<&str> {
+    let id = path.strip_prefix("/mail/v4/messages/")?;
+    (!id.contains('/')
+        && ![
+            "import",
+            "read",
+            "unread",
+            "delete",
+            "label",
+            "unlabel",
+            "undoactions",
+        ]
+        .contains(&id))
+    .then_some(id)
+}
+
 /// How many messages the harness was asked to send
 /// (`POST /mail/v4/messages/{draft ID}`) in its log.
 fn send_requests(log: &str) -> Vec<String> {
     log.lines()
         .filter(|line| line.contains("| POST"))
-        .filter_map(|line| {
-            let path = line.split('"').nth(1)?;
-            let id = path.strip_prefix("/mail/v4/messages/")?;
-            (!id.contains('/')
-                && ![
-                    "import",
-                    "read",
-                    "unread",
-                    "delete",
-                    "label",
-                    "unlabel",
-                    "undoactions",
-                ]
-                .contains(&id))
-            .then(|| id.to_owned())
-        })
+        .filter_map(|line| sent_draft_id(line.split('"').nth(1)?).map(str::to_owned))
         .collect()
 }
 
@@ -1025,6 +1028,558 @@ fn interrupted_sends_are_settled_from_what_proton_shows() -> Result<()> {
         "{sent} sent, {received} received, {drafts} drafts"
     );
     let _ = std::fs::remove_dir_all(&scratch);
+    Ok(())
+}
+
+/// A TLS proxy in front of the Proton harness, for sends that go wrong on
+/// the way. It serves the harness's own certificate, so the client runs its
+/// real TLS path, forwards every request to the harness, and does to the
+/// requests a test picks what a dropped connection or a struggling server
+/// would.
+mod proxy {
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
+
+    use anyhow::{Context, Result, anyhow};
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+        net::TcpListener,
+        task::JoinHandle,
+    };
+    use tokio_rustls::{
+        TlsAcceptor,
+        rustls::{
+            ServerConfig,
+            crypto::aws_lc_rs,
+            pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+        },
+    };
+    use zmail_test_support::ProtonHarness;
+
+    /// The requests a fault is for.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Route {
+        /// Sending a draft (`POST /mail/v4/messages/{draft ID}`).
+        Send,
+        /// Looking messages up by ExternalID (the metadata listing and its
+        /// count).
+        Lookup,
+    }
+
+    /// What the proxy does to the next request on a route.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Fault {
+        /// Forwards it, waits for the harness's answer (the harness has
+        /// done what was asked), then closes the connection without passing
+        /// the answer on: the client sees the connection drop.
+        DropAnswer,
+        /// Answers it with this status and Proton code without forwarding
+        /// it: the harness never sees it.
+        Refuse(u16, i64),
+    }
+
+    /// A request as the proxy received it.
+    #[derive(Debug, Clone)]
+    pub struct Seen {
+        method: String,
+        path: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    impl Seen {
+        /// The draft this request sends, if it is a send.
+        pub fn sent_draft(&self) -> Option<&str> {
+            if self.method != "POST" {
+                return None;
+            }
+            super::sent_draft_id(&self.path)
+        }
+
+        /// The ExternalID this request looks messages up by, if it does.
+        pub fn lookup(&self) -> Option<String> {
+            let listing = self.method == "POST"
+                && self.path == "/mail/v4/messages"
+                && self.headers.iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case("x-http-method-override") && value == "GET"
+                });
+            if !listing {
+                return None;
+            }
+            let body: serde_json::Value = serde_json::from_slice(&self.body).ok()?;
+            body.get("ExternalID")?.as_str().map(str::to_owned)
+        }
+
+        /// The ExternalID of the draft this request creates, if it does.
+        pub fn created_draft(&self) -> Option<String> {
+            let creates = self.method == "POST"
+                && self.path == "/mail/v4/messages"
+                && !self
+                    .headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("x-http-method-override"));
+            if !creates {
+                return None;
+            }
+            let body: serde_json::Value = serde_json::from_slice(&self.body).ok()?;
+            body.pointer("/Message/ExternalID")?
+                .as_str()
+                .map(str::to_owned)
+        }
+
+        fn route(&self) -> Option<Route> {
+            if self.sent_draft().is_some() {
+                Some(Route::Send)
+            } else if self.lookup().is_some() {
+                Some(Route::Lookup)
+            } else {
+                None
+            }
+        }
+    }
+
+    type Faults = Arc<Mutex<VecDeque<(Route, Fault)>>>;
+    type Log = Arc<Mutex<Vec<Seen>>>;
+
+    pub struct Proxy {
+        url: String,
+        faults: Faults,
+        seen: Log,
+        task: JoinHandle<()>,
+    }
+
+    impl Proxy {
+        /// Starts the proxy on a free loopback port, on the current tokio
+        /// runtime.
+        pub async fn start(harness: &ProtonHarness) -> Result<Self> {
+            let (cert, key) = harness.server_certificate_paths();
+            let chain = CertificateDer::pem_file_iter(&cert)
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                .map_err(|error| anyhow!("{}: {error:?}", cert.display()))?;
+            let key = PrivateKeyDer::from_pem_file(&key)
+                .map_err(|error| anyhow!("{}: {error:?}", key.display()))?;
+            let mut config =
+                ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                    .with_safe_default_protocol_versions()?
+                    .with_no_client_auth()
+                    .with_single_cert(chain, key)?;
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            let acceptor = TlsAcceptor::from(Arc::new(config));
+            let upstream = reqwest::Client::builder()
+                .tls_built_in_root_certs(false)
+                .add_root_certificate(reqwest::Certificate::from_pem(&harness.ca_pem()?)?)
+                .no_proxy()
+                .http1_only()
+                .build()
+                .context("failed to build the proxy's client")?;
+            let base = harness.base_url().trim_end_matches('/').to_owned();
+
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let url = format!("https://{}", listener.local_addr()?);
+            let faults = Faults::default();
+            let seen = Log::default();
+            let (task_faults, task_seen) = (faults.clone(), seen.clone());
+            let task = tokio::spawn(async move {
+                while let Ok((tcp, _)) = listener.accept().await {
+                    let (acceptor, upstream, base) =
+                        (acceptor.clone(), upstream.clone(), base.clone());
+                    let (faults, seen) = (task_faults.clone(), task_seen.clone());
+                    tokio::spawn(async move {
+                        if let Ok(tls) = acceptor.accept(tcp).await {
+                            serve(tls, &upstream, &base, &faults, &seen).await;
+                        }
+                    });
+                }
+            });
+            Ok(Self {
+                url,
+                faults,
+                seen,
+                task,
+            })
+        }
+
+        /// The base URL clients use instead of the harness's.
+        pub fn url(&self) -> &str {
+            &self.url
+        }
+
+        /// Does `fault` to the next request on `route`.
+        pub fn arm(&self, route: Route, fault: Fault) {
+            self.faults
+                .lock()
+                .expect("the faults")
+                .push_back((route, fault));
+        }
+
+        /// Whether every armed fault has been used.
+        pub fn disarmed(&self) -> bool {
+            self.faults.lock().expect("the faults").is_empty()
+        }
+
+        /// Every request so far, in order.
+        pub fn seen(&self) -> Vec<Seen> {
+            self.seen.lock().expect("the requests").clone()
+        }
+    }
+
+    impl Drop for Proxy {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    /// Serves one client connection, a request at a time.
+    async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+        stream: S,
+        upstream: &reqwest::Client,
+        base: &str,
+        faults: &Faults,
+        seen: &Log,
+    ) {
+        let mut stream = BufReader::new(stream);
+        while let Some(request) = read_request(&mut stream).await {
+            seen.lock().expect("the requests").push(request.clone());
+            let fault = request.route().and_then(|route| {
+                let mut faults = faults.lock().expect("the faults");
+                let index = faults.iter().position(|(armed, _)| *armed == route)?;
+                faults.remove(index).map(|(_, fault)| fault)
+            });
+            let answer = match fault {
+                Some(Fault::Refuse(status, code)) => (
+                    status,
+                    vec![("Content-Type".to_owned(), "application/json".to_owned())],
+                    serde_json::json!({
+                        "Code": code,
+                        "Error": format!("refused by the test proxy ({status})"),
+                    })
+                    .to_string()
+                    .into_bytes(),
+                ),
+                fault => {
+                    let Ok(answer) = forward(upstream, base, &request).await else {
+                        return;
+                    };
+                    if fault == Some(Fault::DropAnswer) {
+                        // Closed without a TLS close_notify, as a reset
+                        // connection is.
+                        return;
+                    }
+                    answer
+                }
+            };
+            if write_answer(stream.get_mut(), answer).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Reads an HTTP/1.1 request with a `Content-Length` body (all the
+    /// Proton client sends); `None` at the end of the connection.
+    async fn read_request<S: AsyncRead + Unpin>(stream: &mut BufReader<S>) -> Option<Seen> {
+        let mut line = String::new();
+        if stream.read_line(&mut line).await.ok()? == 0 {
+            return None;
+        }
+        let mut parts = line.split_whitespace();
+        let method = parts.next()?.to_owned();
+        let path = parts.next()?.to_owned();
+        let mut headers = Vec::new();
+        loop {
+            let mut line = String::new();
+            if stream.read_line(&mut line).await.ok()? == 0 {
+                return None;
+            }
+            let line = line.trim_end();
+            if line.is_empty() {
+                break;
+            }
+            let (name, value) = line.split_once(':')?;
+            headers.push((name.trim().to_owned(), value.trim().to_owned()));
+        }
+        let length = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.parse().ok())
+            .unwrap_or(0);
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await.ok()?;
+        Some(Seen {
+            method,
+            path,
+            headers,
+            body,
+        })
+    }
+
+    type Answer = (u16, Vec<(String, String)>, Vec<u8>);
+
+    /// Sends the request on to the harness and reads its whole answer.
+    async fn forward(upstream: &reqwest::Client, base: &str, request: &Seen) -> Result<Answer> {
+        let hop = |name: &str| {
+            ["host", "content-length", "connection", "transfer-encoding"]
+                .iter()
+                .any(|hop| name.eq_ignore_ascii_case(hop))
+        };
+        let method = reqwest::Method::from_bytes(request.method.as_bytes())?;
+        let mut builder = upstream.request(method, format!("{base}{}", request.path));
+        for (name, value) in request.headers.iter().filter(|(name, _)| !hop(name)) {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        let response = builder.body(request.body.clone()).send().await?;
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .filter(|(name, _)| !hop(name.as_str()))
+            .map(|(name, value)| {
+                (
+                    name.to_string(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        Ok((status, headers, response.bytes().await?.to_vec()))
+    }
+
+    async fn write_answer<S: AsyncWrite + Unpin>(
+        stream: &mut S,
+        (status, headers, body): Answer,
+    ) -> std::io::Result<()> {
+        let mut head = format!("HTTP/1.1 {status} Proxied\r\n");
+        for (name, value) in headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+        stream.write_all(head.as_bytes()).await?;
+        stream.write_all(&body).await?;
+        stream.flush().await
+    }
+}
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn a_send_that_may_have_gone_out_is_looked_up_before_any_retry() -> Result<()> {
+    use proxy::{Fault, Proxy, Route};
+
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let proxy = runtime.handle().block_on(Proxy::start(&harness))?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, secrets.as_ref(), account_id)?;
+    let sync_service =
+        SyncService::for_command(runtime.handle().clone(), store.clone(), secrets.clone())?;
+    ensure!(sync_service.runs_sync());
+    // Zmail reaches the harness only through the proxy.
+    sync_service.configure_proton(
+        ClientConfig::for_test_harness(proxy.url(), &harness.ca_pem()?)?
+            .with_app_version(AppVersion::zmail(env!("CARGO_PKG_VERSION"))?),
+    )?;
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;
+    let identity_id = store
+        .list_identities(account_id)?
+        .into_iter()
+        .find(|identity| identity.email_address == PROTON_HARNESS_PRIMARY_ADDRESS)
+        .context("no identity for the primary address")?
+        .id;
+
+    // The test's own view of the account, straight to the harness.
+    let own_secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, own_secrets.as_ref(), account_id)?;
+    let sessions = zmail_proton::ProtonSessions::new(harness_config(&harness)?, own_secrets)?;
+    let session = runtime.handle().block_on(sessions.session(account_id))?;
+    // Sent copies, received copies (the alias's) and drafts with the
+    // message's Message-ID.
+    let held = |message_id: &str| -> Result<(usize, usize, usize)> {
+        let metadata = runtime
+            .handle()
+            .block_on(session.client().get_message_metadata(&MessageFilter {
+                external_id: message_id.to_owned(),
+                ..MessageFilter::default()
+            }))?;
+        let flagged = |flag| {
+            metadata
+                .iter()
+                .filter(|message| message.flags.has(flag))
+                .count()
+        };
+        Ok((
+            flagged(zmail_proton_api::MessageFlags::SENT),
+            flagged(zmail_proton_api::MessageFlags::RECEIVED),
+            metadata.iter().filter(|message| message.is_draft()).count(),
+        ))
+    };
+    let state = |job_id: i64| -> Result<zmail_core::OutboxJobSummary> {
+        store
+            .list_outbox_jobs(Some(account_id))?
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .context("the job is kept")
+    };
+    let queue = |subject: &str| -> Result<i64> {
+        let draft_id = store.create_draft(&NewDraft {
+            account_id,
+            identity_id,
+            to: vec![PROTON_HARNESS_ALIAS_ADDRESS.to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: subject.to_owned(),
+            body: format!("{subject}, delivered once."),
+            threading: Default::default(),
+        })?;
+        store.queue_draft(draft_id)
+    };
+    let pass = || -> Result<()> {
+        sync_service
+            .process_outbox_and_wait(Some(account_id))
+            .with_context(|| format!("server log:\n{}", harness.logs()))?;
+        Ok(())
+    };
+    // The attempt failed and the job waits to retry. Faults are armed
+    // before a job is due, as the outbox poll may get to it first.
+    let failed = |job_id: i64| -> Result<()> {
+        let failed = state(job_id)?;
+        ensure!(
+            failed.state == OutboxJobState::Retrying,
+            "{failed:?}; server log:\n{}",
+            harness.logs()
+        );
+        ensure!(proxy.disarmed(), "the fault was not used");
+        Ok(())
+    };
+    // The retry is made due now rather than after its back-off.
+    let retry = |job_id: i64| -> Result<usize> {
+        let from = proxy.seen().len();
+        store.retry_outbox_job(job_id)?;
+        pass()?;
+        Ok(from)
+    };
+    // What the proxy saw from request `from` on: the drafts sent and the
+    // lookups by ExternalID.
+    let since = |from: usize| -> (Vec<String>, Vec<String>) {
+        let seen = proxy.seen();
+        let seen = &seen[from.min(seen.len())..];
+        (
+            seen.iter()
+                .filter_map(|request| request.sent_draft().map(str::to_owned))
+                .collect(),
+            seen.iter().filter_map(proxy::Seen::lookup).collect(),
+        )
+    };
+    let message_id = |from: usize| -> Result<String> {
+        proxy.seen()[from..]
+            .iter()
+            .find_map(proxy::Seen::created_draft)
+            .context("no draft was created")
+    };
+
+    // 1. Proton sent it, and the answer never arrived (the connection
+    // dropped): the retry finds it sent and sends nothing.
+    let start = proxy.seen().len();
+    let harness_sends = send_requests(&harness.logs()).len();
+    proxy.arm(Route::Send, Fault::DropAnswer);
+    let job_id = queue("Sent, answer lost")?;
+    pass()?;
+    let id = message_id(start)?;
+    ensure!(
+        send_requests(&harness.logs()).len() == harness_sends + 1,
+        "the harness did not get the send"
+    );
+    ensure!(held(&id)? == (1, 1, 0), "not sent before the drop");
+    failed(job_id)?;
+    let retried = retry(job_id)?;
+    let after = state(job_id)?;
+    ensure!(after.state == OutboxJobState::Sent, "{after:?}");
+    ensure!(after.attempt_count == 2, "{after:?}");
+    let (sends, lookups) = since(retried);
+    ensure!(sends.is_empty(), "sent again: {sends:?}");
+    ensure!(lookups.contains(&id), "no lookup by {id}: {lookups:?}");
+    ensure!(
+        send_requests(&harness.logs()).len() == harness_sends + 1,
+        "exactly one send request; server log:\n{}",
+        harness.logs()
+    );
+    let (sent, received, drafts) = held(&id)?;
+    ensure!(
+        (sent, received, drafts) == (1, 1, 0),
+        "{sent} sent, {received} received, {drafts} drafts"
+    );
+
+    // 2. A server error before Proton sent it, then a lookup that fails
+    // too: the job waits again without sending. The next retry finds the
+    // draft unsent and sends that same draft, once.
+    let start = proxy.seen().len();
+    let harness_sends = send_requests(&harness.logs()).len();
+    proxy.arm(Route::Send, Fault::Refuse(502, 0));
+    let job_id = queue("Refused with 502")?;
+    pass()?;
+    let id = message_id(start)?;
+    let (sends, _) = since(start);
+    let [draft_id] = sends.as_slice() else {
+        bail!("one send expected: {sends:?}");
+    };
+    let draft_id = draft_id.clone();
+    ensure!(send_requests(&harness.logs()).len() == harness_sends);
+    ensure!(held(&id)? == (0, 0, 1), "the draft is kept");
+    failed(job_id)?;
+    proxy.arm(Route::Lookup, Fault::Refuse(502, 0));
+    let retried = retry(job_id)?;
+    let (sends, lookups) = since(retried);
+    ensure!(sends.is_empty(), "sent without a lookup: {sends:?}");
+    ensure!(lookups.contains(&id), "no lookup by {id}: {lookups:?}");
+    failed(job_id)?;
+    let retried = retry(job_id)?;
+    let after = state(job_id)?;
+    ensure!(
+        after.state == OutboxJobState::Sent,
+        "{after:?}; server log:\n{}",
+        harness.logs()
+    );
+    let (sends, _) = since(retried);
+    ensure!(
+        sends == [draft_id.clone()],
+        "sends {sends:?}, the draft {draft_id}"
+    );
+    ensure!(send_requests(&harness.logs())[harness_sends..] == [draft_id]);
+    let (sent, received, drafts) = held(&id)?;
+    ensure!(
+        (sent, received, drafts) == (1, 1, 0),
+        "{sent} sent, {received} received, {drafts} drafts"
+    );
+
+    // 3. Proton refused it (validation failed): as before, the retry
+    // sends from a new draft without looking anything up, and the refused
+    // draft is left, as Bridge leaves it.
+    let start = proxy.seen().len();
+    let harness_sends = send_requests(&harness.logs()).len();
+    proxy.arm(Route::Send, Fault::Refuse(422, 2001));
+    let job_id = queue("Refused with 422")?;
+    pass()?;
+    let id = message_id(start)?;
+    let (refused, _) = since(start);
+    failed(job_id)?;
+    let retried = retry(job_id)?;
+    let after = state(job_id)?;
+    ensure!(after.state == OutboxJobState::Sent, "{after:?}");
+    let (sends, lookups) = since(retried);
+    ensure!(
+        sends.len() == 1 && refused.len() == 1 && sends != refused,
+        "a new draft expected: refused {refused:?}, then sent {sends:?}"
+    );
+    ensure!(!lookups.contains(&id), "looked up: {lookups:?}");
+    ensure!(send_requests(&harness.logs()).len() == harness_sends + 1);
+    let (sent, received, drafts) = held(&id)?;
+    ensure!(
+        (sent, received, drafts) == (1, 1, 1),
+        "{sent} sent, {received} received, {drafts} drafts"
+    );
     Ok(())
 }
 

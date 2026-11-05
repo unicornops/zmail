@@ -27,6 +27,9 @@ zmail-proton-api = { path = "../zmail-proton-api", features = ["test-harness"] }
 # Proton sync tests drive the real sync runtime with Proton support built in.
 zmail-proton = { path = "../zmail-proton" }
 zmail-sync = { path = "../zmail-sync", features = ["proton"] }
+# A proxy in front of the Proton harness serves its certificate, so the
+# client's real TLS path runs, and drops or refuses chosen requests.
+tokio-rustls.workspace = true
 # Records the new-mail notifications a Proton sync raises.
 zmail-notify = { path = "../zmail-notify" }
 # The terminal UI's send and setup tests drive its screens with key events;

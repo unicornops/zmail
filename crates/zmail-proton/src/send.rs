@@ -48,6 +48,11 @@
 // sent is sent as it is, unless attachments had been uploaded to it (their
 // session keys went with the stopped process), in which case it is deleted
 // and the message is sent from a new draft.
+// Modified by UnicornOps on 2026-11-05: a `SendDraft` that fails without
+// proving Proton refused it (a timeout, a dropped connection, a 5xx or
+// 429) is marked as possibly sent, so the outbox looks the message up by
+// its ExternalID before any retry, as for an interrupted send, rather than
+// sending it again from a new draft.
 
 //! Sending a message through Proton: Bridge's SMTP service.
 
@@ -55,7 +60,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow, bail};
 use zmail_core::{
-    OutgoingMessage, ReplyAction,
+    OutgoingMessage, ReplyAction, UnconfirmedSend,
     key_change::KeyTrust,
     participants::{Participant, envelope_address},
 };
@@ -389,8 +394,30 @@ async fn send_with_key(
     client
         .send_draft(&draft.metadata.id, &req)
         .await
+        .map_err(send_error)
         .context("failed to send draft")?;
     Ok(())
+}
+
+/// A failed `SendDraft`, marked [`UnconfirmedSend`] when Proton may have
+/// sent the message all the same ([`Error::may_have_been_carried_out`]).
+/// Everything before it (the draft, the attachments, the recipients'
+/// keys, the packages) sends nothing, so its failures are always definite
+/// and keep their retry from a new draft. An unconfirmed send is never
+/// sent again blind: the outbox looks the message up first
+/// ([`find_outgoing_message`]), sends its draft if that is all there is,
+/// and starts again only when there is no trace. Bridge's client
+/// (go-proton-api) repeats a request that got no answer as it is, so
+/// Bridge too sends the same draft again after a timeout, but without
+/// looking first.
+fn send_error(error: Error) -> anyhow::Error {
+    let unconfirmed = error.may_have_been_carried_out();
+    let error = anyhow!(error);
+    if unconfirmed {
+        error.context(UnconfirmedSend)
+    } else {
+        error
+    }
 }
 
 /// The draft an interrupted send created, to send as it is: created with

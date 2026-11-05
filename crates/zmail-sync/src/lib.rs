@@ -22,6 +22,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use backoff::Backoff;
+use interrupted::InterruptedSend;
 use proton::Credentials;
 use tokio::{
     runtime::{Builder, Handle},
@@ -30,8 +31,9 @@ use tokio::{
 };
 use wake::{WakeSignal, unless_woken};
 use zmail_core::{
-    AuthKind, MailboxSnapshot, OutboxJobState, PendingOutboxJob, ProtocolKind, RuntimeSummary,
-    SubmissionKind, SyncPhase, SyncTarget,
+    AuthKind, INTERRUPTED_SEND_MESSAGE, MailboxSnapshot, OutboxJobState, PendingOutboxJob,
+    ProtocolKind, RuntimeSummary, SubmissionKind, SyncPhase, SyncTarget, UnconfirmedSend,
+    is_interrupted_send,
     key_change::PinnedKeyChanged,
     reauth::{ReauthReason, ReauthRequired},
 };
@@ -1629,6 +1631,12 @@ impl SyncService {
         let Err(error) = delivered else {
             return self.inner.store.record_outbox_sent(job.job_id);
         };
+        // The server may have sent it: every later attempt asks first
+        // (see [`interrupted`]). Marked before the job leaves `Sending`,
+        // so a stop in between still leaves it to be looked up.
+        if !job.send_unconfirmed && error.downcast_ref::<UnconfirmedSend>().is_some() {
+            self.inner.store.mark_outbox_send_unconfirmed(job.job_id)?;
+        }
         // A refused sign-in fails at once: retrying the same credentials
         // cannot work, and the stored message tells the shell to offer
         // Re-authenticate. So does a recipient key that no longer matches
@@ -1641,6 +1649,12 @@ impl SyncService {
             self.inner
                 .store
                 .record_outbox_failure(job.job_id, changed.to_string())
+        } else if is_interrupted_send(&error.to_string()) {
+            // The server cannot tell whether an earlier attempt sent it:
+            // at most once, as for an interrupted SMTP send.
+            self.inner
+                .store
+                .record_outbox_failure(job.job_id, INTERRUPTED_SEND_MESSAGE)
         } else if job.attempt_count >= MAX_OUTBOX_ATTEMPTS {
             self.inner
                 .store
@@ -1705,6 +1719,23 @@ impl SyncService {
         } else {
             job
         };
+        if job.send_unconfirmed {
+            // An earlier attempt may have sent the message: ask the server
+            // first, as for an interrupted send, and never send it blind.
+            // The earlier attempt's claim time is gone, so the lookup has
+            // no time window.
+            match self
+                .find_outgoing(job, None)
+                .await
+                .context(UnconfirmedSend)
+                .context("failed to check whether an earlier attempt sent the message")?
+            {
+                InterruptedSend::Sent => return Ok(()),
+                InterruptedSend::Resume(resume) => return self.resume_send(job, resume).await,
+                InterruptedSend::Unknown => bail!(INTERRUPTED_SEND_MESSAGE),
+                InterruptedSend::NotSent => {}
+            }
+        }
         let target = self.outbox_account(job)?;
         if job.target.outgoing.kind == SubmissionKind::Proton {
             return self.deliver_proton(&target, &job.message).await;

@@ -24,6 +24,17 @@
 //! When the server cannot be asked (offline, refused sign-in), the job is
 //! left as it is and checked again [`INTERRUPTED_SEND_RECHECK`] later.
 //!
+//! A send can be in the same doubt without Zmail stopping: the request to
+//! send timed out, or the connection dropped, after the server may have
+//! acted on it (#405). The adapter marks such a failure
+//! [`zmail_core::UnconfirmedSend`], the job is marked for good
+//! (`LocalStore::mark_outbox_send_unconfirmed`), and every later attempt
+//! makes the same lookup ([`SyncService::find_outgoing`]) before it sends
+//! anything: sent means `Sent`, a leftover is finished
+//! ([`SyncService::resume_send`]), no trace means a fresh send, and a
+//! lookup that fails is retried later like any failed attempt, never
+//! followed by a send.
+//!
 //! Only the process holding the sync lock (ADR 0007) settles interrupted
 //! sends, at sync start or takeover before its first outbox pass, then on
 //! every pass. A job counts as interrupted once nothing has renewed its
@@ -100,7 +111,10 @@ impl SyncService {
         while let Some((interrupted, _sending)) = self.claim_interrupted_send(account_id)? {
             let job = &interrupted.job;
             let found = self
-                .renewing_claim(job.job_id, self.find_interrupted_send(&interrupted))
+                .renewing_claim(
+                    job.job_id,
+                    self.find_outgoing(job, interrupted.claimed_at.as_deref()),
+                )
                 .await;
             let store = &self.inner.store;
             match found {
@@ -177,13 +191,16 @@ impl SyncService {
         Ok(Some((interrupted, guard)))
     }
 
-    /// Asks the server what became of an interrupted send. An error means
-    /// it could not be asked.
-    async fn find_interrupted_send(
+    /// Asks the server what became of a send of `job` that may or may not
+    /// have happened: an interrupted one, claimed at `claimed_at`, or one
+    /// that failed without proving the server refused it
+    /// ([`zmail_core::UnconfirmedSend`]). An error means it could not be
+    /// asked.
+    pub(crate) async fn find_outgoing(
         &self,
-        interrupted: &InterruptedOutboxJob,
+        job: &PendingOutboxJob,
+        claimed_at: Option<&str>,
     ) -> Result<InterruptedSend> {
-        let job = &interrupted.job;
         // Every claim gives the message its Message-ID; without one there
         // is nothing to look for.
         let Some(message_id) = job.message.message_id.as_deref() else {
@@ -194,9 +211,7 @@ impl SyncService {
             SubmissionKind::Jmap => {
                 let target = self.outbox_account(job)?;
                 let secret = self.outbox_secret(job, &target).await?;
-                let claimed_at = interrupted
-                    .claimed_at
-                    .as_deref()
+                let claimed_at = claimed_at
                     .and_then(parse_timestamp)
                     .map(|claimed_at| claimed_at.timestamp());
                 let trace = zmail_jmap::find_submitted_message(
@@ -224,9 +239,13 @@ impl SyncService {
         }
     }
 
-    /// Finishes an interrupted send from what it left on the server: a
-    /// delivery attempt, recorded as one.
-    async fn resume_send(&self, job: &PendingOutboxJob, resume: ResumeSend) -> Result<()> {
+    /// Finishes a send from what it left on the server: a delivery
+    /// attempt, recorded as one.
+    pub(crate) async fn resume_send(
+        &self,
+        job: &PendingOutboxJob,
+        resume: ResumeSend,
+    ) -> Result<()> {
         let target = self.outbox_account(job)?;
         match resume {
             ResumeSend::JmapImported(email_id) => {

@@ -1034,6 +1034,124 @@ async fn retries_a_dropped_message_listing_but_not_a_dropped_post() {
     assert!(message.matches(": ").count() >= 2, "{message}");
 }
 
+#[tokio::test]
+async fn tells_a_send_that_may_have_happened_from_one_refused() {
+    // What `SendDraft` gets back, and whether Proton may have sent the
+    // message all the same.
+    let cases = [
+        ("dropped after the request", Reply::drop_connection(), true),
+        ("bad gateway", api_error(502, 0, "Bad gateway"), true),
+        ("server error", api_error(500, 0, "Internal error"), true),
+        (
+            "still rate limited",
+            api_error(429, 2028, "Too many requests").with_header("Retry-After", "0"),
+            true,
+        ),
+        (
+            "success it cannot read",
+            Reply::json(200, serde_json::json!({"Code": 1000})),
+            true,
+        ),
+        (
+            "validation failed",
+            api_error(422, 2001, "Invalid recipients"),
+            false,
+        ),
+        ("bad request", api_error(400, 0, "Bad request"), false),
+        ("forbidden", api_error(403, 0, "Forbidden"), false),
+    ];
+    for (case, reply, unconfirmed) in cases {
+        let reply = Arc::new(Mutex::new(Some(reply)));
+        let server = MockServer::start(move |_, _| {
+            reply
+                .lock()
+                .expect("reply")
+                .take()
+                .unwrap_or_else(|| api_error(429, 2028, "Too many requests"))
+        })
+        .await;
+        let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+        let error = manager
+            .new_client("uid", "access", "refresh")
+            .send_draft("draft", &crate::SendDraftReq::default())
+            .await
+            .expect_err(case);
+        assert_eq!(
+            error.may_have_been_carried_out(),
+            unconfirmed,
+            "{case}: {error:?}"
+        );
+        if case == "dropped after the request" {
+            // The send is never repeated by the client itself.
+            assert_eq!(server.requests().len(), 1, "{case}");
+        }
+    }
+
+    // Nothing listening: the request was never sent.
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.local_addr().expect("addr").port()
+    };
+    let manager =
+        Manager::new(test_config(&format!("https://127.0.0.1:{port}"), None)).expect("manager");
+    let error = manager
+        .new_client("uid", "access", "refresh")
+        .send_draft("draft", &crate::SendDraftReq::default())
+        .await
+        .expect_err("refused");
+    assert!(error.is_network(), "{error:?}");
+    assert!(!error.may_have_been_carried_out(), "{error:?}");
+
+    // A TLS failure stops at the handshake.
+    let server = MockServer::start(|_, _| user_reply()).await;
+    let manager =
+        Manager::new(test_config(&server.url, Some(PinSet::trusted_api_pins()))).expect("manager");
+    let error = manager
+        .new_client("uid", "access", "refresh")
+        .send_draft("draft", &crate::SendDraftReq::default())
+        .await
+        .expect_err("pin mismatch");
+    assert!(!error.may_have_been_carried_out(), "{error:?}");
+
+    // No answer in time once the request was written. The client's own
+    // timeouts are Bridge's 30 s, so a client with a short one stands in.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!(
+        "http://{}/mail/v4/messages/draft",
+        listener.local_addr().expect("addr")
+    );
+    let silent = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut request = [0; 1024];
+        let _ = stream.read(&mut request).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let timeout = reqwest::Client::builder()
+        .timeout(Duration::from_millis(200))
+        .build()
+        .expect("client")
+        .post(&url)
+        .body("{}")
+        .send()
+        .await
+        .expect_err("timed out");
+    assert!(timeout.is_timeout() && !timeout.is_connect(), "{timeout:?}");
+    assert!(Error::from_transport(timeout).may_have_been_carried_out());
+    silent.abort();
+
+    // Errors raised before any request say nothing was sent.
+    assert!(!Error::Package("no key".to_owned()).may_have_been_carried_out());
+    assert!(
+        !Error::Deauthenticated(Box::new(Error::from_api(crate::ApiError {
+            status: 422,
+            code: Code(10013),
+            message: "Invalid refresh token".to_owned(),
+            details: None,
+        })))
+        .may_have_been_carried_out()
+    );
+}
+
 #[test]
 fn idempotent_requests_are_the_ones_safe_to_repeat() {
     assert!(Request::get("/x").is_idempotent());
