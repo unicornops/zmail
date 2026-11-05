@@ -36,6 +36,7 @@ use zmail_core::{
     is_interrupted_send,
     key_change::PinnedKeyChanged,
     reauth::{ReauthReason, ReauthRequired},
+    time::parse_timestamp,
 };
 use zmail_notify::{NewMailArrival, NewMailBatch, Notifier};
 use zmail_security::{SecretSlot, SecretStore};
@@ -1637,6 +1638,23 @@ impl SyncService {
         if !job.send_unconfirmed && error.downcast_ref::<UnconfirmedSend>().is_some() {
             self.inner.store.mark_outbox_send_unconfirmed(job.job_id)?;
         }
+        // A JMAP server that refused the submission sent nothing. Its copy
+        // in Sent is destroyed with the refusal; one that could not be is
+        // left to the next sync's write-back. A refusal that sending again
+        // cannot change fails at once, with the server's reason.
+        if let Some(refused) = submission_refused(&error) {
+            if let Some(copy) = &refused.unsent_copy {
+                self.inner
+                    .store
+                    .queue_unsent_copy_destroy(job.target.account_id, copy)?;
+            }
+            if refused.is_permanent() {
+                return self
+                    .inner
+                    .store
+                    .record_outbox_failure(job.job_id, refused.to_string());
+            }
+        }
         // A refused sign-in fails at once: retrying the same credentials
         // cannot work, and the stored message tells the shell to offer
         // Re-authenticate. So does a recipient key that no longer matches
@@ -1773,15 +1791,37 @@ impl SyncService {
                 zmail_smtp::submit_outgoing_message(&config, &job.message).await
             }
             SubmissionKind::Jmap => {
-                zmail_jmap::submit_outgoing_message(
-                    &job.target.endpoint,
-                    &job.target.username,
-                    &secret,
-                    target.auth,
-                    &job.target.identity_email,
-                    &job.message,
-                )
-                .await
+                // After an earlier attempt, the copies it left in Sent say
+                // whether it went, so a retry neither sends twice nor
+                // leaves a second copy (#406). Their keywords settle every
+                // JMAP retry, so JMAP failures are never marked
+                // `UnconfirmedSend` for the lookup above.
+                let earlier = self.inner.store.earlier_send_attempts_since(job.job_id)?;
+                match earlier {
+                    None => {
+                        zmail_jmap::submit_outgoing_message(
+                            &job.target.endpoint,
+                            &job.target.username,
+                            &secret,
+                            target.auth,
+                            &job.target.identity_email,
+                            &job.message,
+                        )
+                        .await
+                    }
+                    Some(since) => {
+                        zmail_jmap::resubmit_outgoing_message(
+                            &job.target.endpoint,
+                            &job.target.username,
+                            &secret,
+                            target.auth,
+                            &job.target.identity_email,
+                            &job.message,
+                            parse_timestamp(&since).map(|since| since.timestamp()),
+                        )
+                        .await
+                    }
+                }
             }
             SubmissionKind::Proton => unreachable!("Proton submission is delivered above"),
         }
@@ -1957,6 +1997,12 @@ fn failure_message(error: &anyhow::Error) -> String {
 /// The [`ReauthRequired`] failure somewhere in `error`'s chain, if any:
 /// the user has to sign in again before the operation can work.
 fn reauth_required(error: &anyhow::Error) -> Option<&ReauthRequired> {
+    error.chain().find_map(|cause| cause.downcast_ref())
+}
+
+/// The [`zmail_jmap::SubmissionRefused`] failure somewhere in `error`'s
+/// chain, if any: the JMAP server said it did not send the message.
+fn submission_refused(error: &anyhow::Error) -> Option<&zmail_jmap::SubmissionRefused> {
     error.chain().find_map(|cause| cause.downcast_ref())
 }
 
@@ -3411,5 +3457,98 @@ mod outbox_key_change_tests {
         };
         assert_ne!(state(changed), OutboxJobState::Failed, "requeued");
         assert_eq!(state(other), OutboxJobState::Failed);
+    }
+}
+
+#[cfg(test)]
+mod outbox_refusal_tests {
+    use std::sync::Arc;
+
+    use zmail_core::{AuthKind, OutboxJobState, OutboxJobSummary, PendingOpKind};
+    use zmail_jmap::SubmissionRefused;
+    use zmail_security::{InMemorySecretStore, SecretStore};
+    use zmail_store::LocalStore;
+
+    use super::{SyncService, tests::insert_account};
+
+    fn refused(error_type: &str, unsent_copy: Option<&str>) -> SubmissionRefused {
+        SubmissionRefused {
+            error_type: error_type.to_owned(),
+            description: Some(format!("{error_type} here")),
+            unsent_copy: unsent_copy.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_refused_jmap_submission_fails_at_once_and_its_leftover_copy_is_removed_later() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the runtime starts");
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let account_id = insert_account(&store, AuthKind::Password);
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        let service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+        let claim = |subject: &str| {
+            let draft_id = store
+                .create_draft(&zmail_core::NewDraft {
+                    account_id,
+                    identity_id,
+                    to: vec!["bob@example.org".to_owned()],
+                    cc: Vec::new(),
+                    bcc: Vec::new(),
+                    subject: subject.to_owned(),
+                    body: "Hello".to_owned(),
+                    threading: Default::default(),
+                })
+                .expect("draft");
+            store.queue_draft(draft_id).expect("queued");
+            store
+                .claim_due_outbox_job(Some(account_id))
+                .expect("claimed")
+                .expect("due")
+        };
+        let summary = |job_id: i64| -> OutboxJobSummary {
+            store
+                .list_outbox_jobs(Some(account_id))
+                .expect("jobs")
+                .into_iter()
+                .find(|job| job.id == job_id)
+                .expect("job")
+        };
+
+        // Refused for good, on the first attempt, through the context an
+        // interrupted send's resume adds: failed with the server's words,
+        // and the copy it could not destroy queued for the write-back.
+        let job = claim("Refused");
+        let error = anyhow::Error::new(refused("forbiddenFrom", Some("e9")))
+            .context("failed to submit the copy an interrupted send imported");
+        service.record_attempt(&job, Err(error)).expect("recorded");
+        let failed = summary(job.job_id);
+        assert_eq!(failed.state, OutboxJobState::Failed);
+        assert_eq!(
+            failed.last_error_message.as_deref(),
+            Some("the JMAP server refused the submission: forbiddenFrom here")
+        );
+        let ops = store.list_pending_ops(account_id).expect("ops");
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].kind, PendingOpKind::Destroy);
+        assert_eq!(ops[0].remote_id, "e9");
+
+        // Refused for now: retried as other failures are, and the copy,
+        // destroyed already, needs nothing more.
+        let job = claim("Rate limited");
+        service
+            .record_attempt(&job, Err(refused("rateLimit", None).into()))
+            .expect("recorded");
+        let retrying = summary(job.job_id);
+        assert_eq!(retrying.state, OutboxJobState::Retrying);
+        assert_eq!(
+            retrying.last_error_message.as_deref(),
+            Some("the JMAP server refused the submission: rateLimit here")
+        );
+        assert_eq!(store.list_pending_ops(account_id).expect("ops").len(), 1);
     }
 }

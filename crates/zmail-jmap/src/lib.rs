@@ -262,8 +262,10 @@ async fn apply_single_jmap_op(
             .await
             .map(|_| ())
             .with_context(|| format!("failed to unflag JMAP email {email_id}")),
-        PendingOpKind::Destroy => client
-            .email_destroy(email_id)
+        // An email the server no longer has is as good as destroyed: the
+        // write-back of a refused send's copy (#406) may find the next
+        // attempt removed it first.
+        PendingOpKind::Destroy => destroy_emails(client, &[email_id])
             .await
             .with_context(|| format!("failed to destroy JMAP email {email_id}")),
         PendingOpKind::Move => {
@@ -286,7 +288,11 @@ async fn apply_single_jmap_op(
     }
 }
 
-/// Submits a composed outgoing message through JMAP `EmailSubmission`.
+/// Submits a composed outgoing message through JMAP `EmailSubmission`:
+/// imports its copy into Sent, marked [`SUBMIT_PENDING`], and submits
+/// that copy. When the server refuses the submission
+/// ([`SubmissionRefused`]), the copy is destroyed again, so Sent never
+/// shows a message that was not sent.
 pub async fn submit_outgoing_message(
     endpoint: &str,
     username: &str,
@@ -300,10 +306,68 @@ pub async fn submit_outgoing_message(
     }
 
     let client = connect_client(endpoint, username, secret, auth).await?;
-    let identity_id = resolve_identity_id(&client, identity_email)
+    import_and_submit(&client, identity_email, message).await
+}
+
+/// Sends `message` again after an earlier attempt, begun no sooner than
+/// `attempted_since` (Unix seconds; every email is looked at when
+/// unknown), ended without it being sent for sure: a lost answer or a
+/// timeout, which may hide an accepted submission, or a refusal whose
+/// copy could not be destroyed. The copies that attempt left with the
+/// message's Message-ID settle it, by the keywords [`submit_email`] sets:
+///
+/// - a copy marked [`SUBMITTED`]: the server accepted the earlier
+///   submission, so nothing is sent again;
+/// - copies still marked [`SUBMIT_PENDING`] were never submitted. They
+///   are destroyed, as the draft may have been edited since, and the
+///   message is imported and submitted afresh; when one cannot be
+///   destroyed, nothing is sent, so Sent never holds two copies;
+/// - a copy with neither (an older Zmail's) proves nothing either way
+///   and is left as it is, as before Zmail marked copies.
+pub async fn resubmit_outgoing_message(
+    endpoint: &str,
+    username: &str,
+    secret: &str,
+    auth: AuthKind,
+    identity_email: &str,
+    message: &OutgoingMessage,
+    attempted_since: Option<i64>,
+) -> Result<()> {
+    if message.to.is_empty() && message.cc.is_empty() && message.bcc.is_empty() {
+        bail!("JMAP submission requires at least one recipient");
+    }
+
+    let client = connect_client(endpoint, username, secret, auth).await?;
+    if let Some(message_id) = message.message_id.as_deref().and_then(bare_message_id) {
+        let copies = find_copies(&client, &message_id, attempted_since).await?;
+        if copies.iter().any(|copy| copy.submitted) {
+            return Ok(());
+        }
+        let unsent = copies
+            .iter()
+            .filter(|copy| copy.pending)
+            .map(|copy| copy.id.as_str())
+            .collect::<Vec<_>>();
+        if !unsent.is_empty() {
+            destroy_emails(&client, &unsent)
+                .await
+                .context("failed to remove the copy an earlier attempt left in Sent")?;
+        }
+    }
+    import_and_submit(&client, identity_email, message).await
+}
+
+/// Imports `message`'s copy into Sent and submits it from the identity
+/// with `identity_email` ([`submit_or_discard`]).
+async fn import_and_submit(
+    client: &Client,
+    identity_email: &str,
+    message: &OutgoingMessage,
+) -> Result<()> {
+    let identity_id = resolve_identity_id(client, identity_email)
         .await?
         .with_context(|| format!("no JMAP identity matches {identity_email}"))?;
-    let sent_mailbox_ids = sent_mailbox_ids(&client).await?;
+    let sent_mailbox_ids = sent_mailbox_ids(client).await?;
     let raw_message = render_rfc822_message(message)?;
     // Marked until the submission succeeds, so an interrupted send can
     // tell an imported copy that never went from one that did.
@@ -322,7 +386,7 @@ pub async fn submit_outgoing_message(
         .map(str::to_owned)
         .with_context(|| "JMAP import did not return an email id")?;
 
-    submit_email(&client, &email_id, &identity_id, message).await
+    submit_or_discard(client, &email_id, &identity_id, message).await
 }
 
 /// The keyword an outgoing message's copy is imported with until its
@@ -337,6 +401,118 @@ const SUBMITTED: &str = "$submitted";
 /// case the server's clock is behind this computer's.
 const SUBMISSION_CLOCK_SLACK: i64 = 24 * 60 * 60;
 
+/// The JMAP server answered that it did not create the submission, so
+/// the message was not sent: a `notCreated` SetError (RFC 8621, section
+/// 7.5: `forbiddenFrom`, `invalidRecipients`, `tooManyRecipients`,
+/// `forbiddenToSend` and the rest), or a method error, after which the
+/// server is as it was (RFC 8620, section 3.6.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmissionRefused {
+    /// The error's type, as the server gave it.
+    pub error_type: String,
+    /// The server's description, when it gave one.
+    pub description: Option<String>,
+    /// The copy in Sent that could not be destroyed after the refusal:
+    /// still marked `$submitpending`, for the caller to remove later.
+    pub unsent_copy: Option<String>,
+}
+
+impl SubmissionRefused {
+    /// The refusal a SetError or method error (`type`, `description`)
+    /// states.
+    fn from_error(error: &serde_json::Value) -> Self {
+        let text = |name: &str| {
+            error
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        Self {
+            error_type: text("type").unwrap_or_default(),
+            description: text("description").filter(|text| !text.trim().is_empty()),
+            unsent_copy: None,
+        }
+    }
+
+    /// Whether sending the same message again cannot work until the
+    /// message, the account or the server changes, so the send fails at
+    /// once. A rate limit, the server's own failures (`serverFail`,
+    /// `serverUnavailable`) and types Zmail does not know, which RFC 8620
+    /// (section 3.6.2) says to treat as `serverFail`, may pass later.
+    pub fn is_permanent(&self) -> bool {
+        matches!(
+            self.error_type.as_str(),
+            // EmailSubmission's own (RFC 8621, section 7.5).
+            "invalidEmail"
+                | "tooManyRecipients"
+                | "noRecipients"
+                | "invalidRecipients"
+                | "forbiddenMailFrom"
+                | "forbiddenFrom"
+                | "forbiddenToSend"
+                // Any create's and any method's (RFC 8620, sections 3.6.2
+                // and 5.3); Apache James also gives `invalidArguments` for
+                // an address it cannot parse.
+                | "forbidden"
+                | "overQuota"
+                | "tooLarge"
+                | "invalidProperties"
+                | "invalidArguments"
+                | "invalidResultReference"
+                | "unknownMethod"
+                | "accountNotFound"
+                | "accountNotSupportedByMethod"
+                | "accountReadOnly"
+        )
+    }
+}
+
+impl std::fmt::Display for SubmissionRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match (&self.description, self.error_type.as_str()) {
+            (Some(description), _) => description.as_str(),
+            (None, "") => "no reason given",
+            (None, error_type) => error_type,
+        };
+        write!(f, "the JMAP server refused the submission: {reason}")
+    }
+}
+
+impl std::error::Error for SubmissionRefused {}
+
+/// Why a submission did not go through.
+enum SubmitError {
+    /// The server said it did not create it.
+    Refused(SubmissionRefused),
+    /// No answer that says: the server may have accepted it, which the
+    /// copy's keywords then show.
+    Unknown(anyhow::Error),
+}
+
+/// Submits the copy `email_id` ([`submit_email`]). When the server
+/// refuses, the copy is destroyed, as it would otherwise sit in Sent as a
+/// message that was never sent; one that cannot be destroyed is named in
+/// the refusal ([`SubmissionRefused::unsent_copy`]). Any other failure
+/// leaves the copy alone: the submission may have happened, and only its
+/// keywords can say.
+async fn submit_or_discard(
+    client: &Client,
+    email_id: &str,
+    identity_id: &str,
+    message: &OutgoingMessage,
+) -> Result<()> {
+    match submit_email(client, email_id, identity_id, message).await {
+        Ok(()) => Ok(()),
+        Err(SubmitError::Refused(mut refused)) => {
+            if destroy_emails(client, &[email_id]).await.is_err() {
+                refused.unsent_copy = Some(email_id.to_owned());
+            }
+            Err(refused.into())
+        }
+        Err(SubmitError::Unknown(error)) => Err(error),
+    }
+}
+
 /// Submits the imported email `email_id` (`EmailSubmission/set`). On
 /// success the server swaps the copy's [`SUBMIT_PENDING`] for
 /// [`SUBMITTED`] in the same call (`onSuccessUpdateEmail`), so the copy
@@ -346,7 +522,7 @@ async fn submit_email(
     email_id: &str,
     identity_id: &str,
     message: &OutgoingMessage,
-) -> Result<()> {
+) -> std::result::Result<(), SubmitError> {
     use jmap_client::core::set::SetObject;
 
     let mut request = client.build();
@@ -357,7 +533,8 @@ async fn submit_email(
         .identity_id(identity_id)
         .envelope(message.from_email.as_str(), all_recipients(message))
         .create_id()
-        .context("the JMAP EmailSubmission has no creation id")?;
+        .context("the JMAP EmailSubmission has no creation id")
+        .map_err(SubmitError::Unknown)?;
     submissions
         .arguments()
         .on_success_update_email(&create_id)
@@ -368,15 +545,45 @@ async fn submit_email(
     let response = client
         .send::<serde_json::Value>(&request)
         .await
-        .map_err(|error| anyhow!("failed to create the JMAP EmailSubmission: {error}"))?;
+        .map_err(|error| {
+            SubmitError::Unknown(anyhow!(
+                "failed to create the JMAP EmailSubmission: {error}"
+            ))
+        })?;
     submission_created(response.method_responses().first(), &create_id)
 }
 
 /// Whether an `EmailSubmission/set` answer created submission `create_id`,
 /// or why not.
-fn submission_created(method_response: Option<&serde_json::Value>, create_id: &str) -> Result<()> {
-    let arguments = identities::method_arguments(method_response, "EmailSubmission/set")
-        .context("failed to create the JMAP EmailSubmission")?;
+fn submission_created(
+    method_response: Option<&serde_json::Value>,
+    create_id: &str,
+) -> std::result::Result<(), SubmitError> {
+    let Some([name, arguments, _]) = method_response
+        .and_then(serde_json::Value::as_array)
+        .and_then(|call| <&[serde_json::Value; 3]>::try_from(call.as_slice()).ok())
+    else {
+        return Err(SubmitError::Unknown(anyhow!(
+            "the JMAP server answered EmailSubmission/set with no method response"
+        )));
+    };
+    match name.as_str() {
+        Some("EmailSubmission/set") => {}
+        // A method error leaves the server as it was, but for a partial
+        // failure, which says nothing about this submission.
+        Some("error") if arguments["type"] != "serverPartialFail" => {
+            return Err(SubmitError::Refused(SubmissionRefused::from_error(
+                arguments,
+            )));
+        }
+        _ => {
+            return Err(SubmitError::Unknown(anyhow!(
+                "the JMAP server answered EmailSubmission/set with {}: {}",
+                name,
+                identities::refusal_reason(arguments)
+            )));
+        }
+    }
     if arguments
         .get("created")
         .and_then(serde_json::Value::as_object)
@@ -388,12 +595,40 @@ fn submission_created(method_response: Option<&serde_json::Value>, create_id: &s
         .get("notCreated")
         .and_then(|refused| refused.get(create_id))
     {
-        Some(error) => bail!(
-            "the JMAP server refused the submission: {}",
-            identities::refusal_reason(error)
-        ),
-        None => bail!("the JMAP server did not say whether it accepted the submission"),
+        Some(error) => Err(SubmitError::Refused(SubmissionRefused::from_error(error))),
+        None => Err(SubmitError::Unknown(anyhow!(
+            "the JMAP server did not say whether it accepted the submission"
+        ))),
     }
+}
+
+/// Destroys the emails `ids` (`Email/set`). One the server no longer has
+/// counts as destroyed.
+async fn destroy_emails(client: &Client, ids: &[&str]) -> Result<()> {
+    let mut request = client.build();
+    request.set_email().destroy(ids.iter().copied());
+    let response = client
+        .send::<serde_json::Value>(&request)
+        .await
+        .map_err(|error| anyhow!("failed to destroy the JMAP email: {error}"))?;
+    let arguments = identities::method_arguments(response.method_responses().first(), "Email/set")?;
+    for id in ids {
+        let destroyed = arguments
+            .get("destroyed")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|destroyed| destroyed.iter().any(|done| done.as_str() == Some(id)));
+        let refusal = arguments
+            .get("notDestroyed")
+            .and_then(|refused| refused.get(id));
+        let gone = refusal.is_some_and(|error| error["type"] == "notFound");
+        if !destroyed && !gone {
+            bail!(
+                "the JMAP server did not destroy email {id}: {}",
+                refusal.map_or("no reason given", identities::refusal_reason)
+            );
+        }
+    }
+    Ok(())
 }
 
 /// What a JMAP account shows of a message whose send was interrupted
@@ -427,16 +662,43 @@ pub async fn find_submitted_message(
     let message_id = bare_message_id(message_id)
         .context("an outgoing message without a Message-ID cannot be looked up")?;
     let client = connect_client(endpoint, username, secret, auth).await?;
+    let copies = find_copies(&client, &message_id, claimed_at).await?;
 
+    if copies.iter().any(|copy| copy.submitted) {
+        return Ok(SubmissionTrace::Submitted);
+    }
+    if copies.iter().any(|copy| !copy.pending) {
+        return Ok(SubmissionTrace::Unknown);
+    }
+    Ok(copies.first().map_or(SubmissionTrace::None, |copy| {
+        SubmissionTrace::Imported(copy.id.clone())
+    }))
+}
+
+/// An email with an outgoing message's Message-ID, and the submission
+/// keywords it has.
+struct SentCopy {
+    id: String,
+    /// Marked [`SUBMITTED`].
+    submitted: bool,
+    /// Marked [`SUBMIT_PENDING`].
+    pending: bool,
+}
+
+/// The emails received since shortly before `since` (Unix seconds; every
+/// email when unknown) whose Message-ID is `message_id` (bare).
+async fn find_copies(
+    client: &Client,
+    message_id: &str,
+    since: Option<i64>,
+) -> Result<Vec<SentCopy>> {
     let mut ids = Vec::new();
     let mut position = 0;
     loop {
         let mut request = client.build();
         let query = request.query_email();
-        if let Some(claimed_at) = claimed_at {
-            query.filter(email::query::Filter::after(
-                claimed_at - SUBMISSION_CLOCK_SLACK,
-            ));
+        if let Some(since) = since {
+            query.filter(email::query::Filter::after(since - SUBMISSION_CLOCK_SLACK));
         }
         query
             .sort([email::query::Comparator::received_at().descending()])
@@ -455,7 +717,7 @@ pub async fn find_submitted_message(
     }
 
     let mut copies = Vec::new();
-    let mut batches = batches::GetBatches::new(&client, "email's Message-ID");
+    let mut batches = batches::GetBatches::new(client, "email's Message-ID");
     let mut pending = ids.as_slice();
     while !pending.is_empty() {
         let mut response: EmailGetResponse = batches
@@ -470,37 +732,31 @@ pub async fn find_submitted_message(
             })
             .await
             .context("failed to look for the sent message")?;
-        copies.extend(response.take_list().into_iter().filter(|email| {
-            email.message_id().is_some_and(|ids| {
+        copies.extend(response.take_list().into_iter().filter_map(|email| {
+            let matches = email.message_id().is_some_and(|ids| {
                 ids.iter()
-                    .any(|id| bare_message_id(id).as_deref() == Some(message_id.as_str()))
+                    .any(|id| bare_message_id(id).as_deref() == Some(message_id))
+            });
+            let id = email.id().filter(|_| matches)?.to_owned();
+            let has = |keyword: &str| {
+                email
+                    .keywords()
+                    .iter()
+                    .any(|set| set.eq_ignore_ascii_case(keyword))
+            };
+            Some(SentCopy {
+                id,
+                submitted: has(SUBMITTED),
+                pending: has(SUBMIT_PENDING),
             })
         }));
     }
-
-    let has = |email: &email::Email, keyword: &str| {
-        email
-            .keywords()
-            .iter()
-            .any(|set| set.eq_ignore_ascii_case(keyword))
-    };
-    if copies.iter().any(|email| has(email, SUBMITTED)) {
-        return Ok(SubmissionTrace::Submitted);
-    }
-    if copies.iter().any(|email| !has(email, SUBMIT_PENDING)) {
-        return Ok(SubmissionTrace::Unknown);
-    }
-    Ok(copies
-        .iter()
-        .find_map(|email| email.id())
-        .map_or(SubmissionTrace::None, |id| {
-            SubmissionTrace::Imported(id.to_owned())
-        }))
+    Ok(copies)
 }
 
 /// Submits the copy an interrupted send imported and never submitted
 /// ([`SubmissionTrace::Imported`]), as [`submit_outgoing_message`] would
-/// have.
+/// have, destroying it if the server refuses.
 pub async fn submit_imported_message(
     endpoint: &str,
     username: &str,
@@ -514,7 +770,7 @@ pub async fn submit_imported_message(
     let identity_id = resolve_identity_id(&client, identity_email)
         .await?
         .with_context(|| format!("no JMAP identity matches {identity_email}"))?;
-    submit_email(&client, email_id, &identity_id, message).await
+    submit_or_discard(&client, email_id, &identity_id, message).await
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

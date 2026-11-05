@@ -3815,6 +3815,50 @@ impl LocalStore {
             .context("failed to list pending mailbox operations")
     }
 
+    /// Queues destroying the copy a refused JMAP send left in Sent
+    /// (`remote_id`, the email's id) when it could not be destroyed at
+    /// once, so the next sync's write-back removes it and Sent does not
+    /// keep a message that was never sent (#406).
+    pub fn queue_unsent_copy_destroy(&self, account_id: i64, remote_id: &str) -> Result<()> {
+        let mut conn = self.connection()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin the unsent copy transaction")?;
+        let queued = transaction
+            .query_row(
+                "SELECT 1 FROM pending_ops WHERE account_id = ?1 AND remote_id = ?2 \
+                 AND op = ?3 AND state = 'pending'",
+                params![account_id, remote_id, PendingOpKind::Destroy.as_str()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !queued {
+            // The write-back addresses a JMAP email by its id alone; the
+            // mailbox only says where it was.
+            let sent = transaction
+                .query_row(
+                    "SELECT name FROM mailboxes WHERE account_id = ?1 AND lower(role) = 'sent' \
+                     ORDER BY sort_order ASC, id ASC LIMIT 1",
+                    params![account_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .unwrap_or_else(|| "Sent".to_owned());
+            insert_pending_op(
+                &transaction,
+                account_id,
+                PendingOpKind::Destroy,
+                &sent,
+                remote_id,
+                None,
+            )?;
+        }
+        transaction
+            .commit()
+            .context("failed to commit the unsent copy transaction")
+    }
+
     /// Returns the number of queued write-back operations for an account.
     pub fn pending_op_count(&self, account_id: i64) -> Result<usize> {
         let conn = self.connection()?;
@@ -4828,6 +4872,27 @@ impl LocalStore {
         )
         .context("failed to renew the outbox claim")?;
         Ok(())
+    }
+
+    /// When an earlier attempt at sending outbox job `job_id`'s draft could
+    /// have begun at the soonest (the creation of the first job that made
+    /// one), if there was an attempt before the current one: an earlier
+    /// attempt of the job, or another job for the same draft, which sends
+    /// the same Message-ID. `None` for the draft's first attempt.
+    pub fn earlier_send_attempts_since(&self, job_id: i64) -> Result<Option<String>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            r#"
+            SELECT MIN(earlier.created_at)
+            FROM outbox_jobs AS current
+            JOIN outbox_jobs AS earlier ON earlier.draft_id = current.draft_id
+            WHERE current.id = ?1
+              AND earlier.attempt_count > CASE WHEN earlier.id = current.id THEN 1 ELSE 0 END
+            "#,
+            params![job_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .context("failed to look for earlier attempts at sending the outbox job")
     }
 
     /// Claims an outbox job a send was interrupted on: one still `Sending`
@@ -11468,6 +11533,87 @@ mod tests {
         store.record_outbox_sent(job_id).expect("sent");
         queue("Another");
         assert!(!claim().send_unconfirmed);
+    }
+
+    #[test]
+    fn a_send_knows_when_its_drafts_earlier_attempts_began() {
+        use rusqlite::params;
+
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Jmap)
+            .expect("account should be created");
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id,
+                to: vec!["recipient@example.test".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Again".to_owned(),
+                body: "Body".to_owned(),
+                threading: Default::default(),
+            })
+            .expect("draft should be created");
+        let first = store.queue_draft(draft_id).expect("draft should queue");
+        store
+            .connection()
+            .expect("connection")
+            .execute(
+                "UPDATE outbox_jobs SET created_at = '2026-11-01T09:00:00Z' WHERE id = ?1",
+                params![first],
+            )
+            .expect("an older job");
+        let claim = || {
+            store
+                .claim_due_outbox_job(Some(account_id))
+                .expect("claimed")
+                .expect("due")
+                .job_id
+        };
+
+        assert_eq!(claim(), first);
+        assert_eq!(
+            store.earlier_send_attempts_since(first).expect("looked up"),
+            None,
+            "the draft's first attempt has none before it"
+        );
+        store
+            .record_outbox_failure(first, "refused")
+            .expect("failed");
+        store.retry_outbox_job(first).expect("requeued");
+        assert_eq!(claim(), first);
+        assert_eq!(
+            store.earlier_send_attempts_since(first).expect("looked up"),
+            Some("2026-11-01T09:00:00Z".to_owned())
+        );
+
+        // Sent again from a new job, the draft keeps its Message-ID, so
+        // the old job's attempts count.
+        store
+            .record_outbox_failure(first, "refused")
+            .expect("failed");
+        let second = store.queue_draft(draft_id).expect("queued again");
+        assert_eq!(claim(), second);
+        assert_eq!(
+            store
+                .earlier_send_attempts_since(second)
+                .expect("looked up"),
+            Some("2026-11-01T09:00:00Z".to_owned())
+        );
+
+        // A refused send's leftover copy is queued for destroying once.
+        store
+            .queue_unsent_copy_destroy(account_id, "e9")
+            .expect("queued");
+        store
+            .queue_unsent_copy_destroy(account_id, "e9")
+            .expect("queued");
+        let ops = store.list_pending_ops(account_id).expect("ops");
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].kind, PendingOpKind::Destroy);
+        assert_eq!(ops[0].remote_id, "e9");
     }
 
     #[test]
