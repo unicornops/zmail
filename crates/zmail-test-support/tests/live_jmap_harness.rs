@@ -1506,6 +1506,145 @@ fn interrupted_jmap_sends_are_settled_from_the_copys_keywords() -> Result<()> {
     Ok(())
 }
 
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn a_refused_jmap_send_leaves_nothing_in_sent_and_its_retry_sends_once() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    secrets.set_account_secret(account_id, MAIL_HARNESS_JMAP_PASSWORD)?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let sync_service =
+        SyncService::for_command(runtime.handle().clone(), store.clone(), secrets.clone())?;
+    ensure!(sync_service.runs_sync());
+    sync_service.sync_account_and_wait(account_id)?;
+    let identity_id = store.list_identities(account_id)?[0].id;
+    let account_side = James::connect(MAIL_HARNESS_JMAP_ACCOUNT, MAIL_HARNESS_JMAP_PASSWORD)?;
+    let recipient = James::connect(MAIL_HARNESS_SENDER, MAIL_HARNESS_SENDER_PASSWORD)?;
+    let subject = format!(
+        "JMAP refused send {}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis()
+    );
+    // The account's emails and the recipient's with the subject, once
+    // James has had time to deliver anything the submission queued.
+    let copies = |james: &James| -> Result<Vec<serde_json::Value>> {
+        thread::sleep(Duration::from_secs(5));
+        Ok(james
+            .emails()?
+            .into_iter()
+            .filter(|email| email["subject"] == subject.as_str())
+            .collect())
+    };
+    // The threads with the subject in the store's Sent mailbox.
+    let stored_sent = || -> Result<usize> {
+        let sent = store
+            .list_mailboxes(account_id)?
+            .into_iter()
+            .find(|mailbox| mailbox.role == Some(zmail_core::MailboxRole::Sent))
+            .context("the store has the account's Sent mailbox")?;
+        Ok(store
+            .list_threads(sent.id, 0..200)?
+            .iter()
+            .filter(|thread| thread.subject == subject)
+            .count())
+    };
+    let body = "Sent once, after the typo is fixed.";
+
+    // James refuses an envelope recipient it cannot parse: its local part
+    // ends with a dot. The other recipient is real, so a submission that
+    // went through would reach them.
+    let draft_id = store.create_draft(&NewDraft {
+        account_id,
+        identity_id,
+        to: vec![
+            MAIL_HARNESS_SENDER.to_owned(),
+            "nobody.@localhost".to_owned(),
+        ],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: subject.clone(),
+        body: body.to_owned(),
+        threading: Default::default(),
+    })?;
+    let job_id = store.queue_draft(draft_id)?;
+    sync_service.process_outbox_and_wait(Some(account_id))?;
+    let job = store
+        .list_outbox_jobs(Some(account_id))?
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .context("the job is kept")?;
+    println!("refused send: {job:?}");
+    ensure!(
+        job.state == OutboxJobState::Failed && job.attempt_count == 1,
+        "a refusal fails the job at once: {job:?}"
+    );
+    let reason = job.last_error_message.clone().unwrap_or_default();
+    ensure!(
+        reason.starts_with("the JMAP server refused the submission: ")
+            && reason.contains("nobody.@localhost"),
+        "the job says why, in James's words: {reason:?}"
+    );
+    let left = copies(&account_side)?;
+    ensure!(left.is_empty(), "Sent keeps no unsent copy: {left:?}");
+    let delivered = copies(&recipient)?;
+    ensure!(delivered.is_empty(), "nothing was delivered: {delivered:?}");
+    ensure!(
+        store.list_pending_ops(account_id)?.is_empty(),
+        "the copy went with the refusal, so nothing is left to remove"
+    );
+    sync_service.sync_account_and_wait(account_id)?;
+    ensure!(stored_sent()? == 0, "Zmail's Sent shows nothing either");
+
+    // The user fixes the recipient and retries: one delivery, one copy.
+    store.update_draft(
+        draft_id,
+        &zmail_core::DraftUpdate {
+            identity_id,
+            to: vec![MAIL_HARNESS_SENDER.to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: subject.clone(),
+            body: body.to_owned(),
+        },
+    )?;
+    store.retry_outbox_job(job_id)?;
+    sync_service.process_outbox_and_wait(Some(account_id))?;
+    let job = store
+        .list_outbox_jobs(Some(account_id))?
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .context("the job is kept")?;
+    ensure!(
+        job.state == OutboxJobState::Sent && job.attempt_count == 2,
+        "{job:?}"
+    );
+    recipient.wait_for_email("the retried send", |email| {
+        email["subject"] == subject.as_str()
+    })?;
+    let delivered = copies(&recipient)?;
+    ensure!(delivered.len() == 1, "delivered once: {delivered:?}");
+    let sent = copies(&account_side)?;
+    ensure!(
+        sent.len() == 1
+            && sent[0]["keywords"]
+                .as_object()
+                .is_some_and(|keywords| keywords.contains_key("$submitted")),
+        "one copy in Sent, marked submitted: {sent:?}"
+    );
+    sync_until(
+        &sync_service,
+        &store,
+        account_id,
+        "the sent copy in Sent",
+        |_| Ok((stored_sent()? == 1).then_some(())),
+    )?;
+    Ok(())
+}
+
 /// Whether a James email (see [`James::emails`]) has `message_id`.
 fn has_message_id(email: &serde_json::Value, message_id: &str) -> bool {
     email["messageId"]

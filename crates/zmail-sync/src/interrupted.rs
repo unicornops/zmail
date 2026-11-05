@@ -15,7 +15,8 @@
 //!   the same call. `$submitted` means `Sent`; `$submitpending` alone means
 //!   the copy is submitted now; no copy means the queue. A copy with
 //!   neither keyword (imported before Zmail marked copies) proves nothing,
-//!   so it is treated as SMTP.
+//!   so it is treated as SMTP. A server that refuses that submission gets
+//!   the copy destroyed, as on any send (#406).
 //! - **SMTP**: the server keeps nothing to ask about (a copy in Sent may be
 //!   appended after the submission, or never), so the job fails with
 //!   [`INTERRUPTED_SEND_MESSAGE`], which asks the user to check Sent before
