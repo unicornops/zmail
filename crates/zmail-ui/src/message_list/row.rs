@@ -616,18 +616,27 @@ fn comfortable_row(
                 )
                 .child(
                     div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
                         .w_full()
                         .h(rems_from_px(ROW_PREVIEW_LINE_HEIGHT))
-                        .type_style(TYPE_BODY)
-                        .line_height(rems_from_px(ROW_PREVIEW_LINE_HEIGHT))
-                        .text_color(rgb(snippet_color(&row, colors)))
-                        .ellipsis()
-                        .child(highlighted(
-                            &row.snippet,
-                            &row.matches.snippet,
-                            None,
-                            colors,
-                        )),
+                        .children(status_alert(&row, colors))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .type_style(TYPE_BODY)
+                                .line_height(rems_from_px(ROW_PREVIEW_LINE_HEIGHT))
+                                .text_color(rgb(snippet_color(&row, colors)))
+                                .ellipsis()
+                                .child(highlighted(
+                                    &row.snippet,
+                                    &row.matches.snippet,
+                                    None,
+                                    colors,
+                                )),
+                        ),
                 ),
         )
 }
@@ -667,6 +676,7 @@ fn compact_row(
                 .ellipsis()
                 .child(subject_and_snippet(&row, colors)),
         )
+        .children(status_alert(&row, colors))
         .children(status_icons(&row, colors))
         .child(trailing(&row, quick_actions, colors))
 }
@@ -756,6 +766,26 @@ fn snippet_color(row: &MessageRow, colors: &UiColors) -> u32 {
         SnippetTone::Muted => colors.muted,
         SnippetTone::Danger => colors.danger,
     }
+}
+
+/// The alert icon of a status that needs attention, in the status's
+/// colour, so a failed row does not say so by colour alone (WCAG 1.4.1):
+/// on the focused selection the status takes the selection foreground
+/// like the rest of the row, and the icon still marks it.
+fn status_alert(row: &MessageRow, colors: &UiColors) -> Option<gpui::Div> {
+    (row.snippet_tone == SnippetTone::Danger).then(|| {
+        div()
+            .flex_none()
+            .debug_selector({
+                let part = row.part("alert");
+                move || part
+            })
+            .child(icon(
+                "alert-circle",
+                ICON_SIZE_SM,
+                snippet_color(row, colors),
+            ))
+    })
 }
 
 fn sender(row: &MessageRow, colors: &UiColors) -> gpui::Div {
@@ -1255,5 +1285,72 @@ mod tests {
         let row = MessageRow::draft("draft-row-4".into(), &draft, &now, HourCycle::H24);
         assert_eq!(row.snippet, "Failed \u{2022} 1 attachment");
         assert_eq!(row.snippet_tone, SnippetTone::Danger);
+    }
+    /// The bundled dark and light themes, as the app loads them.
+    fn bundled_colors() -> [UiColors; 2] {
+        [zmail_theme::bundled::DARK, zmail_theme::bundled::LIGHT].map(|json| {
+            let family = zmail_theme::ThemeFamily::from_json_str(json).expect("the theme parses");
+            let theme = family.default_theme().expect("the theme has a variant");
+            UiColors::from_theme(&family.summary(theme))
+        })
+    }
+
+    #[test]
+    fn a_selected_failed_row_draws_its_status_in_the_selection_foreground() {
+        use crate::styles::contrast::{MIN_TEXT_CONTRAST, contrast_ratio};
+
+        let mut row = row(&thread(1, ""));
+        row.snippet_tone = SnippetTone::Danger;
+        for colors in bundled_colors() {
+            let check = |what: &str, fg: u32, bg: u32| {
+                let ratio = contrast_ratio(fg, bg);
+                assert!(
+                    ratio >= MIN_TEXT_CONTRAST,
+                    "{what}: #{fg:06X} on #{bg:06X} is {ratio:.2}:1"
+                );
+            };
+            // On the focused selection's accent fill the status takes the
+            // selection foreground, as the rest of the row does (#407).
+            let selected = row_colors(true, true, &colors);
+            assert_eq!(snippet_color(&row, &selected), colors.selection_foreground);
+            check(
+                "status on the focused selection",
+                snippet_color(&row, &selected),
+                row_background(true, true, &colors),
+            );
+            // Every text colour a row can use reads on that fill.
+            for color in [
+                selected.foreground,
+                selected.muted,
+                selected.accent,
+                selected.warning,
+                selected.danger,
+                selected.success,
+                selected.info,
+            ] {
+                check(
+                    "row text on the focused selection",
+                    color,
+                    colors.selection_background,
+                );
+            }
+            // Elsewhere it stays the danger colour: on the resting row, on
+            // hover and on the grey selection of an unfocused list.
+            let resting = row_colors(false, true, &colors);
+            assert_eq!(snippet_color(&row, &resting), colors.danger);
+            check(
+                "status on a row",
+                colors.danger,
+                row_background(false, true, &colors),
+            );
+            check("status on hover", colors.danger, colors.hover_background);
+            let unfocused = row_colors(true, false, &colors);
+            assert_eq!(snippet_color(&row, &unfocused), colors.danger);
+            check(
+                "status on the unfocused selection",
+                colors.danger,
+                row_background(true, false, &colors),
+            );
+        }
     }
 }

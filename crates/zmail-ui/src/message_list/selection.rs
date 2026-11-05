@@ -89,13 +89,19 @@ pub(crate) fn span(anchor: usize, to: usize) -> RangeInclusive<usize> {
 }
 
 /// The palette for a row on the focused selection's accent fill: text,
-/// icons, the unread dot and the badge all take the selection foreground.
+/// icons, status text, the unread dot and the badge all take the selection
+/// foreground. A status colour does not read on the accent (the bundled
+/// red on the bundled blue is 1.4:1 dark, 1.0:1 light), so a failed row
+/// keeps its alert icon to say so instead (#407).
 pub(crate) fn selected_row_colors(colors: &UiColors) -> UiColors {
     UiColors {
         foreground: colors.selection_foreground,
         muted: colors.selection_foreground,
         accent: colors.selection_foreground,
         warning: colors.selection_foreground,
+        danger: colors.selection_foreground,
+        success: colors.selection_foreground,
+        info: colors.selection_foreground,
         background: colors.selection_background,
         ..*colors
     }
