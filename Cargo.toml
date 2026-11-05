@@ -42,7 +42,7 @@ aes-gcm = { version = "0.10.3", features = ["stream"] }
 ammonia = "4.2.4"
 anyhow = "1"
 async-imap = { version = "0.12.0", default-features = false, features = ["runtime-tokio"] }
-base64 = "0.22.1"
+base64 = "0.23.1"
 chrono = "0.4"
 # The terminal UI's terminal layer (ADR 0007): raw mode, the alternate
 # screen, key, mouse and bracketed-paste events on Linux, macOS and Windows

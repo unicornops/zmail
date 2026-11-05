@@ -10615,7 +10615,7 @@ name = "zmail-proton"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "mail-parser",
  "rand 0.10.3",
@@ -10633,7 +10633,7 @@ dependencies = [
 name = "zmail-proton-api"
 version = "0.0.1"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "futures-util",
  "pgp",
@@ -10808,7 +10808,7 @@ name = "zmail-tui"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "crossterm",
  "ratatui",
