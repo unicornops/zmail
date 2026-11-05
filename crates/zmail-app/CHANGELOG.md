@@ -5,7 +5,7 @@
 
 ### Bug Fixes
 
-* **ui:** keep a selected row's status readable on the accent fill ([#413](https://github.com/unicornops/zmail/issues/413)) ([e97f622](https://github.com/unicornops/zmail/commit/e97f6222ac768bc3c387949a99cc357943487371)), closes [#407](https://github.com/unicornops/zmail/issues/407)
+* **ui:** keep a selected row's status readable on the accent fill ([#413](https://github.com/unicornops/zmail/issues/413)) ([e97f622](https://github.com/unicornops/zmail/commit/e97f6222ac768bc3c387949a99cc357943487371))
 
 ## [0.32.7](https://github.com/unicornops/zmail/compare/v0.32.6...v0.32.7) (2026-11-05)
 
