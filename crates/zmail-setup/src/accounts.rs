@@ -5,6 +5,8 @@
 //!   keychain (never anywhere else) and starts the first sync, or the
 //!   OAuth2 browser flow that ends in it.
 //! - [`read_sync_progress`] reads the first sync's progress from the store.
+//! - [`backfill`] reads how much of a Proton account's older mail is
+//!   still to fetch, for the account's details.
 //! - [`remove_account`] removes an account's local data and every keychain
 //!   secret it has.
 //!
@@ -16,7 +18,10 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use zmail_core::{AuthKind, SyncPhase, text::count_noun};
+use zmail_core::{
+    AccountSummary, AuthKind, SyncPhase,
+    text::{count_noun, thousands},
+};
 use zmail_security::{SecretSlot, SecretStore};
 use zmail_store::{AccountRemovalImpact, LocalStore};
 use zmail_sync::SyncService;
@@ -204,6 +209,74 @@ pub fn read_sync_progress(store: &LocalStore, account_id: i64) -> Option<SyncPro
         conversations: mailboxes.iter().map(|mailbox| mailbox.total_threads).sum(),
         done: status.phase == SyncPhase::Idle && status.last_success_at.is_some(),
     })
+}
+
+/// How far an account's older mail has got. A Proton account fetches its
+/// newest mail first and older mail in the background, keeping the count
+/// in its sync checkpoint (docs/adr/0004-proton-native.md); IMAP and JMAP
+/// accounts list everything in each sync, so they have none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Backfill {
+    /// Messages listed so far.
+    pub fetched: usize,
+    /// The account's message count when its first sync started, when
+    /// known.
+    pub total: Option<usize>,
+    /// The whole history is in.
+    pub complete: bool,
+}
+
+impl Backfill {
+    /// Messages still to fetch, when the total is known.
+    pub fn remaining(&self) -> Option<usize> {
+        if self.complete {
+            return Some(0);
+        }
+        self.total.map(|total| total.saturating_sub(self.fetched))
+    }
+
+    /// "All older mail fetched", "1,234 of 85,000 messages still to
+    /// fetch", or, when the total is unknown or overtaken by new mail,
+    /// "2,048 fetched so far, more to come".
+    pub fn label(&self) -> String {
+        match (self.complete, self.total, self.remaining()) {
+            (true, _, _) => "All older mail fetched".to_owned(),
+            (false, Some(total), Some(remaining)) if remaining > 0 => format!(
+                "{} of {} still to fetch",
+                thousands(remaining),
+                count_noun_thousands(total, "message", "messages")
+            ),
+            _ => format!("{} fetched so far, more to come", thousands(self.fetched)),
+        }
+    }
+}
+
+/// `count_noun` with a grouped count: `85,000 messages`.
+fn count_noun_thousands(count: usize, singular: &str, plural: &str) -> String {
+    format!(
+        "{} {}",
+        thousands(count),
+        if count == 1 { singular } else { plural }
+    )
+}
+
+/// Reads how far `account`'s older mail has got from its stored sync
+/// checkpoint, or `None` for an account without a backfill (IMAP, JMAP,
+/// a build without Proton) or one that hasn't synced yet.
+pub fn backfill(account: &AccountSummary) -> Option<Backfill> {
+    match account.protocol {
+        #[cfg(feature = "proton")]
+        zmail_core::ProtocolKind::Proton => {
+            let checkpoint =
+                zmail_proton::ProtonCheckpoint::parse(account.sync_status.checkpoint.as_deref()?)?;
+            Some(Backfill {
+                fetched: checkpoint.listed,
+                total: checkpoint.total,
+                complete: !checkpoint.backfill_pending(),
+            })
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -409,8 +482,8 @@ mod tests {
     use zmail_store::{AccountRemovalImpact, LocalStore};
 
     use super::{
-        CACHE_BUDGETS, budget_label, budget_options, read_sync_progress, removal_blocker,
-        removal_description, removal_lines, remove_account,
+        Backfill, CACHE_BUDGETS, backfill, budget_label, budget_options, read_sync_progress,
+        removal_blocker, removal_description, removal_lines, remove_account,
     };
 
     fn account() -> NewAccount {
@@ -558,5 +631,82 @@ mod tests {
             super::store_authorized_account(&store, secrets.as_ref(), None, &password, &tokens)
                 .is_err()
         );
+    }
+
+    /// An account of `protocol` whose last sync stored `checkpoint`.
+    fn summary(protocol: ProtocolKind, checkpoint: Option<&str>) -> zmail_core::AccountSummary {
+        zmail_core::AccountSummary {
+            id: 1,
+            display_name: "Jane".to_owned(),
+            protocol,
+            endpoint: String::new(),
+            username: "jane@example.test".to_owned(),
+            identity_count: 1,
+            cache_policy: CachePolicySummary::performance_first(),
+            sync_status: zmail_core::SyncStatusSummary {
+                checkpoint: checkpoint.map(str::to_owned),
+                ..zmail_core::SyncStatusSummary::idle("")
+            },
+            color_override: None,
+        }
+    }
+
+    #[test]
+    fn backfill_labels_say_how_much_older_mail_is_left() {
+        let pending = Backfill {
+            fetched: 1_536,
+            total: Some(85_000),
+            complete: false,
+        };
+        assert_eq!(pending.remaining(), Some(83_464));
+        assert_eq!(pending.label(), "83,464 of 85,000 messages still to fetch");
+        let unknown = Backfill {
+            total: None,
+            ..pending
+        };
+        assert_eq!(unknown.remaining(), None);
+        assert_eq!(unknown.label(), "1,536 fetched so far, more to come");
+        let overtaken = Backfill {
+            total: Some(1_000),
+            ..pending
+        };
+        assert_eq!(overtaken.label(), "1,536 fetched so far, more to come");
+        let complete = Backfill {
+            complete: true,
+            ..pending
+        };
+        assert_eq!(complete.remaining(), Some(0));
+        assert_eq!(complete.label(), "All older mail fetched");
+    }
+
+    #[test]
+    fn only_a_synced_proton_account_has_a_backfill() {
+        assert_eq!(backfill(&summary(ProtocolKind::Imap, Some("42"))), None);
+        assert_eq!(backfill(&summary(ProtocolKind::Proton, None)), None);
+    }
+
+    #[cfg(feature = "proton")]
+    #[test]
+    fn a_proton_backfill_is_read_from_the_checkpoint() {
+        let pending = summary(
+            ProtocolKind::Proton,
+            Some(r#"{"event_id":"ev","backfill_end_id":"m9","listed":512,"total":2000}"#),
+        );
+        assert_eq!(
+            backfill(&pending),
+            Some(Backfill {
+                fetched: 512,
+                total: Some(2_000),
+                complete: false,
+            })
+        );
+        let complete = summary(
+            ProtocolKind::Proton,
+            Some(r#"{"event_id":"ev","listed":2000,"total":2000}"#),
+        );
+        assert_eq!(backfill(&complete).map(|fill| fill.complete), Some(true));
+        // Zmail 0.17.0 and earlier stored the bare event ID: history complete.
+        let legacy = summary(ProtocolKind::Proton, Some("ACXDmTaBub14w=="));
+        assert_eq!(backfill(&legacy).map(|fill| fill.complete), Some(true));
     }
 }

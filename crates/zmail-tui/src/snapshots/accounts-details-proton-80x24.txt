@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test               SETUP ACCOUNTS           Folder: Unified Inbox
+  Your mail accounts, kept in the encrypted mail store with their passwords in
+  the system keychain. A adds one; C changes the one under the cursor; D deletes
+  it from this computer.
+
+  Work                    me@work.example           IMAP · Password   Not synce…
+  Home                    me@home.example           IMAP · Password   Sync fail…
+  Fastmail                me@fast.example           JMAP · Password   Not synce…
+  Proton                  me@proton.example         Proton · Passwo…  Up to date
+
+  Sync: Proton
+  Status      : Up to date
+  Last report : Fetched 512 of 2,000 messages; older mail is still arriving
+  Last synced : Thu 15 Oct 2026, 11:59
+  Last tried  : Thu 15 Oct 2026, 11:59
+  Older mail  : 1,488 of 2,000 messages still to fetch
+
+
+
+
+
+                                                               Home: sync failed
+? Help       > [Change]   N Next       C Change     M Main Menu  Q Quit
+< Setup      P Prev       A Add        D Delete     : Commands
