@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.0](https://github.com/unicornops/zmail/compare/v0.32.9...v0.33.0) (2026-11-07)
+
+
+### Features
+
+* **tui:** show the account's sync details in Setup → Accounts ([#416](https://github.com/unicornops/zmail/issues/416)) ([0b6c2f4](https://github.com/unicornops/zmail/commit/0b6c2f43f8962c5f53dfdf405d3c1fb02611c01a))
+
 ## [0.32.9](https://github.com/unicornops/zmail/compare/v0.32.8...v0.32.9) (2026-11-05)
 
 
