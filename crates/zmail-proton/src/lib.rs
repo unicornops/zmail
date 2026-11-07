@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use anyhow::{Result, bail};
 use zmail_core::{
     AccountSyncSnapshot, MailDelta, NewIdentity, OpApplyReport, OutgoingMessage, PendingOp,
-    ProtocolKind, SyncTarget,
+    ProtocolKind, SyncTarget, text::thousands,
 };
 use zmail_proton_api::{Address, AddressStatus};
 
@@ -322,19 +322,6 @@ fn backfill_progress(checkpoint: &ProtonCheckpoint) -> String {
     }
 }
 
-/// A count with thousands separators: `85,000`.
-fn thousands(count: usize) -> String {
-    let digits = count.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    grouped
-}
-
 /// Each address ID's email, and the email for messages of an unknown
 /// address: the first enabled address, else `fallback`.
 fn address_identities(addresses: &[Address], fallback: &str) -> (HashMap<String, String>, String) {
@@ -442,9 +429,5 @@ mod tests {
             backfill_progress(&overtaken),
             "Fetched 2,048 messages; older mail is still arriving"
         );
-        assert_eq!(thousands(0), "0");
-        assert_eq!(thousands(999), "999");
-        assert_eq!(thousands(1_000), "1,000");
-        assert_eq!(thousands(1_234_567), "1,234,567");
     }
 }

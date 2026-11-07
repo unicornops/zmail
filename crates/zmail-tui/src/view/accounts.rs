@@ -11,11 +11,13 @@ use ratatui::{
     text::Span,
 };
 use zmail_autodiscover::{AuthMethod, MailSettings, Provider, StepOutcome};
-use zmail_core::{AuthKind, ProtocolKind, SyncPhase, text::count_noun};
+use zmail_core::{
+    AccountSummary, AuthKind, ProtocolKind, SyncPhase, text::count_noun, time::format_full_date,
+};
 use zmail_security::terminal::sanitize_line;
 use zmail_setup::{
     AccountField,
-    accounts::{auth_label, budget_label},
+    accounts::{auth_label, backfill, budget_label},
     check::{CheckPart, check_label},
     discovery::{self, describe_server, describe_source, short_error, step_label},
     form::security_label,
@@ -157,14 +159,7 @@ pub(super) fn draw_accounts(app: &mut App, frame: &mut Frame, theme: Theme, body
     }
     let name_width = 22.min(out.width / 3);
     for (index, account) in app.accounts.iter().enumerate() {
-        let status = match account.sync_status.phase {
-            SyncPhase::Failed => "Sync failed".to_owned(),
-            SyncPhase::Connecting | SyncPhase::Discovering | SyncPhase::Syncing => {
-                "Syncing".to_owned()
-            }
-            _ if account.sync_status.last_success_at.is_some() => "Up to date".to_owned(),
-            _ => "Not synced yet".to_owned(),
-        };
+        let status = status_label(account);
         let kind = format!(
             "{} · {}",
             protocol_label(account.protocol),
@@ -198,8 +193,84 @@ pub(super) fn draw_accounts(app: &mut App, frame: &mut Frame, theme: Theme, body
             ))
         });
     }
+    if let Some(account) = app.accounts.get(app.accounts_cursor) {
+        sync_details(&mut out, app, account);
+    }
     let cursor = (!app.accounts.is_empty()).then_some(header + app.accounts_cursor);
     draw_pane(app, frame, PaneId::Accounts, body, out.lines, cursor);
+}
+
+/// An account's sync state in a word or two, for its row.
+fn status_label(account: &AccountSummary) -> &'static str {
+    match account.sync_status.phase {
+        SyncPhase::Failed => "Sync failed",
+        SyncPhase::Backoff => "Retrying",
+        SyncPhase::Connecting | SyncPhase::Discovering | SyncPhase::Syncing => "Syncing",
+        _ if account.sync_status.last_success_at.is_some() => "Up to date",
+        _ => "Not synced yet",
+    }
+}
+
+/// The sync state of the account under the cursor, below the list: what
+/// the last sync said, when it last worked, how much older mail is still
+/// to fetch (Proton) and the last error. The detail and the error come
+/// from the sync and the server, so both are filtered.
+fn sync_details(out: &mut Lines, app: &App, account: &AccountSummary) {
+    let theme = out.theme;
+    let status = &account.sync_status;
+    out.blank();
+    out.line(
+        &format!("Sync: {}", sanitize_line(&account.display_name)),
+        theme.bold(),
+    );
+    let label = status_label(account);
+    let mut rows = vec![("Status", label.to_owned())];
+    if !status.detail.is_empty() && status.detail != label {
+        rows.push(("Last report", sanitize_line(&status.detail)));
+    }
+    let zone = app.now().timezone();
+    rows.push((
+        "Last synced",
+        status.last_success_at.as_deref().map_or_else(
+            || "Never".to_owned(),
+            |at| format_full_date(at, &zone, app.hour_cycle),
+        ),
+    ));
+    if let Some(attempt) = status.last_attempt_at.as_deref() {
+        rows.push((
+            "Last tried",
+            format_full_date(attempt, &zone, app.hour_cycle),
+        ));
+    }
+    if let Some(fill) = backfill(account) {
+        rows.push(("Older mail", fill.label()));
+    }
+    if status.failure_count > 0 {
+        rows.push((
+            "Failures",
+            format!(
+                "{} in a row",
+                count_noun(status.failure_count, "time", "times")
+            ),
+        ));
+    }
+    let error = status.last_error_message.as_deref().map(sanitize_line);
+    let width = rows
+        .iter()
+        .map(|(label, _)| label.len())
+        .chain(error.as_ref().map(|_| "Last error".len()))
+        .max()
+        .unwrap_or(0);
+    for (label, value) in rows {
+        out.para(&format!("{label:<width$} : {value}"), Style::new(), 0);
+    }
+    if let Some(error) = error {
+        out.para(
+            &format!("{:<width$} : {error}", "Last error"),
+            theme.flag(),
+            0,
+        );
+    }
 }
 
 fn protocol_label(protocol: ProtocolKind) -> &'static str {
