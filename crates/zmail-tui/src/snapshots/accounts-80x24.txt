@@ -6,10 +6,10 @@
   Work                    me@work.example           IMAP · Password   Not synce…
   Home                    me@home.example           IMAP · Password   Not synce…
 
-
-
-
-
+  Sync: Work
+  Status      : Not synced yet
+  Last report : IMAP account created locally
+  Last synced : Never
 
 
 

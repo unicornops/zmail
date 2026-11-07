@@ -13,9 +13,24 @@ pub fn count_noun(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
+/// Formats a count with thousands separators, for example `85,000`.
+///
+/// English grouping only, like [`count_noun`].
+pub fn thousands(count: usize) -> String {
+    let digits = count.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
 #[cfg(test)]
 mod tests {
-    use super::count_noun;
+    use super::{count_noun, thousands};
 
     #[test]
     fn count_noun_picks_the_singular_only_for_one() {
@@ -24,5 +39,14 @@ mod tests {
         assert_eq!(count_noun(2, "message", "messages"), "2 messages");
         assert_eq!(count_noun(1, "identity", "identities"), "1 identity");
         assert_eq!(count_noun(5, "identity", "identities"), "5 identities");
+    }
+
+    #[test]
+    fn thousands_groups_digits_in_threes() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(85_000), "85,000");
+        assert_eq!(thousands(1_234_567), "1,234,567");
     }
 }

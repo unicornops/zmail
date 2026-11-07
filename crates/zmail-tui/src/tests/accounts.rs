@@ -184,6 +184,67 @@ fn the_accounts_list_and_its_commands() {
 }
 
 #[test]
+fn the_accounts_list_shows_the_sync_details_of_the_account_under_the_cursor() {
+    let store = seeded_store();
+    let (_, proton) = seed_jmap_and_proton(&store);
+    let home = store.list_accounts().expect("accounts")[1].id;
+    store
+        .record_sync_success(
+            proton,
+            "Fetched 512 of 2,000 messages; older mail is still arriving",
+            r#"{"event_id":"ev","backfill_end_id":"m512","listed":512,"total":2000}"#,
+        )
+        .expect("recorded");
+    // The error comes from the server, so it may carry escapes.
+    for _ in 0..3 {
+        store
+            .record_sync_failure(
+                home,
+                "Sync failed",
+                "connection refused\x1b[2J by \u{202E}imap.home.example",
+            )
+            .expect("recorded");
+    }
+    let (mut app, _) = setup_app(store, environment(), true);
+    keys(&mut app, "sa");
+    assert_eq!(app.screen, Screen::Accounts);
+    // The store stamps the real time; pin the times so the screen is stable.
+    app.refresh();
+    for account in &mut app.accounts {
+        let status = &mut account.sync_status;
+        status.last_attempt_at = Some(super::ago(1));
+        if status.last_success_at.is_some() {
+            status.last_success_at = Some(super::ago(1));
+        }
+    }
+
+    keys(&mut app, "n");
+    let buffer = draw(&mut app, 80, 24);
+    assert_printable(&buffer);
+    assert_snapshot("accounts-details-failed-80x24", &buffer);
+    let text = text_of(&buffer);
+    assert!(text.contains("Retrying") || text.contains("Sync failed"));
+    assert!(text.contains("3 times in a row"), "{text}");
+
+    keys(&mut app, "nn");
+    let buffer = draw(&mut app, 80, 24);
+    let text = text_of(&buffer);
+    assert!(
+        text.contains("Last synced : Thu 15 Oct 2026, 11:59"),
+        "{text}"
+    );
+    // Only a build with Proton reads its checkpoint.
+    #[cfg(feature = "proton")]
+    {
+        assert_snapshot("accounts-details-proton-80x24", &buffer);
+        assert!(
+            text.contains("Older mail  : 1,488 of 2,000 messages still to fetch"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn delete_asks_then_removes_the_account_and_its_secrets() {
     let (mut app, secrets) = setup_app(seeded_store(), environment(), true);
     let work = app.accounts[0].id;
