@@ -64,6 +64,14 @@ impl LocalStore {
     /// Applies changes to some messages of an account, touching only those
     /// messages, their threads and their mailboxes.
     ///
+    /// Account-level changes come first, in the same transaction: the
+    /// delta's identities replace the account's as a snapshot's do (the
+    /// user's edits stay); renamed mailboxes take their new names and
+    /// parents with their conversations, read state and bodies (queued
+    /// write-backs follow the name); removed mailboxes go with their
+    /// conversations. A mailbox already holding a rename's new name, and
+    /// not itself renamed away, is a stale copy and is removed first.
+    ///
     /// Each message in [`MailDelta::message_ids`] is first removed from
     /// every mailbox and thread the delta does not place it in (all of
     /// them, for a deleted message); a thread left empty is removed, and
@@ -80,6 +88,10 @@ impl LocalStore {
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the mail delta transaction")?;
+        if let Some(identities) = &delta.identities {
+            crate::replace_account_identities(&transaction, account_id, identities)?;
+        }
+        let mut changed = apply_mailbox_changes(&transaction, account_id, delta)?;
         let context = MergeContext::load(&transaction, account_id)?;
 
         let mut places: HashMap<&str, HashSet<(&str, &str)>> = HashMap::new();
@@ -108,7 +120,6 @@ impl LocalStore {
         let mut unknown = Vec::new();
         let mut hydration: HashMap<&str, Hydration> = HashMap::new();
         let mut touched_threads: HashSet<i64> = HashSet::new();
-        let mut changed: HashSet<i64> = HashSet::new();
         for remote_id in covered {
             let rows = stored_places(&transaction, account_id, remote_id)?;
             if rows.is_empty() {
@@ -155,6 +166,85 @@ impl LocalStore {
             .context("failed to commit the mail delta transaction")?;
         Ok(unknown)
     }
+}
+
+/// Renames and removes the delta's mailboxes, and returns the ids of the
+/// removed ones (for the counters and the address history, which follow
+/// the mail).
+fn apply_mailbox_changes(
+    transaction: &Transaction<'_>,
+    account_id: i64,
+    delta: &MailDelta,
+) -> Result<HashSet<i64>> {
+    let mut removed = HashSet::new();
+    if delta.renamed.is_empty() && delta.removed.is_empty() {
+        return Ok(removed);
+    }
+    let existing = load_account_mailbox_ids(transaction, account_id)?;
+    let renamed_away: HashSet<&str> = delta
+        .renamed
+        .iter()
+        .filter(|rename| existing.contains_key(&rename.from))
+        .map(|rename| rename.from.as_str())
+        .collect();
+    let mut remove = |name: &str| -> Result<()> {
+        if let Some(mailbox) = existing.get(name) {
+            transaction
+                .execute("DELETE FROM mailboxes WHERE id = ?1", params![mailbox.id])
+                .with_context(|| format!("failed to remove the {name} mailbox"))?;
+            removed.insert(mailbox.id);
+        }
+        Ok(())
+    };
+    for name in &delta.removed {
+        if !renamed_away.contains(name.as_str()) {
+            remove(name)?;
+        }
+    }
+    for rename in &delta.renamed {
+        if !renamed_away.contains(rename.to.as_str()) && rename.to != rename.from {
+            remove(&rename.to)?;
+        }
+    }
+    // Two steps, so renames that swap or shift names never collide.
+    let moves: Vec<(i64, &zmail_core::MailboxRename)> = delta
+        .renamed
+        .iter()
+        .filter(|rename| rename.from != rename.to)
+        .filter_map(|rename| {
+            existing
+                .get(&rename.from)
+                .map(|mailbox| (mailbox.id, rename))
+        })
+        .collect();
+    for (mailbox_id, _) in &moves {
+        transaction
+            .execute(
+                "UPDATE mailboxes SET name = ?2 WHERE id = ?1",
+                params![mailbox_id, format!("\u{1}renaming-{mailbox_id}")],
+            )
+            .context("failed to start renaming a mailbox")?;
+    }
+    for (mailbox_id, rename) in &moves {
+        transaction
+            .execute(
+                "UPDATE mailboxes SET name = ?2, parent_name = ?3 WHERE id = ?1",
+                params![mailbox_id, rename.to, rename.parent],
+            )
+            .with_context(|| format!("failed to rename the {} mailbox", rename.from))?;
+        for column in ["source_mailbox", "target_mailbox"] {
+            transaction
+                .execute(
+                    &format!(
+                        "UPDATE pending_ops SET {column} = ?3 \
+                         WHERE account_id = ?1 AND {column} = ?2"
+                    ),
+                    params![account_id, rename.from, rename.to],
+                )
+                .context("failed to move queued changes to a renamed mailbox")?;
+        }
+    }
+    Ok(removed)
 }
 
 /// What every partial write reads once up front.
@@ -956,6 +1046,7 @@ mod tests {
         MailDelta {
             mailboxes: snapshot(mailboxes).mailboxes,
             message_ids: message_ids.iter().map(|id| (*id).to_owned()).collect(),
+            ..Default::default()
         }
     }
 
@@ -1146,6 +1237,198 @@ mod tests {
                 ("Archive".to_owned(), 0, 0),
                 ("INBOX".to_owned(), 1, 0),
             ]
+        );
+    }
+
+    /// Work (c1) with a nested Work/Sub (c2), and a Holiday label (c2).
+    fn foldered() -> (LocalStore, i64) {
+        let (store, account_id) = mirrored();
+        let mut m1 = message("m1", "Ann", "2026-10-01T00:00:00+00:00", true);
+        m1.body_text = Some("m1 body".to_owned());
+        let c1 = thread("c1", vec![m1]);
+        let c2 = thread(
+            "c2",
+            vec![message("m3", "Cy", "2026-10-03T00:00:00+00:00", false)],
+        );
+        let mut extra = snapshot(vec![
+            ("Folders/Work", vec![c1]),
+            ("Folders/Work/Sub", vec![c2.clone()]),
+            ("Labels/Holiday", vec![c2]),
+        ]);
+        extra.mailboxes[1].parent = Some("Folders/Work".to_owned());
+        store
+            .merge_account_snapshot(account_id, &extra)
+            .expect("merged");
+        (store, account_id)
+    }
+
+    fn rename(from: &str, to: &str, parent: Option<&str>) -> zmail_core::MailboxRename {
+        zmail_core::MailboxRename {
+            from: from.to_owned(),
+            to: to.to_owned(),
+            parent: parent.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn renamed_mailboxes_keep_their_mail_and_queued_changes() {
+        let (store, account_id) = foldered();
+        let work = mailbox_id(&store, account_id, "Folders/Work");
+        let thread = store.list_threads(work, 0..10).expect("threads")[0].id;
+        store.set_thread_flagged(thread, true).expect("flagged");
+        let before = rows(&store, account_id);
+
+        // The Work folder becomes Jobs: its subfolder's path changes too.
+        let unknown = store
+            .apply_mail_delta(
+                account_id,
+                &MailDelta {
+                    renamed: vec![
+                        rename("Folders/Work", "Folders/Jobs", Some("Folders")),
+                        rename("Folders/Work/Sub", "Folders/Jobs/Sub", Some("Folders/Jobs")),
+                    ],
+                    ..MailDelta::default()
+                },
+            )
+            .expect("delta");
+        assert!(unknown.is_empty());
+
+        let renamed = |name: &str| name.replace("Folders/Work", "Folders/Jobs");
+        let after = rows(&store, account_id);
+        let expected: Vec<_> = before
+            .into_iter()
+            .map(|(mailbox, thread, ids)| (renamed(&mailbox), thread, ids))
+            .collect();
+        let mut expected = expected;
+        expected.sort();
+        assert_eq!(after, expected, "same rows, new names");
+        let sub = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes")
+            .into_iter()
+            .find(|mailbox| mailbox.name == "Folders/Jobs/Sub")
+            .expect("the subfolder");
+        assert_eq!(sub.parent.as_deref(), Some("Folders/Jobs"));
+        let jobs = mailbox_id(&store, account_id, "Folders/Jobs");
+        let view = store
+            .thread_view(store.list_threads(jobs, 0..10).expect("threads")[0].id)
+            .expect("view")
+            .expect("thread");
+        assert_eq!(view.messages[0].body_text.as_deref(), Some("m1 body"));
+        let ops = store.list_pending_ops(account_id).expect("ops");
+        assert!(!ops.is_empty());
+        assert!(
+            ops.iter().all(|op| op.source_mailbox == "Folders/Jobs"),
+            "{ops:?}"
+        );
+    }
+
+    #[test]
+    fn renames_can_swap_names_and_replace_a_stale_copy() {
+        let (store, account_id) = foldered();
+        let work = contents(&store, account_id, "Folders/Work");
+        let holiday = contents(&store, account_id, "Labels/Holiday");
+        store
+            .apply_mail_delta(
+                account_id,
+                &MailDelta {
+                    renamed: vec![
+                        rename("Folders/Work", "Labels/Holiday", Some("Labels")),
+                        rename("Labels/Holiday", "Folders/Work", Some("Folders")),
+                    ],
+                    ..MailDelta::default()
+                },
+            )
+            .expect("swap");
+        assert_eq!(contents(&store, account_id, "Labels/Holiday"), work);
+        assert_eq!(contents(&store, account_id, "Folders/Work"), holiday);
+
+        // A mailbox already holding the new name is a stale copy.
+        store
+            .apply_mail_delta(
+                account_id,
+                &MailDelta {
+                    renamed: vec![rename("Folders/Work", "INBOX", None)],
+                    ..MailDelta::default()
+                },
+            )
+            .expect("over a stale copy");
+        assert_eq!(contents(&store, account_id, "INBOX"), holiday);
+        assert!(
+            !store
+                .list_mailboxes(account_id)
+                .expect("mailboxes")
+                .iter()
+                .any(|mailbox| mailbox.name == "Folders/Work")
+        );
+    }
+
+    #[test]
+    fn removed_mailboxes_go_and_their_mail_stays_elsewhere() {
+        let (store, account_id) = foldered();
+        let all_mail = contents(&store, account_id, "All Mail");
+        store
+            .apply_mail_delta(
+                account_id,
+                &MailDelta {
+                    removed: vec!["Labels/Holiday".to_owned(), "Labels/Unknown".to_owned()],
+                    ..MailDelta::default()
+                },
+            )
+            .expect("delta");
+        let names: Vec<String> = store
+            .list_mailboxes(account_id)
+            .expect("mailboxes")
+            .into_iter()
+            .map(|mailbox| mailbox.name)
+            .collect();
+        assert!(!names.contains(&"Labels/Holiday".to_owned()), "{names:?}");
+        assert_eq!(contents(&store, account_id, "All Mail"), all_mail);
+        assert_eq!(
+            contents(&store, account_id, "Folders/Work/Sub"),
+            [("c2".to_owned(), vec!["m3".to_owned()])]
+        );
+    }
+
+    #[test]
+    fn a_delta_can_carry_the_accounts_identities() {
+        let (store, account_id) = mirrored();
+        let before = store.list_identities(account_id).expect("identities");
+        let mut identities: Vec<zmail_core::NewIdentity> = before
+            .iter()
+            .map(|identity| zmail_core::NewIdentity {
+                display_name: identity.display_name.clone(),
+                email_address: identity.email_address.clone(),
+                signature: String::new(),
+                is_primary: identity.is_primary,
+            })
+            .collect();
+        identities.push(zmail_core::NewIdentity {
+            display_name: "Alias".to_owned(),
+            email_address: "alias@localhost".to_owned(),
+            signature: String::new(),
+            is_primary: false,
+        });
+        store
+            .apply_mail_delta(
+                account_id,
+                &MailDelta {
+                    identities: Some(identities),
+                    ..MailDelta::default()
+                },
+            )
+            .expect("delta");
+        let after = store.list_identities(account_id).expect("identities");
+        assert_eq!(after.len(), before.len() + 1);
+        assert!(
+            after
+                .iter()
+                .any(|identity| identity.email_address == "alias@localhost")
+        );
+        assert_eq!(
+            contents(&store, account_id, "INBOX").len(),
+            2,
+            "mail untouched"
         );
     }
 

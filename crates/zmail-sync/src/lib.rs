@@ -2839,6 +2839,7 @@ mod tests {
                 mailbox("Labels/New", vec![gained]),
             ],
             message_ids: Vec::new(),
+            ..Default::default()
         };
         let known = HashSet::from(["INBOX".to_owned()]);
         let arrived = HashSet::from(["new"]);

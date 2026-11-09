@@ -5,6 +5,13 @@
 //! message listed so far. Zmail 0.17.0 and earlier stored the bare event
 //! ID, which still reads as "events from this ID, all history fetched", so
 //! existing accounts carry on without a resync.
+//!
+//! It also keeps each mirrored label's mailbox name by label ID, as Bridge
+//! keeps its label map, so a renamed or moved label renames its mailbox
+//! instead of losing its mail. Checkpoints from before 0.33.1 have no map;
+//! the next sync that reads the labels fills it in.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +32,15 @@ pub struct ProtonCheckpoint {
     /// progress text; `None` when it is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<usize>,
+    /// Each mirrored label's mailbox name, by label ID, as of the last
+    /// sync that read the labels.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// The history is being listed again because Proton asked for a full
+    /// resync: the backfill rewrites each message it lists in place
+    /// (correcting where it is) instead of only adding mail.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relist: bool,
 }
 
 impl ProtonCheckpoint {
@@ -70,6 +86,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn keeps_the_label_map_and_the_relist_flag() {
+        let checkpoint = ProtonCheckpoint {
+            event_id: "ev".to_owned(),
+            backfill_end_id: Some("m9".to_owned()),
+            listed: 512,
+            total: Some(2_000),
+            labels: BTreeMap::from([("0".to_owned(), "INBOX".to_owned())]),
+            relist: true,
+        };
+        assert_eq!(
+            ProtonCheckpoint::parse(&checkpoint.to_json()),
+            Some(checkpoint)
+        );
+        // Older checkpoints have neither.
+        let older = ProtonCheckpoint::parse(r#"{"event_id":"ev","listed":3}"#).expect("parses");
+        assert!(older.labels.is_empty());
+        assert!(!older.relist);
+        assert!(!older.to_json().contains("relist"));
+    }
+
+    #[test]
     fn reads_a_bare_event_id_as_complete_history() {
         let checkpoint = ProtonCheckpoint::parse("ACXDmTaBub14w==").expect("checkpoint");
         assert_eq!(checkpoint.event_id, "ACXDmTaBub14w==");
@@ -85,6 +122,7 @@ mod tests {
             backfill_end_id: Some("m512".to_owned()),
             listed: 512,
             total: Some(85_000),
+            ..ProtonCheckpoint::default()
         };
         let json = pending.to_json();
         assert_eq!(

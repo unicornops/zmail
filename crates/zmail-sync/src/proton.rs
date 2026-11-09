@@ -8,10 +8,13 @@
 //! is never watched.
 //!
 //! A Proton sync writes in two steps. First the account's events since the
-//! checkpoint (or, the first time, its newest mail) replace the mirror, as
-//! other protocols' snapshots do. Then, while the checkpoint has a backfill
-//! cursor, the next stretch of older mail is merged in without removing
-//! anything and without new-mail notifications. Each step stores its
+//! checkpoint are applied in place: changed messages, renamed, added and
+//! removed mailboxes, and the identities (the first time, its newest mail
+//! replaces the empty mirror, as other protocols' snapshots do). Then,
+//! while the checkpoint has a backfill cursor, the next stretch of older
+//! mail is merged in without removing anything and without new-mail
+//! notifications; after a refresh request the stretch is written as a
+//! delta instead, so each listed message lands where Proton has it. Each step stores its
 //! checkpoint, so a failure resumes where it stopped, and the next sync is
 //! scheduled [`BACKFILL_PAUSE`] later until the history is complete;
 //! write-back, sending and events run between the stretches.
@@ -123,14 +126,9 @@ impl SyncService {
             let _ = store.record_sync_progress(account_id, detail);
         };
 
-        let update = zmail_proton::discover_and_sync(
-            target,
-            session,
-            !mailboxes.is_empty(),
-            &paging,
-            &progress,
-        )
-        .await?;
+        let update =
+            zmail_proton::discover_and_sync(target, session, &mailboxes, &paging, &progress)
+                .await?;
         match &update {
             zmail_proton::MirrorUpdate::Replace(snapshot) => {
                 // A resync diffs against the whole mirror for its new-mail
@@ -147,7 +145,7 @@ impl SyncService {
                 store.begin_sync_attempt(
                     account_id,
                     SyncPhase::Syncing,
-                    "Writing Proton message changes into the local mirror",
+                    "Writing Proton changes into the local mirror",
                 )?;
                 let unknown: HashSet<String> = store
                     .apply_mail_delta(account_id, delta)?
@@ -178,7 +176,12 @@ impl SyncService {
         if let Some(backfill) = backfill {
             store.begin_sync_attempt(account_id, SyncPhase::Syncing, &backfill.snapshot.detail)?;
             // Older mail never notifies: it is history, not new mail.
-            store.merge_account_snapshot(account_id, &backfill.snapshot)?;
+            match backfill.relist_delta() {
+                Some(delta) => {
+                    store.apply_mail_delta(account_id, &delta)?;
+                }
+                None => store.merge_account_snapshot(account_id, &backfill.snapshot)?,
+            }
             store.record_sync_checkpoint(account_id, &backfill.snapshot.checkpoint)?;
             self.inner.index_wake.notify_one();
             checkpoint = backfill.snapshot.checkpoint;

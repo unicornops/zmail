@@ -1650,6 +1650,26 @@ pub struct MailDelta {
     /// mailbox and conversation `mailboxes` does not put it in. A deleted
     /// message is listed here and placed nowhere.
     pub message_ids: Vec<String>,
+    /// Mailboxes renamed or moved on the server, applied before the
+    /// messages: each keeps its conversations under its new name.
+    pub renamed: Vec<MailboxRename>,
+    /// Mailboxes gone from the server, removed with their conversations;
+    /// their messages stay in the other mailboxes that hold them.
+    pub removed: Vec<String>,
+    /// The account's identities, when its addresses changed on the server;
+    /// applied as a snapshot's identities are (the user's edits stay).
+    pub identities: Option<Vec<NewIdentity>>,
+}
+
+/// A mailbox the server renamed or moved, for a [`MailDelta`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MailboxRename {
+    /// The stored name.
+    pub from: String,
+    /// The new name.
+    pub to: String,
+    /// The new parent's name, if nested.
+    pub parent: Option<String>,
 }
 
 /// Mailbox snapshot written into the local store by a sync adapter.

@@ -2189,3 +2189,166 @@ fn applies_events_to_just_the_changed_messages() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn label_changes_keep_the_mail_already_fetched() -> Result<()> {
+    use zmail_proton_api::{CreateLabelReq, LabelType, UpdateLabelReq};
+
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+    let state = harness.state().clone();
+    let label_id = |name: &str| -> Result<String> {
+        state
+            .labels
+            .iter()
+            .find(|label| label.name == name)
+            .map(|label| label.id.clone())
+            .with_context(|| format!("no {name} label"))
+    };
+    let dinner = state
+        .messages
+        .iter()
+        .find(|message| message.subject == "Dinner on Sunday")
+        .map(|message| message.id.clone())
+        .context("no Dinner on Sunday")?;
+    let runtime = BackgroundRuntime::start(2)?;
+    let manager = Manager::new(harness_config(&harness)?)?;
+    let (client, _) = runtime
+        .handle()
+        .block_on(manager.login(harness.username(), harness.password()))?;
+
+    // Small pages, so the label changes land while older mail is still
+    // arriving (#418: they used to restart the whole sync).
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&proton_account(harness.username()))?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, secrets.as_ref(), account_id)?;
+    let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+    sync_service.configure_proton(harness_config(&harness)?)?;
+    sync_service.set_proton_paging(zmail_proton::SyncPaging {
+        page_size: 2,
+        first_sync_pages: 1,
+        backfill_pages_per_run: 1,
+    });
+    let checkpoint = |store: &LocalStore| -> Result<zmail_proton::ProtonCheckpoint> {
+        store.list_accounts()?[0]
+            .sync_status
+            .checkpoint
+            .as_deref()
+            .and_then(zmail_proton::ProtonCheckpoint::parse)
+            .context("no Proton checkpoint")
+    };
+    let names = |store: &LocalStore| -> Result<Vec<String>> {
+        Ok(store
+            .list_mailboxes(account_id)?
+            .into_iter()
+            .map(|mailbox| mailbox.name)
+            .collect())
+    };
+
+    sync_service
+        .sync_account_and_wait(account_id)
+        .with_context(|| format!("first sync failed; server log:\n{}", harness.logs()))?;
+    let first = checkpoint(&store)?;
+    ensure!(first.backfill_pending());
+    ensure!(
+        first.labels.values().any(|name| name == "Folders/Work"),
+        "the first sync keeps the label map: {:?}",
+        first.labels
+    );
+
+    // Another client renames Work to Jobs and moves Receipts into it,
+    // deletes the Family label, and files Dinner on Sunday under a new
+    // Trips label.
+    let color = "#7272a7".to_owned();
+    let work = label_id("Work")?;
+    runtime.handle().block_on(async {
+        client
+            .update_label(
+                &work,
+                &UpdateLabelReq {
+                    name: "Jobs".to_owned(),
+                    color: color.clone(),
+                    parent_id: String::new(),
+                },
+            )
+            .await?;
+        client
+            .update_label(
+                &label_id("Receipts")?,
+                &UpdateLabelReq {
+                    name: "Receipts".to_owned(),
+                    color: color.clone(),
+                    parent_id: work.clone(),
+                },
+            )
+            .await?;
+        client.delete_label(&label_id("Family")?).await?;
+        let trips = client
+            .create_label(&CreateLabelReq {
+                name: "Trips".to_owned(),
+                color: color.clone(),
+                kind: LabelType::Label,
+                parent_id: String::new(),
+            })
+            .await?;
+        client.label_messages(&[dinner], &trips.id).await?;
+        anyhow::Ok(())
+    })?;
+
+    // The scheduled syncs apply the changes; the count of messages listed
+    // never goes back.
+    let mut listed = first.listed;
+    wait_for("the label changes", || {
+        let now = checkpoint(&store)?;
+        ensure!(
+            now.listed >= listed,
+            "the backfill restarted: {listed} -> {}",
+            now.listed
+        );
+        listed = now.listed;
+        Ok(names(&store)?.contains(&"Folders/Jobs/Receipts".to_owned()))
+    })
+    .with_context(|| format!("server log:\n{}", harness.logs()))?;
+    let after = names(&store)?;
+    for gone in ["Folders/Work", "Folders/Receipts", "Labels/Family"] {
+        ensure!(
+            !after.contains(&gone.to_owned()),
+            "{gone} stayed: {after:?}"
+        );
+    }
+    ensure!(subjects(&store, account_id, "Folders/Jobs")?.contains(&"Quarterly report".to_owned()));
+    ensure!(subjects(&store, account_id, "Labels/Trips")?.contains(&"Dinner on Sunday".to_owned()));
+
+    wait_for("the older mail", || {
+        let now = checkpoint(&store)?;
+        ensure!(now.listed >= listed, "the backfill restarted");
+        listed = now.listed;
+        Ok(!now.backfill_pending())
+    })
+    .with_context(|| format!("server log:\n{}", harness.logs()))?;
+    wait_for("the last scheduled sync", || {
+        Ok(sync_service.sync_account_and_wait(account_id).is_ok())
+    })?;
+
+    // The same mirror a full sync of the account gives now.
+    let reference = Arc::new(LocalStore::open_ephemeral()?);
+    let reference_id = reference.insert_account(&proton_account(harness.username()))?;
+    let reference_secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    sign_in(&harness, reference_secrets.as_ref(), reference_id)?;
+    let reference_service = SyncService::new(
+        runtime.handle().clone(),
+        reference.clone(),
+        reference_secrets,
+    );
+    reference_service.configure_proton(harness_config(&harness)?)?;
+    reference_service.sync_account_and_wait(reference_id)?;
+    let kept = mirror_contents(&store, account_id)?;
+    let full = mirror_contents(&reference, reference_id)?;
+    ensure!(
+        kept == full,
+        "mirror after label changes {kept:#?}\n!= full sync {full:#?}"
+    );
+    Ok(())
+}

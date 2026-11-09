@@ -12644,6 +12644,7 @@ mod tests {
                 &MailDelta {
                     mailboxes: vec![moved],
                     message_ids: vec!["message-headers".to_owned()],
+                    ..Default::default()
                 },
             )
             .expect("the delta should apply");

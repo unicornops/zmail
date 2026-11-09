@@ -1,14 +1,16 @@
-// Ported from go-proton-api `label.go` (`GetLabels`) and `label_types.go` at
+// Ported from go-proton-api `label.go` (`GetLabels`, `CreateLabel`,
+// `UpdateLabel`, `DeleteLabel`) and `label_types.go` at
 // 8a62023d3e38cb29749bcfc01bf44eafda6cec82
 // (https://github.com/ProtonMail/go-proton-api).
 // Copyright (c) 2020 James Houlahan, Copyright (c) 2022 Proton AG.
 // Licensed under the MIT License; see crates/zmail-proton-api/LICENSE-MIT.
-// Modified by UnicornOps on 2026-10-21: rewritten in Rust. Creating,
-// updating and deleting labels are not ported yet.
+// Modified by UnicornOps on 2026-10-21: rewritten in Rust. Modified on
+// 2026-11-09: creating, updating and deleting labels ported (the live
+// tests change labels from another client with them).
 
 //! Labels and folders, and Proton's system labels.
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{client::Client, manager::Request, response::Error};
 
@@ -109,7 +111,73 @@ fn split_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>,
     Ok(path.split('/').map(str::to_owned).collect())
 }
 
+/// A new label or folder (go-proton-api's `CreateLabelReq`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CreateLabelReq {
+    /// Name.
+    #[serde(rename = "Name")]
+    pub name: String,
+    /// Colour, such as `#7272a7`.
+    #[serde(rename = "Color")]
+    pub color: String,
+    /// Label or folder.
+    #[serde(rename = "Type", serialize_with = "serialize_label_type")]
+    pub kind: LabelType,
+    /// Parent folder, for a nested folder.
+    #[serde(rename = "ParentID", skip_serializing_if = "String::is_empty")]
+    pub parent_id: String,
+}
+
+/// A label's new name, colour and parent (go-proton-api's
+/// `UpdateLabelReq`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpdateLabelReq {
+    /// Name.
+    #[serde(rename = "Name")]
+    pub name: String,
+    /// Colour, such as `#7272a7`.
+    #[serde(rename = "Color")]
+    pub color: String,
+    /// Parent folder, for a nested folder.
+    #[serde(rename = "ParentID", skip_serializing_if = "String::is_empty")]
+    pub parent_id: String,
+}
+
+fn serialize_label_type<S: serde::Serializer>(
+    kind: &LabelType,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_i64(kind.query_value())
+}
+
+#[derive(Deserialize)]
+struct LabelRes {
+    #[serde(rename = "Label")]
+    label: Label,
+}
+
 impl Client {
+    /// Creates a label or folder (`CreateLabel`).
+    pub async fn create_label(&self, req: &CreateLabelReq) -> Result<Label, Error> {
+        let request = Request::post("/core/v4/labels").json(req)?;
+        let res: LabelRes = self.json(&request).await?;
+        Ok(res.label)
+    }
+
+    /// Renames, recolours or moves a label (`UpdateLabel`).
+    pub async fn update_label(&self, label_id: &str, req: &UpdateLabelReq) -> Result<Label, Error> {
+        let request = Request::put(format!("/core/v4/labels/{label_id}")).json(req)?;
+        let res: LabelRes = self.json(&request).await?;
+        Ok(res.label)
+    }
+
+    /// Deletes a label (`DeleteLabel`).
+    pub async fn delete_label(&self, label_id: &str) -> Result<(), Error> {
+        self.send(&Request::delete(format!("/core/v4/labels/{label_id}")))
+            .await?;
+        Ok(())
+    }
+
     /// Returns the labels of the given types, in that order (`GetLabels`).
     pub async fn get_labels(&self, types: &[LabelType]) -> Result<Vec<Label>, Error> {
         #[derive(Deserialize)]
@@ -145,5 +213,28 @@ mod tests {
         assert_eq!(labels[1].kind, LabelType::Folder);
         assert_eq!(labels[2].kind, LabelType::Other(9));
         assert!(labels[2].path.is_empty());
+    }
+
+    #[test]
+    fn encodes_label_requests_like_go_proton_api() {
+        let create = CreateLabelReq {
+            name: "Trips".to_owned(),
+            color: "#7272a7".to_owned(),
+            kind: LabelType::Folder,
+            parent_id: String::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&create).expect("json"),
+            serde_json::json!({"Name": "Trips", "Color": "#7272a7", "Type": 3})
+        );
+        let update = UpdateLabelReq {
+            name: "Holidays".to_owned(),
+            color: "#7272a7".to_owned(),
+            parent_id: "f0".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_value(&update).expect("json"),
+            serde_json::json!({"Name": "Holidays", "Color": "#7272a7", "ParentID": "f0"})
+        );
     }
 }

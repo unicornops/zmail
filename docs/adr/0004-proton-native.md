@@ -165,10 +165,38 @@ ID of the one before, from `stage_metadata.go`) but splits it up
   update to a message the backfill has not reached places it at once
   without notifying, and listing it later finds it already there. An
   event batch with no message changes writes nothing.
-- **Resyncs.** A refresh, label, address or user event still resyncs the
-  account, and the resync is paged too: the newest pages replace the
-  mirror, which drops the older mail fetched so far (and its downloaded
-  bodies), and the backfill starts again from the top.
+- **Label, address and user events (#418).** These are applied in place,
+  as Bridge applies them (`service_label_events.go`,
+  `service_address_events.go`), never by a resync. Until 0.33.0 they
+  resynced the account, which threw away the older mail fetched so far:
+  on a 1.3-million-message account the backfill could never finish.
+  - The checkpoint keeps each mirrored label's mailbox name by label ID,
+    as Bridge keeps its label map.
+  - A label event reads the labels again and compares them with that
+    map and with the mailboxes the mirror holds:
+    - a label whose name or path changed (the children of a moved folder
+      included) renames its mailbox in place, with its conversations,
+      bodies and queued write-backs;
+    - a mailbox no label names any more is removed;
+    - a label whose mailbox is missing is added, and its messages are
+      listed by label.
+  - Address and user events read the addresses and the user again and
+    update the identities as a first sync does. The user's edits stay.
+  - All of it goes into the same `MailDelta` transaction as the message
+    changes.
+  - A checkpoint from before the map existed gets it filled in from the
+    labels the mirror holds. A rename seen without a map becomes a
+    removal and an addition, so that label's mail is listed again.
+- **Refresh.** Only Proton's `RefreshMail` asks for a full resync. Bridge
+  rebuilds from scratch. Zmail lists the newest pages again instead and
+  writes them as a delta, so each listed message lands where Proton has
+  it now, and it follows any label and address changes. The backfill then
+  restarts from the top with the checkpoint's `relist` flag, and writes
+  each stretch as a delta over the messages it lists, not a merge.
+  Nothing is removed, so the fetched history and its bodies stay. The
+  cost: a message deleted on Proton while its events were lost stays in
+  the mirror. A mirror whose checkpoint can't be read is listed again the
+  same way. Only an empty mirror is ever replaced (the first sync).
 
 This sends fewer requests per second than Bridge's sync, with the same
 endpoints and page size. Two steps of a write still grow with the
