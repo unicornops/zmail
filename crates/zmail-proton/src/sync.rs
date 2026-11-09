@@ -112,6 +112,29 @@ pub(crate) async fn fetch_metadata_pages(
     .await
 }
 
+/// Lists the metadata of every message with the label, newest first: the
+/// mail of a mailbox a label change adds.
+pub(crate) async fn fetch_label_messages(
+    client: &Client,
+    label_id: &str,
+    page_size: usize,
+) -> Result<Vec<MessageMetadata>> {
+    let pages = list_pages(
+        |mut filter| async move {
+            filter.label_id = label_id.to_owned();
+            client
+                .get_message_metadata_page(0, page_size, &filter)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+        "",
+        usize::MAX,
+        &|_| {},
+    )
+    .await?;
+    Ok(pages.messages)
+}
+
 /// The cursor walk of [`fetch_metadata_pages`], over any page source.
 async fn list_pages<F, Fut>(
     mut fetch: F,

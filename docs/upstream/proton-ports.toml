@@ -298,6 +298,16 @@ local = "crates/zmail-proton/src/events.rs"
 
 [[port]]
 repo = "proton-bridge"
+upstream = "internal/services/imapservice/service_label_events.go"
+local = "crates/zmail-proton/src/events.rs"
+
+[[port]]
+repo = "proton-bridge"
+upstream = "internal/services/imapservice/service_address_events.go"
+local = "crates/zmail-proton/src/events.rs"
+
+[[port]]
+repo = "proton-bridge"
 upstream = "internal/services/userevents/subscription.go"
 local = "crates/zmail-proton/src/events.rs"
 

@@ -20,16 +20,17 @@ mod session;
 mod signin;
 mod sync;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use zmail_core::{
     AccountSyncSnapshot, MailDelta, NewIdentity, OpApplyReport, OutgoingMessage, PendingOp,
     ProtocolKind, SyncTarget, text::thousands,
 };
-use zmail_proton_api::{Address, AddressStatus};
+use zmail_proton_api::{Address, AddressStatus, User};
 
 pub use checkpoint::ProtonCheckpoint;
+use events::EventsOutcome;
 pub use events::{EVENT_JITTER, EVENT_PERIOD, event_poll_delay, has_new_events};
 pub use hydrate::fetch_message_bodies;
 pub use send::OutgoingTrace;
@@ -44,13 +45,15 @@ pub type Progress<'a> = &'a (dyn Fn(&str) + Send + Sync);
 /// What a sync does to the account's mirror.
 #[derive(Debug)]
 pub enum MirrorUpdate {
-    /// Replace the mirror with this snapshot: a first sync, or the paged
-    /// resync a refresh, label, address or user event asks for.
+    /// Replace the mirror with this snapshot: a first sync, into an empty
+    /// mirror.
     Replace(AccountSyncSnapshot),
-    /// Apply the changes to these messages; nothing else in the mirror is
-    /// read or rewritten.
+    /// Apply the changes to these messages and mailboxes (and the
+    /// identities, when they changed); nothing else in the mirror is read
+    /// or rewritten. Events give these, and so does a refresh, which lists
+    /// the newest mail again without removing the rest.
     Apply {
-        /// The changed messages.
+        /// The changes.
         delta: MailDelta,
         /// The messages the events created. Those the mirror did not hold
         /// yet are new mail; messages an update placed before the backfill
@@ -98,16 +101,35 @@ pub struct Backfill {
     pub snapshot: AccountSyncSnapshot,
     /// Whether the account's whole history is now listed.
     pub complete: bool,
+    /// While the history is listed again after a refresh, every message
+    /// listed in this step: write the step as a [`MailDelta`] covering
+    /// them, so each listed message ends up exactly where Proton has it.
+    pub relisted: Option<Vec<String>>,
+}
+
+impl Backfill {
+    /// The step as a delta over the messages it listed, while relisting.
+    pub fn relist_delta(&self) -> Option<MailDelta> {
+        let message_ids = self.relisted.clone()?;
+        Some(MailDelta {
+            mailboxes: self.snapshot.mailboxes.clone(),
+            message_ids,
+            ..MailDelta::default()
+        })
+    }
 }
 
 /// Syncs a Proton account's changes and returns what to write into the
 /// store.
 ///
-/// With a checkpoint from an earlier sync and a stored mirror, the
-/// account's events since then become changes to just the messages they
-/// name (Bridge's event loop), so a new message costs the same however
-/// large the mailbox is. A refresh request from the server, or a label,
-/// address or user change, falls back to a first sync.
+/// With a checkpoint from an earlier sync and a stored mirror (`stored`
+/// holds its mailbox names), the account's events since then become
+/// changes to just the messages, mailboxes and identities they name
+/// (Bridge's event loop), so a new message costs the same however large
+/// the mailbox is and a label or address change keeps the mail already
+/// fetched. A refresh request from the server lists the newest mail again
+/// and restarts the backfill over the whole history in place (see
+/// `relist`); nothing is removed.
 ///
 /// A first sync takes the newest event ID first, so no change made during
 /// it is missed, then mirrors the identities (combined address mode: one
@@ -119,7 +141,7 @@ pub struct Backfill {
 pub async fn discover_and_sync(
     target: &SyncTarget,
     session: &ProtonSession,
-    has_mirror: bool,
+    stored: &HashSet<String>,
     paging: &SyncPaging,
     progress: Progress<'_>,
 ) -> Result<MirrorUpdate> {
@@ -130,11 +152,19 @@ pub async fn discover_and_sync(
         .checkpoint
         .as_deref()
         .and_then(ProtonCheckpoint::parse)
-        && has_mirror
-        && let Some(applied) = events::apply_events(session.client(), &checkpoint.event_id).await?
+        && !stored.is_empty()
     {
+        let outcome =
+            events::apply_events(session.client(), &checkpoint, stored, paging.page_size).await?;
+        let applied = match outcome {
+            EventsOutcome::Applied(applied) => *applied,
+            EventsOutcome::Refresh => {
+                return relist(session, &checkpoint, stored, paging, progress).await;
+            }
+        };
         let checkpoint = ProtonCheckpoint {
             event_id: applied.event_id,
+            labels: applied.labels.unwrap_or(checkpoint.labels),
             ..checkpoint
         }
         .to_json();
@@ -143,10 +173,7 @@ pub async fn discover_and_sync(
                 delta,
                 created: applied.created,
                 checkpoint,
-                detail: format!(
-                    "Proton account: applied {} message changes",
-                    applied.changes
-                ),
+                detail: applied.summary.detail(),
             },
             None => MirrorUpdate::Unchanged {
                 checkpoint,
@@ -154,26 +181,30 @@ pub async fn discover_and_sync(
             },
         });
     }
+    if !stored.is_empty() {
+        // A mirror without a usable checkpoint is listed again in place,
+        // never replaced.
+        return relist(
+            session,
+            &ProtonCheckpoint::default(),
+            stored,
+            paging,
+            progress,
+        )
+        .await;
+    }
     first_sync(session, paging, progress)
         .await
         .map(MirrorUpdate::Replace)
 }
 
-async fn first_sync(
-    session: &ProtonSession,
-    paging: &SyncPaging,
-    progress: Progress<'_>,
-) -> Result<AccountSyncSnapshot> {
-    let client = session.client();
-    let event_id = client.get_latest_event_id().await?;
-    let user = client.get_user().await?;
-    let addresses = client.get_addresses().await?;
-    let enabled: Vec<_> = addresses
+/// The account's identities from its enabled addresses, primary first
+/// (combined address mode); an address without a display name takes the
+/// user's.
+fn identities_for(user: &User, addresses: &[Address]) -> Vec<NewIdentity> {
+    addresses
         .iter()
         .filter(|address| address.status == AddressStatus::ENABLED)
-        .collect();
-    let identities: Vec<NewIdentity> = enabled
-        .iter()
         .enumerate()
         .map(|(index, address)| NewIdentity {
             display_name: if address.display_name.is_empty() {
@@ -185,7 +216,99 @@ async fn first_sync(
             signature: String::new(),
             is_primary: index == 0,
         })
-        .collect();
+        .collect()
+}
+
+/// What a refresh request does when the mirror holds mail: Bridge resyncs
+/// the account from scratch, which on a large mailbox would throw away
+/// hours of fetched history. Zmail lists the newest mail again, writes it
+/// in place (each message where Proton has it now), follows the label and
+/// address changes, and restarts the backfill from there with the
+/// checkpoint's `relist` flag, so the rest of the history is rewritten in
+/// place too as it is listed again. Nothing is removed, so a message
+/// deleted on Proton while its events were lost stays until it is listed
+/// again or deleted here.
+async fn relist(
+    session: &ProtonSession,
+    before: &ProtonCheckpoint,
+    stored: &HashSet<String>,
+    paging: &SyncPaging,
+    progress: Progress<'_>,
+) -> Result<MirrorUpdate> {
+    let client = session.client();
+    let event_id = client.get_latest_event_id().await?;
+    let user = client.get_user().await?;
+    let addresses = client.get_addresses().await?;
+    let identities = identities_for(&user, &addresses);
+    let (identity_for_address, fallback_identity) = address_identities(&addresses, &user.email);
+    let labels = client.get_labels(&sync::LABEL_TYPES).await?;
+    let label_names = events::label_map(&labels);
+    // The mail of added mailboxes is listed with the rest.
+    let structure = events::mailbox_changes(&before.labels, &label_names, stored);
+
+    let listed = |count: usize| progress(&format!("Listing Proton messages again: {count} so far"));
+    let pages = sync::fetch_metadata_pages(
+        client,
+        "",
+        paging.first_sync_pages,
+        paging.page_size,
+        &listed,
+    )
+    .await?;
+    let total = match pages.next_end_id {
+        Some(_) => client
+            .count_messages(&zmail_proton_api::MessageFilter::default())
+            .await
+            .ok(),
+        None => None,
+    };
+    let delta = MailDelta {
+        mailboxes: sync::build_mailboxes(
+            &labels,
+            &pages.messages,
+            &identity_for_address,
+            &fallback_identity,
+        ),
+        message_ids: pages.messages.iter().map(|meta| meta.id.clone()).collect(),
+        renamed: structure.renamed,
+        removed: structure.removed,
+        identities: (!identities.is_empty()).then_some(identities),
+    };
+    let checkpoint = ProtonCheckpoint {
+        event_id,
+        relist: pages.next_end_id.is_some(),
+        backfill_end_id: pages.next_end_id,
+        listed: pages.messages.len(),
+        total,
+        labels: label_names,
+    };
+    let detail = if checkpoint.backfill_pending() {
+        backfill_progress(&checkpoint)
+    } else {
+        format!(
+            "Proton asked for a full resync: listed all {} messages again",
+            thousands(checkpoint.listed)
+        )
+    };
+    Ok(MirrorUpdate::Apply {
+        delta,
+        // Listing again finds history, not new mail.
+        created: Vec::new(),
+        checkpoint: checkpoint.to_json(),
+        detail,
+    })
+}
+
+async fn first_sync(
+    session: &ProtonSession,
+    paging: &SyncPaging,
+    progress: Progress<'_>,
+) -> Result<AccountSyncSnapshot> {
+    let client = session.client();
+    let event_id = client.get_latest_event_id().await?;
+    let user = client.get_user().await?;
+    let addresses = client.get_addresses().await?;
+    let identities = identities_for(&user, &addresses);
     let (identity_for_address, fallback_identity) = address_identities(&addresses, &user.email);
 
     let labels = client.get_labels(&sync::LABEL_TYPES).await?;
@@ -219,6 +342,8 @@ async fn first_sync(
         backfill_end_id: pages.next_end_id,
         listed: pages.messages.len(),
         total,
+        labels: events::label_map(&labels),
+        relist: false,
     };
     let detail = if checkpoint.backfill_pending() {
         backfill_progress(&checkpoint)
@@ -282,7 +407,11 @@ pub async fn backfill_older_mail(
         &identity_for_address,
         &fallback_identity,
     );
+    let relisted = checkpoint
+        .relist
+        .then(|| pages.messages.iter().map(|meta| meta.id.clone()).collect());
     let checkpoint = ProtonCheckpoint {
+        relist: checkpoint.relist && pages.next_end_id.is_some(),
         backfill_end_id: pages.next_end_id,
         listed: checkpoint.listed + pages.messages.len(),
         ..checkpoint
@@ -304,11 +433,26 @@ pub async fn backfill_older_mail(
             mailboxes,
         },
         complete,
+        relisted,
     }))
 }
 
-/// The status line while older mail is still arriving.
+/// The status line while older mail is still arriving, or being listed
+/// again after a refresh request.
 fn backfill_progress(checkpoint: &ProtonCheckpoint) -> String {
+    if checkpoint.relist {
+        return match checkpoint.total.filter(|total| *total > checkpoint.listed) {
+            Some(total) => format!(
+                "Proton asked for a full resync: listed {} of {} messages again",
+                thousands(checkpoint.listed),
+                thousands(total)
+            ),
+            None => format!(
+                "Proton asked for a full resync: listed {} messages again",
+                thousands(checkpoint.listed)
+            ),
+        };
+    }
     match checkpoint.total.filter(|total| *total > checkpoint.listed) {
         Some(total) => format!(
             "Fetched {} of {} messages; older mail is still arriving",
@@ -407,6 +551,7 @@ mod tests {
             backfill_end_id: Some("m".to_owned()),
             listed: 2_048,
             total: Some(85_000),
+            ..ProtonCheckpoint::default()
         };
         assert_eq!(
             backfill_progress(&checkpoint),
@@ -428,6 +573,21 @@ mod tests {
         assert_eq!(
             backfill_progress(&overtaken),
             "Fetched 2,048 messages; older mail is still arriving"
+        );
+        let relisting = ProtonCheckpoint {
+            relist: true,
+            ..unknown.clone()
+        };
+        assert_eq!(
+            backfill_progress(&relisting),
+            "Proton asked for a full resync: listed 2,048 messages again"
+        );
+        assert_eq!(
+            backfill_progress(&ProtonCheckpoint {
+                total: Some(85_000),
+                ..relisting
+            }),
+            "Proton asked for a full resync: listed 2,048 of 85,000 messages again"
         );
     }
 }
