@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.1](https://github.com/unicornops/zmail/compare/v0.33.0...v0.33.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **proton:** apply label, address and user events in place instead of resyncing ([#419](https://github.com/unicornops/zmail/issues/419)) ([cad61eb](https://github.com/unicornops/zmail/commit/cad61eba559d4ea165fb8640d5465ffcbb5a3619))
+
 ## [0.33.0](https://github.com/unicornops/zmail/compare/v0.32.9...v0.33.0) (2026-11-07)
 
 
