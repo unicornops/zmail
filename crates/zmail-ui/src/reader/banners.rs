@@ -19,8 +19,11 @@
 //! | Finding | Tier |
 //! |---|---|
 //! | The From domain imitates a well-known domain | Danger |
+//! | The display name shows an address or website on another domain | Caution |
+//! | The From domain mixes alphabets in one label | Caution |
 //! | Reply-To is on an unrelated domain | Caution |
 //! | Reply-To is on a parent or subdomain of the From domain | Info |
+//! | The From domain is written with international letters | Info |
 //!
 //! "Looks safe" hides the banner for that message only (stored with the
 //! message); "Show details" shows the evidence the banner is based on.
