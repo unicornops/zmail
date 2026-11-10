@@ -6,5 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+# The terminal filter's character classes, for subjects and senders.
+zmail-security = { path = "../zmail-security" }
+
 [lints]
 workspace = true
