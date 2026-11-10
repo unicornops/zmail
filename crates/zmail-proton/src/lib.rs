@@ -33,8 +33,11 @@ pub use checkpoint::ProtonCheckpoint;
 use events::EventsOutcome;
 pub use events::{EVENT_JITTER, EVENT_PERIOD, event_poll_delay, has_new_events};
 pub use hydrate::fetch_message_bodies;
-pub use send::OutgoingTrace;
-pub use session::{ProtonSession, ProtonSessions, delete_session, has_session, store_new_session};
+pub use send::{OutgoingTrace, UnverifiedContactCard};
+pub use session::{
+    ProtonSession, ProtonSessions, StoredSession, delete_session, has_session, store_new_session,
+    stored_session,
+};
 pub use signin::{ProtonSignIn, SignInStep, SignedInAccount};
 pub use sync::SyncPaging;
 pub use zmail_proton_api::{API_HOST_URL, AppVersion, ClientConfig};

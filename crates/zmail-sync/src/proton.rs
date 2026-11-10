@@ -194,6 +194,13 @@ impl SyncService {
                 });
             }
         }
+        // A refresh token the keychain refused is said in the account's
+        // status, so the user knows why the next start would ask to sign
+        // in again. The sync itself worked, and sending must carry on, so
+        // this is its report rather than a failure.
+        if let Err(error) = session.save_refresh_token() {
+            detail = format!("Synced, but {error:#}");
+        }
         Ok((detail, checkpoint))
     }
 
@@ -356,6 +363,32 @@ impl SyncService {
         }
         #[cfg(not(feature = "proton"))]
         let _ = account_id;
+    }
+
+    /// Signs a removed Proton account's session out on Proton's side, in
+    /// the background and best effort, so its refresh token stops working
+    /// wherever a copy may be (the keychain entry that could not be
+    /// deleted, a backup). `uid` and `refresh_token` are the stored
+    /// session, read before the account's keychain entries were deleted;
+    /// the session Zmail has open is used when there is one. Never waits
+    /// for the network: removing an account works offline.
+    pub fn sign_out_proton_session(
+        &self,
+        account_id: i64,
+        uid: Option<String>,
+        refresh_token: Option<String>,
+    ) {
+        #[cfg(feature = "proton")]
+        if let Some(sessions) = self.proton_sessions() {
+            let stored = uid
+                .zip(refresh_token)
+                .map(|(uid, refresh_token)| zmail_proton::StoredSession::new(uid, refresh_token));
+            self.inner.handle.spawn(async move {
+                sessions.sign_out(account_id, stored).await;
+            });
+        }
+        #[cfg(not(feature = "proton"))]
+        let _ = (account_id, uid, refresh_token);
     }
 
     /// Watches a Proton account until the next reconnect: Bridge's event

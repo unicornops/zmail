@@ -53,6 +53,12 @@
 // 429) is marked as possibly sent, so the outbox looks the message up by
 // its ExternalID before any retry, as for an interrupted send, rather than
 // sending it again from a new draft.
+// Modified by UnicornOps on 2026-11-10: `getContactSettings` compares the
+// contact's address with the recipient without regard to case (asking
+// again in lower case when the address as typed finds no contact), and a
+// contact card that may hold settings for the recipient but does not
+// verify stops the send with `UnverifiedContactCard`, where Bridge sends
+// as if there were no contact (ADR 0004).
 
 //! Sending a message through Proton: Bridge's SMTP service.
 
@@ -65,11 +71,11 @@ use zmail_core::{
     participants::{Participant, envelope_address},
 };
 use zmail_proton_api::{
-    ATTACHMENT_DISPOSITION, Address, AddressStatus, CardType, Client, ContactSettings,
-    CreateAttachmentReq, CreateDraftAction, CreateDraftReq, DraftTemplate, EmailAddress,
-    EncryptionScheme, Error, KeyRing, MULTIPART_MIXED, MailSettings, Message, MessageFilter,
-    MessageFlags, RecipientType, SendDraftReq, SendPreferences, SessionKey, TEXT_HTML, TEXT_PLAIN,
-    UnlockedKey,
+    ATTACHMENT_DISPOSITION, Address, AddressStatus, CardType, Client, ContactEmail,
+    ContactSettings, CreateAttachmentReq, CreateDraftAction, CreateDraftReq, DraftTemplate,
+    EmailAddress, EncryptionScheme, Error, KeyRing, MULTIPART_MIXED, MailSettings, Message,
+    MessageFilter, MessageFlags, RecipientType, SendDraftReq, SendPreferences, SessionKey,
+    TEXT_HTML, TEXT_PLAIN, UnlockedKey, same_address,
 };
 
 use crate::{
@@ -244,6 +250,7 @@ async fn send(
     )
     .await
     .context("failed to send the message through Proton")
+    .map_err(explain_unverified_card)
 }
 
 /// Finds the account address a message is sent from (`GetAddr`).
@@ -692,23 +699,95 @@ async fn get_recipients(
 
 /// What the user's contact card says about a recipient
 /// (`getContactSettings`).
+///
+/// Addresses are compared without regard to case (Bridge compares them
+/// exactly), and a card that may hold settings for the recipient but does
+/// not verify stops the send with [`UnverifiedContactCard`] where Bridge
+/// carries on as if there were no contact (ADR 0004).
 async fn get_contact_settings(
     client: &Client,
     user_kr: &KeyRing,
     recipient: &str,
 ) -> Result<ContactSettings> {
-    let contacts = client
+    let mut contacts = client
         .get_all_contact_emails(recipient)
         .await
         .context("failed to get contact data")?;
-    let Some(contact) = contacts.iter().find(|contact| contact.email == recipient) else {
+    // The contact may be saved in lower case under an address typed with
+    // capitals.
+    let lowered = recipient.to_lowercase();
+    if find_contact(&contacts, recipient).is_none() && lowered != recipient {
+        contacts = client
+            .get_all_contact_emails(&lowered)
+            .await
+            .context("failed to get contact data")?;
+    }
+    let Some(contact) = find_contact(&contacts, recipient) else {
         return Ok(ContactSettings::default());
     };
     let contact = client
         .get_contact(&contact.contact_id)
         .await
         .context("failed to get contact")?;
-    Ok(contact.get_settings(user_kr, recipient, CardType::SIGNED)?)
+    contact
+        .get_settings(user_kr, recipient, CardType::SIGNED)
+        .map_err(|error| contact_settings_error(recipient, error))
+}
+
+/// The contact address that is `recipient`, whatever its case.
+fn find_contact<'a>(contacts: &'a [ContactEmail], recipient: &str) -> Option<&'a ContactEmail> {
+    contacts
+        .iter()
+        .find(|contact| same_address(&contact.email, recipient))
+}
+
+/// A send stopped because the recipient's contact card may hold send
+/// settings or pinned keys but did not verify, so Zmail cannot tell what
+/// the user asked for. Sending anyway could send unencrypted, or to a key
+/// the user never pinned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnverifiedContactCard {
+    /// The recipient's address.
+    pub recipient: String,
+    /// Why the card was not accepted (for logs; not shown).
+    pub reason: String,
+}
+
+impl std::fmt::Display for UnverifiedContactCard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Not sent: the Proton contact for {} has encryption settings Zmail could not verify. \
+             Open the contact in Proton Mail, check its keys and settings, save it, then send again.",
+            self.recipient
+        )
+    }
+}
+
+impl std::error::Error for UnverifiedContactCard {}
+
+fn contact_settings_error(recipient: &str, error: Error) -> anyhow::Error {
+    match error {
+        Error::ContactCardUnverified { reason, .. } => anyhow::Error::new(UnverifiedContactCard {
+            recipient: recipient.to_owned(),
+            reason,
+        }),
+        error => anyhow::Error::new(error),
+    }
+}
+
+/// Puts an [`UnverifiedContactCard`] found anywhere in `error` at the
+/// front, so the message the outbox shows says what to do rather than
+/// "failed to send the message through Proton".
+fn explain_unverified_card(error: anyhow::Error) -> anyhow::Error {
+    let card = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<UnverifiedContactCard>())
+        .cloned();
+    match card {
+        Some(card) => error.context(card),
+        None => error,
+    }
 }
 
 /// Each recipient's send preferences, by address (`recipients`).
@@ -804,6 +883,66 @@ mod tests {
     use zmail_proton_api::{RecipientKey, SignatureType};
 
     use crate::send_prefs::tests::KEY_A;
+
+    #[test]
+    fn finds_the_contact_whatever_the_case_of_the_address() {
+        let contacts = vec![
+            ContactEmail {
+                email: "alice@example.com".to_owned(),
+                contact_id: "alice".to_owned(),
+                ..ContactEmail::default()
+            },
+            ContactEmail {
+                email: "Bob@Example.com".to_owned(),
+                contact_id: "bob".to_owned(),
+                ..ContactEmail::default()
+            },
+        ];
+        for typed in ["bob@example.com", "BOB@EXAMPLE.COM", "Bob@Example.com"] {
+            assert_eq!(
+                find_contact(&contacts, typed).map(|contact| contact.contact_id.as_str()),
+                Some("bob"),
+                "{typed}"
+            );
+        }
+        assert!(find_contact(&contacts, "bobby@example.com").is_none());
+    }
+
+    /// A card that did not verify stops the send with a message that says
+    /// what to do, in front of the generic send failure, and stays
+    /// findable in the chain.
+    #[test]
+    fn an_unverified_contact_card_explains_itself_in_the_send_error() {
+        let error = contact_settings_error(
+            "bob@example.com",
+            Error::ContactCardUnverified {
+                email: "bob@example.com".to_owned(),
+                reason: "signature verification failed".to_owned(),
+            },
+        )
+        .context("failed to get contact settings for bob@example.com")
+        .context("failed to get recipients")
+        .context("failed to send the message through Proton");
+        let error = explain_unverified_card(error);
+        let message = error.to_string();
+        assert!(message.starts_with("Not sent: the Proton contact for bob@example.com"));
+        assert!(message.contains("could not verify"), "{message}");
+        let card = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<UnverifiedContactCard>())
+            .expect("found in the chain");
+        assert_eq!(card.reason, "signature verification failed");
+
+        // Other failures keep their message.
+        let other = explain_unverified_card(
+            contact_settings_error("bob@example.com", Error::Key("bad boolean".to_owned()))
+                .context("failed to send the message through Proton"),
+        );
+        assert_eq!(
+            other.to_string(),
+            "failed to send the message through Proton"
+        );
+    }
 
     #[test]
     fn replies_reply_and_everything_else_forwards() {

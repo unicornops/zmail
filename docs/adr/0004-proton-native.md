@@ -383,6 +383,24 @@ never changed. This deviates from Bridge for the same reason a send never
 decrypts server data (below): Zmail does not let the server decide what
 the user's own client trusts.
 
+**Contact cards that do not verify (November 10, 2026).** Bridge reads a
+recipient's send settings from the contact's signed card and treats a
+card whose signature does not verify exactly like no contact at all
+(`GetSettings`), so a pinned key or "always encrypt" disappears silently
+when the card is damaged, and Bridge compares the recipient's address
+with the contact's exactly. Zmail compares addresses without regard to
+case (asking Proton again in lower case when the address as typed finds
+no contact). When a signed card does not verify, Zmail looks at what it
+holds, without trusting or using any of it: if it holds a key or an
+`X-PM-*` setting for the recipient, or cannot be read at all, the send
+stops with a message naming the recipient and saying to check and save
+the contact in Proton Mail. An unverifiable card with nothing for the
+recipient stays "no settings", as in Bridge: a card signed by a user key
+the account no longer has (after a password reset) must not stop every
+send to that contact. This does not protect against a server that leaves
+the card out altogether; that needs Zmail to remember pins itself, which
+it does not do yet.
+
 If Proton accounts with post-quantum keys need support later, `pgp`'s
 `pqc` feature adds them. Messages compressed with bzip2 by external
 OpenPGP senders need `pgp`'s `bzip2` feature, which the hydration phase
@@ -491,7 +509,9 @@ network peer.**
   `zmail-proton` (the Bridge services port: login, sync, message
   building, events and sending). New `zmail-security` secret slots hold
   the Proton session UID, the refresh token and the salted key password;
-  the account password itself is never stored.
+  the account password itself is never stored. Removing an account signs
+  its session out on Proton's side as well (best effort, in the
+  background), and so does an add whose session the keychain refuses.
 - The phases are tracked in #237: ADR and pins, the fake-server harness,
   the client core, auth, keys, read sync, hydration, events, pending
   operations, onboarding (hidden until #139), sending, and the weekly
