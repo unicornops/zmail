@@ -10757,6 +10757,7 @@ dependencies = [
  "chrono",
  "divan",
  "rusqlite",
+ "rustix",
  "serde_json",
  "thiserror 2.0.21",
  "zeroize",
