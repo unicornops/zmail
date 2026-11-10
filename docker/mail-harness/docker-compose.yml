@@ -1,6 +1,6 @@
 services:
   greenmail:
-    image: greenmail/standalone:2.1.8
+    image: greenmail/standalone:2.1.8@sha256:d556b8c7df01ba04a0e0f67dacab2c5f75a61207a51774e0654c179b83a671e1
     environment:
       GREENMAIL_OPTS: >-
         -Dgreenmail.setup.test.smtp
@@ -18,7 +18,7 @@ services:
       - ./preload:/opt/greenmail/preload:ro
 
   james:
-    image: apache/james:memory-3.9.0
+    image: apache/james:memory-3.9.0@sha256:c7d6172292a902ca7be5f16dace658f42d31bfca62a0a38598bee7a6dab09434
     ports:
       - "4025:25"
       - "4081:8000"
@@ -31,7 +31,7 @@ services:
       - "3243:143"
 
   jmap-proxy:
-    image: nginx:1.27-alpine
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     depends_on:
       - james
     ports:
