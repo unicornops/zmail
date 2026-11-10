@@ -340,10 +340,10 @@ capture_release() {
   "${REPO_ROOT}/scripts/mail-harness.sh" up
   HARNESS_STARTED=1
 
-  "${APP_BINARY}" launch-imap-fixture \
+  # The password goes in the environment, never on the command line.
+  ZMAIL_FIXTURE_SECRET="phase2-password" "${APP_BINARY}" launch-imap-fixture \
     "imap://127.0.0.1:3143" \
     "phase2" \
-    "phase2-password" \
     "phase2@localhost" \
     >"${APP_LOG}" 2>&1 &
   APP_PID=$!

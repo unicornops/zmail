@@ -4,3 +4,7 @@
 /.zed
 /THIRD_PARTY.html
 /.zmail-dev
+# Core dumps (a crash of a development build, or of a tool run here)
+# hold memory: mail, keys, passwords.
+core
+core.*
