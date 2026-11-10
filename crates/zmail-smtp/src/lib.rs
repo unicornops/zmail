@@ -172,6 +172,9 @@ async fn submit_within(
     if message.to.is_empty() && message.cc.is_empty() && message.bcc.is_empty() {
         bail!("SMTP submission requires at least one recipient");
     }
+    // mail-send writes `MAIL FROM` and `RCPT TO` as they are, so an
+    // address that could break out of them never reaches the server.
+    message.check_addresses()?;
 
     let builder = client_builder(config, timeouts)?;
     let recipients = all_recipients(message);
@@ -351,7 +354,7 @@ pub fn render_rfc822_message(message: &OutgoingMessage) -> Result<Vec<u8>> {
 
     for attachment in &message.attachments {
         builder = builder.attachment(
-            attachment.content_type.as_str(),
+            attachment_content_type(&attachment.content_type),
             attachment.filename.as_str(),
             attachment.bytes.as_slice(),
         );
@@ -360,6 +363,23 @@ pub fn render_rfc822_message(message: &OutgoingMessage) -> Result<Vec<u8>> {
     builder
         .write_to_vec()
         .context("failed to render the RFC-822 message")
+}
+
+/// An attachment's media type as its `Content-Type` header gets it: a
+/// `type/subtype` of RFC 2045 tokens as it is, anything else
+/// `application/octet-stream`. mail-builder writes the type as it is, and
+/// a forward's comes from the received mail or the JMAP server.
+fn attachment_content_type(content_type: &str) -> &str {
+    let is_token = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() && !br#"()<>@,;:\"/[]?="#.contains(&byte))
+    };
+    match content_type.split_once('/') {
+        Some((kind, subtype)) if is_token(kind) && is_token(subtype) => content_type,
+        _ => "application/octet-stream",
+    }
 }
 
 fn normalize_body(body: &str) -> String {
@@ -538,6 +558,51 @@ mod tests {
             "{rendered}"
         );
         assert!(super::all_recipients(&message).contains(&"blind@localhost".to_owned()));
+    }
+
+    #[test]
+    fn attachment_types_that_are_not_type_and_subtype_are_sent_as_octet_stream() {
+        let attachment = |content_type: &str| OutgoingAttachment {
+            filename: "file.bin".to_owned(),
+            content_type: content_type.to_owned(),
+            bytes: b"payload".to_vec(),
+        };
+        let message = OutgoingMessage {
+            from_email: "sender@localhost".to_owned(),
+            from_name: None,
+            to: vec!["recipient@localhost".to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            reply_to: Vec::new(),
+            subject: "Types".to_owned(),
+            text_body: "Body".to_owned(),
+            attachments: vec![
+                attachment("image/svg+xml"),
+                attachment("text/plain\r\nX-Injected: yes"),
+                attachment("text"),
+                attachment("text/plain; charset=utf-8"),
+                attachment("text/pl ain"),
+            ],
+            message_id: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            reply_action: None,
+        };
+        let rendered =
+            String::from_utf8(render_rfc822_message(&message).expect("renders")).expect("utf-8");
+        assert!(
+            rendered.contains("Content-Type: image/svg+xml"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("X-Injected"), "{rendered}");
+        assert!(!rendered.contains("charset=utf-8;"), "{rendered}");
+        assert_eq!(
+            rendered
+                .matches("Content-Type: application/octet-stream")
+                .count(),
+            4,
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -730,3 +795,6 @@ mod tests {
         assert!(render_rfc822_message(&converted).is_ok());
     }
 }
+
+#[cfg(test)]
+mod envelope_tests;

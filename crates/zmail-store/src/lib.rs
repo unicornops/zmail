@@ -4618,7 +4618,7 @@ impl LocalStore {
         let draft = transaction
             .query_row(
                 r#"
-                SELECT account_id, state, to_json, cc_json, bcc_json
+                SELECT account_id, state, to_json, cc_json, bcc_json, identity_email
                 FROM drafts
                 WHERE id = ?1
                 "#,
@@ -4633,6 +4633,7 @@ impl LocalStore {
                             .map_err(to_from_sql_error)?,
                         recipients_from_json(row.get::<_, String>(4)?)
                             .map_err(to_from_sql_error)?,
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )
@@ -4647,6 +4648,12 @@ impl LocalStore {
         if draft.2.is_empty() && draft.3.is_empty() && draft.4.is_empty() {
             bail!("draft {draft_id} has no recipients");
         }
+        // What the outbox will put in the envelope: the draft stays a
+        // draft to fix, whichever frontend (or `mailto:` link) filled it.
+        zmail_core::participants::check_envelope(
+            &draft.5,
+            draft.2.iter().chain(&draft.3).chain(&draft.4),
+        )?;
 
         let now = utc_now_timestamp();
         let due = if delay.is_zero() {
@@ -11407,6 +11414,60 @@ mod tests {
         assert!(store.cancel_queued_outbox_job(job_id).expect("cancel runs"));
         store.delete_draft(queued).expect("taken back, it can go");
         assert!(store.list_outbox_jobs(None).expect("jobs").is_empty());
+    }
+
+    #[test]
+    fn a_draft_with_an_address_that_cannot_be_sent_to_is_not_queued() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity = store
+            .list_identities(account_id)
+            .expect("identities should load")
+            .into_iter()
+            .next()
+            .expect("demo account should have an identity");
+        let draft = |bcc: &str| NewDraft {
+            account_id,
+            identity_id: identity.id,
+            to: vec!["Kai <kai@example.test>".to_owned()],
+            cc: Vec::new(),
+            bcc: vec![bcc.to_owned()],
+            subject: "Hello".to_owned(),
+            body: "Body".to_owned(),
+            threading: Default::default(),
+        };
+
+        // As a `mailto:` link's `bcc=` can deliver it.
+        let draft_id = store
+            .create_draft(&draft("a@example.test>\r\nRCPT TO:<other@example.net"))
+            .expect("drafts keep what was typed");
+        let error = store
+            .queue_draft_after(draft_id, Duration::from_secs(5))
+            .expect_err("not queued");
+        assert_eq!(
+            error.to_string(),
+            "Not an address Zmail can send to: a@example.test>\\r\\nRCPT TO:<other@example.net"
+        );
+        let unnamed = store
+            .create_draft(&draft("Just A Name"))
+            .expect("drafts keep what was typed");
+        store.queue_draft(unnamed).expect_err("not queued");
+        assert!(store.list_outbox_jobs(None).expect("jobs").is_empty());
+        assert!(
+            store
+                .list_drafts(Some(account_id))
+                .expect("drafts")
+                .iter()
+                .all(|draft| draft.state == DraftState::Editing),
+            "both stay drafts to fix"
+        );
+
+        let fine = store
+            .create_draft(&draft("hidden@example.test"))
+            .expect("created");
+        store.queue_draft(fine).expect("queues");
     }
 
     #[test]
