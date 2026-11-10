@@ -21,6 +21,14 @@
 // parts that do not verify and public-only subkeys are dropped, and a key
 // without a valid self-signature does not unlock. Detached signatures are
 // only checked with keys whose self-signature allows signing.
+// Modified by UnicornOps on 2026-11-10: a key only unlocks when its primary
+// key and every secret subkey is password-protected. gopenpgp's
+// `Key.Unlock` refuses a key with no protected part ("key is not locked");
+// rPGP's `remove_password` leaves unprotected material as it is, so without
+// the check any passphrase would "unlock" a key the server made up. Zmail
+// is stricter than upstream for a key with some parts protected and some
+// not, which gopenpgp accepts. Decrypted data is read up to a limit, so a
+// compressed message cannot expand without bound (`MAX_DECRYPTED_BYTES`).
 
 //! User and address keys, and unlocking them into a [`KeyRing`].
 //!
@@ -29,7 +37,7 @@
 //! the user keys, or (on older "legacy" accounts) with the salted key
 //! password itself.
 
-use std::fmt;
+use std::{fmt, io::Read};
 
 use pgp::{
     composed::{Deserializable, DetachedSignature, Message, MessageBuilder, SignedSecretKey},
@@ -167,6 +175,7 @@ impl Key {
         let (key, _) = SignedSecretKey::from_string(&self.private_key).map_err(key_error)?;
         // Only the parts whose self-signatures verify are unlocked or used.
         let mut key = cert::verify_secret(key)?;
+        ensure_locked(&key)?;
         let password = Password::from(secret.as_slice());
         key.primary_key
             .remove_password(&password)
@@ -184,6 +193,25 @@ impl Key {
     }
 }
 
+/// Refuses a key with any secret part that is not password-protected.
+///
+/// The password is what ties a key to the account: a user key opens with
+/// the salted key password, an address key with a token the user keys
+/// signed. A key that needs no password proves neither, so the server
+/// could list one of its own.
+fn ensure_locked(key: &SignedSecretKey) -> Result<(), Error> {
+    let locked = key.primary_key.secret_params().is_encrypted()
+        && key
+            .secret_subkeys
+            .iter()
+            .all(|subkey| subkey.key.secret_params().is_encrypted());
+    if locked {
+        Ok(())
+    } else {
+        Err(Error::Key("key is not locked".to_owned()))
+    }
+}
+
 /// Decrypts an address key token with the user keys and checks the user
 /// keys' signature over it (`getPassphraseFromToken`).
 fn passphrase_from_token(
@@ -191,7 +219,7 @@ fn passphrase_from_token(
     token: &str,
     signature: &str,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let passphrase = user_keyring.decrypt_armored(token)?;
+    let passphrase = user_keyring.decrypt_armored_within(token, MAX_TOKEN_BYTES)?;
     user_keyring.verify_detached_armored(&passphrase, signature)?;
     Ok(passphrase)
 }
@@ -316,14 +344,26 @@ impl KeyRing {
 
     /// Decrypts an armored message with any of the keys. The plaintext is
     /// zeroized on drop; signatures inside the message are not checked.
+    /// Fails if the plaintext is over [`MAX_DECRYPTED_BYTES`].
     pub fn decrypt_armored(&self, armored: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
+        self.decrypt_armored_within(armored, MAX_DECRYPTED_BYTES)
+    }
+
+    /// Like [`KeyRing::decrypt_armored`], for data known to be small:
+    /// fails if the plaintext is over `limit` bytes.
+    pub fn decrypt_armored_within(
+        &self,
+        armored: &str,
+        limit: usize,
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
         let (message, _) = Message::from_string(armored).map_err(key_error)?;
         let secret_keys: Vec<&SignedSecretKey> = self.keys.iter().map(|key| &key.key).collect();
-        decrypt_message(message, &secret_keys)
+        decrypt_message(message, &secret_keys, limit)
     }
 
     /// Decrypts a binary OpenPGP message (such as an attachment's key
-    /// packets followed by its data packets) with any of the keys.
+    /// packets followed by its data packets) with any of the keys. Fails
+    /// if the plaintext is over [`MAX_DECRYPTED_BYTES`].
     pub fn decrypt_binary(&self, message: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
         let secret_keys: Vec<&SignedSecretKey> = self.keys.iter().map(|key| &key.key).collect();
         decrypt_bytes(message, &secret_keys)
@@ -351,14 +391,27 @@ impl KeyRing {
     }
 }
 
+/// The most plaintext one message body or attachment may decrypt to.
+///
+/// A compressed OpenPGP message of a few kilobytes can expand to many
+/// gigabytes, and anyone who has the user's public key can send one, so
+/// decryption stops with an error here instead of running out of memory.
+/// Proton limits a message with its attachments to 25 MB; this is five
+/// times that, so no mail Proton accepts comes near it.
+pub const MAX_DECRYPTED_BYTES: usize = 128 * 1024 * 1024;
+
+/// The most an address key token may decrypt to. Tokens are 64 characters.
+const MAX_TOKEN_BYTES: usize = 64 * 1024;
+
 fn decrypt_bytes(bytes: &[u8], keys: &[&SignedSecretKey]) -> Result<Zeroizing<Vec<u8>>, Error> {
     let message = Message::from_bytes(bytes).map_err(key_error)?;
-    decrypt_message(message, keys)
+    decrypt_message(message, keys, MAX_DECRYPTED_BYTES)
 }
 
 fn decrypt_message(
     message: Message<'_>,
     keys: &[&SignedSecretKey],
+    limit: usize,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
     let unlocked = Password::empty();
     let passwords = vec![&unlocked; keys.len()];
@@ -368,10 +421,20 @@ fn decrypt_message(
     if message.is_compressed() {
         message = message.decompress().map_err(key_error)?;
     }
-    let data = message
-        .as_data_vec()
+    // Decompression happens as the message is read: read one byte past the
+    // limit at most, and refuse the message if that byte is there.
+    let mut data = Zeroizing::new(Vec::new());
+    let allowed = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    (&mut message)
+        .take(allowed)
+        .read_to_end(&mut data)
         .map_err(|error| Error::Key(format!("reading decrypted data: {error}")))?;
-    Ok(Zeroizing::new(data))
+    if data.len() > limit {
+        return Err(Error::Key(format!(
+            "the decrypted data is over the {limit}-byte limit"
+        )));
+    }
+    Ok(data)
 }
 
 fn key_error(error: pgp::errors::Error) -> Error {
@@ -566,6 +629,196 @@ pub(crate) mod tests {
         )
         .expect("packet");
         assert!(check_key(&subkey_swapped).is_err());
+    }
+
+    fn armored(key: &SignedSecretKey) -> String {
+        key.to_armored_string(pgp::composed::ArmorOptions::default())
+            .expect("armor")
+    }
+
+    /// gopenpgp's `Key.Unlock` refuses a key that is not locked. rPGP's
+    /// `remove_password` leaves such a key alone, so without the check any
+    /// passphrase "unlocks" a key the server made up.
+    #[test]
+    fn refuses_an_unprotected_user_key() {
+        let made_up = cert::fixtures::generate(true, 1, 0);
+        let unprotected = key("made-up", &armored(&made_up));
+        for passphrase in [&b""[..], b"password", salted_password().as_bytes()] {
+            let error = unprotected.unlock(passphrase, None).expect_err("refused");
+            assert!(error.to_string().contains("key is not locked"), "{error}");
+        }
+        assert!(Keys(vec![unprotected.clone()]).unlock(b"", None).is_err());
+
+        // The same key, locked, unlocks with its password only.
+        let locked = key(
+            "locked",
+            &armored(&cert::fixtures::locked(&made_up, "secret")),
+        );
+        assert!(locked.unlock(b"secret", None).is_ok());
+        assert!(locked.unlock(b"", None).is_err());
+
+        // Listed next to the user's real key, only the real key unlocks.
+        let keys = Keys(vec![unprotected, key(USER_KEY_ID, USER_KEY_SALTED)]);
+        let keyring = keys
+            .unlock(salted_password().as_bytes(), None)
+            .expect("the real key");
+        let ids: Vec<&str> = keyring.keys().iter().map(|key| key.id.as_str()).collect();
+        assert_eq!(ids, [USER_KEY_ID]);
+    }
+
+    /// An address key with no token is a legacy key, locked with the
+    /// salted key password. An unprotected one listed first would become
+    /// the key drafts are encrypted to and signed with.
+    #[test]
+    fn refuses_an_unprotected_address_key_without_a_token() {
+        let user_keyring = Keys(vec![key("user", USER_KEY_PASSWORD)])
+            .unlock(b"password", None)
+            .expect("user keys");
+        let made_up = armored(&cert::fixtures::generate(true, 1, 0));
+        let unprotected = Key {
+            primary: false,
+            ..key("made-up", &made_up)
+        };
+        assert!(
+            Keys(vec![unprotected.clone()])
+                .unlock(b"password", Some(&user_keyring))
+                .is_err()
+        );
+
+        // In front of the real address key, it is skipped.
+        let keyring = Keys(vec![unprotected.clone(), address_key()])
+            .unlock(b"password", Some(&user_keyring))
+            .expect("the real address key");
+        assert_eq!(keyring.len(), 1);
+        assert_eq!(
+            keyring.first().map(|key| key.id.as_str()),
+            Some("address-key")
+        );
+
+        // Borrowing a real key's token and signature does not help either.
+        let with_token = Key {
+            token: Some(ADDRESS_KEY_TOKEN.to_owned()),
+            signature: Some(ADDRESS_KEY_TOKEN_SIGNATURE.to_owned()),
+            ..unprotected
+        };
+        let error = with_token
+            .unlock(b"password", Some(&user_keyring))
+            .expect_err("refused");
+        assert!(error.to_string().contains("key is not locked"), "{error}");
+    }
+
+    /// Every secret part must be locked. gopenpgp accepts a key with some
+    /// parts locked and some not; Zmail does not.
+    #[test]
+    fn refuses_a_mix_of_locked_and_unprotected_parts() {
+        let plain = cert::fixtures::generate(true, 2, 0);
+        let locked = cert::fixtures::locked(&plain, "secret");
+        key("locked", &armored(&locked))
+            .unlock(b"secret", None)
+            .expect("fully locked key unlocks");
+
+        let mut plain_subkey = locked.clone();
+        plain_subkey.secret_subkeys[1] = plain.secret_subkeys[1].clone();
+        let mut plain_primary = locked.clone();
+        plain_primary.primary_key = plain.primary_key.clone();
+        let mut only_primary_locked = plain.clone();
+        only_primary_locked.primary_key = locked.primary_key.clone();
+
+        for mixed in [&plain_subkey, &plain_primary, &only_primary_locked] {
+            let error = key("mixed", &armored(mixed))
+                .unlock(b"secret", None)
+                .expect_err("refused");
+            assert!(error.to_string().contains("key is not locked"), "{error}");
+        }
+    }
+
+    fn zeros<'a>(
+        keyring: &KeyRing,
+        plain_len: u64,
+    ) -> pgp::composed::MessageBuilder<
+        'a,
+        std::io::Take<std::io::Repeat>,
+        pgp::composed::EncryptionSeipdV1,
+    > {
+        let key = keyring.first().expect("key").secret_key();
+        let mut rng = rand::rng();
+        let mut builder = MessageBuilder::from_reader("", std::io::repeat(0).take(plain_len))
+            .seipd_v1(&mut rng, SymmetricKeyAlgorithm::AES256);
+        builder.compression(pgp::types::CompressionAlgorithm::ZLIB);
+        builder
+            .encrypt_to_key(&mut rng, &key.secret_subkeys[0].key.public_key())
+            .expect("encrypt");
+        builder
+    }
+
+    /// A message that is small as sent and large once decompressed:
+    /// `plain_len` zero bytes, compressed and encrypted to `keyring`.
+    pub(crate) fn compressed_zeros(keyring: &KeyRing, plain_len: u64) -> Vec<u8> {
+        zeros(keyring, plain_len)
+            .to_vec(&mut rand::rng())
+            .expect("message")
+    }
+
+    /// [`compressed_zeros`], armored.
+    pub(crate) fn compressed_zeros_armored(keyring: &KeyRing, plain_len: u64) -> String {
+        zeros(keyring, plain_len)
+            .to_armored_string(&mut rand::rng(), pgp::composed::ArmorOptions::default())
+            .expect("message")
+    }
+
+    /// A compression bomb fails with an error at the limit instead of
+    /// being expanded into memory.
+    #[test]
+    fn stops_decrypting_at_the_limit() {
+        let keyring = Keys(vec![key("user", USER_KEY_PASSWORD)])
+            .unlock(b"password", None)
+            .expect("user keys");
+        let keys: Vec<&SignedSecretKey> = keyring.keys().iter().map(|key| &key.key).collect();
+        let decrypt = |bytes: &[u8], limit| {
+            decrypt_message(Message::from_bytes(bytes).expect("message"), &keys, limit)
+        };
+
+        // 16 MiB of plaintext in a message of a few kilobytes.
+        let plain_len = 16 * 1024 * 1024;
+        let small = compressed_zeros(&keyring, plain_len);
+        assert!(small.len() < 64 * 1024, "{} bytes", small.len());
+        let limit = usize::try_from(plain_len).expect("fits");
+        assert_eq!(decrypt(&small, limit).expect("at the limit").len(), limit);
+        for limit in [limit - 1, 1024 * 1024, 0] {
+            let error = decrypt(&small, limit).expect_err("over the limit");
+            assert!(error.to_string().contains("-byte limit"), "{error}");
+        }
+        assert_eq!(
+            keyring.decrypt_binary(&small).expect("decrypts").len(),
+            limit
+        );
+
+        // The limit bodies and attachments get.
+        let bomb = compressed_zeros(&keyring, MAX_DECRYPTED_BYTES as u64 + 1);
+        assert!(bomb.len() < 1024 * 1024, "{} bytes", bomb.len());
+        let error = keyring.decrypt_binary(&bomb).expect_err("over the limit");
+        assert!(error.to_string().contains("-byte limit"), "{error}");
+    }
+
+    #[test]
+    fn stops_decrypting_armored_data_at_the_limit() {
+        let keyring = Keys(vec![key("user", USER_KEY_PASSWORD)])
+            .unlock(b"password", None)
+            .expect("user keys");
+        let armored = compressed_zeros_armored(&keyring, 1024 * 1024);
+        assert_eq!(
+            keyring.decrypt_armored(&armored).expect("decrypts").len(),
+            1024 * 1024
+        );
+        assert!(
+            keyring
+                .decrypt_armored_within(&armored, 1024 * 1024)
+                .is_ok()
+        );
+        let error = keyring
+            .decrypt_armored_within(&armored, 1024 * 1024 - 1)
+            .expect_err("over the limit");
+        assert!(error.to_string().contains("-byte limit"), "{error}");
     }
 
     #[test]

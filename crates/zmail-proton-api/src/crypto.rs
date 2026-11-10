@@ -386,8 +386,8 @@ mod tests {
         use crate::{
             KeyFlags,
             cert::fixtures::{
-                Binding, DAY, binding, generate, inject_secret, key_id_hex, key_revocation, now,
-                recipients, set_signatures, subkey, subkey_id, subkey_revocation,
+                Binding, DAY, binding, generate, inject_secret, key_id_hex, key_revocation, locked,
+                now, recipients, set_signatures, subkey, subkey_id, subkey_revocation,
                 user_certification,
             },
             keyring::Key,
@@ -414,7 +414,7 @@ mod tests {
         fn own(key: &SignedSecretKey) -> Result<KeyRing, Error> {
             Keys(vec![Key {
                 id: "address-key".to_owned(),
-                private_key: key
+                private_key: locked(key, "fixture")
                     .to_armored_string(ArmorOptions::default())
                     .expect("armor"),
                 token: None,
@@ -423,7 +423,7 @@ mod tests {
                 active: true,
                 flags: KeyFlags(3),
             }])
-            .unlock(b"", None)
+            .unlock(b"fixture", None)
         }
 
         fn key_packet_recipients(key: &RecipientKey) -> Result<Vec<String>, Error> {

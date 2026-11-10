@@ -286,6 +286,35 @@ encrypted to every key that can encrypt. A key that fails is treated as
 not unlocked. This check has no upstream counterpart in Bridge; it is
 there because the crypto library changed.
 
+**Unprotected keys never unlock (November 10, 2026).** gopenpgp's
+`Key.Unlock` refuses a key that is not locked ("gopenpgp: key is not
+locked"), so under Bridge every key is tied to the account: a user key
+opens with the salted key password, an address key with a token the user
+keys signed. rPGP's `remove_password` leaves unprotected key material as
+it is and reports success, so `Key::unlock` checks first that the primary
+key and every secret subkey is password-protected and refuses the key
+otherwise. Without the check a server could list a key of its own, with no
+protection, among the user's keys, and any passphrase would "unlock" it.
+Zmail is stricter than gopenpgp in one case: gopenpgp accepts a key with
+some parts locked and some not, Zmail refuses it. Proton's clients lock
+every part of a key.
+
+**SRP versions below 3 are refused (November 10, 2026).** go-srp answers
+password hash versions 0 to 4. Versions 0 to 2 hash the password without
+bcrypt, so the client proof lets whoever asked for one test password
+guesses cheaply. Zmail answers versions 3 and 4 only and otherwise stops
+before sending a proof, with an error that says to sign in at
+account.proton.me first (Proton's own clients move an old account to the
+current version when it signs in). Only an account that has not signed
+in to one of Proton's clients for years can still be on an older version.
+
+**Decrypted data is bounded (November 10, 2026).** A compressed OpenPGP
+message expands as it is read. Zmail reads at most 128 MiB of plaintext
+from one body or attachment (five times Proton's 25 MB limit for a message
+with its attachments), 1 MiB from a contact card and 64 KiB from an
+address-key token, and fails the decryption beyond that, as any other
+message that does not decrypt.
+
 **Verifying keys (October 24, 2026).** go-crypto, under gopenpgp and so
 under Bridge, checks a certificate's self-signatures when it reads one
 (`openpgp/keys.go` `ReadEntity`, `addUserID`, `addSubkey`, and

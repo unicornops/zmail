@@ -785,6 +785,36 @@ async fn refuses_a_server_that_cannot_prove_the_password() {
     assert!(matches!(error, Error::InvalidServerProof), "{error:?}");
 }
 
+/// A server that asks for a password hash without bcrypt (versions 0 to
+/// 2) gets no proof at all.
+#[tokio::test]
+async fn refuses_srp_versions_without_bcrypt() {
+    for version in [0u8, 1, 2] {
+        let server = MockServer::start(move |_, _| {
+            Reply::json(
+                200,
+                serde_json::json!({
+                    "Version": version,
+                    "Modulus": crate::srp_modulus::tests::TEST_MODULUS_CLEAR_SIGN,
+                    "ServerEphemeral": BASE64.encode([1u8; 256]),
+                    "Salt": BASE64.encode([2u8; 10]),
+                    "SRPSession": "s",
+                }),
+            )
+        })
+        .await;
+        let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+        let error = manager.login("zmail", PASSWORD).await.expect_err("version");
+        assert!(
+            matches!(error, Error::SrpVersionTooOld(found) if found == version),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("account.proton.me"), "{error}");
+        // Only the challenge was fetched; no proof was sent.
+        assert_eq!(server.requests().len(), 1);
+    }
+}
+
 #[tokio::test]
 async fn refuses_an_unsigned_modulus() {
     let server = MockServer::start(|_, _| {

@@ -10,6 +10,9 @@
 // than raw random bytes, and tokens are redacted from `Debug` output.
 // FIDO2 is not supported (ADR 0004) but the empty `FIDO2` object is sent
 // as upstream does. `AuthModulus` is not ported.
+// Modified by UnicornOps on 2026-11-10: SRP password hash versions below 3
+// are refused (`MIN_SRP_VERSION`). go-srp's `NewAuth` answers versions 0 to
+// 2 as well.
 
 //! Sessions: SRP login, the `Auth` response, new clients and token refresh.
 
@@ -301,9 +304,19 @@ impl Manager {
     }
 }
 
+/// The oldest SRP password hash version Zmail answers. Versions 3 and 4
+/// hash the password with bcrypt and the account's salt; versions 0 to 2
+/// (accounts that have not signed in to a Proton client for years) use
+/// plain hashes of the password and username, so a server that asks for
+/// one gets a proof it can test password guesses against cheaply.
+const MIN_SRP_VERSION: u8 = 3;
+
 /// Builds the SRP proofs for a login challenge (go-srp `NewAuth` and
 /// `GenerateProofs`), checking the modulus signature first.
 fn srp_proofs(info: &AuthInfo, username: &str, password: &str) -> Result<SRPProof, Error> {
+    if info.version < MIN_SRP_VERSION {
+        return Err(Error::SrpVersionTooOld(info.version));
+    }
     let version = SrpHashVersion::try_from(info.version).map_err(Error::Srp)?;
     let auth = SRPAuth::new(
         &ModulusVerifier,

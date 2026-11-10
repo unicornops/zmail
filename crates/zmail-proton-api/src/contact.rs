@@ -92,13 +92,14 @@ impl Card {
     /// Nothing in the card is read before its signature is checked, and
     /// oversized cards are refused before any decryption or verification.
     fn decode(&self, kr: &KeyRing) -> Result<vcard::Card, Error> {
-        // Armor adds about a third; the vCard reader caps the plaintext.
+        // Armor adds about a third. The plaintext is capped as it is
+        // decrypted (a compressed card can expand) and by the vCard reader.
         if self.data.len() > 2 * vcard::MAX_CARD_BYTES {
             return Err(Error::Key("the contact card is too large".to_owned()));
         }
         let mut data = self.data.clone();
         if self.kind.0 & CardType::ENCRYPTED.0 != 0 {
-            let plain = kr.decrypt_armored(&data)?;
+            let plain = kr.decrypt_armored_within(&data, vcard::MAX_CARD_BYTES)?;
             data = String::from_utf8_lossy(&plain).into_owned();
         }
         if self.kind.0 & CardType::SIGNED.0 != 0 {
@@ -317,6 +318,48 @@ mod tests {
             data: card.to_owned(),
             signature: Some(signature),
         }
+    }
+
+    /// An encrypted card that is small as sent and expands past the card
+    /// limit when decompressed is refused while it is decrypted.
+    #[test]
+    fn refuses_an_encrypted_card_that_expands_past_the_limit() {
+        use pgp::{
+            composed::{ArmorOptions, MessageBuilder},
+            crypto::sym::SymmetricKeyAlgorithm,
+            types::CompressionAlgorithm,
+        };
+
+        let kr = keyring();
+        let encrypted = |text: String| {
+            let key = kr.first().expect("key").secret_key();
+            let mut rng = rand::rng();
+            let mut builder = MessageBuilder::from_bytes("", text.into_bytes())
+                .seipd_v1(&mut rng, SymmetricKeyAlgorithm::AES256);
+            builder.compression(CompressionAlgorithm::ZLIB);
+            builder
+                .encrypt_to_key(&mut rng, &key.secret_subkeys[0].key.public_key())
+                .expect("encrypt");
+            Card {
+                kind: CardType::ENCRYPTED,
+                data: builder
+                    .to_armored_string(&mut rng, ArmorOptions::default())
+                    .expect("armor"),
+                signature: None,
+            }
+        };
+
+        let card = encrypted(CARD.to_owned());
+        assert!(card.decode(&kr).is_ok());
+
+        let bomb = encrypted(format!(
+            "BEGIN:VCARD\r\n{}END:VCARD\r\n",
+            "NOTE:x\r\n".repeat(4 * vcard::MAX_CARD_BYTES / 8)
+        ));
+        // Small enough to pass the size check on the armored data.
+        assert!(bomb.data.len() < vcard::MAX_CARD_BYTES / 8);
+        let error = bomb.decode(&kr).expect_err("over the limit");
+        assert!(error.to_string().contains("-byte limit"), "{error}");
     }
 
     #[test]

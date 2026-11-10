@@ -73,7 +73,7 @@ pub use draft::{CreateDraftAction, CreateDraftReq, DraftTemplate, UpdateDraftReq
 pub use event::{AddressEvent, Event, EventAction, LabelEvent, MAX_COLLECTED_EVENTS, MessageEvent};
 pub use header_types::Headers;
 pub use hv::HumanVerification;
-pub use keyring::{Key, KeyFlags, KeyRing, Keys, UnlockedKey};
+pub use keyring::{Key, KeyFlags, KeyRing, Keys, MAX_DECRYPTED_BYTES, UnlockedKey};
 pub use keys::{PublicKey, RecipientType};
 pub use label::*;
 pub use mail_settings::MailSettings;
