@@ -859,8 +859,127 @@ fn jmap_credentials(
 ) -> Result<jmap_client::client::Credentials> {
     match auth {
         AuthKind::Password => Ok(jmap_client::client::Credentials::basic(username, secret)),
-        AuthKind::OAuth2 => Ok(jmap_client::client::Credentials::bearer(secret.to_owned())),
+        AuthKind::OAuth2 => {
+            // `jmap-client` unwraps the header it builds from the token, so
+            // a token that is not a valid header value would panic there.
+            if reqwest::header::HeaderValue::from_str(&format!("Bearer {secret}")).is_err() {
+                bail!(
+                    "the OAuth access token contains characters that cannot be sent to the \
+                     server; sign in to the account again"
+                );
+            }
+            Ok(jmap_client::client::Credentials::bearer(secret.to_owned()))
+        }
         AuthKind::ProtonSession => bail!("Proton accounts do not sign in over JMAP"),
+    }
+}
+
+/// Where RFC 8620 section 2.2 puts the session resource on a host.
+const WELL_KNOWN_JMAP: &str = "/.well-known/jmap";
+/// How many redirects from `/.well-known/jmap` are followed, as
+/// `jmap-client` allows for the session itself.
+const MAX_SESSION_REDIRECTS: usize = 5;
+/// How long each request that follows those redirects may take, as
+/// `jmap-client`'s default.
+const SESSION_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The session URL for a stored endpoint.
+///
+/// Zmail stores three shapes: a bare origin (the live harness), a
+/// `/.well-known/jmap` URL (typed in, or from the DNS SRV step) and the
+/// session URL itself (the well-known step's URL after its redirects, or a
+/// provider preset such as Fastmail's). A bare origin means its
+/// `/.well-known/jmap`. That URL commonly redirects to the session on
+/// another host (`example.com` to `api.example.com`), so its redirects are
+/// followed here, without credentials and never from HTTPS to HTTP, as
+/// autodiscovery does. Where they end is used only when it answers as a
+/// JMAP server does without credentials (401, or the session as JSON), so
+/// a redirect to a sign-in page is not mistaken for the session; the
+/// credentials then go only to that host.
+async fn session_url(endpoint: &str) -> Result<Url> {
+    let mut url =
+        Url::parse(endpoint).with_context(|| format!("invalid JMAP endpoint {endpoint}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("JMAP endpoints should be absolute HTTP or HTTPS URLs");
+    }
+    url.set_fragment(None);
+    if url.query().is_none() && matches!(url.path().trim_end_matches('/'), "" | WELL_KNOWN_JMAP) {
+        url.set_path(WELL_KNOWN_JMAP);
+    }
+    if url.path() != WELL_KNOWN_JMAP {
+        return Ok(url);
+    }
+
+    let well_known = url.clone();
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(SESSION_LOOKUP_TIMEOUT)
+        .build()
+        .context("failed to build the JMAP session lookup client")?;
+    for _ in 0..=MAX_SESSION_REDIRECTS {
+        let response = http
+            .get(url.clone())
+            .send()
+            .await
+            .with_context(|| format!("failed to connect to the JMAP endpoint {url}"))?;
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|location| location.to_str().ok());
+        let Some(location) = location.filter(|_| response.status().is_redirection()) else {
+            return Ok(if url == well_known || answers_as_jmap(&response) {
+                url
+            } else {
+                well_known
+            });
+        };
+        url = next_session_hop(&url, location)?;
+    }
+    bail!("the JMAP endpoint {endpoint} redirects too many times")
+}
+
+/// Whether a credential-less answer came from a JMAP session resource: it
+/// asks for credentials, or returns the session (JSON).
+fn answers_as_jmap(response: &reqwest::Response) -> bool {
+    response.status() == reqwest::StatusCode::UNAUTHORIZED
+        || (response.status().is_success()
+            && response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.trim_start().starts_with("application/json")))
+}
+
+/// Where a redirect from `current` to `location` leads, refused when it
+/// leaves HTTP(S) or goes from HTTPS to HTTP.
+fn next_session_hop(current: &Url, location: &str) -> Result<Url> {
+    let mut next = current
+        .join(location)
+        .with_context(|| format!("the JMAP endpoint {current} redirects to an invalid URL"))?;
+    next.set_fragment(None);
+    let allowed = match next.scheme() {
+        "https" => true,
+        "http" => current.scheme() == "http",
+        _ => false,
+    };
+    if !allowed {
+        bail!("the JMAP endpoint {current} redirects to {next}, which is not HTTPS");
+    }
+    Ok(next)
+}
+
+/// What `jmap-client` 0.4.1's `connect` is given to fetch `session`.
+///
+/// It always appends `/.well-known/jmap` to the URL it is given and offers
+/// no way to supply a session fetched elsewhere, so a well-known URL loses
+/// that suffix, and any other session URL gets an empty fragment: the
+/// appended path then lands in the fragment, which is never sent, and
+/// the request goes to `session` exactly.
+fn jmap_client_url(session: &Url) -> String {
+    let url = session.as_str();
+    match url.strip_suffix(WELL_KNOWN_JMAP) {
+        Some(base) if session.query().is_none() && session.fragment().is_none() => base.to_owned(),
+        _ => format!("{url}#"),
     }
 }
 
@@ -870,16 +989,17 @@ pub(crate) async fn connect_client(
     secret: &str,
     auth: AuthKind,
 ) -> Result<Client> {
-    let mut client_builder = Client::new().credentials(jmap_credentials(auth, username, secret)?);
-    if let Some(host) = Url::parse(endpoint)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-    {
-        client_builder = client_builder.follow_redirects([host]);
+    let credentials = jmap_credentials(auth, username, secret)?;
+    let session = session_url(endpoint).await?;
+    let mut client_builder = Client::new().credentials(credentials);
+    // Same-host redirects only: a session or API URL that moves to another
+    // host would take the credentials with it.
+    if let Some(host) = session.host_str() {
+        client_builder = client_builder.follow_redirects([host.to_owned()]);
     }
 
     client_builder
-        .connect(endpoint)
+        .connect(&jmap_client_url(&session))
         .await
         .with_context(|| format!("failed to connect to the JMAP endpoint {endpoint}"))
 }
@@ -2218,3 +2338,6 @@ mod tests {
 
 #[cfg(test)]
 mod submission_tests;
+
+#[cfg(test)]
+mod session_tests;
