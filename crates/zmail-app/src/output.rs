@@ -8,7 +8,8 @@
 use std::io::{self, Write};
 
 use zmail_core::{
-    AccountSummary, DraftDetail, DraftSummary, OutboxJobSummary, PendingOp, SearchHit, ThreadView,
+    AccountSummary, DraftDetail, DraftSummary, MailboxSummary, OutboxJobSummary, PendingOp,
+    SearchHit, ThreadView,
 };
 use zmail_security::terminal::{sanitize, sanitize_line};
 
@@ -39,6 +40,25 @@ pub(crate) fn write_accounts(out: &mut dyn Write, accounts: &[AccountSummary]) -
             "  sync: {} ({})",
             account.sync_status.phase,
             line(&account.sync_status.detail)
+        )?;
+    }
+    Ok(())
+}
+
+/// `mailboxes`: each mailbox's id, name and role, and how much is in it.
+pub(crate) fn write_mailboxes(out: &mut dyn Write, mailboxes: &[MailboxSummary]) -> io::Result<()> {
+    for mailbox in mailboxes {
+        let role = mailbox
+            .role
+            .map(|role| format!(" ({})", role.as_str()))
+            .unwrap_or_default();
+        writeln!(
+            out,
+            "#{} {}{role} • {} conversations, {} unread",
+            mailbox.id,
+            line(&mailbox.name),
+            mailbox.total_threads,
+            mailbox.unread_threads
         )?;
     }
     Ok(())

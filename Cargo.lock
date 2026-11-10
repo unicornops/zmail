@@ -10531,6 +10531,7 @@ dependencies = [
  "zmail-core",
  "zmail-imap",
  "zmail-security",
+ "zmail-setup",
  "zmail-store",
  "zmail-sync",
  "zmail-theme",
