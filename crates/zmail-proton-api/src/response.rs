@@ -173,13 +173,11 @@ pub enum Error {
     /// an invalid salt or server ephemeral, or an unsupported version.
     #[error("Proton sign-in failed: {0}")]
     Srp(#[source] proton_srp::SRPError),
-    /// The server asked for an SRP password hash older than version 3.
-    /// Those hashes use no bcrypt, so the proof Zmail would send lets
-    /// whoever asked for it guess the password far more cheaply.
+    /// The server asked for an SRP password hash older than version 3:
+    /// one of Proton's older sign-in methods, which Zmail does not support
+    /// (Bridge does).
     #[error(
-        "Proton asked for an old sign-in method (version {0}) that Zmail does not use. \
-         Sign in at account.proton.me once, which moves an old account to the current \
-         method, then try again"
+        "this Proton account uses an old sign-in method (version {0}) that Zmail does not support"
     )]
     SrpVersionTooOld(u8),
     /// The server's SRP proof did not match: it does not know the

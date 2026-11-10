@@ -11,8 +11,9 @@
 // FIDO2 is not supported (ADR 0004) but the empty `FIDO2` object is sent
 // as upstream does. `AuthModulus` is not ported.
 // Modified by UnicornOps on 2026-11-10: SRP password hash versions below 3
-// are refused (`MIN_SRP_VERSION`). go-srp's `NewAuth` answers versions 0 to
-// 2 as well.
+// are not supported (`MIN_SRP_VERSION`). Upstream answers them: go-srp's
+// `NewAuth` takes versions 0 to 4, and neither go-proton-api
+// (`NewClientWithLoginWithHVToken`) nor Bridge checks the version.
 
 //! Sessions: SRP login, the `Auth` response, new clients and token refresh.
 
@@ -304,11 +305,14 @@ impl Manager {
     }
 }
 
-/// The oldest SRP password hash version Zmail answers. Versions 3 and 4
-/// hash the password with bcrypt and the account's salt; versions 0 to 2
-/// (accounts that have not signed in to a Proton client for years) use
-/// plain hashes of the password and username, so a server that asks for
-/// one gets a proof it can test password guesses against cheaply.
+/// The oldest SRP password hash version Zmail answers.
+///
+/// Versions 3 and 4 hash the password with bcrypt and the salt the server
+/// sends. Versions 0 to 2 are Proton's older methods: bcrypt too, but
+/// salted with a hash of the username (version 0 also hashes the username
+/// and password together first). go-srp, and so Bridge, still answers
+/// them. Zmail does not: it has no account or test server that uses them,
+/// and no need to support them.
 const MIN_SRP_VERSION: u8 = 3;
 
 /// Builds the SRP proofs for a login challenge (go-srp `NewAuth` and

@@ -785,10 +785,10 @@ async fn refuses_a_server_that_cannot_prove_the_password() {
     assert!(matches!(error, Error::InvalidServerProof), "{error:?}");
 }
 
-/// A server that asks for a password hash without bcrypt (versions 0 to
-/// 2) gets no proof at all.
+/// A server that asks for one of the old password hash versions (0 to 2)
+/// gets no proof at all.
 #[tokio::test]
-async fn refuses_srp_versions_without_bcrypt() {
+async fn refuses_srp_versions_below_three() {
     for version in [0u8, 1, 2] {
         let server = MockServer::start(move |_, _| {
             Reply::json(
@@ -809,7 +809,7 @@ async fn refuses_srp_versions_without_bcrypt() {
             matches!(error, Error::SrpVersionTooOld(found) if found == version),
             "{error:?}"
         );
-        assert!(error.to_string().contains("account.proton.me"), "{error}");
+        assert!(error.to_string().contains("old sign-in method"), "{error}");
         // Only the challenge was fetched; no proof was sent.
         assert_eq!(server.requests().len(), 1);
     }

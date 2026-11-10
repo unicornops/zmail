@@ -299,14 +299,24 @@ Zmail is stricter than gopenpgp in one case: gopenpgp accepts a key with
 some parts locked and some not, Zmail refuses it. Proton's clients lock
 every part of a key.
 
-**SRP versions below 3 are refused (November 10, 2026).** go-srp answers
-password hash versions 0 to 4. Versions 0 to 2 hash the password without
-bcrypt, so the client proof lets whoever asked for one test password
-guesses cheaply. Zmail answers versions 3 and 4 only and otherwise stops
-before sending a proof, with an error that says to sign in at
-account.proton.me first (Proton's own clients move an old account to the
-current version when it signs in). Only an account that has not signed
-in to one of Proton's clients for years can still be on an older version.
+**SRP versions below 3 are not supported (November 10, 2026): a
+deviation from Bridge.** Bridge signs in through go-proton-api's
+`NewClientWithLoginWithHVToken`, which passes the `Version` from
+`/auth/v4/info` straight to go-srp's `NewAuth`. `HashPassword` there
+answers versions 0 to 4 and fails only for any other number ("pmapi:
+unsupported auth version"); nothing in go-srp, go-proton-api or Bridge
+refuses, warns about or otherwise treats versions 0 to 2 differently.
+Versions 3 and 4 hash the password with bcrypt and the salt the server
+sends. Versions 0 to 2 are Proton's older methods and use bcrypt as well,
+salted with the MD5 of the lower-cased username (version 2 first strips
+`-`, `.` and `_` from it; version 0 first hashes username and password
+together with SHA-512). Zmail answers versions 3 and 4 only and otherwise
+stops before sending a proof, with an error saying the account uses an
+old sign-in method Zmail does not support. This is a choice to support
+less, not a security fix: every version costs one bcrypt per password
+guess, so an old version gives whoever asks for it no cheaper attack.
+Zmail has no account, test vector from a live server or harness that
+exercises the old versions, and no need for them.
 
 **Decrypted data is bounded (November 10, 2026).** A compressed OpenPGP
 message expands as it is read. Zmail reads at most 128 MiB of plaintext
