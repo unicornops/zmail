@@ -41,7 +41,7 @@ use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use super::{KEY_LEN, KeyId, StoreKey, Subkey, hex, sync_parent_dir};
+use super::{KEY_LEN, KeyId, StoreKey, Subkey, hex, private, sync_parent_dir};
 
 /// The first bytes of every encrypted file.
 const MAGIC: &[u8; 4] = b"ZMB1";
@@ -142,7 +142,7 @@ impl BlobVault {
     pub fn write_from(&self, logical_name: &str, reader: &mut dyn Read) -> Result<(String, u64)> {
         let name = self.storage_name(logical_name);
         let path = self.path_of(&name)?;
-        fs::create_dir_all(&self.inner.directory)
+        private::create_private_dir_all(&self.inner.directory)
             .with_context(|| format!("failed to create {}", self.inner.directory.display()))?;
         let mut suffix = [0; 8];
         UnwrapErr(SysRng).fill_bytes(&mut suffix);
@@ -151,7 +151,7 @@ impl BlobVault {
             .directory
             .join(format!("{name}.{}.tmp", hex(&suffix)));
         let result = (|| {
-            let mut file = fs::File::create(&temporary)
+            let mut file = private::create_private_file(&temporary)
                 .with_context(|| format!("failed to create {}", temporary.display()))?;
             let length = self.seal(reader, &mut file)?;
             file.sync_all()

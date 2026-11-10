@@ -522,6 +522,17 @@ It does not protect against:
   and old backups.
 - **Metadata visible from outside the files**: the number and sizes of
   the attachment blobs, file timestamps, and the size of the database.
+  From other users of the same computer these are hidden as well: on
+  Unix the data directory, `attachments/` and the default `backups/` are
+  created 0700, and the database (SQLite gives its `-wal` and `-shm` the
+  database's mode), the lock files, the sidecar, attachment files and
+  backups 0600, whatever the umask; ones made before that are tightened
+  when the store opens (the attachment files once, while their directory
+  is still open to others). The lock files matter most: whoever can open
+  one can hold its lock and keep Zmail from opening the store or from
+  syncing. On Windows nothing is changed: the data directory is under
+  the user's profile, whose inherited access list admits the user, the
+  system and administrators.
 
 Full-disk encryption (FileVault, BitLocker, LUKS) covers several of
 these (swap, the open cache, old blocks) and is what Zmail recommends

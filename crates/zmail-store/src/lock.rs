@@ -19,6 +19,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use zmail_security::vault::private;
 
 use crate::encryption::suffixed;
 
@@ -104,7 +105,7 @@ impl SyncLock {
     /// waits.
     pub fn try_acquire(database: &Path) -> Result<Option<Self>> {
         if let Some(parent) = database.parent() {
-            fs::create_dir_all(parent)
+            private::create_private_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         Ok(try_lock_exclusive(&sync_path(database))?.map(|file| Self { _file: file }))
@@ -134,14 +135,20 @@ fn try_lock_exclusive(path: &Path) -> Result<Option<fs::File>> {
     }
 }
 
+/// Opens the lock file at `path`, creating it for its owner alone: anyone
+/// who can open a lock file can hold its lock, and keep Zmail from opening
+/// the store or from syncing.
 fn open(path: &Path) -> Result<fs::File> {
-    fs::OpenOptions::new()
+    let file = private::private_file_options()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(path)
-        .with_context(|| format!("failed to open {}", path.display()))
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    // One made before lock files were private.
+    let _ = private::make_file_private(&file);
+    Ok(file)
 }
 
 // No test in this crate's library may start a process: the child gets

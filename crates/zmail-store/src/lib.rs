@@ -769,7 +769,7 @@ impl LocalStore {
     pub fn open(path: impl AsRef<Path>, key: StoreKey) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
+            zmail_security::vault::private::create_private_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         let lock = Arc::new(lock::StoreLock::shared(&path)?);
@@ -785,6 +785,7 @@ impl LocalStore {
             );
         }
 
+        encryption::make_store_private(&path);
         let vault = BlobVault::new(attachment_storage_dir(&path), &key);
         let store = Self {
             path: Arc::new(path),
@@ -1640,9 +1641,22 @@ impl LocalStore {
             .to_str()
             .context("the backup path must be valid UTF-8")?
             .to_owned();
+        // The backup is the whole store: it starts as an empty file of its
+        // owner's alone, which `VACUUM INTO` accepts and fills in. A file
+        // already there is left for SQLite to refuse.
+        let created = zmail_security::vault::private::private_file_options()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .is_ok();
         let conn = self.connection()?;
-        conn.execute("VACUUM INTO ?1", params![target])
-            .with_context(|| format!("failed to back the store up to {}", path.display()))?;
+        if let Err(error) = conn.execute("VACUUM INTO ?1", params![target]) {
+            if created {
+                let _ = fs::remove_file(path);
+            }
+            return Err(error)
+                .with_context(|| format!("failed to back the store up to {}", path.display()));
+        }
         Ok(())
     }
 
@@ -1650,7 +1664,7 @@ impl LocalStore {
     /// `keep` backups. Returns the created backup path.
     pub fn create_backup(&self, directory: impl AsRef<Path>, keep: usize) -> Result<PathBuf> {
         let directory = directory.as_ref();
-        fs::create_dir_all(directory)
+        zmail_security::vault::private::create_private_dir_all(directory)
             .with_context(|| format!("failed to create {}", directory.display()))?;
 
         let nanos = SystemTime::now()

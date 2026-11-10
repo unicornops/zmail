@@ -21,6 +21,7 @@ use std::{
 use anyhow::{Context, anyhow};
 
 mod blob;
+pub mod private;
 
 pub use blob::{BlobReader, BlobVault, file_key_id, is_encrypted_file};
 use hkdf::Hkdf;
@@ -505,7 +506,7 @@ impl StoreKeyRecord {
         text.push('\n');
         let temporary = path.with_extension("json.tmp");
         {
-            let mut file = fs::File::create(&temporary)
+            let mut file = private::create_private_file(&temporary)
                 .with_context(|| format!("failed to create {}", temporary.display()))?;
             file.write_all(text.as_bytes())
                 .and_then(|()| file.sync_all())
