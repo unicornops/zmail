@@ -1,6 +1,7 @@
 //! The unlock step before the workspace (ADR 0005): a quick unlock opens
 //! no window, a locked keychain offers Try Again and never opens the store
-//! unencrypted, and a lost key offers Start Over.
+//! unencrypted, a lost key offers Start Over, and an unencrypted database
+//! in the encrypted store's place is not opened and offers Move It Aside.
 
 use std::{
     cell::RefCell,
@@ -14,7 +15,7 @@ use std::{
 
 use gpui::{TestAppContext, WindowHandle};
 use zmail_security::InMemorySecretStore;
-use zmail_security::vault::{KeyId, StoreKey};
+use zmail_security::vault::{KeyId, StoreKey, StoreKeyRecord, StoreLocation};
 use zmail_store::{LocalStore, MigrationReport, StoreKeychain};
 
 use crate::store_unlock::{
@@ -45,6 +46,31 @@ impl StoreKeychain for Keychain {
 
     fn delete_store_key(&self, id: KeyId) -> anyhow::Result<()> {
         self.keys.delete_store_key(id)
+    }
+
+    fn save_store_marker(
+        &self,
+        location: &StoreLocation,
+        marker: &StoreKeyRecord,
+    ) -> anyhow::Result<()> {
+        if self.locked.load(Ordering::SeqCst) {
+            anyhow::bail!("the keychain is locked");
+        }
+        self.keys.save_store_marker(location, marker)
+    }
+
+    fn load_store_marker(
+        &self,
+        location: &StoreLocation,
+    ) -> anyhow::Result<Option<StoreKeyRecord>> {
+        if self.locked.load(Ordering::SeqCst) {
+            anyhow::bail!("the keychain is locked");
+        }
+        self.keys.load_store_marker(location)
+    }
+
+    fn delete_store_marker(&self, location: &StoreLocation) -> anyhow::Result<()> {
+        self.keys.delete_store_marker(location)
     }
 }
 
@@ -187,6 +213,58 @@ fn a_lost_key_offers_start_over(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_replaced_store_is_not_opened_and_offers_move_it_aside(cx: &mut TestAppContext) {
+    let directory = scratch("replaced");
+    let path = directory.join("zmail.sqlite3");
+    let keychain = Arc::new(Keychain::default());
+    let key_id = {
+        let (store, _) = LocalStore::unlock(&path, &*keychain, &|_| {}).expect("the store opens");
+        store.store_key().id()
+    };
+    // An unencrypted database in its place: SQLite's plaintext header is
+    // all the store looks at before refusing.
+    let mut planted = b"SQLite format 3\0".to_vec();
+    planted.resize(4096, 0);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(directory.join(format!("zmail.sqlite3{suffix}")));
+    }
+    std::fs::write(&path, &planted).expect("planted");
+
+    let opened = unlock(path.clone(), keychain, cx);
+    settle(cx);
+    assert!(opened.borrow().is_none(), "the planted store is not opened");
+    let handle = unlock_window(cx).expect("the window explains");
+    assert_eq!(phase(handle, cx), UnlockPhase::Replaced);
+    assert_eq!(
+        std::fs::read(&path).expect("readable"),
+        planted,
+        "the file is left as it was found"
+    );
+
+    handle
+        .update(cx, |view, _, cx| view.move_replaced_aside(cx))
+        .expect("the window is open");
+    settle(cx);
+    let (store, notice) = opened.borrow_mut().take().expect("an empty store opens");
+    assert!(store.needs_onboarding().expect("the new store reads"));
+    assert_eq!(store.store_key().id(), key_id, "with the store's own key");
+    let notice = notice.expect("the workspace says what happened");
+    assert!(notice.contains("was not opened"), "{notice}");
+    let aside: Vec<_> = std::fs::read_dir(&directory)
+        .expect("listed")
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("replaced-"))
+        .collect();
+    assert_eq!(aside.len(), 1, "the planted file is kept aside");
+    assert_eq!(
+        std::fs::read(aside[0].path().join("zmail.sqlite3")).expect("readable"),
+        planted
+    );
+    drop(store);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[gpui::test]
 fn every_phase_shows_its_actions(cx: &mut TestAppContext) {
     for (phase, buttons) in [
         (UnlockPhase::Working(None), &[][..]),
@@ -197,6 +275,10 @@ fn every_phase_shows_its_actions(cx: &mut TestAppContext) {
         (
             UnlockPhase::Unreadable,
             &["store-unlock-quit", "store-unlock-start-over"][..],
+        ),
+        (
+            UnlockPhase::Replaced,
+            &["store-unlock-quit", "store-unlock-move-aside"][..],
         ),
         (
             UnlockPhase::Failed("disk full".to_owned()),

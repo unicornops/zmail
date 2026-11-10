@@ -8,6 +8,12 @@ Proton Mail (#237, ADR 0004): Proton mail is end-to-end encrypted, and
 Zmail must not be the place where it sits on disk in plaintext. The
 decision applies to every account, not only Proton ones.
 
+Amended in November 2026 after a security review: the keychain keeps a
+marker for each encrypted store (§3), a plaintext database found where an
+encrypted store was is refused instead of encrypted (§4), an interrupted
+rotation deletes a key only when the marker agrees (§3), and the blob
+migration never leaves the attachment directory (§4, step 4).
+
 ## Context
 
 Everything Zmail keeps lives in one data directory:
@@ -202,6 +208,22 @@ explicit export, as is `export-account` (mbox).
   cipher settings. That lets Zmail tell "this store needs key X and the
   keychain has no X" apart from "this is a plaintext store", and leaves
   room for a passphrase-wrapped copy of the key later.
+- **A marker per store, also in the keychain**, under
+  `dev.zmail.desktop` / `store-at-<location>`, where the location is the
+  first 16 bytes of SHA-256 of the database's absolute path (as given;
+  links are not resolved, so redirecting the path through a link does not
+  select another marker). Its value is the store's key id, plus the
+  pending key id while a rotation runs: the keychain's own copy of the
+  sidecar. The sidecar can be written by anything that can write the data
+  directory; the marker only by something that can write the keychain.
+  It is written (or corrected) each time the store opens encrypted with
+  its key under the exclusive lock, so a store encrypted before markers
+  existed gets one on its next start with no migration step, and each
+  store sharing a keychain (`ZMAIL_DATA_DIR`) has its own. Writing it is
+  best effort: a keychain that refuses the marker never keeps an
+  encrypted store from opening, and the next start tries again. The
+  marker is what §4 and the rotation below check; it is not needed to
+  open an encrypted store, whose key and sidecar decide that as before.
 - Creation order is crash-safe: generate, write to the keychain, read it
   back and compare, write the sidecar, and only then write encrypted
   data. Zmail never deletes the keychain entry except when the user
@@ -255,7 +277,16 @@ then shows a recovery screen instead of the workspace:
   keychain entry are deleted. The database opens with exactly one of the
   two keys, which tells the next start how far a crashed rotation got:
   before the swap it is undone (the copy, the new key's files and the new
-  key go), after it it is finished. A user who fears their old key leaked
+  key go), after it it is finished. The sidecar alone never gets a key
+  deleted: the marker names the pending key from before the sidecar does
+  until the rotation is over, and a start that finds a pending key in the
+  sidecar deletes the unused key and its files only when the marker names
+  the same two keys. Otherwise (a rotation interrupted in a build from
+  before markers, a sidecar someone else wrote, or one naming the same
+  key twice) it only makes the sidecar name the key that opens the
+  database and leaves every key and file where it is: an unused keychain
+  entry costs nothing, and a deleted one may be another store's. A
+  rotation whose marker can't be written does not start. A user who fears their old key leaked
   must also assume old disk images and backups are readable with it;
   rotation protects what is written afterwards.
 - *Changing how the key is wrapped* (adding a passphrase later) does not
@@ -276,7 +307,11 @@ touches the store:
 
 1. **Detect.** A file that starts with `SQLite format 3\0` is plaintext;
    a SQLCipher file starts with its random salt. The header is the source
-   of truth, not the sidecar.
+   of truth, not the sidecar. A plaintext file is migrated only when the
+   keychain has no marker (§3) for the store's path; see "A plaintext
+   store where an encrypted one was" below. The marker is written once
+   the encrypted database has opened with its key, never before the
+   rename in step 3, so an interrupted migration is always resumed.
 2. **Key.** Create the key as in §3, before any encrypted byte exists.
 3. **Database, by copy.** Checkpoint the WAL (`wal_checkpoint(TRUNCATE)`),
    `ATTACH` a new `zmail.sqlite3.encrypting` with the key, run
@@ -294,7 +329,10 @@ touches the store:
    `message_attachments` and `draft_attachments` that isn't an opaque
    name yet: encrypt the plaintext file to its opaque name (temp, fsync,
    rename), delete the plaintext file, then point every row that used the
-   old name at the new one. The new name follows from the old one, so a
+   old name at the new one. Only files in `attachments/` itself are read
+   or deleted: a draft copy's row holds an absolute path, of which only
+   the file name is used, links are not followed, and when `attachments`
+   is itself a link the step does nothing. The new name follows from the old one, so a
    crash between the steps is finished by the next start, which runs this
    step whenever a row still has an old name. Last, any plaintext file left
    in `attachments/` (no row names one any more) is deleted, and so are
@@ -328,6 +366,38 @@ touches the store:
 **If migration can't finish** (disk full, keychain unavailable), Zmail
 does not open the plaintext store: it shows the error and Retry, and
 never falls back to plaintext (Rob's decision).
+
+**A plaintext store where an encrypted one was.** Once a store has
+opened encrypted, a plaintext database at its path did not come from
+Zmail. Something that can write the data directory but not read the
+keychain (a synced or restored folder, another OS on the same disk,
+another program of the same user on macOS) could put one there: its
+account rows would point at another server, and Zmail would sign in to
+it with the passwords in the keychain, which are named by account row id
+only. So when the marker exists and the file is plaintext, Zmail does
+not open it, does not encrypt it and makes no key for it, whatever the
+sidecar says:
+
+- The GUI's unlock window says "Your mail store was replaced", with
+  Quit and Move It Aside. The CLI and the terminal UI stop with the same
+  explanation and what to do.
+- Move It Aside moves the database and its journals to
+  `replaced-<time>` beside the store. The sidecar, the attachment files
+  and the backups stay, so the next start makes an empty store with the
+  same key and a backup of the encrypted store still opens.
+- If the keychain can't be asked for the marker, a plaintext file is not
+  migrated: that is the keychain error with Retry, as for a key.
+- A missing database is a new store, with or without a marker; nothing
+  in it comes from outside.
+- For a user who puts an old unencrypted store back on purpose,
+  `LocalStore::forget_encrypted_store` deletes that one store's marker,
+  after which the file is migrated as in step 1. No command calls it yet.
+
+What the marker does not cover: a store that has never opened encrypted
+on this keychain (a first migration is trusted, as it always was), a
+keychain that was reset together with the swap (the account passwords
+are gone with it), and a data directory that was moved, whose new path
+has no marker until its first encrypted open.
 
 ### 5. Performance
 
@@ -461,8 +531,8 @@ alongside this.
 
 - `zmail-security` gains the `vault` module: the store key and its
   keychain slot (`store-<key id>`, a store-level entry beside the
-  per-account `SecretSlot`s), the sidecar, HKDF subkeys and the blob
-  format. Direct dependencies on `aes-gcm` (with `stream`), `hkdf`,
+  per-account `SecretSlot`s), the store's marker (`store-at-<location>`),
+  the sidecar, HKDF subkeys and the blob format. Direct dependencies on `aes-gcm` (with `stream`), `hkdf`,
   `hmac`, `sha2` and `zeroize`, all already in `Cargo.lock`.
 - `LocalStore::open` takes the store key; the app resolves it from the
   keychain (creating it, migrating, or showing recovery). The IMAP and

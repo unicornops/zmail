@@ -175,6 +175,8 @@ MATRIX=(
   "unlock-keychain-dark unlock-keychain dark 560 460"
   "unlock-unreadable-dark unlock-unreadable dark 560 460"
   "unlock-unreadable-light unlock-unreadable light 560 460"
+  "unlock-replaced-dark unlock-replaced dark 560 460"
+  "unlock-replaced-light unlock-replaced light 560 460"
   "inbox-dark-150 inbox@150 dark 1280 800"
   "reader-dark-150 reader@150 dark 1280 800"
   "compose-dark-150 compose@150 dark 760 680"

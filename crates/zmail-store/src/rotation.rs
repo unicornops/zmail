@@ -20,6 +20,15 @@
 //! next start undoes the rotation (the copy, the new key's files and the
 //! new key go). A crash after it leaves one that opens with the new key:
 //! the next start finishes step 5.
+//!
+//! The record is a file anyone who can write the data directory can write,
+//! so it is not what allows a key to be deleted. The keychain's marker for
+//! the store ([`StoreLocation`]) names the pending key too, from before the
+//! record does until the rotation is over; a start that finds a pending
+//! key in the record deletes the unused key and its files only when the
+//! marker names the same two keys. Otherwise it only makes the record name
+//! the key that opens the database, and leaves every key where it is: a
+//! key nobody uses costs nothing, and a deleted one can be another store's.
 
 use std::{
     fs,
@@ -30,12 +39,12 @@ use std::{
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, params};
 use zmail_security::vault::{
-    self, BlobVault, KeyId, StoreKey, StoreKeyRecord, StoreKeychain, file_key_id,
+    self, BlobVault, KeyId, StoreKey, StoreKeyRecord, StoreKeychain, StoreLocation, file_key_id,
 };
 
 use crate::encryption::{
-    export_with_progress, remove_journals, remove_with_journals, store_file_state, suffixed,
-    sync_file, verify_copy,
+    export_with_progress, remember_encrypted_store, remove_journals, remove_with_journals,
+    store_file_state, suffixed, sync_file, verify_copy,
 };
 use crate::{
     LocalStore, MigrationProgress, StoreFileState, StoreOpenError, attachment_storage_dir,
@@ -96,11 +105,18 @@ pub(crate) fn rotate_key_until(
     let old_key = vault::load_key(keychain, record.key_id)?;
 
     let new_key = vault::stash_new_key(keychain)?;
-    StoreKeyRecord {
+    let pending = StoreKeyRecord {
         key_id: old_key.id(),
         pending_key_id: Some(new_key.id()),
+    };
+    // The keychain learns of the rotation before the record does: it is
+    // what lets a later start delete the key this rotation leaves unused.
+    if let Err(error) = keychain.save_store_marker(&StoreLocation::of(path), &pending) {
+        // Nothing names the new key yet, and this call made it.
+        let _ = keychain.delete_store_key(new_key.id());
+        return Err(StoreOpenError::Keychain(error));
     }
-    .write(&record_path)?;
+    pending.write(&record_path)?;
 
     // The lock is held until the old key is gone, so nothing opens the
     // store half way.
@@ -111,7 +127,7 @@ pub(crate) fn rotate_key_until(
             RotationStep::Renamed
         )));
     }
-    finish(path, keychain, old_key.id(), new_key.id())?;
+    finish(path, keychain, old_key.id(), new_key.id(), true)?;
     drop(lock);
     progress(MigrationProgress::Finished);
     Ok(new_key.id())
@@ -275,34 +291,56 @@ fn reencrypt(
     }
 }
 
-/// Step 5: the record names the new key alone, and the old key's files and
-/// keychain entry go.
-fn finish(path: &Path, keychain: &dyn StoreKeychain, old: KeyId, new: KeyId) -> Result<()> {
+/// Step 5: the record and the marker name the new key alone, and the old
+/// key's files and keychain entry go. Without `delete_unused` (the keychain
+/// does not vouch for the rotation) the old key and its files stay.
+fn finish(
+    path: &Path,
+    keychain: &dyn StoreKeychain,
+    old: KeyId,
+    new: KeyId,
+    delete_unused: bool,
+) -> Result<()> {
     StoreKeyRecord {
         key_id: new,
         pending_key_id: None,
     }
     .write(&StoreKeyRecord::path_for(path))?;
-    remove_files_with_key(&attachment_storage_dir(path), old)?;
-    keychain
-        .delete_store_key(old)
-        .context("failed to delete the old store key from the keychain")?;
+    remember_encrypted_store(keychain, &StoreLocation::of(path), new);
+    if delete_unused {
+        remove_files_with_key(&attachment_storage_dir(path), old)?;
+        keychain
+            .delete_store_key(old)
+            .context("failed to delete the old store key from the keychain")?;
+    }
     Ok(())
 }
 
-/// Undoes a rotation that stopped before the swap: the copy, the new key's
-/// files and the new key go, and the record names the old key alone.
-fn undo(path: &Path, keychain: &dyn StoreKeychain, old: KeyId, new: KeyId) -> Result<()> {
+/// Undoes a rotation that stopped before the swap: the copy goes, and the
+/// record and the marker name the old key alone; with `delete_unused`, the
+/// new key and its files go too.
+fn undo(
+    path: &Path,
+    keychain: &dyn StoreKeychain,
+    old: KeyId,
+    new: KeyId,
+    delete_unused: bool,
+) -> Result<()> {
     remove_with_journals(&suffixed(path, ".rekeying"))?;
-    remove_files_with_key(&attachment_storage_dir(path), new)?;
+    if delete_unused {
+        remove_files_with_key(&attachment_storage_dir(path), new)?;
+    }
     StoreKeyRecord {
         key_id: old,
         pending_key_id: None,
     }
     .write(&StoreKeyRecord::path_for(path))?;
-    keychain
-        .delete_store_key(new)
-        .context("failed to delete an unused store key from the keychain")?;
+    remember_encrypted_store(keychain, &StoreLocation::of(path), old);
+    if delete_unused {
+        keychain
+            .delete_store_key(new)
+            .context("failed to delete an unused store key from the keychain")?;
+    }
     Ok(())
 }
 
@@ -313,13 +351,24 @@ pub(crate) fn resolve_interrupted(
     keychain: &dyn StoreKeychain,
 ) -> Result<(), StoreOpenError> {
     let record_path = StoreKeyRecord::path_for(path);
-    let Some(StoreKeyRecord {
-        key_id: old,
-        pending_key_id: Some(new),
-    }) = StoreKeyRecord::read(&record_path)?
+    let Some(
+        record @ StoreKeyRecord {
+            key_id: old,
+            pending_key_id: Some(new),
+        },
+    ) = StoreKeyRecord::read(&record_path)?
     else {
         return Ok(());
     };
+    // Only a rotation the keychain knows of may delete a key or its files:
+    // the record alone could name any key in the keychain, another store's
+    // or (as both ids) this store's own. A keychain that does not answer
+    // counts as one that does not know.
+    let delete_unused = old != new
+        && matches!(
+            keychain.load_store_marker(&StoreLocation::of(path)),
+            Ok(Some(marker)) if marker == record
+        );
     let opens = |id: KeyId| -> Result<bool, StoreOpenError> {
         let key = match vault::load_key(keychain, id) {
             Ok(key) => key,
@@ -333,9 +382,9 @@ pub(crate) fn resolve_interrupted(
         }
     };
     if opens(old)? {
-        undo(path, keychain, old, new)?;
+        undo(path, keychain, old, new, delete_unused)?;
     } else if opens(new)? {
-        finish(path, keychain, old, new)?;
+        finish(path, keychain, old, new, delete_unused)?;
     } else {
         return Err(StoreOpenError::Unreadable { key_id: Some(old) });
     }
@@ -535,6 +584,20 @@ mod tests {
         assert_eq!(record.key_id, key);
         assert_eq!(record.pending_key_id, None);
         assert!(!suffixed(path, ".rekeying").exists());
+        assert_eq!(
+            keychain
+                .load_store_marker(&StoreLocation::of(path))
+                .expect("the marker loads"),
+            Some(record),
+            "the keychain's marker names the same key"
+        );
+    }
+
+    /// The key record of the store at `path`.
+    fn record(path: &Path) -> StoreKeyRecord {
+        StoreKeyRecord::read(&StoreKeyRecord::path_for(path))
+            .expect("readable")
+            .expect("exists")
     }
 
     /// Whether any file under `directory` holds `needle` in plaintext.
@@ -633,5 +696,210 @@ mod tests {
             assert!(!plaintext_anywhere(&directory, PHRASE.as_bytes()));
             let _ = fs::remove_dir_all(directory);
         }
+    }
+
+    #[test]
+    fn a_rotation_is_announced_to_the_keychain_before_the_record() {
+        let directory = temp_dir("announce");
+        let path = directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        seeded_store(&path, &keychain);
+
+        rotate_key_until(&path, &keychain, &no_progress, Some(RotationStep::Exported))
+            .expect_err("stopped");
+        let pending = record(&path);
+        assert!(pending.pending_key_id.is_some());
+        assert_eq!(
+            keychain
+                .load_store_marker(&StoreLocation::of(&path))
+                .expect("loads"),
+            Some(pending)
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_forged_pending_key_never_deletes_a_key_from_the_keychain() {
+        // Another store shares the keychain; its key id is in its record,
+        // for anyone to read.
+        let other_directory = temp_dir("forged-other");
+        let other_path = other_directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        let other_account = seeded_store(&other_path, &keychain);
+        let other = record(&other_path).key_id;
+
+        let directory = temp_dir("forged");
+        let path = directory.join("zmail.sqlite3");
+        let account = seeded_store(&path, &keychain);
+        let own = record(&path).key_id;
+
+        // The record names the other store's key as pending, as the key the
+        // store is "moving from", and its own key as both.
+        for (key_id, pending) in [(own, other), (other, own), (own, own)] {
+            StoreKeyRecord {
+                key_id,
+                pending_key_id: Some(pending),
+            }
+            .write(&StoreKeyRecord::path_for(&path))
+            .expect("the record is forged");
+
+            assert_intact(&path, &keychain, account, own);
+            assert!(
+                keychain.load_store_key(other).expect("readable").is_some(),
+                "{key_id} -> {pending}: the other store's key is kept"
+            );
+        }
+        assert_intact(&other_path, &keychain, other_account, other);
+        let _ = fs::remove_dir_all(directory);
+        let _ = fs::remove_dir_all(other_directory);
+    }
+
+    #[test]
+    fn an_interrupted_rotation_the_keychain_does_not_know_of_keeps_both_keys() {
+        // As after a crash in a rotation started by a Zmail from before
+        // markers: the store recovers, and no key is deleted on the record's
+        // word alone.
+        for step in [
+            RotationStep::Exported,
+            RotationStep::Reencrypted,
+            RotationStep::Renamed,
+        ] {
+            let directory = temp_dir("unmarked");
+            let path = directory.join("zmail.sqlite3");
+            let keychain = InMemorySecretStore::default();
+            let account = seeded_store(&path, &keychain);
+            let old = record(&path).key_id;
+            rotate_key_until(&path, &keychain, &no_progress, Some(step)).expect_err("stopped");
+            let pending = record(&path).pending_key_id.expect("pending");
+            keychain
+                .delete_store_marker(&StoreLocation::of(&path))
+                .expect("deleted");
+
+            let expected = if step == RotationStep::Renamed {
+                pending
+            } else {
+                old
+            };
+            let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+            assert_eq!(store.store_key().id(), expected, "{step:?}");
+            assert_eq!(
+                store
+                    .search_threads(account, PHRASE, 10)
+                    .expect("search")
+                    .len(),
+                1
+            );
+            let attachment: i64 = store
+                .connection()
+                .expect("connection")
+                .query_row("SELECT id FROM message_attachments", [], |row| row.get(0))
+                .expect("attachment");
+            assert_eq!(
+                store
+                    .attachment_blob(attachment)
+                    .expect("blob")
+                    .read()
+                    .expect("decrypts"),
+                PHRASE.as_bytes()
+            );
+            drop(store);
+            assert_eq!(
+                record(&path),
+                StoreKeyRecord {
+                    key_id: expected,
+                    pending_key_id: None
+                }
+            );
+            for key in [old, pending] {
+                assert!(
+                    keychain.load_store_key(key).expect("readable").is_some(),
+                    "{step:?}: {key} is kept"
+                );
+            }
+            assert!(!suffixed(&path, ".rekeying").exists());
+            assert!(!plaintext_anywhere(&directory, PHRASE.as_bytes()));
+
+            // A rotation afterwards works as usual.
+            let new = LocalStore::rotate_key(&path, &keychain, &no_progress).expect("rotates");
+            let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+            assert_eq!(store.store_key().id(), new);
+            drop(store);
+            let _ = fs::remove_dir_all(directory);
+        }
+    }
+
+    /// A keychain whose keys work and whose markers can't be written.
+    #[derive(Default)]
+    struct NoMarkerKeychain(InMemorySecretStore);
+
+    impl StoreKeychain for NoMarkerKeychain {
+        fn save_store_key(&self, key: &StoreKey) -> Result<()> {
+            self.0.save_store_key(key)
+        }
+        fn load_store_key(&self, id: KeyId) -> Result<Option<StoreKey>> {
+            self.0.load_store_key(id)
+        }
+        fn delete_store_key(&self, id: KeyId) -> Result<()> {
+            self.0.delete_store_key(id)
+        }
+        fn save_store_marker(&self, _: &StoreLocation, _: &StoreKeyRecord) -> Result<()> {
+            bail!("the keychain refused the marker")
+        }
+        fn load_store_marker(&self, _: &StoreLocation) -> Result<Option<StoreKeyRecord>> {
+            Ok(None)
+        }
+        fn delete_store_marker(&self, _: &StoreLocation) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_rotation_the_keychain_cannot_record_does_not_start() {
+        let directory = temp_dir("no-marker");
+        let path = directory.join("zmail.sqlite3");
+        let keychain = NoMarkerKeychain::default();
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        let old = store.store_key().id();
+        drop(store);
+        let before = record(&path);
+
+        let error = LocalStore::rotate_key(&path, &keychain, &no_progress).expect_err("refused");
+        assert!(matches!(error, StoreOpenError::Keychain(_)), "{error:?}");
+        assert_eq!(record(&path), before, "the record is untouched");
+        assert!(keychain.0.load_store_key(old).expect("readable").is_some());
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert_eq!(store.store_key().id(), old);
+        drop(store);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_plaintext_database_put_in_place_during_a_rotation_is_refused() {
+        let directory = temp_dir("replaced-rotating");
+        let path = directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        seeded_store(&path, &keychain);
+        rotate_key_until(&path, &keychain, &no_progress, Some(RotationStep::Exported))
+            .expect_err("stopped");
+        let pending = record(&path);
+
+        // Any plaintext SQLite file will do.
+        remove_with_journals(&path).expect("removed");
+        Connection::open(&path)
+            .expect("opens")
+            .execute_batch("CREATE TABLE planted(id INTEGER);")
+            .expect("written");
+        assert_eq!(
+            store_file_state(&path).expect("state"),
+            StoreFileState::Plaintext
+        );
+
+        let error = LocalStore::unlock(&path, &keychain, &no_progress).expect_err("refused");
+        assert!(error.replaced_store().is_some(), "{error:?}");
+        assert_eq!(record(&path), pending, "nothing was undone or finished");
+        for key in [pending.key_id, pending.pending_key_id.expect("pending")] {
+            assert!(keychain.load_store_key(key).expect("readable").is_some());
+        }
+        let _ = fs::remove_dir_all(directory);
     }
 }

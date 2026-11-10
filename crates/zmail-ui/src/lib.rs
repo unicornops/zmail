@@ -315,6 +315,8 @@ pub enum UnlockFixture {
     Keychain,
     /// The store's key is gone.
     Unreadable,
+    /// An unencrypted database is where the encrypted store was.
+    Replaced,
 }
 
 impl UnlockFixture {
@@ -330,6 +332,7 @@ impl UnlockFixture {
                 "failed to load the mail store key: the keychain is locked".to_owned(),
             ),
             Self::Unreadable => store_unlock::UnlockPhase::Unreadable,
+            Self::Replaced => store_unlock::UnlockPhase::Replaced,
         }
     }
 }

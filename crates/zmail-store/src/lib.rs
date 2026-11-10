@@ -29,7 +29,9 @@ use zmail_core::{
     participants::address_entries, preferences::UiPreferences,
 };
 use zmail_security::html::text_of_stored_html;
-pub use zmail_security::vault::{BlobVault, StoreKey, StoreKeychain};
+pub use zmail_security::vault::{
+    BlobVault, StoreKey, StoreKeyRecord, StoreKeychain, StoreLocation,
+};
 
 mod address_history;
 mod connection;
@@ -43,8 +45,9 @@ mod search;
 
 use connection::{StoreConnection, StoreToken};
 pub use encryption::{
-    MigrationProgress, MigrationReport, StoreFileState, StoreOpenError, encrypt_plaintext_store,
-    move_unreadable_store_aside, store_file_state,
+    MigrationProgress, MigrationReport, ReplacedStoreError, StoreFileState, StoreOpenError,
+    encrypt_plaintext_store, move_replaced_store_aside, move_unreadable_store_aside,
+    store_file_state,
 };
 pub use identities::{HiddenIdentity, IdentityLink, IdentityMergeReport};
 pub use lock::SyncLock;
