@@ -27,6 +27,40 @@ pub const CID_SCHEME: &str = "cid";
 /// replaces every `href` with one, and a click on it comes back to Zmail.
 pub const LINK_SCHEME: &str = "zmail-link";
 
+/// The image types Zmail serves to a page, for inline (`cid:`) parts and
+/// remote images alike: raster formats only. SVG is a document (it can
+/// carry scripts, links and loads of its own), so it is never served, as
+/// the sanitiser never keeps a `data:` SVG.
+pub const RASTER_IMAGE_TYPES: &[&str] = &[
+    "image/png",
+    "image/apng",
+    "image/gif",
+    "image/jpeg",
+    // Not registered, but common in mail.
+    "image/jpg",
+    "image/pjpeg",
+    "image/webp",
+    "image/avif",
+    "image/bmp",
+];
+
+/// Whether `content_type` (any case, parameters allowed) is one of
+/// [`RASTER_IMAGE_TYPES`].
+pub fn is_raster_image(content_type: &str) -> bool {
+    let kind = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    RASTER_IMAGE_TYPES.contains(&kind.as_str())
+}
+
+/// The most remote resources one message may fetch once the user loads
+/// its remote content; the rest stay blocked. Each is at most
+/// `RemoteLimits::max_bytes`.
+pub const MAX_REMOTE_IMAGES: usize = 100;
+
 /// A prepared message for the web renderer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebDocument {
@@ -80,8 +114,9 @@ impl Default for Appearance {
 
 impl WebDocument {
     /// The document for a prepared message: its sanitised HTML, its inline
-    /// image parts (a part that cannot be read, or is not an image, is
-    /// left out) and, when `remote` allows it, its remote images.
+    /// image parts (a part that cannot be read, or is not a raster image,
+    /// [`is_raster_image`], is left out) and, when `remote` allows it, its
+    /// remote images (the first [`MAX_REMOTE_IMAGES`]).
     ///
     /// `prepared` must have been prepared with remote content blocked, so
     /// its HTML has a `zmail-blocked:<n>` placeholder for every remote
@@ -98,7 +133,7 @@ impl WebDocument {
         let resources = prepared
             .inline_parts
             .iter()
-            .filter(|part| part.content_type.to_ascii_lowercase().starts_with("image/"))
+            .filter(|part| is_raster_image(&part.content_type))
             .filter_map(|part| match part.read() {
                 Ok(bytes) => Some(InlineResource {
                     content_id: part.content_id.clone(),
@@ -115,11 +150,16 @@ impl WebDocument {
             })
             .collect();
         let remote = if remote.allows() {
+            let mut fetches = 0;
             let fetchable: Vec<Option<String>> = prepared
                 .remote
                 .resources
                 .iter()
-                .map(|resource| is_public_remote_url(&resource.url).then(|| resource.url.clone()))
+                .map(|resource| {
+                    let fetch = fetches < MAX_REMOTE_IMAGES && is_public_remote_url(&resource.url);
+                    fetches += usize::from(fetch);
+                    fetch.then(|| resource.url.clone())
+                })
                 .collect();
             html = rewrite_blocked(&html, |index| {
                 fetchable
@@ -351,32 +391,193 @@ pub fn remote_url(index: usize) -> String {
 
 /// Replaces each `zmail-blocked:<n>` placeholder in `html` that `replace`
 /// gives an address for; the others stay blocked.
+///
+/// The sanitiser writes placeholders only where a resource loads: in the
+/// value of an `src`, `background` or `style` attribute, and in a
+/// `<style>` element. Only those are rewritten, so the same characters in
+/// the message's text, or in another attribute (`alt`, `title`), are left
+/// as they are.
 fn rewrite_blocked(html: &str, replace: impl Fn(usize) -> Option<String>) -> String {
     let prefix = format!("{BLOCKED_SCHEME}:");
     let mut out = String::with_capacity(html.len());
+    let mut markup = Markup::Text;
     let mut rest = html;
-    while let Some(at) = rest.find(&prefix) {
-        out.push_str(&rest[..at]);
-        let after = &rest[at + prefix.len()..];
-        let digits = after
-            .find(|ch: char| !ch.is_ascii_digit())
-            .unwrap_or(after.len());
-        let replacement = after[..digits]
-            .parse()
-            .ok()
-            .filter(|_| digits > 0)
-            .and_then(&replace);
-        match replacement {
-            Some(address) => out.push_str(&address),
-            None => {
-                out.push_str(&prefix);
-                out.push_str(&after[..digits]);
-            }
+    while let Some(ch) = rest.chars().next() {
+        if markup.loads_resources() && rest.starts_with(&prefix) {
+            let after = &rest[prefix.len()..];
+            let digits = after
+                .find(|ch: char| !ch.is_ascii_digit())
+                .unwrap_or(after.len());
+            let replacement = after[..digits]
+                .parse()
+                .ok()
+                .filter(|_| digits > 0)
+                .and_then(&replace);
+            out.push_str(
+                replacement
+                    .as_deref()
+                    .unwrap_or(&rest[..prefix.len() + digits]),
+            );
+            rest = &after[digits..];
+            continue;
         }
-        rest = &after[digits..];
+        markup = markup.next(ch, rest);
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
     }
-    out.push_str(rest);
     out
+}
+
+/// Where a scan of serialised HTML is, as far as [`rewrite_blocked`]
+/// needs to know. Sanitised HTML is serialised by html5ever: text has `<`
+/// escaped, so a `<` in text always opens a tag, and attribute values are
+/// quoted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Markup {
+    /// Text between tags.
+    Text,
+    /// After `<`: the tag's name so far, lowercase (`/style` for a closing
+    /// tag).
+    TagName(String),
+    /// In a tag, outside attribute values: the tag's name, the attribute
+    /// name being read (or the last one read), whether a space ended it,
+    /// and whether `=` followed it.
+    Attributes {
+        tag: String,
+        attribute: String,
+        ended: bool,
+        equals: bool,
+    },
+    /// In an attribute value, quoted or not.
+    Value {
+        tag: String,
+        attribute: String,
+        quote: Option<char>,
+    },
+    /// In a `<style>` element's text.
+    Style,
+}
+
+impl Markup {
+    /// Whether a placeholder here is one the sanitiser wrote.
+    fn loads_resources(&self) -> bool {
+        match self {
+            Self::Value { attribute, .. } => {
+                matches!(attribute.as_str(), "src" | "background" | "style")
+            }
+            Self::Style => true,
+            _ => false,
+        }
+    }
+
+    /// The state after `ch`, the first character of `rest`.
+    fn next(self, ch: char, rest: &str) -> Self {
+        match self {
+            Self::Text => match ch {
+                '<' => Self::TagName(String::new()),
+                _ => Self::Text,
+            },
+            Self::Style => {
+                let closes = rest
+                    .get(..7)
+                    .is_some_and(|start| start.eq_ignore_ascii_case("</style"));
+                if closes {
+                    Self::TagName(String::new())
+                } else {
+                    Self::Style
+                }
+            }
+            Self::TagName(mut name) => match ch {
+                '>' => Self::after_tag(&name),
+                ch if ch.is_whitespace() => Self::Attributes {
+                    tag: name,
+                    attribute: String::new(),
+                    ended: false,
+                    equals: false,
+                },
+                ch => {
+                    name.push(ch.to_ascii_lowercase());
+                    Self::TagName(name)
+                }
+            },
+            Self::Attributes {
+                tag,
+                mut attribute,
+                ended,
+                equals,
+            } => match ch {
+                '>' => Self::after_tag(&tag),
+                '"' | '\'' if equals => Self::Value {
+                    tag,
+                    attribute,
+                    quote: Some(ch),
+                },
+                '=' => Self::Attributes {
+                    tag,
+                    attribute,
+                    ended: false,
+                    equals: true,
+                },
+                ch if ch.is_whitespace() || ch == '/' => Self::Attributes {
+                    tag,
+                    attribute,
+                    ended: true,
+                    equals,
+                },
+                ch if equals => Self::Value {
+                    tag,
+                    attribute,
+                    quote: None,
+                }
+                .next(ch, rest),
+                ch => {
+                    if ended {
+                        attribute.clear();
+                    }
+                    attribute.push(ch.to_ascii_lowercase());
+                    Self::Attributes {
+                        tag,
+                        attribute,
+                        ended: false,
+                        equals: false,
+                    }
+                }
+            },
+            Self::Value {
+                tag,
+                attribute,
+                quote,
+            } => match (quote, ch) {
+                (Some(quote), ch) if ch == quote => Self::Attributes {
+                    tag,
+                    attribute,
+                    ended: true,
+                    equals: false,
+                },
+                (None, '>') => Self::after_tag(&tag),
+                (None, ch) if ch.is_whitespace() => Self::Attributes {
+                    tag,
+                    attribute,
+                    ended: true,
+                    equals: false,
+                },
+                _ => Self::Value {
+                    tag,
+                    attribute,
+                    quote,
+                },
+            },
+        }
+    }
+
+    /// The state after the `>` that ends tag `name`.
+    fn after_tag(name: &str) -> Self {
+        if name == "style" {
+            Self::Style
+        } else {
+            Self::Text
+        }
+    }
 }
 
 /// The link id in a `zmail-link:<n>` URL.
@@ -461,6 +662,77 @@ mod tests {
             "<img src=\"zmail-mail://remote/0\"><img src=\"zmail-mail://remote/12\">\
              <p style=\"background:url(zmail-blocked:1)\">zmail-blocked:x zmail-blocked:</p>"
         );
+    }
+
+    #[test]
+    fn placeholders_are_rewritten_only_where_resources_load() {
+        let every = |index| Some(remote_url(index));
+        // Where the sanitiser writes them.
+        for (html, expected) in [
+            (
+                "<img alt=\"x\" src=\"zmail-blocked:0\">",
+                "<img alt=\"x\" src=\"zmail-mail://remote/0\">",
+            ),
+            (
+                "<td background=\"zmail-blocked:1\" width=\"3\">",
+                "<td background=\"zmail-mail://remote/1\" width=\"3\">",
+            ),
+            (
+                "<p style=\"background:url(&quot;zmail-blocked:2&quot;)\">x</p>",
+                "<p style=\"background:url(&quot;zmail-mail://remote/2&quot;)\">x</p>",
+            ),
+            (
+                "<style>p{background:url(\"zmail-blocked:3\")}</style><p>zmail-blocked:3</p>",
+                "<style>p{background:url(\"zmail-mail://remote/3\")}</style><p>zmail-blocked:3</p>",
+            ),
+            (
+                "<STYLE type=\"text/css\">a{b:url(zmail-blocked:4)}</STYLE >zmail-blocked:4",
+                "<STYLE type=\"text/css\">a{b:url(zmail-mail://remote/4)}</STYLE >zmail-blocked:4",
+            ),
+        ] {
+            assert_eq!(rewrite_blocked(html, every), expected, "{html}");
+        }
+        // Text and other attributes keep what the mail wrote.
+        for html in [
+            "<p>Your code is zmail-blocked:0</p>",
+            "<p>src=\"zmail-blocked:0\"</p>",
+            "<img alt=\"zmail-blocked:0\" title=\"zmail-blocked:1\" src=\"cid:a\">",
+            "<a href=\"zmail-link:0\" title=\"src=zmail-blocked:0\">zmail-blocked:0</a>",
+            "<p data-src=\"zmail-blocked:0\">&lt;img src=\"zmail-blocked:0\"&gt;</p>",
+            "<p>&lt;style&gt;zmail-blocked:0</p>",
+        ] {
+            assert_eq!(rewrite_blocked(html, every), html, "{html}");
+        }
+        // Text after a closed tag is text again.
+        assert_eq!(
+            rewrite_blocked("<img src=\"zmail-blocked:0\">zmail-blocked:0", every),
+            "<img src=\"zmail-mail://remote/0\">zmail-blocked:0"
+        );
+    }
+
+    #[test]
+    fn only_raster_images_are_served() {
+        for kind in [
+            "image/png",
+            "IMAGE/JPEG",
+            "image/jpg",
+            "image/gif; name=a.gif",
+            "image/webp",
+            "image/avif",
+        ] {
+            assert!(is_raster_image(kind), "{kind}");
+        }
+        for kind in [
+            "image/svg+xml",
+            "image/svg",
+            "image/x-icon",
+            "image/",
+            "text/html",
+            "application/octet-stream",
+            "",
+        ] {
+            assert!(!is_raster_image(kind), "{kind}");
+        }
     }
 
     #[test]
@@ -580,6 +852,7 @@ mod tests {
             inline_parts: vec![
                 InlinePart::new("logo@x", "IMAGE/PNG", 3, Arc::new(Bytes(b"png"))),
                 InlinePart::new("doc@x", "application/pdf", 3, Arc::new(Bytes(b"pdf"))),
+                InlinePart::new("vector@x", "image/svg+xml", 3, Arc::new(Bytes(b"svg"))),
             ],
         };
         let prepared = prepare(&source, &PrepareOptions::default());

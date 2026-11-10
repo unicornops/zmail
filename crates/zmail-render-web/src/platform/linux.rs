@@ -977,13 +977,15 @@ fn id_of(data: Ptr) -> u64 {
 /// Compiles the content filter, then starts the warm-up view.
 fn compile_filter(api: &Api) {
     let rules = content_rule_list();
-    let directory = filter_directory();
-    if let Err(error) = std::fs::create_dir_all(&directory) {
-        fail(format!(
-            "the content filter store could not be created: {error}"
-        ));
-        return;
-    }
+    let directory = match filter_directory() {
+        Ok(directory) => directory,
+        Err(error) => {
+            fail(format!(
+                "the content filter store could not be created: {error}"
+            ));
+            return;
+        }
+    };
     let directory = c_string(&directory.to_string_lossy());
     // SAFETY: on the engine thread; the store copies its path; `g_bytes_new`
     // copies the rules; the callback runs once, on this thread.
@@ -1004,13 +1006,43 @@ fn compile_filter(api: &Api) {
     }
 }
 
-/// Where compiled content filters are kept: a directory of the user's own.
-fn filter_directory() -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
+/// Where compiled content filters are kept, created if need be: a
+/// directory of the user's own, mode 0700. In `XDG_RUNTIME_DIR` (private
+/// to the user) it is reused; without one it is a fresh directory in the
+/// temporary directory with a random name, and creating it fails if
+/// anything is already there, so another user cannot have made it, or a
+/// link to elsewhere, first.
+fn filter_directory() -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("zmail-{}", std::process::id())));
-    base.join("zmail-webkit-filters")
+    {
+        let directory = runtime.join("zmail-webkit-filters");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&directory)?;
+        return Ok(directory);
+    }
+    fresh_private_directory(&std::env::temp_dir())
+}
+
+/// A new directory in `parent`, mode 0700, with a random name. Creating
+/// it fails if anything is already there.
+fn fresh_private_directory(parent: &std::path::Path) -> std::io::Result<PathBuf> {
+    use std::{
+        hash::{BuildHasher, RandomState},
+        os::unix::fs::DirBuilderExt,
+    };
+    let random = RandomState::new().hash_one(std::process::id());
+    let directory = parent.join(format!(
+        "zmail-webkit-filters-{}-{random:016x}",
+        std::process::id()
+    ));
+    // Not recursive: an existing directory or link is an error.
+    std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+    Ok(directory)
 }
 
 unsafe extern "C" fn on_filter_compiled(store: Ptr, result: Ptr, _data: Ptr) {
@@ -2688,6 +2720,23 @@ fn start_failed() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_fallback_filter_directory_is_fresh_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent =
+            std::env::temp_dir().join(format!("zmail-filter-dir-test-{}", std::process::id()));
+        std::fs::create_dir_all(&parent).expect("a parent");
+        let first = super::fresh_private_directory(&parent).expect("created");
+        let second = super::fresh_private_directory(&parent).expect("created");
+        assert_ne!(first, second, "a fresh name each time");
+        let mode = std::fs::metadata(&first)
+            .expect("exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "private to the user: {mode:o}");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
     use super::*;
 
     #[test]
