@@ -371,10 +371,11 @@ jobs:
             <key>CFBundleVersion</key><string>${VERSION}</string>
             <key>NSHighResolutionCapable</key><true/>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
-            <key>CFBundleDocumentTypes</key>
+            <key>CFBundleURLTypes</key>
             <array>
               <dict>
                 <key>CFBundleURLName</key><string>Email address</string>
+                <key>CFBundleTypeRole</key><string>Editor</string>
                 <key>CFBundleURLSchemes</key>
                 <array><string>mailto</string></array>
               </dict>
