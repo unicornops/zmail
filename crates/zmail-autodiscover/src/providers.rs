@@ -125,6 +125,22 @@ impl Provider {
         }
     }
 
+    /// Whether `host` is one of a built-in provider's servers.
+    pub fn is_known_host(host: &str) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        Self::ALL
+            .into_iter()
+            .flat_map(|provider| match provider.servers() {
+                Servers::Jmap(session_url) => url::Url::parse(session_url)
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_owned))
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                Servers::ImapSmtp { imap, smtp } => vec![imap.0.to_owned(), smtp.0.to_owned()],
+            })
+            .any(|known| known == host)
+    }
+
     /// The provider whose mail servers `mx_host` belongs to, if any.
     pub fn from_mx_host(mx_host: &str) -> Option<Self> {
         let mx_host = mx_host.trim_end_matches('.').to_ascii_lowercase();

@@ -128,8 +128,42 @@ pub fn describe_server(server: &ServerSettings) -> String {
 pub fn describe_source(source: &Source) -> String {
     match source {
         Source::Provider(provider) => format!("zmail's built-in {provider} settings"),
+        Source::DnsSrv {
+            record,
+            outside_domain: true,
+        } => {
+            // `_imaps._tcp.example.com` is a record of `example.com`.
+            let domain = record.splitn(3, '.').nth(2).unwrap_or(record);
+            format!(
+                "DNS record {record}, which points outside {domain}. Check that this server is your provider's before you sign in"
+            )
+        }
         other => other.to_string(),
     }
+}
+
+/// Whether the user has to confirm the servers before signing in: a DNS
+/// record sent them outside the mail domain (RFC 6186 section 6).
+pub fn needs_confirmation(settings: &MailSettings) -> bool {
+    !settings.unconfirmed_hosts().is_empty()
+}
+
+/// What to ask before signing in to servers a DNS record found outside
+/// `domain`, naming them; `None` when nothing needs confirming.
+///
+/// DNS answers are not protected, so on an untrusted network they can be
+/// forged to point at a server that has a valid certificate of its own and
+/// would receive the password. Many domains do point at a hosting
+/// provider's servers, so these are offered, but only once confirmed.
+pub fn confirmation(settings: &MailSettings, domain: &str) -> Option<String> {
+    let hosts = settings.unconfirmed_hosts();
+    if hosts.is_empty() {
+        return None;
+    }
+    let hosts = hosts.join(" and ");
+    Some(format!(
+        "The DNS records for {domain} point to {hosts}, outside {domain}. DNS answers can be forged on an untrusted network to send your password elsewhere, so continue only if {hosts} is where your mail provider says your mail is."
+    ))
 }
 
 #[cfg(test)]
@@ -142,7 +176,10 @@ mod tests {
         PortProbe, Provider, Security, SrvRecord, Step,
     };
 
-    use super::{Next, Outcome, finish, is_guess, next, short_error};
+    use super::{
+        Next, Outcome, confirmation, describe_source, finish, is_guess, needs_confirmation, next,
+        short_error,
+    };
     use crate::form::AccountFormValues;
 
     const AUTOCONFIG_URL: &str = "https://autoconfig.example.test/mail/config-v1.1.xml";
@@ -314,6 +351,85 @@ mod tests {
         assert_eq!(form.imap_host, "imap.example.test");
         assert_eq!(form.smtp_host, "smtp.example.test");
         assert_eq!(form.imap_security, Security::Tls, "TLS stays the default");
+    }
+
+    /// SRV records sending example.test's mail to a hosting provider.
+    struct HostedSrv;
+
+    impl DnsLookup for HostedSrv {
+        fn srv(&self, name: &str) -> Result<Vec<SrvRecord>, String> {
+            let target = match name {
+                "_imaps._tcp.example.test" => ("mail.provider.test.", 993),
+                "_submissions._tcp.example.test" => ("mail.provider.test.", 465),
+                _ => return Ok(Vec::new()),
+            };
+            Ok(vec![SrvRecord {
+                priority: 0,
+                weight: 0,
+                port: target.1,
+                target: target.0.to_owned(),
+            }])
+        }
+
+        fn mx(&self, _: &str) -> Result<Vec<MxRecord>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn a_dns_record_outside_the_domain_is_named_and_needs_confirming() {
+        let network = Network {
+            fetch: Arc::new(FakeWeb(None)),
+            dns: Some(Arc::new(HostedSrv)),
+            probe: Arc::new(Ports(Vec::new())),
+        };
+        let (discovery, ran, asked) = drive(&network, false);
+        assert_eq!(
+            ran,
+            [Step::DnsSrv, Step::DomainAutoconfig, Step::WellKnownJmap],
+            "the domain's own HTTPS sources are asked first"
+        );
+        assert_eq!(asked, 0, "the DNS answer is enough to stop before Mozilla");
+        let mut form = AccountFormValues::default();
+        let Outcome::Found(settings) = finish(&discovery, &mut form) else {
+            panic!("the hosting provider's servers are offered");
+        };
+        assert_eq!(form.imap_host, "mail.provider.test");
+        assert!(needs_confirmation(&settings));
+        let sentence = confirmation(&settings, "example.test").expect("a question");
+        assert!(sentence.contains("mail.provider.test"), "{sentence}");
+        assert!(sentence.contains("example.test"), "{sentence}");
+        assert_eq!(
+            sentence.matches("mail.provider.test").count(),
+            2,
+            "named once per mention, not once per server: {sentence}"
+        );
+        let MailSettings::ImapSmtp { imap, .. } = &settings else {
+            panic!("IMAP settings");
+        };
+        let source = describe_source(&imap.source);
+        assert!(
+            source.contains("outside example.test") && source.contains("your provider's"),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn the_domains_own_file_wins_over_a_dns_record_outside_it() {
+        let network = Network {
+            fetch: Arc::new(FakeWeb(Some(AUTOCONFIG))),
+            dns: Some(Arc::new(HostedSrv)),
+            probe: Arc::new(Ports(Vec::new())),
+        };
+        let (discovery, ran, _) = drive(&network, false);
+        assert_eq!(ran, [Step::DnsSrv, Step::DomainAutoconfig]);
+        let mut form = AccountFormValues::default();
+        let Outcome::Found(settings) = finish(&discovery, &mut form) else {
+            panic!("settings were found");
+        };
+        assert_eq!(form.imap_host, "imap.example.test");
+        assert!(!needs_confirmation(&settings));
+        assert_eq!(confirmation(&settings, "example.test"), None);
     }
 
     #[test]
