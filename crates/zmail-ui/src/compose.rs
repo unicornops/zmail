@@ -16,6 +16,12 @@
 //! files dropped onto the editor (`ExternalPaths`), and show as cards with
 //! a Remove button.
 //!
+//! Send checks the draft first ([`send_checks`]): with no recipients, or
+//! one that is not a valid address, it says what to fix in a banner above
+//! the fields and focuses the field at fault; with no subject, or a
+//! message that mentions an attachment with nothing attached, it asks
+//! before sending.
+//!
 //! [`ComposeState`] holds the open draft's inputs and store-owned fields;
 //! [`recipients`] has the To, Cc and Bcc chip fields.
 //! The inputs are built once per draft and never rebuilt from the store
@@ -39,7 +45,8 @@ use crate::actions::{
     AddAttachment, RemoveAttachment, SaveDraft, SelectIdentity, Send, ShowBcc, ShowCc,
 };
 use crate::components::{
-    Button, ButtonSize, HitTargetExt, Select, SelectEvent, TextInput, TextInputEvent,
+    Button, ButtonSize, HitTargetExt, Modal, ModalState, Select, SelectEvent, TextInput,
+    TextInputEvent,
 };
 use crate::mail_actions::MailActions;
 use crate::pane::{dispatch_from, pane_focus_indicator};
@@ -50,10 +57,13 @@ use crate::styles::{
 use crate::widgets::{EllipsisExt, empty_state, format_size, icon, label_chip, status_banner};
 
 mod recipients;
+pub(crate) mod send_checks;
 pub(crate) mod window;
 
 pub(crate) use recipients::{RecipientField, RecipientFieldEvent};
 pub(crate) use window::ComposeWindow;
+
+use send_checks::SendCheck;
 
 /// The key context the compose pane sets.
 pub(crate) const KEY_CONTEXT: &str = "Compose";
@@ -237,6 +247,16 @@ pub(crate) struct ComposeView {
     /// The pending autosave. Each edit replaces it, which cancels the one
     /// before, so the save runs once typing pauses.
     autosave_task: Task<()>,
+    /// Why the last Send did not go: a plain sentence saying what to fix,
+    /// shown above the fields until it is fixed.
+    send_problem: Option<String>,
+    /// The question Send is asking ("Send without a subject?"), its
+    /// dialog, and the dialog's Cancel, which has focus when it opens.
+    send_check: Option<SendCheck>,
+    send_check_modal: ModalState,
+    send_check_cancel: FocusHandle,
+    /// The questions answered Send Anyway during this press of Send.
+    waived_checks: Vec<SendCheck>,
     _quit_subscription: Subscription,
 }
 
@@ -275,8 +295,25 @@ impl ComposeView {
             input_subscriptions: Vec::new(),
             unsaved_edits: false,
             autosave_task: Task::ready(()),
+            send_problem: None,
+            send_check: None,
+            send_check_modal: ModalState::new(cx),
+            send_check_cancel: cx.focus_handle(),
+            waived_checks: Vec::new(),
             _quit_subscription: quit_subscription,
         }
+    }
+
+    /// What the banner says about the last Send, if anything.
+    #[cfg(test)]
+    pub(crate) fn send_problem(&self) -> Option<&str> {
+        self.send_problem.as_deref()
+    }
+
+    /// The question Send is asking, if any.
+    #[cfg(test)]
+    pub(crate) fn send_check(&self) -> Option<SendCheck> {
+        self.send_check
     }
 
     /// Whether the From menu shows.
@@ -318,6 +355,7 @@ impl ComposeView {
     pub(crate) fn close_draft(&mut self, cx: &mut Context<Self>) {
         self.flush_autosave(cx);
         self.compose = None;
+        self.send_problem = None;
         self.in_window = None;
         self.input_subscriptions.clear();
         self.from_menu = None;
@@ -390,6 +428,7 @@ impl ComposeView {
                     ComposeState::from_draft(draft, self.presentation, &self.store, window, cx);
                 self.input_subscriptions = Self::watch_inputs(&compose, window, cx);
                 self.compose = Some(compose);
+                self.send_problem = None;
             }
         }
         self.load_identities(account_id, cx);
@@ -465,7 +504,10 @@ impl ComposeView {
                 field,
                 window,
                 |this: &mut Self, _, event: &RecipientFieldEvent, window, cx| match event {
-                    RecipientFieldEvent::Changed => this.schedule_autosave(window, cx),
+                    RecipientFieldEvent::Changed => {
+                        this.recheck_recipients(cx);
+                        this.schedule_autosave(window, cx);
+                    }
                 },
             )
         }));
@@ -526,23 +568,52 @@ impl ComposeView {
         }
     }
 
-    fn send(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
-        self.send_draft(cx);
+    fn send(&mut self, _: &Send, window: &mut Window, cx: &mut Context<Self>) {
+        self.waived_checks.clear();
+        self.send_draft(window, cx);
     }
 
     /// Saves the draft and queues it to send once the undo-send window
-    /// ([`UiPreferences::undo_send_delay`]) has passed.
+    /// ([`UiPreferences::undo_send_delay`]) has passed, after the checks
+    /// of [`send_checks`]: a problem with the recipients stops it, with a
+    /// banner saying what to fix and focus in the field at fault; an empty
+    /// subject or a missing attachment asks first.
     ///
     /// [`UiPreferences::undo_send_delay`]: zmail_core::preferences::UiPreferences::undo_send_delay
-    pub(crate) fn send_draft(&mut self, cx: &mut Context<Self>) {
-        let Some((draft_id, account_id)) = self
+    pub(crate) fn send_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((draft_id, account_id, state)) = self
             .compose
             .as_ref()
-            .map(|compose| (compose.draft_id, compose.account_id))
+            .map(|compose| (compose.draft_id, compose.account_id, compose.state))
         else {
             cx.emit(ComposeEvent::Error("No draft is open.".to_owned()));
             return;
         };
+        let already_gone = match state {
+            DraftState::Queued | DraftState::Sending => Some(send_checks::ALREADY_QUEUED),
+            DraftState::Sent => Some(send_checks::ALREADY_SENT),
+            DraftState::Editing | DraftState::Failed => None,
+        };
+        if let Some(problem) = already_gone {
+            self.send_problem = Some(problem.to_owned());
+            cx.notify();
+            return;
+        }
+        if let Some((field, problem)) = self.recipient_problem(cx) {
+            self.send_problem = Some(problem);
+            self.focus_recipient_field(&field, window, cx);
+            cx.notify();
+            return;
+        }
+        self.send_problem = None;
+        if let Some(check) = self.unanswered_check(cx) {
+            self.send_check = Some(check);
+            let cancel = self.send_check_cancel.clone();
+            self.send_check_modal.open_focusing(&cancel, window, cx);
+            cx.notify();
+            return;
+        }
+        self.waived_checks.clear();
         if let Err(error) = self.save(cx) {
             cx.emit(ComposeEvent::Error(error.to_string()));
             return;
@@ -562,8 +633,108 @@ impl ComposeView {
                 job_id,
                 undo_delay,
             }),
-            Err(error) => cx.emit(ComposeEvent::Error(error.to_string())),
+            Err(error) => cx.emit(ComposeEvent::Error(format!(
+                "Couldn't queue this message to send: {error}"
+            ))),
         }
+    }
+
+    /// What stops the draft from sending as its recipients stand: the
+    /// field at fault and what to say. Recipients that are not valid
+    /// addresses come first (focus goes to the first field with one);
+    /// otherwise a draft with nobody to send to.
+    fn recipient_problem(&self, cx: &App) -> Option<(Entity<RecipientField>, String)> {
+        let compose = self.compose.as_ref()?;
+        let mut invalid = Vec::new();
+        let mut first_at_fault = None;
+        for field in compose.recipient_fields() {
+            let field_invalid = field.read(cx).invalid_recipients(cx);
+            if !field_invalid.is_empty() {
+                first_at_fault.get_or_insert_with(|| field.clone());
+            }
+            let label = field.read(cx).label().to_string();
+            invalid.extend(
+                field_invalid
+                    .into_iter()
+                    .map(|recipient| (label.clone(), recipient)),
+            );
+        }
+        if let Some(field) = first_at_fault {
+            return Some((field, send_checks::invalid_recipients_message(&invalid)));
+        }
+        compose
+            .recipient_fields()
+            .iter()
+            .all(|field| field.read(cx).recipients(cx).is_empty())
+            .then(|| (compose.to.clone(), send_checks::NO_RECIPIENTS.to_owned()))
+    }
+
+    /// While the banner shows a recipient problem, edits to the recipients
+    /// update it, and it goes once they are fixed.
+    fn recheck_recipients(&mut self, cx: &mut Context<Self>) {
+        if self.send_problem.is_some() {
+            self.send_problem = self.recipient_problem(cx).map(|(_, problem)| problem);
+            cx.notify();
+        }
+    }
+
+    /// Focuses a recipient field, showing Cc or Bcc first if hidden.
+    fn focus_recipient_field(
+        &mut self,
+        field: &Entity<RecipientField>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(compose) = self.compose.as_mut() {
+            if *field == compose.cc {
+                compose.show_cc = true;
+            } else if *field == compose.bcc {
+                compose.show_bcc = true;
+            }
+        }
+        field.update(cx, |field, cx| field.focus(window, cx));
+    }
+
+    /// The first question Send still has to ask about this draft: no
+    /// subject (not for the inline reply, which keeps the conversation's),
+    /// then a mentioned attachment that is not attached.
+    fn unanswered_check(&self, cx: &App) -> Option<SendCheck> {
+        let compose = self.compose.as_ref()?;
+        let no_subject = self.presentation != Presentation::Inline
+            && compose.subject.read(cx).text().trim().is_empty();
+        let no_attachment = compose.attachments.is_empty()
+            && send_checks::mentions_attachment(compose.body.read(cx).text());
+        [
+            (no_subject, SendCheck::NoSubject),
+            (no_attachment, SendCheck::NoAttachment),
+        ]
+        .into_iter()
+        .find(|(applies, check)| *applies && !self.waived_checks.contains(check))
+        .map(|(_, check)| check)
+    }
+
+    /// Send Anyway: sends unless another question is still to come.
+    fn send_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(check) = self.send_check.take() {
+            self.waived_checks.push(check);
+        }
+        self.send_check_modal.close(window, cx);
+        self.send_draft(window, cx);
+    }
+
+    /// Cancel: back to the draft, in the field the question was about.
+    fn cancel_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let check = self.send_check.take();
+        self.waived_checks.clear();
+        self.send_check_modal.close(window, cx);
+        if let Some(compose) = self.compose.as_ref() {
+            match check {
+                Some(SendCheck::NoSubject) => focus_input(&compose.subject, window, cx),
+                Some(SendCheck::NoAttachment) => focus_input(&compose.body, window, cx),
+                None => {}
+            }
+        }
+        cx.notify();
     }
 
     /// Attach Files…: picks files with the system file picker.
@@ -796,6 +967,43 @@ impl Render for ComposeView {
                         .children(self.render_action_buttons(cx)),
                 )
             })
+            .children(self.render_send_check(cx))
+    }
+}
+
+impl ComposeView {
+    /// The question Send is asking, with Cancel focused (see
+    /// [`ComposeView::send_draft`]).
+    fn render_send_check(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let check = self
+            .send_check
+            .filter(|_| self.send_check_modal.is_open())?;
+        Some(
+            Modal::new("send-check-dialog", self.send_check_modal.focus_handle())
+                .title(check.title())
+                .description(check.description())
+                .footer(
+                    div().debug_selector(|| "send-check-cancel".into()).child(
+                        Button::new("send-check-cancel", "Cancel")
+                            .track_focus(&self.send_check_cancel)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.cancel_send(window, cx)),
+                            ),
+                    ),
+                )
+                .footer(
+                    div().debug_selector(|| "send-check-confirm".into()).child(
+                        Button::new("send-check-confirm", "Send Anyway")
+                            .primary()
+                            .icon("send")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.send_anyway(window, cx)),
+                            ),
+                    ),
+                )
+                .on_dismiss(cx.listener(|this, _, window, cx| this.cancel_send(window, cx)))
+                .into_any_element(),
+        )
     }
 }
 
@@ -868,6 +1076,17 @@ impl ComposeView {
                         )
                         .children(state_chip),
                 )
+            })
+            .when_some(self.send_problem.as_ref(), |this, problem| {
+                this.child(status_banner(
+                    "compose-send-problem",
+                    Role::Alert,
+                    problem,
+                    "alert-circle",
+                    colors.danger,
+                    colors.danger_background,
+                    colors,
+                ))
             })
             .when_some(compose.last_error_message.as_ref(), |this, error| {
                 this.child(status_banner(

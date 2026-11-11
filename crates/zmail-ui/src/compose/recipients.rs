@@ -84,9 +84,19 @@ impl Recipient {
         self.participant.key()
     }
 
+    /// How a problem with this recipient names it: the address as typed,
+    /// else the name (a chip such as "design team" has no address).
+    fn problem_text(&self) -> &str {
+        self.participant
+            .email
+            .as_deref()
+            .unwrap_or_else(|| self.participant.display_name())
+    }
+
     /// Whether the address looks deliverable: one `@` with text on both
     /// sides and no spaces, and a domain that neither starts nor ends with
-    /// a dot nor has two in a row.
+    /// a dot nor has two in a row. Send checks every recipient with this
+    /// before queueing ([`RecipientField::invalid_recipients`]).
     pub(crate) fn is_valid(&self) -> bool {
         let Some(email) = self.participant.email.as_deref() else {
             return false;
@@ -177,6 +187,22 @@ impl RecipientField {
             .chain(&Recipient::parse_list(self.input.read(cx).text()))
             .map(Recipient::header_value)
             .collect()
+    }
+
+    /// The recipients that are not valid addresses, chips first, then
+    /// whatever is still typed, as a problem with them names them.
+    pub(crate) fn invalid_recipients(&self, cx: &App) -> Vec<String> {
+        self.chips
+            .iter()
+            .chain(&Recipient::parse_list(self.input.read(cx).text()))
+            .filter(|recipient| !recipient.is_valid())
+            .map(|recipient| recipient.problem_text().to_owned())
+            .collect()
+    }
+
+    /// The field's label: "To", "Cc" or "Bcc".
+    pub(crate) fn label(&self) -> &SharedString {
+        &self.label
     }
 
     /// The chips.

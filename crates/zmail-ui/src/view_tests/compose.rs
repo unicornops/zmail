@@ -60,6 +60,14 @@ fn inputs(
     })
 }
 
+/// Gives the open draft a subject, so Send does not ask about an empty
+/// one.
+fn give_subject(compose: &Entity<ComposeView>, cx: &mut VisualTestContext) {
+    let subject = state(compose, cx, |compose, _| compose.subject.clone());
+    cx.update(|_, cx| subject.update(cx, |input, cx| input.set_text("Plans", cx)));
+    cx.run_until_parked();
+}
+
 /// A recipient field's chips as saved, and which are valid.
 fn chips(field: &Entity<RecipientField>, cx: &mut VisualTestContext) -> Vec<(String, bool)> {
     cx.read_entity(field, |field, _| {
@@ -688,9 +696,14 @@ fn attachments_come_from_the_file_picker_and_dropped_files(cx: &mut TestAppConte
 fn send_closes_the_window_and_queues_the_message(cx: &mut TestAppContext) {
     let (view, main, compose, mut w, harness) = new_draft(Setup::Account, cx);
     let (draft_id, _, _) = inputs(&compose, &mut w);
+    give_subject(&compose, &mut w);
     // Sending with no recipients explains why, in the compose window.
     keys("secondary-enter", &mut w);
-    assert_eq!(compose_window_toasts(&view, main).len(), 1);
+    assert!(
+        cx_problem(&compose, &mut w).is_some(),
+        "the window says what to fix"
+    );
+    assert!(compose_window_toasts(&view, main).is_empty());
 
     w.simulate_input("kai@example.test,");
     keys("secondary-enter", &mut w);
@@ -702,6 +715,12 @@ fn send_closes_the_window_and_queues_the_message(cx: &mut TestAppContext) {
         .expect("the draft exists");
     assert_eq!(draft.to, ["kai@example.test"]);
     assert_ne!(draft.state, zmail_core::DraftState::Editing);
+}
+
+fn cx_problem(compose: &Entity<ComposeView>, cx: &mut VisualTestContext) -> Option<String> {
+    cx.read_entity(compose, |compose, _| {
+        compose.send_problem().map(str::to_owned)
+    })
 }
 
 /// The outbox jobs' ids.
@@ -728,6 +747,7 @@ fn draft_state(harness: &Harness, draft_id: i64) -> zmail_core::DraftState {
 fn undo_send_holds_the_message_and_reopens_its_window(cx: &mut TestAppContext) {
     let (view, main, compose, mut w, harness) = new_draft(Setup::Account, cx);
     let (draft_id, _, _) = inputs(&compose, &mut w);
+    give_subject(&compose, &mut w);
     w.simulate_input("kai@example.test,");
     keys("secondary-enter", &mut w);
 
@@ -762,7 +782,8 @@ fn undo_send_holds_the_message_and_reopens_its_window(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn the_undo_toast_lasts_as_long_as_the_undo_window(cx: &mut TestAppContext) {
-    let (view, main, _compose, mut w, harness) = new_draft(Setup::Account, cx);
+    let (view, main, compose, mut w, harness) = new_draft(Setup::Account, cx);
+    give_subject(&compose, &mut w);
     // A five-second window.
     let mut preferences = harness.store.ui_preferences().expect("preferences load");
     preferences.undo_send_delay_secs = 5;
@@ -783,6 +804,7 @@ fn the_undo_toast_lasts_as_long_as_the_undo_window(cx: &mut TestAppContext) {
 fn undo_after_sending_started_says_it_is_too_late(cx: &mut TestAppContext) {
     let (view, main, compose, mut w, harness) = new_draft(Setup::Account, cx);
     let (draft_id, _, _) = inputs(&compose, &mut w);
+    give_subject(&compose, &mut w);
     w.simulate_input("kai@example.test,");
     keys("secondary-enter", &mut w);
     // The outbox claims the job (as it would once the window ends).
@@ -917,6 +939,7 @@ fn undoing_a_reply_sent_from_the_pane_reopens_it_there(cx: &mut TestAppContext) 
     });
     cx.run_until_parked();
     let pane = cx.read_entity(&view, |view, _| view.compose.clone());
+    give_subject(&pane, cx);
     cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
             pane.compose
@@ -944,7 +967,8 @@ fn undoing_a_reply_sent_from_the_pane_reopens_it_there(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn with_undo_send_off_the_message_goes_at_once(cx: &mut TestAppContext) {
-    let (view, main, _compose, mut w, harness) = new_draft(Setup::Account, cx);
+    let (view, main, compose, mut w, harness) = new_draft(Setup::Account, cx);
+    give_subject(&compose, &mut w);
     let mut preferences = harness.store.ui_preferences().expect("preferences load");
     preferences.undo_send_delay_secs = 0;
     harness

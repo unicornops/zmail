@@ -356,6 +356,15 @@ impl WorkspaceView {
                     });
                 }
             }
+            InitialView::DraftSend(draft_id) => cx.defer_in(window, move |view, window, cx| {
+                view.open_draft_in_window(draft_id, false, window, cx);
+                if let Some(handle) = view.compose_window(draft_id, cx) {
+                    let _ = handle.update(cx, |root, window, cx| {
+                        root.compose()
+                            .update(cx, |compose, cx| compose.send_draft(window, cx))
+                    });
+                }
+            }),
             InitialView::Reply(thread_id) => {
                 if let Ok(Some(thread)) = view.store.thread_view(thread_id) {
                     view.show_thread(thread_id, thread.mailbox_id, cx);
@@ -368,7 +377,7 @@ impl WorkspaceView {
                     view.select_account(draft.account_id, cx);
                     view.open_draft(draft_id, window, cx);
                     view.compose
-                        .update(cx, |compose, cx| compose.send_draft(cx));
+                        .update(cx, |compose, cx| compose.send_draft(window, cx));
                 }
             }
             // `show_thread`, not `select_thread`, which would mark the thread
@@ -1615,6 +1624,7 @@ impl WorkspaceView {
                     // The window closed: the pane may edit the draft again.
                     cx.observe_release_in(&root, window, move |this, _, window, cx| {
                         this.compose_windows.remove(&draft_id);
+                        this.say_draft_kept(draft_id, cx);
                         if this.compose.read(cx).showing_in_window() == Some(draft_id) {
                             this.open_draft(draft_id, window, cx);
                         }
@@ -1643,6 +1653,22 @@ impl WorkspaceView {
             self.show_undo_send_toast(draft_id, job_id, undo_delay, ReopenIn::Window, cx);
             self.refresh_from_store(cx);
             cx.notify();
+        }
+    }
+
+    /// A compose window closed with its draft still being written (not
+    /// sent, nor gone): with the window gone, the main window says where
+    /// the draft is.
+    fn say_draft_kept(&mut self, draft_id: i64, cx: &mut Context<Self>) {
+        if let Ok(Some(draft)) = self.store.draft_detail(draft_id)
+            && matches!(
+                draft.state,
+                zmail_core::DraftState::Editing | zmail_core::DraftState::Failed
+            )
+        {
+            self.toasts.update(cx, |toasts, cx| {
+                toasts.push(Toast::new("Draft saved to Drafts"), cx);
+            });
         }
     }
 
@@ -1741,7 +1767,7 @@ impl WorkspaceView {
     ) {
         let Some(thread) = self.selected_thread_view() else {
             self.store_error
-                .get_or_insert_with(|| "Select a thread first.".to_owned());
+                .get_or_insert_with(|| "Open a conversation first.".to_owned());
             cx.notify();
             return;
         };
@@ -1865,7 +1891,7 @@ impl WorkspaceView {
     pub(crate) fn forward_selected_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.selected_thread_view() else {
             self.store_error
-                .get_or_insert_with(|| "Select a thread first.".to_owned());
+                .get_or_insert_with(|| "Open a conversation first.".to_owned());
             cx.notify();
             return;
         };
@@ -1930,7 +1956,7 @@ impl WorkspaceView {
     fn create_thread_draft(&self, start: reply::DraftStart, cx: &mut Context<Self>) -> Result<i64> {
         let account_id = self
             .selected_account_id
-            .context("select an account before composing")?;
+            .context("Choose an account in the sidebar first.")?;
         let started = self.mail_actions.update(cx, |actions, cx| {
             actions.create_started_draft(account_id, &start, cx)
         })?;

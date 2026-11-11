@@ -77,6 +77,10 @@ pub(crate) enum FixtureView {
     /// A new message whose recipients include addresses that are not
     /// valid, highlighted as chips to fix.
     ComposeInvalid,
+    /// `ComposeInvalid` with Send pressed: what to fix, above the fields.
+    ComposeInvalidSend,
+    /// Send pressed on a message with no subject, which asks first.
+    ComposeNoSubject,
     /// A message from a help desk identity with a reply-to, shown under
     /// From.
     ComposeReplyTo,
@@ -221,6 +225,8 @@ impl FixtureView {
             "reader-html-scrolled" => Self::ReaderHtmlScrolled,
             "compose" => Self::Compose,
             "compose-invalid" => Self::ComposeInvalid,
+            "compose-invalid-send" => Self::ComposeInvalidSend,
+            "compose-no-subject" => Self::ComposeNoSubject,
             "compose-reply-to" => Self::ComposeReplyTo,
             "undo-send" => Self::UndoSend,
             "account-setup" => Self::AccountSetup,
@@ -581,7 +587,7 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
             })?;
             InitialView::Sending(draft_id)
         }
-        FixtureView::ComposeInvalid => {
+        FixtureView::ComposeInvalid | FixtureView::ComposeInvalidSend => {
             let identity = store
                 .list_identities(account_id)?
                 .into_iter()
@@ -601,7 +607,29 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
                 body: "Hi all,\n\nThe offline search build is ready to try.\n\nSam".to_owned(),
                 threading: Default::default(),
             })?;
-            InitialView::Draft(draft_id)
+            if view == FixtureView::ComposeInvalidSend {
+                InitialView::DraftSend(draft_id)
+            } else {
+                InitialView::Draft(draft_id)
+            }
+        }
+        FixtureView::ComposeNoSubject => {
+            let identity = store
+                .list_identities(account_id)?
+                .into_iter()
+                .next()
+                .context("the fixture account has no identity")?;
+            let draft_id = store.create_draft(&NewDraft {
+                account_id,
+                identity_id: identity.id,
+                to: vec!["Priya Raman <priya.raman@example.org>".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: String::new(),
+                body: "Hi Priya,\n\nAre you free for lunch on Thursday?\n\nSam".to_owned(),
+                threading: Default::default(),
+            })?;
+            InitialView::DraftSend(draft_id)
         }
         FixtureView::ComposeReplyTo => {
             let identity_id = store.add_identity(
@@ -1699,6 +1727,8 @@ mod tests {
             "reader-html-scrolled",
             "compose",
             "compose-invalid",
+            "compose-invalid-send",
+            "compose-no-subject",
             "compose-reply-to",
             "undo-send",
             "account-setup",
