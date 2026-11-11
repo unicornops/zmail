@@ -203,6 +203,7 @@ impl FixtureView {
             "onboarding-result" => Self::Onboarding(OnboardingStep::Result),
             "onboarding-manual" => Self::Onboarding(OnboardingStep::Manual),
             "onboarding-manual-cleartext" => Self::Onboarding(OnboardingStep::ManualCleartext),
+            "onboarding-sign-in-refused" => Self::Onboarding(OnboardingStep::SignInRefused),
             "onboarding-colour" => Self::Onboarding(OnboardingStep::Colour),
             "onboarding-syncing" => Self::Onboarding(OnboardingStep::Syncing),
             "sidebar" => Self::Sidebar,
@@ -233,7 +234,7 @@ impl FixtureView {
             "unlock-unreadable" => Self::Unlock(UnlockFixture::Unreadable),
             "unlock-replaced" => Self::Unlock(UnlockFixture::Replaced),
             other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, outbox-compact, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, compose-reply-to, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-accounts-identities, settings-identity-edit, settings-identity-add, settings-identity-remove, settings-identity-hidden, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain, unlock-unreadable or unlock-replaced"
+                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, outbox-compact, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, compose-reply-to, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-sign-in-refused, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-accounts-identities, settings-identity-edit, settings-identity-add, settings-identity-remove, settings-identity-hidden, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain, unlock-unreadable or unlock-replaced"
             ),
         })
     }
@@ -1651,6 +1652,7 @@ mod tests {
             "settings-identity-hidden",
             "onboarding-google-guide",
             "onboarding-google-guide-invalid",
+            "onboarding-sign-in-refused",
             "settings-appearance",
             "settings-keyboard",
             "settings-privacy",

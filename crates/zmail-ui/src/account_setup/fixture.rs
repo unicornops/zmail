@@ -8,6 +8,7 @@ use zmail_autodiscover::{
     StepFindings,
 };
 use zmail_core::AccountColor;
+use zmail_setup::check::{CheckFailure, CheckPart};
 
 use super::{
     AccountField, AccountSetupServices, AccountSetupView, Check, OnboardingStep, Stage,
@@ -48,6 +49,20 @@ impl AccountSetupView {
             OnboardingStep::Provider => Stage::Provider,
             OnboardingStep::Credentials => {
                 fill(self, Some(Provider::Google), cx);
+                Stage::Credentials
+            }
+            OnboardingStep::SignInRefused => {
+                fill(self, Some(Provider::Google), cx);
+                let failure = CheckFailure {
+                    part: CheckPart::Incoming,
+                    server: "imap.gmail.com:993".to_owned(),
+                    message: "IMAP authentication failed: [AUTHENTICATIONFAILED] Invalid credentials (Failure)".to_owned(),
+                    refused: true,
+                };
+                self.form
+                    .errors
+                    .insert(AccountField::Password, failure.summary());
+                self.check_failure = Some(failure);
                 Stage::Credentials
             }
             OnboardingStep::GoogleGuide | OnboardingStep::GoogleGuideInvalid => {

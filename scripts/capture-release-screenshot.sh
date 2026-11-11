@@ -107,6 +107,8 @@ MATRIX=(
   "onboarding-manual-dark onboarding-manual dark 1440 920"
   "onboarding-manual-light onboarding-manual light 1440 920"
   "onboarding-manual-cleartext-dark onboarding-manual-cleartext dark 1440 920"
+  "onboarding-sign-in-refused-dark onboarding-sign-in-refused dark 1440 920"
+  "onboarding-sign-in-refused-light onboarding-sign-in-refused light 1440 920"
   "onboarding-colour-dark onboarding-colour dark 1440 920"
   "onboarding-colour-light onboarding-colour light 1440 920"
   "onboarding-syncing-dark onboarding-syncing dark 1440 920"

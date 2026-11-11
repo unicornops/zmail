@@ -52,6 +52,7 @@ impl Render for AccountSetupView {
             #[cfg(feature = "proton")]
             Stage::ProtonMailboxPassword => self.render_proton_mailbox_password(&colors),
         };
+        let check_status = self.render_check_status(&colors, cx);
         let footer = self.render_footer(cx);
 
         div()
@@ -85,7 +86,8 @@ impl Render for AccountSetupView {
                                         .tone(BannerTone::Info),
                                 )
                             })
-                            .child(body),
+                            .child(body)
+                            .children(check_status),
                     ),
             )
             .when_some(footer, |this, footer| {
@@ -734,7 +736,67 @@ impl AccountSetupView {
                 )
             })
             .children(cards)
+            .children(self.render_password_with_servers(colors))
             .into_any_element()
+    }
+
+    /// The password, on a server settings step, once the server has
+    /// refused it there.
+    fn render_password_with_servers(&self, colors: &UiColors) -> Option<gpui::Div> {
+        self.password_with_servers.then(|| {
+            section_card("Sign-in", colors).child(field(self, AccountField::Password, colors))
+        })
+    }
+
+    /// The sign-in test's progress, or why it failed, with Save anyway.
+    fn render_check_status(&self, colors: &UiColors, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !matches!(
+            self.stage,
+            Stage::Credentials | Stage::Result | Stage::Manual
+        ) {
+            return None;
+        }
+        if let Some((_, label)) = &self.checking {
+            return Some(
+                div()
+                    .debug_selector(|| "account-setup-checking".into())
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .child(spinner("account-setup-check-spinner", colors.info))
+                    .child(caption(format!("{label}…"), colors))
+                    .into_any_element(),
+            );
+        }
+        let failure = self.check_failure.as_ref()?;
+        let (title, text) = if failure.refused {
+            (
+                "The server refused the sign-in",
+                "Correct the password (or the user name) and try again. To set the account up now and sign in later, save it anyway.",
+            )
+        } else {
+            (
+                "Zmail couldn't reach the server",
+                "Check the server marked above and try again. If you're offline or the server is down, save the account anyway: it syncs once the server answers.",
+            )
+        };
+        Some(
+            Banner::new("account-setup-check-failed", text)
+                .tone(BannerTone::Caution)
+                .title(title)
+                .action(
+                    div()
+                        .debug_selector(|| "account-setup-save-anyway".into())
+                        .child(
+                            Button::new("account-setup-save-anyway", "Save anyway").on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.save_anyway(window, cx);
+                                }),
+                            ),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_manual(&self, colors: &UiColors, cx: &mut Context<Self>) -> AnyElement {
@@ -807,6 +869,7 @@ impl AccountSetupView {
             .when(cleartext, |this| this.child(self.render_cleartext_warning(colors, cx)))
             .child(labelled("Protocol", self.protocol_select.clone(), colors).max_w(rems_from_px(240.0)))
             .children(servers)
+            .children(self.render_password_with_servers(colors))
             .into_any_element()
     }
 
@@ -975,10 +1038,13 @@ impl AccountSetupView {
     /// The footer: Back on the left, the stage's actions on the right.
     /// `None` when the stage has neither (its actions are in the body).
     fn render_footer(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        // Nothing moves on while the sign-in is tested.
+        let checking = self.checking.is_some();
         let primary = |id: &'static str, label: &'static str, cx: &mut Context<Self>| {
             div().debug_selector(move || id.into()).child(
                 Button::new(id, label)
                     .primary()
+                    .disabled(checking)
                     .shortcut("secondary-enter")
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.advance(window, cx);

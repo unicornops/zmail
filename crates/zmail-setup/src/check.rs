@@ -8,7 +8,7 @@
 //! sign-in. Server replies quoted in the failure are untrusted text.
 
 use anyhow::Result;
-use zmail_core::{NewAccount, OutgoingConfig, ProtocolKind, SubmissionKind};
+use zmail_core::{NewAccount, OutgoingConfig, ProtocolKind, SubmissionKind, SyncTarget};
 
 use crate::form::AccountField;
 
@@ -128,6 +128,50 @@ pub async fn check_part(
     }
 }
 
+/// [`check_part`] for a frontend without an async runtime of its own (the
+/// GUI): runs it on a runtime made for this one test. It blocks until the
+/// server answers or the connection times out, so call it off the UI
+/// thread.
+pub fn check_part_blocking(
+    account: &NewAccount,
+    secret: &str,
+    part: CheckPart,
+) -> Result<(), CheckFailure> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| CheckFailure {
+            part,
+            server: match part {
+                CheckPart::Incoming => incoming_server(account),
+                CheckPart::Outgoing => account
+                    .outgoing
+                    .as_ref()
+                    .map(outgoing_server)
+                    .unwrap_or_default(),
+            },
+            message: format!("Zmail could not start the connection test: {error}"),
+            refused: false,
+        })?;
+    runtime.block_on(check_part(account, secret, part))
+}
+
+/// A stored account as the connection test takes it, to test a new
+/// password before it replaces the saved one. Only its incoming half:
+/// the stored account's outgoing server is not part of its sync target.
+pub fn stored_account(target: &SyncTarget) -> NewAccount {
+    NewAccount {
+        display_name: target.display_name.clone(),
+        protocol: target.protocol,
+        auth: target.auth,
+        endpoint: target.endpoint.clone(),
+        username: target.username.clone(),
+        cache_policy: target.cache_policy.clone(),
+        outgoing: None,
+        identities: Vec::new(),
+    }
+}
+
 /// The SMTP settings to sign in with, as the outbox builds them.
 fn submission_config(
     outgoing: &OutgoingConfig,
@@ -207,7 +251,7 @@ mod tests {
 
     use zmail_core::{AuthKind, CachePolicySummary, NewAccount, OutgoingConfig, ProtocolKind};
 
-    use super::{CheckPart, check_connection, check_label};
+    use super::{CheckPart, check_connection, check_label, check_part_blocking};
     use crate::form::AccountField;
 
     /// An IMAP account whose servers are a closed port on this machine.
@@ -253,5 +297,19 @@ mod tests {
             "the secret never shows"
         );
         assert!(check_label(&account, CheckPart::Incoming).starts_with("Signing in to 127.0.0.1:"));
+    }
+
+    #[test]
+    fn the_blocking_test_runs_without_a_runtime_of_the_callers() {
+        let account = closed_account();
+        let failure = check_part_blocking(&account, "secret", CheckPart::Outgoing)
+            .expect_err("nothing listens there");
+        assert_eq!(failure.part, CheckPart::Outgoing);
+        assert_eq!(failure.field(), AccountField::SmtpHost);
+        assert!(
+            failure
+                .summary()
+                .starts_with("Zmail couldn't connect to the outgoing server (127.0.0.1:")
+        );
     }
 }

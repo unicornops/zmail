@@ -20,12 +20,12 @@ zmail-security = { path = "../zmail-security" }
 zmail-smtp = { path = "../zmail-smtp" }
 zmail-store = { path = "../zmail-store" }
 zmail-sync = { path = "../zmail-sync" }
+# The connection test's own runtime, for a frontend without one
+# (`check::check_part_blocking`).
+tokio.workspace = true
 # Proton Mail sign-in (docs/adr/0004-proton-native.md); only with the
 # `proton` feature.
 zmail-proton = { path = "../zmail-proton", optional = true }
-
-[dev-dependencies]
-tokio.workspace = true
 
 [features]
 # The Proton Mail sign-in steps, for frontends built with Proton.

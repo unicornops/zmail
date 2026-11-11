@@ -19,6 +19,13 @@
 //!    needs an explicit opt-in.
 //! 6. **Colour**, then the **first sync** with progress.
 //!
+//! Before a password account is stored, its sign-in is tested on both
+//! servers (`zmail_setup::check`, [`SignInCheck`]), with progress. A
+//! failure is shown against the field to fix (the password, or the
+//! server's host), the form stays editable, and Save anyway stores the
+//! account untested, for setting up offline. An OAuth2 account signs in
+//! in the browser once stored, as before.
+//!
 //! The account is stored at the end of step 5. On first launch the main
 //! window shows this view instead of its panes; afterwards
 //! [`open_add_account`] opens it in an Add Account window of its own, from
@@ -34,9 +41,11 @@ use gpui::{
     SharedString, Subscription, Task, Window,
 };
 use zmail_autodiscover::{Discovery, EmailAddress, MailSettings, Provider, Step};
-use zmail_core::{AccountColor, ProtocolKind};
+use zmail_core::{AccountColor, NewAccount, ProtocolKind};
 use zmail_security::SecretStore;
+use zmail_setup::check::{CheckFailure, CheckPart, check_label};
 use zmail_setup::discovery::{self, Next, Outcome};
+use zmail_setup::{AccountFormValues, AccountSetupSecret};
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
@@ -80,6 +89,39 @@ pub(crate) struct AccountSetupServices {
 }
 
 impl Global for AccountSetupServices {}
+
+/// The sign-in test run before an account (or a new password) is saved:
+/// `zmail_setup::check`, unless a test installs a fake as a global. It
+/// blocks, so it runs on the background executor.
+#[derive(Clone)]
+pub(crate) struct SignInCheck(pub(crate) Arc<CheckFn>);
+
+/// Tests one half of an account's sign-in with a secret.
+pub(crate) type CheckFn =
+    dyn Fn(&NewAccount, &str, CheckPart) -> Result<(), CheckFailure> + Send + Sync;
+
+impl Global for SignInCheck {}
+
+impl SignInCheck {
+    /// The installed check, or the real one.
+    pub(crate) fn get(cx: &App) -> Self {
+        cx.try_global::<Self>()
+            .cloned()
+            .unwrap_or_else(|| Self(Arc::new(zmail_setup::check::check_part_blocking)))
+    }
+
+    /// Tests one half of `account`'s sign-in off the UI thread.
+    pub(crate) fn spawn(
+        &self,
+        account: Arc<NewAccount>,
+        secret: Arc<str>,
+        part: CheckPart,
+        cx: &App,
+    ) -> Task<Result<(), CheckFailure>> {
+        let check = self.0.clone();
+        cx.background_spawn(async move { check(&account, &secret, part) })
+    }
+}
 
 /// Opens the add-account flow in the Add Account window, at the provider
 /// step, or brings that window forward when it is already open. Settings →
@@ -176,6 +218,9 @@ pub enum OnboardingStep {
     Manual,
     /// The manual form with an unencrypted SMTP server chosen.
     ManualCleartext,
+    /// Google's sign-in step after the server refused the password, with
+    /// Save anyway.
+    SignInRefused,
     /// The colour step for the first seeded account.
     Colour,
     /// The first sync of the first seeded account.
@@ -228,6 +273,15 @@ pub(crate) struct AccountSetupView {
     pub(crate) color: AccountColor,
     pub(crate) sync: SyncProgress,
     sync_task: Option<Task<()>>,
+    /// The sign-in test running now: the half it is on, and what it is
+    /// doing ("Signing in to imap.example.com:993").
+    pub(crate) checking: Option<(CheckPart, String)>,
+    check_task: Option<Task<()>>,
+    /// Why the last sign-in test failed. The flow then offers Save anyway.
+    pub(crate) check_failure: Option<CheckFailure>,
+    /// The server settings steps show the password too: the server refused
+    /// it, and that is where the user is.
+    pub(crate) password_with_servers: bool,
     /// The Proton sign-in in progress.
     #[cfg(feature = "proton")]
     pub(crate) proton: proton::ProtonFlow,
@@ -310,6 +364,10 @@ impl AccountSetupView {
             color: AccountColor::Blue,
             sync: SyncProgress::default(),
             sync_task: None,
+            checking: None,
+            check_task: None,
+            check_failure: None,
+            password_with_servers: false,
             #[cfg(feature = "proton")]
             proton: proton::ProtonFlow::default(),
             _subscriptions: subscriptions,
@@ -407,6 +465,8 @@ impl AccountSetupView {
         if self.account_id.is_some() {
             return;
         }
+        // Leaving stops a sign-in test.
+        self.stop_check();
         // Leaving the guide goes back to the app password.
         if self.stage == Stage::GoogleGuide {
             self.form.use_oauth = false;
@@ -561,6 +621,9 @@ impl AccountSetupView {
     /// The sign-in step's Continue: a provider preset fills the servers
     /// and stores the account; Other runs autodiscovery.
     fn submit_credentials(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.checking.is_some() {
+            return;
+        }
         let values = self.form.values(cx);
         if self.show_errors(
             validate_account_form(&values, Check::Credentials),
@@ -703,9 +766,47 @@ impl AccountSetupView {
     // Storing the account
     // -----------------------------------------------------------------------
 
-    /// Validates everything and stores the account, then moves to the
-    /// colour step.
+    /// Validates everything, tests a password sign-in, and stores the
+    /// account, then moves to the colour step.
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.checking.is_some() {
+            return;
+        }
+        let Some(values) = self.validated(window, cx) else {
+            return;
+        };
+        // An OAuth2 account signs in in the browser once it is stored.
+        match zmail_setup::build_account_from_form(&values) {
+            Ok((account, AccountSetupSecret::Password(secret))) => {
+                self.check_failure = None;
+                let secret = Arc::from(secret.as_str());
+                self.start_check(values, Arc::new(account), secret, window, cx);
+            }
+            Ok((_, AccountSetupSecret::OAuth2(_))) => self.store(&values, window, cx),
+            Err(error) => cx.emit(AccountSetupEvent::Error(format!("{error:#}"))),
+        }
+    }
+
+    /// Save anyway, after a failed sign-in test: stores the account
+    /// untested, as someone setting up offline needs.
+    pub(crate) fn save_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.checking.is_some() {
+            return;
+        }
+        let Some(values) = self.validated(window, cx) else {
+            return;
+        };
+        self.check_failure = None;
+        self.store(&values, window, cx);
+    }
+
+    /// The form's values when every field checks out; otherwise shows the
+    /// errors where they are fixed.
+    fn validated(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AccountFormValues> {
         let values = self.form.values(cx);
         let errors = validate_account_form(&values, Check::All);
         if !errors.is_empty() {
@@ -735,14 +836,97 @@ impl AccountSetupView {
             };
             self.go(stage, window, cx);
             self.show_errors(errors, window, cx);
-            return;
+            return None;
         }
+        Some(values)
+    }
+
+    /// Tests `account`'s sign-in, the incoming server first, then stores
+    /// it as `values` (what was tested, whatever is typed meanwhile), or
+    /// shows why it failed.
+    fn start_check(
+        &mut self,
+        values: AccountFormValues,
+        account: Arc<NewAccount>,
+        secret: Arc<str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let check = SignInCheck::get(cx);
+        self.checking = Some((
+            CheckPart::Incoming,
+            check_label(&account, CheckPart::Incoming),
+        ));
+        self.check_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let mut result = Ok(());
+            for part in [CheckPart::Incoming, CheckPart::Outgoing] {
+                let Ok(running) = this.update(cx, |this, cx| {
+                    this.checking = Some((part, check_label(&account, part)));
+                    cx.notify();
+                    check.spawn(account.clone(), secret.clone(), part, cx)
+                }) else {
+                    return;
+                };
+                result = running.await;
+                if result.is_err() {
+                    break;
+                }
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.check_finished(&values, result, window, cx);
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Stops a sign-in test that is running.
+    fn stop_check(&mut self) {
+        self.checking = None;
+        self.check_task = None;
+    }
+
+    /// The sign-in test's answer: store the account, or show the failure
+    /// against the field to fix, where that field is.
+    fn check_finished(
+        &mut self,
+        values: &AccountFormValues,
+        result: Result<(), CheckFailure>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.checking = None;
+        self.check_task = None;
+        let failure = match result {
+            Ok(()) => {
+                self.store(values, window, cx);
+                return;
+            }
+            Err(failure) => failure,
+        };
+        let field = match (failure.field(), self.form.protocol) {
+            (AccountField::ImapHost, ProtocolKind::Jmap) => AccountField::JmapUrl,
+            (field, _) => field,
+        };
+        if field == AccountField::Password {
+            // The password is on the sign-in step; the server steps show
+            // it as well, so it is fixed without going back.
+            self.password_with_servers = true;
+        } else if self.stage != Stage::Manual {
+            self.go(Stage::Manual, window, cx);
+        }
+        self.show_errors(vec![(field, failure.summary())], window, cx);
+        self.check_failure = Some(failure);
+        cx.notify();
+    }
+
+    /// Stores the account, then moves to the colour step.
+    fn store(&mut self, values: &AccountFormValues, window: &mut Window, cx: &mut Context<Self>) {
         let services = cx.global::<AccountSetupServices>().clone();
         match zmail_setup::accounts::store_account(
             &services.store,
             &services.secrets,
             Some(&services.sync_service),
-            &values,
+            values,
         ) {
             Ok((account_id, message)) => {
                 self.account_id = Some(account_id);
