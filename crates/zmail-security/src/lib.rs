@@ -180,6 +180,8 @@ pub struct InMemorySecretStore {
     secrets: Mutex<HashMap<(i64, SecretSlot), String>>,
     /// Store keys ([`vault::StoreKeychain`]), as the keychain holds them.
     store_keys: Mutex<HashMap<vault::KeyId, zeroize::Zeroizing<String>>>,
+    /// Store markers ([`vault::StoreLocation`]), as the keychain holds them.
+    store_markers: Mutex<HashMap<vault::StoreLocation, String>>,
 }
 
 impl InMemorySecretStore {
@@ -198,6 +200,14 @@ impl InMemorySecretStore {
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<vault::KeyId, zeroize::Zeroizing<String>>> {
         self.store_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn lock_store_markers(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<vault::StoreLocation, String>> {
+        self.store_markers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }

@@ -7,6 +7,13 @@
 //! migration is needed, so an interrupted migration is always picked up
 //! where the files say it stopped.
 //!
+//! A plaintext file is only ever encrypted for a store that has not been
+//! encrypted before. Once a store has opened encrypted, the keychain holds
+//! a marker for its path ([`StoreLocation`]); a plaintext file found there
+//! afterwards did not come from Zmail, and [`LocalStore::unlock`] refuses
+//! it ([`ReplacedStoreError`]) instead of encrypting it under the user's
+//! key and using its accounts.
+//!
 //! Encrypting is a copy: `sqlcipher_export` writes an encrypted
 //! `<store>.encrypting` beside the plaintext file, the copy is checked
 //! against the original, and one rename puts it in place. Until that
@@ -26,7 +33,9 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags};
-use zmail_security::vault::{self, KeyId, StoreKey, StoreKeyError, StoreKeyRecord, StoreKeychain};
+use zmail_security::vault::{
+    self, KeyId, StoreKey, StoreKeyError, StoreKeyRecord, StoreKeychain, StoreLocation,
+};
 
 use crate::{LocalStore, connection, lock::StoreLock};
 
@@ -134,6 +143,42 @@ pub enum StoreOpenError {
     Other(#[from] anyhow::Error),
 }
 
+/// A plaintext database is where this installation kept an encrypted
+/// store: the keychain has a marker for the path, so the file did not come
+/// from Zmail. It is never opened, and never encrypted under the user's
+/// key: its accounts could point at someone else's server, and Zmail would
+/// sign in there with the passwords in the keychain.
+///
+/// It travels inside [`StoreOpenError::Other`], so its message is what a
+/// command prints; [`StoreOpenError::replaced_store`] finds it for a
+/// frontend that shows it as a state of its own.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "this mail store was replaced with an unencrypted one. Zmail encrypted the store at \
+     {path} and now finds an unencrypted database there, which it has not opened: its \
+     accounts could send your passwords to another server. If you did not put it there, \
+     something else changed Zmail's files. Move that file (and any {name}-wal and {name}-shm \
+     beside it) somewhere else and start Zmail again: it starts an empty store, and your \
+     mail downloads again once you add your accounts",
+    path = .path.display(),
+    name = .path.file_name().unwrap_or_default().to_string_lossy()
+)]
+pub struct ReplacedStoreError {
+    /// The database that was replaced.
+    pub path: PathBuf,
+}
+
+impl StoreOpenError {
+    /// The refusal of a plaintext database put where an encrypted store
+    /// was, when that is why the store didn't open.
+    pub fn replaced_store(&self) -> Option<&ReplacedStoreError> {
+        match self {
+            Self::Other(error) => error.downcast_ref(),
+            Self::Unreadable { .. } | Self::Keychain(_) => None,
+        }
+    }
+}
+
 impl From<StoreKeyError> for StoreOpenError {
     fn from(error: StoreKeyError) -> Self {
         match error {
@@ -204,9 +249,26 @@ impl LocalStore {
         progress: &(dyn Fn(MigrationProgress) + Sync),
         lock: Arc<StoreLock>,
     ) -> Result<Option<MigrationReport>, StoreOpenError> {
+        let state = store_file_state(path)?;
+        let location = StoreLocation::of(path);
+        if state == StoreFileState::Plaintext {
+            // Only a store that was never encrypted is encrypted now. The
+            // keychain has to answer: without it nothing says which this is.
+            match keychain.load_store_marker(&location) {
+                Ok(None) => {}
+                Ok(Some(_)) => {
+                    return Err(StoreOpenError::Other(
+                        ReplacedStoreError {
+                            path: path.to_owned(),
+                        }
+                        .into(),
+                    ));
+                }
+                Err(error) => return Err(StoreOpenError::Keychain(error)),
+            }
+        }
         crate::rotation::resolve_interrupted(path, keychain)?;
         let record = StoreKeyRecord::path_for(path);
-        let state = store_file_state(path)?;
         let key = match vault::load_store_key(keychain, &record)? {
             Some(key) => key,
             // An encrypted store whose record is gone: the key can't be
@@ -222,7 +284,12 @@ impl LocalStore {
         };
         // Also after a crash between the two steps, so whatever is still
         // plaintext gets encrypted on the next start.
+        let key_id = key.id();
         let store = Self::open_with_lock(path.to_owned(), key, lock)?;
+        // The database is encrypted and its key opens it: from here on a
+        // plaintext file at this path is refused. Stores encrypted before
+        // the marker existed get theirs here, on their next open.
+        remember_encrypted_store(keychain, &location, key_id);
         let encrypted_attachments = store.encrypt_plaintext_blobs(progress)?;
         drop(store);
         crate::connection::close_dropped_store_connections();
@@ -237,6 +304,47 @@ impl LocalStore {
             progress(MigrationProgress::Finished);
         }
         Ok(report)
+    }
+}
+
+/// Makes the keychain's marker for the store at `location` name `key_id`
+/// alone, unless it already does.
+///
+/// Best effort: the store has just opened with its key, and a keychain
+/// that will not take the marker must not keep the user from their mail.
+/// Without the marker the store is as it was before markers existed, and
+/// the next open tries again.
+pub(crate) fn remember_encrypted_store(
+    keychain: &dyn StoreKeychain,
+    location: &StoreLocation,
+    key_id: KeyId,
+) {
+    let marker = StoreKeyRecord {
+        key_id,
+        pending_key_id: None,
+    };
+    if matches!(keychain.load_store_marker(location), Ok(Some(existing)) if existing == marker) {
+        return;
+    }
+    let _ = keychain.save_store_marker(location, &marker);
+}
+
+impl LocalStore {
+    /// Forgets that the store at `path` was encrypted, so the next
+    /// [`LocalStore::unlock`] encrypts a plaintext database found there
+    /// instead of refusing it ([`ReplacedStoreError`]).
+    ///
+    /// Only for a user who put an old unencrypted store back on purpose
+    /// and says so: after this, whatever plaintext database is at `path`
+    /// is trusted, with its accounts. Nothing else is touched; keys stay
+    /// in the keychain.
+    pub fn forget_encrypted_store(
+        path: impl AsRef<Path>,
+        keychain: &dyn StoreKeychain,
+    ) -> Result<(), StoreOpenError> {
+        keychain
+            .delete_store_marker(&StoreLocation::of(path.as_ref()))
+            .map_err(StoreOpenError::Keychain)
     }
 }
 
@@ -452,6 +560,12 @@ impl LocalStore {
         progress: &(dyn Fn(MigrationProgress) + Sync),
     ) -> Result<usize> {
         let directory = self.vault.directory().to_owned();
+        // Everything below reads and deletes files by names from the
+        // database. Through a link in place of the directory those would be
+        // someone else's files, so then nothing is migrated or cleaned up.
+        if fs::symlink_metadata(&directory).is_ok_and(|metadata| !metadata.is_dir()) {
+            return Ok(0);
+        }
         let conn = self.connection()?;
         let received: Vec<String> = {
             let mut statement =
@@ -486,15 +600,12 @@ impl LocalStore {
         let mut done = 0;
         progress(MigrationProgress::Attachments { done, total });
         for name in received {
-            // A name from the database must stay inside the directory.
-            let relative = Path::new(&name);
-            if !relative
-                .components()
-                .all(|component| matches!(component, std::path::Component::Normal(_)))
-            {
+            // A name from the database must be a file in the directory
+            // itself.
+            let Ok(old) = self.vault.path_of(&name) else {
                 continue;
-            }
-            let new_name = self.encrypt_legacy_file(&[directory.join(relative)], &name)?;
+            };
+            let new_name = self.encrypt_legacy_file(&old, &name)?;
             self.connection()?
                 .execute(
                     "UPDATE message_attachments SET storage_path = ?2 WHERE storage_path = ?1",
@@ -510,10 +621,12 @@ impl LocalStore {
                 continue;
             };
             let file_name = file_name.to_owned();
-            // A draft copy is stored by absolute path; if the data directory
-            // has moved since, it is beside the other attachments.
-            let new_name =
-                self.encrypt_legacy_file(&[old.clone(), directory.join(&file_name)], &file_name)?;
+            // A draft copy's row holds an absolute path, but the copy was
+            // always written beside the other attachments. Only the file
+            // name is used: the row's path may be from before the data
+            // directory moved, and in a database someone else wrote it can
+            // name any file, which must be neither read in nor deleted.
+            let new_name = self.encrypt_legacy_file(&directory.join(&file_name), &file_name)?;
             let new_path = self.vault.path_of(&new_name)?;
             self.connection()?
                 .execute(
@@ -528,25 +641,28 @@ impl LocalStore {
         Ok(done)
     }
 
-    /// Encrypts the first of `candidates` that is a plaintext file under
-    /// `logical_name`, deletes it, and returns the opaque name. When none
-    /// exists (already done, or missing) the name is returned as is.
-    fn encrypt_legacy_file(&self, candidates: &[PathBuf], logical_name: &str) -> Result<String> {
+    /// Encrypts the plaintext file at `old`, in the attachment directory,
+    /// under `logical_name`, deletes it, and returns the opaque name. When
+    /// there is no such file (already done, or missing) the name is
+    /// returned as is. A link is not a file here: what it points at is
+    /// outside the directory.
+    fn encrypt_legacy_file(&self, old: &Path, logical_name: &str) -> Result<String> {
         let new_name = self.vault.storage_name(logical_name);
-        for old in candidates {
-            if !old.is_file() || vault::is_encrypted_file(old).unwrap_or(false) {
-                continue;
-            }
+        if is_regular_file(old) && !vault::is_encrypted_file(old).unwrap_or(false) {
             let mut file =
                 fs::File::open(old).with_context(|| format!("failed to open {}", old.display()))?;
             let (written, _) = self.vault.write_from(logical_name, &mut file)?;
             debug_assert_eq!(written, new_name);
             drop(file);
             fs::remove_file(old).with_context(|| format!("failed to remove {}", old.display()))?;
-            break;
         }
         Ok(new_name)
     }
+}
+
+/// Whether `path` is a file itself, not a link to one.
+fn is_regular_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
 /// Whether `name` is one of the vault's opaque file names (32 hex digits).
@@ -637,6 +753,44 @@ pub fn move_unreadable_store_aside(path: &Path) -> Result<PathBuf> {
         suffixed(path, "-shm"),
         StoreKeyRecord::path_for(path),
         parent.join("attachments"),
+    ];
+    moving.retain(|path| path.exists());
+    for from in moving {
+        let name = from
+            .file_name()
+            .ok_or_else(|| anyhow!("{} has no file name", from.display()))?;
+        let to = aside.join(name);
+        fs::rename(&from, &to)
+            .with_context(|| format!("failed to move {} to {}", from.display(), to.display()))?;
+    }
+    Ok(aside)
+}
+
+/// Moves a plaintext database that replaced the encrypted store
+/// ([`ReplacedStoreError`]), with its journals, into `replaced-<time>`
+/// beside it, so the next start makes a new, empty store. The key record,
+/// the attachment files and the backups stay: they belong to the encrypted
+/// store, and its key still opens a backup of it. Returns the directory
+/// the files went to.
+pub fn move_replaced_store_aside(path: &Path) -> Result<PathBuf> {
+    crate::connection::close_dropped_store_connections();
+    if store_file_state(path)? != StoreFileState::Plaintext {
+        bail!("{} is not an unencrypted database", path.display());
+    }
+    let parent = path
+        .parent()
+        .context("the store path has no parent directory")?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let aside = parent.join(format!("replaced-{nanos}"));
+    fs::create_dir_all(&aside).with_context(|| format!("failed to create {}", aside.display()))?;
+    let mut moving = vec![
+        path.to_owned(),
+        suffixed(path, "-wal"),
+        suffixed(path, "-shm"),
+        suffixed(path, "-journal"),
     ];
     moving.retain(|path| path.exists());
     for from in moving {
@@ -952,6 +1106,15 @@ mod tests {
             bail!("the keychain is locked")
         }
         fn delete_store_key(&self, _: KeyId) -> Result<()> {
+            bail!("the keychain is locked")
+        }
+        fn save_store_marker(&self, _: &StoreLocation, _: &StoreKeyRecord) -> Result<()> {
+            bail!("the keychain is locked")
+        }
+        fn load_store_marker(&self, _: &StoreLocation) -> Result<Option<StoreKeyRecord>> {
+            bail!("the keychain is locked")
+        }
+        fn delete_store_marker(&self, _: &StoreLocation) -> Result<()> {
             bail!("the keychain is locked")
         }
     }
@@ -1301,7 +1464,7 @@ mod tests {
                 .attachment_storage_dir()
                 .join("incoming-INBOX-7-0-ledger.txt");
             store
-                .encrypt_legacy_file(std::slice::from_ref(&old), "incoming-INBOX-7-0-ledger.txt")
+                .encrypt_legacy_file(&old, "incoming-INBOX-7-0-ledger.txt")
                 .expect("encrypted");
             assert!(!old.exists());
         }
@@ -1370,5 +1533,578 @@ mod tests {
         drop(store);
         let _ = fs::remove_dir_all(directory);
         let _ = fs::remove_dir_all(outside);
+    }
+
+    /// The keychain's marker for the store at `path`.
+    fn marker(keychain: &dyn StoreKeychain, path: &Path) -> Option<StoreKeyRecord> {
+        keychain
+            .load_store_marker(&StoreLocation::of(path))
+            .expect("the marker loads")
+    }
+
+    /// A plaintext database with one account, as someone else would put in
+    /// the encrypted store's place.
+    fn planted_store(path: &Path) {
+        let source = LocalStore::open_ephemeral().expect("opens");
+        seed(&source);
+        // Windows can't remove a file a kept connection still has open.
+        connection::close_dropped_store_connections();
+        remove_with_journals(path).expect("the store's database is removed");
+        plaintext_copy(&source, path);
+    }
+
+    /// An encrypted store with one message, opened once through `keychain`.
+    /// Returns the account and the store's key id.
+    fn encrypted_store(path: &Path, keychain: &dyn StoreKeychain) -> (i64, KeyId) {
+        let (store, _) = LocalStore::unlock(path, keychain, &no_progress).expect("unlocks");
+        let account = seed(&store);
+        let key_id = store.store_key().id();
+        drop(store);
+        connection::close_dropped_store_connections();
+        (account, key_id)
+    }
+
+    #[test]
+    fn an_encrypted_store_is_marked_in_the_keychain_on_its_next_open() {
+        let directory = temp_dir("marker");
+        let path = directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        assert_eq!(marker(&keychain, &path), None);
+
+        let (account, key_id) = encrypted_store(&path, &keychain);
+        let expected = Some(StoreKeyRecord {
+            key_id,
+            pending_key_id: None,
+        });
+        assert_eq!(marker(&keychain, &path), expected, "a new store is marked");
+
+        // A store encrypted before markers existed has none: its next open
+        // adds it, with nothing else to do.
+        keychain
+            .delete_store_marker(&StoreLocation::of(&path))
+            .expect("deleted");
+        let (store, report) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert_eq!(report, None);
+        assert!(finds_secret(&store, account));
+        drop(store);
+        assert_eq!(marker(&keychain, &path), expected);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_plaintext_database_in_an_encrypted_stores_place_is_refused() {
+        // With the key record still there, and with it removed as well.
+        for remove_record in [false, true] {
+            let directory = temp_dir("replaced");
+            let path = directory.join("zmail.sqlite3");
+            let keychain = InMemorySecretStore::default();
+            let (_, key_id) = encrypted_store(&path, &keychain);
+
+            planted_store(&path);
+            if remove_record {
+                fs::remove_file(StoreKeyRecord::path_for(&path)).expect("removed");
+            }
+            let planted = fs::read(&path).expect("readable");
+
+            for _ in 0..2 {
+                let error = LocalStore::unlock(&path, &keychain, &no_progress)
+                    .expect_err("the planted store is refused");
+                let replaced = error
+                    .replaced_store()
+                    .unwrap_or_else(|| panic!("expected a replaced store, got {error:?}"));
+                assert_eq!(replaced.path, path);
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains("replaced with an unencrypted one"),
+                    "{message}"
+                );
+                assert!(message.contains("zmail.sqlite3-wal"), "{message}");
+            }
+            assert_eq!(
+                fs::read(&path).expect("readable"),
+                planted,
+                "the file is left exactly as it was found"
+            );
+            assert!(!suffixed(&path, ".encrypting").exists());
+            assert_eq!(
+                StoreKeyRecord::path_for(&path).exists(),
+                !remove_record,
+                "no key is made for it"
+            );
+            assert_eq!(
+                marker(&keychain, &path).map(|marker| marker.key_id),
+                Some(key_id)
+            );
+            assert!(
+                keychain.load_store_key(key_id).expect("loads").is_some(),
+                "the store's key is kept"
+            );
+            let _ = fs::remove_dir_all(directory);
+        }
+    }
+
+    #[test]
+    fn other_open_errors_are_not_a_replaced_store() {
+        assert!(
+            StoreOpenError::Unreadable { key_id: None }
+                .replaced_store()
+                .is_none()
+        );
+        assert!(
+            StoreOpenError::Keychain(anyhow!("locked"))
+                .replaced_store()
+                .is_none()
+        );
+        assert!(
+            StoreOpenError::Other(anyhow!("disk full"))
+                .replaced_store()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_first_migration_marks_the_store_and_a_later_plaintext_file_is_refused() {
+        let directory = temp_dir("migrate-then-replace");
+        let path = directory.join("zmail.sqlite3");
+        let source = LocalStore::open_ephemeral().expect("opens");
+        let account = seed(&source);
+        plaintext_copy(&source, &path);
+        drop(source);
+        let keychain = InMemorySecretStore::default();
+
+        let (store, report) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert!(report.is_some(), "an unmarked plaintext store is migrated");
+        assert!(finds_secret(&store, account));
+        let key_id = store.store_key().id();
+        drop(store);
+        connection::close_dropped_store_connections();
+        assert_eq!(
+            marker(&keychain, &path),
+            Some(StoreKeyRecord {
+                key_id,
+                pending_key_id: None
+            })
+        );
+
+        planted_store(&path);
+        let error = LocalStore::unlock(&path, &keychain, &no_progress).expect_err("refused");
+        assert!(error.replaced_store().is_some(), "{error:?}");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_migration_interrupted_before_the_swap_leaves_no_marker() {
+        // Otherwise the next start would refuse the user's own store.
+        for step in [MigrationStep::Exported, MigrationStep::Verified] {
+            let directory = temp_dir("crash-marker");
+            let path = directory.join("zmail.sqlite3");
+            let source = LocalStore::open_ephemeral().expect("opens");
+            seed(&source);
+            plaintext_copy(&source, &path);
+            drop(source);
+            let keychain = InMemorySecretStore::default();
+            let key =
+                vault::create_store_key(&keychain, &StoreKeyRecord::path_for(&path)).expect("key");
+            encrypt_plaintext_store_until(&path, &key, &no_progress, Some(step))
+                .expect_err("stopped");
+            assert_eq!(marker(&keychain, &path), None, "{step:?}");
+
+            let (store, report) =
+                LocalStore::unlock(&path, &keychain, &no_progress).expect("recovers");
+            assert!(report.is_some(), "{step:?}");
+            drop(store);
+            assert!(marker(&keychain, &path).is_some(), "{step:?}");
+            let _ = fs::remove_dir_all(directory);
+        }
+    }
+
+    /// A keychain whose keys work while its markers can be made to fail.
+    #[derive(Default)]
+    struct MarkerTroubleKeychain {
+        inner: InMemorySecretStore,
+        markers_fail: AtomicBool,
+    }
+
+    impl MarkerTroubleKeychain {
+        fn check(&self) -> Result<()> {
+            if self.markers_fail.load(Ordering::SeqCst) {
+                bail!("the keychain refused the marker");
+            }
+            Ok(())
+        }
+    }
+
+    impl StoreKeychain for MarkerTroubleKeychain {
+        fn save_store_key(&self, key: &StoreKey) -> Result<()> {
+            self.inner.save_store_key(key)
+        }
+        fn load_store_key(&self, id: KeyId) -> Result<Option<StoreKey>> {
+            self.inner.load_store_key(id)
+        }
+        fn delete_store_key(&self, id: KeyId) -> Result<()> {
+            self.inner.delete_store_key(id)
+        }
+        fn save_store_marker(
+            &self,
+            location: &StoreLocation,
+            marker: &StoreKeyRecord,
+        ) -> Result<()> {
+            self.check()?;
+            self.inner.save_store_marker(location, marker)
+        }
+        fn load_store_marker(&self, location: &StoreLocation) -> Result<Option<StoreKeyRecord>> {
+            self.check()?;
+            self.inner.load_store_marker(location)
+        }
+        fn delete_store_marker(&self, location: &StoreLocation) -> Result<()> {
+            self.check()?;
+            self.inner.delete_store_marker(location)
+        }
+    }
+
+    #[test]
+    fn a_keychain_that_refuses_markers_never_locks_an_encrypted_store() {
+        let directory = temp_dir("marker-trouble");
+        let path = directory.join("zmail.sqlite3");
+        let keychain = MarkerTroubleKeychain::default();
+        keychain.markers_fail.store(true, Ordering::SeqCst);
+
+        // A new store, then the same store again: both open without a marker.
+        let (account, key_id) = encrypted_store(&path, &keychain);
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert!(finds_secret(&store, account));
+        drop(store);
+        assert_eq!(marker(&keychain.inner, &path), None);
+
+        // Once the keychain takes it, the next open adds the marker.
+        keychain.markers_fail.store(false, Ordering::SeqCst);
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        drop(store);
+        connection::close_dropped_store_connections();
+        assert_eq!(
+            marker(&keychain.inner, &path).map(|marker| marker.key_id),
+            Some(key_id)
+        );
+
+        // A plaintext file while the marker can't be read is not encrypted:
+        // nothing says whether this store was encrypted before.
+        planted_store(&path);
+        keychain.markers_fail.store(true, Ordering::SeqCst);
+        let error = LocalStore::unlock(&path, &keychain, &no_progress).expect_err("blocked");
+        assert!(matches!(error, StoreOpenError::Keychain(_)), "{error:?}");
+        assert_eq!(
+            store_file_state(&path).expect("state"),
+            StoreFileState::Plaintext
+        );
+        keychain.markers_fail.store(false, Ordering::SeqCst);
+        let error = LocalStore::unlock(&path, &keychain, &no_progress).expect_err("refused");
+        assert!(error.replaced_store().is_some(), "{error:?}");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_lost_key_is_still_unreadable_and_starting_over_marks_the_new_store() {
+        let directory = temp_dir("lost-key");
+        let path = directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        let (_, key_id) = encrypted_store(&path, &keychain);
+
+        keychain.delete_store_key(key_id).expect("deleted");
+        assert!(matches!(
+            LocalStore::unlock(&path, &keychain, &no_progress),
+            Err(StoreOpenError::Unreadable { key_id: Some(id) }) if id == key_id
+        ));
+        move_unreadable_store_aside(&path).expect("moved aside");
+
+        // The marker is left from the old store; a missing database is a
+        // new store all the same, and the marker follows its key.
+        let (fresh, report) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert_eq!(report, None);
+        assert!(fresh.needs_onboarding().expect("reads"));
+        let new_key = fresh.store_key().id();
+        drop(fresh);
+        assert_ne!(new_key, key_id);
+        assert_eq!(
+            marker(&keychain, &path),
+            Some(StoreKeyRecord {
+                key_id: new_key,
+                pending_key_id: None
+            })
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_second_store_sharing_the_keychain_is_migrated_and_marked_on_its_own() {
+        let first_directory = temp_dir("shared-first");
+        let second_directory = temp_dir("shared-second");
+        let first = first_directory.join("zmail.sqlite3");
+        let second = second_directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        let (first_account, first_key) = encrypted_store(&first, &keychain);
+
+        // The second store is an old plaintext one: the first store's
+        // marker says nothing about it.
+        let source = LocalStore::open_ephemeral().expect("opens");
+        let second_account = seed(&source);
+        plaintext_copy(&source, &second);
+        drop(source);
+        let (store, report) =
+            LocalStore::unlock(&second, &keychain, &no_progress).expect("unlocks");
+        assert!(report.is_some());
+        assert!(finds_secret(&store, second_account));
+        let second_key = store.store_key().id();
+        drop(store);
+        connection::close_dropped_store_connections();
+        assert_ne!(first_key, second_key);
+        assert_eq!(
+            marker(&keychain, &first).map(|marker| marker.key_id),
+            Some(first_key)
+        );
+        assert_eq!(
+            marker(&keychain, &second).map(|marker| marker.key_id),
+            Some(second_key)
+        );
+
+        // Each is refused on its own, and the other still opens.
+        planted_store(&second);
+        let error = LocalStore::unlock(&second, &keychain, &no_progress).expect_err("refused");
+        assert!(error.replaced_store().is_some(), "{error:?}");
+        let (store, _) = LocalStore::unlock(&first, &keychain, &no_progress).expect("unlocks");
+        assert!(finds_secret(&store, first_account));
+        drop(store);
+        let _ = fs::remove_dir_all(first_directory);
+        let _ = fs::remove_dir_all(second_directory);
+    }
+
+    #[test]
+    fn moving_a_replaced_store_aside_keeps_the_key_and_starts_empty() {
+        let directory = temp_dir("replaced-aside");
+        let path = directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        let (account, key_id) = encrypted_store(&path, &keychain);
+        // A backup of the real store, which its key still opens afterwards.
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        let backup = directory.join("backups").join("zmail-backup-1.sqlite3");
+        fs::create_dir_all(backup.parent().expect("parent")).expect("backups dir");
+        store.backup_to(&backup).expect("backed up");
+        drop(store);
+        connection::close_dropped_store_connections();
+
+        assert!(
+            move_replaced_store_aside(&path).is_err(),
+            "an encrypted store is never moved aside as replaced"
+        );
+        assert!(path.exists());
+
+        planted_store(&path);
+        let planted = fs::read(&path).expect("readable");
+        let aside = move_replaced_store_aside(&path).expect("moved aside");
+        assert_eq!(
+            fs::read(aside.join("zmail.sqlite3")).expect("readable"),
+            planted
+        );
+        assert!(!path.exists());
+        assert!(StoreKeyRecord::path_for(&path).exists());
+        assert!(backup.exists());
+
+        let (fresh, report) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert_eq!(report, None);
+        assert!(fresh.needs_onboarding().expect("reads"));
+        assert_eq!(fresh.store_key().id(), key_id, "the store keeps its key");
+        drop(fresh);
+        connection::close_dropped_store_connections();
+
+        // Putting the backup back restores the mail.
+        remove_with_journals(&path).expect("removed");
+        fs::copy(&backup, &path).expect("restored");
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert!(finds_secret(&store, account));
+        drop(store);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn forgetting_the_marker_lets_a_deliberately_restored_plaintext_store_in() {
+        let directory = temp_dir("forget");
+        let path = directory.join("zmail.sqlite3");
+        let other_directory = temp_dir("forget-other");
+        let other = other_directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        encrypted_store(&path, &keychain);
+        let (_, other_key) = encrypted_store(&other, &keychain);
+
+        planted_store(&path);
+        assert!(LocalStore::unlock(&path, &keychain, &no_progress).is_err());
+        LocalStore::forget_encrypted_store(&path, &keychain).expect("forgotten");
+        assert_eq!(marker(&keychain, &path), None);
+        assert_eq!(
+            marker(&keychain, &other).map(|marker| marker.key_id),
+            Some(other_key),
+            "only this store is forgotten"
+        );
+
+        let (store, report) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert!(report.is_some(), "the plaintext store is encrypted");
+        assert_eq!(store.list_accounts().expect("accounts").len(), 1);
+        drop(store);
+        assert!(marker(&keychain, &path).is_some(), "and marked again");
+        let _ = fs::remove_dir_all(directory);
+        let _ = fs::remove_dir_all(other_directory);
+    }
+
+    /// Adds a legacy draft attachment row whose copy is said to be at
+    /// `storage_path`.
+    fn legacy_draft_row(store: &LocalStore, account: i64, storage_path: &Path) {
+        let identity = store.list_identities(account).expect("identities")[0].id;
+        let draft = store
+            .create_draft(&zmail_core::NewDraft {
+                account_id: account,
+                identity_id: identity,
+                to: vec!["bob@example.com".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Draft".to_owned(),
+                body: "Draft".to_owned(),
+                threading: Default::default(),
+            })
+            .expect("draft");
+        store
+            .connection()
+            .expect("connection")
+            .execute(
+                "INSERT INTO draft_attachments(draft_id, filename, content_type, size_bytes, \
+                 original_path, storage_path, created_at) \
+                 VALUES (?1, 'notes.txt', 'text/plain', 5, '/tmp/notes.txt', ?2, '2026-10-02')",
+                rusqlite::params![draft, storage_path.display().to_string()],
+            )
+            .expect("legacy draft attachment");
+    }
+
+    /// The encrypted files in `directory`, decrypted with the store's key.
+    fn vault_contents(store: &LocalStore) -> Vec<Vec<u8>> {
+        fs::read_dir(store.attachment_storage_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| vault::is_encrypted_file(&entry.path()).unwrap_or(false))
+                    .map(|entry| store.vault.read_file(&entry.path()).expect("decrypts"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_file_migration_never_reads_or_deletes_a_file_outside_the_attachments() {
+        let directory = temp_dir("outside");
+        let path = directory.join("zmail.sqlite3");
+        let elsewhere = temp_dir("outside-elsewhere");
+        let victim = elsewhere.join("private-notes.txt");
+        fs::write(&victim, ATTACHMENT_PHRASE).expect("written");
+        let keychain = InMemorySecretStore::default();
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        let account = seed(&store);
+        // A row naming a file elsewhere by its absolute path, and one
+        // reaching it through `..`.
+        legacy_draft_row(&store, account, &victim);
+        legacy_draft_row(
+            &store,
+            account,
+            &store
+                .attachment_storage_dir()
+                .join("..")
+                .join("..")
+                .join(elsewhere.file_name().expect("name"))
+                .join("private-notes.txt"),
+        );
+        drop(store);
+
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert_eq!(
+            fs::read(&victim).expect("the file outside is still there"),
+            ATTACHMENT_PHRASE
+        );
+        assert!(
+            vault_contents(&store).is_empty(),
+            "nothing from outside was taken into the store"
+        );
+        // The rows now name files in the attachment directory only.
+        let rows: Vec<String> = {
+            let conn = store.connection().expect("connection");
+            let mut statement = conn
+                .prepare("SELECT storage_path FROM draft_attachments")
+                .expect("prepared");
+            statement
+                .query_map([], |row| row.get(0))
+                .expect("queried")
+                .collect::<rusqlite::Result<_>>()
+                .expect("rows")
+        };
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            assert_eq!(
+                Path::new(&row).parent(),
+                Some(store.attachment_storage_dir().as_path()),
+                "{row}"
+            );
+        }
+        drop(store);
+        let _ = fs::remove_dir_all(directory);
+        let _ = fs::remove_dir_all(elsewhere);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_file_migration_does_not_follow_links() {
+        // A link inside the attachment directory, named as a legacy draft
+        // copy and as a received attachment.
+        let directory = temp_dir("links");
+        let path = directory.join("zmail.sqlite3");
+        let elsewhere = temp_dir("links-elsewhere");
+        let victim = elsewhere.join("private-notes.txt");
+        fs::write(&victim, ATTACHMENT_PHRASE).expect("written");
+        let keychain = InMemorySecretStore::default();
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        let account = seed(&store);
+        let attachments = store.attachment_storage_dir();
+        fs::create_dir_all(&attachments).expect("attachments dir");
+        std::os::unix::fs::symlink(&victim, attachments.join("draft-1-1-notes.txt"))
+            .expect("linked");
+        std::os::unix::fs::symlink(&victim, attachments.join("incoming-INBOX-7-0-ledger.txt"))
+            .expect("linked");
+        legacy_draft_row(&store, account, &attachments.join("draft-1-1-notes.txt"));
+        seed_attachment(&store, account, "incoming-INBOX-7-0-ledger.txt");
+        drop(store);
+
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert_eq!(fs::read(&victim).expect("still there"), ATTACHMENT_PHRASE);
+        assert!(vault_contents(&store).is_empty(), "the link was not read");
+        drop(store);
+        connection::close_dropped_store_connections();
+        let _ = fs::remove_dir_all(directory);
+
+        // A link in place of the attachment directory itself: nothing in
+        // the directory it points at is read or deleted.
+        let directory = temp_dir("linked-dir");
+        let path = directory.join("zmail.sqlite3");
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        let account = seed(&store);
+        let attachments = store.attachment_storage_dir();
+        let _ = fs::remove_dir_all(&attachments);
+        std::os::unix::fs::symlink(&elsewhere, &attachments).expect("linked");
+        legacy_draft_row(&store, account, &attachments.join("private-notes.txt"));
+        seed_attachment(&store, account, "private-notes.txt");
+        drop(store);
+
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        drop(store);
+        assert_eq!(fs::read(&victim).expect("still there"), ATTACHMENT_PHRASE);
+        assert_eq!(
+            fs::read_dir(&elsewhere).expect("listed").count(),
+            1,
+            "nothing was written there either"
+        );
+        let _ = fs::remove_dir_all(directory);
+        let _ = fs::remove_dir_all(elsewhere);
     }
 }

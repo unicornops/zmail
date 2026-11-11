@@ -25,7 +25,7 @@ mod blob;
 pub use blob::{BlobReader, BlobVault, file_key_id, is_encrypted_file};
 use hkdf::Hkdf;
 use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 /// Length of the data key and of every subkey, in bytes.
@@ -225,6 +225,53 @@ pub trait StoreKeychain: Send + Sync {
     fn load_store_key(&self, id: KeyId) -> anyhow::Result<Option<StoreKey>>;
     /// Deletes the key with `id`; deleting a missing key is not an error.
     fn delete_store_key(&self, id: KeyId) -> anyhow::Result<()>;
+    /// Saves the keychain's own copy of the key record of the store at
+    /// `location` (its marker), replacing an earlier one.
+    fn save_store_marker(
+        &self,
+        location: &StoreLocation,
+        marker: &StoreKeyRecord,
+    ) -> anyhow::Result<()>;
+    /// Loads the marker of the store at `location`; `Ok(None)` when the
+    /// keychain has none.
+    fn load_store_marker(&self, location: &StoreLocation)
+    -> anyhow::Result<Option<StoreKeyRecord>>;
+    /// Deletes the marker of the store at `location`; deleting a missing
+    /// marker is not an error.
+    fn delete_store_marker(&self, location: &StoreLocation) -> anyhow::Result<()>;
+}
+
+/// Names a store by where its database is, for its marker in the keychain.
+///
+/// The key record beside the database can be written by anyone who can
+/// write the data directory. The marker is the keychain's copy of it,
+/// under `store-at-<location>`: it says that the store at this path has
+/// been encrypted and with which key, and only something that can write
+/// the keychain can change it. Zmail uses it to refuse a plaintext
+/// database put where an encrypted one was, and to delete a key after an
+/// interrupted rotation only when the keychain agrees a rotation was under
+/// way (ADR 0005 §3).
+///
+/// The location is a hash of the database's absolute path, as given: links
+/// are not resolved, so pointing the path somewhere else through a link
+/// does not change which marker applies. Each store sharing a keychain
+/// (`ZMAIL_DATA_DIR`) has its own marker.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StoreLocation(String);
+
+impl StoreLocation {
+    /// The location of the store whose database is at `database`.
+    pub fn of(database: &Path) -> Self {
+        let absolute = std::path::absolute(database).unwrap_or_else(|_| database.to_owned());
+        let digest = Sha256::digest(absolute.as_os_str().as_encoded_bytes());
+        Self(hex(&digest[..16]))
+    }
+}
+
+impl fmt::Display for StoreLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 impl StoreKeychain for crate::KeyringSecretStore {
@@ -255,6 +302,34 @@ impl StoreKeychain for crate::KeyringSecretStore {
             }
         }
     }
+
+    fn save_store_marker(
+        &self,
+        location: &StoreLocation,
+        marker: &StoreKeyRecord,
+    ) -> anyhow::Result<()> {
+        marker_entry(location)?
+            .set_password(&marker.marker_text())
+            .context("failed to store the mail store's marker")
+    }
+
+    fn load_store_marker(
+        &self,
+        location: &StoreLocation,
+    ) -> anyhow::Result<Option<StoreKeyRecord>> {
+        match marker_entry(location)?.get_password() {
+            Ok(text) => StoreKeyRecord::from_marker_text(&text).map(Some),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(error).context("failed to load the mail store's marker"),
+        }
+    }
+
+    fn delete_store_marker(&self, location: &StoreLocation) -> anyhow::Result<()> {
+        match marker_entry(location)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(error).context("failed to delete the mail store's marker"),
+        }
+    }
 }
 
 impl StoreKeychain for crate::InMemorySecretStore {
@@ -275,6 +350,38 @@ impl StoreKeychain for crate::InMemorySecretStore {
         self.lock_store_keys().remove(&id);
         Ok(())
     }
+
+    fn save_store_marker(
+        &self,
+        location: &StoreLocation,
+        marker: &StoreKeyRecord,
+    ) -> anyhow::Result<()> {
+        self.lock_store_markers()
+            .insert(location.clone(), marker.marker_text());
+        Ok(())
+    }
+
+    fn load_store_marker(
+        &self,
+        location: &StoreLocation,
+    ) -> anyhow::Result<Option<StoreKeyRecord>> {
+        self.lock_store_markers()
+            .get(location)
+            .map(|text| StoreKeyRecord::from_marker_text(text))
+            .transpose()
+    }
+
+    fn delete_store_marker(&self, location: &StoreLocation) -> anyhow::Result<()> {
+        self.lock_store_markers().remove(location);
+        Ok(())
+    }
+}
+
+/// The keychain entry for a store's marker.
+fn marker_entry(location: &StoreLocation) -> anyhow::Result<keyring::Entry> {
+    keyring::Entry::new(crate::KEYRING_SERVICE, &format!("store-at-{location}"))
+        .map_err(anyhow::Error::from)
+        .context("failed to prepare secure storage for the mail store's marker")
 }
 
 /// The keychain entry for a store key.
@@ -343,6 +450,34 @@ impl StoreKeyRecord {
             .and_then(serde_json::Value::as_str)
             .map(str::parse)
             .transpose()?;
+        Ok(Self {
+            key_id,
+            pending_key_id,
+        })
+    }
+
+    /// The record as a marker's text in the keychain: the key id, then the
+    /// pending key id when a rotation is under way.
+    fn marker_text(&self) -> String {
+        match self.pending_key_id {
+            Some(pending) => format!("{} {pending}", self.key_id),
+            None => self.key_id.to_string(),
+        }
+    }
+
+    /// Reads a marker's text back.
+    fn from_marker_text(text: &str) -> anyhow::Result<Self> {
+        let mut ids = text.split_whitespace();
+        let key_id = ids
+            .next()
+            .context("the mail store's marker is empty")?
+            .parse()
+            .context("the mail store's marker is unusable")?;
+        let pending_key_id = ids
+            .next()
+            .map(str::parse)
+            .transpose()
+            .context("the mail store's marker is unusable")?;
         Ok(Self {
             key_id,
             pending_key_id,
@@ -596,6 +731,66 @@ mod tests {
         fn delete_store_key(&self, _: KeyId) -> anyhow::Result<()> {
             Ok(())
         }
+        fn save_store_marker(&self, _: &StoreLocation, _: &StoreKeyRecord) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn load_store_marker(&self, _: &StoreLocation) -> anyhow::Result<Option<StoreKeyRecord>> {
+            Ok(None)
+        }
+        fn delete_store_marker(&self, _: &StoreLocation) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_marker_round_trips_and_each_store_path_has_its_own() {
+        let keychain = InMemorySecretStore::default();
+        let first = StoreLocation::of(Path::new("/data/one/zmail.sqlite3"));
+        let second = StoreLocation::of(Path::new("/data/two/zmail.sqlite3"));
+        assert_ne!(first, second);
+        assert_eq!(
+            first,
+            StoreLocation::of(Path::new("/data/one/zmail.sqlite3"))
+        );
+        assert_eq!(first.to_string().len(), 32);
+
+        let plain = StoreKeyRecord {
+            key_id: KeyId::generate(),
+            pending_key_id: None,
+        };
+        let rotating = StoreKeyRecord {
+            key_id: KeyId::generate(),
+            pending_key_id: Some(KeyId::generate()),
+        };
+        assert_eq!(keychain.load_store_marker(&first).expect("loads"), None);
+        keychain.save_store_marker(&first, &plain).expect("saves");
+        keychain
+            .save_store_marker(&second, &rotating)
+            .expect("saves");
+        assert_eq!(
+            keychain.load_store_marker(&first).expect("loads"),
+            Some(plain)
+        );
+        assert_eq!(
+            keychain.load_store_marker(&second).expect("loads"),
+            Some(rotating)
+        );
+        keychain.delete_store_marker(&first).expect("deletes");
+        assert_eq!(keychain.load_store_marker(&first).expect("loads"), None);
+        assert_eq!(
+            keychain.load_store_marker(&second).expect("loads"),
+            Some(rotating),
+            "another store's marker is untouched"
+        );
+        assert!(StoreKeyRecord::from_marker_text("").is_err());
+        assert!(StoreKeyRecord::from_marker_text("not-a-key-id").is_err());
+    }
+
+    #[test]
+    fn a_relative_store_path_names_the_same_location_as_its_absolute_one() {
+        let relative = Path::new("zmail-marker-test/zmail.sqlite3");
+        let absolute = std::env::current_dir().expect("cwd").join(relative);
+        assert_eq!(StoreLocation::of(relative), StoreLocation::of(&absolute));
     }
 
     #[test]

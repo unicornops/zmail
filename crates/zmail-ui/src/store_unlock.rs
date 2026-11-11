@@ -12,6 +12,10 @@
 //! - **The store is unreadable** (its key is gone): mail on the servers
 //!   is safe, local-only mail (drafts, the outbox, queued changes) is
 //!   lost. Start Over moves the old files aside and starts a new store.
+//! - **The store was replaced** (an unencrypted database is where the
+//!   encrypted store was): Zmail does not open it or encrypt it under the
+//!   user's key. Move It Aside puts the file in a folder beside the store
+//!   and starts an empty one with the same key.
 //! - **Anything else** (a full disk, a failed check): the error and Retry.
 
 use std::{
@@ -29,7 +33,7 @@ use gpui::{
 };
 use zmail_store::{
     LocalStore, MigrationProgress, MigrationReport, StoreKeychain, StoreOpenError,
-    move_unreadable_store_aside,
+    move_replaced_store_aside, move_unreadable_store_aside,
 };
 
 use crate::a11y::{AccessibleExt, readable};
@@ -97,6 +101,8 @@ pub(crate) enum UnlockPhase {
     KeychainUnavailable(String),
     /// The store's key is gone.
     Unreadable,
+    /// An unencrypted database is where the encrypted store was.
+    Replaced,
     /// Anything else.
     Failed(String),
 }
@@ -189,6 +195,9 @@ fn finish(
             UnlockPhase::KeychainUnavailable(format!("{error:#}")),
             cx,
         ),
+        Err(error) if error.replaced_store().is_some() => {
+            show(unlocker, UnlockPhase::Replaced, cx);
+        }
         Err(StoreOpenError::Other(error)) => {
             show(unlocker, UnlockPhase::Failed(format!("{error:#}")), cx);
         }
@@ -339,6 +348,28 @@ impl StoreUnlockView {
         }
     }
 
+    /// Move It Aside: put the unencrypted database that replaced the store
+    /// in a folder beside it and start an empty store.
+    pub(crate) fn move_replaced_aside(&mut self, cx: &mut Context<Self>) {
+        let Some(unlocker) = self.unlocker.clone() else {
+            return;
+        };
+        match move_replaced_store_aside(&unlocker.path) {
+            Ok(aside) => {
+                *unlocker.notice.borrow_mut() = Some(format!(
+                    "Started an empty mail store. The unencrypted one that had replaced yours \
+                     was not opened; it was moved to {}.",
+                    aside.display()
+                ));
+                self.retry(cx);
+            }
+            Err(error) => self.set_phase(
+                UnlockPhase::Failed(format!("The file could not be moved aside: {error:#}")),
+                cx,
+            ),
+        }
+    }
+
     fn render_body(&self, colors: &UiColors, cx: &mut Context<Self>) -> gpui::Div {
         match &self.phase {
             UnlockPhase::Working(progress) => {
@@ -409,6 +440,37 @@ impl StoreUnlockView {
                         ),
                 )
                 .child(self.footer(&[Action::Quit, Action::StartOver], cx)),
+            UnlockPhase::Replaced => div()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_4))
+                .child(heading(
+                    "Your mail store was replaced",
+                    "Zmail keeps your mail encrypted, and has now found an unencrypted mail \
+                     store in its place. Zmail did not put it there and has not opened it: its \
+                     accounts could send your passwords to someone else's server.",
+                    colors,
+                ))
+                .child(
+                    Banner::new(
+                        "store-unlock-replaced",
+                        "Move It Aside keeps that file, unopened, in a folder beside the store \
+                         and starts an empty one. Add your accounts and your mail downloads \
+                         again; backups of the encrypted store still open.",
+                    )
+                    .title("Starting again")
+                    .tone(BannerTone::Danger),
+                )
+                .child(
+                    div()
+                        .type_style(TYPE_CAPTION)
+                        .text_color(rgb(colors.muted))
+                        .child(
+                            "If you did not do this, something else on this computer changed \
+                             Zmail's files.",
+                        ),
+                )
+                .child(self.footer(&[Action::Quit, Action::MoveAside], cx)),
             UnlockPhase::Failed(detail) => div()
                 .flex()
                 .flex_col()
@@ -436,6 +498,9 @@ impl StoreUnlockView {
                 Action::StartOver => Button::new("store-unlock-start-over", "Start Over")
                     .danger()
                     .on_click(cx.listener(|this, _, _, cx| this.start_over(cx))),
+                Action::MoveAside => Button::new("store-unlock-move-aside", "Move It Aside")
+                    .danger()
+                    .on_click(cx.listener(|this, _, _, cx| this.move_replaced_aside(cx))),
             };
             let id = action.id();
             footer = footer.child(div().debug_selector(move || id.into()).child(button));
@@ -450,6 +515,7 @@ enum Action {
     Quit,
     Retry,
     StartOver,
+    MoveAside,
 }
 
 impl Action {
@@ -458,6 +524,7 @@ impl Action {
             Self::Quit => "store-unlock-quit",
             Self::Retry => "store-unlock-retry",
             Self::StartOver => "store-unlock-start-over",
+            Self::MoveAside => "store-unlock-move-aside",
         }
     }
 }
