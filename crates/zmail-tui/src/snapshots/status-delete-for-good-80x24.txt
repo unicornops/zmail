@@ -1,5 +1,5 @@
   ZMAIL 0.0.0-test               MESSAGE INDEX       Folder: INBOX  Conv 1 of 1
-  N @     11:10  Harbour Ferries      Ferry tickets for August
+  N @       11:10  Harbour Ferries      Ferry tickets for August
 
 
 
