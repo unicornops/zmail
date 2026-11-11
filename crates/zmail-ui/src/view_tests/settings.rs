@@ -213,6 +213,65 @@ fn undo_send_delay_is_a_choice_of_steps(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn mail_settings_apply_at_once(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::Accounts);
+    cx.update(|_, cx| settings::open(Some(SettingsSection::Mail), cx));
+    cx.run_until_parked();
+    let (root, mut window_cx) = settings_window(cx);
+    let [html, notifications, indexing, on_battery, on_metered] =
+        root.read_with(&window_cx, |root, cx| root.mail().read(cx).selects());
+    let label = |select: &Entity<Select>, window_cx: &mut VisualTestContext| {
+        select.read_with(window_cx, |select, _| {
+            select.selected_label().map(|label| label.to_string())
+        })
+    };
+    // The defaults: formatted, notifications on, indexing on but paused
+    // on battery and metered connections.
+    assert_eq!(label(&html, &mut window_cx).as_deref(), Some("Formatted"));
+    assert_eq!(label(&notifications, &mut window_cx).as_deref(), Some("On"));
+    assert_eq!(label(&indexing, &mut window_cx).as_deref(), Some("On"));
+    assert_eq!(label(&on_battery, &mut window_cx).as_deref(), Some("Pause"));
+    assert_eq!(label(&on_metered, &mut window_cx).as_deref(), Some("Pause"));
+
+    // HTML mail as plain text reaches the reader at once.
+    pick(&html, 1, &mut window_cx);
+    cx.run_until_parked();
+    assert!(preferences(&harness).html_as_text);
+    assert!(cx.read_entity(&view, |view, cx| view.reader.read(cx).html_as_text()));
+    pick(&html, 0, &mut window_cx);
+    cx.run_until_parked();
+    assert!(!cx.read_entity(&view, |view, cx| view.reader.read(cx).html_as_text()));
+
+    // Notifications off: new mail posts nothing.
+    pick(&notifications, 1, &mut window_cx);
+    cx.run_until_parked();
+    assert!(!preferences(&harness).notifications.enabled);
+    let notifier = cx.read_entity(&view, |view, _| view.notifier.clone());
+    notifier.set_quiet(false);
+    notifier.notify_new_mail(&zmail_notify::NewMailBatch {
+        account_id: harness.home_account_id.expect("the Home account"),
+        account: "Home".to_owned(),
+        arrivals: vec![zmail_notify::NewMailArrival {
+            subject: "Home newest".to_owned(),
+            sender: "Kai Santos".to_owned(),
+            mailbox: "INBOX".to_owned(),
+            remote_thread_id: "newest".to_owned(),
+        }],
+    });
+    cx.run_until_parked();
+    assert!(cx.shown_system_notifications().is_empty());
+
+    // Indexing switches are stored for the indexer to read.
+    pick(&on_battery, 1, &mut window_cx);
+    pick(&on_metered, 1, &mut window_cx);
+    pick(&indexing, 1, &mut window_cx);
+    let indexing = preferences(&harness).indexing;
+    assert!(!indexing.enabled);
+    assert!(indexing.on_battery);
+    assert!(indexing.on_metered);
+}
+
+#[gpui::test]
 fn importing_a_zed_theme_uses_it_and_bad_files_say_why(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace_with(
         cx,

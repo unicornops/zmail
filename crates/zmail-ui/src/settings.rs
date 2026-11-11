@@ -9,6 +9,7 @@
 //! |--------|---------|
 //! | `accounts` | each account's status, identities (edit, add, remove, make primary), colour, cache budget, Re-authenticate and Remove; Add Account |
 //! | `appearance` | theme mode, imported Zed theme, row density, reading pane |
+//! | `mail` | HTML mail as plain text, new-mail notifications, background indexing |
 //! | `keyboard` | Standard or Gmail shortcuts, and the shortcut list with search |
 //! | `privacy` | remote content (blocked until allowed) and the senders always allowed, the sender-warning level |
 //! | `sending` | the undo-send delay |
@@ -27,6 +28,7 @@ mod about;
 mod accounts;
 mod appearance;
 mod keyboard;
+mod mail;
 mod privacy;
 mod sending;
 
@@ -48,6 +50,7 @@ use self::about::AboutSettings;
 pub(crate) use self::accounts::AccountsSettings;
 use self::appearance::AppearanceSettings;
 use self::keyboard::KeyboardSettings;
+use self::mail::MailSettings;
 use self::privacy::PrivacySettings;
 use self::sending::SendingSettings;
 use crate::WorkspaceView;
@@ -97,6 +100,8 @@ pub enum SettingsSection {
     Accounts,
     /// Theme, imported theme, density and reading pane.
     Appearance,
+    /// HTML mail as plain text, notifications and background indexing.
+    Mail,
     /// The keymap and the shortcut list.
     Keyboard,
     /// Remote content and sender warnings.
@@ -109,9 +114,10 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Every section, in list order.
-    pub(crate) const ALL: [SettingsSection; 6] = [
+    pub(crate) const ALL: [SettingsSection; 7] = [
         SettingsSection::Accounts,
         SettingsSection::Appearance,
+        SettingsSection::Mail,
         SettingsSection::Keyboard,
         SettingsSection::Privacy,
         SettingsSection::Sending,
@@ -123,6 +129,7 @@ impl SettingsSection {
         match self {
             Self::Accounts => "Accounts",
             Self::Appearance => "Appearance",
+            Self::Mail => "Mail",
             Self::Keyboard => "Keyboard",
             Self::Privacy => "Privacy",
             Self::Sending => "Sending",
@@ -134,6 +141,7 @@ impl SettingsSection {
         match self {
             Self::Accounts => "user",
             Self::Appearance => "sun",
+            Self::Mail => "mail",
             Self::Keyboard => "keyboard",
             Self::Privacy => "shield",
             Self::Sending => "send",
@@ -145,6 +153,7 @@ impl SettingsSection {
         match self {
             Self::Accounts => "accounts",
             Self::Appearance => "appearance",
+            Self::Mail => "mail",
             Self::Keyboard => "keyboard",
             Self::Privacy => "privacy",
             Self::Sending => "sending",
@@ -334,6 +343,7 @@ pub(crate) struct SettingsWindow {
     nav_focus: FocusHandle,
     accounts: Entity<AccountsSettings>,
     appearance: Entity<AppearanceSettings>,
+    mail: Entity<MailSettings>,
     keyboard: Entity<KeyboardSettings>,
     privacy: Entity<PrivacySettings>,
     sending: Entity<SendingSettings>,
@@ -378,6 +388,7 @@ impl SettingsWindow {
     fn new(section: SettingsSection, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let accounts = cx.new(|cx| AccountsSettings::new(window, cx));
         let appearance = cx.new(|cx| AppearanceSettings::new(window, cx));
+        let mail = cx.new(MailSettings::new);
         let keyboard = cx.new(KeyboardSettings::new);
         let privacy = cx.new(PrivacySettings::new);
         let sending = cx.new(SendingSettings::new);
@@ -386,6 +397,7 @@ impl SettingsWindow {
         let subscriptions = vec![
             cx.subscribe(&accounts, Self::on_section_event),
             cx.subscribe(&appearance, Self::on_section_event),
+            cx.subscribe(&mail, Self::on_section_event),
             cx.subscribe(&sending, Self::on_section_event),
             cx.subscribe(&keyboard, Self::on_section_event),
             cx.subscribe(&privacy, Self::on_section_event),
@@ -413,6 +425,7 @@ impl SettingsWindow {
             nav_focus,
             accounts,
             appearance,
+            mail,
             keyboard,
             privacy,
             sending,
@@ -446,6 +459,7 @@ impl SettingsWindow {
     /// Re-read every section's preferences (they changed elsewhere).
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.appearance.update(cx, |section, cx| section.reload(cx));
+        self.mail.update(cx, |section, cx| section.reload(cx));
         self.sending.update(cx, |section, cx| section.reload(cx));
         self.privacy.update(cx, |section, cx| section.reload(cx));
         self.keyboard.update(cx, |section, cx| section.reload(cx));
@@ -459,7 +473,10 @@ impl SettingsWindow {
                 .update(cx, |accounts, cx| accounts.refresh(cx)),
             SettingsSection::About => self.about.update(cx, |about, cx| about.refresh(cx)),
             SettingsSection::Privacy => self.privacy.update(cx, |privacy, cx| privacy.refresh(cx)),
-            SettingsSection::Appearance | SettingsSection::Keyboard | SettingsSection::Sending => {}
+            SettingsSection::Appearance
+            | SettingsSection::Mail
+            | SettingsSection::Keyboard
+            | SettingsSection::Sending => {}
         }
     }
 
@@ -473,6 +490,12 @@ impl SettingsWindow {
     #[cfg(test)]
     pub(crate) fn appearance(&self) -> &Entity<AppearanceSettings> {
         &self.appearance
+    }
+
+    /// The Mail section.
+    #[cfg(test)]
+    pub(crate) fn mail(&self) -> &Entity<MailSettings> {
+        &self.mail
     }
 
     /// The Keyboard section.
@@ -615,6 +638,7 @@ impl SettingsWindow {
         match self.section {
             SettingsSection::Accounts => self.accounts.clone().into(),
             SettingsSection::Appearance => self.appearance.clone().into(),
+            SettingsSection::Mail => self.mail.clone().into(),
             SettingsSection::Keyboard => self.keyboard.clone().into(),
             SettingsSection::Privacy => self.privacy.clone().into(),
             SettingsSection::Sending => self.sending.clone().into(),
@@ -792,6 +816,7 @@ pub(crate) fn setting_text(
 
 impl EventEmitter<SettingsEvent> for AccountsSettings {}
 impl EventEmitter<SettingsEvent> for AppearanceSettings {}
+impl EventEmitter<SettingsEvent> for MailSettings {}
 impl EventEmitter<SettingsEvent> for KeyboardSettings {}
 impl EventEmitter<SettingsEvent> for PrivacySettings {}
 impl EventEmitter<SettingsEvent> for SendingSettings {}

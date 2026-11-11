@@ -303,6 +303,7 @@ impl WorkspaceView {
         // system changes unless the user has picked a theme.
         view.apply_theme_preference(window.appearance());
         view.apply_layout_preferences();
+        view.apply_mail_preferences(cx);
         view.apply_motion(cx);
         view.read_system_motion(cx);
         view.apply_text_size(cx);

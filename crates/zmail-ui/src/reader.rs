@@ -45,6 +45,8 @@ mod selectable;
 mod source;
 mod web;
 
+pub(crate) use self::web::formatting_unavailable;
+
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,

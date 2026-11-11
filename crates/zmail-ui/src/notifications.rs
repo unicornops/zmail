@@ -10,11 +10,17 @@
 //! operating system's notification store. A click on a notification from
 //! an earlier run, or one older than the last [`REMEMBERED_NOTIFICATIONS`],
 //! only brings the window forward.
+//!
+//! Settings → Mail turns them off ([`NotificationPreferences::enabled`]),
+//! from the next arrival on: nothing more reaches the operating system.
+//!
+//! [`NotificationPreferences::enabled`]: zmail_core::preferences::NotificationPreferences
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use gpui::{App, Global, SharedString, SystemNotification, SystemNotificationResponse};
+use zmail_core::preferences::NotificationPreferences;
 use zmail_notify::{ChannelSink, NewMailNotification, NewMailNotifier, ThreadRef};
 
 use crate::WorkspaceView;
@@ -33,6 +39,16 @@ struct NotificationTargets {
 }
 
 impl Global for NotificationTargets {}
+
+/// The user's notification choices, and the notifier they apply to.
+struct NotificationSettings {
+    preferences: NotificationPreferences,
+    /// The sync service's notifier: what it composes follows the
+    /// preferences too.
+    _notifier: Arc<MailNotifier>,
+}
+
+impl Global for NotificationSettings {}
 
 impl NotificationTargets {
     /// A new tag for a notification that opens `target`.
@@ -60,6 +76,11 @@ impl NotificationTargets {
 pub(crate) fn start(cx: &mut App) -> Arc<MailNotifier> {
     let (sink, receiver) = zmail_notify::channel();
     cx.set_global(NotificationTargets::default());
+    let notifier = Arc::new(NewMailNotifier::with_sink(sink));
+    cx.set_global(NotificationSettings {
+        preferences: NotificationPreferences::default(),
+        _notifier: notifier.clone(),
+    });
     cx.on_system_notification_response(open_clicked);
     cx.spawn(async move |cx| {
         while let Some(notification) = receiver.recv().await {
@@ -67,11 +88,30 @@ pub(crate) fn start(cx: &mut App) -> Arc<MailNotifier> {
         }
     })
     .detach();
-    Arc::new(NewMailNotifier::with_sink(sink))
+    notifier
 }
 
-/// Posts one notification to the operating system.
+/// Applies the saved notification choices (at startup, and when Settings
+/// changes them). Showing only "New mail" (`show_content`) reaches the
+/// notifier once it can leave the sender and subject out.
+pub(crate) fn apply_preferences(preferences: NotificationPreferences, cx: &mut App) {
+    if cx.has_global::<NotificationSettings>() {
+        cx.global_mut::<NotificationSettings>().preferences = preferences;
+    }
+}
+
+/// Whether new mail raises notifications.
+pub(crate) fn enabled(cx: &App) -> bool {
+    cx.try_global::<NotificationSettings>()
+        .is_none_or(|settings| settings.preferences.enabled)
+}
+
+/// Posts one notification to the operating system, unless the user
+/// turned them off.
 fn post(notification: NewMailNotification, cx: &mut App) {
+    if !enabled(cx) {
+        return;
+    }
     let tag = cx
         .global_mut::<NotificationTargets>()
         .remember(notification.opens);
