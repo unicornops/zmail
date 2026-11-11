@@ -1547,6 +1547,8 @@ mod tests {
     fn planted_store(path: &Path) {
         let source = LocalStore::open_ephemeral().expect("opens");
         seed(&source);
+        // Windows can't remove a file a kept connection still has open.
+        connection::close_dropped_store_connections();
         remove_with_journals(path).expect("the store's database is removed");
         plaintext_copy(&source, path);
     }

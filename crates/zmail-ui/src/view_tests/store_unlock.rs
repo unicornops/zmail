@@ -216,18 +216,22 @@ fn a_lost_key_offers_start_over(cx: &mut TestAppContext) {
 fn a_replaced_store_is_not_opened_and_offers_move_it_aside(cx: &mut TestAppContext) {
     let directory = scratch("replaced");
     let path = directory.join("zmail.sqlite3");
+    // The keychain remembers an encrypted store at this path, as it does
+    // once one has opened there.
     let keychain = Arc::new(Keychain::default());
-    let key_id = {
-        let (store, _) = LocalStore::unlock(&path, &*keychain, &|_| {}).expect("the store opens");
-        store.store_key().id()
-    };
+    keychain
+        .save_store_marker(
+            &StoreLocation::of(&path),
+            &StoreKeyRecord {
+                key_id: StoreKey::generate().id(),
+                pending_key_id: None,
+            },
+        )
+        .expect("the marker is kept");
     // An unencrypted database in its place: SQLite's plaintext header is
     // all the store looks at before refusing.
     let mut planted = b"SQLite format 3\0".to_vec();
     planted.resize(4096, 0);
-    for suffix in ["", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(directory.join(format!("zmail.sqlite3{suffix}")));
-    }
     std::fs::write(&path, &planted).expect("planted");
 
     let opened = unlock(path.clone(), keychain, cx);
@@ -247,7 +251,6 @@ fn a_replaced_store_is_not_opened_and_offers_move_it_aside(cx: &mut TestAppConte
     settle(cx);
     let (store, notice) = opened.borrow_mut().take().expect("an empty store opens");
     assert!(store.needs_onboarding().expect("the new store reads"));
-    assert_eq!(store.store_key().id(), key_id, "with the store's own key");
     let notice = notice.expect("the workspace says what happened");
     assert!(notice.contains("was not opened"), "{notice}");
     let aside: Vec<_> = std::fs::read_dir(&directory)

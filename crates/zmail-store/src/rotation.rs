@@ -883,7 +883,9 @@ mod tests {
             .expect_err("stopped");
         let pending = record(&path);
 
-        // Any plaintext SQLite file will do.
+        // Any plaintext SQLite file will do. Windows can't remove a file a
+        // kept connection still has open.
+        connection::close_dropped_store_connections();
         remove_with_journals(&path).expect("removed");
         Connection::open(&path)
             .expect("opens")
