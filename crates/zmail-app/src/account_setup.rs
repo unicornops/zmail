@@ -107,7 +107,7 @@ fn store_checked_account(
             None => Ok(()),
         });
     if let Err(error) = kept {
-        let _ = zmail_setup::accounts::remove_account(store, secrets, account_id);
+        let _ = zmail_setup::accounts::remove_account(store, secrets, None, account_id);
         return Err(error.context("the account was not added"));
     }
     Ok(account_id)
