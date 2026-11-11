@@ -1,9 +1,9 @@
   ZMAIL 0.0.0-test               MESSAGE INDEX        Folder: INBOX  Msg 1 of 5
-  N*      11:35  Grace Hopper         Launch plan for the terminal UI
-   *      09:00  Ada Lovelace         Launch plan for the terminal UI
-  N   Yesterday  Harbour News         Harbour newsletter, issue 42
-    @       Mon  山田 太郎            東京オフィスの会議 📅 next week
-         25 Sep  Billing              Invoice fdp.exe
+  N*        11:35  Grace Hopper         Launch plan for the terminal UI
+   *        09:00  Ada Lovelace         Launch plan for the terminal UI
+  N     Yesterday  Harbour News         Harbour newsletter, issue 42
+    @         Mon  山田 太郎            東京オフィスの会議 📅 next week
+           25 Sep  Billing              Invoice fdp.exe
 
 
 

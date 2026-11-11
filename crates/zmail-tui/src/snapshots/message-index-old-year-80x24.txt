@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test               MESSAGE INDEX       Folder: INBOX  Conv 1 of 2
+           15 Sep  Bob                  This year's news
+       5 Oct 2025  Ada Lovelace         Last year's minutes
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                  [Folder "INBOX" opened with 2 conversations]
+? Help       > [ViewMsg]  N NextMsg    Spc NextPage U Undo       F Forward
+< FldrList   P PrevMsg    - PrevPage   D Delete     R Reply      O OTHER CMDS

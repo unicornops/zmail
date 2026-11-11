@@ -900,12 +900,24 @@ fn oauth_shows_the_url_and_opens_the_browser_locally() {
     key(&mut app, KeyCode::Down);
     key(&mut app, KeyCode::Enter);
     assert!(add(&app).form.use_oauth);
+    // The field being edited is in view, under the guide; PageUp reads
+    // the guide, and typing brings the field back.
+    let text = screen(&mut app, 80, 24);
+    assert!(text.contains("Your name"), "the field:\n{text}");
+    for _ in 0..3 {
+        key(&mut app, KeyCode::PageUp);
+    }
     let text = screen(&mut app, 80, 24);
     assert!(
         text.contains("Create a Google Cloud project"),
         "the guide:\n{text}"
     );
     keys(&mut app, "Jane");
+    let text = screen(&mut app, 80, 24);
+    assert!(
+        text.contains("Your name") && !text.contains("Create a Google Cloud project"),
+        "the field:\n{text}"
+    );
     key(&mut app, KeyCode::Tab);
     keys(&mut app, "42-abc.apps.googleusercontent.com");
     key(&mut app, KeyCode::Tab);
@@ -1147,4 +1159,24 @@ fn proton_steps_show_the_risk_note_and_ask_for_the_code() {
     add_mut(&mut app).proton_input = PASSWORD.to_owned();
     let text = screen(&mut app, 80, 24);
     assert!(text.contains("Mailbox password : [hidden]"), "{text}");
+}
+
+#[test]
+fn the_field_being_edited_stays_in_view_in_a_small_terminal() {
+    let (mut app, _) = empty_app();
+    start_adding(&mut app);
+    // 40x8 leaves four rows for the form, fewer than its introduction.
+    let text = screen(&mut app, 40, 8);
+    assert!(text.contains("Email address :"), "{text}");
+    keys(&mut app, "jane@example.org");
+    let text = screen(&mut app, 40, 8);
+    assert!(text.contains("Email address : jane@example.org"), "{text}");
+    // PageUp reads the introduction; typing brings the field back.
+    key(&mut app, KeyCode::PageUp);
+    let text = screen(&mut app, 40, 8);
+    assert!(text.contains("Add an account"), "{text}");
+    assert!(!text.contains("Email address"), "{text}");
+    key(&mut app, KeyCode::Backspace);
+    let text = screen(&mut app, 40, 8);
+    assert!(text.contains("Email address : jane@example.or"), "{text}");
 }

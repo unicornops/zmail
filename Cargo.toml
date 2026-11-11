@@ -126,6 +126,9 @@ rustls-native-certs = "0.8.2"
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# SIGTERM and SIGHUP in the terminal UI (Unix), to give the terminal back
+# before exiting; already in the tree through crossterm.
+signal-hook = { version = "0.3.18", default-features = false }
 thiserror = "2.0.21"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = "0.26.4"

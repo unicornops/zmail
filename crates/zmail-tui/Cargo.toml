@@ -37,6 +37,10 @@ zmail-sync = { path = "../zmail-sync" }
 # `proton` feature, as in zmail-ui.
 zmail-proton = { path = "../zmail-proton", optional = true }
 
+# SIGTERM and SIGHUP: quit as Q does, so the terminal is given back.
+[target.'cfg(unix)'.dependencies]
+signal-hook.workspace = true
+
 [dev-dependencies]
 # A fixed store key, so a second test process can open the same store
 # (the sync-lock test).

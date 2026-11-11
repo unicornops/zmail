@@ -6,11 +6,11 @@
        I     MESSAGE INDEX      -  View messages in current folder
        L     FOLDER LIST        -  Select a folder to view
        T     OUTBOX             -  Messages waiting to send, or that failed
-       A     ADDRESS BOOK       -  Address book (not in the terminal yet)
        S     SETUP              -  Configure Zmail options
        Q     QUIT               -  Leave Zmail
 
        Current folder: Unified Inbox
+
 
 
 

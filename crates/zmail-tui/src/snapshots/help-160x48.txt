@@ -12,7 +12,8 @@
     P N        previous and next item (Up and Down work too)
     - Space    previous and next page;  Home End  first and last
     W          WhereIs: search the Message Index with the search language (from:, to:, subject:, has:attachment, is:unread, before:, after:), find a folder, or
-               find text in a message. The index follows as you type; Enter also asks the server for mail not downloaded yet.
+               find text in a message. The index follows as you type; Enter also asks the server for mail not downloaded yet. Esc or < shows the whole folder
+               again.
     /          list conversations or single messages
     V          the preview pane, beside the index in terminals 120 columns or wider
     :          the command palette: every command of the screen with its key; type a few letters of what you want (arch, folder, trash), Up and Down move, Enter
@@ -42,7 +43,6 @@
     S or Enter there saves the attachment under the cursor. The path starts in the folder you last saved to (else Downloads, else your home folder) with the
   attachment's name made safe for a file; Tab completes it, and a folder saves into that folder. Zmail asks before replacing a file.
     A there saves every attachment into a folder, numbering a name that is taken (report (1).pdf).
-    Zmail never opens an attachment from the terminal: save it, then open it yourself.
 
 < Back              Spc NextPage        : Commands
 - PrevPage          M Main Menu         Q Quit

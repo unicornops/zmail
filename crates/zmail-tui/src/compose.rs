@@ -2006,7 +2006,7 @@ impl App {
                 pico("^O", "Postpone", Pico::Postpone),
             ]),
             Field::From => entries.extend([
-                pico("Spc", "Next From", Pico::NextFrom),
+                pico("Spc", "NextFrom", Pico::NextFrom),
                 pico("^O", "Postpone", Pico::Postpone),
             ]),
             Field::Subject => entries.extend([
