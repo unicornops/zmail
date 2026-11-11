@@ -20,7 +20,7 @@ mod compose;
 mod identities;
 
 use crate::{
-    app::{App, MENU_ITEMS, Prompt, SETUP_ROWS, Screen, SetupRow},
+    app::{App, Cmd, MENU_ITEMS, Prompt, SETUP_ROWS, Screen, SetupRow},
     clipboard::{CopyTarget, copy_target},
     data::{FolderRow, LocalFolder},
     keymap,
@@ -34,6 +34,10 @@ use crate::{
 /// The Message Index's first column, which marks the conversations
 /// selected with `;` (Alpine's `X`); a click on it selects.
 pub(crate) const MARKER_WIDTH: usize = 2;
+
+/// The Message Index's date column: room for an earlier year's
+/// `12 Oct 2024`, the longest [`format_list_date`] gives.
+const DATE_WIDTH: usize = 11;
 
 /// Styles and characters for this terminal: colours unless `NO_COLOR`,
 /// box drawing unless ASCII.
@@ -138,7 +142,11 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         return;
     }
     let width = area.width;
-    let body = Rect::new(0, 1, width, area.height - 4);
+    // A message or question longer than the status line wraps upwards
+    // over the body's last rows rather than being cut off.
+    let status = status_line(app, theme, usize::from(width), status_room(area.height));
+    let status_rows = status.rows() as u16;
+    let body = Rect::new(0, 1, width, area.height - 3 - status_rows);
     draw_title(app, frame, theme, Rect::new(0, 0, width, 1));
     match app.screen {
         Screen::MainMenu => {
@@ -230,7 +238,12 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
             Some(palette.cursor + 3),
         );
     }
-    draw_status(app, frame, theme, Rect::new(0, area.height - 3, width, 1));
+    draw_status(
+        frame,
+        theme,
+        Rect::new(0, area.height - 2 - status_rows, width, status_rows),
+        status,
+    );
     draw_commands(app, frame, theme, Rect::new(0, area.height - 2, width, 2));
 }
 
@@ -488,8 +501,36 @@ fn draw_title(app: &App, frame: &mut Frame, theme: Theme, area: Rect) {
     );
 }
 
-fn draw_status(app: &App, frame: &mut Frame, theme: Theme, area: Rect) {
-    let width = usize::from(area.width);
+/// The most rows the status line takes: a long message or question wraps
+/// onto at most half of what the body would have.
+fn status_room(height: u16) -> usize {
+    usize::from(height.saturating_sub(4) / 2).max(1)
+}
+
+/// What the status line shows.
+enum StatusLine {
+    /// A text field on one row, showing its end, where the typing is.
+    Field(String),
+    /// A question, wrapped when it is longer than the line.
+    Question(Vec<String>),
+    /// A message in brackets, wrapped when it is longer than the line, and
+    /// the sync note on the right when both fit: the message wins.
+    Message {
+        rows: Vec<String>,
+        note: Option<String>,
+    },
+}
+
+impl StatusLine {
+    fn rows(&self) -> usize {
+        match self {
+            Self::Field(_) => 1,
+            Self::Question(rows) | Self::Message { rows, .. } => rows.len().max(1),
+        }
+    }
+}
+
+fn status_line(app: &App, theme: Theme, width: usize, room: usize) -> StatusLine {
     if let Some(prompt) = app.prompt_text() {
         let field = matches!(
             app.prompt,
@@ -500,39 +541,100 @@ fn draw_status(app: &App, frame: &mut Frame, theme: Theme, area: Rect) {
                     | Prompt::Palette(_)
             )
         );
-        // A field shows its end, where the typing is.
-        let shown = if field {
-            text::truncate_start(&prompt, width.saturating_sub(1), theme.ellipsis())
+        // One cell is kept for the cursor.
+        let width = width.saturating_sub(1);
+        return if field {
+            StatusLine::Field(text::truncate_start(&prompt, width, theme.ellipsis()))
         } else {
-            text::truncate(&prompt, width.saturating_sub(1), theme.ellipsis())
+            StatusLine::Question(wrap_rows(&prompt, width, room, theme.ellipsis()))
         };
-        frame
-            .buffer_mut()
-            .set_stringn(area.x, area.y, &shown, width, theme.bold());
-        if field {
+    }
+    let note = app
+        .sync_note()
+        .filter(|note| !note.is_empty() && text::width(note) < width);
+    let Some(status) = &app.status else {
+        return StatusLine::Message {
+            rows: Vec::new(),
+            note,
+        };
+    };
+    let message = format!("[{status}]");
+    let beside = note.as_ref().map_or(0, |note| text::width(note) + 2);
+    if text::width(&message) + beside <= width {
+        return StatusLine::Message {
+            rows: vec![message],
+            note,
+        };
+    }
+    StatusLine::Message {
+        rows: wrap_rows(&message, width, room, theme.ellipsis()),
+        note: None,
+    }
+}
+
+/// `text` wrapped to `width`, in at most `max` rows, the last cut with an
+/// ellipsis when there is more.
+fn wrap_rows(text: &str, width: usize, max: usize, ellipsis: &str) -> Vec<String> {
+    let rows = wrap(text, width);
+    let max = max.max(1);
+    if rows.len() <= max {
+        return rows.into_iter().map(|row| row.text).collect();
+    }
+    let mut shown: Vec<String> = rows[..max - 1].iter().map(|row| row.text.clone()).collect();
+    shown.push(text::truncate(
+        &text[rows[max - 1].start..],
+        width,
+        ellipsis,
+    ));
+    shown
+}
+
+fn draw_status(frame: &mut Frame, theme: Theme, area: Rect, status: StatusLine) {
+    let width = usize::from(area.width);
+    match status {
+        StatusLine::Field(shown) => {
+            frame
+                .buffer_mut()
+                .set_stringn(area.x, area.y, &shown, width, theme.bold());
             let x = text::width(&shown).min(width.saturating_sub(1));
             frame.set_cursor_position(Position::new(area.x + x as u16, area.y));
         }
-        return;
-    }
-    let note = app.sync_note().unwrap_or_default();
-    let note_width = text::width(&note);
-    if let Some(status) = &app.status {
-        let room = width.saturating_sub(if note.is_empty() { 0 } else { note_width + 2 });
-        let shown = text::truncate(&format!("[{status}]"), room, theme.ellipsis());
-        let x = (room.saturating_sub(text::width(&shown))) / 2;
-        frame
-            .buffer_mut()
-            .set_stringn(area.x + x as u16, area.y, &shown, room, theme.reversed());
-    }
-    if !note.is_empty() && note_width < width {
-        frame.buffer_mut().set_stringn(
-            area.x + (width - note_width) as u16,
-            area.y,
-            &note,
-            note_width,
-            theme.faint(),
-        );
+        StatusLine::Question(rows) => {
+            for (row, shown) in rows.iter().enumerate() {
+                frame.buffer_mut().set_stringn(
+                    area.x,
+                    area.y + row as u16,
+                    shown,
+                    width,
+                    theme.bold(),
+                );
+            }
+        }
+        StatusLine::Message { rows, note } => {
+            let note_width = note.as_deref().map_or(0, text::width);
+            let room = width.saturating_sub(if note.is_some() { note_width + 2 } else { 0 });
+            // Centred, as Pine's are; several rows as one block.
+            let block = rows.iter().map(|row| text::width(row)).max().unwrap_or(0);
+            let x = room.saturating_sub(block) / 2;
+            for (row, shown) in rows.iter().enumerate() {
+                frame.buffer_mut().set_stringn(
+                    area.x + x as u16,
+                    area.y + row as u16,
+                    shown,
+                    room - x,
+                    theme.reversed(),
+                );
+            }
+            if let Some(note) = note {
+                frame.buffer_mut().set_stringn(
+                    area.x + (width - note_width) as u16,
+                    area.y,
+                    &note,
+                    note_width,
+                    theme.faint(),
+                );
+            }
+        }
     }
 }
 
@@ -546,9 +648,10 @@ fn draw_commands(app: &mut App, frame: &mut Frame, theme: Theme, area: Rect) {
         let buffer = frame.buffer_mut();
         let key = fit(&entry.key, entry.key.len(), "");
         buffer.set_stringn(x, y, &key, slot, theme.reversed());
+        // A space after the key, and one before the next slot's key.
         let label = fit(
             entry.label,
-            slot.saturating_sub(key.len() + 1),
+            slot.saturating_sub(key.len() + 2),
             theme.ellipsis(),
         );
         buffer.set_stringn(x + key.len() as u16 + 1, y, &label, slot, Style::new());
@@ -595,15 +698,26 @@ fn menu_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
 fn folder_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
     let width = usize::from(width);
     if app.folders.is_empty() {
-        return vec![
-            PaneLine::default(),
-            PaneLine::new(Span::raw(fit(
-                "  No accounts yet. Add one in the Zmail window, or with zmail-app add-imap or \
-                 add-jmap.",
-                width,
-                theme.ellipsis(),
-            ))),
-        ];
+        // Wrapped, not cut off: it is all there is to read here.
+        // The user's keys; one the keymap took away is left out.
+        let key = |screen, cmd, builtin, name: &str| match app.key_label(screen, cmd, builtin) {
+            key if key.is_empty() => name.to_owned(),
+            key => format!("{key} for {name}"),
+        };
+        let note = format!(
+            "No accounts yet. Add one in Setup, Accounts: {}, then {}, which starts adding \
+             one.",
+            key(Screen::FolderList, Cmd::MainMenu, "M", "the Main Menu"),
+            key(Screen::MainMenu, Cmd::Setup, "S", "Setup"),
+        );
+        let mut lines = vec![PaneLine::default()];
+        for row in wrap(&note, width.saturating_sub(4).max(10)) {
+            lines.push(PaneLine {
+                joiner: row.joiner,
+                ..PaneLine::new(Span::raw(format!("  {}", row.text)))
+            });
+        }
+        return lines;
     }
     let current = app.folder.as_ref().map(|folder| folder.selection);
     app.folders
@@ -699,7 +813,7 @@ fn index_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
     }
     let now = app.now();
     let sender_width = (width / 4).clamp(8, 24);
-    let fixed = MARKER_WIDTH + 3 + 1 + 9 + 2 + sender_width + 1;
+    let fixed = MARKER_WIDTH + 3 + 1 + DATE_WIDTH + 2 + sender_width + 1;
     let subject_width = width.saturating_sub(fixed);
     app.index
         .entries
@@ -725,7 +839,7 @@ fn index_lines(app: &App, theme: Theme, width: u16) -> Vec<PaneLine> {
             };
             let rest = format!(
                 " {}  {} {}",
-                fit_right(&date, 9, theme.ellipsis()),
+                fit_right(&date, DATE_WIDTH, theme.ellipsis()),
                 fit(&entry.sender, sender_width, theme.ellipsis()),
                 fit(&subject, subject_width, theme.ellipsis())
             );
@@ -1198,7 +1312,8 @@ Moving around
   W          WhereIs: search the Message Index with the search language \
 (from:, to:, subject:, has:attachment, is:unread, before:, after:), find a \
 folder, or find text in a message. The index follows as you type; Enter also \
-asks the server for mail not downloaded yet.
+asks the server for mail not downloaded yet. Esc or < shows the whole folder \
+again.
   /          list conversations or single messages
   V          the preview pane, beside the index in terminals 120 columns or wider
   :          the command palette: every command of the screen with its key; \
@@ -1307,8 +1422,8 @@ tests the sign-in before saving, then asks for the name and address mail \
 goes out with.
   In the form, Up, Down and Tab move between the fields, Enter goes to the \
 next one or continues from the last, Space changes a choice, ^U clears a \
-field, Esc goes back a step and ^C cancels. Password fields show [hidden], \
-never what you type, and the password goes only to the system keychain.
+field, Esc goes back a step and ^C cancels. PageUp and PageDown scroll \
+a step longer than the screen. Password fields show [hidden], never what you type, and the password goes only to the system keychain.
   OAuth opens your browser and also shows the address to open by hand. The \
 browser sends the sign-in back to 127.0.0.1 on its own computer, so over SSH \
 it can't reach this Zmail: use an app password, or add the account on the \

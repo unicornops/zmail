@@ -317,11 +317,12 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
     if let Some(thread) = safety_thread(view, now) {
         snapshot.mailboxes[0].threads.insert(0, thread);
     }
+    let blobs = store
+        .sync_target(account_id)?
+        .context("the fixture account is missing")?
+        .blobs;
+    store_attachment_contents(&mut snapshot, &blobs)?;
     if view == FixtureView::ReaderAttachments {
-        let blobs = store
-            .sync_target(account_id)?
-            .context("the fixture account is missing")?
-            .blobs;
         snapshot.mailboxes[0]
             .threads
             .insert(0, attachments_thread(now, &blobs)?);
@@ -591,6 +592,34 @@ fn thread_id(store: &LocalStore, account_id: i64, role: &str, subject: &str) -> 
         .find(|thread| thread.subject == subject)
         .map(|thread| thread.id)
         .with_context(|| format!("the fixture thread {subject:?} is missing"))
+}
+
+/// Stores contents for the fixture mail's attachments (encrypted, as
+/// synced mail's are), so saving one can be tried, in `launch-tui-fixture`
+/// too: a line saying what it is, repeated to the size listed. The
+/// `reader-attachments` view's files, up to megabytes, stay metadata.
+fn store_attachment_contents(
+    snapshot: &mut AccountSyncSnapshot,
+    blobs: &zmail_core::BlobStore,
+) -> Result<()> {
+    let attachments = snapshot
+        .mailboxes
+        .iter_mut()
+        .flat_map(|mailbox| &mut mailbox.threads)
+        .flat_map(|thread| &mut thread.messages)
+        .flat_map(|message| &mut message.attachments);
+    for attachment in attachments {
+        let line = format!(
+            "{} is a made-up attachment from Zmail's fixture mail.\n",
+            attachment.filename
+        );
+        let size = usize::try_from(attachment.size_bytes).unwrap_or(usize::MAX);
+        let contents: Vec<u8> = line.bytes().cycle().take(size).collect();
+        attachment.storage_path = blobs
+            .write(&attachment.filename, &contents)
+            .with_context(|| format!("failed to store the fixture's {}", attachment.filename))?;
+    }
+    Ok(())
 }
 
 /// Subject of the `reader-attachments` view's thread.
@@ -1766,6 +1795,22 @@ mod tests {
             .context("the attachments thread should exist")?;
         assert_eq!(thread.subject, ATTACHMENTS_SUBJECT);
         assert!(thread.messages[0].attachments.len() >= 5);
+        Ok(())
+    }
+
+    #[test]
+    fn the_mails_attachments_have_contents_to_save() -> Result<()> {
+        let (store, _) = seeded(FixtureView::Inbox)?;
+        let account_id = store.list_accounts()?[0].id;
+        let thread_id = thread_id(&store, account_id, "inbox", "Q4 roadmap review")?;
+        let thread = store
+            .thread_view(thread_id)?
+            .context("the roadmap thread should exist")?;
+        let attachment = &thread.messages[0].attachments[0];
+        assert_eq!(attachment.filename, "q4-roadmap-draft.pdf");
+        let contents = store.attachment_blob(attachment.id)?.read()?;
+        assert_eq!(contents.len() as u64, attachment.size_bytes);
+        assert!(contents.starts_with(b"q4-roadmap-draft.pdf is a made-up attachment"));
         Ok(())
     }
 

@@ -940,7 +940,6 @@ fn the_outbox_shows_queued_failed_and_refused_messages() {
     let interrupted = queue("Interrupted", "di@example.com");
     // A send attempt claims them.
     while store.claim_due_outbox_job(None).expect("claim").is_some() {}
-    let waiting = queue("Waiting", "ada@example.com");
     store
         .record_outbox_failure(failed, "550 mailbox \x1b[31munavailable")
         .expect("failure");
@@ -954,6 +953,10 @@ fn the_outbox_shows_queued_failed_and_refused_messages() {
     store
         .record_outbox_failure(interrupted, zmail_core::INTERRUPTED_SEND_MESSAGE)
         .expect("interrupted");
+    // The Outbox lists the newest change first, by the second, then the
+    // newest job: queued last, this one is first even when the clock
+    // ticks over during the test.
+    let waiting = queue("Waiting", "ada@example.com");
     let mut app = app_with(store.clone(), environment());
     keys(&mut app, "t");
     assert_eq!(app.screen, Screen::Outbox);

@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                      Search "from:ada" in INBOX  Conv 1 of 1
+  N*        11:35  Grace Hopper         Launch plan for the terminal UI
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+              [1 match for "from:ada". Esc shows the whole folder]
+? Help       > [ViewMsg]  N NextMsg    Spc NextPage U Undo       F Forward
+< ClrSearch  P PrevMsg    - PrevPage   D Delete     R Reply      O OTHER CMDS

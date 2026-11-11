@@ -52,7 +52,10 @@ mod tests;
 
 use std::{
     io::{self, Write},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::{Context, Result};
@@ -121,18 +124,78 @@ pub fn run(launch: Launch) -> Result<()> {
         app.set_keymap(UserKeymap::load(path));
     }
 
+    let stop = StopSignals::watch().context("couldn't watch for SIGTERM and SIGHUP")?;
     let guard = terminal::TerminalGuard::enter(app.preferences().mouse)
         .context("couldn't set up the terminal")?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
         .context("couldn't set up the terminal")?;
-    let result = event_loop(&mut app, &mut terminal);
+    let result = event_loop(&mut app, &mut terminal, &stop);
     drop(terminal);
     drop(guard);
     result
 }
 
-fn event_loop(app: &mut App, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+/// Watches for the process being asked to stop (SIGTERM, or SIGHUP when
+/// the terminal goes away): the TUI then quits as a confirmed Quit does,
+/// saving the draft being written, and gives the terminal back. A second
+/// signal while it does ends the process at once, as the signal would
+/// have. The signals' own handling is back once this is dropped.
+struct StopSignals {
+    stop: Arc<AtomicBool>,
+    #[cfg(unix)]
+    ids: Vec<signal_hook::SigId>,
+}
+
+impl StopSignals {
+    #[cfg(unix)]
+    fn watch() -> io::Result<Self> {
+        use signal_hook::{consts::signal, flag};
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut ids = Vec::new();
+        for signal in [signal::SIGTERM, signal::SIGHUP] {
+            ids.push(flag::register_conditional_shutdown(
+                signal,
+                128 + signal,
+                stop.clone(),
+            )?);
+            ids.push(flag::register(signal, stop.clone())?);
+        }
+        Ok(Self { stop, ids })
+    }
+
+    /// Windows has no SIGTERM or SIGHUP.
+    #[cfg(not(unix))]
+    fn watch() -> io::Result<Self> {
+        Ok(Self {
+            stop: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    fn asked(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StopSignals {
+    fn drop(&mut self) {
+        for id in self.ids.drain(..) {
+            signal_hook::low_level::unregister(id);
+        }
+    }
+}
+
+fn event_loop(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    stop: &StopSignals,
+) -> Result<()> {
     loop {
+        // Before drawing: after SIGHUP there may be no terminal to draw on.
+        if stop.asked() {
+            app.quit_now();
+            return Ok(());
+        }
         terminal.draw(|frame| view::draw(app, frame))?;
         run_effects(app, terminal)?;
         if app.should_quit() {

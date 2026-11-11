@@ -466,7 +466,8 @@ pub const SETUP_ROWS: [SetupRow; 8] = [
 ];
 
 /// The Main Menu's items: key, name, description, command.
-pub const MENU_ITEMS: [(&str, &str, &str, Cmd); 8] = [
+/// The address book isn't in the terminal yet, so it isn't listed.
+pub const MENU_ITEMS: [(&str, &str, &str, Cmd); 7] = [
     ("?", "HELP", "Get help using Zmail", Cmd::Help),
     (
         "C",
@@ -491,12 +492,6 @@ pub const MENU_ITEMS: [(&str, &str, &str, Cmd); 8] = [
         "OUTBOX",
         "Messages waiting to send, or that failed",
         Cmd::Outbox,
-    ),
-    (
-        "A",
-        "ADDRESS BOOK",
-        "Address book (not in the terminal yet)",
-        Cmd::AddressBook,
     ),
     ("S", "SETUP", "Configure Zmail options", Cmd::Setup),
     ("Q", "QUIT", "Leave Zmail", Cmd::Quit),
@@ -774,6 +769,15 @@ impl App {
             app.status = Some(NO_ACCOUNTS.to_owned());
         }
         app
+    }
+
+    /// Quits without asking, as a confirmed Quit does: a message being
+    /// written keeps its last keystrokes. Also for SIGTERM and SIGHUP.
+    pub fn quit_now(&mut self) {
+        if let Err(error) = self.save_compose() {
+            self.report(error);
+        }
+        self.quit = true;
     }
 
     /// Whether the user has quit.
@@ -1122,7 +1126,12 @@ impl App {
         while let Ok(notice) = self.notices.1.try_recv() {
             match notice {
                 Notice::Status(status) => self.status = Some(status),
-                Notice::Setup(event) => self.setup_event(*event),
+                Notice::Setup(event) => {
+                    // A step that moved on shows its field.
+                    self.reveal
+                        .extend([PaneId::AddAccount, PaneId::EditAccount]);
+                    self.setup_event(*event);
+                }
                 Notice::ServerSearchDone { query, result } => {
                     if self.index.search.as_deref() == Some(query.as_str()) {
                         self.load_index(None);
@@ -1178,7 +1187,14 @@ impl App {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key),
             Event::Mouse(mouse) => self.on_mouse(mouse),
             Event::Paste(text) => self.on_paste(&text),
-            Event::Resize(width, height) => self.size = (width, height),
+            Event::Resize(width, height) => {
+                if self.size != (width, height) {
+                    // A form's field being edited stays in view.
+                    self.reveal
+                        .extend([PaneId::AddAccount, PaneId::EditAccount]);
+                }
+                self.size = (width, height);
+            }
             _ => {}
         }
     }
@@ -1218,6 +1234,11 @@ impl App {
             self.effects.push(Effect::Redraw);
             return;
         }
+        if matches!(self.screen, Screen::AddAccount | Screen::EditAccount)
+            && self.form_page_key(key)
+        {
+            return;
+        }
         // Compose takes every key: letters are text there. So do Add and
         // Change, whose forms have text fields.
         match self.screen {
@@ -1231,11 +1252,18 @@ impl App {
             return;
         }
         if key.code == KeyCode::Esc {
-            self.selection = None;
+            let mut cleared = self.selection.take().is_some();
             if let Some(state) = self.message.as_mut() {
-                state.find = None;
-                state.selected_link = None;
+                cleared |= state.find.take().is_some() | state.selected_link.take().is_some();
             }
+            if cleared {
+                return;
+            }
+            // Search results are left as `<` leaves them.
+            if self.screen == Screen::Index && self.index.search.is_some() {
+                return self.back();
+            }
+            self.status = Some(self.leaving_hint("Esc"));
             return;
         }
         // The user's keymap first: a key it binds is the user's.
@@ -1247,6 +1275,53 @@ impl App {
         }
         if let Some(cmd) = self.command_for(key) {
             self.run(cmd);
+        } else if control && key.code == KeyCode::Char('c') {
+            self.status = Some(self.leaving_hint("Ctrl-C"));
+        }
+    }
+
+    /// Add's and Change's forms: PageUp and PageDown scroll the form to
+    /// read what is above or below it, and any other key brings the field
+    /// being edited back into view, however small the terminal. True when
+    /// the key was a page key, handled here.
+    fn form_page_key(&mut self, key: KeyEvent) -> bool {
+        let pane = if self.screen == Screen::AddAccount {
+            PaneId::AddAccount
+        } else if self.edit.as_ref().is_some_and(|edit| edit.form.is_none()) {
+            PaneId::EditAccount
+        } else {
+            // The identity form has its own text area.
+            return false;
+        };
+        let direction = match key.code {
+            KeyCode::PageUp => -1,
+            KeyCode::PageDown => 1,
+            _ => {
+                self.reveal.insert(pane);
+                return false;
+            }
+        };
+        let height = self.pane(pane).map_or(10, DrawnPane::height).max(2);
+        self.scroll_pane(pane, direction * (height as isize - 1));
+        true
+    }
+
+    /// What the status line says when `pressed`, a key that cancels or
+    /// quits elsewhere, does nothing on this screen: how to go back and
+    /// how to quit, with the user's keys.
+    fn leaving_hint(&self, pressed: &str) -> String {
+        let back = (self.screen != Screen::MainMenu)
+            .then(|| self.key_label(self.screen, Cmd::Back, "<"))
+            .filter(|key| !key.is_empty())
+            .map(|key| format!("{key} goes back"));
+        let quit = Some(self.key_label(self.screen, Cmd::Quit, "Q"))
+            .filter(|key| !key.is_empty())
+            .map(|key| format!("{key} quits"));
+        let how: Vec<String> = back.into_iter().chain(quit).collect();
+        if how.is_empty() {
+            format!("{pressed} does nothing here")
+        } else {
+            format!("{pressed} does nothing here: {}", how.join(", "))
         }
     }
 
@@ -1288,7 +1363,6 @@ impl App {
                 'a' if self.screen == Screen::Accounts => Cmd::AddAccount,
                 'c' if self.screen == Screen::Accounts => Cmd::ChangeAccount,
                 'd' if self.screen == Screen::Accounts => Cmd::DeleteAccount,
-                'a' if self.screen == Screen::MainMenu => Cmd::AddressBook,
                 't' if self.screen == Screen::MainMenu => Cmd::Outbox,
                 // Compose wherever C is free.
                 'c' if !matches!(self.screen, Screen::Setup | Screen::Help | Screen::Accounts) => {
@@ -1370,8 +1444,8 @@ impl App {
                     entry("E", "Archive", Archive),
                     entry("S", "Save", Save),
                     entry("*", "Flag", Flag),
-                    entry("K", "Read/Unread", ReadState),
-                    entry(";", "UnselectAll", ToggleSelected),
+                    entry("K", "Read/Unrd", ReadState),
+                    entry(";", "UnselAll", ToggleSelected),
                     entry("^C", "Cancel", Back),
                 ];
             }
@@ -1507,7 +1581,12 @@ impl App {
             ],
             Screen::Index => vec![
                 entry("?", "Help", Help),
-                entry("<", "FldrList", Back),
+                // Esc clears the search too.
+                if self.index.search.is_some() {
+                    entry("<", "ClrSearch", Back)
+                } else {
+                    entry("<", "FldrList", Back)
+                },
                 entry(">", "[ViewMsg]", Select),
                 entry("P", "PrevMsg", Prev),
                 entry("N", "NextMsg", Next),
@@ -1796,6 +1875,12 @@ impl App {
             }
             Screen::Attachments => {
                 self.reveal.insert(PaneId::Attachments);
+            }
+            Screen::AddAccount => {
+                self.reveal.insert(PaneId::AddAccount);
+            }
+            Screen::EditAccount => {
+                self.reveal.insert(PaneId::EditAccount);
             }
             _ => {}
         }
@@ -2164,13 +2249,7 @@ impl App {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match prompt {
             Prompt::Quit => match key.code {
-                KeyCode::Char('y' | 'Y') => {
-                    // A message being written keeps its last keystrokes.
-                    if let Err(error) = self.save_compose() {
-                        self.report(error);
-                    }
-                    self.quit = true;
-                }
+                KeyCode::Char('y' | 'Y') => self.quit_now(),
                 _ => {
                     self.prompt = None;
                     self.status = None;
@@ -2353,7 +2432,7 @@ impl App {
                 self.index.search = Some(query.clone());
                 self.load_index(None);
                 self.status = Some(format!(
-                    "{} for \"{query}\"",
+                    "{} for \"{query}\". Esc shows the whole folder",
                     count_noun(self.index.entries.len(), "match", "matches")
                 ));
                 self.search_server(query);
@@ -2913,7 +2992,7 @@ impl App {
             }
             Prompt::Text { purpose, input } => format!("{}: {input}", purpose.label()),
             Prompt::Apply => format!(
-                "Apply to {}: D delete, E archive, S save, * flag, K read or unread, ; unselect",
+                "Apply to {}: D delete, E archive, S save, * flag, K read/unread",
                 count_noun(self.selected.len(), "conversation", "conversations")
             ),
             Prompt::Save(save) => save.label(),

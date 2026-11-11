@@ -1071,3 +1071,209 @@ fn with_no_accounts_the_screens_say_how_to_add_one() {
     keys(&mut app, "i");
     assert_eq!(app.screen, Screen::FolderList);
 }
+
+#[test]
+fn a_long_status_message_wins_over_the_sync_note_and_wraps() {
+    let store = seeded_store();
+    let work = store.list_accounts().expect("accounts")[0].id;
+    store
+        .record_sync_failure(work, "Fetching mail", "the server closed the connection")
+        .expect("the failure is recorded");
+    let mut app = app_with(store, environment());
+    open_work_inbox(&mut app, 80, 24);
+    // A short message keeps the note beside it.
+    app.status = Some("Conversation archived".to_owned());
+    let screen = text_of(&draw(&mut app, 80, 24));
+    assert!(screen.contains("[Conversation archived]"), "{screen}");
+    assert!(screen.contains("Work: sync failed"), "{screen}");
+    // A long one takes the line, wrapping rather than being cut off.
+    let error = "Couldn't save q4-roadmap-draft.pdf: the stored blob for attachment 7 is \
+                 missing at /home/ada/.local/share/zmail/attachments/3f/3f2a9c.bin; sync \
+                 the account again to download it";
+    app.status = Some(error.to_owned());
+    let buffer = draw(&mut app, 80, 24);
+    assert_snapshot("status-long-message-80x24", &buffer);
+    let screen = text_of(&buffer);
+    assert!(!screen.contains("sync failed"), "{screen}");
+    assert!(!screen.contains('…'), "{screen}");
+    let shown: Vec<&str> = screen
+        .lines()
+        .filter(|line| line.contains('[') || line.contains(']') || line.contains("blob"))
+        .collect();
+    assert!(shown.join(" ").contains("download it]"), "{screen}");
+    // The next key clears it, and the note is back.
+    keys(&mut app, "n");
+    let screen = text_of(&draw(&mut app, 80, 24));
+    assert!(screen.contains("Work: sync failed"), "{screen}");
+}
+
+#[test]
+fn a_question_longer_than_the_line_wraps() {
+    let mut app = app();
+    open_work_inbox(&mut app, 80, 24);
+    keys(&mut app, ";;;");
+    keys(&mut app, "a");
+    let screen = text_of(&draw(&mut app, 60, 15));
+    let lines: Vec<&str> = screen.lines().collect();
+    // Above the two-line command bar.
+    assert_eq!(
+        lines[lines.len() - 4..lines.len() - 2],
+        [
+            "Apply to 3 conversations: D delete, E archive, S save, *",
+            "flag, K read/unread"
+        ],
+        "{screen}"
+    );
+}
+
+#[test]
+fn dates_from_an_earlier_year_show_the_year() {
+    let store = seeded_store();
+    let work = store.list_accounts().expect("accounts")[0].id;
+    let mut snapshot = AccountSyncSnapshot {
+        checkpoint: "test:2".to_owned(),
+        detail: "Up to date".to_owned(),
+        identities: None,
+        mailboxes: vec![mailbox(
+            "INBOX",
+            Some("inbox"),
+            vec![
+                thread(
+                    "recent",
+                    "This year's news",
+                    false,
+                    &[text_mail(
+                        "Bob <bob@work.example>",
+                        30 * 24 * 60,
+                        true,
+                        "Hi",
+                    )],
+                ),
+                thread(
+                    "old",
+                    "Last year's minutes",
+                    false,
+                    &[text_mail(
+                        "Ada Lovelace <ada@work.example>",
+                        375 * 24 * 60,
+                        true,
+                        "The minutes",
+                    )],
+                ),
+            ],
+        )],
+    };
+    snapshot.mailboxes[0].threads[0].unread_count = 0;
+    store
+        .replace_account_snapshot(work, &snapshot)
+        .expect("stored");
+    let mut app = app_with(store, environment());
+    let buffer = open_work_inbox(&mut app, 80, 24);
+    assert_snapshot("message-index-old-year-80x24", &buffer);
+    for width in [60, 80, 200] {
+        let screen = text_of(&draw(&mut app, width, 24));
+        assert!(screen.contains("5 Oct 2025"), "{width}:\n{screen}");
+        assert!(screen.contains("15 Sep"), "{width}:\n{screen}");
+    }
+}
+
+#[test]
+fn esc_or_less_than_leaves_search_results_and_the_bar_says_so() {
+    let mut app = app();
+    open_work_inbox(&mut app, 80, 24);
+    let screen = text_of(&draw(&mut app, 80, 24));
+    assert!(screen.contains("< FldrList"), "{screen}");
+    keys(&mut app, "wfrom:ada");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.index.entries.len(), 1);
+    let buffer = draw(&mut app, 80, 24);
+    assert_snapshot("search-results-80x24", &buffer);
+    assert!(text_of(&buffer).contains("< ClrSearch"));
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.index.entries.len(), 4);
+    assert_eq!(app.screen, Screen::Index);
+    let screen = text_of(&draw(&mut app, 80, 24));
+    assert!(
+        screen.contains("Showing the whole folder again"),
+        "{screen}"
+    );
+    assert!(screen.contains("< FldrList"), "{screen}");
+}
+
+#[test]
+fn ctrl_c_and_esc_on_a_browse_screen_say_how_to_leave() {
+    let mut app = app();
+    open_work_inbox(&mut app, 80, 24);
+    control(&mut app, 'c');
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Ctrl-C does nothing here: < goes back, Q quits")
+    );
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Esc does nothing here: < goes back, Q quits")
+    );
+    assert_eq!(app.screen, Screen::Index);
+    assert!(!app.should_quit());
+    keys(&mut app, "m");
+    control(&mut app, 'c');
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Ctrl-C does nothing here: Q quits")
+    );
+    // Esc that clears something says nothing.
+    keys(&mut app, "i");
+    key(&mut app, KeyCode::Enter);
+    keys(&mut app, "w");
+    keys(&mut app, "plan");
+    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.status, None);
+}
+
+#[test]
+fn the_main_menu_leaves_out_the_address_book() {
+    let mut app = app();
+    let screen = text_of(&draw(&mut app, 80, 24));
+    assert!(!screen.to_lowercase().contains("address book"), "{screen}");
+    keys(&mut app, "a");
+    assert_eq!(app.screen, Screen::MainMenu);
+    assert_eq!(app.status, None);
+}
+
+#[test]
+fn the_empty_folder_list_wraps_and_points_to_setup() {
+    let mut app = app_with(
+        Arc::new(LocalStore::open_ephemeral().expect("the store opens")),
+        environment(),
+    );
+    keys(&mut app, "l");
+    let screen = text_of(&draw(&mut app, 60, 15));
+    assert!(!screen.contains('…'), "{screen}");
+    let text = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        text.contains(
+            "No accounts yet. Add one in Setup, Accounts: M for the Main Menu, then S for \
+             Setup, which starts adding one."
+        ),
+        "{screen}"
+    );
+}
+
+#[test]
+fn quit_now_keeps_the_message_being_written() {
+    let store = seeded_store();
+    let mut app = app_with(store.clone(), environment());
+    keys(&mut app, "c");
+    assert_eq!(app.screen, Screen::Compose);
+    keys(&mut app, "ada@work.example");
+    app.quit_now();
+    assert!(app.should_quit());
+    let drafts = store.list_drafts(None).expect("drafts");
+    assert_eq!(drafts.len(), 1);
+    assert!(
+        format!("{:?}", drafts[0]).contains("ada@work.example"),
+        "{drafts:?}"
+    );
+}

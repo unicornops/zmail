@@ -10827,6 +10827,7 @@ dependencies = [
  "ratatui",
  "ratatui-textarea",
  "serde_json",
+ "signal-hook",
  "tokio",
  "unicode-width",
  "url",

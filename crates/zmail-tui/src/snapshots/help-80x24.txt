@@ -16,7 +16,7 @@
                (from:, to:, subject:, has:attachment, is:unread, before:,
                after:), find a folder, or find text in a message. The index
                follows as you type; Enter also asks the server for mail not
-               downloaded yet.
+               downloaded yet. Esc or < shows the whole folder again.
     /          list conversations or single messages
     V          the preview pane, beside the index in terminals 120 columns or
 
