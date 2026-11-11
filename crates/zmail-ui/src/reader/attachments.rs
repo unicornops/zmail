@@ -1,14 +1,14 @@
 //! Attachment cards: one per received attachment, below the message body.
 //!
 //! A card shows a type icon (chosen by extension, then MIME type), the
-//! file name and a readable size, with Open and Save As buttons. The
+//! file name as it is saved (`sanitize_filename`) and a readable size, with Open and Save As buttons. The
 //! buttons dispatch [`OpenAttachment`] and [`SaveAttachmentAs`]; the
 //! workspace saves the file and warns before opening a program or script
 //! (see `crate::attachments`).
 
 use gpui::{AnyElement, FontWeight, IntoElement, Role, SharedString, div, prelude::*, px, rgb};
 use zmail_core::{ReceivedAttachment, ThreadMessage};
-use zmail_security::attachment_safety::is_executable_or_script;
+use zmail_security::attachment_safety::{is_executable_or_script, sanitize_filename};
 
 use crate::a11y::AccessibleExt;
 use crate::actions::{OpenAttachment, SaveAttachmentAs};
@@ -38,8 +38,11 @@ pub(crate) fn attachment_cards(message: &ThreadMessage, colors: &UiColors) -> Ve
 
 fn attachment_card(attachment: &ReceivedAttachment, colors: &UiColors) -> impl IntoElement {
     let attachment_id = attachment.id;
-    let kind = AttachmentKind::of(&attachment.filename, &attachment.content_type);
-    let name = SharedString::from(attachment.filename.clone());
+    // The name as it is saved: no bidirectional or invisible characters
+    // to make `invoice<RLO>fdp.exe` show as `invoiceexe.pdf`.
+    let filename = sanitize_filename(&attachment.filename);
+    let kind = AttachmentKind::of(&filename, &attachment.content_type);
+    let name = SharedString::from(filename);
     let detail = format!(
         "{} \u{00B7} {}",
         kind.label,

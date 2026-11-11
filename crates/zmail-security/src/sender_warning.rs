@@ -4,9 +4,16 @@
 //!
 //! | Finding | Tier |
 //! |---|---|
-//! | The From domain imitates a well-known domain | Danger |
+//! | The From domain imitates a well-known domain (look-alike letters from any alphabet included) | Danger |
+//! | The display name shows an address or website on another domain | Caution |
+//! | The From domain mixes alphabets in one label (Latin and Cyrillic, say) | Caution |
 //! | Reply-To is on an unrelated domain | Caution |
+//! | The display name is a mailing list's `'member' via List` rewrite, sent from the list, showing a member on another domain | Info |
 //! | Reply-To is on a parent or subdomain of the From domain | Info |
+//! | The From domain is written with international letters | Info |
+//!
+//! One banner shows, at the highest tier, worded after the first finding
+//! of that tier in this table; its evidence lists every finding's.
 //!
 //! "Looks safe" hides the warning for that message only (stored with the
 //! message, `LocalStore::dismiss_sender_warning`). With the sender
@@ -84,13 +91,14 @@ fn describe(
                 .join(", ")
         })
         .filter(|addresses| !addresses.is_empty());
+    let international = report.international_domain.as_ref();
+    let mixed = international.filter(|domain| domain.mixed);
 
-    let mut details = vec![("From", from_address)];
+    // The banner names the most serious finding; the evidence lists every
+    // finding's.
     let (title, message) = match tier {
         SafetyTier::Danger => {
             let known = report.lookalike_of.clone().unwrap_or_default();
-            details.push(("Sender's domain", from_domain));
-            details.push(("Looks like", known.clone()));
             (
                 "Possible impersonation",
                 format!(
@@ -99,24 +107,72 @@ fn describe(
             )
         }
         SafetyTier::Caution => {
-            let reply_domain = report.reply_to_mismatch.clone().unwrap_or_default();
-            (
-                "Replies go somewhere else",
-                format!(
-                    "Replying sends your message to {reply_domain}, not to the sender's domain."
-                ),
-            )
+            if let Some(shown) = &report.name_shows {
+                (
+                    "Name shows another address",
+                    format!(
+                        "The sender's name shows {shown}, but the message comes from {from_domain}."
+                    ),
+                )
+            } else if mixed.is_some() {
+                (
+                    "Mixed alphabets in the sender's domain",
+                    format!(
+                        "The sender's domain mixes letters from different alphabets, which can make it look like another domain. Its plain form is {from_domain}."
+                    ),
+                )
+            } else {
+                let reply_domain = report.reply_to_mismatch.clone().unwrap_or_default();
+                (
+                    "Replies go somewhere else",
+                    format!(
+                        "Replying sends your message to {reply_domain}, not to the sender's domain."
+                    ),
+                )
+            }
         }
         SafetyTier::Info => {
-            let reply_domain = report.reply_to_mismatch.clone().unwrap_or_default();
-            (
-                "Replies go to a related address",
-                format!(
-                    "Replies go to {reply_domain}, a related domain, rather than {from_domain}."
-                ),
-            )
+            if let Some(member) = &report.mailing_list_member {
+                (
+                    "Sent through a mailing list",
+                    format!(
+                        "The sender's name shows {member}, but the message came from the list's address, {from_address}."
+                    ),
+                )
+            } else if let Some(reply_domain) = &report.reply_to_mismatch {
+                (
+                    "Replies go to a related address",
+                    format!(
+                        "Replies go to {reply_domain}, a related domain, rather than {from_domain}."
+                    ),
+                )
+            } else {
+                (
+                    "International sender domain",
+                    format!(
+                        "The sender's domain uses international letters. Its plain form is {from_domain}."
+                    ),
+                )
+            }
         }
     };
+
+    let mut details = vec![("From", from_address)];
+    if let Some(shown) = &report.name_shows {
+        details.push(("Name shows", shown.clone()));
+    }
+    if let Some(member) = &report.mailing_list_member {
+        details.push(("List member", member.clone()));
+    }
+    if report.lookalike_of.is_some() || report.name_shows.is_some() || international.is_some() {
+        details.push(("Sender's domain", from_domain));
+    }
+    if let Some(known) = &report.lookalike_of {
+        details.push(("Looks like", known.clone()));
+    }
+    if let Some(domain) = international {
+        details.push(("Alphabets", domain.scripts.join(", ")));
+    }
     if report.reply_to_mismatch.is_some()
         && let Some(addresses) = reply_to_addresses
     {
@@ -212,5 +268,108 @@ mod tests {
             warning.details.last(),
             Some(&("Replies go to (Reply-To)", "evil@evil.example".to_owned()))
         );
+    }
+
+    #[test]
+    fn a_name_showing_another_address_is_caution_with_both_domains() {
+        let warning =
+            warning("\"ceo@corp.example\" <boss@evil.example>", None).expect("the name is flagged");
+        assert_eq!(warning.tier, SafetyTier::Caution);
+        assert_eq!(warning.title, "Name shows another address");
+        assert_eq!(
+            warning.message,
+            "The sender's name shows corp.example, but the message comes from evil.example."
+        );
+        assert_eq!(
+            warning.details,
+            vec![
+                ("From", "boss@evil.example".to_owned()),
+                ("Name shows", "corp.example".to_owned()),
+                ("Sender's domain", "evil.example".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn international_domains_show_their_plain_form() {
+        let mixed = warning("Bank <x@b\u{0430}nk.example>", None).expect("mixed alphabets");
+        assert_eq!(mixed.tier, SafetyTier::Caution);
+        assert_eq!(mixed.title, "Mixed alphabets in the sender's domain");
+        assert!(mixed.message.contains("xn--"), "{}", mixed.message);
+        assert!(
+            mixed
+                .details
+                .contains(&("Alphabets", "Latin, Cyrillic".to_owned()))
+        );
+
+        let international =
+            warning("Hans <hans@m\u{00FC}ller.example>", None).expect("international");
+        assert_eq!(international.tier, SafetyTier::Info);
+        assert_eq!(international.title, "International sender domain");
+        assert_eq!(
+            international.message,
+            "The sender's domain uses international letters. Its plain form is xn--mller-kva.example."
+        );
+        assert!(!shows(international.tier, SenderWarnings::Fewer));
+
+        // A Cyrillic look-alike of a well-known domain is impersonation.
+        let lookalike = warning("Apple <id@\u{0430}pple.com>", None).expect("a lookalike");
+        assert_eq!(lookalike.tier, SafetyTier::Danger);
+        assert!(
+            lookalike
+                .details
+                .contains(&("Looks like", "apple.com".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_comma_in_the_name_does_not_hide_the_warning() {
+        let warning = warning(
+            "\"PayPal, Inc.\" <support@paypa1.com>",
+            Some("\"Billing, Dept\" <collect@evil.example>"),
+        )
+        .expect("flagged");
+        assert_eq!(warning.tier, SafetyTier::Danger);
+        assert_eq!(
+            warning.details,
+            vec![
+                ("From", "support@paypa1.com".to_owned()),
+                ("Sender's domain", "paypa1.com".to_owned()),
+                ("Looks like", "paypal.com".to_owned()),
+                (
+                    "Replies go to (Reply-To)",
+                    "collect@evil.example".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mailing_list_rewrite_is_info_with_list_wording() {
+        let list = warning(
+            "'alice@example.com' via Dev Team <dev-team@lists.example>",
+            None,
+        )
+        .expect("still shown");
+        assert_eq!(list.tier, SafetyTier::Info);
+        assert_eq!(list.title, "Sent through a mailing list");
+        assert_eq!(
+            list.message,
+            "The sender's name shows alice@example.com, but the message came from the list's address, dev-team@lists.example."
+        );
+        assert_eq!(
+            list.details,
+            vec![
+                ("From", "dev-team@lists.example".to_owned()),
+                ("List member", "alice@example.com".to_owned()),
+            ]
+        );
+        assert!(shows(list.tier, SenderWarnings::Standard));
+        assert!(!shows(list.tier, SenderWarnings::Fewer));
+
+        // A plain name showing someone else's address keeps the alarm.
+        let plain = warning("'alice@example.com' <dev-team@lists.example>", None).expect("flagged");
+        assert_eq!(plain.tier, SafetyTier::Caution);
+        assert_eq!(plain.title, "Name shows another address");
     }
 }

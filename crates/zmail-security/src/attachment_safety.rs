@@ -58,16 +58,26 @@ pub fn sanitize_filename(name: &str) -> String {
     truncate_keeping_extension(&sanitized, MAX_FILENAME_BYTES)
 }
 
-/// Bidirectional overrides, isolates and marks, and zero-width characters:
-/// they change how a name looks without being visible themselves.
+/// Bidirectional overrides, isolates and marks, zero-width characters and
+/// the other characters that show as nothing (the soft hyphen, the line
+/// and paragraph separators, the Mongolian vowel separator, the Hangul
+/// fillers): they change how a name looks without being visible
+/// themselves.
 pub(crate) fn is_invisible_format_char(ch: char) -> bool {
     matches!(
         ch,
-        '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{2069}'
+            | '\u{3164}'
             | '\u{FEFF}'
+            | '\u{FFA0}'
     )
 }
 
@@ -128,6 +138,19 @@ const EXECUTABLE_EXTENSIONS: &[&str] = &[
     "hta",
     "chm",
     "settingcontent-ms",
+    "rdp",
+    "library-ms",
+    "search-ms",
+    "searchconnector-ms",
+    "website",
+    "theme",
+    "themepack",
+    "deskthemepack",
+    "diagcab",
+    "wsb",
+    "cab",
+    "msu",
+    "vsto",
     // Windows scripts.
     "bat",
     "cmd",
@@ -209,6 +232,23 @@ const EXECUTABLE_EXTENSIONS: &[&str] = &[
     "ppam",
     "ppsm",
     "sldm",
+    // Office files that run code or fetch data when opened: OneNote
+    // notebooks (embedded files), binary workbooks (macros), web queries,
+    // SYLK, and Access databases.
+    "one",
+    "xlsb",
+    "iqy",
+    "slk",
+    "ade",
+    "adp",
+    "accde",
+    "mde",
+    // macOS configuration profiles and Shortcuts.
+    "mobileconfig",
+    "shortcut",
+    // Python zip applications.
+    "pyz",
+    "pyzw",
 ];
 
 /// MIME types of programs, installers and scripts, for attachments whose
@@ -427,6 +467,21 @@ mod tests {
         );
         assert_eq!(sanitize_filename("zero\u{200B}width.txt"), "zerowidth.txt");
         assert_eq!(sanitize_filename("\u{FEFF}bom.txt"), "bom.txt");
+        // The Arabic letter mark, line and paragraph separators, the soft
+        // hyphen, the Mongolian vowel separator and the Hangul fillers
+        // are invisible too.
+        for invisible in [
+            '\u{061C}', '\u{2028}', '\u{2029}', '\u{00AD}', '\u{180E}', '\u{115F}', '\u{1160}',
+            '\u{3164}', '\u{FFA0}',
+        ] {
+            assert_eq!(
+                sanitize_filename(&format!("invoice{invisible}.pdf")),
+                "invoice.pdf",
+                "U+{:04X}",
+                u32::from(invisible)
+            );
+        }
+        assert_eq!(sanitize_filename("\u{3164}"), FALLBACK_FILENAME);
     }
 
     #[test]
@@ -496,6 +551,50 @@ mod tests {
                 is_executable_or_script(name, "application/octet-stream"),
                 "{name} should be flagged"
             );
+        }
+    }
+
+    #[test]
+    fn commonly_abused_types_are_executable() {
+        for extension in [
+            // Windows: remote desktop, OneNote, binary Excel, search and
+            // library shortcuts, themes, troubleshooters, web queries,
+            // SYLK, Sandbox configurations, cabinets and updates, Office
+            // add-ins, Internet shortcuts and Access databases.
+            "rdp",
+            "one",
+            "xlsb",
+            "library-ms",
+            "search-ms",
+            "searchconnector-ms",
+            "theme",
+            "themepack",
+            "deskthemepack",
+            "diagcab",
+            "iqy",
+            "slk",
+            "wsb",
+            "cab",
+            "msu",
+            "vsto",
+            "website",
+            "ade",
+            "adp",
+            "accde",
+            "mde",
+            // macOS: configuration profiles and Shortcuts.
+            "mobileconfig",
+            "shortcut",
+            // Python zip applications.
+            "pyz",
+            "pyzw",
+        ] {
+            let name = format!("invoice.{extension}");
+            assert!(
+                is_executable_or_script(&name, "application/octet-stream"),
+                "{name} should be flagged"
+            );
+            assert_eq!(open_risk(&name.to_ascii_uppercase(), ""), OpenRisk::Program);
         }
     }
 
