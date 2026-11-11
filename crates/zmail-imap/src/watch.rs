@@ -322,28 +322,53 @@ where
 
 /// Waits on an initialised IDLE, handing every server response to
 /// `on_response`, until [`IDLE_RENEW_INTERVAL`] has passed.
+///
+/// Silence is normal in IDLE, so the connection's stall timeout is off for
+/// the wait; the renewal's `DONE`, under it again, proves the connection
+/// still works.
 async fn idle_until_renewal<F>(
     idle: &mut async_imap::extensions::idle::Handle<DynImapStream>,
+    on_response: F,
+) -> Result<()>
+where
+    F: FnMut(&Response<'_>),
+{
+    idle_for(idle, IDLE_RENEW_INTERVAL, on_response).await
+}
+
+/// [`idle_until_renewal`] with the renewal interval given.
+pub(crate) async fn idle_for<F>(
+    idle: &mut async_imap::extensions::idle::Handle<DynImapStream>,
+    renew_after: Duration,
     mut on_response: F,
 ) -> Result<()>
 where
     F: FnMut(&Response<'_>),
 {
-    let renew_at = tokio::time::Instant::now() + IDLE_RENEW_INTERVAL;
-    loop {
-        let remaining = renew_at.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Ok(());
-        }
-        let (wait, _stop) = idle.wait_with_timeout(remaining);
-        match wait.await.context("the IMAP IDLE failed")? {
-            IdleResponse::NewData(response) => on_response(response.parsed()),
-            IdleResponse::Timeout => return Ok(()),
-            // Nothing else stops this wait, so the stream ended: the
-            // server closed the connection.
-            IdleResponse::ManualInterrupt => bail!("the IMAP server closed the IDLE connection"),
+    let stall_timeout = idle.as_mut().timeout();
+    idle.as_mut().set_timeout(None);
+    let renew_at = tokio::time::Instant::now() + renew_after;
+    let result = async {
+        loop {
+            let remaining = renew_at.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(());
+            }
+            let (wait, _stop) = idle.wait_with_timeout(remaining);
+            match wait.await.context("the IMAP IDLE failed")? {
+                IdleResponse::NewData(response) => on_response(response.parsed()),
+                IdleResponse::Timeout => return Ok(()),
+                // Nothing else stops this wait, so the stream ended: the
+                // server closed the connection.
+                IdleResponse::ManualInterrupt => {
+                    bail!("the IMAP server closed the IDLE connection")
+                }
+            }
         }
     }
+    .await;
+    idle.as_mut().set_timeout(stall_timeout);
+    result
 }
 
 /// The mailbox a NOTIFY response names: `STATUS` responses carry it, and a
