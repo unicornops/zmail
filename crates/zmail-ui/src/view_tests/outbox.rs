@@ -141,7 +141,11 @@ fn the_outbox_detail_shows_the_error_and_retries_edits_and_deletes(cx: &mut Test
             .expect("the draft lookup")
             .is_none()
     );
-    assert_eq!(toasts(&view, cx), ["Message deleted"]);
+    // Closing the compose window said where the draft was kept.
+    assert_eq!(
+        toasts(&view, cx),
+        ["Draft saved to Drafts", "Message deleted"]
+    );
     assert_eq!(shown_job(&view, cx), None);
 }
 
