@@ -10741,6 +10741,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "mail-send",
+ "tokio",
  "tokio-rustls",
  "zmail-core",
 ]

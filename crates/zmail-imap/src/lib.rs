@@ -1,11 +1,14 @@
 //! Real IMAP adapter for Phase 2.
 
+#[cfg(test)]
+mod connection_tests;
 mod qresync;
+mod stall;
 mod watch;
 
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Once},
+    sync::{Arc, Once, OnceLock},
     time::Duration,
 };
 
@@ -25,7 +28,10 @@ use tokio::{
 };
 use tokio_rustls::{
     TlsConnector,
-    rustls::{ClientConfig, RootCertStore, pki_types::ServerName},
+    rustls::{
+        ClientConfig, RootCertStore,
+        pki_types::{CertificateDer, ServerName},
+    },
 };
 use url::Url;
 use zmail_core::threading::bare_message_id;
@@ -55,6 +61,10 @@ pub const PRIORITY_CAPABILITIES: &[&str] = &[
 ];
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long the server gets to send its greeting once connected. A server
+/// that accepts the connection but never greets (often the wrong port or
+/// security) fails here rather than after the longer stall timeout.
+const GREETING_TIMEOUT: Duration = Duration::from_secs(30);
 const FETCH_BATCH_SIZE: usize = 50;
 // Lazy sync: headers only. Bodies (and attachment blobs) are fetched on
 // demand by `fetch_message_bodies` when a message is opened.
@@ -912,7 +922,10 @@ trait ImapIo: AsyncRead + AsyncWrite + Unpin + Send + std::fmt::Debug {}
 
 impl<T> ImapIo for T where T: AsyncRead + AsyncWrite + Unpin + Send + std::fmt::Debug {}
 
-type DynImapStream = Box<dyn ImapIo>;
+/// The connection every session runs on: plain or TLS, under the
+/// [`stall::StallTimeout`] that fails a command whose connection stops
+/// moving.
+type DynImapStream = stall::StallTimeout<Box<dyn ImapIo>>;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct ImapCheckpoint {
@@ -1017,14 +1030,56 @@ impl Authenticator for Xoauth2Authenticator<'_> {
     }
 }
 
+/// The TLS settings for every IMAP connection, built once: the operating
+/// system's trusted roots load on the first TLS connection, not on each.
+///
+/// A root the system store holds but rustls cannot parse is skipped rather
+/// than failing every connection; only a store with no usable root at all
+/// is an error (and is tried again on the next connection).
+fn tls_config() -> Result<Arc<ClientConfig>> {
+    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    if let Some(config) = CONFIG.get() {
+        return Ok(config.clone());
+    }
+    ensure_rustls_provider();
+    let roots = root_store(rustls_native_certs::load_native_certs().certs)?;
+    let config = Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    Ok(CONFIG.get_or_init(|| config).clone())
+}
+
+/// A root store from the system's certificates, skipping any that do not
+/// parse.
+fn root_store(certificates: Vec<CertificateDer<'static>>) -> Result<RootCertStore> {
+    let mut roots = RootCertStore::empty();
+    roots.add_parsable_certificates(certificates);
+    if roots.is_empty() {
+        bail!("no TLS root certificates were loaded for the IMAP connection");
+    }
+    Ok(roots)
+}
+
 async fn connect_session(
     endpoint: &ImapEndpoint,
     username: &str,
     secret: &str,
     auth: AuthKind,
 ) -> Result<Session<DynImapStream>> {
-    ensure_rustls_provider();
+    connect_session_with(endpoint, username, secret, auth, stall::STALL_TIMEOUT).await
+}
 
+/// [`connect_session`] with the stall timeout given, so tests can use a
+/// short one.
+async fn connect_session_with(
+    endpoint: &ImapEndpoint,
+    username: &str,
+    secret: &str,
+    auth: AuthKind,
+    stall_timeout: Duration,
+) -> Result<Session<DynImapStream>> {
     let tcp = timeout(
         CONNECT_TIMEOUT,
         TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
@@ -1033,24 +1088,10 @@ async fn connect_session(
     .context("timed out while connecting to the IMAP server")?
     .with_context(|| format!("failed to connect to {}:{}", endpoint.host, endpoint.port))?;
 
-    let stream: DynImapStream = match endpoint.security {
+    let stream: Box<dyn ImapIo> = match endpoint.security {
         ImapSecurity::Plain => Box::new(tcp),
         ImapSecurity::ImplicitTls => {
-            let mut roots = RootCertStore::empty();
-            let native = rustls_native_certs::load_native_certs();
-            for cert in native.certs {
-                roots
-                    .add(cert)
-                    .map_err(|error| anyhow!("failed to add a native root certificate: {error}"))?;
-            }
-            if roots.is_empty() {
-                bail!("no TLS root certificates were loaded for the IMAP connection");
-            }
-
-            let config = ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            let connector = TlsConnector::from(Arc::new(config));
+            let connector = TlsConnector::from(tls_config()?);
             let server_name = ServerName::try_from(endpoint.host.clone())
                 .with_context(|| format!("invalid IMAP server name {}", endpoint.host))?;
             let tls_stream = timeout(CONNECT_TIMEOUT, connector.connect(server_name, tcp))
@@ -1060,11 +1101,12 @@ async fn connect_session(
             Box::new(tls_stream)
         }
     };
+    let stream = stall::StallTimeout::new(stream, Some(stall_timeout));
 
     let mut client = Client::new(stream);
-    client
-        .read_response()
+    timeout(GREETING_TIMEOUT, client.read_response())
         .await
+        .context("the IMAP server accepted the connection but sent no greeting")?
         .context("failed to read the IMAP greeting")?
         .context("the IMAP server closed the connection before greeting")?;
 
@@ -2005,6 +2047,37 @@ mod tests {
         xoauth2_response,
     };
     use zmail_core::{MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
+
+    #[test]
+    fn an_unparsable_system_root_is_skipped_not_fatal() {
+        use tokio_rustls::rustls::pki_types::CertificateDer;
+
+        let garbage = CertificateDer::from(vec![0x30, 0x03, 0x02, 0x01, 0x00]);
+        let error = super::root_store(vec![garbage.clone()])
+            .expect_err("a store with no usable root is an error");
+        assert!(format!("{error:#}").contains("no TLS root certificates"));
+
+        // The system's own roots, where the machine has any, with one bad
+        // certificate among them.
+        let native = rustls_native_certs::load_native_certs().certs;
+        if native.is_empty() {
+            return;
+        }
+        let mut certificates = vec![garbage];
+        certificates.extend(native);
+        let roots = super::root_store(certificates).expect("the good roots still load");
+        assert!(!roots.is_empty());
+    }
+
+    #[test]
+    fn the_tls_config_is_built_once() {
+        if rustls_native_certs::load_native_certs().certs.is_empty() {
+            return;
+        }
+        let first = super::tls_config().expect("TLS config");
+        let second = super::tls_config().expect("TLS config");
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+    }
 
     #[test]
     fn search_criteria_map_operators_onto_search_keys() {

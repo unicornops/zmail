@@ -1,6 +1,6 @@
 //! Minimal SMTP submission client used by the Phase 2b harness.
 
-use std::sync::Once;
+use std::{sync::Once, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use mail_send::{
@@ -17,9 +17,46 @@ use zmail_core::{
 
 pub use zmail_core::SubmissionSecurity;
 
+#[cfg(test)]
+mod timeout_tests;
+
 /// Delivery model for SMTP-native accounts.
 pub const DELIVERY_MODEL: &str =
     "Queued submission with offline retry and explicit identity binding.";
+
+/// How long connecting, the TLS handshake, the greeting and signing in may
+/// take in all. mail-send's own default is an hour.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+/// The base for each command of a send. RFC 5321 section 4.5.3.2.6 gives
+/// the server ten minutes to answer the end of the message (it may be
+/// scanning it), and a send given up while the server was still deciding
+/// may go out twice when retried.
+const SEND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// The slowest upload a send allows for on top of [`SEND_TIMEOUT`]:
+/// 32 KiB/s (256 kbit/s), so a large attachment on a slow link still goes.
+const SLOWEST_UPLOAD_BYTES_PER_SECOND: u64 = 32 * 1024;
+
+/// The time limits of one submission; tests shorten them.
+#[derive(Debug, Clone, Copy)]
+struct Timeouts {
+    connect: Duration,
+    send: Duration,
+}
+
+const TIMEOUTS: Timeouts = Timeouts {
+    connect: CONNECT_TIMEOUT,
+    send: SEND_TIMEOUT,
+};
+
+impl Timeouts {
+    /// The limit for each command of sending a message of `bytes`:
+    /// mail-send times the whole upload and the server's answer to it as
+    /// one command.
+    fn for_message(self, bytes: usize) -> Duration {
+        let upload = (bytes as u64).div_ceil(SLOWEST_UPLOAD_BYTES_PER_SECOND);
+        self.send + Duration::from_secs(upload)
+    }
+}
 
 /// Connection settings for an SMTP submission attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,24 +159,27 @@ pub async fn submit_outgoing_message(
     config: &SubmissionConfig,
     message: &OutgoingMessage,
 ) -> Result<()> {
+    submit_within(config, message, TIMEOUTS).await
+}
+
+async fn submit_within(
+    config: &SubmissionConfig,
+    message: &OutgoingMessage,
+    timeouts: Timeouts,
+) -> Result<()> {
     ensure_rustls_provider();
 
     if message.to.is_empty() && message.cc.is_empty() && message.bcc.is_empty() {
         bail!("SMTP submission requires at least one recipient");
     }
 
-    let mut builder = SmtpClientBuilder::new(config.host.clone(), config.port)
-        .map_err(anyhow::Error::msg)?
-        .helo_host(config.hello_name.clone());
-
-    if let Some(credentials) = config.sasl_credentials()? {
-        builder = builder.credentials(credentials);
-    }
-
+    let builder = client_builder(config, timeouts)?;
     let recipients = all_recipients(message);
+    let body = render_rfc822_message(message)?;
+    let send_timeout = timeouts.for_message(body.len());
     let smtp_message = Message::empty()
         .from(message.from_email.as_str())
-        .body(render_rfc822_message(message)?);
+        .body(body);
     let smtp_message = recipients
         .iter()
         .fold(smtp_message, |smtp_message, recipient| {
@@ -149,56 +189,68 @@ pub async fn submit_outgoing_message(
     // mail-send 0.7 returns the server's final reply (with the queue ID);
     // an error status is already an `Err`, and nothing here uses the text.
     match config.security {
-        SubmissionSecurity::Plain => builder
-            .connect_plain()
-            .await
-            .map_err(|error| {
+        SubmissionSecurity::Plain => {
+            let mut client = builder.connect_plain().await.map_err(|error| {
                 connect_error(
                     error,
                     "failed to connect to the SMTP server over plain text",
                 )
-            })?
-            .send(smtp_message)
-            .await
-            .context("failed to submit the SMTP message")?,
-        SubmissionSecurity::StartTls => builder
-            .implicit_tls(false)
-            .connect()
-            .await
-            .map_err(|error| {
-                connect_error(error, "failed to connect to the SMTP server using STARTTLS")
-            })?
-            .send(smtp_message)
-            .await
-            .context("failed to submit the SMTP message")?,
-        SubmissionSecurity::ImplicitTls => builder
-            .connect()
-            .await
-            .map_err(|error| {
+            })?;
+            client.timeout = send_timeout;
+            client.send(smtp_message).await
+        }
+        SubmissionSecurity::StartTls => {
+            let mut client = builder
+                .implicit_tls(false)
+                .connect()
+                .await
+                .map_err(|error| {
+                    connect_error(error, "failed to connect to the SMTP server using STARTTLS")
+                })?;
+            client.timeout = send_timeout;
+            client.send(smtp_message).await
+        }
+        SubmissionSecurity::ImplicitTls => {
+            let mut client = builder.connect().await.map_err(|error| {
                 connect_error(
                     error,
                     "failed to connect to the SMTP server using implicit TLS",
                 )
-            })?
-            .send(smtp_message)
-            .await
-            .context("failed to submit the SMTP message")?,
-    };
+            })?;
+            client.timeout = send_timeout;
+            client.send(smtp_message).await
+        }
+    }
+    .context("failed to submit the SMTP message")?;
 
     Ok(())
+}
+
+/// The client for `config`, with its sign-in and connect timeout.
+fn client_builder(
+    config: &SubmissionConfig,
+    timeouts: Timeouts,
+) -> Result<SmtpClientBuilder<String>> {
+    let mut builder = SmtpClientBuilder::new(config.host.clone(), config.port)
+        .map_err(anyhow::Error::msg)?
+        .helo_host(config.hello_name.clone())
+        .timeout(timeouts.connect);
+    if let Some(credentials) = config.sasl_credentials()? {
+        builder = builder.credentials(credentials);
+    }
+    Ok(builder)
 }
 
 /// Connects, signs in (`AUTH`, when the config has credentials) and says
 /// goodbye, sending nothing: the add-account flow's connection test. A
 /// refused sign-in is a [`ReauthRequired`] error, as when sending.
 pub async fn check_sign_in(config: &SubmissionConfig) -> Result<()> {
+    check_sign_in_within(config, TIMEOUTS).await
+}
+
+async fn check_sign_in_within(config: &SubmissionConfig, timeouts: Timeouts) -> Result<()> {
     ensure_rustls_provider();
-    let mut builder = SmtpClientBuilder::new(config.host.clone(), config.port)
-        .map_err(anyhow::Error::msg)?
-        .helo_host(config.hello_name.clone());
-    if let Some(credentials) = config.sasl_credentials()? {
-        builder = builder.credentials(credentials);
-    }
+    let builder = client_builder(config, timeouts)?;
     // QUIT is a courtesy: the sign-in has already succeeded.
     match config.security {
         SubmissionSecurity::Plain => {
