@@ -1206,3 +1206,158 @@ fn an_expired_google_sign_in_explains_the_7_day_testing_limit(cx: &mut TestAppCo
         "the guide's fix is linked"
     );
 }
+
+/// The first account, failing to sync with `error`, and Settings →
+/// Accounts opened on it as Fix… opens it.
+fn fix_banner_for(
+    error: &str,
+    cx: &mut TestAppContext,
+) -> (Entity<SettingsWindow>, VisualTestContext, i64, &'static str) {
+    let (_view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Settings(SettingsSection::Accounts),
+        |_| {},
+    );
+    let account = harness.store.list_accounts().expect("accounts")[0].clone();
+    harness
+        .store
+        .record_sync_failure(account.id, "Sync failed after retry", error)
+        .expect("the failure is recorded");
+    let (root, mut window_cx) = settings_window(cx);
+    let accounts = root.read_with(&window_cx, |root, _| root.accounts().clone());
+    accounts.update(&mut window_cx, |accounts, cx| {
+        accounts.focus_account(account.id, cx)
+    });
+    window_cx.run_until_parked();
+    let name: &'static str = account.display_name.leak();
+    (root, window_cx, account.id, name)
+}
+
+#[gpui::test]
+fn a_server_that_cannot_be_reached_offers_try_again(cx: &mut TestAppContext) {
+    let (root, mut window_cx, _, name) =
+        fix_banner_for("timed out while connecting to the IMAP server", cx);
+    assert!(window_cx.debug_bounds("account-fix").is_some());
+    assert!(window_cx.debug_bounds("account-fix-retry").is_some());
+    assert!(
+        window_cx.debug_bounds("account-fix-reauth").is_none(),
+        "signing in again would not help"
+    );
+    click_selector("account-fix-retry", &mut window_cx);
+    let toasts = root.read_with(&window_cx, |root, cx| root.toast_messages(cx));
+    assert_eq!(toasts, [format!("Trying {name} again.")]);
+}
+
+#[gpui::test]
+fn a_refused_sign_in_offers_only_re_authenticate(cx: &mut TestAppContext) {
+    let (_root, mut window_cx, _, _) = fix_banner_for("IMAP authentication failed", cx);
+    assert!(window_cx.debug_bounds("account-fix-reauth").is_some());
+    assert!(window_cx.debug_bounds("account-fix-retry").is_none());
+}
+
+#[gpui::test]
+fn any_other_failure_offers_both(cx: &mut TestAppContext) {
+    let (_root, mut window_cx, _, _) = fix_banner_for("failed to list IMAP mailboxes", cx);
+    assert!(window_cx.debug_bounds("account-fix-reauth").is_some());
+    assert!(window_cx.debug_bounds("account-fix-retry").is_some());
+}
+
+#[gpui::test]
+fn re_authenticate_on_a_proton_account_is_never_silent(cx: &mut TestAppContext) {
+    use zmail_core::{AuthKind, CachePolicySummary, NewAccount, NewIdentity, ProtocolKind};
+    let (_view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Settings(SettingsSection::Accounts),
+        |_| {},
+    );
+    let proton = harness
+        .store
+        .insert_account(&NewAccount {
+            display_name: "rob@proton.test".to_owned(),
+            protocol: ProtocolKind::Proton,
+            auth: AuthKind::ProtonSession,
+            endpoint: "https://mail-api.proton.me".to_owned(),
+            username: "rob".to_owned(),
+            cache_policy: CachePolicySummary::performance_first(),
+            outgoing: None,
+            identities: vec![NewIdentity {
+                display_name: "Rob".to_owned(),
+                email_address: "rob@proton.test".to_owned(),
+                signature: String::new(),
+                is_primary: true,
+            }],
+        })
+        .expect("stored");
+    let (root, mut window_cx) = settings_window(cx);
+    let accounts = root.read_with(&window_cx, |root, _| root.accounts().clone());
+    accounts.update(&mut window_cx, |accounts, cx| accounts.refresh(cx));
+    window_cx.run_until_parked();
+
+    // A session Proton has not ended: nothing to do, and it says so.
+    click_selector(&format!("reauth-{proton}"), &mut window_cx);
+    let toasts = root.read_with(&window_cx, |root, cx| root.toast_messages(cx));
+    assert_eq!(toasts.len(), 1);
+    assert!(
+        toasts[0].starts_with("Proton hasn't ended Zmail's session"),
+        "{toasts:?}"
+    );
+
+    // Once Proton ends it, Re-authenticate signs in to that account again.
+    harness
+        .store
+        .record_sync_failure(
+            proton,
+            "Sync failed after retry",
+            format!("the Proton session for account {proton} has ended; sign in again"),
+        )
+        .expect("the failure is recorded");
+    accounts.update(&mut window_cx, |accounts, cx| accounts.refresh(cx));
+    window_cx.run_until_parked();
+    // (The first answer's toast still covers the card's button.)
+    window_cx.update(|window, cx| {
+        accounts.update(cx, |accounts, cx| {
+            accounts.reauthenticate(proton, window, cx)
+        })
+    });
+    window_cx.run_until_parked();
+    #[cfg(feature = "proton")]
+    {
+        let handle = window_cx
+            .update(|_, cx| crate::account_setup::open_window(cx))
+            .expect("the sign-in window is open");
+        let setup = handle
+            .read_with(&window_cx, |root, _| root.setup().clone())
+            .expect("the window is open");
+        setup.read_with(&window_cx, |setup, cx| {
+            assert_eq!(setup.stage, crate::account_setup::Stage::ProtonSignIn);
+            assert_eq!(
+                setup.signing_in_again().map(|again| again.account_id),
+                Some(proton)
+            );
+            assert_eq!(
+                setup
+                    .form
+                    .text(crate::account_setup::AccountField::Email, cx),
+                "rob"
+            );
+            assert!(!setup.can_go_back(), "it is not an Add Account flow");
+        });
+        assert_eq!(
+            harness.store.list_accounts().expect("accounts").len(),
+            2,
+            "nothing is added"
+        );
+    }
+    #[cfg(not(feature = "proton"))]
+    {
+        let toasts = root.read_with(&window_cx, |root, cx| root.toast_messages(cx));
+        assert!(
+            toasts
+                .iter()
+                .any(|toast| toast.contains("no Proton Mail support")),
+            "{toasts:?}"
+        );
+    }
+}

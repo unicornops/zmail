@@ -5,7 +5,7 @@
 //! 1. **Welcome** (first run only).
 //! 2. **Provider:** Google, Microsoft 365, Fastmail, iCloud or Other.
 //! 3. **Sign in:** name, address and password. OAuth2 and its client
-//!    fields sit under Advanced until zmail has client IDs of its own
+//!    fields sit under Advanced until Zmail has client IDs of its own
 //!    (#89); Microsoft 365, which refuses passwords, opens it. Gmail keeps
 //!    app passwords as the default and offers a guide to creating a
 //!    Google OAuth client of your own instead (`google_guide.rs`).
@@ -130,6 +130,14 @@ pub(crate) fn open_add_account(cx: &mut App) {
     open_add_account_with_notice(None, cx);
 }
 
+/// Signs in to the Proton account `account_id` again, in the Add Account
+/// window, keeping the account and its mail. Settings → Accounts offers it
+/// once Proton has ended the account's session.
+#[cfg(feature = "proton")]
+pub(crate) fn open_proton_sign_in_again(account_id: i64, cx: &mut App) {
+    window::open_sign_in_again(account_id, cx);
+}
+
 /// [`open_add_account`], explaining at the top why it opened when the user
 /// did not ask for it (an account that can't sync, say).
 pub(crate) fn open_add_account_with_notice(notice: Option<SharedString>, cx: &mut App) {
@@ -143,7 +151,7 @@ pub(crate) fn open_add_account_with_notice(notice: Option<SharedString>, cx: &mu
 /// A step of the flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stage {
-    /// What zmail is, and a Get Started button (first run only).
+    /// What Zmail is, and a Get Started button (first run only).
     Welcome,
     /// Pick the provider.
     Provider,
@@ -154,7 +162,7 @@ pub(crate) enum Stage {
     GoogleGuide,
     /// Autodiscovery with progress.
     Discovering,
-    /// May zmail ask Mozilla's ISPDB?
+    /// May Zmail ask Mozilla's ISPDB?
     Consent,
     /// What discovery found, and where.
     Result,

@@ -23,11 +23,11 @@ pub struct AppPasswordHelp {
 pub fn app_password_help(provider: Provider) -> Option<AppPasswordHelp> {
     let (text, url) = match provider {
         Provider::Google => (
-            "Google needs an app password, not your Google password. App passwords need 2-Step Verification turned on for your Google account; then create one for zmail.",
+            "Google needs an app password, not your Google password. App passwords need 2-Step Verification turned on for your Google account; then create one for Zmail.",
             google::APP_PASSWORDS_HELP_URL,
         ),
         Provider::ICloud => (
-            "iCloud needs an app-specific password, not your Apple Account password. Create one for zmail in your Apple Account settings.",
+            "iCloud needs an app-specific password, not your Apple Account password. Create one for Zmail in your Apple Account settings.",
             "https://support.apple.com/en-us/102654",
         ),
         Provider::Fastmail => (
@@ -43,7 +43,11 @@ pub fn app_password_help(provider: Provider) -> Option<AppPasswordHelp> {
 pub fn provider_hint(provider: Provider) -> &'static str {
     match provider {
         Provider::Google => "Gmail and Google Workspace",
-        Provider::Microsoft365 => "Outlook.com and work or school accounts",
+        // The next step needs an OAuth client ID from an organisation,
+        // which a personal Outlook.com user doesn't have (#269).
+        Provider::Microsoft365 => {
+            "Work or school accounts, with your organisation's OAuth client ID; not personal Outlook.com yet"
+        }
         Provider::Fastmail => "Fastmail, over JMAP",
         Provider::ICloud => "iCloud Mail",
     }

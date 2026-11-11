@@ -962,6 +962,24 @@ impl SidebarView {
                 )),
         )
         .when(failing, |this| {
+            // What Fix… leads to: the account settings, with Try again for
+            // a server that couldn't be reached and Re-authenticate for a
+            // refused sign-in.
+            let fix_tooltip = match status
+                .last_error_message
+                .as_deref()
+                .map(zmail_setup::accounts::sync_failure)
+            {
+                Some(zmail_setup::accounts::SyncFailure::Unreachable) => {
+                    zmail_setup::accounts::unreachable_sentence(
+                        zmail_setup::accounts::server_host(&account.endpoint).as_deref(),
+                    )
+                }
+                Some(zmail_setup::accounts::SyncFailure::SignIn) => {
+                    "Sign in again in the account settings".to_owned()
+                }
+                _ => "Open the account settings".to_owned(),
+            };
             this.child(
                 div()
                     .flex_none()
@@ -970,7 +988,7 @@ impl SidebarView {
                         Button::new(format!("account-fix-{account_id}"), "Fix…")
                             .variant(ButtonVariant::Ghost)
                             .size(ButtonSize::Small)
-                            .tooltip("Open the account settings")
+                            .tooltip(fix_tooltip)
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.stop_propagation();
                                 cx.emit(SidebarEvent::FixAccount(account_id));

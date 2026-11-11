@@ -10,7 +10,7 @@ use gpui::{
 use zmail_autodiscover::{AuthMethod, MailSettings, Provider, ServerSettings, Source, StepOutcome};
 use zmail_core::{AccountColor, ProtocolKind, SyncPhase};
 use zmail_setup::discovery::{self, describe_server, describe_source, short_error, step_label};
-use zmail_setup::providers::{AppPasswordHelp, app_password_help};
+use zmail_setup::providers::{AppPasswordHelp, app_password_help, provider_hint};
 
 use super::{AccountField, AccountSetupView, KEY_CONTEXT, Stage};
 use crate::a11y::{A11yFlags, AccessibleExt, Politeness, readable};
@@ -295,29 +295,22 @@ impl AccountSetupView {
                 .child(caption(hint, colors).pl(px(SPACE_2)))
         };
         let mut tiles = Vec::new();
-        for (provider, id, hint) in [
-            (
-                Provider::Google,
-                "account-setup-provider-google",
-                "Gmail and Google Workspace",
-            ),
+        for (provider, id) in [
+            (Provider::Google, "account-setup-provider-google"),
             (
                 Provider::Microsoft365,
                 "account-setup-provider-microsoft365",
-                "Outlook.com and work or school accounts",
             ),
-            (
-                Provider::Fastmail,
-                "account-setup-provider-fastmail",
-                "Fastmail, over JMAP",
-            ),
-            (
-                Provider::ICloud,
-                "account-setup-provider-icloud",
-                "iCloud Mail",
-            ),
+            (Provider::Fastmail, "account-setup-provider-fastmail"),
+            (Provider::ICloud, "account-setup-provider-icloud"),
         ] {
-            tiles.push(tile(id, provider.name(), hint, Some(provider), cx));
+            tiles.push(tile(
+                id,
+                provider.name(),
+                provider_hint(provider),
+                Some(provider),
+                cx,
+            ));
         }
         #[cfg(feature = "proton")]
         tiles.push(
@@ -335,7 +328,7 @@ impl AccountSetupView {
                     .full_width()
                     .icon("shield")
                     .selected(self.history.contains(&Stage::ProtonSignIn))
-                    .tooltip("Paid Proton plans; zmail signs in the way Proton Mail Bridge does")
+                    .tooltip("Paid Proton plans; Zmail signs in the way Proton Mail Bridge does")
                     .on_click(cx.listener(
                         |this, _: &ClickEvent, window, cx| {
                             this.choose_proton(window, cx);
@@ -344,7 +337,7 @@ impl AccountSetupView {
                 )
                 .child(
                     caption(
-                        "Paid Proton plans; zmail signs in the way Proton Mail Bridge does",
+                        "Paid Proton plans; Zmail signs in the way Proton Mail Bridge does",
                         colors,
                     )
                     .pl(px(SPACE_2)),
@@ -353,7 +346,7 @@ impl AccountSetupView {
         tiles.push(tile(
             "account-setup-provider-other",
             "Other",
-            "Any IMAP or JMAP provider; zmail looks up its settings",
+            "Any IMAP or JMAP provider; Zmail looks up its settings",
             None,
             cx,
         ));
@@ -436,7 +429,7 @@ impl AccountSetupView {
         let oauth_note = (provider == Some(Provider::Microsoft365)).then(|| {
             Banner::new(
                 "account-setup-oauth-only",
-                "Microsoft 365 only allows OAuth sign-in. zmail doesn't have its own Microsoft app registration yet, so enter an OAuth client ID from your organisation under Advanced.",
+                "Microsoft 365 only allows OAuth sign-in. Zmail doesn't have its own Microsoft app registration yet, so enter an OAuth client ID from your organisation under Advanced.",
             )
             .tone(BannerTone::Caution)
             .title("OAuth sign-in needed")
@@ -513,7 +506,7 @@ impl AccountSetupView {
                         )
                         .when(self.form.use_oauth, |this| {
                             this.child(caption(
-                                "zmail has no OAuth client of its own yet, so use one registered with your provider. Continuing opens your provider's sign-in page in the browser.",
+                                "Zmail has no OAuth client of its own yet, so use one registered with your provider. Continuing opens your provider's sign-in page in the browser.",
                                 colors,
                             ))
                             .child(field(self, AccountField::OauthClientId, colors))
@@ -597,7 +590,7 @@ impl AccountSetupView {
             .child(heading(
                 "Finding your settings",
                 format!(
-                    "zmail is asking {domain} how to connect. Your password isn't sent anywhere until zmail signs in."
+                    "Zmail is asking {domain} how to connect. Your password isn't sent anywhere until Zmail signs in."
                 ),
                 colors,
             ))
@@ -713,7 +706,7 @@ impl AccountSetupView {
             .gap(px(SPACE_4))
             .child(heading(
                 "Settings found",
-                "zmail will connect with these settings. Check them, or edit them if your provider says otherwise.",
+                "Zmail will connect with these settings. Check them, or edit them if your provider says otherwise.",
                 colors,
             ))
             .when(guessed, |this| {
@@ -829,7 +822,7 @@ impl AccountSetupView {
                         180.0,
                     ))
                     .child(caption(
-                        "zmail connects to IMAP over TLS, usually on port 993. STARTTLS on port 143 isn't supported yet.",
+                        "Zmail connects to IMAP over TLS, usually on port 993. STARTTLS on port 143 isn't supported yet.",
                         colors,
                     )),
                 section_card("Outgoing mail (SMTP)", colors)
@@ -859,7 +852,7 @@ impl AccountSetupView {
                 this.child(
                     Banner::new(
                         "account-setup-not-found",
-                        format!("zmail couldn't find the settings for {domain}. The servers below are the usual names; check them before you continue."),
+                        format!("Zmail couldn't find the settings for {domain}. The servers below are the usual names; check them before you continue."),
                     )
                     .tone(BannerTone::Caution)
                     .title("Settings not found"),
@@ -1010,7 +1003,7 @@ impl AccountSetupView {
             .gap(px(SPACE_4))
             .child(heading(
                 "Getting your mail",
-                "zmail copies your recent mail to this computer. You can start reading while it works; the rest arrives in the background.",
+                "Zmail copies your recent mail to this computer. You can start reading while it works; the rest arrives in the background.",
                 colors,
             ))
             .child(

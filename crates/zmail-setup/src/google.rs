@@ -50,7 +50,7 @@ pub const GUIDE_STEPS: [GuideStep; 6] = [
     GuideStep {
         id: "project",
         title: "Create a Google Cloud project",
-        body: "Name it anything, for example zmail. No billing account is needed.",
+        body: "Name it anything, for example Zmail. No billing account is needed.",
         link: Some((
             "Create project",
             "https://console.cloud.google.com/projectcreate",
@@ -101,10 +101,10 @@ pub const GUIDE_STEPS: [GuideStep; 6] = [
 ];
 
 /// The guide's warning about Testing apps.
-pub const TESTING_EXPIRY: &str = "While the app's publishing status is Testing, Google ends zmail's sign-in after 7 days and you have to sign in again. To avoid that, publish the app under Audience (Google then warns that it is unverified, which you can accept for your own app), or on Google Workspace choose Internal.";
+pub const TESTING_EXPIRY: &str = "While the app's publishing status is Testing, Google ends Zmail's sign-in after 7 days and you have to sign in again. To avoid that, publish the app under Audience (Google then warns that it is unverified, which you can accept for your own app), or on Google Workspace choose Internal.";
 
 /// What Settings says when a Google account's saved sign-in stops working.
-pub const EXPIRED_ADVICE: &str = "Google no longer accepts zmail's saved sign-in. If your Google Cloud app is still in Testing, Google ends its sign-ins after 7 days. Publish the app under Audience, or on Google Workspace make it Internal, then sign in again so it lasts.";
+pub const EXPIRED_ADVICE: &str = "Google no longer accepts Zmail's saved sign-in. If your Google Cloud app is still in Testing, Google ends its sign-ins after 7 days. Publish the app under Audience, or on Google Workspace make it Internal, then sign in again so it lasts.";
 
 /// Checks a pasted client ID, returning what is wrong with it.
 pub fn check_client_id(client_id: &str) -> Option<&'static str> {

@@ -2,15 +2,15 @@
   How do you sign in to iCloud?
 
   Incoming (IMAP): imap.mail.me.com:993 · TLS
-      Found in zmail's built-in iCloud settings
+      Found in Zmail's built-in iCloud settings
   Outgoing (SMTP): smtp.mail.me.com:587 · STARTTLS
-      Found in zmail's built-in iCloud settings
+      Found in Zmail's built-in iCloud settings
 
   > App password for iCloud
     OAuth in the browser, with your provider's client
 
   iCloud needs an app-specific password, not your Apple Account password. Create
-  one for zmail in your Apple Account settings.
+  one for Zmail in your Apple Account settings.
   How to create one: https://support.apple.com/en-us/102654
 
 

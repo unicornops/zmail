@@ -362,6 +362,49 @@ pub fn store_signed_in<S: SignInSteps>(
     Ok((new_account, account_id, stored))
 }
 
+/// Keeps a finished sign-in for an account already in Zmail, signing in
+/// again after Proton ended its session: checks that it is the same
+/// Proton account, then hands back the storing of the new session in the
+/// account's keychain slots, to run on the sync runtime. The account's
+/// mail, folders and settings stay as they are; nothing downloads again.
+///
+/// Only for an account whose session has ended: a session still in use
+/// would write its own refresh token over the new one.
+pub fn store_signed_in_again<S: SignInSteps>(
+    store: &LocalStore,
+    secrets: &Arc<dyn SecretStore>,
+    sign_in: &S,
+    account_id: i64,
+    account: &SignedInAccount,
+) -> Result<impl Future<Output = Result<()>> + Send + use<S>, String> {
+    let existing = store
+        .list_accounts()
+        .ok()
+        .and_then(|accounts| accounts.into_iter().find(|found| found.id == account_id))
+        .ok_or_else(|| "This account is no longer in Zmail.".to_owned())?;
+    let addresses = store
+        .list_identities(account_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|identity| identity.email_address);
+    let same = std::iter::once(existing.display_name.clone())
+        .chain(std::iter::once(existing.username.clone()))
+        .chain(addresses)
+        .any(|address| address.trim().eq_ignore_ascii_case(account.email.trim()));
+    if !same {
+        return Err(format!(
+            "You signed in as {}, which isn't {}. Sign in with that account's Proton address.",
+            account.email, existing.display_name
+        ));
+    }
+    let session = sign_in.store(secrets.clone(), account_id);
+    Ok(async move {
+        session
+            .await
+            .map_err(|error| error.context("Could not keep the Proton session"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -374,7 +417,7 @@ mod tests {
 
     use super::{
         ProtonAction, ProtonFlow, ProtonStage, RISK_NOTE, SignInSteps, check_sign_in, duplicate,
-        proton_account, store_signed_in,
+        proton_account, store_signed_in, store_signed_in_again,
     };
     use crate::form::AccountField;
 
@@ -607,6 +650,62 @@ mod tests {
         assert!(
             store.list_accounts().expect("accounts").is_empty(),
             "an account without its session is removed again"
+        );
+    }
+
+    #[test]
+    fn signing_in_again_keeps_the_account_and_needs_the_same_proton_account() {
+        let store = Arc::new(LocalStore::open_ephemeral().expect("a store"));
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        let account_id = store
+            .insert_account(&proton_account("zmail", &signed_in()))
+            .expect("stored");
+
+        // Someone else's Proton account is refused, and nothing is kept.
+        let other = SignedInAccount {
+            email: "someone@proton.me".to_owned(),
+            display_name: String::new(),
+        };
+        let refused =
+            store_signed_in_again(&store, &secrets, &Script::default(), account_id, &other)
+                .err()
+                .expect("a different account");
+        assert!(refused.contains("someone@proton.me"), "{refused}");
+        assert!(
+            secrets
+                .get_account_secret_from_slot(account_id, SecretSlot::ProtonUid)
+                .is_err()
+        );
+
+        // The same account (whatever the case) keeps its new session in
+        // the existing account, which is not added again.
+        let same = SignedInAccount {
+            email: "ZMAIL@proton.me".to_owned(),
+            display_name: String::new(),
+        };
+        let session =
+            store_signed_in_again(&store, &secrets, &Script::default(), account_id, &same)
+                .expect("the same account");
+        block_on(session).expect("the session is kept");
+        assert!(
+            secrets
+                .get_account_secret_from_slot(account_id, SecretSlot::ProtonUid)
+                .is_ok()
+        );
+        assert_eq!(store.list_accounts().expect("accounts").len(), 1);
+
+        // A session that can't be kept says so; the account stays.
+        let failing = Script {
+            store_fails: true,
+            ..Script::default()
+        };
+        let session = store_signed_in_again(&store, &secrets, &failing, account_id, &same)
+            .expect("the same account");
+        assert!(block_on(session).is_err());
+        assert_eq!(store.list_accounts().expect("accounts").len(), 1);
+        assert!(
+            store_signed_in_again(&store, &secrets, &Script::default(), 999, &same).is_err(),
+            "an account that is gone"
         );
     }
 

@@ -209,7 +209,12 @@ fn refused(error: &anyhow::Error) -> bool {
     }) {
         return true;
     }
-    let text = format!("{error:#}").to_ascii_lowercase();
+    refused_text(&format!("{error:#}"))
+}
+
+/// Whether an error's text says the server refused the credentials.
+pub fn refused_text(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
     [
         "authenticationfailed",
         "authentication failed",

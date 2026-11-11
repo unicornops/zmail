@@ -11,7 +11,9 @@
 //!   Service): Retry. Zmail never opens the store without encryption.
 //! - **The store is unreadable** (its key is gone): mail on the servers
 //!   is safe, local-only mail (drafts, the outbox, queued changes) is
-//!   lost. Start Over moves the old files aside and starts a new store.
+//!   lost. Try Again looks for the key again (a keychain restored from a
+//!   backup, say); Start Over moves the old files aside and starts a new
+//!   store.
 //! - **The store was replaced** (an unencrypted database is where the
 //!   encrypted store was): Zmail does not open it or encrypt it under the
 //!   user's key. Move It Aside puts the file in a folder beside the store
@@ -408,6 +410,14 @@ impl StoreUnlockView {
                     Banner::new("store-unlock-keychain-error", detail.clone())
                         .tone(BannerTone::Caution),
                 )
+                .when(cfg!(target_os = "linux"), |this| {
+                    this.child(
+                        div()
+                            .type_style(TYPE_CAPTION)
+                            .text_color(rgb(colors.muted))
+                            .child(readable("store-unlock-secret-service", LINUX_KEYCHAIN_HINT)),
+                    )
+                })
                 .child(self.footer(&[Action::Quit, Action::Retry], cx)),
             UnlockPhase::Unreadable => div()
                 .flex()
@@ -435,11 +445,13 @@ impl StoreUnlockView {
                         .type_style(TYPE_CAPTION)
                         .text_color(rgb(colors.muted))
                         .child(
-                            "Start Over keeps the old files in a folder beside the new store, \
-                             in case the key turns up again.",
+                            "If you can bring the key back (by restoring the keychain from a \
+                             backup, say), do that and try again. Start Over keeps the old \
+                             files in a folder beside the new store, in case the key turns up \
+                             later.",
                         ),
                 )
-                .child(self.footer(&[Action::Quit, Action::StartOver], cx)),
+                .child(self.footer(&[Action::Quit, Action::StartOver, Action::Retry], cx)),
             UnlockPhase::Replaced => div()
                 .flex()
                 .flex_col()
@@ -508,6 +520,12 @@ impl StoreUnlockView {
         footer
     }
 }
+
+/// What to do on Linux when no Secret Service answers.
+const LINUX_KEYCHAIN_HINT: &str = "On Linux the keychain is a Secret Service, such as GNOME Keyring \
+     or KWallet, running in your desktop session. If none is installed, install gnome-keyring and \
+     log in again. Without a desktop session (over SSH, say), see \"Using Zmail over SSH or on a \
+     headless machine\" in Zmail's README.";
 
 /// The buttons the window can show.
 #[derive(Clone, Copy)]
