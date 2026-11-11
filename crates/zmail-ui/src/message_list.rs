@@ -36,6 +36,7 @@ use zmail_core::{
 };
 use zmail_store::LocalStore;
 
+pub(crate) use self::row::outbox_status;
 pub(crate) use self::selection::ListSelection;
 use self::selection::{OpenMovePicker, row_colors};
 use crate::ListMode;
@@ -52,7 +53,7 @@ use crate::styles::{
 };
 use crate::widgets::{empty_state, toolbar_button};
 
-use self::row::{MessageRow, RowAccount, outbox_status, row_content, row_shell};
+use self::row::{MessageRow, RowAccount, row_content, row_shell};
 
 /// The key context the list sets.
 pub(crate) const KEY_CONTEXT: &str = "MessageList";
@@ -195,6 +196,9 @@ pub(crate) enum MessageListEvent {
     /// A thread, search result or draft row was clicked (after its open
     /// event). The single-pane layout shows the detail pane on it.
     RowClicked,
+    /// A row's Delete quick action: the shell deletes the thread, asking
+    /// first when it would go for good.
+    DeleteThread(i64),
     /// A search filter chip was chosen: the shell edits the query.
     FilterSearch(SearchFilter),
     /// The search results are scrolled near their end and the store has

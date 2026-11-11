@@ -97,6 +97,9 @@ pub(crate) enum FixtureView {
     /// The seeded inbox with its three newest threads selected, showing
     /// the bulk action bar and the reader's selection count.
     MultiSelect,
+    /// A conversation in the Trash, with the question before deleting it
+    /// for good.
+    DeleteForGood,
     /// The `accounts` view with a search across the Unified Inbox, so the
     /// scope control and account chips show.
     Search,
@@ -247,6 +250,7 @@ impl FixtureView {
             "sidebar" => Self::Sidebar,
             "accounts" => Self::Accounts,
             "multi-select" => Self::MultiSelect,
+            "delete-for-good" => Self::DeleteForGood,
             "search" => Self::Search,
             "search-filters" => Self::SearchFilters,
             "reader-safety-info" => Self::ReaderSafetyInfo,
@@ -494,6 +498,11 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         }
         FixtureView::Sidebar => InitialView::Sidebar,
         FixtureView::MultiSelect => InitialView::MultiSelect,
+        FixtureView::DeleteForGood => {
+            let thread = thread_id(store, account_id, "inbox", "Q4 roadmap review")?;
+            store.delete_thread(thread)?;
+            InitialView::DeleteForGood(thread)
+        }
         FixtureView::Reader => {
             InitialView::Thread(thread_id(store, account_id, "inbox", "Q4 roadmap review")?)
         }
@@ -1735,6 +1744,7 @@ mod tests {
             "sidebar",
             "accounts",
             "multi-select",
+            "delete-for-good",
             "search",
             "search-filters",
             "reader-safety-info",
@@ -2259,6 +2269,21 @@ mod tests {
         let (store, initial_view) = seeded(FixtureView::MultiSelect)?;
         assert_eq!(initial_view, InitialView::MultiSelect);
         assert_eq!(store.list_accounts()?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_for_good_opens_on_a_conversation_in_the_trash() -> Result<()> {
+        let (store, initial_view) = seeded(FixtureView::DeleteForGood)?;
+        let InitialView::DeleteForGood(thread) = initial_view else {
+            panic!("expected the delete question, got {initial_view:?}");
+        };
+        let account_id = store.list_accounts()?[0].id;
+        let trash = store.mailbox_id_by_role(account_id, "trash")?;
+        assert_eq!(
+            store.thread_state(thread)?.map(|thread| thread.mailbox_id),
+            trash
+        );
         Ok(())
     }
 

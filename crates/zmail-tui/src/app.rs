@@ -288,7 +288,7 @@ impl Cmd {
             Self::Copy => "Copy the selection",
             Self::Home => "To the first line or item",
             Self::End => "To the last line or item",
-            Self::Delete => "Delete: move to the Trash",
+            Self::Delete => "Delete: to the Trash, or for good after asking",
             Self::Undo => "Undo the last change",
             Self::Archive => "Archive the conversation",
             Self::Save => "Save (move) to a folder",
@@ -373,6 +373,14 @@ pub enum Prompt {
         prompt: PathPrompt,
         /// The file that is there.
         path: std::path::PathBuf,
+    },
+    /// "Delete these conversations for good?", before a delete that
+    /// cannot be undone.
+    DeleteForGood {
+        /// The conversations.
+        thread_ids: Vec<i64>,
+        /// How many of them go for good; the rest move to the Trash.
+        permanent: usize,
     },
     /// "Remove this account from this computer?"
     RemoveAccount {
@@ -1513,6 +1521,9 @@ impl App {
             Some(Prompt::ReplaceFile { .. }) => {
                 return vec![entry("Y", "Replace", Select), entry("N", "No", Back)];
             }
+            Some(Prompt::DeleteForGood { .. }) => {
+                return vec![entry("Y", "Delete", Select), entry("N", "No", Back)];
+            }
             Some(Prompt::Path(ref path)) => {
                 return vec![
                     entry(
@@ -2300,6 +2311,9 @@ impl App {
             Prompt::Save(save) => self.save_key(save, key),
             Prompt::Path(path) => self.path_key(path, key),
             Prompt::Palette(palette) => self.palette_key(palette, key),
+            Prompt::DeleteForGood { thread_ids, .. } => {
+                self.delete_for_good_key(&thread_ids, key);
+            }
             Prompt::ReplaceFile { prompt, path } => {
                 self.prompt = None;
                 let replace = matches!(key.code, KeyCode::Char('y' | 'Y'));
@@ -3016,6 +3030,10 @@ impl App {
                         .unwrap_or_default()
                 )
             ),
+            Prompt::DeleteForGood {
+                thread_ids,
+                permanent,
+            } => crate::triage::delete_for_good_question(*permanent, thread_ids.len()),
             Prompt::RemoveAccount { account_id, lines } => self.remove_question(*account_id, lines),
             Prompt::RemoveIdentity {
                 email,

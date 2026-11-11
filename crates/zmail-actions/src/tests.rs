@@ -533,6 +533,34 @@ fn permanent_delete_records_an_entry_that_cannot_be_undone() {
 }
 
 #[test]
+fn permanent_deletes_counts_what_a_delete_would_destroy() {
+    // No trash: every delete is for good.
+    let no_trash = fixture(false);
+    let actions = MailActions::new(no_trash.store.clone());
+    let both = [no_trash.thread_id, no_trash.other_id];
+    assert_eq!(actions.permanent_deletes(&both).expect("counts"), 2);
+    assert_eq!(
+        no_trash.mailbox_of(no_trash.thread_id),
+        Some(no_trash.inbox_id),
+        "nothing is changed"
+    );
+
+    // With a trash, a delete from the Inbox moves; from the trash, it
+    // destroys.
+    let fixture = fixture(true);
+    let mut actions = MailActions::new(fixture.store.clone());
+    let both = [fixture.thread_id, fixture.other_id];
+    assert_eq!(actions.permanent_deletes(&both).expect("counts"), 0);
+    actions
+        .delete_threads(&[fixture.thread_id], &mut ignore)
+        .expect("delete works");
+    assert_eq!(fixture.mailbox_of(fixture.thread_id), fixture.trash_id);
+    assert_eq!(actions.permanent_deletes(&both).expect("counts"), 1);
+    // Gone threads are not counted.
+    assert_eq!(actions.permanent_deletes(&[-1]).expect("counts"), 0);
+}
+
+#[test]
 fn undo_entry_undoes_only_its_own_change() {
     let fixture = fixture(true);
     let mut actions = MailActions::new(fixture.store.clone());

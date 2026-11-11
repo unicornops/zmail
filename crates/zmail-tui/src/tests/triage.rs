@@ -143,7 +143,19 @@ fn without_a_trash_delete_is_for_good_and_says_it_cannot_be_undone() {
         .expect("Home's INBOX") as u16;
     click(&mut app, 6, row);
     let ferry = current(&app);
+    let home_inbox = mailbox_of(&store, ferry);
+
+    // D asks first; anything but y keeps it.
     keys(&mut app, "d");
+    assert!(matches!(app.prompt, Some(Prompt::DeleteForGood { .. })));
+    assert_snapshot("status-delete-for-good-80x24", &draw(&mut app, 80, 24));
+    keys(&mut app, "n");
+    assert_eq!(app.prompt, None);
+    assert_eq!(mailbox_of(&store, ferry), home_inbox);
+    assert_eq!(status(&app), "Nothing deleted");
+    assert_eq!(queued(&store, home), []);
+
+    keys(&mut app, "dy");
     assert_eq!(mailbox_of(&store, ferry), None);
     assert_eq!(status(&app), "Conversation deleted");
     assert_eq!(queued(&store, home), [PendingOpKind::Destroy]);

@@ -5,7 +5,9 @@
 //! they call [`MailActions`] with its id rather than dispatching the
 //! selection-based actions. That is the same path every other mail change
 //! takes, so the change is recorded for undo and the shell refreshes from
-//! the [`MailEvent`](crate::mail_actions::MailEvent) it emits.
+//! the [`MailEvent`](crate::mail_actions::MailEvent) it emits. Delete goes
+//! through the shell instead, which asks first when the thread would be
+//! deleted for good.
 
 use anyhow::Result;
 use gpui::{AnyElement, Context, IntoElement, div, prelude::*};
@@ -52,7 +54,8 @@ impl QuickAction {
     ) -> Result<()> {
         match self {
             Self::Archive => actions.archive_threads(&[thread_id], cx),
-            Self::Delete => actions.delete_threads(&[thread_id], cx),
+            // Handled by the shell (`run_quick_action`).
+            Self::Delete => Ok(()),
             Self::SetFlagged(flagged) => actions.set_threads_flagged(&[thread_id], flagged, cx),
             Self::SetRead(read) => actions.set_threads_read(&[thread_id], read, cx),
         }
@@ -121,6 +124,10 @@ impl MessageListView {
         action: QuickAction,
         cx: &mut Context<Self>,
     ) {
+        if action == QuickAction::Delete {
+            cx.emit(MessageListEvent::DeleteThread(thread_id));
+            return;
+        }
         if let Err(error) = self
             .mail_actions
             .update(cx, |actions, cx| action.run(actions, thread_id, cx))

@@ -7,7 +7,7 @@
   Your keys
     The keymap file, /home/ada/.local/share/zmail/tui-keymap.json, rebinds keys on each screen; the README says how to write one.
     D          nothing (MessageIndex)
-    X          Delete: move to the Trash (MessageIndex)
+    X          Delete: to the Trash, or for good after asking (MessageIndex)
     W          Write a new message (MainMenu)
     ^P         Every command of this screen, searchable (every screen)
 

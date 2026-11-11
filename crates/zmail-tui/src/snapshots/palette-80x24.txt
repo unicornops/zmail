@@ -9,7 +9,7 @@
     N      NextMsg    The next item
     -      PrevPage   Up a page
     Spc    NextPage   Down a page
-    D      Delete     Delete: move to the Trash
+    D      Delete     Delete: to the Trash, or for good after asking
     U      Undo       Undo the last change
     R      Reply      Reply to the message
     F      Forward    Forward the message
