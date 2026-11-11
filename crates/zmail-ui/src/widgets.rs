@@ -363,13 +363,16 @@ pub(crate) fn status_banner(
         .child(
             div()
                 .flex_1()
+                // Both shrink below the text's length, so a long message
+                // wraps.
+                .min_w_0()
                 .flex()
                 .items_center()
                 .gap_3()
                 .px_4()
                 .py_3()
                 .child(icon(icon_name, ICON_SIZE_SM, accent_color))
-                .child(div().flex_1().text_sm().child(message.to_owned())),
+                .child(div().flex_1().min_w_0().text_sm().child(message.to_owned())),
         )
 }
 
