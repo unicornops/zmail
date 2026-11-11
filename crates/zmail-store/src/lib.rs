@@ -41,6 +41,7 @@ mod key_trust;
 mod lock;
 mod merge;
 mod quarantine;
+mod remote_content;
 mod rotation;
 mod search;
 
@@ -52,6 +53,7 @@ pub use encryption::{
 };
 pub use identities::{HiddenIdentity, IdentityLink, IdentityMergeReport};
 pub use lock::SyncLock;
+pub use remote_content::RemoteContentSender;
 
 /// A received attachment's encrypted blob (ADR 0005), from
 /// [`LocalStore::attachment_blob`]. Its contents are only ever written out

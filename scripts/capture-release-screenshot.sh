@@ -169,6 +169,8 @@ MATRIX=(
   "settings-keyboard-light settings-keyboard light 820 900"
   "settings-privacy-dark settings-privacy dark 820 600"
   "settings-privacy-light settings-privacy light 820 600"
+  "settings-privacy-senders-dark settings-privacy-senders dark 820 900"
+  "settings-privacy-senders-light settings-privacy-senders light 820 900"
   "settings-sending-dark settings-sending dark 820 600"
   "settings-sending-light settings-sending light 820 600"
   "settings-about-dark settings-about dark 820 900"
