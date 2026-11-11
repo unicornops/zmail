@@ -48,6 +48,13 @@ pub struct SenderSafetyReport {
     /// unrelated to the From domain (`"ceo@corp.example"
     /// <a@evil.example>`): that domain, in its ASCII form.
     pub name_shows: Option<String>,
+    /// The display name is a mailing list's rewrite of a member's message
+    /// (`'alice@example.com' via Dev Team`, Google Groups and Mailman)
+    /// sent from the list's own address, and the member's address is on
+    /// a domain unrelated to the list's: that address, lowercased. Only
+    /// information, because that is how lists send; but the form is easy
+    /// to forge, so it is still shown.
+    pub mailing_list_member: Option<String>,
     /// The From domain is written with letters outside ASCII.
     pub international_domain: Option<InternationalDomain>,
 }
@@ -87,9 +94,10 @@ impl SenderSafetyReport {
     /// The highest tier that applies, or `None` when the sender looks
     /// safe. A lookalike From domain is [`SafetyTier::Danger`]; a Reply-To
     /// on an unrelated domain, a display name showing another domain and a
-    /// From domain mixing alphabets are [`SafetyTier::Caution`]; a Reply-To
-    /// on a parent or subdomain of the From domain and an international
-    /// From domain are [`SafetyTier::Info`].
+    /// From domain mixing alphabets are [`SafetyTier::Caution`]; a mailing
+    /// list's rewrite of a member's address in the name, a Reply-To on a
+    /// parent or subdomain of the From domain and an international From
+    /// domain are [`SafetyTier::Info`].
     pub fn tier(&self) -> Option<SafetyTier> {
         if self.lookalike_of.is_some() {
             return Some(SafetyTier::Danger);
@@ -102,8 +110,10 @@ impl SenderSafetyReport {
         if self.name_shows.is_some() || mixed || reply_to_unrelated {
             return Some(SafetyTier::Caution);
         }
-        (self.reply_to_mismatch.is_some() || self.international_domain.is_some())
-            .then_some(SafetyTier::Info)
+        (self.mailing_list_member.is_some()
+            || self.reply_to_mismatch.is_some()
+            || self.international_domain.is_some())
+        .then_some(SafetyTier::Info)
     }
 
     /// Human-readable warning lines, in priority order.
@@ -118,6 +128,11 @@ impl SenderSafetyReport {
         if let Some(shown) = &self.name_shows {
             warnings.push(format!(
                 "The sender's name shows {shown}, but the message comes from {from_domain}."
+            ));
+        }
+        if let Some(member) = &self.mailing_list_member {
+            warnings.push(format!(
+                "Sent through a mailing list: the name shows {member}, the message came from {from_domain}."
             ));
         }
         if let Some(domain) = &self.international_domain {
@@ -372,10 +387,22 @@ pub fn analyze_sender_identity(from: &str, reply_to: Option<&str>) -> SenderSafe
 
     let lookalike_of = domain.as_ref().and_then(lookalike_known_domain);
     let international_domain = domain.as_ref().and_then(international_domain);
-    let name_shows = match (&domain, sender.name.as_deref(), sender.email.as_deref()) {
-        (Some(domain), Some(name), Some(email)) => name_shows_domain(name, email, &domain.ascii),
-        _ => None,
-    };
+    let (name_shows, mailing_list_member) =
+        match (&domain, sender.name.as_deref(), sender.email.as_deref()) {
+            (Some(domain), Some(name), Some(email)) => {
+                let name = visible_text(name);
+                let member = list_member(&name, email, &domain.ascii);
+                let shows = name_shows_domain(&name, member.as_deref(), &domain.ascii);
+                let member = member.filter(|member| {
+                    address_domain_parts(member).is_some_and(|member| {
+                        looks_like_domain(&member.ascii)
+                            && !same_organisation(&member.ascii, &domain.ascii)
+                    })
+                });
+                (shows, member)
+            }
+            _ => (None, None),
+        };
     let reply_to_mismatch = match (&domain, reply_to) {
         (Some(domain), Some(reply_to)) => reply_to_mismatch(reply_to, &domain.ascii),
         _ => None,
@@ -386,6 +413,7 @@ pub fn analyze_sender_identity(from: &str, reply_to: Option<&str>) -> SenderSafe
         lookalike_of,
         reply_to_mismatch,
         name_shows,
+        mailing_list_member,
         international_domain,
     }
 }
@@ -411,11 +439,11 @@ fn reply_to_mismatch(reply_to: &str, from_domain: &str) -> Option<String> {
 /// e-mail address in it (`"ceo@corp.example"`), a web address
 /// (`www.bank.example`, `https://bank.example`), or a well-known domain
 /// written bare (`PayPal.com`). Other dotted words ("Inc.", "J.R.R.",
-/// "Mr.Smith") are not read as domains. The member's address in a mailing
-/// list's rewrite of the name ([`list_member`]) does not count.
-fn name_shows_domain(name: &str, from_email: &str, from_domain: &str) -> Option<String> {
-    let name = visible_text(name);
-    let member = list_member(&name, from_email, from_domain);
+/// "Mr.Smith") are not read as domains. `name` has been through
+/// [`visible_text`]. `member`, the member's address in a mailing list's
+/// rewrite of the name ([`list_member`]), is reported on its own, at a
+/// lower tier.
+fn name_shows_domain(name: &str, member: Option<&str>, from_domain: &str) -> Option<String> {
     let addresses = name
         .split(|ch: char| {
             ch.is_whitespace()
@@ -425,11 +453,11 @@ fn name_shows_domain(name: &str, from_email: &str, from_domain: &str) -> Option<
                 )
         })
         .filter(|token| token.contains('@'))
-        .filter(|token| member.as_deref() != Some(token.to_lowercase().as_str()))
+        .filter(|token| member != Some(token.to_lowercase().as_str()))
         .filter_map(address_domain_parts)
         .map(|domain| domain.ascii)
         .filter(|domain| looks_like_domain(domain));
-    let websites = shown_hosts(&name)
+    let websites = shown_hosts(name)
         .into_iter()
         .filter(|shown| shown.written_as_address || is_known_domain(&shown.host))
         .map(|shown| shown.host);
@@ -446,7 +474,9 @@ fn name_shows_domain(name: &str, from_email: &str, from_domain: &str) -> Option<
 /// name (`dev-team@`, letters and digits compared), or one on a list host
 /// (Google Groups, groups.io, a `lists.` or `groups.` domain). `None`
 /// otherwise, so a name that just shows someone else's address, or says
-/// "via" a list it is not sent from, is still flagged.
+/// "via" a list it is not sent from, is flagged as usual. The sender can
+/// forge this form, which is why it lowers the warning to Info rather
+/// than removing it.
 fn list_member(name: &str, from_email: &str, from_domain: &str) -> Option<String> {
     let lower = name.to_lowercase();
     let (member, list) = lower.split_once(" via ")?;
@@ -901,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn mailing_list_rewrites_of_a_member_address_are_safe() {
+    fn mailing_list_rewrites_of_a_member_address_are_info() {
         // Google Groups and Mailman put the member's address in the name
         // and send from the list's own address.
         for from in [
@@ -909,13 +939,43 @@ mod tests {
             "\"'alice@example.com' via Dev Team\" <dev-team@googlegroups.com>",
             "alice@example.com via Announcements <announce@googlegroups.com>",
             "'alice@example.com' via Mailman-Users <mailman-users@python.org>",
-            "alice@example.com via Dev <dev@lists.example.org>",
+            "alice@example.com via Dev <dev@lists.debian.org>",
             "'Alice@Example.com' VIA Rust Users <rust-users@groups.io>",
         ] {
             let report = analyze_sender_identity(from, None);
             assert_eq!(report.name_shows, None, "{from}");
-            assert!(report.is_safe(), "{from} produced {report:?}");
+            assert_eq!(
+                report.mailing_list_member.as_deref(),
+                Some("alice@example.com"),
+                "{from}"
+            );
+            // Still shown, as information.
+            assert_eq!(report.tier(), Some(SafetyTier::Info), "{from}");
+            assert!(!report.is_safe());
         }
+        // The form can be forged; it is still shown, as information.
+        let forged = analyze_sender_identity(
+            "'ceo@corp.example' via Payments <payments@evil.example>",
+            None,
+        );
+        assert_eq!(
+            forged.mailing_list_member.as_deref(),
+            Some("ceo@corp.example")
+        );
+        assert_eq!(forged.tier(), Some(SafetyTier::Info));
+        // A member on the list's own domain is nothing to report.
+        let report = analyze_sender_identity(
+            "'bob@python.org' via Python-Dev <python-dev@python.org>",
+            None,
+        );
+        assert!(report.is_safe(), "{report:?}");
+        // A list rewrite with an unrelated Reply-To is Caution, for the
+        // Reply-To.
+        let report = analyze_sender_identity(
+            "'alice@example.com' via Dev <dev@googlegroups.com>",
+            Some("x@evil.example"),
+        );
+        assert_eq!(report.tier(), Some(SafetyTier::Caution));
     }
 
     #[test]
@@ -945,6 +1005,7 @@ mod tests {
         ] {
             let report = analyze_sender_identity(from, None);
             assert_eq!(report.name_shows.as_deref(), Some(shown), "{from}");
+            assert_eq!(report.mailing_list_member, None, "{from}");
             assert_eq!(report.tier(), Some(SafetyTier::Caution), "{from}");
         }
     }

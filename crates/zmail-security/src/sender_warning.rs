@@ -5,9 +5,10 @@
 //! | Finding | Tier |
 //! |---|---|
 //! | The From domain imitates a well-known domain (look-alike letters from any alphabet included) | Danger |
-//! | The display name shows an address or website on another domain (not a mailing list's `'member' via List` rewrite sent from the list) | Caution |
+//! | The display name shows an address or website on another domain | Caution |
 //! | The From domain mixes alphabets in one label (Latin and Cyrillic, say) | Caution |
 //! | Reply-To is on an unrelated domain | Caution |
+//! | The display name is a mailing list's `'member' via List` rewrite, sent from the list, showing a member on another domain | Info |
 //! | Reply-To is on a parent or subdomain of the From domain | Info |
 //! | The From domain is written with international letters | Info |
 //!
@@ -131,7 +132,14 @@ fn describe(
             }
         }
         SafetyTier::Info => {
-            if let Some(reply_domain) = &report.reply_to_mismatch {
+            if let Some(member) = &report.mailing_list_member {
+                (
+                    "Sent through a mailing list",
+                    format!(
+                        "The sender's name shows {member}, but the message came from the list's address, {from_address}."
+                    ),
+                )
+            } else if let Some(reply_domain) = &report.reply_to_mismatch {
                 (
                     "Replies go to a related address",
                     format!(
@@ -152,6 +160,9 @@ fn describe(
     let mut details = vec![("From", from_address)];
     if let Some(shown) = &report.name_shows {
         details.push(("Name shows", shown.clone()));
+    }
+    if let Some(member) = &report.mailing_list_member {
+        details.push(("List member", member.clone()));
     }
     if report.lookalike_of.is_some() || report.name_shows.is_some() || international.is_some() {
         details.push(("Sender's domain", from_domain));
@@ -331,5 +342,34 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn a_mailing_list_rewrite_is_info_with_list_wording() {
+        let list = warning(
+            "'alice@example.com' via Dev Team <dev-team@lists.example>",
+            None,
+        )
+        .expect("still shown");
+        assert_eq!(list.tier, SafetyTier::Info);
+        assert_eq!(list.title, "Sent through a mailing list");
+        assert_eq!(
+            list.message,
+            "The sender's name shows alice@example.com, but the message came from the list's address, dev-team@lists.example."
+        );
+        assert_eq!(
+            list.details,
+            vec![
+                ("From", "dev-team@lists.example".to_owned()),
+                ("List member", "alice@example.com".to_owned()),
+            ]
+        );
+        assert!(shows(list.tier, SenderWarnings::Standard));
+        assert!(!shows(list.tier, SenderWarnings::Fewer));
+
+        // A plain name showing someone else's address keeps the alarm.
+        let plain = warning("'alice@example.com' <dev-team@lists.example>", None).expect("flagged");
+        assert_eq!(plain.tier, SafetyTier::Caution);
+        assert_eq!(plain.title, "Name shows another address");
     }
 }
