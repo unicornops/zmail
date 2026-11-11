@@ -1,8 +1,9 @@
-//! Zmail Phase 3 desktop bootstrap and account setup CLI.
+//! Zmail's entry point: the desktop app, the terminal UI and the CLI.
 
 use std::{
-    io::{self, Write},
-    path::PathBuf,
+    io::{self, IsTerminal, Write},
+    path::{Path, PathBuf},
+    process::ExitCode,
     sync::Arc,
 };
 
@@ -10,14 +11,25 @@ use anyhow::{Context, Result, bail};
 use zmail_assets::ZmailAssets;
 use zmail_core::{
     AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, NewAccount, NewDraft, NewIdentity,
-    OutgoingConfig, ProtocolKind, SubmissionSecurity, ThemeAppearance, ThemeSummary, UpstreamPins,
+    OutgoingConfig, ProtocolKind, ThemeAppearance, ThemeSummary, UpstreamPins,
 };
-use zmail_security::{InMemorySecretStore, KeyringSecretStore, SecretSlot, SecretStore};
+use zmail_security::{InMemorySecretStore, KeyringSecretStore, SecretStore};
 use zmail_store::{LocalStore, MigrationProgress, StoreOpenError};
 use zmail_sync::{BackgroundRuntime, SyncService};
 use zmail_theme::ThemeFamily;
 use zmail_ui::InitialView;
 
+use cli::Command;
+use output::line;
+use prompts::{prompt_multiline_with_default, prompt_optional, prompt_recipients};
+use prompts::{prompt_with_default, prompt_yes_no};
+
+mod account_setup;
+mod cli;
+mod hardening;
+mod mailto;
+mod output;
+mod prompts;
 mod ui_fixture;
 
 const PHASE0_DARK_THEME: &str = zmail_theme::bundled::DARK;
@@ -27,31 +39,93 @@ const ZED_UPSTREAM_COMMIT: &str = env!("ZMAIL_ZED_COMMIT");
 /// Zed stable release tag GPUI is pinned to (see docs/upstream/zed.md).
 const GPUI_VERSION: &str = env!("ZMAIL_ZED_TAG");
 
-fn main() -> Result<()> {
-    let (command, force) = Command::from_env()?;
+/// The exit status of a mistake on the command line.
+const USAGE_ERROR: u8 = 2;
+
+fn main() -> ExitCode {
+    // Before anything can hold a secret: no core file may carry the store
+    // key or mail to disk (ADR 0005).
+    hardening::forbid_core_dumps();
+    let mut args = Vec::new();
+    for arg in std::env::args_os().skip(1) {
+        match arg.into_string() {
+            Ok(arg) => args.push(arg),
+            Err(arg) => {
+                eprintln!(
+                    "error: the argument {} is not valid UTF-8\n\
+                     Run `zmail-app --help` for the commands.",
+                    line(&arg.to_string_lossy())
+                );
+                return ExitCode::from(USAGE_ERROR);
+            }
+        }
+    }
+    let (command, force) = match cli::parse(args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(USAGE_ERROR);
+        }
+    };
+    if !command.opens_a_window() {
+        hardening::make_undumpable();
+    }
+    match run(command, force) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // The chain on one line; it can quote a server or mail.
+            eprintln!("Error: {}", output::text(&format!("{error:#}")));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+impl Command {
+    /// Whether the command opens the desktop app's window.
+    fn opens_a_window(&self) -> bool {
+        matches!(
+            self,
+            Self::Gui
+                | Self::Mailto(_)
+                | Self::LaunchUiFixture { .. }
+                | Self::LaunchImapFixture { .. }
+        )
+    }
+}
+
+fn run(command: Command, force: bool) -> Result<()> {
     match command {
         Command::Gui => launch_gui(),
-        #[cfg(feature = "tui")]
+        Command::Help(spec) => {
+            match spec {
+                Some(spec) => print!("{}", cli::command_help(spec)),
+                None => print!("{}", cli::general_help()),
+            }
+            Ok(())
+        }
+        Command::Version => {
+            println!("zmail-app {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Command::Tui => launch_tui(),
-        #[cfg(feature = "tui")]
         Command::LaunchTuiFixture(view) => launch_tui_fixture(view),
         Command::Mailto(url) => launch_gui_with_mailto(&url),
         Command::LaunchImapFixture {
             endpoint,
             username,
-            secret,
             email,
-        } => launch_imap_fixture(&endpoint, &username, &secret, &email),
+        } => launch_imap_fixture(&endpoint, &username, &email),
         Command::LaunchUiFixture {
             view,
             theme,
             text_size,
         } => launch_ui_fixture(view, theme, text_size),
-        Command::AddImap => add_account(ProtocolKind::Imap, force),
-        Command::AddJmap => add_account(ProtocolKind::Jmap, force),
+        Command::AddAccount {
+            protocol,
+            allow_cleartext,
+        } => account_setup::add_account(protocol, allow_cleartext, force),
         Command::ListAccounts => list_accounts(),
-        Command::SyncAll => sync_accounts(None, force),
-        Command::SyncAccount(account_id) => sync_accounts(Some(account_id), force),
+        Command::Sync(account_id) => sync_accounts(account_id, force),
         Command::Search {
             account_id,
             query,
@@ -63,12 +137,13 @@ fn main() -> Result<()> {
         Command::SaveAttachment {
             attachment_id,
             destination,
-        } => save_attachment(attachment_id, destination.as_deref()),
+            overwrite,
+        } => save_attachment(attachment_id, destination.as_deref(), overwrite),
         Command::FlagThread(thread_id, flagged) => flag_thread(thread_id, flagged),
         Command::MarkThreadRead(thread_id, read) => mark_thread_read(thread_id, read),
         Command::MoveThread(thread_id, mailbox_id) => move_thread(thread_id, mailbox_id),
         Command::ArchiveThread(thread_id) => archive_thread(thread_id),
-        Command::DeleteThread(thread_id) => delete_thread(thread_id),
+        Command::DeleteThread { thread_id, yes } => delete_thread(thread_id, yes),
         Command::Compose(account_id, identity_id) => compose_draft(account_id, identity_id, force),
         Command::ListDrafts(account_id) => list_drafts(account_id),
         Command::ShowDraft(draft_id) => show_draft(draft_id),
@@ -85,414 +160,11 @@ fn main() -> Result<()> {
         Command::DeadOps { account_id } => list_dead_ops(account_id),
         Command::RetryOp(op_id) => retry_dead_op(op_id),
         Command::DiscardOp(op_id) => discard_dead_op(op_id),
-        Command::EmptyTrash(account_id) => empty_trash(account_id, force),
+        Command::EmptyTrash { account_id, yes } => empty_trash(account_id, yes, force),
         Command::CacheBudget {
             account_id,
             budget_mb,
         } => set_cache_budget(account_id, budget_mb),
-        Command::Help => {
-            print_help();
-            Ok(())
-        }
-    }
-}
-
-enum Command {
-    Gui,
-    #[cfg(feature = "tui")]
-    Tui,
-    #[cfg(feature = "tui")]
-    LaunchTuiFixture(ui_fixture::FixtureView),
-    Mailto(String),
-    LaunchImapFixture {
-        endpoint: String,
-        username: String,
-        secret: String,
-        email: String,
-    },
-    LaunchUiFixture {
-        view: ui_fixture::FixtureView,
-        theme: Option<ThemeAppearance>,
-        text_size: Option<u16>,
-    },
-    Backup {
-        directory: Option<String>,
-    },
-    ResetStore,
-    RotateKey,
-    DeadOps {
-        account_id: Option<i64>,
-    },
-    RetryOp(i64),
-    DiscardOp(i64),
-    EmptyTrash(i64),
-    CacheBudget {
-        account_id: i64,
-        budget_mb: Option<u64>,
-    },
-    ExportAccount {
-        account_id: i64,
-        path: String,
-    },
-    AddImap,
-    AddJmap,
-    ListAccounts,
-    SyncAll,
-    SyncAccount(i64),
-    Search {
-        account_id: i64,
-        query: String,
-        server: bool,
-    },
-    IndexAccount(i64),
-    ReadThread(i64),
-    ListAttachments(i64),
-    SaveAttachment {
-        attachment_id: i64,
-        destination: Option<String>,
-    },
-    FlagThread(i64, bool),
-    MarkThreadRead(i64, bool),
-    MoveThread(i64, i64),
-    ArchiveThread(i64),
-    DeleteThread(i64),
-    Compose(i64, Option<i64>),
-    ListDrafts(Option<i64>),
-    ShowDraft(i64),
-    SendDraft(i64),
-    ListOutbox(Option<i64>),
-    RetryOutbox(i64),
-    AddAttachment(i64, PathBuf),
-    RemoveAttachment(i64),
-    ProcessOutbox(Option<i64>),
-    Help,
-}
-
-impl Command {
-    /// The command, and whether `--force` was given (anywhere after the
-    /// command's name).
-    fn from_env() -> Result<(Self, bool)> {
-        Self::parse(std::env::args().skip(1).collect())
-    }
-
-    fn parse(mut args: Vec<String>) -> Result<(Self, bool)> {
-        let force = args.len() > 1 && args[1..].iter().any(|arg| arg == "--force");
-        if force {
-            let name = args.remove(0);
-            args.retain(|arg| arg != "--force");
-            args.insert(0, name);
-        }
-        let command = Self::parse_args(args.into_iter())?;
-        if force && !command.syncs_or_sends() {
-            bail!(
-                "--force is for the commands that sync or send (sync, index, send, \
-                 retry-outbox, process-outbox, compose, add-imap, add-jmap, empty-trash)"
-            );
-        }
-        Ok((command, force))
-    }
-
-    /// Whether the command syncs, indexes or sends, and so needs the
-    /// store's sync lock (ADR 0007) or `--force`.
-    fn syncs_or_sends(&self) -> bool {
-        matches!(
-            self,
-            Self::AddImap
-                | Self::AddJmap
-                | Self::SyncAll
-                | Self::SyncAccount(_)
-                | Self::IndexAccount(_)
-                | Self::Compose(..)
-                | Self::SendDraft(_)
-                | Self::RetryOutbox(_)
-                | Self::ProcessOutbox(_)
-                | Self::EmptyTrash(_)
-        )
-    }
-
-    fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
-        let Some(command) = args.next() else {
-            return Ok(Self::Gui);
-        };
-
-        match command.as_str() {
-            "launch-imap-fixture" => Ok(Self::LaunchImapFixture {
-                endpoint: args
-                    .next()
-                    .context("launch-imap-fixture requires an IMAP endpoint")?,
-                username: args
-                    .next()
-                    .context("launch-imap-fixture requires a username")?,
-                secret: args
-                    .next()
-                    .context("launch-imap-fixture requires a password or app password")?,
-                email: args
-                    .next()
-                    .context("launch-imap-fixture requires a primary identity email")?,
-            }),
-            "launch-ui-fixture" => {
-                let view = ui_fixture::FixtureView::parse(
-                    &args.next().context("launch-ui-fixture requires a view")?,
-                )?;
-                let theme = ui_fixture::parse_theme(args.next().as_deref())?;
-                let text_size = ui_fixture::parse_text_size(args.next().as_deref())?;
-                Ok(Self::LaunchUiFixture {
-                    view,
-                    theme,
-                    text_size,
-                })
-            }
-            #[cfg(feature = "tui")]
-            "launch-tui-fixture" => Ok(Self::LaunchTuiFixture(ui_fixture::FixtureView::parse(
-                args.next().as_deref().unwrap_or("accounts"),
-            )?)),
-            "add-imap" => Ok(Self::AddImap),
-            "add-jmap" => Ok(Self::AddJmap),
-            #[cfg(feature = "tui")]
-            "tui" => Ok(Self::Tui),
-            "list-accounts" => Ok(Self::ListAccounts),
-            "sync" => {
-                let next = args.next();
-                if let Some(next) = next {
-                    if next == "all" {
-                        Ok(Self::SyncAll)
-                    } else {
-                        Ok(Self::SyncAccount(
-                            next.parse::<i64>()
-                                .with_context(|| format!("invalid account id {next}"))?,
-                        ))
-                    }
-                } else {
-                    Ok(Self::SyncAll)
-                }
-            }
-            "search" => {
-                let mut account = args.next().context("search requires an account id")?;
-                let server = account == "--server";
-                if server {
-                    account = args.next().context("search requires an account id")?;
-                }
-                let account_id = account
-                    .parse::<i64>()
-                    .context("search account id must be an integer")?;
-                let query = args.collect::<Vec<_>>().join(" ");
-                if query.trim().is_empty() {
-                    bail!("search requires a query");
-                }
-                Ok(Self::Search {
-                    account_id,
-                    query,
-                    server,
-                })
-            }
-            "index" => Ok(Self::IndexAccount(
-                args.next()
-                    .context("index requires an account id")?
-                    .parse::<i64>()
-                    .context("index account id must be an integer")?,
-            )),
-            "read" => Ok(Self::ReadThread(
-                args.next()
-                    .context("read requires a thread id")?
-                    .parse::<i64>()
-                    .context("thread id must be an integer")?,
-            )),
-            "attachments" => Ok(Self::ListAttachments(
-                args.next()
-                    .context("attachments requires a thread id")?
-                    .parse::<i64>()
-                    .context("thread id must be an integer")?,
-            )),
-            "save-attachment" => {
-                let attachment_id = args
-                    .next()
-                    .context("save-attachment requires an attachment id")?
-                    .parse::<i64>()
-                    .context("attachment id must be an integer")?;
-                let destination = match args.next().as_deref() {
-                    Some(path) if path != "--dest" => Some(path.to_owned()),
-                    Some("--dest") => Some(
-                        args.next()
-                            .context("save-attachment --dest requires a directory")?,
-                    ),
-                    _ => None,
-                };
-                Ok(Self::SaveAttachment {
-                    attachment_id,
-                    destination,
-                })
-            }
-            "flag" => Ok(Self::FlagThread(
-                args.next()
-                    .context("flag requires a thread id")?
-                    .parse::<i64>()
-                    .context("thread id must be an integer")?,
-                true,
-            )),
-            "unflag" => Ok(Self::FlagThread(
-                args.next()
-                    .context("unflag requires a thread id")?
-                    .parse::<i64>()
-                    .context("thread id must be an integer")?,
-                false,
-            )),
-            "mark-read" => Ok(Self::MarkThreadRead(
-                args.next()
-                    .context("mark-read requires a thread id")?
-                    .parse::<i64>()
-                    .context("thread id must be an integer")?,
-                true,
-            )),
-            "mark-unread" => Ok(Self::MarkThreadRead(
-                args.next()
-                    .context("mark-unread requires a thread id")?
-                    .parse::<i64>()
-                    .context("thread id must be an integer")?,
-                false,
-            )),
-            "move" => {
-                let thread_id = args
-                    .next()
-                    .context("move requires a thread id")?
-                    .parse::<i64>()
-                    .context("thread id must be an integer")?;
-                let mailbox_id = args
-                    .next()
-                    .context("move requires a destination mailbox id")?
-                    .parse::<i64>()
-                    .context("destination mailbox id must be an integer")?;
-                Ok(Self::MoveThread(thread_id, mailbox_id))
-            }
-            "archive" => Ok(Self::ArchiveThread(
-                args.next()
-                    .context("archive requires a thread id")?
-                    .parse::<i64>()
-                    .context("thread id must be an integer")?,
-            )),
-            "delete" => Ok(Self::DeleteThread(
-                args.next()
-                    .context("delete requires a thread id")?
-                    .parse::<i64>()
-                    .context("thread id must be an integer")?,
-            )),
-            "compose" => {
-                let account_id = args
-                    .next()
-                    .context("compose requires an account id")?
-                    .parse::<i64>()
-                    .context("account id must be an integer")?;
-                let identity_id = args
-                    .next()
-                    .map(|value| {
-                        value
-                            .parse::<i64>()
-                            .context("identity id must be an integer")
-                    })
-                    .transpose()?;
-                Ok(Self::Compose(account_id, identity_id))
-            }
-            "drafts" => Ok(Self::ListDrafts(parse_optional_id(
-                args.next(),
-                "account id",
-            )?)),
-            "draft" => Ok(Self::ShowDraft(
-                args.next()
-                    .context("draft requires a draft id")?
-                    .parse::<i64>()
-                    .context("draft id must be an integer")?,
-            )),
-            "send" => Ok(Self::SendDraft(
-                args.next()
-                    .context("send requires a draft id")?
-                    .parse::<i64>()
-                    .context("draft id must be an integer")?,
-            )),
-            "outbox" => Ok(Self::ListOutbox(parse_optional_id(
-                args.next(),
-                "account id",
-            )?)),
-            "retry-outbox" => Ok(Self::RetryOutbox(
-                args.next()
-                    .context("retry-outbox requires a job id")?
-                    .parse::<i64>()
-                    .context("job id must be an integer")?,
-            )),
-            "attach" => Ok(Self::AddAttachment(
-                args.next()
-                    .context("attach requires a draft id")?
-                    .parse::<i64>()
-                    .context("draft id must be an integer")?,
-                PathBuf::from(args.next().context("attach requires a file path")?),
-            )),
-            "detach" => Ok(Self::RemoveAttachment(
-                args.next()
-                    .context("detach requires an attachment id")?
-                    .parse::<i64>()
-                    .context("attachment id must be an integer")?,
-            )),
-            "process-outbox" => Ok(Self::ProcessOutbox(parse_optional_id(
-                args.next(),
-                "account id",
-            )?)),
-            "backup" => Ok(Self::Backup {
-                directory: args.next(),
-            }),
-            "reset-store" => Ok(Self::ResetStore),
-            "rotate-key" => Ok(Self::RotateKey),
-            "dead-ops" => Ok(Self::DeadOps {
-                account_id: parse_optional_id(args.next(), "account id")?,
-            }),
-            "retry-op" => Ok(Self::RetryOp(
-                args.next()
-                    .context("retry-op requires a dead operation id")?
-                    .parse::<i64>()
-                    .context("operation id must be an integer")?,
-            )),
-            "discard-op" => Ok(Self::DiscardOp(
-                args.next()
-                    .context("discard-op requires a dead operation id")?
-                    .parse::<i64>()
-                    .context("operation id must be an integer")?,
-            )),
-            "empty-trash" => Ok(Self::EmptyTrash(
-                args.next()
-                    .context("empty-trash requires an account id")?
-                    .parse::<i64>()
-                    .context("account id must be an integer")?,
-            )),
-            "cache-budget" => Ok(Self::CacheBudget {
-                account_id: args
-                    .next()
-                    .context("cache-budget requires an account id")?
-                    .parse::<i64>()
-                    .context("account id must be an integer")?,
-                budget_mb: match args.next().as_deref() {
-                    None | Some("unlimited") => None,
-                    Some(value) => Some(
-                        value
-                            .parse::<u64>()
-                            .context("the budget must be a number of MiB or 'unlimited'")?,
-                    ),
-                },
-            }),
-            "export-account" => Ok(Self::ExportAccount {
-                account_id: args
-                    .next()
-                    .context("export-account requires an account id")?
-                    .parse::<i64>()
-                    .context("account id must be an integer")?,
-                path: args
-                    .next()
-                    .context("export-account requires an output path")?,
-            }),
-            "mailto" => Ok(Self::Mailto(format!(
-                "mailto:{}",
-                args.next().context("mailto requires a URL body")?
-            ))),
-            other if other.starts_with("mailto:") => Ok(Self::Mailto(other.to_owned())),
-            "help" | "--help" | "-h" => Ok(Self::Help),
-            other => bail!("unknown command {other}"),
-        }
     }
 }
 
@@ -501,7 +173,7 @@ impl Command {
 /// Malformed URLs fall back to a plain GUI launch with a warning, and a
 /// missing account configuration surfaces the setup flow instead.
 fn launch_gui_with_mailto(url: &str) -> Result<()> {
-    match parse_mailto(url) {
+    match mailto::parse_mailto(url) {
         Some(mailto) => {
             let store = open_store().context("failed to open the local store")?;
             let Some(target) = store.list_sync_targets()?.first().cloned() else {
@@ -527,99 +199,10 @@ fn launch_gui_with_mailto(url: &str) -> Result<()> {
             launch_gui_with_initial_draft(Some(draft_id))
         }
         None => {
-            eprintln!("warning: ignoring malformed mailto URL {url}");
+            eprintln!("warning: ignoring malformed mailto URL {}", line(url));
             launch_gui()
         }
     }
-}
-
-/// A mailto URL decomposed into draft fields (RFC 6068).
-struct MailtoDraft {
-    to: Vec<String>,
-    cc: Vec<String>,
-    bcc: Vec<String>,
-    subject: String,
-    body: String,
-}
-
-/// Parses an RFC 6068 mailto URL into draft fields.
-fn parse_mailto(raw: &str) -> Option<MailtoDraft> {
-    let rest = raw.strip_prefix("mailto:")?;
-    let (recipients, query) = match rest.split_once('?') {
-        Some((recipients, query)) => (recipients, Some(query)),
-        None => (rest, None),
-    };
-
-    let mut draft = MailtoDraft {
-        to: split_addresses(recipients),
-        cc: Vec::new(),
-        bcc: Vec::new(),
-        subject: String::new(),
-        body: String::new(),
-    };
-
-    let Some(query) = query else {
-        return Some(draft);
-    };
-    for pair in query.split('&') {
-        let Some((name, value)) = pair.split_once('=') else {
-            continue;
-        };
-        let value = percent_decode(value);
-        match name.to_ascii_lowercase().as_str() {
-            "to" => {
-                let decoded = split_addresses(&value);
-                draft.to.extend(decoded);
-            }
-            "cc" => draft.cc = split_addresses(&value),
-            "bcc" => draft.bcc = split_addresses(&value),
-            "subject" => draft.subject = value,
-            "body" => draft.body = value,
-            _ => {}
-        }
-    }
-    Some(draft)
-}
-
-/// Splits a comma-separated recipient list, dropping empty entries.
-fn split_addresses(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-/// Percent-decodes a mailto component, mapping `+` to a space.
-fn percent_decode(raw: &str) -> String {
-    let bytes = raw.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' if index + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok();
-                if let Some(hex) = hex
-                    && let Ok(byte) = u8::from_str_radix(hex, 16)
-                {
-                    decoded.push(byte);
-                    index += 3;
-                } else {
-                    decoded.push(b'%');
-                    index += 1;
-                }
-            }
-            b'+' => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn launch_gui() -> Result<()> {
@@ -721,9 +304,48 @@ fn launch_tui_fixture(view: ui_fixture::FixtureView) -> Result<()> {
     result
 }
 
-fn launch_imap_fixture(endpoint: &str, username: &str, secret: &str, email: &str) -> Result<()> {
+#[cfg(not(feature = "tui"))]
+fn launch_tui() -> Result<()> {
+    bail!("this build of Zmail has no terminal UI")
+}
+
+#[cfg(not(feature = "tui"))]
+fn launch_tui_fixture(_view: ui_fixture::FixtureView) -> Result<()> {
+    bail!("this build of Zmail has no terminal UI")
+}
+
+/// The environment variable `launch-imap-fixture` reads the password
+/// from, so it never shows in `ps` or the shell's history.
+const FIXTURE_SECRET_ENV: &str = "ZMAIL_FIXTURE_SECRET";
+
+/// `launch-imap-fixture`'s password: from [`FIXTURE_SECRET_ENV`], else
+/// asked for without echo on a terminal, else one line of standard input.
+fn fixture_secret() -> Result<String> {
+    if let Some(secret) = std::env::var_os(FIXTURE_SECRET_ENV)
+        && !secret.is_empty()
+    {
+        return secret
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("{FIXTURE_SECRET_ENV} is not valid UTF-8"));
+    }
+    if io::stdin().is_terminal() {
+        return prompts::prompt_secret("Password or app password");
+    }
+    let mut secret = String::new();
+    io::stdin()
+        .read_line(&mut secret)
+        .context("failed to read the password from standard input")?;
+    let secret = secret.trim_end_matches(['\r', '\n']);
+    if secret.is_empty() {
+        bail!("give the password in {FIXTURE_SECRET_ENV} or on standard input");
+    }
+    Ok(secret.to_owned())
+}
+
+fn launch_imap_fixture(endpoint: &str, username: &str, email: &str) -> Result<()> {
     install_panic_log();
-    validate_endpoint(ProtocolKind::Imap, endpoint)?;
+    account_setup::validate_endpoint(ProtocolKind::Imap, endpoint, false)?;
+    let secret = fixture_secret()?;
 
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(LocalStore::open_ephemeral().context("failed to open the fixture store")?);
@@ -732,7 +354,7 @@ fn launch_imap_fixture(endpoint: &str, username: &str, secret: &str, email: &str
         .insert_account(&fixture_imap_account(endpoint, username, email))
         .context("failed to insert the IMAP fixture account")?;
     secrets
-        .set_account_secret(account_id, secret)
+        .set_account_secret(account_id, &secret)
         .with_context(|| format!("failed to store fixture credentials for account {account_id}"))?;
 
     let sync_service = SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
@@ -813,62 +435,9 @@ fn fixture_bootstrap(
     Ok(bootstrap)
 }
 
-fn add_account(protocol: ProtocolKind, force: bool) -> Result<()> {
-    let store = Arc::new(open_store().context("failed to open the local store")?);
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-    let (account, secret) = prompt_account(protocol)?;
-    let account_id = store.insert_account(&account)?;
-    secret.store(store.as_ref(), secrets.as_ref(), account_id)?;
-    let budget_mb = prompt_optional("Disk budget in MiB (empty for unlimited)")?
-        .map(|value| {
-            value
-                .parse::<u64>()
-                .context("the disk budget must be a number of MiB")
-        })
-        .transpose()?;
-    if let Some(budget_mb) = budget_mb {
-        store.set_account_disk_budget(account_id, Some(budget_mb))?;
-    }
-
-    let runtime = BackgroundRuntime::start(4)?;
-    let sync_service = command_sync_service(&runtime, store.clone(), secrets, force)?;
-    if !sync_service.runs_sync() {
-        println!(
-            "Account {account_id} added: {} ({}). {SYNCED_ELSEWHERE}, and starts syncing it \
-             within seconds.",
-            account.display_name, account.protocol
-        );
-        return Ok(());
-    }
-    match sync_service.sync_account_and_wait(account_id) {
-        Ok(()) => {
-            println!(
-                "Account {account_id} added and synced: {} ({})",
-                account.display_name, account.protocol
-            );
-            Ok(())
-        }
-        Err(error) => {
-            eprintln!("Account {account_id} was stored, but the initial sync failed: {error:#}");
-            Err(error)
-        }
-    }
-}
-
 fn list_accounts() -> Result<()> {
     let store = open_store().context("failed to open the local store")?;
-    for account in store.list_accounts()? {
-        println!(
-            "#{} {} [{}] {}",
-            account.id, account.display_name, account.protocol, account.endpoint
-        );
-        println!("  user: {}", account.username);
-        println!("  identities: {}", account.identity_count);
-        println!(
-            "  sync: {} ({})",
-            account.sync_status.phase, account.sync_status.detail
-        );
-    }
+    output::write_accounts(&mut io::stdout().lock(), &store.list_accounts()?)?;
     Ok(())
 }
 
@@ -951,24 +520,13 @@ fn search_threads(account_id: i64, query: &str, server: bool) -> Result<()> {
     }
     let hits = store.search_threads(account_id, query, 50)?;
     if hits.is_empty() {
-        println!("No matches for {query:?} on account {account_id}.");
+        println!(
+            "No matches for \"{}\" on account {account_id}.",
+            line(query)
+        );
         return Ok(());
     }
-
-    for hit in hits {
-        let origin = if hit.from_server { " (server)" } else { "" };
-        println!(
-            "#{} [{}] {}{origin}",
-            hit.thread_id, hit.mailbox_name, hit.subject
-        );
-        println!("  {}", hit.participants);
-        println!("  {}", hit.preview);
-        println!(
-            "  {} unread • flagged={} • {}",
-            hit.unread_count, hit.is_flagged, hit.latest_message_at
-        );
-    }
-
+    output::write_search_hits(&mut io::stdout().lock(), &hits)?;
     Ok(())
 }
 
@@ -977,36 +535,7 @@ fn read_thread(thread_id: i64) -> Result<()> {
     let thread = store
         .thread_view(thread_id)?
         .with_context(|| format!("thread {thread_id} does not exist"))?;
-
-    println!(
-        "#{} [{}] {}",
-        thread.id, thread.mailbox_name, thread.subject
-    );
-    println!(
-        "{} msgs • {} unread • flagged={} • remote_content={}",
-        thread.message_count, thread.unread_count, thread.is_flagged, thread.has_remote_content
-    );
-    println!("{}", thread.participants);
-
-    for message in thread.messages {
-        println!();
-        println!(
-            "{} -> {} [{}]",
-            message.sender, message.recipients, message.render_mode
-        );
-        println!(
-            "{} • read={} • flagged={} • remote_content={}",
-            message.received_at, message.is_read, message.is_flagged, message.has_remote_content
-        );
-        for attachment in &message.attachments {
-            println!(
-                "  attachment #{} {} [{}] {} bytes",
-                attachment.id, attachment.filename, attachment.content_type, attachment.size_bytes
-            );
-        }
-        println!("{}", message.rendered_body);
-    }
-
+    output::write_thread(&mut io::stdout().lock(), &thread)?;
     Ok(())
 }
 
@@ -1015,37 +544,58 @@ fn list_attachments(thread_id: i64) -> Result<()> {
     let thread = store
         .thread_view(thread_id)?
         .with_context(|| format!("thread {thread_id} does not exist"))?;
-
-    println!(
-        "#{} [{}] {}",
-        thread.id, thread.mailbox_name, thread.subject
-    );
-    let mut count = 0;
-    for message in &thread.messages {
-        for attachment in &message.attachments {
-            println!(
-                "#{} {} [{}] {} bytes (message {})",
-                attachment.id,
-                attachment.filename,
-                attachment.content_type,
-                attachment.size_bytes,
-                message.id
-            );
-            count += 1;
-        }
-    }
-    if count == 0 {
-        println!("Thread {thread_id} has no attachments.");
-    }
+    output::write_attachments(&mut io::stdout().lock(), &thread)?;
     Ok(())
 }
 
-fn save_attachment(attachment_id: i64, destination: Option<&str>) -> Result<()> {
+fn save_attachment(attachment_id: i64, destination: Option<&Path>, overwrite: bool) -> Result<()> {
     let store = open_store().context("failed to open the local store")?;
-    let destination = destination.unwrap_or(".");
-    let path = store.save_attachment(attachment_id, destination)?;
-    println!("Saved attachment {attachment_id} to {}.", path.display());
+    let path = save_attachment_in(
+        &store,
+        attachment_id,
+        destination.unwrap_or(Path::new(".")),
+        overwrite,
+    )?;
+    println!(
+        "Saved attachment {attachment_id} to {}.",
+        line(&path.display().to_string())
+    );
     Ok(())
+}
+
+/// `save-attachment`, on an open store: saves under the attachment's
+/// own (sanitised) name in `directory`, and never replaces a file there
+/// unless `overwrite`. Returns where it went.
+fn save_attachment_in(
+    store: &LocalStore,
+    attachment_id: i64,
+    directory: &Path,
+    overwrite: bool,
+) -> Result<PathBuf> {
+    let blob = store.attachment_blob(attachment_id)?;
+    std::fs::create_dir_all(directory)
+        .with_context(|| format!("failed to create {}", directory.display()))?;
+    let destination = directory.join(zmail_security::attachment_safety::sanitize_filename(
+        blob.filename(),
+    ));
+    if overwrite {
+        blob.save_to(&destination)?;
+    } else {
+        // `save_new` creates the file only if nothing is there, so a file
+        // that appears meanwhile is not replaced either.
+        blob.save_new(&destination).map_err(|error| {
+            if destination.exists() {
+                anyhow::anyhow!(
+                    "{} already exists; pass --overwrite to replace it, or --dest to save \
+                     somewhere else",
+                    destination.display()
+                )
+            } else {
+                error
+            }
+        })?;
+    }
+    Ok(destination)
 }
 
 fn flag_thread(thread_id: i64, flagged: bool) -> Result<()> {
@@ -1082,11 +632,39 @@ fn archive_thread(thread_id: i64) -> Result<()> {
     Ok(())
 }
 
-fn delete_thread(thread_id: i64) -> Result<()> {
+fn delete_thread(thread_id: i64, yes: bool) -> Result<()> {
     let store = open_store().context("failed to open the local store")?;
+    if deletes_for_good(&store, thread_id)?
+        && !prompts::confirm(
+            "This conversation is in the Trash, or its account has no Trash, so it is deleted \
+             for good. Delete it",
+            yes,
+        )?
+    {
+        println!("Nothing was deleted.");
+        return Ok(());
+    }
     store.delete_thread(thread_id)?;
     println!("Thread {thread_id} deleted.");
     Ok(())
+}
+
+/// Whether deleting the thread destroys it rather than moving it to the
+/// Trash: it is in the Trash already, or its account has none (as
+/// [`LocalStore::delete_thread`] decides).
+fn deletes_for_good(store: &LocalStore, thread_id: i64) -> Result<bool> {
+    let thread = store
+        .thread_view(thread_id)?
+        .with_context(|| format!("thread {thread_id} does not exist"))?;
+    let Some(mailbox) = store
+        .list_all_mailboxes()?
+        .into_iter()
+        .find(|mailbox| mailbox.id == thread.mailbox_id)
+    else {
+        return Ok(false);
+    };
+    let trash = store.mailbox_id_by_role(mailbox.account_id, "trash")?;
+    Ok(trash.is_none_or(|trash| trash == mailbox.id))
 }
 
 fn compose_draft(account_id: i64, identity_id: Option<i64>, force: bool) -> Result<()> {
@@ -1192,17 +770,7 @@ fn list_drafts(account_id: Option<i64>) -> Result<()> {
         println!("No drafts found.");
         return Ok(());
     }
-
-    for draft in drafts {
-        println!(
-            "#{} account={} identity={} [{}] {}",
-            draft.id, draft.account_id, draft.identity_name, draft.state, draft.subject
-        );
-        println!(
-            "  to: {} • attachments: {} • updated: {}",
-            draft.recipient_summary, draft.attachment_count, draft.updated_at
-        );
-    }
+    output::write_drafts(&mut io::stdout().lock(), &drafts)?;
     Ok(())
 }
 
@@ -1211,44 +779,7 @@ fn show_draft(draft_id: i64) -> Result<()> {
     let draft = store
         .draft_detail(draft_id)?
         .with_context(|| format!("draft {draft_id} does not exist"))?;
-
-    println!(
-        "#{} account={} identity={} <{}> [{}]",
-        draft.id, draft.account_id, draft.identity_name, draft.identity_email, draft.state
-    );
-    println!("To: {}", join_or_placeholder(&draft.to));
-    println!("Cc: {}", join_or_placeholder(&draft.cc));
-    println!("Bcc: {}", join_or_placeholder(&draft.bcc));
-    println!(
-        "Subject: {}",
-        if draft.subject.is_empty() {
-            "(no subject)"
-        } else {
-            &draft.subject
-        }
-    );
-    println!("Updated: {}", draft.updated_at);
-    if let Some(queued_at) = draft.queued_at.as_deref() {
-        println!("Queued: {queued_at}");
-    }
-    if let Some(sent_at) = draft.sent_at.as_deref() {
-        println!("Sent: {sent_at}");
-    }
-    if let Some(error) = draft.last_error_message.as_deref() {
-        println!("Last error: {error}");
-    }
-    println!();
-    println!("{}", draft.body);
-    if !draft.attachments.is_empty() {
-        println!();
-        println!("Attachments:");
-        for attachment in draft.attachments {
-            println!(
-                "  #{} {} ({}, {} bytes)",
-                attachment.id, attachment.filename, attachment.content_type, attachment.size_bytes
-            );
-        }
-    }
+    output::write_draft(&mut io::stdout().lock(), &draft)?;
     Ok(())
 }
 
@@ -1296,19 +827,7 @@ fn list_outbox(account_id: Option<i64>) -> Result<()> {
         println!("No outbox jobs found.");
         return Ok(());
     }
-
-    for job in jobs {
-        println!(
-            "#{} draft={} account={} [{}] attempts={}",
-            job.id, job.draft_id, job.account_id, job.state, job.attempt_count
-        );
-        if let Some(next_attempt_at) = job.next_attempt_at.as_deref() {
-            println!("  next attempt: {next_attempt_at}");
-        }
-        if let Some(error) = job.last_error_message.as_deref() {
-            println!("  last error: {error}");
-        }
-    }
+    output::write_outbox(&mut io::stdout().lock(), &jobs)?;
     Ok(())
 }
 
@@ -1394,24 +913,15 @@ fn list_dead_ops(account_id: Option<i64>) -> Result<()> {
             .collect(),
     };
 
+    let mut out = io::stdout().lock();
     let mut printed = 0;
     for account_id in accounts {
         for op in store.list_dead_ops(account_id)? {
-            println!(
-                "op {} • account {} • {:?} {} in {} -> {} • attempts: {} • last error: {}",
-                op.id,
-                op.account_id,
-                op.kind,
-                op.remote_id,
-                op.source_mailbox,
-                op.target_mailbox.as_deref().unwrap_or("-"),
-                op.attempts,
-                op.last_error.as_deref().unwrap_or("none"),
-            );
+            output::write_dead_op(&mut out, &op)?;
             printed += 1;
         }
     }
-    println!("{printed} dead-lettered operation(s).");
+    writeln!(out, "{printed} dead-lettered operation(s).")?;
     Ok(())
 }
 
@@ -1452,19 +962,25 @@ fn set_cache_budget(account_id: i64, budget_mb: Option<u64>) -> Result<()> {
     Ok(())
 }
 
-fn empty_trash(account_id: i64, force: bool) -> Result<()> {
+fn empty_trash(account_id: i64, yes: bool, force: bool) -> Result<()> {
     let store = Arc::new(open_store().context("failed to open the local store")?);
     let trash_name = store
         .mailbox_name_by_role(account_id, "trash")?
         .with_context(|| format!("account {account_id} has no trash mailbox"))?;
-
-    println!(
-        "This expunges every message in the {trash_name} mailbox of account {account_id} on the server."
-    );
-
     let target = store
         .sync_target(account_id)?
         .with_context(|| format!("account {account_id} no longer exists"))?;
+
+    let question = format!(
+        "This expunges every message in the {} mailbox of account {account_id} ({}) on the \
+         server, for good. Empty it",
+        line(&trash_name),
+        line(&target.display_name)
+    );
+    if !prompts::confirm(&question, yes)? {
+        println!("Nothing was deleted.");
+        return Ok(());
+    }
 
     let runtime = BackgroundRuntime::start(4)?;
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
@@ -1480,20 +996,24 @@ fn empty_trash(account_id: i64, force: bool) -> Result<()> {
 
     if !sync_service.runs_sync() {
         println!(
-            "Expunged {expunged} message(s) from {trash_name}. {SYNCED_ELSEWHERE}, and its \
-             next sync updates the local mirror."
+            "Expunged {expunged} message(s) from {}. {SYNCED_ELSEWHERE}, and its next sync \
+             updates the local mirror.",
+            line(&trash_name)
         );
         return Ok(());
     }
-    println!("Expunged {expunged} message(s) from {trash_name}; syncing the local mirror.");
+    println!(
+        "Expunged {expunged} message(s) from {}; syncing the local mirror.",
+        line(&trash_name)
+    );
     let _ = sync_service.sync_account_and_wait(account_id);
     Ok(())
 }
 
-fn create_backup(directory: Option<&str>) -> Result<()> {
+fn create_backup(directory: Option<&Path>) -> Result<()> {
     let store = open_store().context("failed to open the local store")?;
     let directory = match directory {
-        Some(directory) => std::path::PathBuf::from(directory),
+        Some(directory) => directory.to_owned(),
         None => store
             .path()
             .parent()
@@ -1508,231 +1028,23 @@ fn create_backup(directory: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn export_account(account_id: i64, path: &str) -> Result<()> {
+fn export_account(account_id: i64, path: &Path) -> Result<()> {
     let store = open_store().context("failed to open the local store")?;
-    let mut writer = std::fs::File::create(path)
-        .with_context(|| format!("failed to create the export file {path}"))?;
-    let exported = store.export_account_mbox(account_id, &mut writer)?;
-    println!("Exported {exported} message(s) to {path}.");
+    let exported = export_account_in(&store, account_id, path)?;
+    println!("Exported {exported} message(s) to {}.", path.display());
     Ok(())
 }
 
-/// Credentials collected while setting up a new account.
-enum AccountSecret {
-    /// Password or app password.
-    Password(String),
-    /// An OAuth2 access token pasted by the user (no refresh grant).
-    PastedAccessToken(String),
-    /// Tokens granted by the browser flow, with the client that ran it.
-    OAuth2Flow {
-        client: zmail_auth::OAuth2Client,
-        tokens: zmail_auth::TokenSet,
-    },
-}
-
-impl AccountSecret {
-    /// Persists the credentials for a freshly inserted account.
-    fn store(&self, store: &LocalStore, secrets: &dyn SecretStore, account_id: i64) -> Result<()> {
-        match self {
-            Self::Password(secret) => secrets
-                .set_account_secret(account_id, secret)
-                .with_context(|| format!("failed to store credentials for account {account_id}")),
-            Self::PastedAccessToken(token) => secrets
-                .set_account_secret_in_slot(account_id, SecretSlot::AccessToken, token)
-                .with_context(|| {
-                    format!("failed to store the access token for account {account_id}")
-                }),
-            Self::OAuth2Flow { client, tokens } => {
-                // The full grant is persisted so background sync can refresh
-                // the access token without user interaction.
-                zmail_sync::persist_oauth2_grant(store, secrets, account_id, client, tokens)
-            }
-        }
-    }
-}
-
-fn prompt_account(protocol: ProtocolKind) -> Result<(NewAccount, AccountSecret)> {
-    if protocol == ProtocolKind::Proton {
-        // Proton accounts need Proton sign-in and an encrypted local store
-        // first (docs/adr/0004-proton-native.md, #139).
-        bail!("Proton Mail accounts can't be added yet");
-    }
-    println!("Setting up a new {protocol} account.");
-    let display_name = prompt("Display name")?;
-    let endpoint = match protocol {
-        ProtocolKind::Imap => prompt_with_default("IMAP endpoint", "imaps://mail.example.com:993")?,
-        ProtocolKind::Jmap => prompt_with_default("JMAP base URL", "https://mail.example.com")?,
-        ProtocolKind::Proton => unreachable!("Proton accounts are refused above"),
-    };
-    validate_endpoint(protocol, &endpoint)?;
-    let username = prompt("Username or account email")?;
-    let auth = match protocol {
-        ProtocolKind::Imap => {
-            if prompt_yes_no("Authenticate with an OAuth2 access token (XOAUTH2)?", false)? {
-                AuthKind::OAuth2
-            } else {
-                AuthKind::Password
-            }
-        }
-        ProtocolKind::Jmap => {
-            if prompt_yes_no("Authenticate with an OAuth2 bearer token?", false)? {
-                AuthKind::OAuth2
-            } else {
-                AuthKind::Password
-            }
-        }
-        ProtocolKind::Proton => unreachable!("Proton accounts are refused above"),
-    };
-    let secret = match auth {
-        AuthKind::Password => AccountSecret::Password(
-            rpassword::prompt_password("Password or app password: ")
-                .context("failed to read the account password")?,
-        ),
-        AuthKind::OAuth2 => {
-            if prompt_yes_no("Run the browser authorization flow (PKCE)?", true)? {
-                let client = prompt_oauth2_client(protocol)?;
-                let tokens = client.authorize_interactively()?;
-                println!(
-                    "Received an access token{}.",
-                    if tokens.refresh_token.is_some() {
-                        " and a refresh token"
-                    } else {
-                        ""
-                    }
-                );
-                AccountSecret::OAuth2Flow { client, tokens }
-            } else {
-                AccountSecret::PastedAccessToken(
-                    rpassword::prompt_password("OAuth2 access token: ")
-                        .context("failed to read the OAuth2 access token")?,
-                )
-            }
-        }
-        AuthKind::ProtonSession => unreachable!("Proton accounts are refused above"),
-    };
-    let identity_name = prompt_with_default("Primary identity name", &display_name)?;
-    let identity_email = prompt_with_default("Primary identity email", &username)?;
-    let signature =
-        prompt_with_default("Primary signature", &format!("Regards,\n{identity_name}"))?;
-    let alias_input = prompt_optional("Additional identity emails (comma-separated, optional)")?;
-    let outgoing = match protocol {
-        ProtocolKind::Imap => prompt_smtp_outgoing(&endpoint, &username)?,
-        ProtocolKind::Jmap => OutgoingConfig::jmap_default(),
-        ProtocolKind::Proton => unreachable!("Proton accounts are refused above"),
-    };
-
-    let mut identities = vec![NewIdentity {
-        display_name: identity_name.clone(),
-        email_address: identity_email.clone(),
-        signature,
-        is_primary: true,
-    }];
-
-    if let Some(alias_input) = alias_input {
-        for (index, alias) in alias_input
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .enumerate()
-        {
-            identities.push(NewIdentity {
-                display_name: format!("{identity_name} Alias {}", index + 1),
-                email_address: alias.to_owned(),
-                signature: String::new(),
-                is_primary: false,
-            });
-        }
-    }
-
-    Ok((
-        NewAccount {
-            display_name,
-            protocol,
-            auth,
-            endpoint,
-            username,
-            cache_policy: CachePolicySummary::performance_first(),
-            outgoing: Some(outgoing),
-            identities,
-        },
-        secret,
-    ))
-}
-
-/// Prompts for the OAuth2 client configuration used by the browser flow,
-/// with Gmail and Microsoft 365 presets pre-filling the endpoints.
-fn prompt_oauth2_client(protocol: ProtocolKind) -> Result<zmail_auth::OAuth2Client> {
-    // No consumer provider presets offer JMAP; JMAP accounts always use
-    // custom provider endpoints.
-    if protocol == ProtocolKind::Jmap {
-        return prompt_custom_oauth2_client();
-    }
-
-    let preset = prompt_with_default(
-        "Provider (1 = Gmail, 2 = Microsoft 365, 3 = custom endpoints)",
-        "3",
-    )?;
-    let redirect_port: u16 = prompt_with_default("Local redirect port", "8357")?
-        .parse()
-        .context("the redirect port must be a number")?;
-
-    match preset.trim() {
-        "1" => {
-            let client_id = prompt("Google OAuth2 client id")?;
-            // Google's desktop clients need their secret at the token
-            // exchange, so it is required here.
-            let client_secret = prompt("Google OAuth2 client secret")?;
-            Ok(zmail_auth::OAuth2Preset::Gmail.client(
-                client_id,
-                Some(client_secret),
-                redirect_port,
-            ))
-        }
-        "2" => {
-            let client_id = prompt("Microsoft application (client) id")?;
-            let client_secret = prompt_optional("Client secret (public clients leave this empty)")?;
-            Ok(zmail_auth::OAuth2Preset::Microsoft365.client(
-                client_id,
-                client_secret,
-                redirect_port,
-            ))
-        }
-        _ => {
-            let client_id = prompt("OAuth2 client id")?;
-            let client_secret = prompt_optional("Client secret (public clients leave this empty)")?;
-            let client = prompt_custom_oauth2_client()?;
-            Ok(zmail_auth::OAuth2Client {
-                client_id,
-                client_secret,
-                ..client
-            })
-        }
-    }
-}
-
-/// Prompts for a provider-agnostic OAuth2 client configuration, used by JMAP
-/// accounts (no consumer presets offer JMAP) and the custom-endpoint choice.
-fn prompt_custom_oauth2_client() -> Result<zmail_auth::OAuth2Client> {
-    let redirect_port: u16 = prompt_with_default("Local redirect port", "8357")?
-        .parse()
-        .context("the redirect port must be a number")?;
-    let client_id = prompt("OAuth2 client id")?;
-    let client_secret = prompt_optional("Client secret (public clients leave this empty)")?;
-    let authorization_endpoint = prompt("Authorization endpoint URL")?;
-    let token_endpoint = prompt("Token endpoint URL")?;
-    let scopes = prompt_with_default("Scopes (space-separated)", "email")?
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    Ok(zmail_auth::OAuth2Client {
-        client_id,
-        client_secret,
-        authorization_endpoint,
-        token_endpoint,
-        scopes,
-        redirect_port,
-        extra_authorize_params: Vec::new(),
-    })
+/// `export-account`, on an open store. The mbox holds the mail in
+/// plaintext, so a new file is readable by its owner only (Unix).
+fn export_account_in(store: &LocalStore, account_id: i64, path: &Path) -> Result<usize> {
+    let mut writer = hardening::private_file()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("failed to create the export file {}", path.display()))?;
+    store.export_account_mbox(account_id, &mut writer)
 }
 
 fn fixture_imap_account(endpoint: &str, username: &str, email: &str) -> NewAccount {
@@ -1743,7 +1055,9 @@ fn fixture_imap_account(endpoint: &str, username: &str, email: &str) -> NewAccou
         endpoint: endpoint.to_owned(),
         username: username.to_owned(),
         cache_policy: CachePolicySummary::performance_first(),
-        outgoing: Some(OutgoingConfig::smtp_default(derive_host(endpoint))),
+        outgoing: Some(OutgoingConfig::smtp_default(account_setup::derive_host(
+            endpoint,
+        ))),
         identities: vec![NewIdentity {
             display_name: "Fixture Recipient".to_owned(),
             email_address: email.to_owned(),
@@ -1751,69 +1065,6 @@ fn fixture_imap_account(endpoint: &str, username: &str, email: &str) -> NewAccou
             is_primary: true,
         }],
     }
-}
-
-fn validate_endpoint(protocol: ProtocolKind, endpoint: &str) -> Result<()> {
-    let parsed = url::Url::parse(endpoint)
-        .with_context(|| format!("failed to parse endpoint {endpoint}"))?;
-    match protocol {
-        ProtocolKind::Imap => {
-            if !matches!(parsed.scheme(), "imap" | "imaps") {
-                bail!("IMAP endpoints must use imap:// or imaps://");
-            }
-        }
-        ProtocolKind::Jmap => {
-            if !matches!(parsed.scheme(), "http" | "https") {
-                bail!("JMAP endpoints must use http:// or https://");
-            }
-        }
-        ProtocolKind::Proton => {
-            if parsed.scheme() != "https" {
-                bail!("the Proton API is only reached over https://");
-            }
-        }
-    }
-    Ok(())
-}
-
-fn parse_optional_id(value: Option<String>, label: &str) -> Result<Option<i64>> {
-    value
-        .map(|value| {
-            value
-                .parse::<i64>()
-                .with_context(|| format!("{label} must be an integer"))
-        })
-        .transpose()
-}
-
-fn prompt_smtp_outgoing(endpoint: &str, username: &str) -> Result<OutgoingConfig> {
-    let mut outgoing = OutgoingConfig::smtp_default(derive_host(endpoint));
-    outgoing.host = Some(prompt_with_default(
-        "SMTP host",
-        outgoing.host.as_deref().unwrap_or("localhost"),
-    )?);
-    outgoing.port = Some(
-        prompt_with_default("SMTP port", &outgoing.port.unwrap_or(587).to_string())?
-            .parse::<u16>()
-            .context("SMTP port must be an integer between 0 and 65535")?,
-    );
-    let security = prompt_with_default("SMTP security [plain|starttls|implicit_tls]", "starttls")?;
-    outgoing.security = Some(parse_submission_security(&security)?);
-    outgoing.username = Some(prompt_with_default("SMTP username", username)?);
-    outgoing.hello_name = prompt_with_default("SMTP EHLO hostname", "localhost")?;
-    Ok(outgoing)
-}
-
-fn parse_submission_security(value: &str) -> Result<SubmissionSecurity> {
-    SubmissionSecurity::parse(&value.trim().to_ascii_lowercase())
-        .with_context(|| format!("unknown submission security mode {value}"))
-}
-
-fn derive_host(endpoint: &str) -> String {
-    url::Url::parse(endpoint)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-        .unwrap_or_else(|| "localhost".to_owned())
 }
 
 fn build_bootstrap(runtime: zmail_core::RuntimeSummary) -> Result<AppBootstrap> {
@@ -1841,100 +1092,6 @@ fn load_theme_summary(theme_json: &str, variant_label: &str) -> Result<ThemeSumm
     Ok(theme_family.summary(theme))
 }
 
-fn prompt(label: &str) -> Result<String> {
-    prompt_with_default(label, "")
-}
-
-fn prompt_with_default(label: &str, default: &str) -> Result<String> {
-    let mut stdout = io::stdout();
-    if default.is_empty() {
-        write!(stdout, "{label}: ")?;
-    } else {
-        write!(stdout, "{label} [{default}]: ")?;
-    }
-    stdout.flush()?;
-
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("failed to read terminal input")?;
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        if default.is_empty() {
-            bail!("{label} must not be empty");
-        }
-        Ok(default.to_owned())
-    } else {
-        Ok(trimmed.to_owned())
-    }
-}
-
-fn prompt_optional(label: &str) -> Result<Option<String>> {
-    let mut stdout = io::stdout();
-    write!(stdout, "{label}: ")?;
-    stdout.flush()?;
-
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("failed to read terminal input")?;
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(trimmed.to_owned()))
-    }
-}
-
-fn prompt_recipients(label: &str, current: &[String]) -> Result<Vec<String>> {
-    let default = current.join(", ");
-    let value = prompt_with_default(label, &default)?;
-    Ok(value
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect())
-}
-
-fn prompt_multiline_with_default(label: &str, default: &str) -> Result<String> {
-    println!("{label} (finish with a single '.' on its own line):");
-    if !default.is_empty() {
-        println!("Current value:");
-        println!("{default}");
-    }
-
-    let mut lines = Vec::new();
-    loop {
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .context("failed to read terminal input")?;
-        let trimmed = input.trim_end_matches(['\r', '\n']);
-        if trimmed == "." {
-            break;
-        }
-        if trimmed.is_empty() && lines.is_empty() {
-            return Ok(default.to_owned());
-        }
-        lines.push(trimmed.to_owned());
-    }
-
-    Ok(lines.join("\n"))
-}
-
-fn prompt_yes_no(label: &str, default: bool) -> Result<bool> {
-    let default_label = if default { "Y/n" } else { "y/N" };
-    let response = prompt_with_default(label, default_label)?;
-    match response.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => Ok(true),
-        "n" | "no" => Ok(false),
-        value if value == default_label.to_ascii_lowercase() => Ok(default),
-        _ if response == default_label => Ok(default),
-        other => bail!("expected yes or no, got {other}"),
-    }
-}
-
 fn prompt_identity_selection(
     account_id: i64,
     identities: &[zmail_core::IdentitySummary],
@@ -1945,8 +1102,8 @@ fn prompt_identity_selection(
         println!(
             "  {}: {} <{}>{}",
             identity.id,
-            identity.display_name,
-            identity.email_address,
+            line(&identity.display_name),
+            line(&identity.email_address),
             if identity.id == current_identity_id {
                 " [current]"
             } else {
@@ -1972,69 +1129,6 @@ fn save_draft(store: &LocalStore, draft_id: i64, draft: &zmail_core::DraftDetail
             body: draft.body.clone(),
         },
     )
-}
-
-fn join_or_placeholder(values: &[String]) -> String {
-    if values.is_empty() {
-        "(none)".to_owned()
-    } else {
-        values.join(", ")
-    }
-}
-
-fn print_help() {
-    println!("Zmail commands:");
-    println!("  zmail-app                 Launch the desktop app");
-    #[cfg(feature = "tui")]
-    println!("  zmail-app tui             Read mail in the terminal");
-    println!("  zmail-app launch-imap-fixture ENDPOINT USERNAME SECRET EMAIL");
-    println!("  zmail-app launch-ui-fixture VIEW [dark|light|system] [TEXT_SIZE]");
-    #[cfg(feature = "tui")]
-    println!("  zmail-app launch-tui-fixture [VIEW]");
-    println!("                            Open a seeded UI state for screenshots: empty,");
-    println!("                            inbox, reader, compose, account-setup or onboarding-*,");
-    println!("                            optionally at a text size in percent (100 to 200)");
-    println!("  zmail-app add-imap        Add and sync a real IMAP account");
-    println!("  zmail-app add-jmap        Add and sync a real JMAP account");
-    println!("  zmail-app list-accounts   Show configured accounts");
-    println!("  zmail-app sync [all|ID]   Sync all accounts or one account by id");
-    println!("  zmail-app search [--server] ID QUERY");
-    println!("                            Search local mail for an account; --server also");
-    println!("                            asks the server about mail not indexed yet");
-    println!("  zmail-app index ID        Fetch and index message bodies for an account");
-    println!("  zmail-app read THREAD     Print the hydrated thread reader view");
-    println!("  zmail-app flag THREAD     Flag a thread locally");
-    println!("  zmail-app unflag THREAD   Remove a local flag from a thread");
-    println!("  zmail-app mark-read THREAD");
-    println!("  zmail-app mark-unread THREAD");
-    println!("  zmail-app move THREAD MAILBOX");
-    println!("  zmail-app archive THREAD");
-    println!("  zmail-app delete THREAD");
-    println!("  zmail-app compose ACCOUNT [IDENTITY]");
-    println!("  zmail-app drafts [ACCOUNT]");
-    println!("  zmail-app draft DRAFT");
-    println!("  zmail-app send DRAFT");
-    println!("  zmail-app attach DRAFT PATH");
-    println!("  zmail-app detach ATTACHMENT");
-    println!("  zmail-app outbox [ACCOUNT]");
-    println!("  zmail-app retry-outbox JOB");
-    println!("  zmail-app process-outbox [ACCOUNT]");
-    println!("  zmail-app backup [DIRECTORY]");
-    println!("  zmail-app reset-store     Move a store whose key is lost aside and start over");
-    println!("  zmail-app rotate-key      Re-encrypt the store under a new key (quit Zmail first)");
-    println!("  zmail-app export-account ACCOUNT PATH");
-    println!("  zmail-app attachments THREAD");
-    println!("  zmail-app save-attachment ATTACHMENT [--dest DIRECTORY]");
-    println!("  zmail-app dead-ops [ACCOUNT]");
-    println!("  zmail-app retry-op OPERATION");
-    println!("  zmail-app discard-op OPERATION");
-    println!("  zmail-app empty-trash ACCOUNT");
-    println!();
-    println!("Only one Zmail process syncs a store at a time. While the desktop app or");
-    println!("`zmail-app tui` syncs it, sync, index and process-outbox stop with an error,");
-    println!("and send, retry-outbox, compose, add-imap, add-jmap and empty-trash do their");
-    println!("part and leave the syncing and sending to that Zmail. --force runs them");
-    println!("here anyway, beside it.");
 }
 
 /// What a command that leaves sync or sending to another Zmail says: only
@@ -2172,45 +1266,27 @@ fn reset_unreadable_store() -> Result<()> {
 /// Name of the SQLite database file inside the store directory.
 const STORE_FILE_NAME: &str = "zmail.sqlite3";
 
-/// Legacy store directory used before the platform data directory existed.
+/// The store directory early development builds kept in the current
+/// directory. It is no longer opened or moved: a `.zmail-dev` folder in
+/// an archive or a cloned repository would otherwise become the user's
+/// store.
 const LEGACY_STORE_DIR: &str = ".zmail-dev";
 
 /// Environment variable that overrides the store directory for development.
 const DATA_DIR_ENV: &str = "ZMAIL_DATA_DIR";
 
-/// The resolved store path plus whether a legacy store was migrated into it.
-/// Resolves the store path, migrating a legacy `.zmail-dev` store on first use.
-///
-/// The store lives in a platform data directory so that user data survives
-/// regardless of the directory the app was launched from. A legacy
-/// `.zmail-dev` store in the current directory is moved there once; if the
-/// move fails the legacy store keeps working so no data is ever lost.
+/// The store's path, in the platform data directory (or
+/// [`DATA_DIR_ENV`]), wherever the app was started from.
 fn store_path() -> Result<PathBuf> {
     let dir = data_dir()?;
     let store = dir.join(STORE_FILE_NAME);
-
-    let legacy = PathBuf::from(LEGACY_STORE_DIR);
-    if !store.exists() && legacy.join(STORE_FILE_NAME).exists() {
-        match migrate_legacy_store(&legacy, &dir) {
-            Ok(()) => {
-                eprintln!(
-                    "migrated the legacy {} store to {}",
-                    legacy.display(),
-                    dir.display()
-                );
-                return Ok(store);
-            }
-            Err(error) => {
-                eprintln!(
-                    "warning: failed to migrate the legacy {} store to {}: {error:#}",
-                    legacy.display(),
-                    dir.display()
-                );
-                return Ok(legacy.join(STORE_FILE_NAME));
-            }
-        }
+    if !store.exists() && Path::new(LEGACY_STORE_DIR).join(STORE_FILE_NAME).exists() {
+        eprintln!(
+            "note: ignoring the {LEGACY_STORE_DIR} store in the current folder; Zmail's store \
+             is in {}",
+            dir.display()
+        );
     }
-
     Ok(store)
 }
 
@@ -2251,7 +1327,8 @@ pub(crate) fn install_panic_log() {
             return;
         }
     };
-    if let Err(error) = std::fs::create_dir_all(&log_dir) {
+    // Panic messages can quote mail, so the log is the user's only.
+    if let Err(error) = hardening::create_private_dir_all(&log_dir) {
         eprintln!(
             "warning: no crash log will be kept: failed to create {}: {error}",
             log_dir.display()
@@ -2260,6 +1337,7 @@ pub(crate) fn install_panic_log() {
     }
     let log_path = log_dir.join(CRASH_LOG_FILE_NAME);
     rotate_crash_log(&log_path);
+    hardening::make_private(&log_path);
     install_panic_hook(&log_path);
 
     eprintln!("Crash reports append to {}", log_path.display());
@@ -2294,7 +1372,7 @@ fn install_panic_hook(log_path: &std::path::Path) {
             .map(str::to_owned)
             .unwrap_or_else(|| "unnamed".to_owned());
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
-        let _ = std::fs::OpenOptions::new()
+        let _ = hardening::private_file()
             .create(true)
             .append(true)
             .open(&log_path)
@@ -2385,66 +1463,6 @@ fn resolve_platform_log_dir(
         .join("zmail"))
 }
 
-/// Moves a legacy store directory to the platform data directory.
-fn migrate_legacy_store(legacy: &PathBuf, target: &std::path::Path) -> Result<()> {
-    if target.exists() {
-        bail!(
-            "cannot migrate the legacy {} store because {} already exists",
-            legacy.display(),
-            target.display()
-        );
-    }
-    let parent = target
-        .parent()
-        .context("the target store directory has no parent")?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create {}", parent.display()))?;
-
-    match std::fs::rename(legacy, target) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            // Cross-device moves are not possible; copy instead and leave
-            // the legacy directory in place as a safety net.
-            std::fs::create_dir_all(target)
-                .with_context(|| format!("failed to create {}", target.display()))?;
-            copy_dir_contents(legacy, target)?;
-            eprintln!(
-                "note: the legacy {} store was copied to {} and left in place",
-                legacy.display(),
-                target.display()
-            );
-            Ok(())
-        }
-    }
-}
-
-/// Recursively copies a directory's contents into `target`.
-fn copy_dir_contents(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
-    for entry in
-        std::fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
-    {
-        let entry = entry.with_context(|| format!("failed to list {}", source.display()))?;
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("failed to inspect {}", entry.path().display()))?;
-        let destination = target.join(entry.file_name());
-        if file_type.is_dir() {
-            std::fs::create_dir_all(&destination)
-                .with_context(|| format!("failed to create {}", destination.display()))?;
-            copy_dir_contents(&entry.path(), &destination)?;
-        } else {
-            std::fs::copy(entry.path(), &destination).with_context(|| {
-                format!(
-                    "failed to copy {} to {}",
-                    entry.path().display(),
-                    destination.display()
-                )
-            })?;
-        }
-    }
-    Ok(())
-}
-
 /// Resolves the platform data directory from the provided environment values.
 ///
 /// The unused parameters keep a single signature across platforms so the
@@ -2495,6 +1513,7 @@ fn resolve_platform_data_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zmail_core::SubmissionSecurity;
 
     /// Creates a unique temporary directory for a test.
     fn temp_dir(label: &str) -> PathBuf {
@@ -2509,29 +1528,6 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("failed to create the test directory");
         dir
-    }
-
-    fn args(line: &str) -> Vec<String> {
-        line.split_whitespace().map(str::to_owned).collect()
-    }
-
-    #[test]
-    fn force_is_taken_by_the_commands_that_sync_or_send_only() {
-        let (command, force) = Command::parse(args("sync --force all")).expect("it parses");
-        assert!(matches!(command, Command::SyncAll));
-        assert!(force);
-        let (command, force) = Command::parse(args("process-outbox 3 --force")).expect("parses");
-        assert!(matches!(command, Command::ProcessOutbox(Some(3))));
-        assert!(force);
-        let (command, force) = Command::parse(args("sync 2")).expect("it parses");
-        assert!(matches!(command, Command::SyncAccount(2)));
-        assert!(!force);
-        // Reading the store needs no lock, so there is nothing to force.
-        let error = Command::parse(args("list-accounts --force"))
-            .err()
-            .expect("refused");
-        assert!(format!("{error:#}").contains("--force is for the commands"));
-        assert!(Command::parse(args("search 1 --force invoice")).is_err());
     }
 
     /// A one-connection SMTP server that takes a message, slowly (half a
@@ -2827,37 +1823,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_mailto_extracts_recipients_and_headers() {
-        let draft = parse_mailto("mailto:person@example.com").expect("plain recipient parses");
-        assert_eq!(draft.to, vec!["person@example.com".to_owned()]);
-        assert_eq!(draft.subject, "");
-
-        let draft = parse_mailto(
-            "mailto:one@example.com,two@example.com?subject=Hello%20there&body=Hi%20again",
-        )
-        .expect("recipients with headers parse");
-        assert_eq!(
-            draft.to,
-            vec!["one@example.com".to_owned(), "two@example.com".to_owned()]
-        );
-        assert_eq!(draft.subject, "Hello there");
-        assert_eq!(draft.body, "Hi again");
-
-        let draft = parse_mailto(
-            "mailto:team@example.com?cc=lead@example.com&bcc=audit@example.com&subject=Sprint&body=Plus+decoded+spaces",
-        )
-        .expect("cc, bcc, and plus decoding parse");
-        assert_eq!(draft.cc, vec!["lead@example.com".to_owned()]);
-        assert_eq!(draft.bcc, vec!["audit@example.com".to_owned()]);
-        assert_eq!(draft.body, "Plus decoded spaces");
-
-        assert!(
-            parse_mailto("https://example.com").is_none(),
-            "non-mailto URLs are rejected"
-        );
-    }
-
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn xdg_data_home_takes_precedence() {
@@ -2964,61 +1929,253 @@ mod tests {
         );
     }
 
-    #[test]
-    fn migration_moves_the_legacy_store() {
-        let root = temp_dir("migrate");
-        let legacy = root.join("legacy");
-        std::fs::create_dir_all(legacy.join("attachments"))
-            .expect("failed to create the legacy tree");
-        std::fs::write(legacy.join(STORE_FILE_NAME), "store")
-            .expect("failed to write the store file");
-        std::fs::write(legacy.join("attachments").join("draft.txt"), "attachment")
-            .expect("failed to write the attachment");
+    /// Escape sequences a hostile message carries: a clipboard write
+    /// (OSC 52), a title change, a screen clear, an 8-bit CSI and a
+    /// right-to-left override.
+    const HOSTILE: &str =
+        "\u{1b}]52;c;cHduZWQ=\u{07}\u{1b}]0;owned\u{07}\u{1b}[2J\u{9b}31m\u{202e}";
 
-        let target = root.join("target");
-        migrate_legacy_store(&legacy, &target).expect("migration should succeed");
+    /// Whether `text` holds anything a terminal would act on.
+    fn has_terminal_controls(text: &str) -> bool {
+        text.chars()
+            .any(|ch| (ch.is_control() && ch != '\n') || ('\u{202a}'..='\u{202e}').contains(&ch))
+    }
 
-        assert!(target.join(STORE_FILE_NAME).exists());
-        assert!(target.join("attachments").join("draft.txt").exists());
-        assert!(!legacy.exists(), "the legacy store should be renamed away");
+    /// An ephemeral store with one account whose mail is hostile: an
+    /// Inbox conversation with an attachment (and its blob), and one in
+    /// the Trash. Returns the store, the account, and the two threads.
+    fn hostile_store() -> (LocalStore, i64, i64, i64) {
+        use zmail_core::{
+            AccountSyncSnapshot, MailboxSnapshot, MessageAttachment, MessageHeaders,
+            MessageSnapshot, ThreadSnapshot,
+        };
+
+        let store = LocalStore::open_ephemeral().expect("the store opens");
+        let account_id = store
+            .insert_account(&NewAccount {
+                display_name: format!("Work{HOSTILE}"),
+                protocol: ProtocolKind::Imap,
+                auth: AuthKind::Password,
+                endpoint: "imaps://mail.example.test:993".to_owned(),
+                username: format!("user{HOSTILE}@example.test"),
+                cache_policy: CachePolicySummary::performance_first(),
+                outgoing: Some(OutgoingConfig::smtp_default("mail.example.test".to_owned())),
+                identities: vec![NewIdentity {
+                    display_name: "Sam".to_owned(),
+                    email_address: "sam@example.test".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }],
+            })
+            .expect("an account");
+        let blobs = store
+            .sync_target(account_id)
+            .expect("the target loads")
+            .expect("the account exists")
+            .blobs;
+        let storage_path = blobs
+            .write("hostile", b"attachment bytes")
+            .expect("the blob stores");
+        let thread = |id: &str, attachments: Vec<MessageAttachment>| ThreadSnapshot {
+            remote_thread_id: id.to_owned(),
+            subject: format!("Invoice{HOSTILE}"),
+            participants: format!("Mallory{HOSTILE}"),
+            preview: format!("Pay now{HOSTILE}"),
+            is_flagged: false,
+            has_attachments: !attachments.is_empty(),
+            unread_count: 1,
+            latest_message_at: "2026-11-01T09:00:00Z".to_owned(),
+            messages: vec![MessageSnapshot {
+                remote_id: format!("{id}-1"),
+                identity_email: "sam@example.test".to_owned(),
+                sender: format!("Mallory{HOSTILE} <mallory@example.test>"),
+                reply_to: None,
+                recipients: "Sam <sam@example.test>".to_owned(),
+                subject: format!("Invoice{HOSTILE}"),
+                body_preview: format!("Pay now{HOSTILE}"),
+                body_text: Some(format!("Pay now{HOSTILE}\nSecond line\u{1b}[1A")),
+                raw_html: None,
+                sanitized_html: None,
+                has_remote_content: false,
+                is_read: false,
+                is_flagged: false,
+                received_at: "2026-11-01T09:00:00Z".to_owned(),
+                attachments,
+                headers: MessageHeaders::default(),
+            }],
+        };
+        let snapshot = AccountSyncSnapshot {
+            checkpoint: "test:1".to_owned(),
+            detail: "Up to date".to_owned(),
+            identities: None,
+            mailboxes: vec![
+                MailboxSnapshot {
+                    name: format!("Inbox{HOSTILE}"),
+                    role: Some("inbox".to_owned()),
+                    threads: vec![thread(
+                        "inbox-thread",
+                        vec![MessageAttachment {
+                            filename: format!("report{HOSTILE}.pdf"),
+                            content_type: format!("application/pdf{HOSTILE}"),
+                            size_bytes: 16,
+                            storage_path,
+                            content_id: None,
+                            inline_only: false,
+                        }],
+                    )],
+                    ..Default::default()
+                },
+                MailboxSnapshot {
+                    name: "Trash".to_owned(),
+                    role: Some("trash".to_owned()),
+                    threads: vec![thread("trash-thread", Vec::new())],
+                    ..Default::default()
+                },
+            ],
+        };
+        store
+            .replace_account_snapshot(account_id, &snapshot)
+            .expect("the snapshot stores");
+        let mailboxes = store.list_mailboxes(account_id).expect("mailboxes");
+        let thread_in = |role: zmail_core::MailboxRole| {
+            let mailbox = mailboxes
+                .iter()
+                .find(|mailbox| mailbox.role == Some(role))
+                .expect("the mailbox");
+            store
+                .list_threads(mailbox.id, 0..10)
+                .expect("threads")
+                .first()
+                .expect("a thread")
+                .id
+        };
+        let inbox_thread = thread_in(zmail_core::MailboxRole::Inbox);
+        let trash_thread = thread_in(zmail_core::MailboxRole::Trash);
+        (store, account_id, inbox_thread, trash_thread)
     }
 
     #[test]
-    fn migration_refuses_to_overwrite_an_existing_store() {
-        let root = temp_dir("migrate-existing");
-        let legacy = root.join("legacy");
-        std::fs::create_dir_all(&legacy).expect("failed to create the legacy store");
-        std::fs::write(legacy.join(STORE_FILE_NAME), "store")
-            .expect("failed to write the store file");
-        let target = root.join("target");
-        std::fs::create_dir_all(&target).expect("failed to create the target store");
+    fn mail_strings_reach_the_terminal_filtered() {
+        let (store, account_id, thread_id, _) = hostile_store();
+        let thread = store
+            .thread_view(thread_id)
+            .expect("the thread loads")
+            .expect("the thread exists");
+        let mut printed = Vec::new();
+        output::write_thread(&mut printed, &thread).expect("read prints");
+        output::write_attachments(&mut printed, &thread).expect("attachments print");
+        let hits = store
+            .search_threads(account_id, "Invoice", 50)
+            .expect("the search runs");
+        assert!(!hits.is_empty(), "the search finds the conversation");
+        output::write_search_hits(&mut printed, &hits).expect("search prints");
+        output::write_accounts(&mut printed, &store.list_accounts().expect("accounts"))
+            .expect("list-accounts prints");
 
-        assert!(migrate_legacy_store(&legacy, &target).is_err());
+        // A draft from a hostile mailto: link.
+        let mailto = mailto::parse_mailto(
+            "mailto:ada@example.com?subject=Hi%1B%5D52%3Bc%3BcHduZWQ%3D%07&body=Body%1B%5B2J",
+        )
+        .expect("the link parses");
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let draft_id = store
+            .create_draft(&NewDraft {
+                account_id,
+                identity_id,
+                to: mailto.to,
+                cc: mailto.cc,
+                bcc: mailto.bcc,
+                subject: mailto.subject,
+                body: mailto.body,
+                threading: Default::default(),
+            })
+            .expect("a draft");
+        let draft = store
+            .draft_detail(draft_id)
+            .expect("the draft loads")
+            .expect("the draft exists");
+        output::write_draft(&mut printed, &draft).expect("draft prints");
+        output::write_drafts(&mut printed, &store.list_drafts(None).expect("drafts"))
+            .expect("drafts print");
+
+        let printed = String::from_utf8(printed).expect("UTF-8");
+        assert!(!has_terminal_controls(&printed), "{printed:?}");
+        // The text itself survives.
+        for expected in [
+            "Invoice",
+            "Mallory",
+            "Pay now",
+            "Second line",
+            "report",
+            "Work",
+            "Body",
+        ] {
+            assert!(printed.contains(expected), "{expected} in {printed}");
+        }
     }
 
     #[test]
-    fn copy_dir_contents_copies_nested_files() {
-        let root = temp_dir("copy");
-        let source = root.join("source");
-        std::fs::create_dir_all(source.join("attachments"))
-            .expect("failed to create the source tree");
-        std::fs::write(source.join(STORE_FILE_NAME), "store")
-            .expect("failed to write the store file");
-        std::fs::write(source.join("attachments").join("draft.txt"), "attachment")
-            .expect("failed to write the attachment");
+    fn save_attachment_never_replaces_a_file_unless_asked() {
+        let (store, _, thread_id, _) = hostile_store();
+        let attachment_id = store
+            .thread_view(thread_id)
+            .expect("the thread loads")
+            .expect("the thread exists")
+            .messages[0]
+            .attachments[0]
+            .id;
+        let directory = temp_dir("save-attachment");
 
-        let target = root.join("target");
-        std::fs::create_dir_all(&target).expect("failed to create the target");
-        copy_dir_contents(&source, &target).expect("copy should succeed");
-
-        assert_eq!(
-            std::fs::read_to_string(target.join(STORE_FILE_NAME)).expect("store file should exist"),
-            "store"
+        let saved = save_attachment_in(&store, attachment_id, &directory, false).expect("saved");
+        assert!(saved.starts_with(&directory), "{}", saved.display());
+        assert!(
+            !has_terminal_controls(&saved.display().to_string()),
+            "{saved:?}"
         );
         assert_eq!(
-            std::fs::read_to_string(target.join("attachments").join("draft.txt"))
-                .expect("attachment should exist"),
-            "attachment"
+            std::fs::read(&saved).expect("the file"),
+            b"attachment bytes"
         );
+
+        std::fs::write(&saved, b"the user's own file").expect("the user writes a file");
+        let error =
+            save_attachment_in(&store, attachment_id, &directory, false).expect_err("refused");
+        assert!(format!("{error:#}").contains("--overwrite"), "{error:#}");
+        assert_eq!(
+            std::fs::read(&saved).expect("the file"),
+            b"the user's own file"
+        );
+
+        save_attachment_in(&store, attachment_id, &directory, true).expect("overwritten");
+        assert_eq!(
+            std::fs::read(&saved).expect("the file"),
+            b"attachment bytes"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn delete_knows_when_it_is_for_good() {
+        let (store, _, inbox_thread, trash_thread) = hostile_store();
+        assert!(!deletes_for_good(&store, inbox_thread).expect("checked"));
+        assert!(deletes_for_good(&store, trash_thread).expect("checked"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_mbox_export_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (store, account_id, _, _) = hostile_store();
+        let directory = temp_dir("export");
+        let path = directory.join("export.mbox");
+        let exported = export_account_in(&store, account_id, &path).expect("exported");
+        assert!(exported > 0);
+        let mode = std::fs::metadata(&path)
+            .expect("the file")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

@@ -10523,6 +10523,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "rpassword",
+ "rustix",
  "url",
  "winresource",
  "zmail-assets",
