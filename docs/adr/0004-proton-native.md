@@ -299,24 +299,20 @@ Zmail is stricter than gopenpgp in one case: gopenpgp accepts a key with
 some parts locked and some not, Zmail refuses it. Proton's clients lock
 every part of a key.
 
-**SRP versions below 3 are not supported (November 10, 2026): a
-deviation from Bridge.** Bridge signs in through go-proton-api's
-`NewClientWithLoginWithHVToken`, which passes the `Version` from
-`/auth/v4/info` straight to go-srp's `NewAuth`. `HashPassword` there
-answers versions 0 to 4 and fails only for any other number ("pmapi:
-unsupported auth version"); nothing in go-srp, go-proton-api or Bridge
-refuses, warns about or otherwise treats versions 0 to 2 differently.
-Versions 3 and 4 hash the password with bcrypt and the salt the server
-sends. Versions 0 to 2 are Proton's older methods and use bcrypt as well,
-salted with the MD5 of the lower-cased username (version 2 first strips
-`-`, `.` and `_` from it; version 0 first hashes username and password
-together with SHA-512). Zmail answers versions 3 and 4 only and otherwise
-stops before sending a proof, with an error saying the account uses an
-old sign-in method Zmail does not support. This is a choice to support
-less, not a security fix: every version costs one bcrypt per password
-guess, so an old version gives whoever asks for it no cheaper attack.
-Zmail has no account, test vector from a live server or harness that
-exercises the old versions, and no need for them.
+**SRP password hash versions, as Bridge (November 11, 2026).** Bridge
+signs in through go-proton-api's `NewClientWithLoginWithHVToken`, which
+passes the `Version` from `/auth/v4/info` straight to go-srp's `NewAuth`.
+`HashPassword` there answers versions 0 to 4 and fails for any other
+number ("pmapi: unsupported auth version"). `proton-srp` takes the same
+versions (`SrpHashVersion::try_from`), and Zmail passes the server's
+version to it unchanged. Versions 3 and 4 hash the password with bcrypt
+and the salt the server sends. Versions 0 to 2 are Proton's older methods
+and use bcrypt as well, salted with the MD5 of the lower-cased username
+(version 2 first strips `-`, `.` and `_` from it; version 0 first hashes
+username and password together with SHA-512). Every version costs one
+bcrypt per password guess, so a server that asks for an old version gets
+no cheaper attack, and refusing the old versions would only lock out
+accounts that still use them.
 
 **Decrypted data is bounded (November 10, 2026).** A compressed OpenPGP
 message expands as it is read. Zmail reads at most 128 MiB of plaintext

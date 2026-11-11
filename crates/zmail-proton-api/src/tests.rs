@@ -785,13 +785,13 @@ async fn refuses_a_server_that_cannot_prove_the_password() {
     assert!(matches!(error, Error::InvalidServerProof), "{error:?}");
 }
 
-/// A server that asks for one of the old password hash versions (0 to 2)
-/// gets no proof at all.
+/// Every password hash version go-srp answers (0 to 4) gets a proof, as
+/// under Bridge; any other version gets none.
 #[tokio::test]
-async fn refuses_srp_versions_below_three() {
-    for version in [0u8, 1, 2] {
-        let server = MockServer::start(move |_, _| {
-            Reply::json(
+async fn answers_the_srp_versions_bridge_answers() {
+    for version in 0u8..=5 {
+        let server = MockServer::start(move |request, _| match request.path.as_str() {
+            "/auth/v4/info" => Reply::json(
                 200,
                 serde_json::json!({
                     "Version": version,
@@ -800,18 +800,25 @@ async fn refuses_srp_versions_below_three() {
                     "Salt": BASE64.encode([2u8; 10]),
                     "SRPSession": "s",
                 }),
-            )
+            ),
+            _ => api_error(422, 8002, "Incorrect login credentials"),
         })
         .await;
         let manager = Manager::new(test_config(&server.url, None)).expect("manager");
-        let error = manager.login("zmail", PASSWORD).await.expect_err("version");
-        assert!(
-            matches!(error, Error::SrpVersionTooOld(found) if found == version),
-            "{error:?}"
-        );
-        assert!(error.to_string().contains("old sign-in method"), "{error}");
-        // Only the challenge was fetched; no proof was sent.
-        assert_eq!(server.requests().len(), 1);
+        let error = manager.login("zmail", PASSWORD).await.expect_err("login");
+        let requests = server.requests();
+        if version <= 4 {
+            assert!(
+                matches!(error, Error::PasswordWrong(_)),
+                "{version}: {error:?}"
+            );
+            assert_eq!(requests.len(), 2, "{version}");
+            assert_eq!(requests[1].path, "/auth/v4");
+        } else {
+            assert!(matches!(error, Error::Srp(_)), "{version}: {error:?}");
+            // Only the challenge was fetched; no proof was sent.
+            assert_eq!(requests.len(), 1);
+        }
     }
 }
 
