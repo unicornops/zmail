@@ -25,6 +25,12 @@
 //! message that mentions an attachment with nothing attached, it asks
 //! before sending.
 //!
+//! Discard deletes the draft, after a confirmation with Cancel focused
+//! unless the draft is empty; the host closes the editor on
+//! [`ComposeEvent::Discarded`]. A compose window closed on an empty draft
+//! drops it ([`ComposeView::drop_if_empty`]), so New Message never leaves
+//! an empty draft behind.
+//!
 //! [`ComposeState`] holds the open draft's inputs and store-owned fields;
 //! [`recipients`] has the To, Cc and Bcc chip fields.
 //! The inputs are built once per draft and never rebuilt from the store
@@ -45,7 +51,7 @@ use zmail_sync::SyncService;
 
 use crate::a11y::AccessibleExt;
 use crate::actions::{
-    AddAttachment, RemoveAttachment, SaveDraft, SelectIdentity, Send, ShowBcc, ShowCc,
+    AddAttachment, DiscardDraft, RemoveAttachment, SaveDraft, SelectIdentity, Send, ShowBcc, ShowCc,
 };
 use crate::components::{
     Button, ButtonSize, HitTargetExt, Modal, ModalState, Select, SelectEvent, TextInput,
@@ -214,6 +220,8 @@ pub(crate) enum ComposeEvent {
     PopOut { draft_id: i64 },
     /// The pane's Show Window, for a draft already open in a window.
     ShowWindow { draft_id: i64 },
+    /// The draft was discarded (deleted); the editor is empty now.
+    Discarded { draft_id: i64 },
 }
 
 /// Where a [`ComposeView`] is shown.
@@ -265,6 +273,10 @@ pub(crate) struct ComposeView {
     /// not be ([`attaching`]).
     pending_attachments: Vec<attaching::PendingAttachment>,
     next_pending_attachment: usize,
+    /// The "Discard this draft?" confirmation, and its Cancel button, which
+    /// has focus when it opens.
+    discard_modal: ModalState,
+    discard_cancel: FocusHandle,
     _quit_subscription: Subscription,
 }
 
@@ -310,6 +322,8 @@ impl ComposeView {
             waived_checks: Vec::new(),
             pending_attachments: Vec::new(),
             next_pending_attachment: 0,
+            discard_modal: ModalState::new(cx),
+            discard_cancel: cx.focus_handle(),
             _quit_subscription: quit_subscription,
         }
     }
@@ -324,6 +338,15 @@ impl ComposeView {
     #[cfg(test)]
     pub(crate) fn send_check(&self) -> Option<SendCheck> {
         self.send_check
+    }
+
+    /// Whether the discard confirmation shows, and whether its Cancel has
+    /// focus.
+    #[cfg(test)]
+    pub(crate) fn discard_confirmation(&self, window: &Window) -> Option<bool> {
+        self.discard_modal
+            .is_open()
+            .then(|| self.discard_cancel.is_focused(window))
     }
 
     /// Whether the From menu shows.
@@ -371,6 +394,97 @@ impl ComposeView {
         self.input_subscriptions.clear();
         self.from_menu = None;
         cx.notify();
+    }
+
+    /// Whether the open draft has nothing in it: no recipients, subject,
+    /// text or attachments.
+    fn is_empty(&self, cx: &App) -> bool {
+        self.compose.as_ref().is_some_and(|compose| {
+            compose.attachments.is_empty()
+                && compose
+                    .recipient_fields()
+                    .iter()
+                    .all(|field| field.read(cx).recipients(cx).is_empty())
+                && compose
+                    .draft_inputs()
+                    .iter()
+                    .all(|input| input.read(cx).text().trim().is_empty())
+        })
+    }
+
+    /// Discard: asks first, with Cancel focused, unless the draft is
+    /// empty, which goes at once.
+    pub(crate) fn request_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compose.is_none() {
+            return;
+        }
+        if self.is_empty(cx) {
+            self.discard(window, cx);
+            return;
+        }
+        let cancel = self.discard_cancel.clone();
+        self.discard_modal.open_focusing(&cancel, window, cx);
+        cx.notify();
+    }
+
+    fn discard_draft(&mut self, _: &DiscardDraft, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_discard(window, cx);
+    }
+
+    fn close_discard_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.discard_modal.close(window, cx);
+        cx.notify();
+    }
+
+    /// Deletes the open draft, edits not saved yet included, and empties
+    /// the editor.
+    fn discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_discard_dialog(window, cx);
+        let Some(draft_id) = self.draft_id() else {
+            return;
+        };
+        if let Err(error) = self.delete_open_draft(draft_id, cx) {
+            cx.emit(ComposeEvent::Error(error.to_string()));
+            return;
+        }
+        cx.emit(ComposeEvent::Discarded { draft_id });
+    }
+
+    /// When the open draft is empty and still being written, deletes it
+    /// and returns `true`: closing an empty compose window leaves nothing
+    /// behind in Drafts. Otherwise saves any edits, as closing does.
+    pub(crate) fn drop_if_empty(&mut self, cx: &mut Context<Self>) -> bool {
+        let empty = self.is_empty(cx)
+            && self
+                .compose
+                .as_ref()
+                .is_some_and(|compose| compose.state == DraftState::Editing);
+        let Some(draft_id) = self.draft_id().filter(|_| empty) else {
+            self.flush_autosave(cx);
+            return false;
+        };
+        match self.delete_open_draft(draft_id, cx) {
+            Ok(()) => true,
+            Err(error) => {
+                cx.emit(ComposeEvent::Error(error.to_string()));
+                false
+            }
+        }
+    }
+
+    /// Deletes the open draft through [`MailActions`], dropping any
+    /// pending autosave, and empties the editor.
+    fn delete_open_draft(&mut self, draft_id: i64, cx: &mut Context<Self>) -> Result<()> {
+        self.mail_actions
+            .update(cx, |actions, cx| actions.delete_draft(draft_id, cx))?;
+        self.unsaved_edits = false;
+        self.autosave_task = Task::ready(());
+        self.compose = None;
+        self.in_window = None;
+        self.input_subscriptions.clear();
+        self.from_menu = None;
+        cx.notify();
+        Ok(())
     }
 
     /// In the pane: shows that `draft_id` is open in its own window, with a
@@ -875,6 +989,49 @@ pub(crate) fn send_button(id: &'static str, attaching: bool) -> Button {
     }
 }
 
+impl ComposeView {
+    /// "Discard this draft?", with Cancel focused (see
+    /// [`ComposeView::request_discard`]).
+    fn render_discard_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.discard_modal.is_open() {
+            return None;
+        }
+        Some(
+            Modal::new("discard-draft-dialog", self.discard_modal.focus_handle())
+                .title("Discard this draft?")
+                .description(
+                    "The draft and its attachments are deleted from Zmail. This can't be undone.",
+                )
+                .footer(
+                    div()
+                        .debug_selector(|| "discard-draft-cancel".into())
+                        .child(
+                            Button::new("discard-draft-cancel", "Cancel")
+                                .track_focus(&self.discard_cancel)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.close_discard_dialog(window, cx)
+                                })),
+                        ),
+                )
+                .footer(
+                    div()
+                        .debug_selector(|| "discard-draft-confirm".into())
+                        .child(
+                            Button::new("discard-draft-confirm", "Discard Draft")
+                                .danger()
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.discard(window, cx)),
+                                ),
+                        ),
+                )
+                .on_dismiss(
+                    cx.listener(|this, _, window, cx| this.close_discard_dialog(window, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
 /// How an identity reads in the From menu.
 fn identity_label(identity: &IdentitySummary) -> String {
     if identity.display_name.trim().is_empty() {
@@ -908,6 +1065,7 @@ impl Render for ComposeView {
             .accessible(Role::Form, self.title(cx))
             .on_action(cx.listener(Self::send))
             .on_action(cx.listener(Self::save_draft))
+            .on_action(cx.listener(Self::discard_draft))
             .on_action(cx.listener(Self::add_attachment))
             .on_action(cx.listener(Self::remove_attachment))
             .on_action(cx.listener(Self::select_identity))
@@ -985,6 +1143,7 @@ impl Render for ComposeView {
                 )
             })
             .children(self.render_send_check(cx))
+            .children(self.render_discard_dialog(cx))
     }
 }
 
@@ -1154,8 +1313,8 @@ impl ComposeView {
     }
 
     /// The buttons along the bottom: Send first (bottom-left, the Windows
-    /// placement), then Attach; the pane adds Save Draft, and the pane and
-    /// the inline reply end with Open in Window.
+    /// placement), then Attach; the pane adds Save Draft, then Discard, and
+    /// the pane and the inline reply end with Open in Window.
     fn render_action_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let focus_handle = &self.focus_handle;
         let mut buttons = vec![
@@ -1176,6 +1335,18 @@ impl ComposeView {
                     .into_any_element(),
             );
         }
+        buttons.push(
+            div()
+                .debug_selector(|| "compose-discard".into())
+                .child(
+                    Button::new("compose-discard", "Discard")
+                        .ghost()
+                        .icon("trash-2")
+                        .tooltip("Discard this draft")
+                        .on_click(dispatch_from(focus_handle, DiscardDraft)),
+                )
+                .into_any_element(),
+        );
         if self.presentation != Presentation::Window
             && let Some(draft_id) = self.draft_id()
         {

@@ -106,7 +106,11 @@ pub(crate) struct MessageListState {
     pub(crate) searching_server: bool,
     /// Where the search looks, for the header's scope control.
     pub(crate) search_scope: SearchScopeState,
+    /// The drafts Drafts lists.
     pub(crate) drafts: Vec<DraftSummary>,
+    /// Every draft not sent yet, which the Outbox rows take their
+    /// recipients and subject from.
+    pub(crate) unsent_drafts: Vec<DraftSummary>,
     pub(crate) selected_draft_id: Option<i64>,
     pub(crate) outbox_jobs: Vec<OutboxJobSummary>,
     pub(crate) selected_outbox_job_id: Option<i64>,
@@ -150,6 +154,7 @@ impl Default for MessageListState {
             searching_server: false,
             search_scope: SearchScopeState::default(),
             drafts: Vec::new(),
+            unsent_drafts: Vec::new(),
             selected_draft_id: None,
             outbox_jobs: Vec::new(),
             selected_outbox_job_id: None,
@@ -975,6 +980,7 @@ impl MessageListView {
                 let row = MessageRow::draft(row_id.clone(), draft, &now, self.hour_cycle);
 
                 row_shell(row_id, is_selected, focused, density, colors)
+                    .debug_selector(move || format!("draft-row-{draft_id}"))
                     .map(|this| {
                         row.accessible(this, is_selected, focused && is_selected, index, count)
                     })
@@ -984,6 +990,12 @@ impl MessageListView {
                         cx.emit(MessageListEvent::RowClicked);
                         cx.notify();
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.open_draft_context_menu(index, event.position, window, cx);
+                        }),
+                    )
                     .child(row_content(
                         row,
                         None,
@@ -1022,7 +1034,7 @@ impl MessageListView {
                         let is_selected = Some(job_id) == self.state.selected_outbox_job_id;
                         let draft = self
                             .state
-                            .drafts
+                            .unsent_drafts
                             .iter()
                             .find(|draft| draft.id == job.draft_id);
                         let row = MessageRow::outbox_job(

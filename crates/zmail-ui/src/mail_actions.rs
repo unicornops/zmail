@@ -180,6 +180,12 @@ impl MailActions {
             .remove_draft_attachment(draft_id, attachment_id, &mut emit(cx))
     }
 
+    /// Deletes a draft the user discarded, with its attachments. Fails for
+    /// a draft that is queued, sending or sent.
+    pub(crate) fn delete_draft(&mut self, draft_id: i64, cx: &mut Context<Self>) -> Result<()> {
+        self.inner.delete_draft(draft_id, &mut emit(cx))
+    }
+
     /// Takes a queued message back before it is sent (Undo Send). Returns
     /// `false` when it is too late: delivery has started.
     pub(crate) fn cancel_send(

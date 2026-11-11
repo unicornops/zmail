@@ -154,6 +154,8 @@ actions!(
         Send,
         /// Save the open draft.
         SaveDraft,
+        /// Discard the open draft, after asking unless it is empty.
+        DiscardDraft,
         /// Pick files to attach to the open draft.
         AddAttachment,
         /// Show the Cc field of the open draft and move focus to it.

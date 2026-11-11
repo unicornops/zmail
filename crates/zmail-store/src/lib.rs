@@ -4136,6 +4136,21 @@ impl LocalStore {
 
     /// Lists drafts for one account or across the workspace when no filter is supplied.
     pub fn list_drafts(&self, account_id: Option<i64>) -> Result<Vec<DraftSummary>> {
+        self.drafts_where(account_id, false)
+    }
+
+    /// Like [`Self::list_drafts`], without the drafts already sent: the
+    /// ones Drafts and the Outbox show. A sent draft stays in the store,
+    /// so this list does not grow with every message sent.
+    pub fn list_unsent_drafts(&self, account_id: Option<i64>) -> Result<Vec<DraftSummary>> {
+        self.drafts_where(account_id, true)
+    }
+
+    fn drafts_where(
+        &self,
+        account_id: Option<i64>,
+        unsent_only: bool,
+    ) -> Result<Vec<DraftSummary>> {
         let conn = self.connection()?;
         let sql = r#"
             SELECT
@@ -4153,6 +4168,7 @@ impl LocalStore {
             FROM drafts
             LEFT JOIN draft_attachments ON draft_attachments.draft_id = drafts.id
             WHERE (?1 IS NULL OR drafts.account_id = ?1)
+              AND (?2 = 0 OR drafts.state <> ?3)
             GROUP BY
                 drafts.id,
                 drafts.account_id,
@@ -4167,7 +4183,8 @@ impl LocalStore {
             ORDER BY drafts.updated_at DESC, drafts.id DESC
         "#;
         let mut statement = conn.prepare(sql)?;
-        let rows = statement.query_map(params![account_id], |row| {
+        let sent = DraftState::Sent.as_str();
+        let rows = statement.query_map(params![account_id, unsent_only, sent], |row| {
             let to = recipients_from_json(row.get::<_, String>(4)?).map_err(to_from_sql_error)?;
             let cc = recipients_from_json(row.get::<_, String>(5)?).map_err(to_from_sql_error)?;
             let bcc = recipients_from_json(row.get::<_, String>(6)?).map_err(to_from_sql_error)?;
@@ -4778,6 +4795,24 @@ impl LocalStore {
 
     /// Lists outbox jobs for one account or across the workspace.
     pub fn list_outbox_jobs(&self, account_id: Option<i64>) -> Result<Vec<OutboxJobSummary>> {
+        self.outbox_jobs_where(account_id, false)
+    }
+
+    /// Like [`Self::list_outbox_jobs`], without the jobs already sent: the
+    /// messages the Outbox shows. A sent job stays in the store, so this
+    /// list does not grow with every message sent.
+    pub fn list_unsent_outbox_jobs(
+        &self,
+        account_id: Option<i64>,
+    ) -> Result<Vec<OutboxJobSummary>> {
+        self.outbox_jobs_where(account_id, true)
+    }
+
+    fn outbox_jobs_where(
+        &self,
+        account_id: Option<i64>,
+        unsent_only: bool,
+    ) -> Result<Vec<OutboxJobSummary>> {
         let conn = self.connection()?;
         let mut statement = conn.prepare(
             r#"
@@ -4791,10 +4826,12 @@ impl LocalStore {
                 last_error_message
             FROM outbox_jobs
             WHERE (?1 IS NULL OR account_id = ?1)
+              AND (?2 = 0 OR state <> ?3)
             ORDER BY updated_at DESC, id DESC
             "#,
         )?;
-        let rows = statement.query_map(params![account_id], |row| {
+        let sent = OutboxJobState::Sent.as_str();
+        let rows = statement.query_map(params![account_id, unsent_only, sent], |row| {
             Ok(OutboxJobSummary {
                 id: row.get(0)?,
                 draft_id: row.get(1)?,
@@ -11602,6 +11639,62 @@ mod tests {
             .expect("draft should exist");
         assert_eq!(sent.state, DraftState::Sent);
         assert!(sent.sent_at.is_some());
+    }
+
+    #[test]
+    fn the_unsent_lists_leave_out_sent_drafts_and_jobs() {
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let draft = |subject: &str| {
+            store
+                .create_draft(&NewDraft {
+                    account_id,
+                    identity_id,
+                    to: vec!["recipient@example.test".to_owned()],
+                    cc: Vec::new(),
+                    bcc: Vec::new(),
+                    subject: subject.to_owned(),
+                    body: "Body".to_owned(),
+                    threading: Default::default(),
+                })
+                .expect("draft should be created")
+        };
+        let editing = draft("Still writing");
+        let sent = draft("Delivered");
+        let sent_job = store.queue_draft(sent).expect("queued");
+        store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("claim runs")
+            .expect("a job is due");
+        store.record_outbox_sent(sent_job).expect("sent");
+        let waiting = draft("Waiting");
+        let waiting_job = store
+            .queue_draft_after(waiting, Duration::from_secs(30))
+            .expect("queued");
+
+        let ids = |drafts: Vec<zmail_core::DraftSummary>| {
+            let mut ids: Vec<i64> = drafts.into_iter().map(|draft| draft.id).collect();
+            ids.sort_unstable();
+            ids
+        };
+        assert_eq!(
+            ids(store.list_unsent_drafts(None).expect("drafts")),
+            [editing, waiting]
+        );
+        assert_eq!(
+            ids(store.list_unsent_drafts(Some(account_id)).expect("drafts")),
+            [editing, waiting]
+        );
+        assert_eq!(ids(store.list_drafts(None).expect("drafts")).len(), 3);
+        let unsent_jobs = store.list_unsent_outbox_jobs(None).expect("jobs");
+        assert_eq!(
+            unsent_jobs.iter().map(|job| job.id).collect::<Vec<_>>(),
+            [waiting_job]
+        );
+        assert_eq!(store.list_outbox_jobs(None).expect("jobs").len(), 2);
     }
 
     #[test]

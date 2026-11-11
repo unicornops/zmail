@@ -125,6 +125,7 @@
     "bindings": {
       "secondary-enter": "zmail::Send",
       "secondary-s": "zmail::SaveDraft",
+      "secondary-shift-backspace": "zmail::DiscardDraft",
       "secondary-shift-c": "zmail::ShowCc",
       "secondary-shift-b": "zmail::ShowBcc",
       "secondary-shift-a": "zmail::AddAttachment"

@@ -5,10 +5,11 @@
 //! and Send at its trailing end; Windows puts Send at the bottom-left of
 //! the compose body instead ([`PlatformStyle::send_button`]).
 //!
-//! Escape, the window's close button, or sending closes the window. The
-//! draft is saved first, so closing never loses anything: the draft stays
-//! in Drafts, and the main window says so. Status and errors show as
-//! toasts in the window itself.
+//! Escape, the window's close button, sending or discarding closes the
+//! window. The draft is saved first, so closing never loses anything: the
+//! draft stays in Drafts, and the main window says so, unless it is empty,
+//! which is dropped (so New Message closed again leaves nothing behind).
+//! Status and errors show as toasts in the window itself.
 
 use std::sync::Arc;
 
@@ -22,7 +23,7 @@ use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
 use super::{ComposeEvent, ComposeView, Presentation};
-use crate::actions::{AddAttachment, Cancel, Send};
+use crate::actions::{AddAttachment, Cancel, DiscardDraft, Send};
 use crate::components::title_bar::TRAFFIC_LIGHT_POSITION;
 use crate::components::{
     ComponentTheme, IconButton, TitleBar, Toast, ToastHost, ToastKind, window_frame,
@@ -135,10 +136,11 @@ impl ComposeWindow {
             });
         }
 
-        // The window's own close button saves the draft first.
+        // The window's own close button saves the draft first (or drops
+        // an empty one).
         let saving = compose.downgrade();
         window.on_window_should_close(cx, move |_, cx| {
-            let _ = saving.update(cx, |compose, cx| compose.flush_autosave(cx));
+            let _ = saving.update(cx, |compose, cx| compose.drop_if_empty(cx));
             true
         });
 
@@ -181,8 +183,9 @@ impl ComposeWindow {
         match event {
             ComposeEvent::Status(message) => self.toast(message, ToastKind::Info, cx),
             ComposeEvent::Error(error) => self.toast(error, ToastKind::Error, cx),
-            // The main window confirms the send; this one's job is done.
-            ComposeEvent::Queued { .. } => window.remove_window(),
+            // The main window confirms the send or the discard; this
+            // one's job is done.
+            ComposeEvent::Queued { .. } | ComposeEvent::Discarded { .. } => window.remove_window(),
             ComposeEvent::PopOut { .. } | ComposeEvent::ShowWindow { .. } => {}
         }
     }
@@ -193,15 +196,15 @@ impl ComposeWindow {
         });
     }
 
-    /// Escape: save the draft and close the window.
+    /// Escape: save the draft (or drop an empty one) and close the window.
     fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         self.compose
-            .update(cx, |compose, cx| compose.flush_autosave(cx));
+            .update(cx, |compose, cx| compose.drop_if_empty(cx));
         window.remove_window();
     }
 
-    /// The title bar's content: the title, then Attach and Send where the
-    /// platform puts Send in the title bar.
+    /// The title bar's content: the title, then Discard, Attach and Send
+    /// where the platform puts Send in the title bar.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ComponentTheme::get(cx);
         let compose = self.compose.read(cx);
@@ -232,6 +235,15 @@ impl ComposeWindow {
             )
             .when(draft_open && send_in_bar, |this| {
                 this.child(
+                    div()
+                        .debug_selector(|| "compose-window-discard".into())
+                        .occlude()
+                        .child(
+                            IconButton::new("compose-window-discard", "trash-2", "Discard draft")
+                                .on_click(dispatch_from(&focus_handle, DiscardDraft)),
+                        ),
+                )
+                .child(
                     div().occlude().child(
                         IconButton::new("compose-window-attach", "paperclip", "Attach files")
                             .on_click(dispatch_from(&focus_handle, AddAttachment)),

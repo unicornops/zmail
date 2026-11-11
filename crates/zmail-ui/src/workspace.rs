@@ -21,8 +21,9 @@ use gpui::{
 use std::sync::Arc;
 use zmail_actions::reply;
 use zmail_core::{
-    AccountSummary, AppBootstrap, MailboxRole, MailboxSelection, MailboxSummary, NewDraft,
-    OutboxJobState, SyncPhase, ThemeAppearance, ThreadView, VirtualMailbox, is_interrupted_send,
+    AccountSummary, AppBootstrap, DraftState, MailboxRole, MailboxSelection, MailboxSummary,
+    NewDraft, OutboxJobState, SyncPhase, ThemeAppearance, ThreadState, ThreadView, VirtualMailbox,
+    is_interrupted_send,
     preferences::ReadingPanePosition,
     text::count_noun,
     time::{HourCycle, format_full_date, next_local_midnight},
@@ -194,6 +195,7 @@ impl WorkspaceView {
             all_mailboxes: Vec::new(),
             mailboxes: Vec::new(),
             drafts: Vec::new(),
+            unsent_drafts: Vec::new(),
             outbox_jobs: Vec::new(),
             command_palette: None,
             palette_modal: components::ModalState::new(cx),
@@ -263,7 +265,7 @@ impl WorkspaceView {
         // opened: the sync service sends it, and a toast says so.
         view.last_session_jobs = view
             .store
-            .list_outbox_jobs(None)
+            .list_unsent_outbox_jobs(None)
             .unwrap_or_default()
             .into_iter()
             .filter(|job| matches!(job.state, OutboxJobState::Queued | OutboxJobState::Sending))
@@ -546,11 +548,7 @@ impl WorkspaceView {
             flagged_unread: self.flagged_unread,
             draft_count: self.drafts.len(),
             outbox: OutboxStatus {
-                waiting: self
-                    .outbox_jobs
-                    .iter()
-                    .filter(|job| job.state != OutboxJobState::Sent)
-                    .count(),
+                waiting: self.outbox_jobs.len(),
                 failed: self
                     .outbox_jobs
                     .iter()
@@ -585,6 +583,7 @@ impl WorkspaceView {
             searching_server: self.search_context.servers_pending > 0,
             search_scope: self.search_scope_state(),
             drafts: self.drafts.clone(),
+            unsent_drafts: self.unsent_drafts.clone(),
             selected_draft_id: self.selected_draft_id,
             outbox_jobs: self.outbox_jobs.clone(),
             selected_outbox_job_id: self.selected_outbox_job_id,
@@ -676,18 +675,20 @@ impl WorkspaceView {
         if let Some(virtual_mailbox) = self.virtual_mailbox {
             let selection = MailboxSelection::Virtual(virtual_mailbox);
             self.virtual_counts = self.store.selection_counts(&selection).unwrap_or_default();
-            let rows = self
-                .store
-                .list_selection_threads(&selection, 0..200)
-                .unwrap_or_default();
             let open = self
-                .selected_thread_id
-                .and_then(|selected| rows.iter().find(|row| row.id == selected))
-                .or_else(|| rows.first());
-            self.selected_thread_id = open.map(|row| row.id);
-            if let Some(row) = open {
-                self.selected_account_id = Some(row.account_id);
-                self.selected_mailbox_id = Some(row.mailbox_id);
+                .open_thread_still_listed(&selection)
+                .map(|thread| (thread.id, thread.account_id, thread.mailbox_id))
+                .or_else(|| {
+                    self.store
+                        .first_selection_thread(&selection)
+                        .ok()
+                        .flatten()
+                        .map(|row| (row.id, row.account_id, row.mailbox_id))
+                });
+            self.selected_thread_id = open.map(|(thread_id, _, _)| thread_id);
+            if let Some((_, account_id, mailbox_id)) = open {
+                self.selected_account_id = Some(account_id);
+                self.selected_mailbox_id = Some(mailbox_id);
             }
         }
 
@@ -704,9 +705,17 @@ impl WorkspaceView {
             .filter(|mailbox| Some(mailbox.account_id) == self.selected_account_id)
             .cloned()
             .collect();
-        // Drafts and the outbox are Favourites: every account's.
-        self.drafts = self.store.list_drafts(None).unwrap_or_default();
-        self.outbox_jobs = self.store.list_outbox_jobs(None).unwrap_or_default();
+        // Drafts and the outbox are Favourites: every account's. Sent
+        // messages leave both (and are not read at all, so the refresh
+        // does not grow with every message sent).
+        self.unsent_drafts = self.store.list_unsent_drafts(None).unwrap_or_default();
+        self.drafts = self
+            .unsent_drafts
+            .iter()
+            .filter(|draft| listed_in_drafts(draft.state))
+            .cloned()
+            .collect();
+        self.outbox_jobs = self.store.list_unsent_outbox_jobs(None).unwrap_or_default();
         self.notice_last_session_sends(cx);
         self.flagged_unread = self
             .store
@@ -727,12 +736,18 @@ impl WorkspaceView {
             .or_else(|| self.mailboxes.first().map(|mailbox| mailbox.id));
 
         if self.virtual_mailbox.is_none() {
-            self.selected_thread_id = self.selected_thread_id.filter(|selected_id| {
-                self.selected_mailbox_id
-                    .and_then(|mailbox_id| self.store.list_threads(mailbox_id, 0..200).ok())
-                    .map(|threads| threads.into_iter().any(|thread| thread.id == *selected_id))
-                    .unwrap_or(false)
-            });
+            let open = self
+                .mailbox_selection()
+                .and_then(|selection| self.open_thread_still_listed(&selection));
+            self.selected_thread_id = match open {
+                // An open search hit that moved (on another device, say)
+                // stays open in the folder it went to.
+                Some(thread) if Some(thread.account_id) == self.selected_account_id => {
+                    self.selected_mailbox_id = Some(thread.mailbox_id);
+                    Some(thread.id)
+                }
+                _ => None,
+            };
             if self.selected_thread_id.is_none() {
                 self.selected_thread_id = self
                     .selected_mailbox_id
@@ -889,6 +904,25 @@ impl WorkspaceView {
                 None
             }
         }
+    }
+
+    /// The open conversation, while the list it was opened from still
+    /// shows it: `shown` (a mailbox or virtual mailbox) lists it, or, for
+    /// a search result, it still exists. The store is asked about that one
+    /// conversation, so one opened deep in a large folder stays open
+    /// whichever rows are loaded, at a cost that does not grow with the
+    /// folder.
+    fn open_thread_still_listed(&self, shown: &MailboxSelection) -> Option<ThreadState> {
+        let thread_id = self.selected_thread_id?;
+        let listed = self.list_mode == ListMode::Search
+            || self
+                .store
+                .selection_contains(shown, thread_id)
+                .unwrap_or(false);
+        if !listed {
+            return None;
+        }
+        self.store.thread_state(thread_id).ok().flatten()
     }
 
     /// The thread the conversation commands act on: the selected thread,
@@ -1621,12 +1655,18 @@ impl WorkspaceView {
                     cx.subscribe(&compose, |this, _, event: &ComposeEvent, cx| {
                         this.on_window_compose_event(event, cx)
                     }),
-                    // The window closed: the pane may edit the draft again.
+                    // The window closed: the pane may edit the draft again,
+                    // unless it went with the window (discarded, or empty).
                     cx.observe_release_in(&root, window, move |this, _, window, cx| {
                         this.compose_windows.remove(&draft_id);
                         this.say_draft_kept(draft_id, cx);
                         if this.compose.read(cx).showing_in_window() == Some(draft_id) {
-                            this.open_draft(draft_id, window, cx);
+                            if matches!(this.store.draft_detail(draft_id), Ok(Some(_))) {
+                                this.open_draft(draft_id, window, cx);
+                            } else {
+                                this.compose
+                                    .update(cx, |compose, cx| compose.close_draft(cx));
+                            }
                         }
                         this.refresh_from_store(cx);
                         cx.notify();
@@ -1643,16 +1683,19 @@ impl WorkspaceView {
     /// that window; once the draft is queued (and the window closes), the
     /// Undo Send toast shows here.
     fn on_window_compose_event(&mut self, event: &ComposeEvent, cx: &mut Context<Self>) {
-        if let &ComposeEvent::Queued {
-            draft_id,
-            job_id,
-            undo_delay,
-            ..
-        } = event
-        {
-            self.show_undo_send_toast(draft_id, job_id, undo_delay, ReopenIn::Window, cx);
-            self.refresh_from_store(cx);
-            cx.notify();
+        match *event {
+            ComposeEvent::Queued {
+                draft_id,
+                job_id,
+                undo_delay,
+                ..
+            } => {
+                self.show_undo_send_toast(draft_id, job_id, undo_delay, ReopenIn::Window, cx);
+                self.refresh_from_store(cx);
+                cx.notify();
+            }
+            ComposeEvent::Discarded { .. } => self.draft_discarded(cx),
+            _ => {}
         }
     }
 
@@ -1670,6 +1713,36 @@ impl WorkspaceView {
                 toasts.push(Toast::new("Draft saved to Drafts"), cx);
             });
         }
+    }
+
+    /// Says a draft was discarded and lists the drafts without it.
+    fn draft_discarded(&mut self, cx: &mut Context<Self>) {
+        self.toasts.update(cx, |toasts, cx| {
+            toasts.push(Toast::new("Draft discarded"), cx);
+        });
+        self.refresh_from_store(cx);
+        cx.notify();
+    }
+
+    /// Delete in Drafts: discards the selected draft where it is open,
+    /// after asking (see [`ComposeView::request_discard`]).
+    fn discard_selected_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(draft_id) = self.selected_draft_id else {
+            return;
+        };
+        if let Some(handle) = self.compose_window(draft_id, cx) {
+            let _ = handle.update(cx, |root, window, cx| {
+                window.activate_window();
+                root.compose()
+                    .update(cx, |compose, cx| compose.request_discard(window, cx));
+            });
+            return;
+        }
+        if self.compose.read(cx).draft_id() != Some(draft_id) {
+            self.open_draft(draft_id, window, cx);
+        }
+        self.compose
+            .update(cx, |compose, cx| compose.request_discard(window, cx));
     }
 
     /// The toast for a message waiting out its undo-send window, with
@@ -1884,6 +1957,11 @@ impl WorkspaceView {
                 self.open_draft_in_window(draft_id, true, window, cx);
             }
             ComposeEvent::ShowWindow { .. } => {}
+            ComposeEvent::Discarded { .. } => {
+                self.inline_reply = None;
+                self.draft_discarded(cx);
+                self.focus_pane(Pane::Detail, window, cx);
+            }
         }
     }
 
@@ -2285,7 +2363,13 @@ impl WorkspaceView {
         });
     }
 
-    fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
+    /// Delete: the selected conversations, or in Drafts the selected
+    /// draft (after asking).
+    fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.list_mode == ListMode::Drafts {
+            self.discard_selected_draft(window, cx);
+            return;
+        }
         self.change_threads(cx, |actions, thread_ids, cx| {
             actions.delete_threads(thread_ids, cx)
         });
@@ -2329,17 +2413,19 @@ impl WorkspaceView {
         if self.last_session_jobs.is_empty() {
             return;
         }
+        // The Outbox's list leaves sent jobs out; only until these few are
+        // settled is every job read.
+        let jobs = self.store.list_outbox_jobs(None).unwrap_or_default();
         let mut sent = 0;
-        self.last_session_jobs.retain(|job_id| {
-            match self.outbox_jobs.iter().find(|job| job.id == *job_id) {
+        self.last_session_jobs
+            .retain(|job_id| match jobs.iter().find(|job| job.id == *job_id) {
                 Some(job) if job.state == OutboxJobState::Sent => {
                     sent += 1;
                     false
                 }
                 Some(job) => matches!(job.state, OutboxJobState::Queued | OutboxJobState::Sending),
                 None => false,
-            }
-        });
+            });
         if sent > 0 {
             let message = format!(
                 "{} from your last session {} sent",
@@ -2948,6 +3034,22 @@ impl WorkspaceView {
             ComposeEvent::ShowWindow { draft_id } => {
                 self.open_draft_in_window(*draft_id, false, window, cx);
             }
+            // The draft in its place in Drafts opens; beside the mail list
+            // the pane goes back to the conversation.
+            &ComposeEvent::Discarded { draft_id } => {
+                let index = self.drafts.iter().position(|draft| draft.id == draft_id);
+                self.draft_discarded(cx);
+                if self.list_mode == ListMode::Drafts {
+                    let next = index
+                        .and_then(|index| self.drafts.get(index).or_else(|| self.drafts.last()))
+                        .map(|draft| draft.id);
+                    if let Some(next) = next {
+                        self.open_draft(next, window, cx);
+                    }
+                } else {
+                    self.detail_mode = DetailMode::Reader;
+                }
+            }
         }
     }
 
@@ -3295,6 +3397,13 @@ impl Render for WorkspaceView {
 /// Whether an outbox message failed and waits for a retry.
 fn is_retryable(state: OutboxJobState) -> bool {
     matches!(state, OutboxJobState::Failed | OutboxJobState::Retrying)
+}
+
+/// Whether Drafts lists a draft in `state`: one being written, or one that
+/// failed to send and can be edited again. Queued and sending drafts are
+/// in the Outbox; sent ones are gone from both.
+fn listed_in_drafts(state: DraftState) -> bool {
+    matches!(state, DraftState::Editing | DraftState::Failed)
 }
 
 /// How long after the last pane resize the widths are saved.
