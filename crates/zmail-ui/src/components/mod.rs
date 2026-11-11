@@ -40,7 +40,7 @@ pub(crate) use select::{Select, SelectEvent};
 pub(crate) use skeleton::SkeletonRow;
 pub(crate) use split_handle::{PaneSide, SplitHandle};
 pub(crate) use text_input::{TextInput, TextInputEvent};
-pub(crate) use theme::ComponentTheme;
+pub(crate) use theme::{ComponentTheme, FocusRingExt};
 pub(crate) use title_bar::TitleBar;
 pub(crate) use toast::{Toast, ToastHost, ToastId, ToastKind};
 pub(crate) use window_frame::window_frame;

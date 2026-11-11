@@ -37,6 +37,7 @@ mod deletes;
 mod drafts;
 mod gmail_keymap;
 mod hit_targets;
+mod keyboard_controls;
 mod large_folder;
 mod list;
 mod motion;
@@ -576,7 +577,8 @@ fn search_field_understands_query_operators(cx: &mut TestAppContext) {
 // ---------------------------------------------------------------------------
 
 #[gpui::test]
-fn tab_and_f6_cycle_focus_between_panes(cx: &mut TestAppContext) {
+fn f6_cycles_focus_between_panes(cx: &mut TestAppContext) {
+    // Tab within a pane: see view_tests/keyboard_controls.rs.
     let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
     assert_eq!(
         focused_pane(&view, cx),
@@ -584,13 +586,13 @@ fn tab_and_f6_cycle_focus_between_panes(cx: &mut TestAppContext) {
         "the message list has focus at startup"
     );
 
-    keys("tab", cx);
+    keys("f6", cx);
     assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
-    keys("tab", cx);
+    keys("f6", cx);
     assert_eq!(focused_pane(&view, cx), Some(Pane::Sidebar));
-    keys("tab", cx);
+    keys("f6", cx);
     assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
-    keys("shift-tab", cx);
+    keys("shift-f6", cx);
     assert_eq!(focused_pane(&view, cx), Some(Pane::Sidebar));
     keys("f6", cx);
     assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
@@ -646,14 +648,14 @@ fn arrow_keys_move_the_selection_only_in_the_focused_pane(cx: &mut TestAppContex
     assert_eq!(selected_thread(&view, cx), Some(threads[2]));
 
     // In the reader the arrows scroll; the selection stays.
-    keys("tab", cx);
+    keys("f6", cx);
     assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
     keys("up up down", cx);
     assert_eq!(selected_thread(&view, cx), Some(threads[2]));
 
     // In the sidebar the arrows move through the rows: Inbox, then the
     // Favourites, then the account's folders.
-    keys("tab", cx);
+    keys("f6", cx);
     assert_eq!(focused_pane(&view, cx), Some(Pane::Sidebar));
     let selection =
         |cx: &mut VisualTestContext| cx.read_entity(&view, |view, _| view.mailbox_selection());
@@ -1329,7 +1331,7 @@ fn conversation_actions_have_keys_and_undo(cx: &mut TestAppContext) {
     assert!(thread(cx).is_flagged);
 
     // Archive and undo, from the reader.
-    keys("tab", cx);
+    keys("f6", cx);
     assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
     keys("secondary-e", cx);
     assert_eq!(mailbox_of(&harness, first), harness.archive_id);
@@ -1337,7 +1339,7 @@ fn conversation_actions_have_keys_and_undo(cx: &mut TestAppContext) {
     assert_eq!(mailbox_of(&harness, first), harness.inbox_id);
 
     // Delete moves to the trash.
-    keys("shift-tab", cx);
+    keys("shift-f6", cx);
     view.update(cx, |view, cx| {
         view.selected_thread_id = Some(first);
         cx.notify();

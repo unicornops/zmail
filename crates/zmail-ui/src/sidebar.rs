@@ -450,7 +450,12 @@ impl SidebarView {
 
     /// Enter: on an account or folder parent it expands or collapses the
     /// tree; anywhere else it moves on to the list.
-    fn open_selected(&mut self, _: &OpenSelected, _: &mut Window, cx: &mut Context<Self>) {
+    fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
+        // On a button in the sidebar (Fix…), Enter presses the button.
+        if !self.focus_handle.is_focused(window) {
+            cx.propagate();
+            return;
+        }
         let node = self.cursor.as_ref().and_then(|cursor| {
             self.rows().into_iter().find_map(|row| match row {
                 SidebarRow::Item {

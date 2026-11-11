@@ -282,7 +282,8 @@ Each phase also refreshes the screenshot matrix (Phase 1.8) and attaches it to t
      `MailEvent`s, and registers undo entries.
 3. **Actions and keymap.** Add `actions!` for every command, a default keymap in
    `crates/zmail-ui/keymaps/default.json` using `secondary-`, and pane cycling with Tab and
-   F6. Arrow keys work within panes, and Esc closes overlays. Every toolbar button
+   F6 (since the November 2026 audit, F6 and Ctrl+Tab; Tab walks the controls inside the
+   focused pane). Arrow keys work within panes, and Esc closes overlays. Every toolbar button
    dispatches an action instead of calling methods directly.
 4. **`TextInput` component.** Port GPUI `examples/input.rs`:
    - `EntityInputHandler` for IME.

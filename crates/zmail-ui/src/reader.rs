@@ -273,6 +273,12 @@ impl ReaderView {
         &self.state
     }
 
+    /// Whether message `message_id` shows its From, To and Date lines.
+    #[cfg(test)]
+    pub(crate) fn details_shown(&self, message_id: i64) -> bool {
+        self.conversation.shows_details(message_id)
+    }
+
     /// Whether the action bar is compact.
     #[cfg(test)]
     pub(crate) fn compact_actions(&self) -> bool {
@@ -491,9 +497,14 @@ impl ReaderView {
     fn toggle_current_message(
         &mut self,
         _: &ToggleMessage,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // On a button in the reader, Enter presses the button.
+        if !self.focus_handle.is_focused(window) {
+            cx.propagate();
+            return;
+        }
         if let Some(current) = self.conversation.current() {
             self.toggle_message(current, cx);
         }

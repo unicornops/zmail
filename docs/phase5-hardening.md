@@ -9,9 +9,10 @@ This section records what ships today, so nobody relies on support that does not
 ### Keyboard
 
 - Every command is a GPUI action with a key binding (`crates/zmail-ui/keymaps/default.json`, plus `macos.json` on macOS), a menu entry and a command palette entry (Ctrl+K, Cmd+K on macOS). Settings → Keyboard offers an optional Gmail keymap. Ctrl+/ (Cmd+/) and the Gmail keymap's `?` open a cheat sheet of the bound keys.
-- Each pane (sidebar, message list, reader, compose) has its own focus. Tab and F6 move between panes, and Shift+Tab and Shift+F6 move back. Arrow keys, Home and End move the selection in the focused pane, and Enter opens it.
+- Each pane (sidebar, message list, reader, compose) has its own focus. F6 and Ctrl+Tab move between panes, and Shift+F6 and Ctrl+Shift+Tab move back. Arrow keys, Home and End move the selection in the focused pane, and Enter opens it.
+- Tab and Shift+Tab move through the controls of the focused pane, in the order they are drawn, and come back round to the pane itself, so Tab never leaves the pane: in the reader, the conversation's buttons, each message's sender, recipient summary (Show details), Reply and More, its banners (Load remote content, Always for this sender, Block, Looks safe, Show details) and its attachments' Open and Save As; in the sidebar, Add Account, the account toggles and Fix…; in the message list, its header's buttons and an Outbox row's Retry now, Trust New Key… or Re-authenticate. Escape from a control, from the reader or from the sidebar goes back to the message list. In compose and in dialogs, Tab moves between fields and buttons as usual.
 - Text fields are real editors, with selection, copy, cut, paste, undo and redo, word movement and IME input.
-- Buttons, selects, menus and dialogs are Tab stops with a visible 2px focus ring. Enter and Space activate buttons. Escape closes the topmost overlay.
+- Buttons, selects, menus and dialogs are Tab stops with a visible 2px focus ring. Enter and Space activate buttons (Enter on a button presses it rather than opening or collapsing what the pane has selected). Escape closes the topmost overlay.
 - **Pointer only:** the full date of a list row is a tooltip, so it needs hovering; screen readers get it as the row's description. The row's hover quick actions (Archive, Delete, Flag, Read) have keyboard shortcuts and context-menu equivalents instead.
 
 ### Screen readers
@@ -85,8 +86,8 @@ Run this on each platform before claiming screen-reader support works, and note 
 
    Then open Zmail. The window should be announced as "Zmail".
 2. **Sidebar.** Press F6 until the sidebar has focus. Up and Down should read each row with its unread count and level ("Unified Inbox, 5 unread"). On an account row, Enter (or the screen reader's expand command) should open and close it and announce "expanded" or "collapsed".
-3. **Message list.** Press Tab to the list. Up and Down should read "Unread, from …, subject, time, …" and "selected". Shift+Down should extend the selection and still read each row.
-4. **Reader.** Press Enter, then Tab to the reader. The subject should read as a heading, and n and p should move between messages ("Unread message, from …, date"). The screen reader's reading command should read the body.
+3. **Message list.** Press F6 to the list. Up and Down should read "Unread, from …, subject, time, …" and "selected". Shift+Down should extend the selection and still read each row.
+4. **Reader.** Press Enter, then F6 to the reader. The subject should read as a heading, and n and p should move between messages ("Unread message, from …, date"). The screen reader's reading command should read the body. Tab should then read each button in turn (Reply, More, Load remote content, …) and come back to the reader; Escape goes back to the list.
 5. **Actions.** Press Ctrl+E (Cmd+E) to archive. The "Conversation archived" toast should be announced without moving focus. Press Ctrl+Z (Cmd+Z) to undo.
 6. **Search.** Press Ctrl+F (Cmd+F) and type a word that matches, then press Enter. The result count should be announced ("3 results").
 7. **Palette.** Press Ctrl+K (Cmd+K) and type "arch". Each Down press should announce the highlighted command ("Archive, 2 of 5"). Escape closes it.

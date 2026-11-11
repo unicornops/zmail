@@ -10,6 +10,10 @@
 //!   tooltip.
 //!
 //! A click anywhere else on the header collapses the message.
+//!
+//! The sender and the recipient summary are Tab stops in the reader, so
+//! Enter or Space opens the sender's menu or the details from the
+//! keyboard too.
 
 use gpui::{
     AnyElement, Context, FontWeight, IntoElement, Role, SharedString, div, prelude::*, px, rgb,
@@ -25,7 +29,9 @@ use super::message::{MessageContext, MessageDisplay};
 use super::popover::PopoverAnchor;
 use crate::a11y::{AccessibleExt, readable};
 use crate::actions::ReplyToMessage;
-use crate::components::{Avatar, ButtonSize, HitTargetExt, IconButton, MIN_TARGET_SIZE};
+use crate::components::{
+    Avatar, ButtonSize, ComponentTheme, FocusRingExt, HitTargetExt, IconButton, MIN_TARGET_SIZE,
+};
 use crate::styles::{ICON_SIZE_SM, UiColors, rems_from_px};
 use crate::tooltip::text_tooltip;
 use crate::widgets::{EllipsisExt, icon};
@@ -53,6 +59,7 @@ pub(super) fn render_header(
     let index = display.index;
     let message_id = message.id;
     let focus_handle = reader.focus_handle.clone();
+    let theme = ComponentTheme::get(cx);
 
     let mut avatar = Avatar::new(sender_name.clone());
     if let Some(email) = &sender_email {
@@ -68,6 +75,8 @@ pub(super) fn render_header(
         .accessible(Role::Button, sender_label)
         .aria_description("Sender details")
         .aria_expanded(reader.popover_anchor_is(PopoverAnchor::Sender(index)))
+        .tab_index(0)
+        .focus_ring(&theme)
         .max_w_full()
         .ellipsis()
         .font_weight(FontWeight::SEMIBOLD)
@@ -115,6 +124,8 @@ pub(super) fn render_header(
                                 .accessible(Role::Button, summary.clone())
                                 .aria_description("From, To and Date details")
                                 .aria_expanded(display.details)
+                                .tab_index(0)
+                                .focus_ring(&theme)
                                 .flex()
                                 .items_center()
                                 .min_h(px(MIN_TARGET_SIZE))

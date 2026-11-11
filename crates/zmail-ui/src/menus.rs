@@ -98,11 +98,16 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
     ("zmail::ToggleMessage", "reader navigation key"),
     (
         "zmail::FocusNextPane",
-        "keyboard focus navigation (Tab, F6)",
+        "keyboard focus navigation (F6, Ctrl+Tab)",
     ),
     (
         "zmail::FocusPreviousPane",
-        "keyboard focus navigation (Tab, F6)",
+        "keyboard focus navigation (Shift+F6, Ctrl+Shift+Tab)",
+    ),
+    ("zmail::FocusNextControl", "keyboard focus navigation (Tab)"),
+    (
+        "zmail::FocusPreviousControl",
+        "keyboard focus navigation (Shift+Tab)",
     ),
     ("zmail::Cancel", "Escape closes whatever is on top"),
     (

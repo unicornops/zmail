@@ -27,10 +27,12 @@
       "secondary-b": "zmail::ToggleSidebar",
       "secondary-[": "zmail::GoBack",
       "alt-left": "zmail::GoBack",
-      "tab": "zmail::FocusNextPane",
-      "shift-tab": "zmail::FocusPreviousPane",
+      "tab": "zmail::FocusNextControl",
+      "shift-tab": "zmail::FocusPreviousControl",
       "f6": "zmail::FocusNextPane",
       "shift-f6": "zmail::FocusPreviousPane",
+      "ctrl-tab": "zmail::FocusNextPane",
+      "ctrl-shift-tab": "zmail::FocusPreviousPane",
       "escape": "zmail::Cancel"
     }
   },
