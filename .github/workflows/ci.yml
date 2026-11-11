@@ -145,10 +145,10 @@ jobs:
                   restore-keys: cargo-git-${{ runner.os }}-
 
             - name: Install cargo-deny
-              run: cargo install cargo-deny --locked
+              run: cargo install cargo-deny --version 0.20.2 --locked
 
             - name: Install cargo-audit
-              run: cargo install cargo-audit --locked
+              run: cargo install cargo-audit --version 0.23.0 --locked
 
             - name: Format
               run: cargo fmt --all -- --check
@@ -158,7 +158,7 @@ jobs:
               run: scripts/test-check-proton-upstream.sh
 
             - name: Clippy
-              run: cargo clippy --workspace --all-targets -- -D warnings
+              run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
             - name: Policy
               run: cargo deny check licenses advisories bans sources
