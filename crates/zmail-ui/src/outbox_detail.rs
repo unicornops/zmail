@@ -270,6 +270,7 @@ impl OutboxDetailView {
         div()
             .id("outbox-detail-scroll")
             .flex_1()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_4()
@@ -296,17 +297,21 @@ impl OutboxDetailView {
                     ),
             )
             .when_some(job.last_error_message.clone(), |this, error| {
-                this.child(div().debug_selector(|| "outbox-detail-error".into()).child(
-                    status_banner(
-                        "outbox-detail-error",
-                        Role::Alert,
-                        &format!("The server said: {error}"),
-                        "alert-circle",
-                        colors.danger,
-                        colors.danger_background,
-                        colors,
-                    ),
-                ))
+                this.child(
+                    div()
+                        .debug_selector(|| "outbox-detail-error".into())
+                        .w_full()
+                        .min_w_0()
+                        .child(status_banner(
+                            "outbox-detail-error",
+                            Role::Alert,
+                            &format!("The server said: {error}"),
+                            "alert-circle",
+                            colors.danger,
+                            colors.danger_background,
+                            colors,
+                        )),
+                )
             })
             .when(!buttons.is_empty(), |this| {
                 this.child(div().flex().flex_wrap().gap_2().children(buttons))
