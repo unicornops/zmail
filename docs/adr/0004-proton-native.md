@@ -394,10 +394,15 @@ no contact). When a signed card does not verify, Zmail looks at what it
 holds, without trusting or using any of it: if it holds a key or an
 `X-PM-*` setting for the recipient, or cannot be read at all, the send
 stops with a message naming the recipient and saying to check and save
-the contact in Proton Mail. An unverifiable card with nothing for the
+the contact in Proton Mail. The outbox fails the message at once with that
+message, as for a changed key. An unverifiable card with nothing for the
 recipient stays "no settings", as in Bridge: a card signed by a user key
 the account no longer has (after a password reset) must not stop every
-send to that contact. This does not protect against a server that leaves
+send to that contact. The mail goes, and the account's sync report (the
+status both frontends show under the account) then names the contact and
+says to check it in the Proton Mail web app, until a later send to that
+address finds the contact in order or Zmail is restarted; nothing is
+marked failed. This does not protect against a server that leaves
 the card out altogether; that needs Zmail to remember pins itself, which
 it does not do yet.
 

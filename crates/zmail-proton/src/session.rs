@@ -17,7 +17,7 @@
 //! worthless afterwards, wherever a copy of it may be.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fmt,
     sync::{
         Arc, Mutex as StdMutex,
@@ -41,6 +41,8 @@ pub struct ProtonSession {
     signed_out: Arc<AtomicBool>,
     /// Where rotated refresh tokens are written.
     tokens: Arc<RefreshTokenSlot>,
+    /// Recipients whose contact card did not verify at the last send.
+    contact_warnings: ContactWarnings,
     /// The unlocked user and address keys, unlocked on first use and kept
     /// in memory only for the session's lifetime (zeroized on drop).
     keys: OnceCell<Arc<UnlockedAccount>>,
@@ -85,6 +87,19 @@ impl ProtonSession {
         self.signed_out.load(Ordering::SeqCst)
     }
 
+    /// The contact-card warnings of this session's sends.
+    pub(crate) fn contact_warnings(&self) -> &ContactWarnings {
+        &self.contact_warnings
+    }
+
+    /// What to tell the user about contacts whose card did not verify
+    /// when mail was sent to them, for the account's sync report: the
+    /// mail went out, and the contacts should be checked in the Proton
+    /// Mail web app. `None` when there is nothing to say.
+    pub fn contact_warning(&self) -> Option<String> {
+        self.contact_warnings.message()
+    }
+
     /// Makes sure the session's newest refresh token is in the keychain.
     ///
     /// A refresh writes the new token at once. When that write failed (a
@@ -100,6 +115,63 @@ impl ProtonSession {
                  it unless the keychain starts working"
             )
         })
+    }
+}
+
+/// The recipients whose Proton contact has a signed card that did not
+/// verify the last time mail was sent to them, and was ignored because it
+/// holds no send settings for them.
+///
+/// The mail went out; the user is told, once per contact, in the
+/// account's sync report, to check the contact in the Proton Mail web app.
+/// A later send to the same address that finds nothing wrong takes it off
+/// the list. Kept in memory for the session only.
+#[derive(Debug, Default)]
+pub(crate) struct ContactWarnings(StdMutex<BTreeSet<String>>);
+
+impl ContactWarnings {
+    /// The most addresses the report names; the rest are counted.
+    const NAMED: usize = 3;
+
+    fn set(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Records the outcome of looking up `recipient`'s contact at a send.
+    pub(crate) fn record(&self, recipient: &str, card_unverified: bool) {
+        let recipient = recipient.trim().to_lowercase();
+        if card_unverified {
+            self.set().insert(recipient);
+        } else {
+            self.set().remove(&recipient);
+        }
+    }
+
+    /// What to tell the user, if any contact needs checking.
+    pub(crate) fn message(&self) -> Option<String> {
+        let set = self.set();
+        let mut names: Vec<&str> = set.iter().take(Self::NAMED).map(String::as_str).collect();
+        let (contacts, cards, them) = match set.len() {
+            0 => return None,
+            1 => ("contact", "its contact card", "it"),
+            _ => ("contacts", "their contact cards", "them"),
+        };
+        let more;
+        if set.len() > Self::NAMED {
+            more = format!("{} more", set.len() - Self::NAMED);
+            names.push(&more);
+        }
+        let list = match names.as_slice() {
+            [one] => (*one).to_owned(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+            [] => return None,
+        };
+        Some(format!(
+            "Check the {contacts} for {list} in the Proton Mail web app: Zmail could not verify \
+             {cards} when sending and ignored {them}"
+        ))
     }
 }
 
@@ -332,6 +404,7 @@ impl ProtonSessions {
             key_pass,
             signed_out,
             tokens,
+            contact_warnings: ContactWarnings::default(),
             keys: OnceCell::new(),
         })
     }

@@ -19,7 +19,9 @@
 // regard to case. A signed card that does not verify is no longer always
 // "no settings" (`GetSettings` upstream): when what it holds, unverified,
 // has send settings or keys for the address, or cannot be read at all,
-// `get_settings` fails with `Error::ContactCardUnverified` (ADR 0004).
+// `get_settings` fails with `Error::ContactCardUnverified`, and otherwise
+// the settings say the card was ignored (`card_unverified`), so the user
+// can be told (ADR 0004).
 
 //! Contacts, and what a contact card says about sending to an address.
 
@@ -60,6 +62,10 @@ pub struct ContactSettings {
     pub encrypt_untrusted: Option<bool>,
     /// Pinned public keys.
     pub keys: Vec<RecipientKey>,
+    /// The contact has a signed card that did not verify and was ignored
+    /// (it holds nothing for the address): worth telling the user, who
+    /// can check the contact in the Proton Mail web app.
+    pub card_unverified: bool,
 }
 
 /// A card's protection, a bit set (`CardType`).
@@ -240,7 +246,12 @@ impl Contact {
                     reason: error.to_string(),
                 });
             }
-            Err(CardError::Unverified(_)) => return Ok(ContactSettings::default()),
+            Err(CardError::Unverified(_)) => {
+                return Ok(ContactSettings {
+                    card_unverified: true,
+                    ..ContactSettings::default()
+                });
+            }
         };
         let Some(group) = decoded
             .get("EMAIL")
@@ -568,6 +579,7 @@ mod tests {
             .get_settings(&kr, "bob@example.com", CardType::SIGNED)
             .expect("settings");
         assert!(settings.keys.is_empty() && settings.encrypt.is_none());
+        assert!(settings.card_unverified, "the user is told to check it");
 
         // Settings for another address in the card do not stop this one.
         let mut tampered = Contact {
@@ -579,6 +591,24 @@ mod tests {
             .get_settings(&kr, "nobody@example.com", CardType::SIGNED)
             .expect("settings");
         assert!(settings.encrypt.is_none());
+        assert!(settings.card_unverified);
+
+        // A card that verifies is not flagged, whether or not it lists
+        // the address; nor is a contact without a signed card.
+        let verified = Contact {
+            cards: vec![signed(CARD, &kr)],
+            ..Contact::default()
+        };
+        for address in ["bob@example.com", "nobody@example.com"] {
+            let settings = verified
+                .get_settings(&kr, address, CardType::SIGNED)
+                .expect("settings");
+            assert!(!settings.card_unverified, "{address}");
+        }
+        let settings = Contact::default()
+            .get_settings(&kr, "bob@example.com", CardType::SIGNED)
+            .expect("settings");
+        assert!(!settings.card_unverified);
     }
 
     #[test]
