@@ -82,6 +82,9 @@ pub(crate) struct SearchContext {
     pub(crate) generation: u64,
     /// Server searches still running for this one.
     pub(crate) servers_pending: usize,
+    /// The accounts whose server search failed for this one (offline,
+    /// say), by name: its results may be incomplete.
+    pub(crate) servers_failed: Vec<String>,
     /// Whether the servers were asked for this generation already.
     pub(crate) servers_asked: bool,
     /// How many results the search reads: one page, plus one more for
@@ -105,6 +108,20 @@ pub(crate) struct SearchScopeState {
     pub(crate) many_accounts: bool,
     /// The query's `in:` value, which chooses the folder instead.
     pub(crate) in_clause: Option<String>,
+    /// The accounts whose server could not be searched, by name.
+    pub(crate) servers_failed: Vec<String>,
+}
+
+impl SearchScopeState {
+    /// The servers the search could not reach, as the list names them
+    /// ("Work's server", "the servers of Work and Home"), if any.
+    pub(crate) fn failed_servers(&self) -> Option<String> {
+        match self.servers_failed.as_slice() {
+            [] => None,
+            [one] => Some(format!("{one}\u{2019}s server")),
+            [rest @ .., last] => Some(format!("the servers of {} and {last}", rest.join(", "))),
+        }
+    }
 }
 
 impl SearchContext {
@@ -134,6 +151,7 @@ impl SearchContext {
     fn next_generation(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
         self.servers_pending = 0;
+        self.servers_failed.clear();
         self.servers_asked = false;
         self.limit = SEARCH_PAGE;
         self.has_more = false;
@@ -355,6 +373,7 @@ impl WorkspaceView {
             in_clause: SearchQuery::parse(&self.search_results_query)
                 .mailbox_clause()
                 .map(str::to_owned),
+            servers_failed: context.servers_failed.clone(),
         }
     }
 
@@ -475,7 +494,8 @@ impl WorkspaceView {
     /// Runs the server fallback for every account in `scope` that has
     /// unindexed mail the query could match. Each account's search is
     /// independent: a failure (offline, bad credentials) only leaves that
-    /// account's local results.
+    /// account's local results, and the list says that account's server
+    /// could not be searched (part of #170).
     fn search_servers(&mut self, scope: &SearchScope, query: String, cx: &mut Context<Self>) {
         let folder = self.search_context.server_folder();
         let accounts: Vec<i64> = match scope {
@@ -502,25 +522,46 @@ impl WorkspaceView {
             self.search_context.servers_pending += 1;
             let service = self.sync_service.clone();
             let query = query.clone();
+            let account_name = self
+                .accounts
+                .iter()
+                .find(|account| account.id == account_id)
+                .map(|account| account.display_name.clone())
+                .unwrap_or_default();
             cx.spawn(async move |this, cx| {
                 // Offline or failing servers leave the local results as
-                // they are.
-                let _ = service
+                // they are, and the list says the results may be
+                // incomplete.
+                let searched = service
                     .search_server_in_and_wait(account_id, folder, &query)
                     .await;
                 let _ = this.update(cx, |view, cx| {
-                    if view.search_context.generation != generation {
-                        return;
-                    }
-                    view.search_context.servers_pending =
-                        view.search_context.servers_pending.saturating_sub(1);
-                    // Re-reads the results too.
-                    view.refresh_from_store(cx);
-                    cx.notify();
+                    view.server_search_finished(generation, account_name, searched.is_ok(), cx)
                 });
             })
             .detach();
         }
+        cx.notify();
+    }
+
+    /// One account's server search for search `generation` finished:
+    /// the results are read again, and a failed one is noted.
+    pub(crate) fn server_search_finished(
+        &mut self,
+        generation: u64,
+        account_name: String,
+        searched: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_context.generation != generation {
+            return;
+        }
+        if !searched && !self.search_context.servers_failed.contains(&account_name) {
+            self.search_context.servers_failed.push(account_name);
+        }
+        self.search_context.servers_pending = self.search_context.servers_pending.saturating_sub(1);
+        // Re-reads the results too.
+        self.refresh_from_store(cx);
         cx.notify();
     }
 

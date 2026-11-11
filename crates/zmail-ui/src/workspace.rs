@@ -226,6 +226,7 @@ impl WorkspaceView {
             list_mode: ListMode::Mail,
             detail_mode: DetailMode::Reader,
             store_error: None,
+            body_download_failed: None,
             status_message: None,
             status_generation: 0,
             thread_view_cache: None,
@@ -394,11 +395,15 @@ impl WorkspaceView {
             | InitialView::ThreadSelection(thread_id)
             | InitialView::ThreadLinkPrompt(thread_id)
             | InitialView::ThreadMessageMenu(thread_id)
-            | InitialView::ThreadScrolled(thread_id) => {
+            | InitialView::ThreadScrolled(thread_id)
+            | InitialView::ThreadDownloadFailed(thread_id) => {
                 if let Ok(Some(thread)) = view.store.thread_view(thread_id) {
                     view.show_thread(thread_id, thread.mailbox_id, cx);
                     view.refresh_from_store(cx);
                     view.focus_pane(Pane::Detail, window, cx);
+                }
+                if let InitialView::ThreadDownloadFailed(_) = initial_view {
+                    view.body_download_failed = Some(thread_id);
                 }
                 view.sync_panes(cx);
                 view.reader.update(cx, |reader, cx| match initial_view {
@@ -637,6 +642,8 @@ impl WorkspaceView {
                 .map(|reply| reply.compose.clone()),
             sender_warnings: self.sender_warnings,
             remote_content_messages: self.remote_content_messages.clone(),
+            download_failed: self.body_download_failed.is_some()
+                && self.body_download_failed == self.selected_thread_id,
         };
         self.reader
             .update(cx, |reader, cx| reader.set_state(reader_state, cx));
@@ -1468,8 +1475,9 @@ impl WorkspaceView {
     /// Fetches the bodies of the selected thread's un-hydrated messages on
     /// demand; the reader shows the preview until the body lands.
     ///
-    /// Hydration failures are not surfaced: an offline open keeps showing
-    /// the stored preview instead of an error.
+    /// When the download fails (offline, say) the reader keeps showing the
+    /// stored preview, with a "Couldn't download this message" banner and
+    /// Retry above it.
     pub(crate) fn hydrate_selected_thread_bodies(&mut self, cx: &mut Context<Self>) {
         let (Some(account_id), Some(thread_id)) =
             (self.selected_account_id, self.selected_thread_id)
@@ -1486,15 +1494,47 @@ impl WorkspaceView {
 
         let service = self.sync_service.clone();
         cx.spawn(async move |this, cx| {
-            let _ = service
+            let downloaded = service
                 .hydrate_thread_body_and_wait(account_id, thread_id)
                 .await;
             let _ = this.update(cx, |view, cx| {
-                view.refresh_from_store(cx);
-                cx.notify();
+                view.body_download_finished(thread_id, downloaded.is_ok(), cx)
             });
         })
         .detach();
+    }
+
+    /// A body download for `thread_id` finished: the reader shows the
+    /// bodies, or says the download failed.
+    pub(crate) fn body_download_finished(
+        &mut self,
+        thread_id: i64,
+        downloaded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.body_download_failed = if downloaded {
+            self.body_download_failed.filter(|id| *id != thread_id)
+        } else {
+            Some(thread_id)
+        };
+        self.refresh_from_store(cx);
+        cx.notify();
+    }
+
+    /// The download-failed banner's Retry.
+    fn retry_download(
+        &mut self,
+        action: &crate::actions::RetryDownload,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.body_download_failed == Some(action.thread_id) {
+            self.body_download_failed = None;
+        }
+        if self.selected_thread_id == Some(action.thread_id) {
+            self.hydrate_selected_thread_bodies(cx);
+        }
+        cx.notify();
     }
 
     // -----------------------------------------------------------------------
@@ -2140,7 +2180,9 @@ impl WorkspaceView {
                 self.store_error = Some(error.to_string());
             }
         }
-        let _ = self.sync_service.process_outbox(None);
+        if let Err(error) = self.sync_service.process_outbox(None) {
+            self.show_error(format!("Couldn't start sending: {error:#}"), cx);
+        }
         self.show_status(
             format!(
                 "{} queued for another send attempt.",
@@ -2188,7 +2230,9 @@ impl WorkspaceView {
             .update(cx, |actions, cx| actions.retry_outbox_job(job_id, cx))
         {
             Ok(()) => {
-                let _ = self.sync_service.process_outbox(self.selected_account_id);
+                if let Err(error) = self.sync_service.process_outbox(self.selected_account_id) {
+                    self.show_error(format!("Couldn't start sending: {error:#}"), cx);
+                }
                 self.show_status("Message queued for another send attempt.".to_owned(), cx);
                 self.refresh_from_store(cx);
                 self.schedule_refresh(window, cx);
@@ -3414,6 +3458,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::show_drafts))
             .on_action(cx.listener(Self::show_outbox))
             .on_action(cx.listener(Self::retry_outbox))
+            .on_action(cx.listener(Self::retry_download))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::search_field_down))
             .on_action(cx.listener(Self::search_in_folder))
