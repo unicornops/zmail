@@ -1897,8 +1897,15 @@ impl WorkspaceView {
         };
 
         match self.create_forward_draft(&thread, cx) {
-            Ok(draft_id) => {
+            Ok((draft_id, attachments)) => {
                 self.open_draft_in_window(draft_id, false, window, cx);
+                // Its attachments copy in the background, shown there.
+                if let Some(handle) = self.compose_window(draft_id, cx) {
+                    let _ = handle.update(cx, |root, _, cx| {
+                        root.compose()
+                            .update(cx, |compose, cx| compose.attach_received(attachments, cx))
+                    });
+                }
                 self.refresh_from_store(cx);
             }
             Err(error) => self.store_error = Some(error.to_string()),
@@ -1935,19 +1942,26 @@ impl WorkspaceView {
         self.create_thread_draft(start, cx)
     }
 
-    fn create_forward_draft(&self, thread: &ThreadView, cx: &mut Context<Self>) -> Result<i64> {
+    /// Creates a forward draft without its attachments, which come back
+    /// with it to be copied in off the UI thread.
+    fn create_forward_draft(
+        &self,
+        thread: &ThreadView,
+        cx: &mut Context<Self>,
+    ) -> Result<(i64, Vec<zmail_core::ReceivedAttachment>)> {
         let latest_message = thread
             .messages
             .last()
             .context("selected thread has no messages to forward")?;
-        let start = reply::forward(
+        let mut start = reply::forward(
             &thread.subject,
             &thread.mailbox_name,
             latest_message,
             &self.identities,
             &format_full_date(&latest_message.received_at, &chrono::Local, self.hour_cycle),
         );
-        self.create_thread_draft(start, cx)
+        let attachments = std::mem::take(&mut start.attachments);
+        Ok((self.create_thread_draft(start, cx)?, attachments))
     }
 
     /// Creates the draft a reply or forward starts with, from the

@@ -12,6 +12,10 @@
 /// What Send says when the draft has no recipients.
 pub(crate) const NO_RECIPIENTS: &str = "Add at least one recipient in To before sending.";
 
+/// What Send says while attachments are still being copied in.
+pub(crate) const WAIT_FOR_ATTACHMENTS: &str =
+    "Wait for the attachments to finish copying, then send.";
+
 /// What Send says when the draft is already waiting in the Outbox.
 pub(crate) const ALREADY_QUEUED: &str = "This message is already in the Outbox, waiting to send.";
 
