@@ -5,7 +5,7 @@
 //! | Finding | Tier |
 //! |---|---|
 //! | The From domain imitates a well-known domain (look-alike letters from any alphabet included) | Danger |
-//! | The display name shows an address or website on another domain | Caution |
+//! | The display name shows an address or website on another domain (not a mailing list's `'member' via List` rewrite sent from the list) | Caution |
 //! | The From domain mixes alphabets in one label (Latin and Cyrillic, say) | Caution |
 //! | Reply-To is on an unrelated domain | Caution |
 //! | Reply-To is on a parent or subdomain of the From domain | Info |

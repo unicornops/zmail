@@ -372,8 +372,8 @@ pub fn analyze_sender_identity(from: &str, reply_to: Option<&str>) -> SenderSafe
 
     let lookalike_of = domain.as_ref().and_then(lookalike_known_domain);
     let international_domain = domain.as_ref().and_then(international_domain);
-    let name_shows = match (&domain, sender.name.as_deref()) {
-        (Some(domain), Some(name)) => name_shows_domain(name, &domain.ascii),
+    let name_shows = match (&domain, sender.name.as_deref(), sender.email.as_deref()) {
+        (Some(domain), Some(name), Some(email)) => name_shows_domain(name, email, &domain.ascii),
         _ => None,
     };
     let reply_to_mismatch = match (&domain, reply_to) {
@@ -411,9 +411,11 @@ fn reply_to_mismatch(reply_to: &str, from_domain: &str) -> Option<String> {
 /// e-mail address in it (`"ceo@corp.example"`), a web address
 /// (`www.bank.example`, `https://bank.example`), or a well-known domain
 /// written bare (`PayPal.com`). Other dotted words ("Inc.", "J.R.R.",
-/// "Mr.Smith") are not read as domains.
-fn name_shows_domain(name: &str, from_domain: &str) -> Option<String> {
+/// "Mr.Smith") are not read as domains. The member's address in a mailing
+/// list's rewrite of the name ([`list_member`]) does not count.
+fn name_shows_domain(name: &str, from_email: &str, from_domain: &str) -> Option<String> {
     let name = visible_text(name);
+    let member = list_member(&name, from_email, from_domain);
     let addresses = name
         .split(|ch: char| {
             ch.is_whitespace()
@@ -423,6 +425,7 @@ fn name_shows_domain(name: &str, from_domain: &str) -> Option<String> {
                 )
         })
         .filter(|token| token.contains('@'))
+        .filter(|token| member.as_deref() != Some(token.to_lowercase().as_str()))
         .filter_map(address_domain_parts)
         .map(|domain| domain.ascii)
         .filter(|domain| looks_like_domain(domain));
@@ -433,6 +436,40 @@ fn name_shows_domain(name: &str, from_domain: &str) -> Option<String> {
     addresses
         .chain(websites)
         .find(|shown| !same_organisation(shown, from_domain))
+}
+
+/// The member's address, lowercased, when `name` is how a mailing list
+/// rewrites a member's message (DMARC munging by Google Groups and
+/// Mailman): `'alice@example.com' via Dev Team` or `alice@example.com via
+/// Dev Team`, one address and nothing else before "via", sent from the
+/// list's own address. That is an address whose local part is the list's
+/// name (`dev-team@`, letters and digits compared), or one on a list host
+/// (Google Groups, groups.io, a `lists.` or `groups.` domain). `None`
+/// otherwise, so a name that just shows someone else's address, or says
+/// "via" a list it is not sent from, is still flagged.
+fn list_member(name: &str, from_email: &str, from_domain: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    let (member, list) = lower.split_once(" via ")?;
+    let member = member
+        .trim()
+        .trim_matches(|ch| matches!(ch, '\'' | '"'))
+        .trim();
+    let list = list.trim();
+    if member.is_empty() || member.contains(char::is_whitespace) || !member.contains('@') {
+        return None;
+    }
+    let letters =
+        |text: &str| -> String { text.chars().filter(|ch| ch.is_alphanumeric()).collect() };
+    let local = from_email
+        .rsplit_once('@')
+        .map(|(local, _)| local.to_lowercase())
+        .unwrap_or_default();
+    let names_the_list = !letters(list).is_empty() && letters(list) == letters(&local);
+    let list_host = matches!(from_domain, "googlegroups.com" | "groups.io")
+        || from_domain.ends_with(".groups.io")
+        || from_domain.starts_with("lists.")
+        || from_domain.starts_with("groups.");
+    (names_the_list || list_host).then(|| member.to_owned())
 }
 
 /// Returns the well-known domain a candidate domain is impersonating, if
@@ -841,10 +878,6 @@ mod tests {
             ("\"ceo@corp.example\" <a@evil.example>", "corp.example"),
             ("CEO (ceo@corp.example) <a@evil.example>", "corp.example"),
             (
-                "'alice@example.com' via Team <team@lists.evil.example>",
-                "example.com",
-            ),
-            (
                 "\"Support <help@bank.example>\" <x@evil.example>",
                 "bank.example",
             ),
@@ -864,6 +897,55 @@ mod tests {
             assert_eq!(report.name_shows.as_deref(), Some(shown), "{from}");
             assert_eq!(report.tier(), Some(SafetyTier::Caution), "{from}");
             assert!(!report.is_safe());
+        }
+    }
+
+    #[test]
+    fn mailing_list_rewrites_of_a_member_address_are_safe() {
+        // Google Groups and Mailman put the member's address in the name
+        // and send from the list's own address.
+        for from in [
+            "'alice@example.com' via Dev Team <dev-team@googlegroups.com>",
+            "\"'alice@example.com' via Dev Team\" <dev-team@googlegroups.com>",
+            "alice@example.com via Announcements <announce@googlegroups.com>",
+            "'alice@example.com' via Mailman-Users <mailman-users@python.org>",
+            "alice@example.com via Dev <dev@lists.example.org>",
+            "'Alice@Example.com' VIA Rust Users <rust-users@groups.io>",
+        ] {
+            let report = analyze_sender_identity(from, None);
+            assert_eq!(report.name_shows, None, "{from}");
+            assert!(report.is_safe(), "{from} produced {report:?}");
+        }
+    }
+
+    #[test]
+    fn a_via_name_not_sent_from_its_list_still_warns() {
+        for (from, shown) in [
+            // Just someone else's address.
+            ("\"ceo@corp.example\" <a@evil.example>", "corp.example"),
+            ("'ceo@corp.example' <a@evil.example>", "corp.example"),
+            // "via" a list whose address it is not sent from.
+            (
+                "'ceo@corp.example' via Payments <x@evil.example>",
+                "corp.example",
+            ),
+            (
+                "'ceo@corp.example' via Dev Team <payments@evil.example>",
+                "corp.example",
+            ),
+            (
+                "'ceo@corp.example' via <x@googlegroups.com>",
+                "corp.example",
+            ),
+            // More than one address before "via".
+            (
+                "ceo@corp.example and cfo@corp.example via Dev <dev@googlegroups.com>",
+                "corp.example",
+            ),
+        ] {
+            let report = analyze_sender_identity(from, None);
+            assert_eq!(report.name_shows.as_deref(), Some(shown), "{from}");
+            assert_eq!(report.tier(), Some(SafetyTier::Caution), "{from}");
         }
     }
 
