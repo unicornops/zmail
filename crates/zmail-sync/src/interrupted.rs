@@ -635,17 +635,28 @@ mod tests {
             .block_on(holder.recover_interrupted_sends(None))
             .expect("the check runs");
         assert_eq!(settled, 0);
-        let left = job(&store);
-        assert_eq!(left.state, OutboxJobState::Sending);
-        assert_eq!(left.last_error_message, None);
-        assert!(
+        // The service's own outbox poll runs the same check as soon as the
+        // threshold drops, and may have claimed the job first, in which
+        // case the call above skipped it and the poll's check is still
+        // asking. Wait for whichever one asks to record that it failed.
+        let rechecked = || {
             holder
                 .inner
                 .interrupted_rechecks
                 .lock()
                 .expect("the rechecks")
-                .contains_key(&job_id),
-            "checked again later, not on every pass"
-        );
+                .contains_key(&job_id)
+        };
+        let started = Instant::now();
+        while !rechecked() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "checked again later, not on every pass"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let left = job(&store);
+        assert_eq!(left.state, OutboxJobState::Sending);
+        assert_eq!(left.last_error_message, None);
     }
 }
