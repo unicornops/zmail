@@ -243,11 +243,11 @@ echo "Bootstrapping the ${NEXT_VERSION} release PR"
 git checkout -B "$BRANCH" origin/main
 
 sed -i "s/^version = \"${PREV_VERSION}\"/version = \"${NEXT_VERSION}\"/" "${PACKAGE_PATH}/Cargo.toml"
-LOCK_LINE="$(grep -n 'name = "zmail-app"' Cargo.lock | head -n 1 | cut -d: -f1)"
+LOCK_LINE="$(grep -n -m 1 'name = "zmail-app"' Cargo.lock | cut -d: -f1)"
 sed -i "$((LOCK_LINE + 1))s/version = \"${PREV_VERSION}\"/version = \"${NEXT_VERSION}\"/" Cargo.lock
 sed -i "s|\"${PACKAGE_PATH}\": \"${PREV_VERSION}\"|\"${PACKAGE_PATH}\": \"${NEXT_VERSION}\"|" "$MANIFEST"
 
-header_index="$(grep -n '^## \[' "$CHANGELOG" | head -n 1 | cut -d: -f1)"
+header_index="$(grep -n -m 1 '^## \[' "$CHANGELOG" | cut -d: -f1)"
 rewrite_changelog "$header_index"
 
 git add "$CHANGELOG" "$MANIFEST" Cargo.lock "${PACKAGE_PATH}/Cargo.toml"
