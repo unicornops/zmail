@@ -549,18 +549,29 @@ pub fn validate_account_form(
             }
         }
         if oauth_preset(form).is_none() {
-            require(
-                &mut errors,
-                AccountField::OauthAuthorizationEndpoint,
-                &form.oauth_authorization_endpoint,
-                "Enter the authorization endpoint.",
-            );
-            require(
-                &mut errors,
-                AccountField::OauthTokenEndpoint,
-                &form.oauth_token_endpoint,
-                "Enter the token endpoint.",
-            );
+            // The browser signs in at the first and the client secret and
+            // tokens go to the second: both must be https (http only on
+            // this computer, for a test server).
+            for (field, value, missing, cleartext) in [
+                (
+                    AccountField::OauthAuthorizationEndpoint,
+                    &form.oauth_authorization_endpoint,
+                    "Enter the authorization endpoint.",
+                    "Enter the authorization endpoint as an https:// address.",
+                ),
+                (
+                    AccountField::OauthTokenEndpoint,
+                    &form.oauth_token_endpoint,
+                    "Enter the token endpoint.",
+                    "Enter the token endpoint as an https:// address.",
+                ),
+            ] {
+                if require(&mut errors, field, value, missing)
+                    && zmail_auth::check_endpoint(value).is_err()
+                {
+                    errors.push((field, cleartext.to_owned()));
+                }
+            }
         }
     } else {
         require(
@@ -991,6 +1002,28 @@ mod tests {
                 AccountField::OauthTokenEndpoint
             ]
         );
+        // They must be https, except on this computer (a test server).
+        let cleartext = AccountFormValues {
+            oauth_authorization_endpoint: "http://provider.test/authorize".to_owned(),
+            oauth_token_endpoint: "http://provider.test/token".to_owned(),
+            ..form.clone()
+        };
+        let errors = validate_account_form(&cleartext, Check::Credentials);
+        assert_eq!(
+            fields(&errors),
+            [
+                AccountField::OauthAuthorizationEndpoint,
+                AccountField::OauthTokenEndpoint
+            ]
+        );
+        assert!(errors[1].1.contains("https://"), "{errors:?}");
+        assert!(build_account_from_form(&cleartext).is_err());
+        let loopback = AccountFormValues {
+            oauth_authorization_endpoint: "http://127.0.0.1:8080/authorize".to_owned(),
+            oauth_token_endpoint: "http://localhost:8080/token".to_owned(),
+            ..form.clone()
+        };
+        assert!(validate_account_form(&loopback, Check::Credentials).is_empty());
         let form = AccountFormValues {
             oauth_authorization_endpoint: "https://provider.test/authorize".to_owned(),
             oauth_token_endpoint: "https://provider.test/token".to_owned(),

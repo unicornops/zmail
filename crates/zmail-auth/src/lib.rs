@@ -11,12 +11,12 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
 use sha2::{Digest, Sha256};
 
 /// A one-shot OAuth2 token exchange result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TokenSet {
     /// Bearer token for IMAP `XOAUTH2` and the provider API.
     pub access_token: String,
@@ -25,6 +25,22 @@ pub struct TokenSet {
     /// Lifetime of the access token in seconds, when reported.
     pub expires_in: Option<u64>,
 }
+
+impl std::fmt::Debug for TokenSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenSet")
+            .field("access_token", &REDACTED)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| REDACTED),
+            )
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
+/// What `Debug` shows in place of a secret.
+const REDACTED: &str = "[redacted]";
 
 /// A token endpoint's refusal (RFC 6749 §5.2): the HTTP status and, when
 /// the body carries them, the error code and its description.
@@ -79,7 +95,7 @@ impl std::fmt::Display for TokenError {
 impl std::error::Error for TokenError {}
 
 /// An OAuth2 provider client configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OAuth2Client {
     /// Provider application client id.
     pub client_id: String,
@@ -98,6 +114,23 @@ pub struct OAuth2Client {
     /// Extra authorization-endpoint parameters (for example Google's
     /// `access_type=offline`) appended to the request URL.
     pub extra_authorize_params: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for OAuth2Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuth2Client")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| REDACTED),
+            )
+            .field("authorization_endpoint", &self.authorization_endpoint)
+            .field("token_endpoint", &self.token_endpoint)
+            .field("scopes", &self.scopes)
+            .field("redirect_port", &self.redirect_port)
+            .field("extra_authorize_params", &self.extra_authorize_params)
+            .finish()
+    }
 }
 
 /// Well-known provider presets for the browser flow.
@@ -188,12 +221,23 @@ impl OAuth2Preset {
 }
 
 /// PKCE pair (RFC 7636): the secret verifier and its S256 challenge.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Pkce {
     /// The verifier kept client-side only.
     pub verifier: String,
     /// The `S256` challenge sent in the authorization request.
     pub challenge: String,
+}
+
+impl std::fmt::Debug for Pkce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The challenge is public (it is in the authorization URL); the
+        // verifier is what proves the code is ours.
+        f.debug_struct("Pkce")
+            .field("verifier", &REDACTED)
+            .field("challenge", &self.challenge)
+            .finish()
+    }
 }
 
 impl Pkce {
@@ -301,6 +345,22 @@ impl OAuth2Client {
         timeout: Duration,
         cancelled: impl Fn() -> bool,
     ) -> Result<String> {
+        self.listen(expected_state, timeout, CALLBACK_READ_TIMEOUT, cancelled)
+    }
+
+    /// The loopback listener. Only the provider's redirect, to the
+    /// callback path and with this sign-in's state, ends the wait (with
+    /// the code, or with the provider's error). Anything else that reaches
+    /// the port (another page, a stale or forged state, a connection that
+    /// sends nothing within `read_timeout`) gets a 400 and the wait goes
+    /// on, until the real redirect or the deadline.
+    fn listen(
+        &self,
+        expected_state: &str,
+        timeout: Duration,
+        read_timeout: Duration,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<String> {
         let listener = TcpListener::bind(("127.0.0.1", self.redirect_port))
             .with_context(|| format!("failed to bind the redirect port {}", self.redirect_port))?;
         listener
@@ -309,63 +369,24 @@ impl OAuth2Client {
 
         let deadline = std::time::Instant::now() + timeout;
         loop {
+            if cancelled() {
+                bail!("the sign-in was cancelled");
+            }
+            if std::time::Instant::now() > deadline {
+                bail!("timed out waiting for the OAuth2 redirect");
+            }
             match listener.accept() {
-                Ok((stream, _)) => {
-                    if let Some(code) = Self::capture_redirect(stream, expected_state)? {
-                        return Ok(code);
-                    }
-                }
+                Ok((stream, _)) => match capture_redirect(stream, expected_state, read_timeout) {
+                    Callback::Code(code) => return Ok(code),
+                    Callback::Failed(error) => return Err(error),
+                    Callback::Ignored => {}
+                },
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if cancelled() {
-                        bail!("the sign-in was cancelled");
-                    }
-                    if std::time::Instant::now() > deadline {
-                        bail!("timed out waiting for the OAuth2 redirect");
-                    }
                     thread::sleep(Duration::from_millis(100));
                 }
                 Err(error) => return Err(error).context("failed to accept the redirect"),
             }
         }
-    }
-
-    /// Reads one redirect request, answers it, and extracts the code.
-    fn capture_redirect(mut stream: TcpStream, expected_state: &str) -> Result<Option<String>> {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .context("failed to prepare the redirect stream")?;
-        let mut request = [0u8; 8192];
-        let read = stream
-            .read(&mut request)
-            .context("failed to read the redirect request")?;
-        let request = String::from_utf8_lossy(&request[..read]).into_owned();
-        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
-                       <html><body><p>zmail received the authorization. Return to the terminal.</p></body></html>";
-        let _ = stream.write_all(response.as_bytes());
-        let _ = stream.flush();
-
-        let Some(query) = request.split_whitespace().nth(1) else {
-            return Ok(None);
-        };
-        let query = query.split('?').nth(1).unwrap_or_default();
-        let mut code = None;
-        let mut state = None;
-        for pair in query.split('&') {
-            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            match key {
-                "code" => code = Some(urldecode(value)),
-                "state" => state = Some(urldecode(value)),
-                _ => {}
-            }
-        }
-
-        if state.as_deref() != Some(expected_state) {
-            bail!("the redirect state does not match the request (possible CSRF)");
-        }
-        let Some(code) = code.filter(|code| !code.is_empty()) else {
-            bail!("the OAuth2 redirect carried no authorization code");
-        };
-        Ok(Some(code))
     }
 
     /// Exchanges the authorization code for tokens using the PKCE verifier.
@@ -385,9 +406,12 @@ impl OAuth2Client {
 
     /// Runs the whole browser flow: request URL, redirect capture, exchange.
     pub fn authorize_interactively(&self) -> Result<TokenSet> {
+        // The CLI's custom client reaches here without the setup form's
+        // checks; the token endpoint is checked on every request.
+        check_endpoint(&self.authorization_endpoint)?;
         let request = self.authorization_request();
         println!(
-            "Open this URL in a browser to authorize zmail:\n{}\n",
+            "Open this URL in a browser to authorize Zmail:\n{}\n",
             request.url
         );
         open_browser(&request.url);
@@ -407,6 +431,140 @@ impl OAuth2Client {
 
     fn token_request(&self, form: Vec<(&str, String)>) -> Result<TokenSet> {
         token_request(&self.token_endpoint, form)
+    }
+}
+
+/// How long one connection to the redirect listener may take to send its
+/// request.
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The path of the loopback redirect URI.
+const CALLBACK_PATH: &str = "/callback";
+
+/// What one connection to the redirect listener brought.
+#[derive(Debug)]
+enum Callback {
+    /// The provider's redirect with the authorization code.
+    Code(String),
+    /// The provider's redirect saying the sign-in failed.
+    Failed(anyhow::Error),
+    /// Anything else, answered with a 400 and otherwise ignored.
+    Ignored,
+}
+
+/// Reads one request from the redirect listener, answers it, and says
+/// what it was.
+fn capture_redirect(
+    mut stream: TcpStream,
+    expected_state: &str,
+    read_timeout: Duration,
+) -> Callback {
+    // An accepted socket can inherit the listener's non-blocking mode.
+    if stream.set_nonblocking(false).is_err()
+        || stream.set_read_timeout(Some(read_timeout)).is_err()
+    {
+        return Callback::Ignored;
+    }
+    let mut request = [0u8; 8192];
+    let callback = match stream.read(&mut request) {
+        Ok(read) => parse_callback(&String::from_utf8_lossy(&request[..read]), expected_state),
+        Err(_) => Callback::Ignored,
+    };
+    let _ = stream.write_all(callback_page(&callback).as_bytes());
+    let _ = stream.flush();
+    callback
+}
+
+/// What a redirect request means for the sign-in waiting on
+/// `expected_state`.
+fn parse_callback(request: &str, expected_state: &str) -> Callback {
+    let mut request_line = request.split_whitespace();
+    let (Some("GET"), Some(target)) = (request_line.next(), request_line.next()) else {
+        return Callback::Ignored;
+    };
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if path != CALLBACK_PATH {
+        return Callback::Ignored;
+    }
+    let mut code = None;
+    let mut state = None;
+    let mut error = None;
+    let mut description = None;
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match key {
+            "code" => code = Some(urldecode(value)),
+            "state" => state = Some(urldecode(value)),
+            "error" => error = Some(urldecode(value)),
+            "error_description" => description = Some(urldecode(value)),
+            _ => {}
+        }
+    }
+    // Only this sign-in's state may end it, with a code or an error; a
+    // forged or stale request is ignored.
+    if state.as_deref() != Some(expected_state) {
+        return Callback::Ignored;
+    }
+    // RFC 6749 section 4.1.2.1: the provider reports a refusal (the user
+    // said no, say) as `error` on the redirect.
+    if let Some(error) = error {
+        let refusal = match description.filter(|description| !description.is_empty()) {
+            Some(description) => format!("{error}: {description}"),
+            None => error,
+        };
+        return Callback::Failed(anyhow!("the provider did not grant access ({refusal})"));
+    }
+    match code.filter(|code| !code.is_empty()) {
+        Some(code) => Callback::Code(code),
+        None => Callback::Failed(anyhow!(
+            "the provider's redirect carried no authorization code"
+        )),
+    }
+}
+
+/// The page the browser shows after a request to the redirect listener.
+fn callback_page(callback: &Callback) -> String {
+    let (status, text) = match callback {
+        Callback::Code(_) => (
+            "200 OK",
+            "Zmail has your sign-in. You can close this tab and go back to Zmail.",
+        ),
+        Callback::Failed(_) => (
+            "200 OK",
+            "The sign-in did not finish. You can close this tab; Zmail says what went wrong.",
+        ),
+        Callback::Ignored => (
+            "400 Bad Request",
+            "This address is only for signing in to Zmail, and this request was not expected.",
+        ),
+    };
+    let body = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Zmail</title></head><body><p>{text}</p></body></html>"
+    );
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// Checks that an OAuth2 endpoint is safe to send credentials to: `https`,
+/// or `http` on the loopback interface only (a local test server).
+pub fn check_endpoint(endpoint: &str) -> Result<()> {
+    let url = reqwest::Url::parse(endpoint.trim())
+        .with_context(|| format!("{endpoint} is not a valid URL"))?;
+    let host = url
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    match url.scheme() {
+        "https" if !host.is_empty() => Ok(()),
+        "http" if loopback => Ok(()),
+        _ => bail!("the OAuth2 endpoint {endpoint} must be an https:// address"),
     }
 }
 
@@ -440,15 +598,21 @@ pub fn refresh_access_token(
 }
 
 fn token_request(endpoint: &str, form: Vec<(&str, String)>) -> Result<TokenSet> {
-    #[cfg(test)]
+    check_endpoint(endpoint)?;
+    let endpoint = endpoint.trim();
+    // The request carries the client secret, the code or the refresh
+    // token: it never follows a redirect (a 307 would post them on to
+    // another host), and an https endpoint never falls back to http.
     let client = reqwest::blocking::Client::builder()
-        // Unit tests talk to loopback mock endpoints; the host proxy
-        // environment must not intercept them.
-        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .https_only(endpoint.starts_with("https://"));
+    // Unit tests talk to loopback mock endpoints; the host proxy
+    // environment must not intercept them.
+    #[cfg(test)]
+    let client = client.no_proxy();
+    let client = client
         .build()
         .context("failed to prepare the token client")?;
-    #[cfg(not(test))]
-    let client = reqwest::blocking::Client::new();
     let response = client
         .post(endpoint)
         .form(&form)
@@ -784,22 +948,238 @@ mod tests {
         assert_eq!(code, "auth-code-1");
     }
 
+    /// Sends `request` to the redirect listener and returns its answer.
+    fn send_to_listener(port: u16, request: &str) -> String {
+        let mut stream = connect_with_retry(port);
+        stream
+            .write_all(request.as_bytes())
+            .expect("the request should send");
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response);
+        response
+    }
+
     #[test]
-    fn redirect_capture_rejects_mismatched_state() {
+    fn a_mismatched_state_is_refused_and_the_wait_goes_on() {
         let port = free_port();
         let client = client(port);
         let listener =
             thread::spawn(move || client.listen_for_redirect("expected", Duration::from_secs(10)));
 
-        let mut stream = connect_with_retry(port);
-        stream
-            .write_all(b"GET /callback?code=auth-code-1&state=attacker HTTP/1.1\r\nHost: x\r\n\r\n")
-            .expect("the redirect should send");
-        let mut response = Vec::new();
-        let _ = stream.read_to_end(&mut response);
+        let forged = send_to_listener(
+            port,
+            "GET /callback?code=auth-code-1&state=attacker HTTP/1.1\r\nHost: x\r\n\r\n",
+        );
+        assert!(forged.starts_with("HTTP/1.1 400"), "{forged}");
+        assert!(
+            !listener.is_finished(),
+            "a forged state must not end the wait"
+        );
 
-        let result = listener.join().expect("the listener thread should finish");
-        assert!(result.is_err(), "a mismatched state must be rejected");
+        let real = send_to_listener(
+            port,
+            "GET /callback?code=auth-code-2&state=expected HTTP/1.1\r\nHost: x\r\n\r\n",
+        );
+        assert!(real.starts_with("HTTP/1.1 200"), "{real}");
+        let code = listener
+            .join()
+            .expect("the listener thread should finish")
+            .expect("the real redirect still arrives");
+        assert_eq!(code, "auth-code-2");
+    }
+
+    #[test]
+    fn stray_requests_do_not_end_the_sign_in() {
+        let port = free_port();
+        let client = client(port);
+        let listener = thread::spawn(move || {
+            client.listen(
+                "expected",
+                Duration::from_secs(10),
+                Duration::from_millis(300),
+                || false,
+            )
+        });
+
+        // Another page, as a web page's <img src> or a favicon would ask.
+        let other_page = send_to_listener(port, "GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert!(other_page.starts_with("HTTP/1.1 400"), "{other_page}");
+        // The callback without any state, and an error with a forged one.
+        for request in [
+            "GET /callback HTTP/1.1\r\n\r\n",
+            "GET /callback?error=access_denied&state=forged HTTP/1.1\r\n\r\n",
+            "POST /callback?code=c&state=expected HTTP/1.1\r\n\r\n",
+            "not http at all",
+        ] {
+            let answer = send_to_listener(port, request);
+            assert!(answer.starts_with("HTTP/1.1 400"), "{request}: {answer}");
+        }
+        // A connection that sends nothing until the read times out.
+        let silent = connect_with_retry(port);
+        thread::sleep(Duration::from_millis(500));
+        drop(silent);
+        assert!(
+            !listener.is_finished(),
+            "stray requests must not end the wait"
+        );
+
+        send_to_listener(
+            port,
+            "GET /callback?code=auth-code-3&state=expected HTTP/1.1\r\n\r\n",
+        );
+        let code = listener
+            .join()
+            .expect("the listener thread should finish")
+            .expect("the real redirect still arrives");
+        assert_eq!(code, "auth-code-3");
+    }
+
+    #[test]
+    fn only_stray_requests_end_at_the_deadline() {
+        let port = free_port();
+        let client = client(port);
+        let listener =
+            thread::spawn(move || client.listen_for_redirect("expected", Duration::from_secs(1)));
+        send_to_listener(port, "GET /callback?state=attacker HTTP/1.1\r\n\r\n");
+        let error = listener
+            .join()
+            .expect("the listener thread should finish")
+            .expect_err("no real redirect came");
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+    }
+
+    #[test]
+    fn a_provider_refusal_is_reported_as_what_it_is() {
+        let port = free_port();
+        let client = client(port);
+        let listener =
+            thread::spawn(move || client.listen_for_redirect("expected", Duration::from_secs(10)));
+        let page = send_to_listener(
+            port,
+            "GET /callback?error=access_denied&error_description=The+user+said+no&state=expected HTTP/1.1\r\n\r\n",
+        );
+        let error = listener
+            .join()
+            .expect("the listener thread should finish")
+            .expect_err("a refusal ends the sign-in");
+        let message = format!("{error:#}");
+        assert!(message.contains("access_denied"), "{message}");
+        assert!(message.contains("The user said no"), "{message}");
+        assert!(!message.contains("CSRF"), "{message}");
+        assert!(page.contains("did not finish"), "{page}");
+        assert!(page.contains("Zmail"), "{page}");
+    }
+
+    #[test]
+    fn the_browser_page_is_neutral_and_names_zmail() {
+        for (request, expected) in [
+            (
+                "GET /callback?code=c&state=s HTTP/1.1",
+                "Zmail has your sign-in",
+            ),
+            ("GET /callback?error=e&state=s HTTP/1.1", "did not finish"),
+            ("GET /other HTTP/1.1", "only for signing in to Zmail"),
+        ] {
+            let page = super::callback_page(&super::parse_callback(request, "s"));
+            assert!(page.contains(expected), "{request}: {page}");
+            assert!(!page.contains("terminal"), "{page}");
+            assert!(
+                !page.contains("zmail "),
+                "the product name is Zmail: {page}"
+            );
+            let length = page
+                .split("Content-Length: ")
+                .nth(1)
+                .and_then(|rest| rest.split("\r\n").next())
+                .and_then(|value| value.parse::<usize>().ok())
+                .expect("a content length");
+            let body = page.split("\r\n\r\n").nth(1).expect("a body");
+            assert_eq!(length, body.len());
+        }
+    }
+
+    #[test]
+    fn oauth_endpoints_must_be_https_except_on_loopback() {
+        for good in [
+            "https://login.example.com/oauth2/token",
+            " https://login.example.com/authorize ",
+            "http://127.0.0.1:8080/token",
+            "http://[::1]:8080/token",
+            "http://localhost/token",
+        ] {
+            assert!(super::check_endpoint(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "http://login.example.com/oauth2/token",
+            "http://127.0.0.1.example.com/token",
+            "ftp://login.example.com/token",
+            "login.example.com/token",
+            "https://",
+            "",
+        ] {
+            assert!(super::check_endpoint(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_token_request_refuses_cleartext_and_redirects() {
+        let error = super::refresh_access_token(
+            "http://login.example.com/token",
+            "test-client",
+            Some("secret"),
+            "refresh-1",
+        )
+        .expect_err("cleartext is refused before anything is sent");
+        assert!(format!("{error:#}").contains("https"), "{error:#}");
+
+        // A token endpoint that redirects elsewhere: the secret is not
+        // posted on, and the redirect is a failure.
+        let port = free_port();
+        let server = mock_token_error(
+            port,
+            "307 Temporary Redirect\r\nLocation: http://127.0.0.1:9/elsewhere",
+            "",
+        );
+        let error = retry_until_bound(|| {
+            super::refresh_access_token(
+                &format!("http://127.0.0.1:{port}/token"),
+                "test-client",
+                Some("secret"),
+                "refresh-1",
+            )
+        })
+        .expect_err("a redirect is not followed");
+        server.join().expect("the mock finishes");
+        let token_error = super::TokenError::find(&error).expect("a token error");
+        assert_eq!(token_error.status, 307);
+    }
+
+    #[test]
+    fn debug_output_never_shows_secrets() {
+        let tokens = super::TokenSet {
+            access_token: "access-secret".to_owned(),
+            refresh_token: Some("refresh-secret".to_owned()),
+            expires_in: Some(3600),
+        };
+        let mut client = client(8357);
+        client.client_secret = Some("client-secret".to_owned());
+        let pkce = Pkce::generate();
+        let request = client.authorization_request();
+        for (output, secrets) in [
+            (
+                format!("{tokens:?}"),
+                vec!["access-secret", "refresh-secret"],
+            ),
+            (format!("{client:?}"), vec!["client-secret"]),
+            (format!("{pkce:?}"), vec![pkce.verifier.as_str()]),
+            (format!("{request:?}"), vec![request.pkce.verifier.as_str()]),
+        ] {
+            for secret in secrets {
+                assert!(!output.contains(secret), "{output}");
+            }
+            assert!(output.contains("[redacted]"), "{output}");
+        }
+        assert!(format!("{client:?}").contains("test-client"));
     }
 
     /// Retries until the mock endpoint is bound; anything other than a
