@@ -259,8 +259,10 @@ fn launch_tui() -> Result<()> {
     let store = Arc::new(open_store_explaining(
         "the terminal UI unlocks the mail store with its key from the system keychain, as \
          the Zmail window does, and the keychain didn't answer. Over SSH, start or unlock \
-         the keychain service on that machine (Secret Service on Linux) and try again; the \
-         store never opens without its key",
+         the keychain service on that machine (Secret Service on Linux) and try again; on \
+         Linux, scripts/zmail-tui-headless.sh in Zmail's source does that for the terminal \
+         UI (README, \"Using Zmail over SSH or on a headless machine\"). The store never \
+         opens without its key",
     )?);
     let runtime = BackgroundRuntime::start(4)?;
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
