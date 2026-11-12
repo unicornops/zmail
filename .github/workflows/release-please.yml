@@ -7,24 +7,30 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag or branch to build (e.g. v0.6.0) - skips release-please and runs the asset build only"
+        description: "Release tag to rebuild and upload (e.g. v0.6.0), or with dry_run any tag or branch to build - skips release-please and runs the asset build only"
         required: true
         type: string
       dry_run:
-        description: "Build, sign, notarize, and create the DMG without uploading anything (for testing release changes)"
+        description: "Build, sign, notarize, and create the DMG without uploading or attesting anything (for testing release changes)"
         required: false
         type: boolean
         default: false
 
+# Read-only by default. Only release-please, the release PR job and
+# publish_release_assets write; the jobs that compile the dependency tree
+# and install tools (build_release_assets, release_screenshot) hold a
+# read-only token and hand their files over as workflow artefacts.
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+  contents: read
 
 jobs:
   release_please:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs['crates/zmail-app--release_created'] }}
       release_sha: ${{ steps.release.outputs['crates/zmail-app--sha'] }}
@@ -59,19 +65,83 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN != '' && secrets.RELEASE_PLEASE_TOKEN || github.token }}
         run: scripts/render-release-pr.sh
 
+  # What to build and where it goes: the tag release-please just created,
+  # or a manual run's tag_name. Anything that will be uploaded must be a
+  # release tag (vX.Y.Z) with an existing release, and is checked out as
+  # refs/tags/<tag>; a dry run may build any tag or branch, since it
+  # uploads nothing.
+  release_target:
+    name: Release Target
+    needs: release_please
+    if: |
+      !cancelled() &&
+      (needs.release_please.outputs.release_created == 'true' ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.target.outputs.tag }}
+      ref: ${{ steps.target.outputs.ref }}
+      publish: ${{ steps.target.outputs.publish }}
+    steps:
+      - name: Resolve and check the release tag
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
+          RELEASE_SHA: ${{ needs.release_please.outputs.release_sha }}
+          INPUT_TAG: ${{ inputs.tag_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            tag="$RELEASE_TAG"
+            ref="$RELEASE_SHA"
+            publish=true
+          elif [ "$DRY_RUN" = "true" ]; then
+            tag="$INPUT_TAG"
+            ref="$INPUT_TAG"
+            publish=false
+          else
+            tag="$INPUT_TAG"
+            ref="refs/tags/$INPUT_TAG"
+            publish=true
+          fi
+          # Every value lands in GITHUB_OUTPUT and in checkout's ref, so
+          # even a dry run's branch name must be a plain ref name.
+          if [[ ! "$ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+            echo "::error::The tag or branch to build is not a plain ref name:"
+            printf '%q\n' "$ref"
+            exit 1
+          fi
+          if [ "$publish" = "true" ]; then
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Only a release tag (vX.Y.Z) can be uploaded; use dry_run to build anything else:"
+              printf '%q\n' "$tag"
+              exit 1
+            fi
+            gh release view "$tag" --json tagName --jq .tagName
+          fi
+          {
+            echo "tag=$tag"
+            echo "ref=$ref"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building $ref (upload to a release: $publish)"
+
   release_screenshot:
     name: Release Screenshot
     needs: release_please
     if: needs.release_please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.release_please.outputs.release_sha }}
+          persist-credentials: false
 
       # GPUI renders through wgpu, which loads the Vulkan loader (libvulkan1)
       # and, failing that, EGL/GL at runtime; mesa-vulkan-drivers supplies
@@ -117,20 +187,17 @@ jobs:
             /tmp/zmail-release-screenshot-openbox.log
           if-no-files-found: ignore
 
-      - name: Upload screenshot release asset
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ needs.release_please.outputs.tag_name }}" artifacts/zmail-linux-screenshot.png --clobber
+      - name: Upload the screenshot for publishing
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zmail-linux-screenshot
+          path: artifacts/zmail-linux-screenshot.png
+          if-no-files-found: error
 
   build_release_assets:
-    needs: release_please
-    if: |
-      always() &&
-      (needs.release_please.outputs.release_created == 'true' ||
-       github.event_name == 'workflow_dispatch')
+    needs: release_target
+    if: ${{ !cancelled() && needs.release_target.result == 'success' }}
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -153,7 +220,8 @@ jobs:
         with:
           # A manual run builds the tag it was started with; otherwise the
           # release tag's commit.
-          ref: ${{ needs.release_please.outputs.release_sha || inputs.tag_name }}
+          ref: ${{ needs.release_target.outputs.ref }}
+          persist-credentials: false
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -244,69 +312,29 @@ jobs:
           $signTool = (Get-ChildItem "C:/Program Files (x86)/Windows Kits/10/bin/*/x64/signtool.exe" | Select-Object -Last 1).FullName
           & $signTool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 /f "$env:RUNNER_TEMP/cert.pfx" /p "$env:WINDOWS_SIGNING_PASSWORD" "target/release/${{ matrix.binary_name }}" "${{ matrix.artifact_path }}"
 
+      # The packaging tools are pinned (bump by hand): they run with this
+      # job's token and, on macOS, before the signing certificate exists.
       - name: Create Windows installer
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cargo install cargo-wix --locked
+          cargo install cargo-wix --version 0.3.9 --locked
           cargo wix -p zmail-app --no-build --nocapture
           mv target/wix/*.msi zmail-windows-x86_64.msi
 
       - name: Create Linux package
         if: runner.os == 'Linux'
         run: |
-          cargo install cargo-deb --locked
+          cargo install cargo-deb --version 3.8.0 --locked
           # cargo-deb builds with the release profile by default and rejects
           # a second --release; --locked keeps the Cargo.lock authoritative.
           cargo deb -p zmail-app --locked
           mv target/debian/*.deb zmail-linux-x86_64.deb
 
-      - name: Set up macOS code signing
-        if: runner.os == 'macOS'
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          if [ -z "$CERTIFICATE_BASE64" ]; then
-            # No certificate configured: fall back to an ad-hoc signature
-            # (see docs/phase5-hardening.md). The release must never block
-            # on absent signing credentials.
-            echo "SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-            echo "::notice::No Developer ID certificate configured; the macOS bundle falls back to an ad-hoc signature."
-            exit 0
-          fi
-
-          KEYCHAIN_NAME="zmail-build.keychain"
-          KEYCHAIN_PASSWORD="temporary_password_$(uuidgen)"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
-          security set-keychain-settings "$KEYCHAIN_NAME"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
-          security list-keychains -d user -s "$KEYCHAIN_NAME" $(security list-keychains -d user | sed s/\"//g)
-
-          CERTIFICATE_PATH="$RUNNER_TEMP/certificate.p12"
-          echo "$CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
-          security import "$CERTIFICATE_PATH" \
-            -P "$CERTIFICATE_PASSWORD" \
-            -A -t cert -f pkcs12 \
-            -k "$KEYCHAIN_NAME" \
-            -T /usr/bin/codesign \
-            -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
-
-          IDENTITY_COUNT=$(security find-identity -v -p codesigning "$KEYCHAIN_NAME" | grep -c "Developer ID Application" || echo "0")
-          if [ "$IDENTITY_COUNT" -eq "0" ]; then
-            echo "::error::No Developer ID Application certificate found after import"
-            exit 1
-          fi
-          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_NAME" | grep "Developer ID Application" | head -1 | sed -n 's/.*"\(.*\)".*/\1/p')
-
-          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
-          echo "KEYCHAIN_NAME=$KEYCHAIN_NAME" >> "$GITHUB_ENV"
-          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
-          echo "Developer ID certificate installed"
-
+      # Everything that installs or runs third-party code on macOS (Homebrew,
+      # the icon tools) happens before the Developer ID certificate is
+      # imported; after it only codesign, the notary tools and our own DMG
+      # script run.
       - name: Install the icon generation dependency
         if: runner.os == 'macOS'
         run: brew install librsvg
@@ -343,10 +371,11 @@ jobs:
             <key>CFBundleVersion</key><string>${VERSION}</string>
             <key>NSHighResolutionCapable</key><true/>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
-            <key>CFBundleDocumentTypes</key>
+            <key>CFBundleURLTypes</key>
             <array>
               <dict>
                 <key>CFBundleURLName</key><string>Email address</string>
+                <key>CFBundleTypeRole</key><string>Editor</string>
                 <key>CFBundleURLSchemes</key>
                 <array><string>mailto</string></array>
               </dict>
@@ -365,6 +394,59 @@ jobs:
             exit 1
           fi
           rm assets-info.json
+
+      - name: Set up macOS code signing
+        if: runner.os == 'macOS'
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CERTIFICATE_BASE64" ]; then
+            # No certificate configured: fall back to an ad-hoc signature
+            # (see docs/phase5-hardening.md). The release must never block
+            # on absent signing credentials.
+            echo "SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "::notice::No Developer ID certificate configured; the macOS bundle falls back to an ad-hoc signature."
+            exit 0
+          fi
+
+          KEYCHAIN_NAME="zmail-build.keychain"
+          KEYCHAIN_PASSWORD="temporary_password_$(uuidgen)"
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+          security set-keychain-settings "$KEYCHAIN_NAME"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+          security list-keychains -d user -s "$KEYCHAIN_NAME" $(security list-keychains -d user | sed s/\"//g)
+
+          CERTIFICATE_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_NAME" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+
+          IDENTITY_COUNT=$(security find-identity -v -p codesigning "$KEYCHAIN_NAME" | grep -c "Developer ID Application" || echo "0")
+          if [ "$IDENTITY_COUNT" -eq "0" ]; then
+            echo "::error::No Developer ID Application certificate found after import"
+            exit 1
+          fi
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_NAME" | grep "Developer ID Application" | head -1 | sed -n 's/.*"\(.*\)".*/\1/p')
+
+          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_NAME=$KEYCHAIN_NAME" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
+          echo "Developer ID certificate installed"
+
+      - name: Sign the macOS app bundle
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          bundle="Zmail.app"
           # Developer ID signature with the hardened runtime and a secure
           # timestamp so the bundle can notarize; an ad-hoc signature only
           # when no certificate is configured.
@@ -460,6 +542,7 @@ jobs:
             security delete-keychain "$KEYCHAIN_NAME" 2>/dev/null || true
           fi
 
+      # publish_release_assets takes the release assets from this artefact.
       - name: Upload workflow artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -469,22 +552,111 @@ jobs:
             zmail-linux-x86_64.deb
             zmail-macos.app.zip
             Zmail-*.dmg
+            zmail-windows-x86_64.msi
+          if-no-files-found: error
 
-      - name: Upload release asset
-        if: ${{ !inputs.dry_run }}
+  # The only job that can write to a release. It runs no project or
+  # dependency code: it takes the built files from the artefacts, writes
+  # SHA256SUMS-<OS> for each platform, attests every asset's build
+  # provenance and uploads them. A platform whose build failed is left out
+  # and the job fails after uploading the rest, so "Re-run failed jobs"
+  # (or release-backfill.yml for Windows) completes the release. A dry run
+  # stops after the checksums.
+  #
+  # Verify a downloaded asset with the GitHub CLI:
+  #   gh attestation verify zmail-linux-x86_64.deb --repo unicornops/zmail
+  publish_release_assets:
+    name: Publish Release Assets
+    needs: [release_target, build_release_assets, release_screenshot]
+    if: ${{ !cancelled() && needs.release_target.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download the build artefacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+
+      - name: Collect the release assets and write the checksums
+        id: collect
+        env:
+          BUILD_RESULT: ${{ needs.build_release_assets.result }}
+          SCREENSHOT_RESULT: ${{ needs.release_screenshot.result }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir release
+          incomplete=false
+          # collect OS ARTEFACT FILE...: every FILE (a glob matching one
+          # file) or nothing from that platform.
+          collect() {
+            local os="$1" dir="dist/$2" pattern
+            local -a files=() match
+            shift 2
+            if [ ! -d "$dir" ]; then
+              echo "::error::No $os build artefact; its assets are not published"
+              incomplete=true
+              return 0
+            fi
+            for pattern in "$@"; do
+              # shellcheck disable=SC2206 # the pattern is meant to glob
+              match=("$dir"/$pattern)
+              if [ "${#match[@]}" -ne 1 ] || [ ! -f "${match[0]}" ]; then
+                echo "::error::$os: expected one $pattern; its assets are not published"
+                incomplete=true
+                return 0
+              fi
+              files+=("${match[0]##*/}")
+            done
+            (cd "$dir" && sha256sum "${files[@]}") > "release/SHA256SUMS-$os"
+            for pattern in "${files[@]}"; do
+              cp "$dir/$pattern" release/
+            done
+          }
+          collect Linux zmail-linux-x86_64 zmail-linux-x86_64.tar.gz zmail-linux-x86_64.deb
+          collect macOS zmail-macos zmail-macos.tar.gz zmail-macos.app.zip 'Zmail-*.dmg'
+          collect Windows zmail-windows-x86_64 zmail-windows-x86_64.zip zmail-windows-x86_64.msi
+          # Only a release-please run takes a screenshot.
+          if [ "$SCREENSHOT_RESULT" != "skipped" ]; then
+            if [ -f dist/zmail-linux-screenshot/zmail-linux-screenshot.png ]; then
+              cp dist/zmail-linux-screenshot/zmail-linux-screenshot.png release/
+            else
+              echo "::error::No release screenshot; it is not published"
+              incomplete=true
+            fi
+          fi
+          if [ "$BUILD_RESULT" != "success" ]; then
+            incomplete=true
+          fi
+          files=(release/*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::Nothing was built"
+            exit 1
+          fi
+          (cd release && sha256sum -- *)
+          echo "incomplete=$incomplete" >> "$GITHUB_OUTPUT"
+
+      # One provenance attestation for every file uploaded below, signed
+      # with this run's OIDC identity (Sigstore) and stored by GitHub.
+      - name: Attest the release assets
+        if: needs.release_target.outputs.publish == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*
+
+      - name: Upload the release assets
+        if: needs.release_target.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.release_target.outputs.tag }}
+        run: gh release upload "$TAG" release/* --clobber
+
+      - name: Fail when a platform is missing
+        if: steps.collect.outputs.incomplete == 'true'
         run: |
-          assets="${{ matrix.artifact_path }}"
-          if [[ "${{ runner.os }}" == "Linux" && -f zmail-linux-x86_64.deb ]]; then
-            assets="$assets zmail-linux-x86_64.deb"
-          fi
-          if [[ "${{ runner.os }}" == "macOS" && -f zmail-macos.app.zip ]]; then
-            assets="$assets zmail-macos.app.zip Zmail-*.dmg"
-          fi
-          if [[ "${{ runner.os }}" == "Windows" && -f zmail-windows-x86_64.msi ]]; then
-            assets="$assets zmail-windows-x86_64.msi"
-          fi
-          sha256sum $assets > "SHA256SUMS-${{ runner.os }}"
-          gh release upload "${{ needs.release_please.outputs.tag_name || inputs.tag_name }}" $assets "SHA256SUMS-${{ runner.os }}" --clobber
+          echo "::error::Not every platform's assets were built; see the errors above"
+          exit 1
