@@ -349,6 +349,7 @@ pub fn store_signed_in<S: SignInSteps>(
 )> {
     let new_account = proton_account(username.trim(), account);
     let account_id = store.insert_account(&new_account)?;
+    crate::accounts::forget_stale_secrets(store, secrets.as_ref(), account_id)?;
     let store = store.clone();
     let session = sign_in.store(secrets.clone(), account_id);
     let stored = async move {

@@ -64,6 +64,17 @@ pub enum SecretSlot {
 }
 
 impl SecretSlot {
+    /// Every slot an account can have a secret in.
+    pub const ALL: [Self; 7] = [
+        Self::Password,
+        Self::ClientSecret,
+        Self::AccessToken,
+        Self::RefreshToken,
+        Self::ProtonUid,
+        Self::ProtonRefreshToken,
+        Self::ProtonKeyPass,
+    ];
+
     /// Returns the stable key fragment identifying the slot.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -97,6 +108,25 @@ pub trait SecretStore: Send + Sync {
     fn get_account_secret_from_slot(&self, account_id: i64, slot: SecretSlot) -> Result<String>;
     /// Removes the secret for an account in a named slot.
     fn delete_account_secret_in_slot(&self, account_id: i64, slot: SecretSlot) -> Result<()>;
+    /// Removes every secret kept for `account_id`, in every slot.
+    ///
+    /// Secrets are named by the account's row id, and a store hands an id
+    /// out again after its account is removed, as does a new store sharing
+    /// the keychain. So this runs before a new account's secrets are
+    /// stored: whatever an earlier account with the id left behind (a
+    /// removal whose keychain delete failed, another store's account) is
+    /// never read as the new account's. Every slot is tried; the first
+    /// failure is returned.
+    fn clear_account_secrets(&self, account_id: i64) -> Result<()> {
+        let mut cleared = Ok(());
+        for slot in SecretSlot::ALL {
+            let deleted = self.delete_account_secret_in_slot(account_id, slot);
+            if cleared.is_ok() {
+                cleared = deleted;
+            }
+        }
+        cleared
+    }
 }
 
 /// OS keychain-backed implementation used by the desktop app.
@@ -363,6 +393,39 @@ mod tests {
                 .get_account_secret_from_slot(4, SecretSlot::RefreshToken)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn clearing_an_account_empties_every_slot_and_no_other_account() {
+        let store = InMemorySecretStore::default();
+        for account in [4, 5] {
+            for slot in SecretSlot::ALL {
+                store
+                    .set_account_secret_in_slot(account, slot, "stale")
+                    .expect("stored");
+            }
+        }
+        store.clear_account_secrets(4).expect("cleared");
+        for slot in SecretSlot::ALL {
+            assert!(
+                store.get_account_secret_from_slot(4, slot).is_err(),
+                "{slot:?}"
+            );
+            assert!(
+                store.get_account_secret_from_slot(5, slot).is_ok(),
+                "{slot:?}"
+            );
+        }
+        // Clearing an account with nothing stored is not an error.
+        store.clear_account_secrets(4).expect("cleared again");
+    }
+
+    #[test]
+    fn every_slot_is_listed_once() {
+        let mut names: Vec<&str> = SecretSlot::ALL.iter().map(|slot| slot.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), SecretSlot::ALL.len());
     }
 
     #[test]

@@ -34,7 +34,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags};
 use zmail_security::vault::{
-    self, KeyId, StoreKey, StoreKeyError, StoreKeyRecord, StoreKeychain, StoreLocation,
+    self, KeyId, StoreKey, StoreKeyError, StoreKeyRecord, StoreKeychain, StoreLocation, private,
 };
 
 use crate::{LocalStore, connection, lock::StoreLock};
@@ -203,7 +203,7 @@ impl LocalStore {
     ) -> Result<(Self, Option<MigrationReport>), StoreOpenError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
+            private::create_private_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         // Encrypting and finishing a key rotation rewrite the store's files,
@@ -387,6 +387,10 @@ pub(crate) fn encrypt_plaintext_store_until(
     }
     let encrypting = suffixed(path, ".encrypting");
     remove_with_journals(&encrypting)?;
+    // The copy becomes the store: it starts as an empty file of its owner's
+    // alone, which SQLite fills in, and its journals take its mode.
+    private::ensure_private_file(&encrypting)
+        .with_context(|| format!("failed to create {}", encrypting.display()))?;
 
     // `ATTACH` inherits these flags, and it has to create the copy.
     let source = Connection::open_with_flags(
@@ -746,7 +750,8 @@ pub fn move_unreadable_store_aside(path: &Path) -> Result<PathBuf> {
         .unwrap_or_default()
         .as_nanos();
     let aside = parent.join(format!("unreadable-{nanos}"));
-    fs::create_dir_all(&aside).with_context(|| format!("failed to create {}", aside.display()))?;
+    private::create_private_dir_all(&aside)
+        .with_context(|| format!("failed to create {}", aside.display()))?;
     let mut moving = vec![
         path.to_owned(),
         suffixed(path, "-wal"),
@@ -785,7 +790,8 @@ pub fn move_replaced_store_aside(path: &Path) -> Result<PathBuf> {
         .unwrap_or_default()
         .as_nanos();
     let aside = parent.join(format!("replaced-{nanos}"));
-    fs::create_dir_all(&aside).with_context(|| format!("failed to create {}", aside.display()))?;
+    private::create_private_dir_all(&aside)
+        .with_context(|| format!("failed to create {}", aside.display()))?;
     let mut moving = vec![
         path.to_owned(),
         suffixed(path, "-wal"),
@@ -802,6 +808,50 @@ pub fn move_replaced_store_aside(path: &Path) -> Result<PathBuf> {
             .with_context(|| format!("failed to move {} to {}", from.display(), to.display()))?;
     }
     Ok(aside)
+}
+
+/// Makes the store's directory and files the owner's alone (0700 and 0600
+/// on Unix), for a store made before they were created that way, and makes
+/// sure the database itself exists so SQLite does not create it with the
+/// umask's mode. Runs at every open; best effort, so a store somewhere
+/// whose modes can't be changed opens as before.
+///
+/// The attachment files are only walked while their directory is still
+/// open to others, which it is once: afterwards the directory is private
+/// and new files are created private.
+pub(crate) fn make_store_private(database: &Path) {
+    let Some(parent) = database.parent() else {
+        return;
+    };
+    let _ = private::make_private(parent);
+    if matches!(
+        store_file_state(database),
+        Ok(StoreFileState::Missing | StoreFileState::Encrypted)
+    ) {
+        let _ = private::ensure_private_file(database);
+    }
+    for suffix in ["-wal", "-shm", "-journal", ".lock", ".sync.lock"] {
+        let _ = private::make_private(&suffixed(database, suffix));
+    }
+    let _ = private::make_private(&StoreKeyRecord::path_for(database));
+    for directory in [
+        crate::attachment_storage_dir(database),
+        parent.join("backups"),
+    ] {
+        if !private::is_open_to_others(&directory) {
+            continue;
+        }
+        // The files first: if this stops half way, the directory is still
+        // open to others and the next open starts again.
+        let tightened = fs::read_dir(&directory).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .all(|entry| private::make_private(&entry.path()).is_ok())
+        });
+        if tightened {
+            let _ = private::make_private(&directory);
+        }
+    }
 }
 
 /// The database's companion file `<path><suffix>`.
@@ -2106,5 +2156,166 @@ mod tests {
         );
         let _ = fs::remove_dir_all(directory);
         let _ = fs::remove_dir_all(elsewhere);
+    }
+
+    /// Every file and directory under `directory` that its group or others
+    /// can reach, with its mode.
+    #[cfg(unix)]
+    fn open_to_others(directory: &Path) -> Vec<(PathBuf, u32)> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut found = Vec::new();
+        let mut pending = vec![directory.to_owned()];
+        while let Some(path) = pending.pop() {
+            let metadata = fs::symlink_metadata(&path).expect("readable");
+            let mode = metadata.permissions().mode() & 0o7777;
+            if mode & 0o077 != 0 {
+                found.push((path.clone(), mode));
+            }
+            if metadata.is_dir() {
+                pending.extend(
+                    fs::read_dir(&path)
+                        .expect("listed")
+                        .flatten()
+                        .map(|entry| entry.path()),
+                );
+            }
+        }
+        found
+    }
+
+    /// Uses everything that writes into the data directory: mail (so the
+    /// database has a WAL and its index), an attachment, a draft copy, a
+    /// backup and the sync lock.
+    #[cfg(unix)]
+    fn use_every_file(store: &LocalStore, directory: &Path) -> crate::SyncLock {
+        let account = seed(store);
+        let target = store.sync_target(account).expect("target").expect("exists");
+        let storage_path = target
+            .blobs
+            .write("incoming-INBOX-3-0-ledger.txt", ATTACHMENT_PHRASE)
+            .expect("written");
+        seed_attachment(store, account, &storage_path);
+        store
+            .create_backup(directory.join("backups"), 3)
+            .expect("backed up");
+        store
+            .try_sync_lock()
+            .expect("the lock file opens")
+            .expect("nothing else syncs")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn everything_in_the_data_directory_is_created_for_the_owner_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = temp_dir("modes").join("data");
+        let path = directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        let sync_lock = use_every_file(&store, &directory);
+
+        // While the store is open, so the WAL and its index are there:
+        // SQLite gives them the database's mode.
+        for name in [
+            "zmail.sqlite3",
+            "zmail.sqlite3-wal",
+            "zmail.sqlite3-shm",
+            "zmail.sqlite3.lock",
+            "zmail.sqlite3.sync.lock",
+            "zmail.store-key.json",
+        ] {
+            let mode = fs::metadata(directory.join(name))
+                .unwrap_or_else(|error| panic!("{name}: {error}"))
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(mode, 0o600, "{name}");
+        }
+        for name in ["", "attachments", "backups"] {
+            let mode = fs::metadata(directory.join(name))
+                .unwrap_or_else(|error| panic!("{name}: {error}"))
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(mode, 0o700, "{name:?}");
+        }
+        assert_eq!(open_to_others(&directory), Vec::new());
+        assert!(
+            fs::read_dir(directory.join("attachments"))
+                .expect("listed")
+                .count()
+                > 0
+        );
+        assert_eq!(
+            fs::read_dir(directory.join("backups"))
+                .expect("listed")
+                .count(),
+            1
+        );
+        drop(sync_lock);
+        drop(store);
+        connection::close_dropped_store_connections();
+
+        // A key rotation rewrites the database and every file.
+        LocalStore::rotate_key(&path, &keychain, &no_progress).expect("rotates");
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert_eq!(open_to_others(&directory), Vec::new());
+        drop(store);
+        let _ = fs::remove_dir_all(directory.parent().expect("parent"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_from_before_private_modes_is_tightened_when_it_opens() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = temp_dir("loosened").join("data");
+        let path = directory.join("zmail.sqlite3");
+        let keychain = InMemorySecretStore::default();
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        let account = seed(&store);
+        drop(use_every_file(&store, &directory));
+        drop(store);
+        connection::close_dropped_store_connections();
+
+        // As an older Zmail left it under the usual umask.
+        let mut pending = vec![directory.clone()];
+        while let Some(entry) = pending.pop() {
+            let is_dir = entry.is_dir();
+            let mode = if is_dir { 0o755 } else { 0o644 };
+            fs::set_permissions(&entry, fs::Permissions::from_mode(mode)).expect("loosened");
+            if is_dir {
+                pending.extend(
+                    fs::read_dir(&entry)
+                        .expect("listed")
+                        .flatten()
+                        .map(|entry| entry.path()),
+                );
+            }
+        }
+        assert!(open_to_others(&directory).len() > 6);
+
+        let (store, _) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert!(finds_secret(&store, account), "the mail is as it was");
+        assert_eq!(open_to_others(&directory), Vec::new());
+        drop(store);
+        let _ = fs::remove_dir_all(directory.parent().expect("parent"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_migrated_store_and_its_files_are_for_the_owner_alone() {
+        let directory = temp_dir("migrated-modes").join("data");
+        fs::create_dir_all(&directory).expect("created");
+        let path = directory.join("zmail.sqlite3");
+        let source = LocalStore::open_ephemeral().expect("opens");
+        seed(&source);
+        plaintext_copy(&source, &path);
+        drop(source);
+        let keychain = InMemorySecretStore::default();
+        let (store, report) = LocalStore::unlock(&path, &keychain, &no_progress).expect("unlocks");
+        assert!(report.is_some());
+        assert_eq!(open_to_others(&directory), Vec::new());
+        drop(store);
+        let _ = fs::remove_dir_all(directory.parent().expect("parent"));
     }
 }

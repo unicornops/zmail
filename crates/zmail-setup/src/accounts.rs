@@ -53,6 +53,7 @@ pub fn store_account(
 ) -> Result<(i64, String)> {
     let (account, secret) = build_account_from_form(form)?;
     let account_id = store.insert_account(&account)?;
+    forget_stale_secrets(store, secrets.as_ref(), account_id)?;
     let message = match secret {
         AccountSetupSecret::Password(secret) => {
             secrets.set_account_secret(account_id, &secret)?;
@@ -103,6 +104,7 @@ pub fn store_authorized_account(
         anyhow::bail!("this account signs in with a password");
     };
     let account_id = store.insert_account(&account)?;
+    forget_stale_secrets(store, secrets, account_id)?;
     if let Err(error) =
         zmail_sync::persist_oauth2_grant(store, secrets, account_id, &client, tokens)
     {
@@ -114,6 +116,28 @@ pub fn store_authorized_account(
         let _ = sync_service.sync_watchers();
     }
     Ok((account_id, format!("{} added.", account.display_name)))
+}
+
+/// Clears whatever the keychain still holds under a new account's id, in
+/// every slot, before the account's own secrets go in.
+///
+/// Secrets are named by account id, and an id is handed out again after
+/// its account is removed (or by another store sharing the keychain). An
+/// earlier account's token left under the id would otherwise be read as
+/// the new account's and sent to the new account's server. An account
+/// whose slots can't be cleared is not kept.
+pub(crate) fn forget_stale_secrets(
+    store: &LocalStore,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+) -> Result<()> {
+    if let Err(error) = secrets.clear_account_secrets(account_id) {
+        let _ = store.delete_account(account_id);
+        return Err(error.context(
+            "Zmail could not clear earlier sign-in details for this account from the keychain",
+        ));
+    }
+    Ok(())
 }
 
 /// Runs the OAuth2 browser flow on a background thread and stores the
@@ -591,6 +615,44 @@ mod tests {
         );
         let account = &store.list_accounts().expect("accounts")[0];
         assert_eq!(account.username, "jane@example.test");
+    }
+
+    #[test]
+    fn a_new_account_never_inherits_secrets_left_under_its_id() {
+        let store = Arc::new(LocalStore::open_ephemeral().expect("a store"));
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        // What an earlier account with the first id left behind: its
+        // removal's keychain delete failed, or another store sharing the
+        // keychain has an account with that id.
+        for slot in SecretSlot::ALL {
+            secrets
+                .set_account_secret_in_slot(1, slot, "someone else's")
+                .expect("kept");
+        }
+        let form = crate::form::AccountFormValues {
+            name: "Jane".to_owned(),
+            email: "jane@example.test".to_owned(),
+            password: "app-password".to_owned(),
+            imap_host: "imap.example.test".to_owned(),
+            smtp_host: "smtp.example.test".to_owned(),
+            ..crate::form::AccountFormValues::default()
+        };
+        let (account_id, _) = super::store_account(&store, &secrets, None, &form).expect("stored");
+        assert_eq!(account_id, 1, "the id is the one with secrets left over");
+        assert_eq!(
+            secrets.get_account_secret(account_id).expect("kept"),
+            "app-password"
+        );
+        for slot in SecretSlot::ALL {
+            if slot != SecretSlot::Password {
+                assert!(
+                    secrets
+                        .get_account_secret_from_slot(account_id, slot)
+                        .is_err(),
+                    "{slot:?} is not inherited"
+                );
+            }
+        }
     }
 
     #[test]

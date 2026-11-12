@@ -150,6 +150,9 @@ fn rekey_files(
     };
     let rekeying = suffixed(path, ".rekeying");
     remove_with_journals(&rekeying)?;
+    // The copy becomes the store: see the same step of a migration.
+    vault::private::ensure_private_file(&rekeying)
+        .with_context(|| format!("failed to create {}", rekeying.display()))?;
     // Applies any pending schema migration first, so the copy is current.
     let store = LocalStore::open_with_lock(path.to_owned(), old_key.clone(), lock.clone())?;
     let old_vault = store.vault.clone();
