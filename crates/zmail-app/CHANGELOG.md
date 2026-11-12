@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.34.0](https://github.com/unicornops/zmail/compare/v0.33.1...v0.34.0) (2026-11-12)
+
+
+### Features
+
+* **ui:** settings for HTML as text, notifications and indexing; lift imported danger colour to AA ([#447](https://github.com/unicornops/zmail/issues/447)) ([3e88a64](https://github.com/unicornops/zmail/commit/3e88a64d56ce8dc07f4b5a603c30751fd87b76bb))
+* **ui:** test the sign-in before the GUI saves an account ([#438](https://github.com/unicornops/zmail/issues/438)) ([bc2f472](https://github.com/unicornops/zmail/commit/bc2f472f155b1c4fe67d1197077d9e8227036ba9))
+* **store:** mark saved attachments as downloaded from the internet ([#434](https://github.com/unicornops/zmail/issues/434)) ([520bc54](https://github.com/unicornops/zmail/commit/520bc54f4434f39e6a532039f2898d4131c135a6))
+* **cli:** list mailboxes, move by name or role, test accounts before storing them ([#433](https://github.com/unicornops/zmail/issues/433)) ([5f7cded](https://github.com/unicornops/zmail/commit/5f7cded99f2ac06d89050bb6af6bf28b2b9f8fb1))
+
+### Bug Fixes
+
+* **ui:** let Tab reach the buttons inside a pane, with F6 and Ctrl+Tab for panes ([#450](https://github.com/unicornops/zmail/issues/450)) ([2ee9826](https://github.com/unicornops/zmail/commit/2ee982654e53dd06bfa5a2c1a44eb96a48a3fb36))
+* **ui:** say when a message download or a server search fails ([#449](https://github.com/unicornops/zmail/issues/449)) ([39a976a](https://github.com/unicornops/zmail/commit/39a976aba772b459a4ca5573a9348544a55d7cee))
+* ask before deleting for good, and keep mail commands off the Outbox ([#442](https://github.com/unicornops/zmail/issues/442)) ([3816608](https://github.com/unicornops/zmail/commit/38166085d06fdb528b3a758aeab4562f1eeb14c7))
+* **ui:** keep deep conversations open, drop sent mail from Drafts, add Discard Draft ([#439](https://github.com/unicornops/zmail/issues/439)) ([414a24e](https://github.com/unicornops/zmail/commit/414a24ec47971b695db8c07dd8453fa3d4d4fd75))
+* **ui:** copy attachments in the background and say how large they are ([#448](https://github.com/unicornops/zmail/issues/448)) ([32989c7](https://github.com/unicornops/zmail/commit/32989c728e63aa8cbda4d2bf8076bda6dedf4cf6))
+* **ui:** check a draft before Send queues it, and say where a closed draft went ([#446](https://github.com/unicornops/zmail/issues/446)) ([84b166d](https://github.com/unicornops/zmail/commit/84b166df7a85d0c22d7e7245e5fd2fc63d593aac))
+* **ui:** say how remote content is allowed, and list the senders always allowed ([#445](https://github.com/unicornops/zmail/issues/445)) ([8e6adfa](https://github.com/unicornops/zmail/commit/8e6adfadabb8ebc7600e1e0740b4ed75398399d6))
+* **ui:** make account recovery do what it says ([#441](https://github.com/unicornops/zmail/issues/441)) ([9dc4bf7](https://github.com/unicornops/zmail/commit/9dc4bf7355c5ab0a889ba999d3f99add3dbc2bd0))
+* **autodiscover:** hold back SRV targets outside the mail domain ([#440](https://github.com/unicornops/zmail/issues/440)) ([5e706ea](https://github.com/unicornops/zmail/commit/5e706eafdc5b390cc485800ffdaf2921863a84f5))
+* **proton:** stop sends on unverifiable contact cards, sign removed sessions out ([#428](https://github.com/unicornops/zmail/issues/428)) ([5e8a454](https://github.com/unicornops/zmail/commit/5e8a454b22d9cb66c2efb353b8e8f800b7f5cfd1))
+* **deps:** update rusqlite to 0.42 for SQLCipher 4.20.0 (RUSTSEC-2026-0502) ([#455](https://github.com/unicornops/zmail/issues/455)) ([4e53182](https://github.com/unicornops/zmail/commit/4e53182760d065d58fee58506ce3030a5534583e))
+* **proton:** refuse unprotected keys, bound decrypted data ([#425](https://github.com/unicornops/zmail/issues/425)) ([b6ec734](https://github.com/unicornops/zmail/commit/b6ec734530b80a97fe37aa9638fca00d8dffe983))
+* **store:** keep the data directory and its files to their owner ([#430](https://github.com/unicornops/zmail/issues/430)) ([080b037](https://github.com/unicornops/zmail/commit/080b037339bd6e61d1fa4ebbfaf2a0e7bcb2af5a))
+* **smtp:** refuse envelope addresses that could break out of MAIL FROM or RCPT TO ([#427](https://github.com/unicornops/zmail/issues/427)) ([579b424](https://github.com/unicornops/zmail/commit/579b42495e32b220a085d5f3a1c1e2e9cd4abb3b))
+* **auth:** harden the OAuth sign-in listener and token requests ([#437](https://github.com/unicornops/zmail/issues/437)) ([492d402](https://github.com/unicornops/zmail/commit/492d402ff8aea74aa54425c617c291829c332ed5))
+* **security:** tighten remote images and filter notification text ([#432](https://github.com/unicornops/zmail/issues/432)) ([b1e169e](https://github.com/unicornops/zmail/commit/b1e169e8f68b136fb893ef4d38c9d39d22f53d38))
+* **release:** stop the release PR script dying on a closed pipe ([#451](https://github.com/unicornops/zmail/issues/451)) ([801ce1e](https://github.com/unicornops/zmail/commit/801ce1ed762db28851f1bfe91a0ed2f48665f875))
+* **store:** refuse a plaintext database where an encrypted store was ([#426](https://github.com/unicornops/zmail/issues/426)) ([eafa814](https://github.com/unicornops/zmail/commit/eafa81467396b6a76117789a34ab870123efd270))
+* **jmap:** sign in at the stored session URL, not one with /.well-known/jmap appended ([#424](https://github.com/unicornops/zmail/issues/424)) ([e9fa7dc](https://github.com/unicornops/zmail/commit/e9fa7dc94c140e358c4b6a6dfaddb5ec0673ea5c))
+* **imap,smtp:** fail stalled connections instead of hanging ([#435](https://github.com/unicornops/zmail/issues/435)) ([ae454ec](https://github.com/unicornops/zmail/commit/ae454ec00109cdc3f11e09c929393c98a6440c50))
+* **tui:** readable status messages, old-year dates and clearer ways out ([#436](https://github.com/unicornops/zmail/issues/436)) ([928fe2a](https://github.com/unicornops/zmail/commit/928fe2ab567ce30c55a3173abe43aa0b9f9b24f4))
+* **security:** read senders and link text as the reader shows them ([#429](https://github.com/unicornops/zmail/issues/429)) ([956be13](https://github.com/unicornops/zmail/commit/956be1358c297d9f71f7693011f4a85d3320f018))
+* **cli:** parse arguments strictly, filter mail output, disable core dumps ([#431](https://github.com/unicornops/zmail/issues/431)) ([73215d9](https://github.com/unicornops/zmail/commit/73215d9446025f1f515a747043850b1ecf0e4901))
+* **deps:** update rustix to 1.1.6 ([#444](https://github.com/unicornops/zmail/issues/444)) ([6e4bdb1](https://github.com/unicornops/zmail/commit/6e4bdb1c10ed47a3955bf5373c0f9a25be297a9b))
+
 ## [0.33.1](https://github.com/unicornops/zmail/compare/v0.33.0...v0.33.1) (2026-11-09)
 
 
