@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.34.0](https://github.com/unicornops/zmail/compare/v0.33.1...v0.34.0) (2026-11-12)
+
+
+### Features
+
+* **cli:** list mailboxes, move by name or role, test accounts before storing them ([#433](https://github.com/unicornops/zmail/issues/433)) ([5f7cded](https://github.com/unicornops/zmail/commit/5f7cded99f2ac06d89050bb6af6bf28b2b9f8fb1))
+* **ui:** settings for HTML as text, notifications and indexing; lift imported danger colour to AA ([#447](https://github.com/unicornops/zmail/issues/447)) ([3e88a64](https://github.com/unicornops/zmail/commit/3e88a64d56ce8dc07f4b5a603c30751fd87b76bb))
+* **ui:** test the sign-in before the GUI saves an account ([#438](https://github.com/unicornops/zmail/issues/438)) ([bc2f472](https://github.com/unicornops/zmail/commit/bc2f472f155b1c4fe67d1197077d9e8227036ba9))
+
+
+### Bug Fixes
+
+* ask before deleting for good, and keep mail commands off the Outbox ([#442](https://github.com/unicornops/zmail/issues/442)) ([3816608](https://github.com/unicornops/zmail/commit/38166085d06fdb528b3a758aeab4562f1eeb14c7))
+* **cli:** parse arguments strictly, filter mail output, disable core dumps ([#431](https://github.com/unicornops/zmail/issues/431)) ([73215d9](https://github.com/unicornops/zmail/commit/73215d9446025f1f515a747043850b1ecf0e4901))
+* **proton:** stop sends on unverifiable contact cards, sign removed sessions out ([#428](https://github.com/unicornops/zmail/issues/428)) ([5e8a454](https://github.com/unicornops/zmail/commit/5e8a454b22d9cb66c2efb353b8e8f800b7f5cfd1))
+* **store:** refuse a plaintext database where an encrypted store was ([#426](https://github.com/unicornops/zmail/issues/426)) ([eafa814](https://github.com/unicornops/zmail/commit/eafa81467396b6a76117789a34ab870123efd270))
+* **tui:** readable status messages, old-year dates and clearer ways out ([#436](https://github.com/unicornops/zmail/issues/436)) ([928fe2a](https://github.com/unicornops/zmail/commit/928fe2ab567ce30c55a3173abe43aa0b9f9b24f4))
+* **ui:** check a draft before Send queues it, and say where a closed draft went ([#446](https://github.com/unicornops/zmail/issues/446)) ([84b166d](https://github.com/unicornops/zmail/commit/84b166df7a85d0c22d7e7245e5fd2fc63d593aac))
+* **ui:** make account recovery do what it says ([#441](https://github.com/unicornops/zmail/issues/441)) ([9dc4bf7](https://github.com/unicornops/zmail/commit/9dc4bf7355c5ab0a889ba999d3f99add3dbc2bd0))
+* **ui:** say how remote content is allowed, and list the senders always allowed ([#445](https://github.com/unicornops/zmail/issues/445)) ([8e6adfa](https://github.com/unicornops/zmail/commit/8e6adfadabb8ebc7600e1e0740b4ed75398399d6))
+* **ui:** say when a message download or a server search fails ([#449](https://github.com/unicornops/zmail/issues/449)) ([39a976a](https://github.com/unicornops/zmail/commit/39a976aba772b459a4ca5573a9348544a55d7cee))
+
 ## [0.33.1](https://github.com/unicornops/zmail/compare/v0.33.0...v0.33.1) (2026-11-09)
 
 
