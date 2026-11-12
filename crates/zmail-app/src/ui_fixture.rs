@@ -151,6 +151,9 @@ pub(crate) enum FixtureView {
     SettingsKeyboard,
     /// The Settings window on Privacy.
     SettingsPrivacy,
+    /// Settings → Privacy listing senders whose remote content is always
+    /// loaded, on two of three accounts.
+    SettingsPrivacySenders,
     /// The Settings window on Sending.
     SettingsSending,
     /// The Settings window on About & Diagnostics, with three accounts,
@@ -255,6 +258,7 @@ impl FixtureView {
             "settings-appearance" => Self::SettingsAppearance,
             "settings-keyboard" => Self::SettingsKeyboard,
             "settings-privacy" => Self::SettingsPrivacy,
+            "settings-privacy-senders" => Self::SettingsPrivacySenders,
             "settings-sending" => Self::SettingsSending,
             "settings-about" => Self::SettingsAbout,
             "unlock-encrypting" => Self::Unlock(UnlockFixture::Encrypting),
@@ -467,6 +471,10 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
             InitialView::Settings(SettingsSection::Keyboard)
         }
         FixtureView::SettingsPrivacy => InitialView::Settings(SettingsSection::Privacy),
+        FixtureView::SettingsPrivacySenders => {
+            seed_allowed_senders(store, account_id, now)?;
+            InitialView::Settings(SettingsSection::Privacy)
+        }
         FixtureView::SettingsSending => InitialView::Settings(SettingsSection::Sending),
         FixtureView::SettingsAbout => {
             seed_more_accounts(store, account_id, now)?;
@@ -619,6 +627,29 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
 }
 
 /// The id of the thread called `subject` in the mailbox with `role`.
+/// "Always for this sender" on the Work invoice and newsletter and the
+/// Personal ferry booking, as the reader stores it.
+fn seed_allowed_senders(store: &LocalStore, work_id: i64, now: u64) -> Result<()> {
+    seed_more_accounts(store, work_id, now)?;
+    let personal = store
+        .list_accounts()?
+        .into_iter()
+        .find(|account| account.display_name == "Personal")
+        .context("the fixture Personal account is missing")?
+        .id;
+    for (account_id, subject) in [
+        (work_id, "Invoice INV-20431 for September"),
+        (work_id, "This week in open source mail clients"),
+        (personal, "Ferry tickets for August"),
+    ] {
+        let thread = store
+            .thread_view(thread_id(store, account_id, "inbox", subject)?)?
+            .with_context(|| format!("the fixture thread {subject:?} is missing"))?;
+        store.set_remote_content_for_message_sender(thread.messages[0].id, true)?;
+    }
+    Ok(())
+}
+
 fn thread_id(store: &LocalStore, account_id: i64, role: &str, subject: &str) -> Result<i64> {
     let mailbox = store
         .mailbox_id_by_role(account_id, role)?
@@ -1692,6 +1723,7 @@ mod tests {
             "settings-appearance",
             "settings-keyboard",
             "settings-privacy",
+            "settings-privacy-senders",
             "settings-sending",
             "settings-about",
         ] {
@@ -1716,6 +1748,19 @@ mod tests {
         assert_eq!(parse_text_size(Some("200"))?, Some(200));
         assert!(parse_text_size(Some("120")).is_err());
         assert!(parse_text_size(Some("big")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn settings_privacy_senders_lists_three_senders_on_two_accounts() -> Result<()> {
+        let (store, _) = seeded(FixtureView::SettingsPrivacySenders)?;
+        let senders = store.list_remote_content_senders()?;
+        assert_eq!(senders.len(), 3);
+        let accounts = senders
+            .iter()
+            .map(|sender| sender.account_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(accounts.len(), 2);
         Ok(())
     }
 

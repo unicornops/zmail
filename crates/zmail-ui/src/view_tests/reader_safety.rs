@@ -192,6 +192,64 @@ fn remote_content_loads_per_message_or_always_for_the_sender(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn privacy_lists_always_allowed_senders_and_removes_them(cx: &mut TestAppContext) {
+    let (_view, cx, harness) =
+        open_thread(cx, thread("remote", "News <news@example.test>", None, true));
+    let (_, message_id) = only_thread(&harness);
+    let account_id = harness.store.list_accounts().expect("the accounts load")[0].id;
+
+    // Nobody is always allowed yet: Privacy says so.
+    cx.update(|_, cx| crate::settings::open(Some(SettingsSection::Privacy), cx));
+    cx.run_until_parked();
+    let (root, mut window_cx) = super::settings::settings_window(cx);
+    let privacy = root.read_with(&window_cx, |root, _| root.privacy().clone());
+    let listed = |window_cx: &mut VisualTestContext| {
+        privacy.read_with(window_cx, |privacy, _| {
+            privacy
+                .allowed_senders()
+                .iter()
+                .map(|sender| (sender.account_id, sender.address.clone()))
+                .collect::<Vec<_>>()
+        })
+    };
+    assert!(listed(&mut window_cx).is_empty());
+    assert!(window_cx.debug_bounds("allowed-senders-empty").is_some());
+
+    // Always for this sender in the main window: the open section picks
+    // it up on its next refresh.
+    click_on(format!("remote-content-always-{message_id}"), cx);
+    root.update(&mut window_cx, |root, cx| root.refresh(cx));
+    window_cx.run_until_parked();
+    assert_eq!(
+        listed(&mut window_cx),
+        vec![(account_id, "news@example.test".to_owned())]
+    );
+    assert!(window_cx.debug_bounds("allowed-senders-empty").is_none());
+
+    // Remove: stored no more, the list is empty again, and the reader
+    // shows the message blocked with both choices back.
+    click_on(
+        format!("allowed-sender-remove-{account_id}-news@example.test"),
+        &mut window_cx,
+    );
+    cx.run_until_parked();
+    assert!(
+        !harness
+            .store
+            .remote_content_allowed_for_sender(account_id, "news@example.test")
+            .expect("the choice loads")
+    );
+    assert!(listed(&mut window_cx).is_empty());
+    assert!(window_cx.debug_bounds("allowed-senders-empty").is_some());
+    assert!(
+        root.read_with(&window_cx, |root, cx| root.toast_messages(cx))
+            .contains(&"Remote content from news@example.test is blocked again.".to_owned())
+    );
+    assert!(drawn(format!("remote-content-load-{message_id}"), cx));
+    assert!(drawn(format!("remote-content-always-{message_id}"), cx));
+}
+
+#[gpui::test]
 fn a_suspect_sender_is_never_trusted_for_remote_content(cx: &mut TestAppContext) {
     // A look-alike domain (Danger): only this message's content can load,
     // even after Looks safe.

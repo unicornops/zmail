@@ -10,7 +10,7 @@
 //! | `accounts` | each account's status, identities (edit, add, remove, make primary), colour, cache budget, Re-authenticate and Remove; Add Account |
 //! | `appearance` | theme mode, imported Zed theme, row density, reading pane |
 //! | `keyboard` | Standard or Gmail shortcuts, and the shortcut list with search |
-//! | `privacy` | remote content (always blocked), the sender-warning level |
+//! | `privacy` | remote content (blocked until allowed) and the senders always allowed, the sender-warning level |
 //! | `sending` | the undo-send delay |
 //! | `about` | version, upstream pins, queues, undelivered changes, Copy diagnostics |
 //!
@@ -458,10 +458,8 @@ impl SettingsWindow {
                 .accounts
                 .update(cx, |accounts, cx| accounts.refresh(cx)),
             SettingsSection::About => self.about.update(cx, |about, cx| about.refresh(cx)),
-            SettingsSection::Appearance
-            | SettingsSection::Keyboard
-            | SettingsSection::Privacy
-            | SettingsSection::Sending => {}
+            SettingsSection::Privacy => self.privacy.update(cx, |privacy, cx| privacy.refresh(cx)),
+            SettingsSection::Appearance | SettingsSection::Keyboard | SettingsSection::Sending => {}
         }
     }
 
