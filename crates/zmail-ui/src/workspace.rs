@@ -41,11 +41,11 @@ use crate::account_setup::{
 };
 use crate::actions::{
     AddAccount, AlwaysLoadRemoteContent, Archive, BlockRemoteContent, Cancel, Delete,
-    DismissSenderWarning, FocusNextPane, FocusPreviousPane, FocusSearch, Forward, GoBack,
-    GoToInbox, LoadRemoteContent, MoveToMailbox, NewMessage, Reply, ReplyAll, ReplyToMessage,
-    RetryOutbox, SaveAttachments, SelectNext, SelectPrevious, ShowDrafts, ShowKeyboardShortcuts,
-    ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme,
-    Undo,
+    DismissSenderWarning, FocusNextControl, FocusNextPane, FocusPreviousControl, FocusPreviousPane,
+    FocusSearch, Forward, GoBack, GoToInbox, LoadRemoteContent, MoveToMailbox, NewMessage, Reply,
+    ReplyAll, ReplyToMessage, RetryOutbox, SaveAttachments, SelectNext, SelectPrevious, ShowDrafts,
+    ShowKeyboardShortcuts, ShowMail, ShowOutbox, SyncAccount, SyncAll, ToggleFlag, ToggleRead,
+    ToggleSidebar, ToggleTheme, Undo,
 };
 use crate::app_menu::AppMenuButton;
 use crate::components::{
@@ -283,6 +283,18 @@ impl WorkspaceView {
             window,
             |this: &mut WorkspaceView, window: &mut Window, cx: &mut Context<Self>| {
                 this.on_window_resized(f32::from(window.viewport_size().width), window, cx);
+            },
+        )
+        .detach();
+
+        // A button that goes away while it has focus (Load remote content,
+        // Retry now) leaves focus in its pane, so Tab carries on there.
+        cx.on_focus_lost(
+            window,
+            |_: &mut WorkspaceView, window: &mut Window, cx: &mut Context<Self>| {
+                if let Some(target) = window.focus_lost_restore_target(cx) {
+                    window.focus(&target, cx);
+                }
             },
         )
         .detach();
@@ -2867,6 +2879,10 @@ impl WorkspaceView {
             self.status_message = None;
             cx.notify();
         } else if self.go_back_to_list(window, cx) {
+        } else if self.focus_is_away_from_the_list(window, cx) {
+            // From a button in a pane, the sidebar or the reader: back to
+            // the list, where the arrows move through the conversations.
+            self.focus_pane(Pane::MessageList, window, cx);
         } else if matches!(self.list_mode, ListMode::Search) {
             self.end_search(cx);
         }
@@ -2875,6 +2891,18 @@ impl WorkspaceView {
     // -----------------------------------------------------------------------
     // Pane focus
     // -----------------------------------------------------------------------
+
+    /// Whether keyboard focus is on a control in the message list, or in
+    /// the sidebar or the reader: where Escape takes it back to the list.
+    /// Compose keeps Escape for itself.
+    fn focus_is_away_from_the_list(&self, window: &Window, cx: &App) -> bool {
+        match self.focused_pane(window, cx) {
+            Some(Pane::MessageList) => !self.message_list.focus_handle(cx).is_focused(window),
+            Some(Pane::Sidebar) => true,
+            Some(Pane::Detail) => matches!(self.detail_mode, DetailMode::Reader),
+            None => false,
+        }
+    }
 
     /// The focus handle of whichever pane the detail area shows.
     fn detail_focus_handle(&self, cx: &App) -> FocusHandle {
@@ -2940,6 +2968,66 @@ impl WorkspaceView {
             None => Pane::Detail,
         };
         self.focus_pane(next, window, cx);
+    }
+
+    /// The focus handle of `pane` itself: where its arrow keys work.
+    fn pane_focus_handle(&self, pane: Pane, cx: &App) -> FocusHandle {
+        match pane {
+            Pane::Sidebar => self.sidebar.focus_handle(cx),
+            Pane::MessageList => self.message_list.focus_handle(cx),
+            Pane::Detail => self.detail_focus_handle(cx),
+        }
+    }
+
+    /// Tab and Shift+Tab: the next or previous control (a button, a
+    /// toggle, a link) in the focused pane, in the order they are drawn.
+    /// After the last control focus comes back to the pane itself, and
+    /// before the first it goes to the last, so Tab never leaves the
+    /// pane; F6 and Ctrl+Tab move between panes. With no pane focused
+    /// (the toolbar), Tab walks the whole window.
+    fn step_control(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane) = self.focused_pane(window, cx) else {
+            if forward {
+                window.focus_next(cx);
+            } else {
+                window.focus_prev(cx);
+            }
+            return;
+        };
+        let pane_focus = self.pane_focus_handle(pane, cx);
+        if forward {
+            window.focus_next(cx);
+            if !pane_focus.contains_focused(window, cx) {
+                window.focus(&pane_focus, cx);
+            }
+        } else if pane_focus.is_focused(window) {
+            let last = last_control_in(&pane_focus, window, cx);
+            window.focus(&last.unwrap_or(pane_focus), cx);
+        } else {
+            window.focus_prev(cx);
+            if !pane_focus.contains_focused(window, cx) {
+                window.focus(&pane_focus, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn focus_next_control(
+        &mut self,
+        _: &FocusNextControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_control(true, window, cx);
+    }
+
+    fn focus_previous_control(
+        &mut self,
+        _: &FocusPreviousControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_control(false, window, cx);
     }
 
     fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
@@ -3472,6 +3560,8 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::focus_previous_pane))
+            .on_action(cx.listener(Self::focus_next_control))
+            .on_action(cx.listener(Self::focus_previous_control))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::reply))
@@ -3577,6 +3667,30 @@ impl Render for WorkspaceView {
 // ---------------------------------------------------------------------------
 // Private utility functions
 // ---------------------------------------------------------------------------
+
+/// The last control inside `pane` in the window's tab order, found by
+/// walking forward from the pane (GPUI does not expose the order), or
+/// `None` when the pane has none. Leaves focus on whatever it reached.
+fn last_control_in(pane: &FocusHandle, window: &mut Window, cx: &mut App) -> Option<FocusHandle> {
+    /// More controls than any pane draws: a stop for a broken tab order.
+    const MAX_CONTROLS: usize = 1000;
+    window.focus(pane, cx);
+    let mut last = None;
+    for _ in 0..MAX_CONTROLS {
+        window.focus_next(cx);
+        let focused = window.focused(cx);
+        match focused {
+            Some(handle) if handle != *pane && pane.contains(&handle, window) => {
+                if last.as_ref() == Some(&handle) {
+                    break;
+                }
+                last = Some(handle);
+            }
+            _ => break,
+        }
+    }
+    last
+}
 
 /// Whether an outbox message failed and waits for a retry.
 fn is_retryable(state: OutboxJobState) -> bool {

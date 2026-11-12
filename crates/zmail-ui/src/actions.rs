@@ -91,6 +91,11 @@ actions!(
         FocusNextPane,
         /// Move focus to the previous pane.
         FocusPreviousPane,
+        /// Move focus to the next control (button, link, toggle) in the
+        /// focused pane, back to the pane itself after the last.
+        FocusNextControl,
+        /// Move focus to the previous control (in the focused pane).
+        FocusPreviousControl,
         /// Close the topmost overlay: the account form, the error banner,
         /// the status message, or search.
         Cancel,

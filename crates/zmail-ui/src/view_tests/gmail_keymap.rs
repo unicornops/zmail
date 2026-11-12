@@ -87,7 +87,7 @@ fn c_composes_and_g_i_goes_to_the_inbox(cx: &mut TestAppContext) {
     view.update(cx, |view, cx| {
         view.select_mailbox(harness.archive_id.expect("an Archive"), cx)
     });
-    keys("tab", cx);
+    keys("f6", cx);
     assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
     keys("g i", cx);
     let selection = cx.read_entity(&view, |view, _| view.selected_mailbox_id);
@@ -114,7 +114,7 @@ fn g_i_opens_the_unified_inbox_with_several_accounts(cx: &mut TestAppContext) {
 #[gpui::test]
 fn j_and_k_in_the_reader_move_through_the_list(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_with_gmail(cx, Setup::Mail);
-    keys("tab", cx);
+    keys("f6", cx);
     assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
     keys("j", cx);
     assert_eq!(selected_thread(&view, cx), Some(harness.threads[1]));
@@ -210,4 +210,25 @@ fn the_keymap_switches_without_a_restart(cx: &mut TestAppContext) {
     // The standard keys still work after both switches.
     keys("down", cx);
     assert_eq!(selected_thread(&view, cx), Some(threads[2]));
+}
+
+#[gpui::test]
+fn single_keys_still_act_from_a_button_in_the_reader(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_with_gmail(cx, Setup::Mail);
+    let threads = harness.threads.clone();
+    // F6 to the reader, then Tab onto its first button.
+    keys("f6 tab", cx);
+    assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
+    let on_reader =
+        cx.update(|window, cx| view.read(cx).reader.focus_handle(cx).is_focused(window));
+    assert!(!on_reader, "a button in the reader has focus");
+
+    keys("s", cx);
+    assert!(flagged(&harness, threads[0]), "s flags the conversation");
+
+    // Escape goes back to the list, where j moves on.
+    keys("escape", cx);
+    assert_eq!(focused_pane(&view, cx), Some(Pane::MessageList));
+    keys("j", cx);
+    assert_eq!(selected_thread(&view, cx), Some(threads[1]));
 }

@@ -227,7 +227,7 @@ fn clicking_a_summary_expands_it_and_its_header_collapses_it(cx: &mut TestAppCon
 #[gpui::test]
 fn n_and_p_move_between_messages_and_enter_toggles(cx: &mut TestAppContext) {
     let (view, cx, reader) = open_conversation(cx);
-    keys("tab", cx);
+    keys("f6", cx);
     assert_eq!(focused_pane(&view, cx), Some(Pane::Detail));
 
     keys("p", cx);

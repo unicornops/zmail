@@ -108,3 +108,23 @@ fn the_window_can_open_with_the_sheet_showing(cx: &mut TestAppContext) {
     assert!(sheet(&view, cx).is_some());
     assert!(cx.debug_bounds("keyboard-shortcuts-groups").is_some());
 }
+
+#[gpui::test]
+fn the_sheet_lists_tab_for_controls_and_f6_for_panes(cx: &mut TestAppContext) {
+    let (view, cx, _harness) = open_workspace(cx, Setup::Mail);
+    keys("secondary-/", cx);
+    let groups = sheet(&view, cx).expect("the sheet is open");
+    assert_eq!(keys_for(&groups, "Move focus to the next control"), ["tab"]);
+    assert_eq!(
+        keys_for(&groups, "Move focus to the previous control"),
+        ["shift-tab"]
+    );
+    assert_eq!(
+        keys_for(&groups, "Move focus to the next pane"),
+        ["f6", "ctrl-tab"]
+    );
+    assert_eq!(
+        keys_for(&groups, "Move focus to the previous pane"),
+        ["shift-f6", "ctrl-shift-tab"]
+    );
+}

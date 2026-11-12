@@ -653,7 +653,12 @@ impl MessageListView {
         }
     }
 
-    fn open_selected(&mut self, _: &OpenSelected, _: &mut Window, cx: &mut Context<Self>) {
+    fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
+        // On a button in a row (Retry now), Enter presses the button.
+        if !self.focus_handle.is_focused(window) {
+            cx.propagate();
+            return;
+        }
         cx.emit(MessageListEvent::Activate);
     }
 }
