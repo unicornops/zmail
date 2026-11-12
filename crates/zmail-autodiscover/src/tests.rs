@@ -294,11 +294,11 @@ fn srv_records_come_first_and_need_no_http() {
         srv: HashMap::from([
             (
                 "_imaps._tcp.example.com".to_owned(),
-                srv("imap.example.net.", 993),
+                srv("imap.example.com.", 993),
             ),
             (
                 "_submission._tcp.example.com".to_owned(),
-                srv("smtp.example.net.", 587),
+                srv("smtp.example.com.", 587),
             ),
             ("_submissions._tcp.example.com".to_owned(), srv(".", 0)),
         ]),
@@ -316,14 +316,15 @@ fn srv_records_come_first_and_need_no_http() {
     };
     assert_eq!(
         (imap.value.host.as_str(), imap.value.port),
-        ("imap.example.net", 993)
+        ("imap.example.com", 993)
     );
     // `_submissions` says "not offered", so STARTTLS submission is used.
     assert_eq!(smtp.value.security, Security::StartTls);
     assert_eq!(
         smtp.source,
         Source::DnsSrv {
-            record: "_submission._tcp.example.com".to_owned()
+            record: "_submission._tcp.example.com".to_owned(),
+            outside_domain: false,
         }
     );
     assert!(web.requested().is_empty());
@@ -331,8 +332,8 @@ fn srv_records_come_first_and_need_no_http() {
 
 #[test]
 fn partial_results_merge_with_each_servers_source() {
-    // SRV finds IMAP only; the autoconfig file supplies SMTP. The SRV IMAP
-    // server wins because it came first.
+    // SRV finds IMAP only (inside the domain); the autoconfig file
+    // supplies SMTP. The SRV IMAP server wins because it came first.
     let web = Arc::new(FakeWeb::default().serve(
         AUTOCONFIG_URL,
         200,
@@ -342,7 +343,7 @@ fn partial_results_merge_with_each_servers_source() {
     let dns = FakeDns {
         srv: HashMap::from([(
             "_imaps._tcp.example.com".to_owned(),
-            srv("imap.example.net", 993),
+            srv("mail.example.com", 993),
         )]),
         mx: Vec::new(),
     };
@@ -355,10 +356,173 @@ fn partial_results_merge_with_each_servers_source() {
     let Some(MailSettings::ImapSmtp { imap, smtp }) = discovery.result() else {
         panic!("expected merged settings: {:?}", discovery.result());
     };
-    assert_eq!(imap.value.host, "imap.example.net");
+    assert_eq!(imap.value.host, "mail.example.com");
     assert!(matches!(imap.source, Source::DnsSrv { .. }));
     assert_eq!(smtp.value.host, "smtp.example.com");
     assert!(matches!(smtp.source, Source::DomainAutoconfig { .. }));
+}
+
+/// SRV records pointing at a hosting provider outside example.com.
+fn hosted_srv() -> FakeDns {
+    FakeDns {
+        srv: HashMap::from([
+            (
+                "_imaps._tcp.example.com".to_owned(),
+                srv("mail.hosting.example.net.", 993),
+            ),
+            (
+                "_submissions._tcp.example.com".to_owned(),
+                srv("mail.hosting.example.net.", 465),
+            ),
+        ]),
+        mx: Vec::new(),
+    }
+}
+
+#[test]
+fn srv_outside_the_domain_ranks_below_the_domains_own_https_sources() {
+    let web = Arc::new(FakeWeb::default().serve(
+        AUTOCONFIG_URL,
+        200,
+        AUTOCONFIG_URL,
+        include_bytes!("../fixtures/example-autoconfig.xml"),
+    ));
+    let discovery = discover(
+        email(),
+        false,
+        &network(&web, Some(hosted_srv()), FakePorts::default()),
+        |_| {},
+    );
+    assert_eq!(
+        steps_run(&discovery),
+        [Step::DnsSrv, Step::DomainAutoconfig],
+        "an SRV answer outside the domain does not end discovery"
+    );
+    let Some(MailSettings::ImapSmtp { imap, smtp }) = discovery.result() else {
+        panic!("expected the autoconfig settings: {:?}", discovery.result());
+    };
+    assert_eq!(imap.value.host, "imap.example.com");
+    assert!(matches!(imap.source, Source::DomainAutoconfig { .. }));
+    assert!(matches!(smtp.source, Source::DomainAutoconfig { .. }));
+    let StepOutcome::Found { note: Some(note) } = &discovery.reports()[0].outcome else {
+        panic!(
+            "the SRV step says what it held back: {:?}",
+            discovery.reports()
+        );
+    };
+    assert!(note.contains("mail.hosting.example.net"), "{note}");
+}
+
+#[test]
+fn srv_outside_the_domain_is_offered_for_confirmation_when_nothing_better_answers() {
+    let web = Arc::new(FakeWeb::default());
+    let discovery = discover(
+        email(),
+        false,
+        &network(&web, Some(hosted_srv()), FakePorts::default()),
+        |_| {},
+    );
+    assert_eq!(
+        steps_run(&discovery),
+        [Step::DnsSrv, Step::DomainAutoconfig, Step::WellKnownJmap],
+        "the domain's HTTPS sources run first, and nothing after them"
+    );
+    assert!(!discovery.needs_consent());
+    let settings = discovery.result().expect("the SRV servers are offered");
+    let MailSettings::ImapSmtp { imap, smtp } = &settings else {
+        panic!("expected IMAP and SMTP: {settings:?}");
+    };
+    assert_eq!(imap.value.host, "mail.hosting.example.net");
+    assert_eq!(
+        imap.source,
+        Source::DnsSrv {
+            record: "_imaps._tcp.example.com".to_owned(),
+            outside_domain: true,
+        }
+    );
+    assert!(imap.source.needs_confirmation() && smtp.source.needs_confirmation());
+    assert_eq!(settings.unconfirmed_hosts(), ["mail.hosting.example.net"]);
+    // Before the HTTPS steps have run it is not a result, and the manual
+    // form is never filled with it silently.
+    let mut early = Discovery::new(email(), true);
+    early.record(
+        Step::DnsSrv,
+        run_step(
+            Step::DnsSrv,
+            &email(),
+            &network(&web, Some(hosted_srv()), FakePorts::default()),
+        ),
+    );
+    assert!(early.result().is_none());
+    assert_eq!(early.partial(), (None, None));
+}
+
+#[test]
+fn srv_inside_the_domain_or_at_a_known_provider_is_used_at_once() {
+    for (target, port) in [
+        ("example.com.", 993),
+        ("imap.mail.example.com.", 993),
+        ("imap.gmail.com.", 993),
+    ] {
+        let dns = FakeDns {
+            srv: HashMap::from([
+                ("_imaps._tcp.example.com".to_owned(), srv(target, port)),
+                (
+                    "_submissions._tcp.example.com".to_owned(),
+                    srv("smtp.example.com.", 465),
+                ),
+            ]),
+            mx: Vec::new(),
+        };
+        let web = Arc::new(FakeWeb::default());
+        let discovery = discover(
+            email(),
+            false,
+            &network(&web, Some(dns), FakePorts::default()),
+            |_| {},
+        );
+        assert_eq!(steps_run(&discovery), [Step::DnsSrv], "{target}");
+        let settings = discovery.result().expect("SRV settings");
+        assert!(settings.unconfirmed_hosts().is_empty(), "{target}");
+    }
+    // Fastmail's JMAP server, as its customers' domains publish it.
+    let dns = FakeDns {
+        srv: HashMap::from([(
+            "_jmap._tcp.example.com".to_owned(),
+            srv("api.fastmail.com.", 443),
+        )]),
+        mx: Vec::new(),
+    };
+    let discovery = discover(
+        email(),
+        false,
+        &network(
+            &Arc::new(FakeWeb::default()),
+            Some(dns),
+            FakePorts::default(),
+        ),
+        |_| {},
+    );
+    assert_eq!(steps_run(&discovery), [Step::DnsSrv]);
+    assert!(matches!(discovery.result(), Some(MailSettings::Jmap(_))));
+}
+
+#[test]
+fn the_domain_check_matches_whole_labels() {
+    use crate::dns::trusted_target;
+    for inside in ["example.com", "Mail.Example.com.", "a.b.example.com"] {
+        assert!(trusted_target("example.com", inside), "{inside}");
+    }
+    for outside in [
+        "notexample.com",
+        "example.com.evil.net",
+        "example.net",
+        "mail.example.co",
+    ] {
+        assert!(!trusted_target("example.com", outside), "{outside}");
+    }
+    assert!(trusted_target("example.com", "outlook.office365.com"));
+    assert!(trusted_target("example.com", "smtp.mail.me.com"));
 }
 
 #[test]

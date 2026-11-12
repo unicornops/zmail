@@ -8,7 +8,7 @@
 //!
 //! | Step | Asks | Notes |
 //! |---|---|---|
-//! | [`Step::DnsSrv`] | the system resolver | RFC 6186 / 8314 / 8620 SRV records |
+//! | [`Step::DnsSrv`] | the system resolver | RFC 6186 / 8314 / 8620 SRV records; see below |
 //! | [`Step::DomainAutoconfig`] | the mail domain itself | `autoconfig.<domain>` and `<domain>/.well-known/autoconfig` |
 //! | [`Step::WellKnownJmap`] | the mail domain itself | RFC 8620 `/.well-known/jmap` |
 //! | [`Step::Ispdb`] | Mozilla (`autoconfig.thunderbird.net`) | only after [`Discovery::set_ispdb_consent`] |
@@ -28,6 +28,13 @@
 //!   is no DNS-over-HTTPS fallback, which would leak the domain too.
 //! - A step that fails (a timeout, a DNS error, a TLS error) never stops
 //!   discovery; the next step runs.
+//! - DNS answers are not authenticated. An SRV record pointing inside the
+//!   mail domain is used at once (the server's TLS certificate then has to
+//!   match a name in that domain), as is one pointing at a built-in
+//!   provider's server. One pointing anywhere else (RFC 6186 section 6) is
+//!   held back: it is used only when the domain's own HTTPS sources
+//!   (autoconfig and `/.well-known/jmap`) found nothing, and it is marked
+//!   [`Source::needs_confirmation`] so the user confirms the host first.
 //! - Plain-text servers are never offered. IMAP over STARTTLS is skipped
 //!   too, because zmail's IMAP client only speaks implicit TLS.
 //!
@@ -120,6 +127,11 @@ pub enum Source {
     DnsSrv {
         /// The record's owner name, such as `_imaps._tcp.example.com`.
         record: String,
+        /// The record points outside the mail domain, to a host that is
+        /// not a built-in provider's server. Plain DNS can be forged, so
+        /// the user confirms such a host before signing in to it (RFC 6186
+        /// section 6); see [`Source::needs_confirmation`].
+        outside_domain: bool,
     },
     /// The mail domain's own autoconfig file.
     DomainAutoconfig {
@@ -151,7 +163,17 @@ impl fmt::Display for Source {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Provider(provider) => write!(formatter, "{} settings", provider.name()),
-            Self::DnsSrv { record } => write!(formatter, "DNS record {record}"),
+            Self::DnsSrv {
+                record,
+                outside_domain: false,
+            } => write!(formatter, "DNS record {record}"),
+            Self::DnsSrv {
+                record,
+                outside_domain: true,
+            } => write!(
+                formatter,
+                "DNS record {record}, which points outside the mail domain"
+            ),
             Self::DomainAutoconfig { url } => {
                 write!(formatter, "your provider's setup file ({url})")
             }
@@ -167,6 +189,21 @@ impl fmt::Display for Source {
             }
             Self::HostnameGuess => formatter.write_str("a guess from common server names"),
         }
+    }
+}
+
+impl Source {
+    /// Whether the user has to confirm the server before signing in to it:
+    /// an SRV record that points outside the mail domain (RFC 6186
+    /// section 6).
+    pub fn needs_confirmation(&self) -> bool {
+        matches!(
+            self,
+            Self::DnsSrv {
+                outside_domain: true,
+                ..
+            }
+        )
     }
 }
 
@@ -198,6 +235,38 @@ pub enum MailSettings {
         /// The SMTP submission server.
         smtp: Found<ServerSettings>,
     },
+}
+
+impl MailSettings {
+    /// The hosts the user has to confirm before signing in
+    /// ([`Source::needs_confirmation`]), each once, in the order shown.
+    pub fn unconfirmed_hosts(&self) -> Vec<String> {
+        let mut hosts = Vec::new();
+        let mut add = |host: String| {
+            if !hosts.contains(&host) {
+                hosts.push(host);
+            }
+        };
+        match self {
+            Self::Jmap(jmap) => {
+                if jmap.source.needs_confirmation()
+                    && let Some(host) = url::Url::parse(&jmap.value.session_url)
+                        .ok()
+                        .and_then(|url| url.host_str().map(str::to_owned))
+                {
+                    add(host);
+                }
+            }
+            Self::ImapSmtp { imap, smtp } => {
+                for server in [imap, smtp] {
+                    if server.source.needs_confirmation() {
+                        add(server.value.host.clone());
+                    }
+                }
+            }
+        }
+        hosts
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +336,34 @@ pub struct StepFindings {
 impl StepFindings {
     fn is_empty(&self) -> bool {
         self.jmap.is_none() && self.imap.is_none() && self.smtp.is_none()
+    }
+
+    /// Splits off the findings the user has to confirm
+    /// ([`Source::needs_confirmation`]): `(the rest, those)`.
+    fn split_unconfirmed(self) -> (Self, Self) {
+        fn split<T>(found: Option<Found<T>>) -> (Option<Found<T>>, Option<Found<T>>) {
+            match found {
+                Some(found) if found.source.needs_confirmation() => (None, Some(found)),
+                found => (found, None),
+            }
+        }
+        let (jmap, held_jmap) = split(self.jmap);
+        let (imap, held_imap) = split(self.imap);
+        let (smtp, held_smtp) = split(self.smtp);
+        (
+            Self {
+                jmap,
+                imap,
+                smtp,
+                note: self.note,
+            },
+            Self {
+                jmap: held_jmap,
+                imap: held_imap,
+                smtp: held_smtp,
+                note: None,
+            },
+        )
     }
 }
 
@@ -371,6 +468,9 @@ pub struct Discovery {
     jmap: Option<Found<JmapSettings>>,
     imap: Option<Found<ServerSettings>>,
     smtp: Option<Found<ServerSettings>>,
+    /// SRV findings that point outside the mail domain: used only once the
+    /// domain's own HTTPS sources have found nothing better.
+    held: StepFindings,
 }
 
 impl Discovery {
@@ -386,6 +486,7 @@ impl Discovery {
             jmap: None,
             imap: None,
             smtp: None,
+            held: StepFindings::default(),
         }
     }
 
@@ -456,16 +557,21 @@ impl Discovery {
     }
 
     /// Records what `step` found. Earlier findings win: a later step only
-    /// fills in what is still missing.
+    /// fills in what is still missing. Findings that need the user's
+    /// confirmation are held back (see [`Self::result`]).
     pub fn record(&mut self, step: Step, result: StepResult) {
         let outcome = match result {
             Ok(findings) if findings.is_empty() => StepOutcome::NothingFound {
                 note: findings.note,
             },
             Ok(findings) => {
+                let (findings, held) = findings.split_unconfirmed();
                 self.jmap = self.jmap.take().or(findings.jmap);
                 self.imap = self.imap.take().or(findings.imap);
                 self.smtp = self.smtp.take().or(findings.smtp);
+                self.held.jmap = self.held.jmap.take().or(held.jmap);
+                self.held.imap = self.held.imap.take().or(held.imap);
+                self.held.smtp = self.held.smtp.take().or(held.smtp);
                 StepOutcome::Found {
                     note: findings.note,
                 }
@@ -477,17 +583,26 @@ impl Discovery {
 
     /// The configuration found so far, once it is complete. A JMAP session
     /// wins over IMAP and SMTP found by the same or a later step.
+    ///
+    /// SRV findings that point outside the mail domain rank below the
+    /// domain's own HTTPS sources: they fill in what is missing only once
+    /// both of those steps have run, and keep their
+    /// [`Source::needs_confirmation`] mark.
     pub fn result(&self) -> Option<MailSettings> {
-        if let Some(jmap) = &self.jmap {
-            return Some(MailSettings::Jmap(jmap.clone()));
-        }
-        match (&self.imap, &self.smtp) {
-            (Some(imap), Some(smtp)) => Some(MailSettings::ImapSmtp {
-                imap: imap.clone(),
-                smtp: smtp.clone(),
-            }),
-            _ => None,
-        }
+        complete(self.jmap.as_ref(), self.imap.as_ref(), self.smtp.as_ref()).or_else(|| {
+            let ranked_below = [Step::DomainAutoconfig, Step::WellKnownJmap];
+            ranked_below
+                .iter()
+                .all(|step| self.reports.iter().any(|report| report.step == *step))
+                .then(|| {
+                    complete(
+                        self.jmap.as_ref().or(self.held.jmap.as_ref()),
+                        self.imap.as_ref().or(self.held.imap.as_ref()),
+                        self.smtp.as_ref().or(self.held.smtp.as_ref()),
+                    )
+                })
+                .flatten()
+        })
     }
 
     /// What was found even when it is incomplete (an IMAP server without
@@ -505,6 +620,24 @@ impl Discovery {
     /// run has run.
     pub fn is_finished(&self) -> bool {
         self.next_step().is_none() && !self.needs_consent()
+    }
+}
+
+/// A complete configuration from these findings, JMAP first.
+fn complete(
+    jmap: Option<&Found<JmapSettings>>,
+    imap: Option<&Found<ServerSettings>>,
+    smtp: Option<&Found<ServerSettings>>,
+) -> Option<MailSettings> {
+    if let Some(jmap) = jmap {
+        return Some(MailSettings::Jmap(jmap.clone()));
+    }
+    match (imap, smtp) {
+        (Some(imap), Some(smtp)) => Some(MailSettings::ImapSmtp {
+            imap: imap.clone(),
+            smtp: smtp.clone(),
+        }),
+        _ => None,
     }
 }
 

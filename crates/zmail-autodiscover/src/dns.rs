@@ -191,6 +191,20 @@ fn best_target(records: &[SrvRecord]) -> Option<(String, u16)> {
     (best.port != 0 && is_dns_name(&target)).then_some((target, best.port))
 }
 
+/// Whether an SRV target may be used without asking the user: inside the
+/// mail domain (RFC 6186 section 6), or one of the built-in providers'
+/// servers. Anything else could be a forged answer sending the password to
+/// a host with a valid certificate of its own.
+pub(crate) fn trusted_target(domain: &str, host: &str) -> bool {
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == domain
+        || host
+            .strip_suffix(domain.as_str())
+            .is_some_and(|rest| rest.ends_with('.'))
+        || Provider::is_known_host(&host)
+}
+
 /// [`crate::Step::DnsSrv`]: `_jmap._tcp`, then `_imaps._tcp`, then
 /// `_submissions._tcp` (TLS) before `_submission._tcp` (STARTTLS).
 /// `_imap._tcp` (STARTTLS) is not looked up: zmail's IMAP client only
@@ -199,6 +213,7 @@ pub(crate) fn srv_step(email: &EmailAddress, dns: &dyn DnsLookup) -> StepResult 
     let domain = email.domain();
     let mut findings = StepFindings::default();
     let mut errors = Vec::new();
+    let mut outside = Vec::new();
     let mut lookup = |service: &str| {
         let name = format!("{service}.{domain}");
         match dns.srv(&name) {
@@ -210,6 +225,17 @@ pub(crate) fn srv_step(email: &EmailAddress, dns: &dyn DnsLookup) -> StepResult 
         }
     };
 
+    let mut source = |record: String, host: &str| {
+        let outside_domain = !trusted_target(domain, host);
+        if outside_domain && !outside.iter().any(|known: &String| known == host) {
+            outside.push(host.to_owned());
+        }
+        Source::DnsSrv {
+            record,
+            outside_domain,
+        }
+    };
+
     if let Some((record, (host, port))) = lookup("_jmap._tcp") {
         // RFC 8620 §2.2: the session resource is at the target's
         // well-known URL.
@@ -218,14 +244,20 @@ pub(crate) fn srv_step(email: &EmailAddress, dns: &dyn DnsLookup) -> StepResult 
         } else {
             format!("https://{host}:{port}/.well-known/jmap")
         };
+        let source = source(record, &host);
+        let trusted = !source.needs_confirmation();
         findings.jmap = Some(Found::new(
             JmapSettings {
                 session_url,
                 username: email.to_string(),
             },
-            Source::DnsSrv { record },
+            source,
         ));
-        return Ok(findings);
+        // A JMAP server inside the domain wins outright; one outside it
+        // may lose to IMAP inside it.
+        if trusted {
+            return Ok(findings);
+        }
     }
     let server = |host: String, port: u16, security: Security| ServerSettings {
         host,
@@ -235,25 +267,27 @@ pub(crate) fn srv_step(email: &EmailAddress, dns: &dyn DnsLookup) -> StepResult 
         auth: AuthMethod::Password,
     };
     if let Some((record, (host, port))) = lookup("_imaps._tcp") {
-        findings.imap = Some(Found::new(
-            server(host, port, Security::Tls),
-            Source::DnsSrv { record },
-        ));
+        let source = source(record, &host);
+        findings.imap = Some(Found::new(server(host, port, Security::Tls), source));
     }
     for (service, security) in [
         ("_submissions._tcp", Security::Tls),
         ("_submission._tcp", Security::StartTls),
     ] {
         if let Some((record, (host, port))) = lookup(service) {
-            findings.smtp = Some(Found::new(
-                server(host, port, security),
-                Source::DnsSrv { record },
-            ));
+            let source = source(record, &host);
+            findings.smtp = Some(Found::new(server(host, port, security), source));
             break;
         }
     }
+    if !outside.is_empty() {
+        findings.note = Some(format!(
+            "Points outside {domain}, to {}, kept as a last resort: used only if {domain}'s own settings aren't found",
+            outside.join(" and ")
+        ));
+    }
     // A failed lookup is not fatal: the step found nothing, and says why.
-    if findings.imap.is_none() && findings.smtp.is_none() && !errors.is_empty() {
+    if findings.is_empty() && !errors.is_empty() {
         findings.note = Some(format!("DNS lookup failed: {}", errors.join("; ")));
     }
     Ok(findings)
