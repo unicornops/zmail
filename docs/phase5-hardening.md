@@ -72,6 +72,7 @@ GPUI (pinned to a Zed stable release, see `docs/upstream/zed.md`) ships AccessKi
 
 - The reader renders message bodies as text, and HTML is converted to text before display.
 - Remote content stays blocked by default (allowed only per message for the session, or always for a sender the user chose, and then only public `https:` addresses; ADR 0006), and attachments are only saved on explicit user action.
+- A saved or opened attachment is marked as downloaded from the internet (`AttachmentBlob::save_to` and `save_new`, so every caller gets it): `com.apple.quarantine` on macOS, so Gatekeeper checks it, and a `Zone.Identifier` stream with `ZoneId=3` on Windows, so SmartScreen and Office's Protected View treat it as from the Internet zone. Marking is best effort: on a file system that cannot carry the mark (FAT, many network shares) the file is saved unmarked. Linux has no such mark.
 
 ### Manual screen-reader check
 

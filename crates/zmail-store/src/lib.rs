@@ -40,6 +40,7 @@ mod identities;
 mod key_trust;
 mod lock;
 mod merge;
+mod quarantine;
 mod rotation;
 mod search;
 
@@ -71,7 +72,11 @@ impl AttachmentBlob {
 
     /// Decrypts the attachment to `destination`, replacing a file there.
     /// The plaintext goes to a temporary file beside it first, so a failed
-    /// or tampered blob never leaves a partial copy.
+    /// or tampered blob never leaves a partial copy. The file is marked as
+    /// downloaded from the internet (`com.apple.quarantine` on macOS, a
+    /// `Zone.Identifier` stream on Windows) before it appears, so the
+    /// system's own checks apply when it is opened; a file system that
+    /// cannot carry the mark does not fail the save.
     pub fn save_to(&self, destination: &Path) -> Result<u64> {
         let parent = destination.parent().unwrap_or(Path::new("."));
         let temporary = parent.join(format!(
@@ -83,6 +88,7 @@ impl AttachmentBlob {
             zmail_security::vault::random_hex(6)
         ));
         let length = self.vault.decrypt_file_to_path(&self.path, &temporary)?;
+        quarantine::mark_downloaded(&temporary);
         fs::rename(&temporary, destination).map_err(|error| {
             let _ = fs::remove_file(&temporary);
             anyhow::Error::from(error).context(format!(
@@ -93,9 +99,12 @@ impl AttachmentBlob {
         Ok(length)
     }
 
-    /// Decrypts the attachment to `destination`, which must not exist yet.
+    /// Decrypts the attachment to `destination`, which must not exist yet,
+    /// and marks it as downloaded, as [`Self::save_to`] does.
     pub fn save_new(&self, destination: &Path) -> Result<u64> {
-        self.vault.decrypt_file_to_path(&self.path, destination)
+        let length = self.vault.decrypt_file_to_path(&self.path, destination)?;
+        quarantine::mark_downloaded(destination);
+        Ok(length)
     }
 
     /// Decrypts the attachment into memory.
@@ -10218,6 +10227,15 @@ mod tests {
         assert_eq!(saved, destination.join("report.txt"));
         let written = std::fs::read(&saved).expect("the saved blob should read back");
         assert_eq!(written, blob, "save-as writes the original bytes");
+        assert_marked_downloaded(&saved);
+        let fresh = destination.join("fresh.txt");
+        store
+            .attachment_blob(attachment.id)
+            .expect("the blob")
+            .save_new(&fresh)
+            .expect("saves to a new file");
+        assert_eq!(std::fs::read(&fresh).expect("reads back"), blob);
+        assert_marked_downloaded(&fresh);
         let stored = std::fs::read(store.attachment_storage_dir().join(&storage_path))
             .expect("the stored blob reads");
         assert!(
@@ -10225,6 +10243,35 @@ mod tests {
             "the stored blob is encrypted"
         );
         let _ = std::fs::remove_dir_all(&destination);
+    }
+
+    /// Asserts that a saved attachment carries the system's "downloaded
+    /// from the internet" mark: `com.apple.quarantine` on macOS, a
+    /// `Zone.Identifier` stream with the Internet zone on Windows. Linux
+    /// has no such mark.
+    fn assert_marked_downloaded(path: &std::path::Path) {
+        #[cfg(target_os = "macos")]
+        {
+            let mut value = [0u8; 256];
+            let length = rustix::fs::getxattr(
+                path,
+                crate::quarantine::QUARANTINE_ATTRIBUTE,
+                &mut value[..],
+            )
+            .expect("the quarantine attribute is set");
+            let value = String::from_utf8_lossy(&value[..length]);
+            assert!(value.starts_with("0081;"), "{value}");
+            assert!(value.contains(";Zmail;"), "{value}");
+        }
+        #[cfg(windows)]
+        {
+            let zone = std::fs::read_to_string(crate::quarantine::zone_identifier(path))
+                .expect("the Zone.Identifier stream is written");
+            assert_eq!(zone, crate::quarantine::ZONE_IDENTIFIER);
+            assert!(zone.contains("ZoneId=3"));
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let _ = path;
     }
 
     /// Returns the local id of an account mailbox by name.
