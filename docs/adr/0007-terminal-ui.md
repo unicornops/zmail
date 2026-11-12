@@ -448,6 +448,8 @@ add-imap` and `add-jmap`; with no account, the TUI says so.
   Over SSH to a Linux machine with no Secret Service running, the TUI
   can't unlock the store, and there is no plaintext fallback. A
   passphrase-protected key would solve this, but that's a separate ADR.
+  `scripts/zmail-tui-headless.sh` is the stopgap: a private D-Bus
+  session with gnome-keyring, unlocked for the life of that session.
 - **Terminal differences.** Colours, Unicode width and key reporting vary
   (Windows Terminal, the macOS Terminal and iTerm2, Linux consoles).
   crossterm hides most of this. Wide characters and emoji in subjects

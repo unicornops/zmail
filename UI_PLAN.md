@@ -124,7 +124,7 @@ that saves time, with attribution in `about.toml`.
 - **Message rows:** two densities.
   - *Comfortable* has three lines: avatar, then bold sender if unread, with the date on
     the right; then the subject; then a one-line snippet.
-  - *Compact* is one line: sender · subject — snippet · date.
+  - *Compact* is one line: sender · subject, snippet · date.
   - Rows also show an unread dot, a thread-count pill, and attachment and flag icons.
   - On hover, quick actions (Archive, Delete, Flag, Read) replace the date.
 - **Dates:** "10:42" today, "Yesterday", then "Mon" within the week, "12 Oct" this year,
@@ -393,12 +393,12 @@ Store dependencies are marked **[store]**.
    - Skeleton rows during the first sync of a mailbox.
    - "You're all caught up" for an empty inbox.
    - A search with no results says where it looked and widens one step:
-     "No results in Inbox — Search Work", then "No results in Work — Search all
+     "No results in Inbox: Search Work", then "No results in Work: Search all
      accounts" (with more than one account), then "Clear search". Searches start
      in the current folder (decided by Rob, October 2026; see Phase 7).
    - Each empty state has one action.
 6. **Drafts and Outbox rows** reuse the message row. Outbox status reads in plain words:
-   "Sending…", "Failed — retrying in 5 min", "Retry now".
+   "Sending…", "Failed: retrying in 5 min", "Retry now".
 
 ### Phase 4: Reader
 
@@ -534,7 +534,7 @@ Store and core dependencies can run in parallel with Phase 1:
   #163) was a no-go for now.
 - Rich-text compose (decision 2).
 - Calendar and contacts.
-- Smart categorised inboxes (Primary/Updates/…) — possibly later, and opt-in.
+- Smart categorised inboxes (Primary/Updates/…), possibly later, and opt-in.
 - Mobile.
 
 ---

@@ -114,14 +114,14 @@ Run this on each platform before claiming screen-reader support works, and note 
 ## Mailbox Deletion Policy
 
 - Deletion moves messages to the account's trash mailbox whenever the server reports one; the write-back queue applies the move to the server on the next sync.
-- When no trash mailbox exists, destroyed messages are only marked `\Deleted` on the server — never expunged — so deletion stays reversible.
+- When no trash mailbox exists, destroyed messages are only marked `\Deleted` on the server, never expunged, so deletion stays reversible.
 - Expunging happens exclusively through the explicit `zmail-app empty-trash ACCOUNT` command: it selects the trash mailbox read-write, marks every message `\Deleted`, and issues `EXPUNGE` within that mailbox only, followed by a sync to refresh the local mirror.
 - JMAP accounts have no dangling state: `Email/set` destroy removes messages server-side immediately, and trash semantics follow the server's own handling.
 
 ## New Mail Notification Policy
 
 - The `zmail-notify` crate composes the notifications; the GUI posts them through GPUI's system notifications, which use `UNUserNotificationCenter` on macOS (macOS asks once whether Zmail may notify; only the `.app` bundle can post, so an unbundled `cargo run` build shows none), toast notifications under the `ie.unicornops.zmail` AppUserModelID on Windows (the MSI's Start menu shortcut carries the same id), and D-Bus `org.freedesktop.Notifications` on Linux.
-- One notification is raised per arrival batch — one sync that found new mail — naming the account and up to three arrival subjects, newest first.
+- One notification is raised per arrival batch, one sync that found new mail, naming the account and up to three arrival subjects, newest first.
 - Clicking a notification brings the window forward with the batch's newest arrival open: its mailbox selected, the conversation selected in the list and shown in the reader (and marked read, as a click in the list would). A conversation no longer in the local mirror, or a notification from an earlier run, only brings the window forward. Linux needs a notification server that supports the `default` action (a click on the body); Windows delivers the click to the running app.
 - The notification's tag, the only identifier the operating system keeps, is an opaque counter; the account, mailbox and server thread id it opens stay in the app's memory.
 - The first sync of a mailbox counts as an initial import, not new mail, and never notifies; reconnecting a large account therefore cannot flood the user.
@@ -135,7 +135,7 @@ Run this on each platform before claiming screen-reader support works, and note 
 
 - Zmail does not upload crash reports or telemetry automatically.
 - Errors stay local to the terminal, local logs, and GitHub issues opened by users.
-- GUI installs a panic hook that appends one line per panic (timestamp, thread, location, message) to a crash log in the platform's state directory — `~/Library/Logs/zmail/crash.log` on macOS, `$XDG_STATE_HOME/zmail/crash.log` (default `~/.local/state/zmail/`) on Linux, and `%LOCALAPPDATA%\zmail\logs\crash.log` on Windows — because GUI launches from Finder, the Dock, or installers have no stderr to print to. The log rotates at 1 MiB (`crash.log.old` keeps the previous content) and `ZMAIL_LOG_DIR` overrides the directory for tests.
+- GUI installs a panic hook that appends one line per panic (timestamp, thread, location, message) to a crash log in the platform's state directory, `~/Library/Logs/zmail/crash.log` on macOS, `$XDG_STATE_HOME/zmail/crash.log` (default `~/.local/state/zmail/`) on Linux, and `%LOCALAPPDATA%\zmail\logs\crash.log` on Windows, because GUI launches from Finder, the Dock, or installers have no stderr to print to. The log rotates at 1 MiB (`crash.log.old` keeps the previous content) and `ZMAIL_LOG_DIR` overrides the directory for tests.
 - Secrets must never be written to crash output, debug logs, or release notes.
 - Dependency advisories are enforced in CI with `cargo audit` and `cargo deny`.
 
@@ -146,19 +146,19 @@ Run this on each platform before claiming screen-reader support works, and note 
 - Tagged releases additionally produce a Linux `.deb` package (via `cargo-deb`), a macOS `.app` bundle (ad-hoc signed), and a macOS DMG with an `/Applications` symlink, each attached with a `SHA256SUMS` manifest.
 - The macOS `.app` bundle carries a generated application icon: `assets/icons/app-icon.svg` is rendered by `scripts/generate-app-icon.sh` (the same rsvg-convert + `sips` + `iconutil` pipeline Shuffleboard uses) to `Zmail.icns`, registered through `CFBundleIconFile`, and to an `AppIcon` set in a compiled asset catalog (`Assets.car`, built with Xcode's `actool`), registered through `CFBundleIconName`. Recent macOS takes the icon from the asset catalog, notifications included (#320); the icns is the fallback. The release job checks the catalog with `assetutil` and the Info.plist with `plutil`.
 - The macOS DMG follows the Shuffleboard release layout (`scripts/create-dmg.sh`): a Finder icon view with large icons, the app and the `Applications` alias side by side. Its filename carries the version (`Zmail-<version>.dmg`) so downloads are identifiable on disk.
-- When the org-wide Apple credentials are present, the macOS bundle is signed with the Developer ID Application certificate (hardened runtime, secure timestamp), notarized by Apple (`notarytool`, stapled and `spctl`-verified) before the DMG is created; without them the bundle falls back to an ad-hoc signature and the release never blocks. The org-wide secrets, shared with the other UnicornOps macOS apps (see `unicornops/shuffleboard`):
-  - `APPLE_CERTIFICATE_BASE64` — the Developer ID Application certificate as base64-encoded P12.
-  - `APPLE_CERTIFICATE_PASSWORD` — the P12 passphrase for the certificate above.
-  - `APPLE_TEAM_ID` — the Apple Developer team identifier.
-  - `APPLE_DEVELOPER_ID` and `APPLE_APP_PASSWORD` — the Apple ID and its app-specific password used by `notarytool`.
+- When the org-wide Apple credentials are present, the macOS bundle is signed with the Developer ID Application certificate (hardened runtime, secure timestamp), notarised by Apple (`notarytool`, stapled and `spctl`-verified) before the DMG is created; without them the bundle falls back to an ad-hoc signature and the release never blocks. The org-wide secrets, shared with the other UnicornOps macOS apps (see `unicornops/shuffleboard`):
+  - `APPLE_CERTIFICATE_BASE64`, the Developer ID Application certificate as base64-encoded P12.
+  - `APPLE_CERTIFICATE_PASSWORD`: the P12 passphrase for the certificate above.
+  - `APPLE_TEAM_ID`: the Apple Developer team identifier.
+  - `APPLE_DEVELOPER_ID` and `APPLE_APP_PASSWORD`: the Apple ID and its app-specific password used by `notarytool`.
 - Windows releases carry the zip archive and a WiX-built MSI installer (Program Files, Start-menu shortcut, `mailto:` scheme registration) produced by `cargo wix`; the executable embeds a VERSIONINFO resource (`crates/zmail-app/build.rs`) the MSI binds its product version against.
-- Signing and notarization are opt-in, repository-controlled, and no-op until the secrets exist. The concrete secret inventory a maintainer adds to activate them:
-  - `WINDOWS_SIGNING_CERT` — an Authenticode certificate as base64-encoded PFX. When present, the Windows release job signs the binary and the zip with `signtool` (RFC 3161 timestamping) before uploading.
-  - `WINDOWS_SIGNING_PASSWORD` — the PFX passphrase for the certificate above.
+- Signing and notarisation are opt-in, repository-controlled, and no-op until the secrets exist. The concrete secret inventory a maintainer adds to activate them:
+  - `WINDOWS_SIGNING_CERT`: an Authenticode certificate as base64-encoded PFX. When present, the Windows release job signs the binary and the zip with `signtool` (RFC 3161 timestamping) before uploading.
+  - `WINDOWS_SIGNING_PASSWORD`: the PFX passphrase for the certificate above.
   - `.deb` signing (pending work): a GPG key (`DEB_SIGNING_KEY` + `DEB_SIGNING_KEY_PASSWORD`) added to a repo signing step when apt hosting exists.
 - No signing step may block the release when its secrets are absent, and no signing secret may ever be printed into build logs.
 - No packaging step may introduce a background helper process that outlives the GUI binary.
-- The release workflow can be exercised without cutting a release: dispatch **Release Please** manually with a tag or branch and the dry-run flag to build, sign, notarize, and produce the DMG without uploading anything.
+- The release workflow can be exercised without cutting a release: dispatch **Release Please** manually with a tag or branch and the dry-run flag to build, sign, notarise, and produce the DMG without uploading anything.
 
 ## Release Process
 
@@ -174,7 +174,7 @@ Release Please's `cargo-workspace` plugin counts only commits that touch the rel
 
 The gap is closed by the **Complete Release Changelog** job in the release workflow, which runs `scripts/render-release-pr.sh` after Release Please on every push to `main`:
 
-1. When Release Please has a release PR open, the job regenerates the pending changelog section from every conventional `feat`/`fix` commit in the release window — app-crate and sub-crate alike — and pushes the completion to the release-please branch.
+1. When Release Please has a release PR open, the job regenerates the pending changelog section from every conventional `feat`/`fix` commit in the release window, app-crate and sub-crate alike, and pushes the completion to the release-please branch.
 2. When no release PR is open but the window holds unreleased conventional commits, the job bootstraps the release PR exactly as Release Please would (version bump, manifest, `Cargo.lock`, changelog, `autorelease: pending` label).
 3. Otherwise it is a no-op.
 

@@ -104,10 +104,10 @@ enough that upstream changes can be tracked file by file:
   the library reads no environment variables.
 - **Encrypted local store first.** Proton mail is end-to-end encrypted
   on Proton's side; writing it decrypted into Zmail's SQLite store would
-  make Zmail the weakest link. Encryption at rest (#139) must ship
-  before any Proton code path is reachable from the UI. Until then the
-  Proton crates are built and tested but not wired into account
-  onboarding or sync dispatch.
+  make Zmail the weakest link. Encryption at rest (#139, ADR 0005)
+  therefore shipped before any Proton code path was reachable from the
+  UI. It has: the Proton crates are wired into onboarding and sync
+  dispatch, and the `proton` feature is on by default.
 - **Scope of the first version.** TOTP two-factor only (no FIDO2),
   combined address mode first, and no code read from the AGPL
   `ProtonMail/clients` monorepo or from the AGPL Rust parts of Proton's
@@ -504,8 +504,14 @@ network peer.**
   under GPL-3.0-only, which matches Zmail's licence. Code ported from
   go-proton-api and go-srp is MIT, and the notices are kept in each file,
   in `about.toml` and in `crates/zmail-proton-api/LICENSE-MIT`.
-- **Unencrypted local copies.** Until #139 ships, nothing Proton-related
-  is reachable from the UI.
+- **Unencrypted local copies.** Proton mail is stored decrypted in
+  Zmail's local store, so the store's protection is the protection the
+  mail has on disk. The store is encrypted at rest for every account
+  (SQLCipher, with attachments in encrypted blobs, ADR 0005), and the
+  `proton` feature ships on by default, labelled experimental in
+  onboarding. ADR 0005's "What this does not protect" applies in full:
+  malware running as the same user, memory, swap and anything Zmail
+  hands out on purpose (Save As, opened attachments).
 
 ## Consequences
 
@@ -519,7 +525,7 @@ network peer.**
   background), and so does an add whose session the keychain refuses.
 - The phases are tracked in #237: ADR and pins, the fake-server harness,
   the client core, auth, keys, read sync, hydration, events, pending
-  operations, onboarding (hidden until #139), sending, and the weekly
+  operations, onboarding (shipped after #139), sending, and the weekly
   upstream check.
 - `deny.toml` gains one `clarify` entry (`proton-srp`) and one advisory
   ignore (`RUSTSEC-2023-0071`) when those crates arrive with the auth

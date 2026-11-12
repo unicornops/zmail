@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed on October 15, 2026 — awaiting acceptance (issue #92).
+Proposed on October 15, 2026, awaiting acceptance (issue #92).
 
 ## Context
 
