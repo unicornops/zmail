@@ -44,7 +44,7 @@ pub use typography::{
 
 use zmail_core::{ThemeAppearance, ThemeSummary};
 
-use self::contrast::{MIN_NON_TEXT_CONTRAST, ensure_contrast, mix, readable_on};
+use self::contrast::{MIN_NON_TEXT_CONTRAST, MIN_TEXT_CONTRAST, ensure_contrast, mix, readable_on};
 
 /// How much of `info` tints [`UiColors::info_background`].
 const INFO_BACKGROUND_TINT: f32 = 0.14;
@@ -341,7 +341,10 @@ pub struct UiColors {
     /// Tinted background for information banners. Themes have no token
     /// for it, so it is `info` mixed lightly into the background.
     pub info_background: u32,
-    /// Danger / error foreground colour for icons and text.
+    /// Danger / error foreground colour for icons and text ("Couldn't
+    /// send", a failed sync): the theme's, lifted towards the foreground
+    /// only as far as it needs to reach 4.5:1 on the background, surface
+    /// and selected row (Zed's One Dark red is 3.78:1 as it comes).
     pub danger: u32,
     /// Warning foreground colour for icons and text.
     pub warning: u32,
@@ -407,6 +410,17 @@ impl UiColors {
         let accent = over_background(&theme.accent, light::ACCENT, dark::ACCENT);
         let accent_foreground = readable_on(accent, &[background, foreground]);
         let info = over_background(&theme.info, light::INFO, dark::INFO);
+        let selected_background = over_surface(
+            &theme.selected_background,
+            light::SELECTED_BACKGROUND,
+            dark::SELECTED_BACKGROUND,
+        );
+        let danger = ensure_contrast(
+            over_background(&theme.danger, light::DANGER, dark::DANGER),
+            &[background, surface, selected_background],
+            MIN_TEXT_CONTRAST,
+            foreground,
+        );
 
         Self {
             background,
@@ -415,11 +429,7 @@ impl UiColors {
             foreground,
             muted: over_background(&theme.muted_foreground, light::MUTED, dark::MUTED),
             accent,
-            selected_background: over_surface(
-                &theme.selected_background,
-                light::SELECTED_BACKGROUND,
-                dark::SELECTED_BACKGROUND,
-            ),
+            selected_background,
             hover_background: over_surface(
                 &theme.hover_background,
                 light::HOVER_BACKGROUND,
@@ -445,7 +455,7 @@ impl UiColors {
                 light::DANGER_BACKGROUND,
                 dark::DANGER_BACKGROUND,
             ),
-            danger: over_background(&theme.danger, light::DANGER, dark::DANGER),
+            danger,
             warning: over_background(&theme.warning, light::WARNING, dark::WARNING),
             success: over_background(&theme.success, light::SUCCESS, dark::SUCCESS),
             info,
@@ -684,7 +694,17 @@ mod tests {
         assert_eq!(colors.surface, 0x2F343E);
         assert_eq!(colors.foreground, 0xDCE0E5);
         assert_eq!(colors.accent, 0x74ADE8);
-        assert_eq!(colors.danger, 0xD07277);
+        // One Dark's red is lifted to AA, and stays a red.
+        assert_ne!(colors.danger, 0xD07277);
+        assert!(contrast::contrast_ratio(0xD07277, colors.selected_background) < 4.5);
+        for fill in [
+            colors.background,
+            colors.surface,
+            colors.selected_background,
+        ] {
+            assert!(contrast::contrast_ratio(colors.danger, fill) >= 4.5);
+        }
+        assert!(colors.danger >> 16 > colors.danger & 0xFF, "still red");
         // A fully transparent hover leaves the surface showing.
         assert_eq!(colors.hover_background, colors.surface);
         // 10% red over the background is a faint red tint.

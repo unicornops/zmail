@@ -1,8 +1,10 @@
 //! Reads and writes the persisted [`UiPreferences`] for the workspace.
 //!
 //! The theme mode, the imported theme, the sidebar's collapsed state, the
-//! pane widths, the list density, the reading pane, motion and the text
-//! size are wired up so far; the rest are stored by `zmail-store` and get
+//! pane widths, the list density, the reading pane, motion, the text
+//! size, HTML mail as plain text and new-mail notifications are wired up
+//! here; background indexing is read by the sync service's indexer before
+//! each batch. The rest are stored by `zmail-store` and get
 //! wired as the views that use them land. The Settings window writes the
 //! preferences to the store and then calls
 //! [`WorkspaceView::apply_preferences`].
@@ -65,6 +67,7 @@ impl WorkspaceView {
         self.apply_motion(cx);
         self.read_system_motion(cx);
         self.apply_text_size(cx);
+        self.apply_mail_preferences(cx);
         if self.reading_pane != reading_pane {
             self.reading_pane_changed(window, cx);
         }
@@ -94,6 +97,22 @@ impl WorkspaceView {
                 self.store_error = Some(format!("Could not load the UI preferences: {error:#}"));
             }
         }
+    }
+
+    /// Applies the saved choices for reading and notifications: HTML mail
+    /// as plain text, and whether new mail raises notifications.
+    pub(crate) fn apply_mail_preferences(&mut self, cx: &mut Context<Self>) {
+        let preferences = match self.store.ui_preferences() {
+            Ok(preferences) => preferences,
+            Err(error) => {
+                self.store_error = Some(format!("Could not load the UI preferences: {error:#}"));
+                return;
+            }
+        };
+        crate::notifications::apply_preferences(preferences.notifications, cx);
+        self.reader.update(cx, |reader, cx| {
+            reader.set_html_as_text(preferences.html_as_text, cx)
+        });
     }
 
     /// Turns animations on or off in every window for the saved motion

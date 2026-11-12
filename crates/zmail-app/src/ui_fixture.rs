@@ -147,6 +147,8 @@ pub(crate) enum FixtureView {
     SettingsIdentityHidden,
     /// The Settings window on Appearance.
     SettingsAppearance,
+    /// The Settings window on Mail.
+    SettingsMail,
     /// The Settings window on Keyboard, with the Gmail keymap on.
     SettingsKeyboard,
     /// The Settings window on Privacy.
@@ -256,6 +258,7 @@ impl FixtureView {
             "settings-identity-remove" => Self::SettingsIdentityRemove,
             "settings-identity-hidden" => Self::SettingsIdentityHidden,
             "settings-appearance" => Self::SettingsAppearance,
+            "settings-mail" => Self::SettingsMail,
             "settings-keyboard" => Self::SettingsKeyboard,
             "settings-privacy" => Self::SettingsPrivacy,
             "settings-privacy-senders" => Self::SettingsPrivacySenders,
@@ -464,6 +467,7 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
             }
         }
         FixtureView::SettingsAppearance => InitialView::Settings(SettingsSection::Appearance),
+        FixtureView::SettingsMail => InitialView::Settings(SettingsSection::Mail),
         FixtureView::SettingsKeyboard => {
             store
                 .update_ui_preferences(|preferences| preferences.keymap = KeymapName::Gmail)
@@ -1721,6 +1725,7 @@ mod tests {
             "onboarding-google-guide-invalid",
             "onboarding-sign-in-refused",
             "settings-appearance",
+            "settings-mail",
             "settings-keyboard",
             "settings-privacy",
             "settings-privacy-senders",

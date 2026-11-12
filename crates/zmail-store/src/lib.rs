@@ -12647,6 +12647,8 @@ mod tests {
             keymap: KeymapName::Gmail,
             undo_send_delay_secs: 5,
             indexing: Default::default(),
+            html_as_text: true,
+            notifications: Default::default(),
             recent_commands: vec!["virtual:flagged".to_owned()],
             sender_warnings: SenderWarnings::Fewer,
             motion: MotionMode::Full,

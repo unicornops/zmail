@@ -315,6 +315,52 @@ mod tests {
     }
 
     #[test]
+    fn danger_text_reaches_aa_and_bundled_themes_keep_their_red() {
+        // The bundled themes already pass: their danger colour is used as
+        // it is.
+        for json in [zmail_theme::bundled::DARK, zmail_theme::bundled::LIGHT] {
+            let theme = bundled(json);
+            let c = UiColors::from_theme(&theme);
+            let token = crate::styles::theme_color(theme.danger.as_deref(), 0, c.background);
+            assert_eq!(c.danger, token, "{}", theme.theme_name);
+        }
+        // An imported Zed One Dark: its red is 3.78:1 on the background,
+        // so error text is lifted to 4.5:1 on every fill it sits on.
+        let theme = ThemeSummary {
+            family_name: "One".to_owned(),
+            theme_name: "One Dark".to_owned(),
+            appearance: ThemeAppearance::Dark,
+            background: Some("#282c33ff".to_owned()),
+            surface: Some("#2f343eff".to_owned()),
+            border: Some("#464b57ff".to_owned()),
+            foreground: Some("#dce0e5ff".to_owned()),
+            muted_foreground: Some("#a9afbcff".to_owned()),
+            accent: Some("#74ade8ff".to_owned()),
+            selected_background: Some("#454a56ff".to_owned()),
+            hover_background: Some("#363c4600".to_owned()),
+            danger: Some("#d07277ff".to_owned()),
+            warning: None,
+            success: None,
+            info: None,
+            button_background: None,
+            danger_background: Some("#d072771a".to_owned()),
+            warning_background: None,
+            success_background: None,
+        };
+        let c = UiColors::from_theme(&theme);
+        assert!(contrast_ratio(0xD07277, c.background) < MIN_TEXT_CONTRAST);
+        for fill in [c.background, c.surface, c.selected_background] {
+            let ratio = contrast_ratio(c.danger, fill);
+            assert!(
+                ratio >= MIN_TEXT_CONTRAST,
+                "#{:06X} is {ratio:.2}:1",
+                c.danger
+            );
+        }
+        assert_ne!(c.danger, c.foreground, "lifted only as far as needed");
+    }
+
+    #[test]
     fn derived_tokens_reach_contrast_for_a_low_contrast_theme() {
         // Zed's One Light keeps borders faint; the derived control border
         // and accent text still have to pass.

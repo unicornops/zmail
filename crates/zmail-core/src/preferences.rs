@@ -3,7 +3,8 @@
 //! [`UiPreferences`] is the one place the desktop shell keeps choices that
 //! should survive a restart: theme mode, list density, reading-pane
 //! position, pane widths, sidebar state, the last open mailbox, the keymap,
-//! the undo-send delay, motion and the text size. The terminal UI keeps its
+//! the undo-send delay, motion, the text size, how HTML mail shows,
+//! new-mail notifications and background indexing. The terminal UI keeps its
 //! own settings in it too ([`TerminalPreferences`]). `zmail-store` persists it
 //! as JSON in the local store's `app_settings` table, next to the rest of
 //! the app's state.
@@ -166,6 +167,30 @@ impl Default for IndexingPreferences {
     }
 }
 
+/// The desktop app's new-mail notifications (Settings → Mail).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationPreferences {
+    /// Whether new mail raises a system notification while the window is
+    /// not focused.
+    #[serde(deserialize_with = "lenient_true")]
+    pub enabled: bool,
+    /// Whether a notification names the sender and subject; off says only
+    /// "New mail" and the account. Settings does not offer it until the
+    /// notifier can leave them out.
+    #[serde(deserialize_with = "lenient_true")]
+    pub show_content: bool,
+}
+
+impl Default for NotificationPreferences {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            show_content: true,
+        }
+    }
+}
+
 /// Which clipboard the terminal UI's OSC 52 copy writes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -281,6 +306,14 @@ pub struct UiPreferences {
     /// Background body indexing switches.
     #[serde(deserialize_with = "lenient")]
     pub indexing: IndexingPreferences,
+    /// Show HTML mail as plain text instead of in the web renderer. The
+    /// `ZMAIL_WEB_RENDERER=0` environment variable turns the renderer off
+    /// whatever this says.
+    #[serde(deserialize_with = "lenient")]
+    pub html_as_text: bool,
+    /// New-mail notifications.
+    #[serde(deserialize_with = "lenient")]
+    pub notifications: NotificationPreferences,
     /// The command palette's recently used entries, most recent first, as
     /// the palette's own keys (`"action:zmail::Archive"`, `"mailbox:42"`).
     /// Update it through [`UiPreferences::note_recent_command`].
@@ -314,6 +347,8 @@ impl Default for UiPreferences {
             keymap: KeymapName::default(),
             undo_send_delay_secs: DEFAULT_UNDO_SEND_DELAY_SECS,
             indexing: IndexingPreferences::default(),
+            html_as_text: false,
+            notifications: NotificationPreferences::default(),
             recent_commands: Vec::new(),
             sender_warnings: SenderWarnings::default(),
             motion: MotionMode::default(),
@@ -433,6 +468,11 @@ mod tests {
                 on_battery: true,
                 on_metered: true,
             },
+            html_as_text: true,
+            notifications: NotificationPreferences {
+                enabled: false,
+                show_content: false,
+            },
             recent_commands: vec!["mailbox:42".to_owned(), "action:zmail::Archive".to_owned()],
             sender_warnings: SenderWarnings::Fewer,
             motion: MotionMode::Reduce,
@@ -480,6 +520,22 @@ mod tests {
         assert!(prefs.indexing.enabled);
         assert!(!prefs.indexing.on_battery);
         assert!(!prefs.indexing.on_metered);
+        assert!(!prefs.html_as_text);
+        assert!(prefs.notifications.enabled);
+        assert!(prefs.notifications.show_content);
+    }
+
+    #[test]
+    fn notification_switches_fall_back_one_by_one() {
+        let prefs = UiPreferences::from_json(
+            r#"{"notifications":{"enabled":false,"show_content":"maybe"},"html_as_text":"yes"}"#,
+        );
+        assert!(!prefs.notifications.enabled);
+        assert!(
+            prefs.notifications.show_content,
+            "a bad value keeps content on"
+        );
+        assert!(!prefs.html_as_text, "a bad value keeps HTML formatted");
     }
 
     #[test]

@@ -14,7 +14,10 @@
 //! view. A page that cannot be shown falls back
 //! to the text view with a notice.
 //!
-//! Set `ZMAIL_WEB_RENDERER=0` to turn the web renderer off.
+//! Settings → Mail → HTML mail "As Plain Text" shows every message in the
+//! text view (`UiPreferences::html_as_text`), at once; setting
+//! `ZMAIL_WEB_RENDERER=0` turns the web renderer off whatever Settings
+//! says.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -43,6 +46,8 @@ const UNMEASURED_HEIGHT: f32 = 120.;
 pub(super) struct ReaderWeb {
     /// Whether this build and platform render HTML mail formatted.
     enabled: bool,
+    /// The user chose to show HTML mail as plain text.
+    as_text: bool,
     /// Where each message's render source (raw HTML, inline parts) is read.
     store: Arc<LocalStore>,
     /// Created at the first render, which has the window.
@@ -67,11 +72,11 @@ pub(super) struct ReaderWeb {
 
 impl ReaderWeb {
     pub(super) fn new(store: Arc<LocalStore>) -> Self {
-        let disabled = std::env::var_os("ZMAIL_WEB_RENDERER").is_some_and(|value| value == "0");
         Self {
             // GPUI's test platform has no native composition; view tests
             // use the text view on every OS.
-            enabled: zmail_render_web::SUPPORTED && !disabled && !cfg!(test),
+            enabled: zmail_render_web::SUPPORTED && !disabled_by_environment() && !cfg!(test),
+            as_text: false,
             store,
             host: None,
             prepared: HashMap::new(),
@@ -112,13 +117,19 @@ impl ReaderWeb {
         self.host.as_ref()
     }
 
+    /// Whether HTML mail shows formatted: the platform can, nothing turned
+    /// the renderer off, and the user did not choose plain text.
+    fn formats(&self) -> bool {
+        self.enabled && !self.as_text
+    }
+
     /// Prepares `message` for the web renderer, once per body: reads its
     /// render source (the raw HTML part and inline parts) from the store
     /// and runs it through `zmail_render::prepare`. Only where the web
     /// renderer runs: elsewhere nothing is prepared and every message
     /// keeps the text view.
     pub(super) fn prepare_message(&mut self, message: &ThreadMessage) {
-        if !self.enabled
+        if !self.formats()
             || self
                 .prepared
                 .get(&message.id)
@@ -187,9 +198,31 @@ impl ReaderView {
         }));
     }
 
+    /// Shows HTML mail as plain text (`as_text`) or formatted again, from
+    /// the open conversation on: its pages close, or are prepared again.
+    pub(crate) fn set_html_as_text(&mut self, as_text: bool, cx: &mut Context<Self>) {
+        if self.web.as_text == as_text {
+            return;
+        }
+        self.web.as_text = as_text;
+        // Forget every page, as opening another conversation does.
+        self.web.retain(&HashSet::new());
+        self.selection = None;
+        let old_count = self.items.len();
+        self.items = self.layout();
+        self.list_state.splice(0..old_count, self.items.len());
+        cx.notify();
+    }
+
+    /// Whether HTML mail shows as plain text by the user's choice.
+    #[cfg(test)]
+    pub(crate) fn html_as_text(&self) -> bool {
+        self.web.as_text
+    }
+
     /// Whether the web renderer could show `message` formatted at all.
     pub(super) fn can_show_formatted(&self, message: &ThreadMessage) -> bool {
-        self.web.enabled
+        self.web.formats()
             && self.web.host.as_ref().is_none_or(WebHost::is_available)
             && self
                 .web
@@ -437,5 +470,49 @@ impl ReaderView {
         self.link_prompt = Some(LinkPrompt::new(&text, &target));
         self.link_modal.open(window, cx);
         cx.notify();
+    }
+}
+
+/// Why HTML mail always shows as plain text whatever Settings says, if
+/// it does: this platform has no web renderer, or `ZMAIL_WEB_RENDERER=0`
+/// turned it off.
+pub(crate) fn formatting_unavailable() -> Option<&'static str> {
+    if !zmail_render_web::SUPPORTED {
+        Some(
+            "This build of Zmail cannot show HTML mail formatted, so it always shows as plain text.",
+        )
+    } else if disabled_by_environment() {
+        Some(
+            "ZMAIL_WEB_RENDERER=0 is set, so HTML mail shows as plain text whatever you choose here.",
+        )
+    } else {
+        None
+    }
+}
+
+/// Whether `ZMAIL_WEB_RENDERER=0` turns the web renderer off.
+fn disabled_by_environment() -> bool {
+    std::env::var_os("ZMAIL_WEB_RENDERER").is_some_and(|value| value == "0")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use zmail_store::LocalStore;
+
+    use super::ReaderWeb;
+
+    #[test]
+    fn plain_text_wins_over_a_renderer_that_could_format() {
+        let mut web = ReaderWeb::new(Arc::new(LocalStore::open_ephemeral().expect("store")));
+        assert!(!web.formats(), "view tests never format");
+        web.enabled = true;
+        assert!(web.formats());
+        web.as_text = true;
+        assert!(!web.formats(), "the user's choice keeps plain text");
+        web.enabled = false;
+        web.as_text = false;
+        assert!(!web.formats(), "a renderer turned off stays off");
     }
 }
