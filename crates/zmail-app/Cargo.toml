@@ -47,6 +47,8 @@ zmail-auth = { path = "../zmail-auth" }
 zmail-core = { path = "../zmail-core" }
 zmail-imap = { path = "../zmail-imap" }
 zmail-security = { path = "../zmail-security" }
+# The connection test before `add-imap`/`add-jmap` store an account.
+zmail-setup = { path = "../zmail-setup" }
 zmail-sync = { path = "../zmail-sync" }
 zmail-store = { path = "../zmail-store" }
 zmail-theme = { path = "../zmail-theme" }

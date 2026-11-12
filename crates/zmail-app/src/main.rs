@@ -141,7 +141,8 @@ fn run(command: Command, force: bool) -> Result<()> {
         } => save_attachment(attachment_id, destination.as_deref(), overwrite),
         Command::FlagThread(thread_id, flagged) => flag_thread(thread_id, flagged),
         Command::MarkThreadRead(thread_id, read) => mark_thread_read(thread_id, read),
-        Command::MoveThread(thread_id, mailbox_id) => move_thread(thread_id, mailbox_id),
+        Command::MoveThread(thread_id, mailbox) => move_thread(thread_id, &mailbox),
+        Command::ListMailboxes(account_id) => list_mailboxes(account_id),
         Command::ArchiveThread(thread_id) => archive_thread(thread_id),
         Command::DeleteThread { thread_id, yes } => delete_thread(thread_id, yes),
         Command::Compose(account_id, identity_id) => compose_draft(account_id, identity_id, force),
@@ -258,8 +259,10 @@ fn launch_tui() -> Result<()> {
     let store = Arc::new(open_store_explaining(
         "the terminal UI unlocks the mail store with its key from the system keychain, as \
          the Zmail window does, and the keychain didn't answer. Over SSH, start or unlock \
-         the keychain service on that machine (Secret Service on Linux) and try again; the \
-         store never opens without its key",
+         the keychain service on that machine (Secret Service on Linux) and try again; on \
+         Linux, scripts/zmail-tui-headless.sh in Zmail's source does that for the terminal \
+         UI (README, \"Using Zmail over SSH or on a headless machine\"). The store never \
+         opens without its key",
     )?);
     let runtime = BackgroundRuntime::start(4)?;
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
@@ -437,7 +440,29 @@ fn fixture_bootstrap(
 
 fn list_accounts() -> Result<()> {
     let store = open_store().context("failed to open the local store")?;
-    output::write_accounts(&mut io::stdout().lock(), &store.list_accounts()?)?;
+    let accounts = store.list_accounts()?;
+    if accounts.is_empty() {
+        println!(
+            "No accounts yet. Add one with `zmail-app add-imap` or `zmail-app add-jmap`, in \
+             `zmail-app tui` (Setup, then Accounts), or in the Zmail window."
+        );
+        return Ok(());
+    }
+    output::write_accounts(&mut io::stdout().lock(), &accounts)?;
+    Ok(())
+}
+
+fn list_mailboxes(account_id: i64) -> Result<()> {
+    let store = open_store().context("failed to open the local store")?;
+    store
+        .sync_target(account_id)?
+        .with_context(|| format!("account {account_id} does not exist"))?;
+    let mailboxes = store.list_mailboxes(account_id)?;
+    if mailboxes.is_empty() {
+        println!("Account {account_id} has no mailboxes yet; it fills them when it syncs.");
+        return Ok(());
+    }
+    output::write_mailboxes(&mut io::stdout().lock(), &mailboxes)?;
     Ok(())
 }
 
@@ -618,11 +643,62 @@ fn mark_thread_read(thread_id: i64, read: bool) -> Result<()> {
     Ok(())
 }
 
-fn move_thread(thread_id: i64, mailbox_id: i64) -> Result<()> {
+fn move_thread(thread_id: i64, mailbox: &str) -> Result<()> {
     let store = open_store().context("failed to open the local store")?;
-    store.move_thread(thread_id, mailbox_id)?;
-    println!("Thread {thread_id} moved to mailbox {mailbox_id}.");
+    let destination = resolve_mailbox(&store, thread_id, mailbox)?;
+    store.move_thread(thread_id, destination.id)?;
+    println!(
+        "Thread {thread_id} moved to {} (mailbox {}).",
+        line(&destination.name),
+        destination.id
+    );
     Ok(())
+}
+
+/// The mailbox `given` names in the thread's account: its id, its role
+/// (`archive`), or its name, exactly or else ignoring case.
+fn resolve_mailbox(
+    store: &LocalStore,
+    thread_id: i64,
+    given: &str,
+) -> Result<zmail_core::MailboxSummary> {
+    let thread = store
+        .thread_view(thread_id)?
+        .with_context(|| format!("thread {thread_id} does not exist"))?;
+    let mailboxes = store.list_all_mailboxes()?;
+    let account_id = mailboxes
+        .iter()
+        .find(|mailbox| mailbox.id == thread.mailbox_id)
+        .map(|mailbox| mailbox.account_id)
+        .with_context(|| format!("thread {thread_id} is in no mailbox"))?;
+    let mailboxes: Vec<_> = mailboxes
+        .into_iter()
+        .filter(|mailbox| mailbox.account_id == account_id)
+        .collect();
+    let found = if let Ok(id) = given.parse::<i64>() {
+        mailboxes.iter().find(|mailbox| mailbox.id == id)
+    } else if let Some(role) = zmail_core::MailboxRole::parse(given) {
+        mailboxes.iter().find(|mailbox| mailbox.role == Some(role))
+    } else {
+        None
+    };
+    let found = found.or_else(|| mailboxes.iter().find(|mailbox| mailbox.name == given));
+    let found = found.or_else(|| {
+        let mut matches = mailboxes
+            .iter()
+            .filter(|mailbox| mailbox.name.eq_ignore_ascii_case(given));
+        match (matches.next(), matches.next()) {
+            (Some(mailbox), None) => Some(mailbox),
+            _ => None,
+        }
+    });
+    found.cloned().with_context(|| {
+        format!(
+            "account {account_id} has no mailbox {}; `zmail-app mailboxes {account_id}` lists \
+             them",
+            line(given)
+        )
+    })
 }
 
 fn archive_thread(thread_id: i64) -> Result<()> {
@@ -2152,6 +2228,37 @@ mod tests {
             b"attachment bytes"
         );
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn move_finds_the_mailbox_by_id_role_or_name() {
+        let (store, account_id, thread_id, _) = hostile_store();
+        let mailboxes = store.list_mailboxes(account_id).expect("mailboxes");
+        let trash = mailboxes
+            .iter()
+            .find(|mailbox| mailbox.name == "Trash")
+            .expect("the Trash");
+        for given in [trash.id.to_string().as_str(), "trash", "TRASH", "Trash"] {
+            let found = resolve_mailbox(&store, thread_id, given).expect("found");
+            assert_eq!(found.id, trash.id, "{given}");
+        }
+        let error = resolve_mailbox(&store, thread_id, "Elsewhere").expect_err("refused");
+        assert!(
+            format!("{error:#}").contains("zmail-app mailboxes"),
+            "{error:#}"
+        );
+        // An id from another account is not this thread's.
+        let error = resolve_mailbox(&store, thread_id, "99999").expect_err("refused");
+        assert!(format!("{error:#}").contains("has no mailbox"), "{error:#}");
+
+        let mut printed = Vec::new();
+        output::write_mailboxes(&mut printed, &mailboxes).expect("mailboxes print");
+        let printed = String::from_utf8(printed).expect("UTF-8");
+        assert!(!has_terminal_controls(&printed), "{printed:?}");
+        assert!(
+            printed.contains(&format!("#{} Trash (trash)", trash.id)),
+            "{printed}"
+        );
     }
 
     #[test]

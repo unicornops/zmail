@@ -8,6 +8,7 @@ use zmail_core::{
     SubmissionSecurity,
 };
 use zmail_security::{KeyringSecretStore, SecretSlot, SecretStore};
+use zmail_setup::check::CheckPart;
 use zmail_store::LocalStore;
 use zmail_sync::BackgroundRuntime;
 
@@ -24,21 +25,24 @@ pub(crate) fn add_account(
 ) -> Result<()> {
     let store = Arc::new(crate::open_store().context("failed to open the local store")?);
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
-    let (account, secret) = prompt_account(protocol, allow_cleartext)?;
-    let account_id = store.insert_account(&account)?;
-    secret.store(store.as_ref(), secrets.as_ref(), account_id)?;
-    let budget_mb = prompt_optional("Disk budget in MiB (empty for unlimited)")?
-        .map(|value| {
-            value
-                .parse::<u64>()
-                .context("the disk budget must be a number of MiB")
-        })
-        .transpose()?;
-    if let Some(budget_mb) = budget_mb {
-        store.set_account_disk_budget(account_id, Some(budget_mb))?;
-    }
-
+    // Every answer is checked as it is given, and the connection before
+    // anything is stored: a mistake leaves nothing behind.
+    let NewAccountAnswers {
+        account,
+        secret,
+        budget_mb,
+    } = prompt_account(protocol, allow_cleartext)?;
     let runtime = BackgroundRuntime::start(4)?;
+    let account_id = store_checked_account(
+        &runtime,
+        &store,
+        secrets.as_ref(),
+        &account,
+        &secret,
+        budget_mb,
+        &|label| println!("{}...", line(label)),
+    )?;
+
     let sync_service = crate::command_sync_service(&runtime, store.clone(), secrets, force)?;
     if !sync_service.runs_sync() {
         println!(
@@ -60,12 +64,60 @@ pub(crate) fn add_account(
         }
         Err(error) => {
             eprintln!(
-                "Account {account_id} was stored, but the initial sync failed: {}",
+                "Account {account_id} was added, but its first sync failed: {}",
                 line(&format!("{error:#}"))
             );
             Err(error)
         }
     }
+}
+
+/// Tests the account's sign-in on both halves (`zmail_setup::check`, as
+/// the terminal UI and the window do), then stores it with its secret
+/// and disk budget. Nothing is stored when the test fails, and an account
+/// whose secret can't be kept is removed again. `progress` hears each
+/// step. Returns the new account's id.
+fn store_checked_account(
+    runtime: &BackgroundRuntime,
+    store: &LocalStore,
+    secrets: &dyn SecretStore,
+    account: &NewAccount,
+    secret: &AccountSecret,
+    budget_mb: Option<u64>,
+    progress: &dyn Fn(&str),
+) -> Result<i64> {
+    for part in [CheckPart::Incoming, CheckPart::Outgoing] {
+        progress(&zmail_setup::check::check_label(account, part));
+        runtime
+            .handle()
+            .block_on(zmail_setup::check::check_part(
+                account,
+                secret.sign_in_secret(),
+                part,
+            ))
+            .map_err(|failure| {
+                anyhow::anyhow!("{}. Nothing was added.", line(&failure.summary()))
+            })?;
+    }
+    let account_id = store.insert_account(account)?;
+    let kept = secret
+        .store(store, secrets, account_id)
+        .and_then(|()| match budget_mb {
+            Some(budget_mb) => store.set_account_disk_budget(account_id, Some(budget_mb)),
+            None => Ok(()),
+        });
+    if let Err(error) = kept {
+        let _ = zmail_setup::accounts::remove_account(store, secrets, account_id);
+        return Err(error.context("the account was not added"));
+    }
+    Ok(account_id)
+}
+
+/// Everything `add-imap` and `add-jmap` ask, checked.
+struct NewAccountAnswers {
+    account: NewAccount,
+    secret: AccountSecret,
+    budget_mb: Option<u64>,
 }
 
 /// Credentials collected while setting up a new account.
@@ -82,6 +134,15 @@ enum AccountSecret {
 }
 
 impl AccountSecret {
+    /// What the connection test signs in with: the password, or the
+    /// access token.
+    fn sign_in_secret(&self) -> &str {
+        match self {
+            Self::Password(secret) | Self::PastedAccessToken(secret) => secret,
+            Self::OAuth2Flow { tokens, .. } => &tokens.access_token,
+        }
+    }
+
     /// Persists the credentials for a freshly inserted account.
     fn store(&self, store: &LocalStore, secrets: &dyn SecretStore, account_id: i64) -> Result<()> {
         match self {
@@ -102,14 +163,14 @@ impl AccountSecret {
     }
 }
 
-fn prompt_account(
-    protocol: ProtocolKind,
-    allow_cleartext: bool,
-) -> Result<(NewAccount, AccountSecret)> {
+fn prompt_account(protocol: ProtocolKind, allow_cleartext: bool) -> Result<NewAccountAnswers> {
     if protocol == ProtocolKind::Proton {
-        // Proton accounts need Proton sign-in and an encrypted local store
-        // first (docs/adr/0004-proton-native.md, #139).
-        bail!("Proton Mail accounts can't be added yet");
+        // Proton accounts sign in to Proton step by step, which the
+        // window and the terminal UI do (docs/adr/0004-proton-native.md).
+        bail!(
+            "add Proton Mail accounts in the Zmail window, or in `zmail-app tui` (Setup, then \
+             Accounts)"
+        );
     }
     println!("Setting up a new {protocol} account.");
     let display_name = prompt("Display name")?;
@@ -166,6 +227,7 @@ fn prompt_account(
     };
     let identity_name = prompt_with_default("Primary identity name", &display_name)?;
     let identity_email = prompt_with_default("Primary identity email", &username)?;
+    check_address(&identity_email)?;
     let signature =
         prompt_with_default("Primary signature", &format!("Regards,\n{identity_name}"))?;
     let alias_input = prompt_optional("Additional identity emails (comma-separated, optional)")?;
@@ -189,6 +251,7 @@ fn prompt_account(
             .filter(|value| !value.is_empty())
             .enumerate()
         {
+            check_address(alias)?;
             identities.push(NewIdentity {
                 display_name: format!("{identity_name} Alias {}", index + 1),
                 email_address: alias.to_owned(),
@@ -198,8 +261,16 @@ fn prompt_account(
         }
     }
 
-    Ok((
-        NewAccount {
+    let budget_mb = prompt_optional("Disk budget in MiB (empty for unlimited)")?
+        .map(|value| {
+            value.parse::<u64>().map_err(|_| {
+                anyhow::anyhow!("the disk budget must be a number of MiB, not {value:?}")
+            })
+        })
+        .transpose()?;
+
+    Ok(NewAccountAnswers {
+        account: NewAccount {
             display_name,
             protocol,
             auth,
@@ -210,7 +281,23 @@ fn prompt_account(
             identities,
         },
         secret,
-    ))
+        budget_mb,
+    })
+}
+
+/// Refuses an identity address that can't be one: it needs a local part
+/// and a domain, and no spaces or control characters.
+fn check_address(address: &str) -> Result<()> {
+    let valid = address
+        .split_once('@')
+        .is_some_and(|(local, domain)| !local.is_empty() && !domain.is_empty())
+        && !address
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control() || matches!(ch, '<' | '>' | ','));
+    if !valid {
+        bail!("{} is not an email address", line(address));
+    }
+    Ok(())
 }
 
 /// Prompts for the OAuth2 client configuration used by the browser flow,
@@ -436,6 +523,72 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{endpoint} with the opt-in: {error:#}"));
         }
         assert!(validate_endpoint(ProtocolKind::Imap, "https://mail.example.com", true).is_err());
+    }
+
+    #[test]
+    fn nothing_is_stored_when_the_connection_test_fails() {
+        // A port nothing listens on: the incoming sign-in fails at once.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("a port")
+            .local_addr()
+            .expect("its address")
+            .port();
+        let account = NewAccount {
+            display_name: "Work".to_owned(),
+            protocol: ProtocolKind::Imap,
+            auth: AuthKind::Password,
+            endpoint: format!("imap://127.0.0.1:{port}"),
+            username: "user@example.test".to_owned(),
+            cache_policy: CachePolicySummary::performance_first(),
+            outgoing: Some(OutgoingConfig::smtp_default("127.0.0.1".to_owned())),
+            identities: vec![NewIdentity {
+                display_name: "Work".to_owned(),
+                email_address: "user@example.test".to_owned(),
+                signature: String::new(),
+                is_primary: true,
+            }],
+        };
+        let store = LocalStore::open_ephemeral().expect("the store opens");
+        let secrets = zmail_security::InMemorySecretStore::shared();
+        let runtime = BackgroundRuntime::start(1).expect("a runtime");
+        let steps = std::sync::Mutex::new(Vec::new());
+        let error = store_checked_account(
+            &runtime,
+            &store,
+            secrets.as_ref(),
+            &account,
+            &AccountSecret::Password("password".to_owned()),
+            Some(100),
+            &|label| steps.lock().expect("the steps").push(label.to_owned()),
+        )
+        .expect_err("the test fails");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("couldn't connect to the incoming server"),
+            "{message}"
+        );
+        assert!(message.contains("Nothing was added"), "{message}");
+        assert!(store.list_accounts().expect("accounts").is_empty());
+        assert_eq!(
+            steps.into_inner().expect("the steps"),
+            vec![format!("Signing in to 127.0.0.1:{port}")]
+        );
+    }
+
+    #[test]
+    fn identity_addresses_are_checked() {
+        for address in ["ada@example.com", "ops@localhost"] {
+            check_address(address).unwrap_or_else(|error| panic!("{address}: {error:#}"));
+        }
+        for address in [
+            "ada",
+            "@example.com",
+            "ada@",
+            "a da@example.com",
+            "a@b>\r\n",
+        ] {
+            assert!(check_address(address).is_err(), "{address}");
+        }
     }
 
     #[test]

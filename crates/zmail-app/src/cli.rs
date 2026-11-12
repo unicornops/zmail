@@ -78,7 +78,9 @@ pub(crate) enum Command {
     },
     FlagThread(i64, bool),
     MarkThreadRead(i64, bool),
-    MoveThread(i64, i64),
+    /// `move`: the thread, and the mailbox as given (id, role or name).
+    MoveThread(i64, String),
+    ListMailboxes(i64),
     ArchiveThread(i64),
     DeleteThread {
         thread_id: i64,
@@ -257,6 +259,18 @@ pub(crate) static COMMANDS: &[Spec] = &[
         },
     },
     Spec {
+        name: "mailboxes",
+        args: &["ACCOUNT"],
+        required: 1,
+        rest: false,
+        options: &[],
+        summary: "List an account's mailboxes and their ids",
+        details: "`move` takes a mailbox's id, role or name.",
+        group: Group::Mail,
+        available: true,
+        build: |args| Ok(Command::ListMailboxes(args.id(0)?)),
+    },
+    Spec {
         name: "search",
         args: &["ACCOUNT", "QUERY"],
         required: 2,
@@ -406,10 +420,17 @@ pub(crate) static COMMANDS: &[Spec] = &[
         rest: false,
         options: &[],
         summary: "Move a conversation to another mailbox",
-        details: "MAILBOX is the mailbox's id.",
+        details: "MAILBOX is a mailbox's id, its role (inbox, drafts, sent, archive, \
+                  junk or trash) or its name, as `zmail-app mailboxes ACCOUNT` lists \
+                  them.",
         group: Group::Mail,
         available: true,
-        build: |args| Ok(Command::MoveThread(args.id(0)?, args.id(1)?)),
+        build: |args| {
+            Ok(Command::MoveThread(
+                args.id(0)?,
+                args.arg(1).unwrap_or_default().to_owned(),
+            ))
+        },
     },
     Spec {
         name: "archive",
@@ -1108,7 +1129,7 @@ pub(crate) fn general_help() -> String {
     push_entry(
         &mut help,
         "  -h, --help",
-        "Show this help, or a command's with one",
+        "Show this help, or after a command, its help",
     );
     push_entry(&mut help, "  -V, --version", "Show the version");
     help.push_str(
@@ -1397,6 +1418,24 @@ mod tests {
         assert!(matches!(
             parse_line("mailto:someone@example.com?subject=-h"),
             Ok((Command::Mailto(_), _))
+        ));
+    }
+
+    #[test]
+    fn move_takes_a_mailbox_id_role_or_name() {
+        for (line, expected) in [
+            ("move 4 7", "7"),
+            ("move 4 archive", "archive"),
+            ("move 4 Projects/Website", "Projects/Website"),
+        ] {
+            let Ok((Command::MoveThread(4, mailbox), _)) = parse_line(line) else {
+                panic!("{line} parses");
+            };
+            assert_eq!(mailbox, expected);
+        }
+        assert!(matches!(
+            parse_line("mailboxes 2"),
+            Ok((Command::ListMailboxes(2), _))
         ));
     }
 
