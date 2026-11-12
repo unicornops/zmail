@@ -2192,6 +2192,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A file name far longer than any file system allows is kept: the
+    /// logical name never reaches the disk, the vault names the file with
+    /// 32 hex digits (ADR 0005).
+    #[test]
+    fn an_attachment_with_a_very_long_name_is_kept() {
+        let filename = format!("{}.pdf", "a".repeat(1000));
+        let raw = format!(
+            "From: sender@example.test\r\n\
+             Subject: long name\r\n\
+             To: rcpt@example.test\r\n\
+             Content-Type: multipart/mixed; boundary=\"BOUND\"\r\n\
+             \r\n\
+             --BOUND\r\n\
+             Content-Type: text/plain\r\n\
+             \r\n\
+             Body text.\r\n\
+             --BOUND\r\n\
+             Content-Type: application/pdf\r\n\
+             Content-Disposition: attachment; filename=\"{filename}\"\r\n\
+             \r\n\
+             payload\r\n\
+             --BOUND--\r\n"
+        );
+        let message = mail_parser::MessageParser::default()
+            .parse(raw.as_bytes())
+            .expect("the message should parse");
+        let dir = std::env::temp_dir().join(format!("zmail-imap-long-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let vault = zmail_security::vault::BlobVault::new(
+            &dir,
+            &zmail_security::vault::StoreKey::generate(),
+        );
+        let blobs = zmail_core::BlobStore::new(std::sync::Arc::new(vault.clone()));
+
+        let attachments = persist_attachments(&message, &"Inbox".repeat(100), "42", &blobs);
+        assert_eq!(attachments.len(), 1, "the attachment is kept");
+        assert_eq!(attachments[0].filename, filename);
+        assert_eq!(attachments[0].storage_path.len(), 32);
+        assert_eq!(
+            vault
+                .read_file(&dir.join(&attachments[0].storage_path))
+                .expect("the blob decrypts"),
+            b"payload"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The path Proton hydration takes (`zmail-proton` rebuilds RFC 822 and
     /// hands it here): the attachment lands encrypted under an opaque name,
     /// and neither its bytes nor its name nor the mailbox appear on disk.

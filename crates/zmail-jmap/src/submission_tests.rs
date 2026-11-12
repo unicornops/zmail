@@ -742,3 +742,49 @@ fn submission_answers_say_whether_the_server_refused() {
         Err(SubmitError::Unknown(_))
     ));
 }
+
+#[tokio::test]
+async fn an_address_that_cannot_stand_in_an_envelope_is_never_submitted() {
+    let server = FakeServer::start(Vec::new());
+    let mut bad_recipient = message();
+    bad_recipient
+        .bcc
+        .push("a@example.com>\r\nRCPT TO:<other@example.net".to_owned());
+    let mut bad_sender = message();
+    bad_sender.from_email = "rob@example.com\r\n".to_owned();
+
+    for message in [&bad_recipient, &bad_sender] {
+        let error = server.send(message).await.expect_err("refused");
+        assert!(
+            error
+                .to_string()
+                .starts_with("Not an address Zmail can send"),
+            "{error}"
+        );
+        let error = server.resend(message).await.expect_err("refused");
+        assert!(
+            error
+                .to_string()
+                .starts_with("Not an address Zmail can send"),
+            "{error}"
+        );
+        let error = submit_imported_message(
+            &server.endpoint,
+            "rob@example.com",
+            "pw",
+            AuthKind::Password,
+            "rob@example.com",
+            "e1",
+            message,
+        )
+        .await
+        .expect_err("refused");
+        assert!(
+            error
+                .to_string()
+                .starts_with("Not an address Zmail can send"),
+            "{error}"
+        );
+    }
+    assert!(server.with_state(|state| state.calls.is_empty() && state.blobs.is_empty()));
+}

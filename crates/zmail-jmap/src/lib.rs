@@ -304,6 +304,8 @@ pub async fn submit_outgoing_message(
     if message.to.is_empty() && message.cc.is_empty() && message.bcc.is_empty() {
         bail!("JMAP submission requires at least one recipient");
     }
+    // The envelope is JSON, but the server takes its addresses into SMTP.
+    message.check_addresses()?;
 
     let client = connect_client(endpoint, username, secret, auth).await?;
     import_and_submit(&client, identity_email, message).await
@@ -336,6 +338,8 @@ pub async fn resubmit_outgoing_message(
     if message.to.is_empty() && message.cc.is_empty() && message.bcc.is_empty() {
         bail!("JMAP submission requires at least one recipient");
     }
+    // The envelope is JSON, but the server takes its addresses into SMTP.
+    message.check_addresses()?;
 
     let client = connect_client(endpoint, username, secret, auth).await?;
     if let Some(message_id) = message.message_id.as_deref().and_then(bare_message_id) {
@@ -766,6 +770,7 @@ pub async fn submit_imported_message(
     email_id: &str,
     message: &OutgoingMessage,
 ) -> Result<()> {
+    message.check_addresses()?;
     let client = connect_client(endpoint, username, secret, auth).await?;
     let identity_id = resolve_identity_id(&client, identity_email)
         .await?

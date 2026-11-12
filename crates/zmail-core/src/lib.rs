@@ -1050,6 +1050,18 @@ pub struct OutgoingMessage {
     pub reply_action: Option<ReplyAction>,
 }
 
+impl OutgoingMessage {
+    /// Checks the envelope this message goes out with, before anything
+    /// reaches a server: the sender's address and every To, Cc and Bcc
+    /// recipient's, by [`participants::is_valid_address`].
+    pub fn check_addresses(&self) -> Result<(), participants::InvalidAddresses> {
+        participants::check_envelope(
+            &self.from_email,
+            self.to.iter().chain(&self.cc).chain(&self.bcc),
+        )
+    }
+}
+
 /// Resolved account and identity used by an outbox delivery attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryTarget {

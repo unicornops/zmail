@@ -11,7 +11,7 @@
 //! ` -> ` as a list separator so those rows still read sensibly until the
 //! next sync rewrites them.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt};
 
 use crate::MessageSnapshot;
 
@@ -111,6 +111,103 @@ pub fn envelope_address(recipient: &str) -> String {
     Participant::parse(recipient)
         .email
         .unwrap_or_else(|| recipient.trim().to_owned())
+}
+
+/// Whether `address`, a bare address (an addr-spec such as
+/// `jane@example.com`), is one Zmail sends mail to or from: one `@` with
+/// text on both sides; no control characters, whitespace, angle brackets
+/// or commas, so it stands in an SMTP envelope (`MAIL FROM:<...>`,
+/// `RCPT TO:<...>`) as it is; and a domain that neither starts nor ends
+/// with a dot nor has two in a row. The GUI's recipient chips and the
+/// TUI's address check apply the same rule, except that they let control
+/// characters other than whitespace through.
+pub fn is_valid_address(address: &str) -> bool {
+    let Some((local, domain)) = address.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.is_empty()
+        && !domain.contains('@')
+        && !address.contains(|ch: char| {
+            ch.is_control() || ch.is_whitespace() || matches!(ch, '<' | '>' | ',')
+        })
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !domain.contains("..")
+}
+
+/// The addresses a message cannot be sent with, from [`check_envelope`]:
+/// its message names each one as the user wrote it, with control
+/// characters shown as escapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidAddresses {
+    /// The sending address, when it is not valid.
+    pub sender: Option<String>,
+    /// Each recipient entry (`Name <address>` or `address`) whose address
+    /// is not valid.
+    pub recipients: Vec<String>,
+}
+
+impl fmt::Display for InvalidAddresses {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut parts = Vec::new();
+        if !self.recipients.is_empty() {
+            let recipients = self
+                .recipients
+                .iter()
+                .map(|entry| printable(entry))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("Not an address Zmail can send to: {recipients}"));
+        }
+        if let Some(sender) = &self.sender {
+            parts.push(format!(
+                "Not an address Zmail can send from: {}",
+                printable(sender)
+            ));
+        }
+        formatter.write_str(&parts.join("; "))
+    }
+}
+
+impl std::error::Error for InvalidAddresses {}
+
+/// Checks the addresses a message goes out with, before any reaches a
+/// server: the sender's bare address and each recipient entry's
+/// ([`envelope_address`]), each by [`is_valid_address`].
+pub fn check_envelope<I>(sender: &str, recipients: I) -> Result<(), InvalidAddresses>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let invalid = InvalidAddresses {
+        sender: (!is_valid_address(sender)).then(|| sender.to_owned()),
+        recipients: recipients
+            .into_iter()
+            .filter(|entry| !is_valid_address(&envelope_address(entry.as_ref())))
+            .map(|entry| entry.as_ref().trim().to_owned())
+            .collect(),
+    };
+    if invalid.sender.is_none() && invalid.recipients.is_empty() {
+        Ok(())
+    } else {
+        Err(invalid)
+    }
+}
+
+/// `value` with its control characters escaped (`\r`, `\u{1b}`), so an
+/// error message shows them instead of acting on them.
+fn printable(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_control() {
+                ch.escape_default().to_string()
+            } else {
+                ch.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Splits a sender string into its display name and address, for headers
@@ -320,8 +417,9 @@ fn unquote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Participant, address_entries, format_address_list, parse_address_list, participant_names,
-        participant_summary, sender_display_name, sender_identity, thread_participants,
+        Participant, address_entries, check_envelope, format_address_list, is_valid_address,
+        parse_address_list, participant_names, participant_summary, sender_display_name,
+        sender_identity, thread_participants,
     };
     use crate::MessageSnapshot;
 
@@ -509,6 +607,67 @@ mod tests {
                 &["rob@example.com"]
             ),
             "Alice, me"
+        );
+    }
+
+    #[test]
+    fn valid_addresses_can_stand_in_an_envelope() {
+        for address in [
+            "jane@example.com",
+            "phase2@localhost",
+            "user+tag@sub.example.co.uk",
+            "jöran@exämple.de",
+        ] {
+            assert!(is_valid_address(address), "{address}");
+        }
+        for address in [
+            "",
+            "jane",
+            "@example.com",
+            "jane@",
+            "jane@@example.com",
+            "jane@example..com",
+            "jane@.example.com",
+            "jane@example.com.",
+            "jane doe@example.com",
+            "jane@example.com\r\nRCPT TO:<x@example.net",
+            "jane@example.com>",
+            "<jane@example.com",
+            "jane@example.com,bob@example.com",
+            "jane@exa\tmple.com",
+            "jane@exa\u{0}mple.com",
+            "jane@exa\u{1b}mple.com",
+            "jane@exa\u{85}mple.com",
+            "jane@exa\u{7f}mple.com",
+        ] {
+            assert!(!is_valid_address(address), "{address:?}");
+        }
+    }
+
+    #[test]
+    fn the_envelope_check_names_each_address_it_refuses() {
+        assert_eq!(
+            check_envelope(
+                "me@example.com",
+                ["Kai <kai@example.com>", "\"Doe, Jane\" <jane@example.com>"]
+            ),
+            Ok(())
+        );
+        let error = check_envelope(
+            "me@example.com\r\n",
+            [
+                "kai@example.com",
+                "a@example.com>\r\nRCPT TO:<x@example.net",
+                "Just A Name",
+            ],
+        )
+        .expect_err("refused");
+        assert_eq!(error.sender.as_deref(), Some("me@example.com\r\n"));
+        assert_eq!(error.recipients.len(), 2);
+        assert_eq!(
+            error.to_string(),
+            "Not an address Zmail can send to: a@example.com>\\r\\nRCPT TO:<x@example.net, \
+             Just A Name; Not an address Zmail can send from: me@example.com\\r\\n"
         );
     }
 }
