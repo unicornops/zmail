@@ -7,11 +7,11 @@
 //! subscribes to the [`MailEvent`]s and refreshes the panes from the local
 //! store, as before.
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Result;
 use gpui::{Context, EventEmitter};
-use zmail_core::{DraftAttachment, DraftUpdate, NewDraft};
+use zmail_core::{DraftUpdate, NewDraft};
 use zmail_store::LocalStore;
 
 pub(crate) use zmail_actions::{MARK_READ_DELAY, MailEvent, UndoEntry, UndoId};
@@ -163,15 +163,10 @@ impl MailActions {
         self.inner.save_draft(draft_id, update, &mut emit(cx))
     }
 
-    /// Copies the file at `path` into the draft as an attachment.
-    pub(crate) fn add_draft_attachment(
-        &mut self,
-        draft_id: i64,
-        path: impl AsRef<Path>,
-        cx: &mut Context<Self>,
-    ) -> Result<DraftAttachment> {
-        self.inner
-            .add_draft_attachment(draft_id, path, &mut emit(cx))
+    /// Reports an attachment copied into a draft off the UI thread
+    /// (`compose::attaching`), so the shell lists it.
+    pub(crate) fn draft_attachments_changed(&mut self, draft_id: i64, cx: &mut Context<Self>) {
+        cx.emit(MailEvent::DraftAttachmentsChanged { draft_id });
     }
 
     /// Removes an attachment from a draft.
@@ -536,11 +531,13 @@ mod tests {
 
         let path = std::env::temp_dir().join(format!("zmail-ui-attachment-{draft_id}.txt"));
         std::fs::write(&path, b"attachment").expect("fixture file writes");
-        let attachment = actions
-            .update(cx, |actions, cx| {
-                actions.add_draft_attachment(draft_id, &path, cx)
-            })
+        let attachment = fixture
+            .store
+            .add_draft_attachment(draft_id, &path)
             .expect("attachment is added");
+        actions.update(cx, |actions, cx| {
+            actions.draft_attachments_changed(draft_id, cx)
+        });
         actions
             .update(cx, |actions, cx| {
                 actions.remove_draft_attachment(draft_id, attachment.id, cx)

@@ -14,7 +14,10 @@
 //!
 //! Attachments come from the system file picker (`prompt_for_paths`) or
 //! files dropped onto the editor (`ExternalPaths`), and show as cards with
-//! a Remove button.
+//! their size and a Remove button. They are copied in on a background
+//! thread ([`attaching`]): Send waits for them, and past
+//! [`attaching::LARGE_ATTACHMENTS_BYTES`] in all a banner warns that the
+//! message may be too large for some providers.
 //!
 //! Send checks the draft first ([`send_checks`]): with no recipients, or
 //! one that is not a valid address, it says what to fix in a banner above
@@ -56,6 +59,7 @@ use crate::styles::{
 };
 use crate::widgets::{EllipsisExt, empty_state, format_size, icon, label_chip, status_banner};
 
+mod attaching;
 mod recipients;
 pub(crate) mod send_checks;
 pub(crate) mod window;
@@ -257,6 +261,10 @@ pub(crate) struct ComposeView {
     send_check_cancel: FocusHandle,
     /// The questions answered Send Anyway during this press of Send.
     waived_checks: Vec<SendCheck>,
+    /// Attachments being copied into the open draft, and those that could
+    /// not be ([`attaching`]).
+    pending_attachments: Vec<attaching::PendingAttachment>,
+    next_pending_attachment: usize,
     _quit_subscription: Subscription,
 }
 
@@ -300,6 +308,8 @@ impl ComposeView {
             send_check_modal: ModalState::new(cx),
             send_check_cancel: cx.focus_handle(),
             waived_checks: Vec::new(),
+            pending_attachments: Vec::new(),
+            next_pending_attachment: 0,
             _quit_subscription: quit_subscription,
         }
     }
@@ -356,6 +366,7 @@ impl ComposeView {
         self.flush_autosave(cx);
         self.compose = None;
         self.send_problem = None;
+        self.pending_attachments.clear();
         self.in_window = None;
         self.input_subscriptions.clear();
         self.from_menu = None;
@@ -429,6 +440,7 @@ impl ComposeView {
                 self.input_subscriptions = Self::watch_inputs(&compose, window, cx);
                 self.compose = Some(compose);
                 self.send_problem = None;
+                self.pending_attachments.clear();
             }
         }
         self.load_identities(account_id, cx);
@@ -594,7 +606,10 @@ impl ComposeView {
             DraftState::Sent => Some(send_checks::ALREADY_SENT),
             DraftState::Editing | DraftState::Failed => None,
         };
-        if let Some(problem) = already_gone {
+        if let Some(problem) = already_gone.or_else(|| {
+            self.attaching()
+                .then_some(send_checks::WAIT_FOR_ATTACHMENTS)
+        }) {
             self.send_problem = Some(problem.to_owned());
             cx.notify();
             return;
@@ -772,31 +787,18 @@ impl ComposeView {
         self.attach_paths(paths.paths().to_vec(), cx);
     }
 
-    /// Copies each file into the draft as an attachment. Folders and
-    /// unreadable files are reported and skipped.
+    /// Copies each file into the draft as an attachment, in the
+    /// background ([`attaching`]). Folders and unreadable files stay as
+    /// cards that say why.
     pub(crate) fn attach_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let Some(draft_id) = self.draft_id() else {
+        if self.compose.is_none() {
             return;
-        };
+        }
         if let Err(error) = self.save(cx) {
             cx.emit(ComposeEvent::Error(error.to_string()));
             return;
         }
-        for path in paths {
-            if path.is_dir() {
-                cx.emit(ComposeEvent::Error(format!(
-                    "{} is a folder; attach the files in it instead.",
-                    path.display()
-                )));
-                continue;
-            }
-            if let Err(error) = self.mail_actions.update(cx, |actions, cx| {
-                actions.add_draft_attachment(draft_id, &path, cx)
-            }) {
-                cx.emit(ComposeEvent::Error(error.to_string()));
-            }
-        }
-        self.refresh_from_store(cx);
+        self.attach_files(paths, cx);
     }
 
     fn remove_attachment(
@@ -855,6 +857,21 @@ impl ComposeView {
             compose.bcc.update(cx, |field, cx| field.focus(window, cx));
             cx.notify();
         }
+    }
+}
+
+/// Send, disabled while attachments are being copied in, with the reason
+/// as its tooltip.
+pub(crate) fn send_button(id: &'static str, attaching: bool) -> Button {
+    let button = Button::new(id, "Send")
+        .primary()
+        .icon("send")
+        .shortcut("secondary-enter")
+        .disabled(attaching);
+    if attaching {
+        button.tooltip("Send is available once the attachments have finished copying")
+    } else {
+        button
     }
 }
 
@@ -1113,6 +1130,26 @@ impl ComposeView {
                     colors,
                 ))
             })
+            .when(!self.pending_attachments.is_empty(), |this| {
+                this.child(
+                    div().flex().flex_wrap().gap_2().children(
+                        self.pending_attachments
+                            .iter()
+                            .map(|pending| self.render_pending_card(pending, colors, cx)),
+                    ),
+                )
+            })
+            .when_some(self.large_attachments_notice(), |this, notice| {
+                this.child(status_banner(
+                    "compose-large-attachments",
+                    Role::Status,
+                    &notice,
+                    "triangle-alert",
+                    colors.warning,
+                    colors.warning_background,
+                    colors,
+                ))
+            })
             .into_any_element()
     }
 
@@ -1122,10 +1159,7 @@ impl ComposeView {
     fn render_action_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let focus_handle = &self.focus_handle;
         let mut buttons = vec![
-            Button::new("compose-send", "Send")
-                .primary()
-                .icon("send")
-                .shortcut("secondary-enter")
+            send_button("compose-send", self.attaching())
                 .on_click(dispatch_from(focus_handle, Send))
                 .into_any_element(),
             Button::new("compose-attach", "Attach")

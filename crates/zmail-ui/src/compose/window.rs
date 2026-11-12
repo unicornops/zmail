@@ -25,7 +25,7 @@ use super::{ComposeEvent, ComposeView, Presentation};
 use crate::actions::{AddAttachment, Cancel, Send};
 use crate::components::title_bar::TRAFFIC_LIGHT_POSITION;
 use crate::components::{
-    Button, ComponentTheme, IconButton, TitleBar, Toast, ToastHost, ToastKind, window_frame,
+    ComponentTheme, IconButton, TitleBar, Toast, ToastHost, ToastKind, window_frame,
 };
 use crate::mail_actions::MailActions;
 use crate::pane::dispatch_from;
@@ -208,6 +208,7 @@ impl ComposeWindow {
         let focus_handle = compose.focus_handle(cx);
         let title = compose.title(cx);
         let draft_open = compose.draft_id().is_some();
+        let attaching = compose.attaching();
         let send_in_bar = matches!(
             PlatformStyle::current().send_button,
             SendButtonPlacement::ToolbarTrailing | SendButtonPlacement::HeaderBarTrailing
@@ -241,10 +242,7 @@ impl ComposeWindow {
                         .debug_selector(|| "compose-window-send".into())
                         .occlude()
                         .child(
-                            Button::new("compose-window-send", "Send")
-                                .primary()
-                                .icon("send")
-                                .shortcut("secondary-enter")
+                            super::send_button("compose-window-send", attaching)
                                 .on_click(dispatch_from(&focus_handle, Send)),
                         ),
                 )
