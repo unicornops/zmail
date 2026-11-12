@@ -14,6 +14,9 @@
 // The session's rotated tokens are tracked until the account is stored.
 // Adding the Bridge user (`addUser`) is Zmail's account insert followed
 // by `store`.
+// Modified by UnicornOps on 2026-11-10: a session that cannot be stored in
+// the keychain is signed out on Proton's side, so a failed add leaves no
+// session behind.
 
 //! Signing in to a Proton account, one step at a time.
 
@@ -27,7 +30,7 @@ use zmail_proton_api::{
 };
 use zmail_security::SecretStore;
 
-use crate::session::store_new_session;
+use crate::session::{delete_session, store_new_session};
 
 /// What the sign-in needs next.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,8 +180,12 @@ impl ProtonSignIn {
     /// Stores the session for `account_id` in the keychain: the UID, the
     /// current refresh token and the salted key password (Bridge's
     /// `addUser` writing its vault).
+    ///
+    /// If the keychain refuses, the account cannot be kept, so the session
+    /// is signed out on Proton's side (best effort) and whatever was
+    /// written is removed again: a failed add leaves no live session.
     pub async fn store(&self, secrets: &dyn SecretStore, account_id: i64) -> Result<()> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
         let key_pass = state
             .key_pass
             .as_ref()
@@ -189,7 +196,17 @@ impl ProtonSignIn {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
             .ok_or_else(|| anyhow!("the sign-in has not finished"))?;
-        store_new_session(secrets, account_id, &auth, key_pass)
+        let stored = store_new_session(secrets, account_id, &auth, key_pass);
+        if stored.is_err() {
+            let _ = delete_session(secrets, account_id);
+            // The session is ending: it must not be stored later.
+            state.key_pass = None;
+            if let Some(client) = state.client.take() {
+                let _ = client.auth_delete().await;
+                client.close();
+            }
+        }
+        stored
     }
 
     /// Gives up: signs the session out on Proton's side (`AuthDelete`).
@@ -271,5 +288,94 @@ fn sign_in_error(error: Error) -> anyhow::Error {
             "Proton did not accept this version of Zmail; Proton may be blocking third-party clients"
         ),
         other => anyhow!(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zmail_proton_api::{AppVersion, ClientConfig};
+    use zmail_security::{InMemorySecretStore, SecretSlot};
+
+    use super::*;
+
+    /// A keychain that takes the session UID and refuses the rest.
+    #[derive(Default)]
+    struct RefusesTokens(InMemorySecretStore);
+
+    impl SecretStore for RefusesTokens {
+        fn set_account_secret(&self, account_id: i64, secret: &str) -> Result<()> {
+            self.0.set_account_secret(account_id, secret)
+        }
+
+        fn get_account_secret(&self, account_id: i64) -> Result<String> {
+            self.0.get_account_secret(account_id)
+        }
+
+        fn delete_account_secret(&self, account_id: i64) -> Result<()> {
+            self.0.delete_account_secret(account_id)
+        }
+
+        fn set_account_secret_in_slot(
+            &self,
+            account_id: i64,
+            slot: SecretSlot,
+            secret: &str,
+        ) -> Result<()> {
+            if slot == SecretSlot::ProtonUid {
+                self.0.set_account_secret_in_slot(account_id, slot, secret)
+            } else {
+                bail!("the keychain is locked")
+            }
+        }
+
+        fn get_account_secret_from_slot(
+            &self,
+            account_id: i64,
+            slot: SecretSlot,
+        ) -> Result<String> {
+            self.0.get_account_secret_from_slot(account_id, slot)
+        }
+
+        fn delete_account_secret_in_slot(&self, account_id: i64, slot: SecretSlot) -> Result<()> {
+            self.0.delete_account_secret_in_slot(account_id, slot)
+        }
+    }
+
+    /// A session the keychain will not keep is given up whole: what was
+    /// written is removed, and the sign-in drops its client (which is
+    /// signed out on Proton's side first; that call needs the harness).
+    #[tokio::test]
+    async fn a_session_that_cannot_be_stored_leaves_nothing_behind() {
+        let manager = Manager::new(
+            ClientConfig::production(AppVersion::zmail("0.0.1").expect("version")).expect("config"),
+        )
+        .expect("manager");
+        let sign_in = ProtonSignIn::new(manager, "zmail", "password");
+        {
+            let mut state = sign_in.state.lock().await;
+            state.key_pass = Some(SaltedKeyPass::from_secret("salted"));
+            *state.auth.lock().expect("auth") = Some(Auth {
+                uid: "uid-1".to_owned(),
+                access_token: "access".to_owned(),
+                refresh_token: "refresh".to_owned(),
+                ..Auth::default()
+            });
+        }
+
+        let secrets = RefusesTokens::default();
+        let error = sign_in.store(&secrets, 7).await.expect_err("refused");
+        assert!(format!("{error:#}").contains("the keychain is locked"));
+        assert!(
+            secrets
+                .get_account_secret_from_slot(7, SecretSlot::ProtonUid)
+                .is_err(),
+            "the UID written before the failure is removed again"
+        );
+        assert!(sign_in.state.lock().await.client.is_none());
+
+        // The session was given up, so it cannot be stored afterwards.
+        let secrets = InMemorySecretStore::default();
+        assert!(sign_in.store(&secrets, 7).await.is_err());
+        assert!(!crate::session::has_session(&secrets, 7));
     }
 }

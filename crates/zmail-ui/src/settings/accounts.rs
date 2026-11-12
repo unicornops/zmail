@@ -722,6 +722,7 @@ impl AccountsSettings {
         let forgot = match zmail_setup::accounts::remove_account(
             &host.store,
             host.secrets.as_ref(),
+            Some(&host.sync_service),
             removal.account_id,
         ) {
             Ok(()) => Ok(()),

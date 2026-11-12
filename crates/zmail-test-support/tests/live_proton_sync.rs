@@ -145,6 +145,68 @@ fn a_revoked_session_asks_to_sign_in_again() -> Result<()> {
     Ok(())
 }
 
+/// Removing an account signs its session out on the server: with the
+/// session Zmail has open, and with only the stored one.
+#[test]
+#[ignore = "requires docker (or PROTON_HARNESS_MODE=native and Go) and the Proton harness"]
+fn signing_out_a_removed_account_ends_its_session_on_the_server() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let harness = ProtonHarness::start()?;
+    let manager = Manager::new(harness_config(&harness)?)?;
+    let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+    let sessions = zmail_proton::ProtonSessions::new(harness_config(&harness)?, secrets.clone())?;
+    let stored = |account_id: i64| -> Result<(String, String)> {
+        Ok((
+            secrets.get_account_secret_from_slot(account_id, SecretSlot::ProtonUid)?,
+            secrets.get_account_secret_from_slot(account_id, SecretSlot::ProtonRefreshToken)?,
+        ))
+    };
+
+    // An open session: the keychain holds its current, unspent refresh
+    // token, which stops working once the session is signed out.
+    sign_in(&harness, secrets.as_ref(), 1)?;
+    // Only a stored session, as when the account never synced this run.
+    sign_in(&harness, secrets.as_ref(), 2)?;
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            sessions.session(1).await.context("resume")?;
+            let (uid, refresh_token) = stored(1)?;
+            ensure!(
+                sessions
+                    .sign_out(1, zmail_proton::stored_session(secrets.as_ref(), 1))
+                    .await,
+                "the open session was not signed out; server log:\n{}",
+                harness.logs()
+            );
+            ensure!(
+                stored(1)? == (uid.clone(), refresh_token.clone()),
+                "signing out wrote to the keychain"
+            );
+            ensure!(
+                manager
+                    .new_client_with_refresh(&uid, &refresh_token)
+                    .await
+                    .is_err(),
+                "the signed-out session can still be resumed"
+            );
+
+            ensure!(
+                sessions
+                    .sign_out(2, zmail_proton::stored_session(secrets.as_ref(), 2))
+                    .await,
+                "the stored session was not signed out; server log:\n{}",
+                harness.logs()
+            );
+
+            // No session at all: nothing to do, and no error.
+            ensure!(!sessions.sign_out(3, None).await);
+            Ok(())
+        })
+}
+
 /// Subjects of the threads in one mailbox.
 fn subjects(store: &LocalStore, account_id: i64, mailbox: &str) -> Result<Vec<String>> {
     let id = store

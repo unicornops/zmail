@@ -740,7 +740,12 @@ impl App {
             .find(|account| account.id == account_id)
             .map(|account| sanitize_line(&account.display_name))
             .unwrap_or_default();
-        match accounts::remove_account(&self.store, secrets.as_ref(), account_id) {
+        match accounts::remove_account(
+            &self.store,
+            secrets.as_ref(),
+            self.sync.as_ref(),
+            account_id,
+        ) {
             Ok(()) => {
                 self.status = Some(format!(
                     "Removed {name} from this computer. Its mail on the server is untouched."

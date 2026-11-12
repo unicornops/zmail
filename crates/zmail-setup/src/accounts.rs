@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use zmail_core::{
-    AccountSummary, AuthKind, SyncPhase,
+    AccountSummary, AuthKind, ProtocolKind, SyncPhase,
     text::{count_noun, thousands},
 };
 use zmail_security::{SecretSlot, SecretStore};
@@ -108,7 +108,7 @@ pub fn store_authorized_account(
     if let Err(error) =
         zmail_sync::persist_oauth2_grant(store, secrets, account_id, &client, tokens)
     {
-        let _ = remove_account(store, secrets, account_id);
+        let _ = remove_account(store, secrets, sync_service, account_id);
         return Err(error.context("Zmail could not keep the sign-in in the keychain"));
     }
     if let Some(sync_service) = sync_service {
@@ -355,11 +355,37 @@ pub enum RemoveError {
 /// Removes an account from this computer: its local data, then every
 /// keychain secret it has, a Proton account's session too. The mail on
 /// the server is untouched.
+///
+/// A Proton account's session is also signed out on Proton's side, so
+/// its refresh token stops working wherever a copy may be (a keychain
+/// entry that could not be deleted, a backup). That runs in the
+/// background through `sync_service` and is best effort: removing an
+/// account never waits for the network and works offline, and without a
+/// sync service the session is only forgotten here.
 pub fn remove_account(
     store: &LocalStore,
     secrets: &dyn SecretStore,
+    sync_service: Option<&SyncService>,
     account_id: i64,
 ) -> Result<(), RemoveError> {
+    // Read before the keychain entries go: signing out needs them when
+    // Zmail has no open session for the account.
+    let proton_session = sync_service
+        .filter(|_| {
+            store
+                .sync_target(account_id)
+                .ok()
+                .flatten()
+                .is_some_and(|target| target.protocol == ProtocolKind::Proton)
+        })
+        .map(|sync_service| {
+            let read = |slot| secrets.get_account_secret_from_slot(account_id, slot).ok();
+            (
+                sync_service,
+                read(SecretSlot::ProtonUid),
+                read(SecretSlot::ProtonRefreshToken),
+            )
+        });
     store
         .delete_account(account_id)
         .map_err(RemoveError::LocalData)?;
@@ -374,6 +400,9 @@ pub fn remove_account(
         SecretSlot::ProtonKeyPass,
     ] {
         forgot = forgot.and(secrets.delete_account_secret_in_slot(account_id, slot));
+    }
+    if let Some((sync_service, uid, refresh_token)) = proton_session {
+        sync_service.sign_out_proton_session(account_id, uid, refresh_token);
     }
     forgot.map_err(RemoveError::Keychain)
 }
@@ -566,6 +595,46 @@ mod tests {
         assert!(description.contains("keychain"));
     }
 
+    /// Removing a Proton account hands its session to the sync service
+    /// to sign out and never waits for it: with no Proton connection (or
+    /// no network) the account and its keychain entries still go.
+    #[test]
+    fn removing_a_proton_account_does_not_wait_for_the_sign_out() {
+        let store = Arc::new(LocalStore::open_ephemeral().expect("a store"));
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        let account_id = store
+            .insert_account(&NewAccount {
+                protocol: ProtocolKind::Proton,
+                auth: AuthKind::ProtonSession,
+                ..account()
+            })
+            .expect("stored");
+        let slots = [
+            SecretSlot::ProtonUid,
+            SecretSlot::ProtonRefreshToken,
+            SecretSlot::ProtonKeyPass,
+        ];
+        for slot in slots {
+            secrets
+                .set_account_secret_in_slot(account_id, slot, "session")
+                .expect("kept");
+        }
+        let runtime = zmail_sync::BackgroundRuntime::start(1).expect("a runtime");
+        let sync_service =
+            zmail_sync::SyncService::new(runtime.handle().clone(), store.clone(), secrets.clone());
+
+        assert!(remove_account(&store, secrets.as_ref(), Some(&sync_service), account_id).is_ok());
+        assert!(store.list_accounts().expect("accounts").is_empty());
+        for slot in slots {
+            assert!(
+                secrets
+                    .get_account_secret_from_slot(account_id, slot)
+                    .is_err(),
+                "{slot:?} is forgotten"
+            );
+        }
+    }
+
     #[test]
     fn removing_an_account_forgets_its_secrets() {
         let store = LocalStore::open_ephemeral().expect("a store");
@@ -581,7 +650,7 @@ mod tests {
         }
         assert!(read_sync_progress(&store, account_id).is_some());
 
-        assert!(remove_account(&store, secrets.as_ref(), account_id).is_ok());
+        assert!(remove_account(&store, secrets.as_ref(), None, account_id).is_ok());
         assert!(store.list_accounts().expect("accounts").is_empty());
         assert!(secrets.get_account_secret(account_id).is_err());
         for slot in [SecretSlot::RefreshToken, SecretSlot::ProtonKeyPass] {

@@ -190,6 +190,15 @@ pub enum Error {
     /// A key could not be read, unlocked, checked or used.
     #[error("Proton key error: {0}")]
     Key(String),
+    /// A contact card that may hold send settings or pinned keys for a
+    /// recipient did not decrypt or verify, so those settings are unknown.
+    #[error("the contact card for {email} could not be verified: {reason}")]
+    ContactCardUnverified {
+        /// The recipient's address.
+        email: String,
+        /// Why the card was not accepted.
+        reason: String,
+    },
     /// The client was configured with invalid values.
     #[error("invalid Proton client configuration: {0}")]
     Config(String),

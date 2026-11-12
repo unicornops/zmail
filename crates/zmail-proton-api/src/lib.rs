@@ -66,7 +66,7 @@ pub use address::{Address, AddressStatus, AddressType};
 pub use attachment::{ATTACHMENT_DISPOSITION, Attachment, CreateAttachmentReq, INLINE_DISPOSITION};
 pub use client::Client;
 pub use config::{API_HOST_URL, AppVersion, ClientConfig};
-pub use contact::{Card, CardType, Contact, ContactEmail, ContactSettings};
+pub use contact::{Card, CardType, Contact, ContactEmail, ContactSettings, same_address};
 pub use cookies::{CookieJar, StoredCookie};
 pub use crypto::{RecipientKey, SessionKey, Split};
 pub use draft::{CreateDraftAction, CreateDraftReq, DraftTemplate, UpdateDraftReq};

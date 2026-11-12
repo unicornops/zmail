@@ -1667,6 +1667,12 @@ impl SyncService {
             self.inner
                 .store
                 .record_outbox_failure(job.job_id, changed.to_string())
+        } else if let Some(unverified) = Self::unverified_contact_card(&error) {
+            // So does a Proton contact card that could not be verified:
+            // the user has to check the contact first.
+            self.inner
+                .store
+                .record_outbox_failure(job.job_id, unverified)
         } else if is_interrupted_send(&error.to_string()) {
             // The server cannot tell whether an earlier attempt sent it:
             // at most once, as for an interrupted SMTP send.

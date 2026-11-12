@@ -15,6 +15,13 @@
 // Modified by UnicornOps on 2026-10-24: hands rPGP the rand 0.10 thread RNG
 // that the rpgp/rpgp#573 fork (RustCrypto 0.14 stack) takes; no change in
 // behaviour.
+// Modified by UnicornOps on 2026-11-10: addresses are compared without
+// regard to case. A signed card that does not verify is no longer always
+// "no settings" (`GetSettings` upstream): when what it holds, unverified,
+// has send settings or keys for the address, or cannot be read at all,
+// `get_settings` fails with `Error::ContactCardUnverified`, and otherwise
+// the settings say the card was ignored (`card_unverified`), so the user
+// can be told (ADR 0004).
 
 //! Contacts, and what a contact card says about sending to an address.
 
@@ -55,6 +62,10 @@ pub struct ContactSettings {
     pub encrypt_untrusted: Option<bool>,
     /// Pinned public keys.
     pub keys: Vec<RecipientKey>,
+    /// The contact has a signed card that did not verify and was ignored
+    /// (it holds nothing for the address): worth telling the user, who
+    /// can check the contact in the Proton Mail web app.
+    pub card_unverified: bool,
 }
 
 /// A card's protection, a bit set (`CardType`).
@@ -85,13 +96,28 @@ pub struct Card {
     pub signature: Option<String>,
 }
 
+/// Why a card could not be decoded.
+enum CardError {
+    /// The card could not be decrypted or its signature checked, or the
+    /// signature is missing or wrong: nothing in it can be trusted.
+    Unverified(Error),
+    /// The card verified, but is not a vCard Zmail can read.
+    Malformed,
+}
+
 impl Card {
     /// Decrypts and verifies the card as its type says, and parses it
     /// (`decode`).
     ///
     /// Nothing in the card is read before its signature is checked, and
     /// oversized cards are refused before any decryption or verification.
-    fn decode(&self, kr: &KeyRing) -> Result<vcard::Card, Error> {
+    fn decode(&self, kr: &KeyRing) -> Result<vcard::Card, CardError> {
+        let data = self.verified_data(kr).map_err(CardError::Unverified)?;
+        vcard::Card::decode(&data).map_err(|_| CardError::Malformed)
+    }
+
+    /// The card's vCard text, decrypted and verified as its type says.
+    fn verified_data(&self, kr: &KeyRing) -> Result<String, Error> {
         // Armor adds about a third. The plaintext is capped as it is
         // decrypted (a compressed card can expand) and by the vCard reader.
         if self.data.len() > 2 * vcard::MAX_CARD_BYTES {
@@ -111,8 +137,49 @@ impl Card {
             let canonical = data.replace("\r\n", "\n").replace('\n', "\r\n");
             kr.verify_detached_armored(canonical.as_bytes(), signature)?;
         }
-        vcard::Card::decode(&data).map_err(Error::Key)
+        Ok(data)
     }
+
+    /// Whether ignoring this card, which did not verify, could lose send
+    /// settings for `email`: its unverified text holds a key or an
+    /// `X-PM-*` setting for the address, or cannot be read (an encrypted
+    /// card, or text that is not a vCard).
+    ///
+    /// The text is not trusted and none of it is used: it only decides
+    /// between failing and carrying on without settings.
+    fn may_hold_settings_for(&self, email: &str) -> bool {
+        if self.kind.0 & CardType::ENCRYPTED.0 != 0 {
+            return true;
+        }
+        let Ok(card) = vcard::Card::decode(&self.data) else {
+            return true;
+        };
+        let groups: Vec<&str> = card
+            .get("EMAIL")
+            .filter(|field| same_address(&field.value, email))
+            .map(|field| field.group.as_str())
+            .collect();
+        [
+            "KEY",
+            FIELD_PM_SCHEME,
+            FIELD_PM_SIGN,
+            FIELD_PM_ENCRYPT,
+            FIELD_PM_ENCRYPT_UNTRUSTED,
+            FIELD_PM_MIME_TYPE,
+        ]
+        .into_iter()
+        .any(|name| {
+            card.get(name)
+                .any(|field| groups.contains(&field.group.as_str()))
+        })
+    }
+}
+
+/// Whether two addresses are the same mailbox for a contact lookup:
+/// compared without regard to case or surrounding spaces. A contact saved
+/// as `bob@example.com` holds the settings for mail to `Bob@Example.com`.
+pub fn same_address(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 
 /// A contact (`Contact`: `ContactMetadata` and `ContactCards`).
@@ -151,8 +218,14 @@ pub struct ContactEmail {
 
 impl Contact {
     /// Reads the send settings for `email` from the contact's card of
-    /// `card_type` (`GetSettings`). No card, an address the card does not
-    /// list, or a card that does not decrypt or verify, gives no settings.
+    /// `card_type` (`GetSettings`). No card, or an address the card does
+    /// not list (compared without regard to case), gives no settings.
+    ///
+    /// A card that does not decrypt or verify gives no settings either,
+    /// as upstream, unless that could lose settings: when the unverified
+    /// card holds a key or a send setting for the address, or cannot be
+    /// read, this fails with [`Error::ContactCardUnverified`] instead of
+    /// treating a pinned key or "always encrypt" as absent.
     pub fn get_settings(
         &self,
         kr: &KeyRing,
@@ -162,14 +235,27 @@ impl Contact {
         let Some(card) = self.cards.iter().find(|card| card.kind == card_type) else {
             return Ok(ContactSettings::default());
         };
-        // `GetGroup`: a decode failure or a missing address is "no
-        // settings", as upstream.
-        let Ok(decoded) = card.decode(kr) else {
-            return Ok(ContactSettings::default());
+        let decoded = match card.decode(kr) {
+            Ok(decoded) => decoded,
+            // `GetGroup`: a card that is not a vCard is "no settings", as
+            // upstream. Its signature verified, so nobody swapped it.
+            Err(CardError::Malformed) => return Ok(ContactSettings::default()),
+            Err(CardError::Unverified(error)) if card.may_hold_settings_for(email) => {
+                return Err(Error::ContactCardUnverified {
+                    email: email.to_owned(),
+                    reason: error.to_string(),
+                });
+            }
+            Err(CardError::Unverified(_)) => {
+                return Ok(ContactSettings {
+                    card_unverified: true,
+                    ..ContactSettings::default()
+                });
+            }
         };
         let Some(group) = decoded
             .get("EMAIL")
-            .find(|field| field.value == email)
+            .find(|field| same_address(&field.value, email))
             .map(|field| field.group.clone())
         else {
             return Ok(ContactSettings::default());
@@ -350,7 +436,7 @@ mod tests {
         };
 
         let card = encrypted(CARD.to_owned());
-        assert!(card.decode(&kr).is_ok());
+        assert!(card.verified_data(&kr).is_ok());
 
         let bomb = encrypted(format!(
             "BEGIN:VCARD\r\n{}END:VCARD\r\n",
@@ -358,7 +444,7 @@ mod tests {
         ));
         // Small enough to pass the size check on the armored data.
         assert!(bomb.data.len() < vcard::MAX_CARD_BYTES / 8);
-        let error = bomb.decode(&kr).expect_err("over the limit");
+        let error = bomb.verified_data(&kr).expect_err("over the limit");
         assert!(error.to_string().contains("-byte limit"), "{error}");
     }
 
@@ -385,20 +471,144 @@ mod tests {
         assert_eq!(other.sign, Some(false));
         assert_eq!(other.encrypt, None);
 
-        // An address the card does not list, or a tampered card: nothing.
+        // An address the card does not list: nothing.
         let none = contact
             .get_settings(&kr, "nobody@example.com", CardType::SIGNED)
             .expect("settings");
         assert!(none.sign.is_none());
+    }
+
+    /// Addresses match whatever their case, in the card and as typed.
+    #[test]
+    fn matches_addresses_without_regard_to_case() {
+        let kr = keyring();
+        let contact = Contact {
+            cards: vec![signed(
+                &CARD.replace("bob@example.com", "Bob@Example.COM"),
+                &kr,
+            )],
+            ..Contact::default()
+        };
+        for typed in ["bob@example.com", "BOB@EXAMPLE.COM", " Bob@Example.com "] {
+            let settings = contact
+                .get_settings(&kr, typed, CardType::SIGNED)
+                .expect("settings");
+            assert_eq!(settings.encrypt, Some(true), "{typed}");
+        }
+        assert!(same_address("Bob@Example.com", "bob@example.COM"));
+        assert!(!same_address("bob@example.com", "bobby@example.com"));
+        assert!(!same_address("bob@example.com", "bob@example.org"));
+    }
+
+    fn unverified(result: Result<ContactSettings, Error>) -> String {
+        match result {
+            Err(Error::ContactCardUnverified { email, .. }) => email,
+            other => panic!("not an unverified card: {other:?}"),
+        }
+    }
+
+    /// A signed card that does not verify is not "no contact" when it
+    /// holds settings or keys for the recipient: the send has to stop.
+    #[test]
+    fn a_card_that_does_not_verify_and_holds_settings_is_an_error() {
+        let kr = keyring();
+        let contact = Contact {
+            cards: vec![signed(CARD, &kr)],
+            ..Contact::default()
+        };
+
+        // Changed after signing.
         let mut tampered = contact.clone();
         tampered.cards[0].data = CARD.replace("X-PM-ENCRYPT:true", "X-PM-ENCRYPT:false");
-        let settings = tampered
+        assert_eq!(
+            unverified(tampered.get_settings(&kr, "bob@example.com", CardType::SIGNED)),
+            "bob@example.com"
+        );
+        // Whatever the case of the address.
+        unverified(tampered.get_settings(&kr, "BOB@example.com", CardType::SIGNED));
+        // The other address in the card has a setting too.
+        unverified(tampered.get_settings(&kr, "other@example.com", CardType::SIGNED));
+
+        // The signature removed, or made by a key that is not the user's.
+        let mut unsigned = contact.clone();
+        unsigned.cards[0].signature = None;
+        unverified(unsigned.get_settings(&kr, "bob@example.com", CardType::SIGNED));
+        let other_keyring = Keys(vec![key(
+            crate::keyring::tests::USER_KEY_ID,
+            crate::keyring::tests::USER_KEY_SALTED,
+        )])
+        .unlock(crate::keyring::tests::salted_password().as_bytes(), None)
+        .expect("unlock");
+        let foreign = Contact {
+            cards: vec![signed(CARD, &other_keyring)],
+            ..Contact::default()
+        };
+        unverified(foreign.get_settings(&kr, "bob@example.com", CardType::SIGNED));
+
+        // A pinned key alone counts.
+        let pinned = "BEGIN:VCARD\r\nVERSION:4.0\r\nitem1.EMAIL:bob@example.com\r\n\
+            item1.KEY;PREF=1:data:application/pgp-keys;base64,AAAA\r\nEND:VCARD\r\n";
+        let mut pinned = Contact {
+            cards: vec![signed(pinned, &kr)],
+            ..Contact::default()
+        };
+        pinned.cards[0].signature = None;
+        unverified(pinned.get_settings(&kr, "bob@example.com", CardType::SIGNED));
+
+        // A card that cannot be read at all cannot be shown to be harmless.
+        let mut garbled = contact.clone();
+        garbled.cards[0].data = "not a vCard".to_owned();
+        unverified(garbled.get_settings(&kr, "bob@example.com", CardType::SIGNED));
+    }
+
+    /// An unverifiable card with nothing for the recipient loses nothing
+    /// when it is ignored, so it stays "no settings", as upstream: a card
+    /// signed by a key the account no longer has must not stop every send
+    /// to that contact.
+    #[test]
+    fn a_card_that_does_not_verify_without_settings_gives_none() {
+        let kr = keyring();
+        let plain = "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Bob\r\n\
+            item1.EMAIL;PREF=1:bob@example.com\r\nEND:VCARD\r\n";
+        let mut contact = Contact {
+            cards: vec![signed(plain, &kr)],
+            ..Contact::default()
+        };
+        contact.cards[0].signature = None;
+        let settings = contact
             .get_settings(&kr, "bob@example.com", CardType::SIGNED)
             .expect("settings");
-        assert!(
-            settings.encrypt.is_none(),
-            "a bad signature gives no settings"
-        );
+        assert!(settings.keys.is_empty() && settings.encrypt.is_none());
+        assert!(settings.card_unverified, "the user is told to check it");
+
+        // Settings for another address in the card do not stop this one.
+        let mut tampered = Contact {
+            cards: vec![signed(CARD, &kr)],
+            ..Contact::default()
+        };
+        tampered.cards[0].data = CARD.replace("FN:Bob", "FN:Robert");
+        let settings = tampered
+            .get_settings(&kr, "nobody@example.com", CardType::SIGNED)
+            .expect("settings");
+        assert!(settings.encrypt.is_none());
+        assert!(settings.card_unverified);
+
+        // A card that verifies is not flagged, whether or not it lists
+        // the address; nor is a contact without a signed card.
+        let verified = Contact {
+            cards: vec![signed(CARD, &kr)],
+            ..Contact::default()
+        };
+        for address in ["bob@example.com", "nobody@example.com"] {
+            let settings = verified
+                .get_settings(&kr, address, CardType::SIGNED)
+                .expect("settings");
+            assert!(!settings.card_unverified, "{address}");
+        }
+        let settings = Contact::default()
+            .get_settings(&kr, "bob@example.com", CardType::SIGNED)
+            .expect("settings");
+        assert!(!settings.card_unverified);
     }
 
     #[test]
@@ -492,6 +702,7 @@ mod tests {
             let parsed = settings(&text).expect("no error, no settings");
             assert!(parsed.sign.is_none());
         }
+        // An oversized card is refused before anything is checked.
         let oversized = Contact {
             cards: vec![Card {
                 kind: CardType::SIGNED,
@@ -500,28 +711,6 @@ mod tests {
             }],
             ..Contact::default()
         };
-        assert!(
-            oversized
-                .get_settings(&kr, "bob@example.com", CardType::SIGNED)
-                .expect("settings")
-                .sign
-                .is_none()
-        );
-
-        // A signed card without its signature is not trusted.
-        let unsigned = Contact {
-            cards: vec![Card {
-                signature: None,
-                ..signed(&card("item1.X-PM-SIGN:true\r\n"), &kr)
-            }],
-            ..Contact::default()
-        };
-        assert!(
-            unsigned
-                .get_settings(&kr, "bob@example.com", CardType::SIGNED)
-                .expect("settings")
-                .sign
-                .is_none()
-        );
+        unverified(oversized.get_settings(&kr, "bob@example.com", CardType::SIGNED));
     }
 }

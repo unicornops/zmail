@@ -194,6 +194,20 @@ impl SyncService {
                 });
             }
         }
+        // A refresh token the keychain refused is said in the account's
+        // status, so the user knows why the next start would ask to sign
+        // in again. The sync itself worked, and sending must carry on, so
+        // this is its report rather than a failure.
+        if let Err(error) = session.save_refresh_token() {
+            detail = format!("Synced, but {error:#}");
+        }
+        // Contacts whose card did not verify when mail was sent to them
+        // (the mail went) stay in the report until a later send finds them
+        // in order: the report is what both frontends show without anything
+        // being marked failed.
+        if let Some(warning) = session.contact_warning() {
+            detail = format!("{}. {warning}", detail.trim_end_matches('.'));
+        }
         Ok((detail, checkpoint))
     }
 
@@ -358,6 +372,52 @@ impl SyncService {
         let _ = account_id;
     }
 
+    /// The message of a Proton send that stopped because the recipient's
+    /// contact card could not be verified
+    /// ([`zmail_proton::UnverifiedContactCard`]), if `error` is one. Only
+    /// the user can fix that, in the Proton Mail web app, so the outbox
+    /// fails the message at once with these words instead of retrying.
+    pub(crate) fn unverified_contact_card(error: &anyhow::Error) -> Option<String> {
+        #[cfg(feature = "proton")]
+        {
+            error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<zmail_proton::UnverifiedContactCard>())
+                .map(ToString::to_string)
+        }
+        #[cfg(not(feature = "proton"))]
+        {
+            let _ = error;
+            None
+        }
+    }
+
+    /// Signs a removed Proton account's session out on Proton's side, in
+    /// the background and best effort, so its refresh token stops working
+    /// wherever a copy may be (the keychain entry that could not be
+    /// deleted, a backup). `uid` and `refresh_token` are the stored
+    /// session, read before the account's keychain entries were deleted;
+    /// the session Zmail has open is used when there is one. Never waits
+    /// for the network: removing an account works offline.
+    pub fn sign_out_proton_session(
+        &self,
+        account_id: i64,
+        uid: Option<String>,
+        refresh_token: Option<String>,
+    ) {
+        #[cfg(feature = "proton")]
+        if let Some(sessions) = self.proton_sessions() {
+            let stored = uid
+                .zip(refresh_token)
+                .map(|(uid, refresh_token)| zmail_proton::StoredSession::new(uid, refresh_token));
+            self.inner.handle.spawn(async move {
+                sessions.sign_out(account_id, stored).await;
+            });
+        }
+        #[cfg(not(feature = "proton"))]
+        let _ = (account_id, uid, refresh_token);
+    }
+
     /// Watches a Proton account until the next reconnect: Bridge's event
     /// loop. Every 20 s plus up to 20 s of jitter it polls the event stream
     /// from the stored checkpoint, and syncs when something changed (the
@@ -427,5 +487,27 @@ impl SyncService {
             let _ = (target, backoff);
             let _ = unless_woken(wake, tokio::time::sleep(poll_interval)).await;
         }
+    }
+}
+
+#[cfg(all(test, feature = "proton"))]
+mod tests {
+    use crate::SyncService;
+
+    /// A send stopped by an unverifiable contact card is recognised
+    /// through the send error's context, with the words the outbox shows.
+    #[test]
+    fn an_unverified_contact_card_is_found_through_the_send_error_context() {
+        let error = anyhow::Error::new(zmail_proton::UnverifiedContactCard {
+            recipient: "bob@example.org".to_owned(),
+            reason: "signature verification failed".to_owned(),
+        })
+        .context("failed to get recipients")
+        .context("failed to send the message through Proton");
+        let message = SyncService::unverified_contact_card(&error).expect("found");
+        assert!(message.starts_with("Not sent: the Proton contact for bob@example.org"));
+        assert!(message.contains("Proton Mail web app"), "{message}");
+        assert!(!message.contains("signature verification failed"));
+        assert!(SyncService::unverified_contact_card(&anyhow::anyhow!("other")).is_none());
     }
 }
