@@ -1860,7 +1860,7 @@ impl SyncService {
 /// Mailboxes absent from the mirror (the first sync of an account) count as
 /// an initial import rather than new mail, so they never notify; reconnecting
 /// a large account therefore cannot flood the user with one notification per
-/// thread.
+/// thread. Nor do Junk, Trash, Sent and Drafts ([`announces_new_mail`]).
 fn collect_arrivals(
     existing_mailboxes: &[MailboxSnapshot],
     snapshot: &zmail_core::AccountSyncSnapshot,
@@ -1873,6 +1873,9 @@ fn collect_arrivals(
         else {
             continue;
         };
+        if !announces_new_mail(mailbox.role.as_deref().or(existing_mailbox.role.as_deref())) {
+            continue;
+        }
         for thread in &mailbox.threads {
             let gained = match existing_mailbox
                 .threads
@@ -1907,6 +1910,21 @@ fn collect_arrivals(
     newest_first(arrivals)
 }
 
+/// Whether new mail in a mailbox with `role` is announced: not in Junk
+/// (spam would reach the lock screen), Trash, or Sent and Drafts (the
+/// user's own mail).
+fn announces_new_mail(role: Option<&str>) -> bool {
+    !matches!(
+        role.and_then(zmail_core::MailboxRole::parse),
+        Some(
+            zmail_core::MailboxRole::Junk
+                | zmail_core::MailboxRole::Trash
+                | zmail_core::MailboxRole::Sent
+                | zmail_core::MailboxRole::Drafts
+        )
+    )
+}
+
 /// Orders arrivals by their newest message's receipt time, newest first
 /// (the notification opens the first).
 fn newest_first(mut arrivals: Vec<(Option<&str>, NewMailArrival)>) -> Vec<NewMailArrival> {
@@ -1928,7 +1946,7 @@ fn notify_with(notifier: &dyn Notifier, target: &SyncTarget, arrivals: Vec<NewMa
 /// The threads of a [`zmail_core::MailDelta`] that gained new mail: the
 /// `arrived` messages, in mailboxes the mirror already had, newest first.
 /// As with [`collect_arrivals`], a mailbox new to the mirror is an import,
-/// not new mail.
+/// not new mail, and Junk, Trash, Sent and Drafts are not announced.
 #[cfg(any(feature = "proton", test))]
 fn collect_delta_arrivals(
     known_mailboxes: &HashSet<String>,
@@ -1937,7 +1955,8 @@ fn collect_delta_arrivals(
 ) -> Vec<NewMailArrival> {
     let mut arrivals = Vec::new();
     for mailbox in &delta.mailboxes {
-        if !known_mailboxes.contains(&mailbox.name) {
+        if !known_mailboxes.contains(&mailbox.name) || !announces_new_mail(mailbox.role.as_deref())
+        {
             continue;
         }
         for thread in &mailbox.threads {
@@ -2807,6 +2826,72 @@ mod tests {
             ("Inbox", "thread-c"),
             "an arrival names its thread for the notification to open"
         );
+    }
+
+    #[test]
+    fn collect_arrivals_leaves_out_junk_trash_sent_and_drafts() {
+        let roles = [
+            ("Spam", Some("junk")),
+            ("Deleted", Some("Trash")),
+            ("Sent Items", Some("sent")),
+            ("Drafts", Some("drafts")),
+            ("Inbox", Some("inbox")),
+            ("Lists", None),
+        ];
+        let with_role = |threads: usize| {
+            roles
+                .iter()
+                .map(|(name, role)| {
+                    let mut mailbox = mailbox(
+                        name,
+                        (0..threads)
+                            .map(|index| thread(&format!("{name}-{index}"), 1, name))
+                            .collect(),
+                    );
+                    mailbox.role = role.map(str::to_owned);
+                    mailbox
+                })
+                .collect::<Vec<_>>()
+        };
+        let snapshot = AccountSyncSnapshot {
+            checkpoint: "test".to_owned(),
+            detail: "test".to_owned(),
+            identities: None,
+            mailboxes: with_role(1),
+        };
+        let arrivals = collect_arrivals(&with_role(0), &snapshot);
+        let mut announced: Vec<&str> = arrivals
+            .iter()
+            .map(|arrival| arrival.mailbox.as_str())
+            .collect();
+        announced.sort_unstable();
+        assert_eq!(announced, ["Inbox", "Lists"]);
+
+        // A role known only from the mirror counts too.
+        let mut existing = vec![mailbox("Junk E-mail", Vec::new())];
+        existing[0].role = Some("junk".to_owned());
+        let snapshot = AccountSyncSnapshot {
+            checkpoint: "test".to_owned(),
+            detail: "test".to_owned(),
+            identities: None,
+            mailboxes: vec![MailboxSnapshot {
+                role: None,
+                ..mailbox("Junk E-mail", vec![thread("j", 1, "Win")])
+            }],
+        };
+        assert!(collect_arrivals(&existing, &snapshot).is_empty());
+
+        // And for a delta sync.
+        let mut junk = mailbox("Spam", vec![thread("s", 1, "Win")]);
+        junk.role = Some("junk".to_owned());
+        let delta = zmail_core::MailDelta {
+            mailboxes: vec![junk],
+            message_ids: Vec::new(),
+            ..Default::default()
+        };
+        let known = HashSet::from(["Spam".to_owned()]);
+        let arrived = HashSet::from(["s-0"]);
+        assert!(collect_delta_arrivals(&known, &delta, &arrived).is_empty());
     }
 
     #[test]

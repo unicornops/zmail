@@ -5,7 +5,10 @@
 //! scheme handler gets them from here. The web view itself never opens a
 //! connection, and its content blocker stays deny-all. Each fetch:
 //!
-//! - accepts only `https` addresses with a host name or a public address;
+//! - accepts only addresses remote content may load from
+//!   (`zmail_render::is_public_remote_url`: `https`, the default port, no
+//!   credentials, a public name or address), the first and every redirect
+//!   target alike;
 //! - resolves the host, refuses it if **any** address is not public
 //!   (private, loopback, link-local, ...; `zmail_render::is_public_ip`), and
 //!   connects to the checked addresses only, so a second lookup cannot
@@ -13,8 +16,15 @@
 //! - sends no cookies, no `Referer` and a generic `User-Agent`;
 //! - follows at most [`RemoteLimits::max_redirects`] redirects, each
 //!   checked the same way;
-//! - accepts only an `image/*` response with status 200, no larger than
-//!   [`RemoteLimits::max_bytes`], within [`RemoteLimits::timeout`].
+//! - accepts only a raster image response
+//!   ([`crate::document::is_raster_image`]: no SVG) with status 200, no
+//!   larger than [`RemoteLimits::max_bytes`], within
+//!   [`RemoteLimits::timeout`].
+//!
+//! A message fetches at most [`crate::document::MAX_REMOTE_IMAGES`]
+//! images. Fetches do not go through a system proxy (`no_proxy`): the
+//! checked addresses are what Zmail connects to (ADR 0006, "Remote
+//! content").
 //!
 //! Fetches run on a few worker threads ([`RemoteFetcher`]), never on the
 //! UI thread.
@@ -31,7 +41,9 @@ use std::{
 };
 
 use url::{Host, Url};
-use zmail_render::is_public_ip;
+use zmail_render::{is_public_ip, is_public_remote_url};
+
+use crate::document::is_raster_image;
 
 /// What a remote image fetch may cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +80,9 @@ pub struct RemoteImage {
 pub enum RemoteError {
     /// The address is not an absolute `https` URL with a host.
     NotHttps(String),
+    /// The address is not one remote content may load from: another port
+    /// than 443, or a local name.
+    NotAllowed(String),
     /// The host is, or resolves to, an address that is not public.
     NotPublic(IpAddr),
     /// The host did not resolve.
@@ -90,6 +105,10 @@ impl std::fmt::Display for RemoteError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotHttps(url) => write!(formatter, "not an https address: {url}"),
+            Self::NotAllowed(url) => write!(
+                formatter,
+                "not an address remote content may load from: {url}"
+            ),
             Self::NotPublic(address) => write!(formatter, "not a public address: {address}"),
             Self::Resolve(error) => write!(formatter, "the host did not resolve: {error}"),
             Self::Request(error) => write!(formatter, "the request failed: {error}"),
@@ -173,14 +192,14 @@ pub fn check_target(url: &str, resolver: &dyn Resolve) -> Result<CheckedTarget, 
     })
 }
 
-/// Checks a response's media type: `image/*` only. Returns it lowercased,
-/// without parameters.
+/// Checks a response's media type: a raster image only
+/// ([`is_raster_image`]). Returns it lowercased, without parameters.
 pub fn check_content_type(content_type: Option<&str>) -> Result<String, RemoteError> {
     let kind = content_type
         .and_then(|value| value.split(';').next())
         .map(|value| value.trim().to_ascii_lowercase())
         .unwrap_or_default();
-    if kind.starts_with("image/") && kind.len() > "image/".len() {
+    if is_raster_image(&kind) {
         Ok(kind)
     } else {
         Err(RemoteError::NotImage(if kind.is_empty() {
@@ -205,6 +224,11 @@ pub fn fetch_image_with(
     let deadline = Instant::now() + limits.timeout;
     let mut address = url.to_owned();
     for _ in 0..=limits.max_redirects {
+        // The page asked for an address the sanitiser allowed; a redirect
+        // must be one too (no other port, no local name).
+        if !is_public_remote_url(&address) {
+            return Err(RemoteError::NotAllowed(address));
+        }
         let target = check_target(&address, resolver)?;
         let remaining = deadline
             .checked_duration_since(Instant::now())
@@ -414,6 +438,44 @@ mod tests {
     }
 
     #[test]
+    fn redirect_targets_follow_the_remote_content_rules() {
+        // fetch_image_with checks every address, the first and each
+        // redirect target, before connecting: these never reach the
+        // network.
+        for url in [
+            "https://img.example.com:8443/a.png",
+            "https://img.example.com:22/a.png",
+            "https://printer/a.png",
+            "https://nas.local/a.png",
+            "http://img.example.com/a.png",
+        ] {
+            assert!(
+                matches!(
+                    fetch_image_with(url, &RemoteLimits::default(), &public()),
+                    Err(RemoteError::NotAllowed(_))
+                ),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn tunnelled_ipv6_addresses_are_refused() {
+        for tunnelled in [
+            // 6to4 carrying 192.168.1.1, and Teredo.
+            "2002:c0a8:101::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+        ] {
+            let address: IpAddr = tunnelled.parse().expect("an address");
+            assert_eq!(
+                check_target("https://img.example.com/a.png", &Fixed(vec![address])),
+                Err(RemoteError::NotPublic(address)),
+                "{tunnelled}"
+            );
+        }
+    }
+
+    #[test]
     fn refused_addresses_never_reach_the_network() {
         // fetch_image_with stops at the check, before building a client.
         let resolver = Fixed(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
@@ -433,11 +495,14 @@ mod tests {
             check_content_type(Some("Image/PNG; charset=binary")),
             Ok("image/png".to_owned())
         );
-        assert_eq!(
-            check_content_type(Some("image/svg+xml")),
-            Ok("image/svg+xml".to_owned())
-        );
-        for other in [Some("text/html"), Some("image/"), Some(""), None] {
+        for other in [
+            Some("image/svg+xml"),
+            Some("image/svg+xml; charset=utf-8"),
+            Some("text/html"),
+            Some("image/"),
+            Some(""),
+            None,
+        ] {
             assert!(
                 matches!(check_content_type(other), Err(RemoteError::NotImage(_))),
                 "{other:?}"

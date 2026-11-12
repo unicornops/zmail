@@ -268,14 +268,18 @@ fn is_public_ipv6(address: Ipv6Addr) -> bool {
         || address.is_loopback()
         || address.is_multicast()
         // IPv4-compatible (::/96), unique local (fc00::/7), link-local
-        // (fe80::/10), the old site-local (fec0::/10), discard (100::/64)
-        // and documentation (2001:db8::/32).
+        // (fe80::/10), the old site-local (fec0::/10), discard (100::/64),
+        // documentation (2001:db8::/32), and the tunnels that reach an
+        // IPv4 address through a relay: 6to4 (2002::/16) and Teredo
+        // (2001::/32).
         || segments[..6] == [0, 0, 0, 0, 0, 0]
         || (segments[0] & 0xfe00) == 0xfc00
         || (segments[0] & 0xffc0) == 0xfe80
         || (segments[0] & 0xffc0) == 0xfec0
         || segments[..4] == [0x100, 0, 0, 0]
-        || segments[..2] == [0x2001, 0xdb8])
+        || segments[..2] == [0x2001, 0xdb8]
+        || segments[0] == 0x2002
+        || segments[..2] == [0x2001, 0])
 }
 
 /// An address as an engine reads it: surrounding whitespace and control
@@ -376,6 +380,9 @@ mod tests {
             "https://[fe80::1]/a.png",
             "https://[::ffff:192.168.0.1]/a.png",
             "https://[64:ff9b::a00:1]/a.png",
+            "https://[2002:c0a8:101::1]/a.png",
+            "https://[2002:808:808::1]/a.png",
+            "https://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/a.png",
             "file:///etc/passwd",
             "//cdn.example.com/a.png",
             "not a url",

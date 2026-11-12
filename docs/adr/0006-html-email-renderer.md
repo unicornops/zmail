@@ -152,6 +152,25 @@ Before any engine sees a message:
    only to the remote origins the mail referenced, only over https, never
    to private or LAN addresses.
 
+   As built, Zmail fetches allowed images itself (`zmail-render-web`'s
+   `remote`), never the engine: `https` on the default port only, every
+   address a name resolves to public (6to4 and Teredo count as not
+   public, since they reach an IPv4 address through a relay), the
+   connection pinned to the checked addresses, every redirect target held
+   to the same rules, raster images only (PNG, GIF, JPEG, WebP, AVIF,
+   BMP; never SVG, for remote and `cid:` images alike), at most 5 MB each
+   and at most 100 per message.
+
+   Remote image fetches ignore system and environment proxy settings
+   (`no_proxy`). That keeps the address checks meaningful (a proxy would
+   resolve and connect on its own, so the private-address and rebinding
+   checks would not hold) but means a user who relies on a system or SOCKS
+   proxy (Tor, a corporate proxy) reaches image hosts directly, from their
+   own address, once they load remote content. Honouring a proxy (and
+   then trusting it with the address checks) is an open decision for the
+   owner; until then, remote content stays blocked by default and the
+   choice to load it is per message.
+
 ### 3. Web renderer hardening (every OS)
 
 - **JavaScript off for mail content**: `allowsContentJavaScript = false`

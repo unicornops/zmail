@@ -10623,6 +10623,9 @@ dependencies = [
 [[package]]
 name = "zmail-notify"
 version = "0.0.1"
+dependencies = [
+ "zmail-security",
+]
 
 [[package]]
 name = "zmail-proton"

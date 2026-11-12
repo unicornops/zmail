@@ -9,6 +9,15 @@
 //! batch's newest arrival). The sync service composes notifications on its
 //! own threads; the GUI posts them to the operating system from its main
 //! thread, so it reads them from a [`channel`].
+//!
+//! Subjects and senders come from mail, so they go through
+//! [`notification_text`] first: control, bidirectional and zero-width
+//! characters removed, line breaks collapsed (a subject cannot forge the
+//! account or sender lines), and at most [`MAX_FIELD_CHARS`] characters.
+//! Freedesktop notification servers may read the body as markup, so on
+//! Linux and the BSDs the body is escaped for it ([`escape_markup`]).
+//! [`NewMailNotifier::set_show_content`] leaves subjects and senders out
+//! altogether.
 
 use std::{
     collections::VecDeque,
@@ -21,6 +30,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use zmail_security::terminal::sanitize_line;
+
 /// Maximum number of new-mail notifications per rolling minute.
 pub const MAX_NOTIFICATIONS_PER_MINUTE: usize = 6;
 
@@ -29,6 +40,47 @@ pub const RATE_WINDOW: Duration = Duration::from_secs(60);
 
 /// Maximum number of arrival subjects listed in a notification body.
 const MAX_SUBJECTS_PER_NOTIFICATION: usize = 3;
+
+/// The most characters of a subject, sender or account name a
+/// notification shows; longer ones are cut with an ellipsis.
+pub const MAX_FIELD_CHARS: usize = 120;
+
+/// A string from mail as a notification shows it: control,
+/// bidirectional and zero-width characters and terminal escape sequences
+/// removed (`zmail_security::terminal::sanitize_line`), every run of
+/// whitespace, line breaks included, made one space, and cut to
+/// [`MAX_FIELD_CHARS`] characters.
+pub fn notification_text(text: &str) -> String {
+    let line = sanitize_line(text);
+    if line.chars().count() <= MAX_FIELD_CHARS {
+        return line;
+    }
+    let mut cut: String = line.chars().take(MAX_FIELD_CHARS - 1).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('\u{2026}');
+    cut
+}
+
+/// `text` escaped for a freedesktop notification body, which servers
+/// with the `body-markup` capability read as a subset of XML: `&`, `<`
+/// and `>` become entities, so mail cannot add bold text, links or
+/// images, or blank the body with a stray `<`.
+pub fn escape_markup(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+/// Whether notification bodies are posted to a freedesktop notification
+/// server, which may read them as markup.
+const BODY_IS_MARKUP: bool = cfg!(all(unix, not(target_os = "macos")));
 
 /// One new message (or reply) surfaced to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +148,7 @@ pub trait Notifier: Send + Sync {
 pub struct NewMailNotifier<S: NotificationSink> {
     sink: S,
     quiet: AtomicBool,
+    show_content: AtomicBool,
     recent: Mutex<VecDeque<Instant>>,
 }
 
@@ -105,6 +158,7 @@ impl<S: NotificationSink> NewMailNotifier<S> {
         Self {
             sink,
             quiet: AtomicBool::new(false),
+            show_content: AtomicBool::new(true),
             recent: Mutex::new(VecDeque::new()),
         }
     }
@@ -119,6 +173,19 @@ impl<S: NotificationSink> NewMailNotifier<S> {
         self.quiet.load(Ordering::SeqCst)
     }
 
+    /// Sets whether notifications show subjects and senders (the
+    /// default). Without them a notification says only "New mail" (or
+    /// how many messages) and the account, for a lock screen or a shared
+    /// screen.
+    pub fn set_show_content(&self, show: bool) {
+        self.show_content.store(show, Ordering::SeqCst);
+    }
+
+    /// Returns whether notifications show subjects and senders.
+    pub fn shows_content(&self) -> bool {
+        self.show_content.load(Ordering::SeqCst)
+    }
+
     /// Raises one notification for the batch, honouring the flood cap.
     pub fn notify_new_mail(&self, batch: &NewMailBatch) {
         let Some(newest) = batch.arrivals.first() else {
@@ -128,12 +195,19 @@ impl<S: NotificationSink> NewMailNotifier<S> {
             return;
         }
 
-        let summary = if batch.arrivals.len() == 1 {
-            format!("New mail: {}", newest.subject)
-        } else {
-            format!("New mail: {} messages", batch.arrivals.len())
+        let show_content = self.shows_content();
+        let summary = match batch.arrivals.len() {
+            1 if show_content => format!("New mail: {}", notification_text(&newest.subject)),
+            1 => "New mail".to_owned(),
+            count => format!("New mail: {count} messages"),
         };
-        let body = self.compose_body(&batch.account, &batch.arrivals, self.reserve_slot());
+        let over_cap = self.reserve_slot();
+        let body = self.compose_body(&batch.account, &batch.arrivals, over_cap || !show_content);
+        let body = if BODY_IS_MARKUP {
+            escape_markup(&body)
+        } else {
+            body
+        };
 
         self.sink.show(NewMailNotification {
             summary,
@@ -163,16 +237,29 @@ impl<S: NotificationSink> NewMailNotifier<S> {
         recent.len() > MAX_NOTIFICATIONS_PER_MINUTE
     }
 
-    fn compose_body(&self, account: &str, arrivals: &[NewMailArrival], over_cap: bool) -> String {
-        let mut lines = vec![account.to_owned()];
-        if over_cap {
-            lines.push(
-                "Mail is arriving quickly; further detail is paused for a moment.".to_owned(),
-            );
+    /// The body: the account, then up to three arrivals, unless
+    /// `account_only` (over the flood cap, or content hidden).
+    fn compose_body(
+        &self,
+        account: &str,
+        arrivals: &[NewMailArrival],
+        account_only: bool,
+    ) -> String {
+        let mut lines = vec![notification_text(account)];
+        if account_only {
+            if self.shows_content() {
+                lines.push(
+                    "Mail is arriving quickly; further detail is paused for a moment.".to_owned(),
+                );
+            }
             return lines.join("\n");
         }
         for arrival in arrivals.iter().take(MAX_SUBJECTS_PER_NOTIFICATION) {
-            lines.push(format!("{} — {}", arrival.subject, arrival.sender));
+            lines.push(format!(
+                "{} — {}",
+                notification_text(&arrival.subject),
+                notification_text(&arrival.sender)
+            ));
         }
         if arrivals.len() > MAX_SUBJECTS_PER_NOTIFICATION {
             lines.push(format!(
@@ -303,8 +390,9 @@ mod tests {
     };
 
     use super::{
-        MAX_NOTIFICATIONS_PER_MINUTE, NewMailArrival, NewMailBatch, NewMailNotification,
-        NewMailNotifier, NotificationSink, ThreadRef, channel,
+        BODY_IS_MARKUP, MAX_FIELD_CHARS, MAX_NOTIFICATIONS_PER_MINUTE, NewMailArrival,
+        NewMailBatch, NewMailNotification, NewMailNotifier, NotificationSink, ThreadRef, channel,
+        escape_markup, notification_text,
     };
 
     #[derive(Default)]
@@ -458,6 +546,89 @@ mod tests {
         assert!(body.contains("Subject 2"));
         assert!(!body.contains("Subject 3"));
         assert!(body.contains("… and 2 more"));
+    }
+
+    fn hostile_batch() -> NewMailBatch {
+        NewMailBatch {
+            account_id: 7,
+            account: "Work".to_owned(),
+            arrivals: vec![NewMailArrival {
+                subject: "<a href=\"https://evil.example\">Your invoice</a>\nPersonal\r\nboss@corp.example \u{202E}fdp.exe\u{200B} & <b".to_owned(),
+                sender: "Bank\u{1b}[2J\nSupport".to_owned(),
+                mailbox: "INBOX".to_owned(),
+                remote_thread_id: "thread-0".to_owned(),
+            }],
+        }
+    }
+
+    #[test]
+    fn mail_text_is_one_clean_short_line() {
+        assert_eq!(
+            notification_text("Hello\nWorld\r\n\tagain  "),
+            "Hello World again"
+        );
+        assert_eq!(
+            notification_text("in\u{202E}voice\u{200B}.pdf\u{2066} \u{1b}]8;;https://x\u{7}link"),
+            "invoice.pdf link"
+        );
+        let long = "x".repeat(500);
+        let cut = notification_text(&long);
+        assert_eq!(cut.chars().count(), MAX_FIELD_CHARS);
+        assert!(cut.ends_with('\u{2026}'));
+        assert_eq!(
+            notification_text(&"é".repeat(MAX_FIELD_CHARS))
+                .chars()
+                .count(),
+            MAX_FIELD_CHARS
+        );
+    }
+
+    #[test]
+    fn markup_is_escaped() {
+        assert_eq!(
+            escape_markup("<a href=\"x\">a & b</a>"),
+            "&lt;a href=\"x\"&gt;a &amp; b&lt;/a&gt;"
+        );
+    }
+
+    #[test]
+    fn hostile_subjects_and_senders_cannot_forge_lines_or_markup() {
+        let sink = Arc::new(RecordingSink::default());
+        let notifier = NewMailNotifier::with_sink(sink.clone());
+        notifier.notify_new_mail(&hostile_batch());
+        let shown = &sink.notifications()[0];
+        assert!(!shown.summary.contains('\n'), "{:?}", shown.summary);
+        assert!(!shown.summary.contains('\u{202E}'));
+        // The account line and one arrival line, nothing more.
+        assert_eq!(shown.body.lines().count(), 2, "{:?}", shown.body);
+        assert!(shown.body.starts_with("Work\n"));
+        for hidden in ['\u{1b}', '\u{202E}', '\u{200B}', '\r'] {
+            assert!(!shown.body.contains(hidden), "{:?}", shown.body);
+        }
+        if BODY_IS_MARKUP {
+            assert!(!shown.body.contains('<'), "{:?}", shown.body);
+            assert!(shown.body.contains("&lt;a href="), "{:?}", shown.body);
+            assert!(shown.body.contains(" &amp; &lt;b"), "{:?}", shown.body);
+        } else {
+            assert!(shown.body.contains("<a href="), "{:?}", shown.body);
+        }
+    }
+
+    #[test]
+    fn hidden_content_leaves_out_subjects_and_senders() {
+        let sink = Arc::new(RecordingSink::default());
+        let notifier = NewMailNotifier::with_sink(sink.clone());
+        assert!(notifier.shows_content());
+        notifier.set_show_content(false);
+        assert!(!notifier.shows_content());
+        notifier.notify_new_mail(&batch(1));
+        notifier.notify_new_mail(&batch(3));
+        let shown = sink.notifications();
+        assert_eq!(shown[0].summary, "New mail");
+        assert_eq!(shown[0].body, "Work");
+        assert_eq!(shown[1].summary, "New mail: 3 messages");
+        assert_eq!(shown[1].body, "Work");
+        assert_eq!(shown[1].opens.remote_thread_id, "thread-0");
     }
 
     #[test]
