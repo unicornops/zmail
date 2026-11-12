@@ -62,6 +62,10 @@ impl SessionServer {
     }
 }
 
+/// Answers one request and closes the connection. Every response says
+/// `Connection: close`, so the client never sends its next request (the
+/// one a redirect leads to, say) down a connection this server has
+/// already dropped.
 fn serve(
     mut stream: TcpStream,
     base: &str,
@@ -96,10 +100,12 @@ fn serve(
         authorized,
     });
     let response = if let Some((_, to)) = redirect.filter(|(from, _)| *from == target) {
-        format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {to}\r\nContent-Length: 0\r\n\r\n")
+        format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
     } else if target == session_path && !authorized {
         "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"jmap\"\r\n\
-         Content-Length: 0\r\n\r\n"
+         Content-Length: 0\r\nConnection: close\r\n\r\n"
             .to_owned()
     } else if target == session_path {
         let body = json!({
@@ -124,11 +130,12 @@ fn serve(
         })
         .to_string();
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
             body.len()
         )
     } else {
-        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_owned()
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
     };
     let _ = stream.write_all(response.as_bytes());
 }
