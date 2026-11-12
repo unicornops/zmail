@@ -45,6 +45,7 @@ mod reader_attachments;
 mod reader_long;
 mod reader_safety;
 mod search;
+mod send_checks;
 mod settings;
 mod store_unlock;
 mod text_scale;

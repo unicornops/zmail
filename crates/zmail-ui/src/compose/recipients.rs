@@ -24,7 +24,10 @@ use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyContext,
     MouseButton, Render, Role, SharedString, Subscription, Window, div, prelude::*, px, rgb,
 };
-use zmail_core::{AddressSuggestion, participants::Participant, participants::parse_address_list};
+use zmail_core::{
+    AddressSuggestion,
+    participants::{Participant, is_valid_address, parse_address_list},
+};
 use zmail_store::LocalStore;
 
 use crate::a11y::{
@@ -84,23 +87,25 @@ impl Recipient {
         self.participant.key()
     }
 
-    /// Whether the address looks deliverable: one `@` with text on both
-    /// sides and no spaces, and a domain that neither starts nor ends with
-    /// a dot nor has two in a row.
+    /// How a problem with this recipient names it: the address as typed,
+    /// else the name (a chip such as "design team" has no address).
+    fn problem_text(&self) -> &str {
+        self.participant
+            .email
+            .as_deref()
+            .unwrap_or_else(|| self.participant.display_name())
+    }
+
+    /// Whether the address is one Zmail can send to, by the rule the SMTP
+    /// and JMAP envelopes are checked with ([`is_valid_address`]). Send
+    /// checks every recipient with this before queueing
+    /// ([`RecipientField::invalid_recipients`]), so a message it lets
+    /// through is not refused later in the Outbox.
     pub(crate) fn is_valid(&self) -> bool {
-        let Some(email) = self.participant.email.as_deref() else {
-            return false;
-        };
-        let Some((local, domain)) = email.split_once('@') else {
-            return false;
-        };
-        !local.is_empty()
-            && !domain.is_empty()
-            && !domain.contains('@')
-            && !email.contains(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '>' | ','))
-            && !domain.starts_with('.')
-            && !domain.ends_with('.')
-            && !domain.contains("..")
+        self.participant
+            .email
+            .as_deref()
+            .is_some_and(is_valid_address)
     }
 }
 
@@ -177,6 +182,22 @@ impl RecipientField {
             .chain(&Recipient::parse_list(self.input.read(cx).text()))
             .map(Recipient::header_value)
             .collect()
+    }
+
+    /// The recipients that are not valid addresses, chips first, then
+    /// whatever is still typed, as a problem with them names them.
+    pub(crate) fn invalid_recipients(&self, cx: &App) -> Vec<String> {
+        self.chips
+            .iter()
+            .chain(&Recipient::parse_list(self.input.read(cx).text()))
+            .filter(|recipient| !recipient.is_valid())
+            .map(|recipient| recipient.problem_text().to_owned())
+            .collect()
+    }
+
+    /// The field's label: "To", "Cc" or "Bcc".
+    pub(crate) fn label(&self) -> &SharedString {
+        &self.label
     }
 
     /// The chips.
@@ -589,5 +610,27 @@ impl Render for RecipientField {
                     Politeness::Polite,
                 )
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Recipient;
+
+    fn valid(text: &str) -> Vec<bool> {
+        Recipient::parse_list(text)
+            .iter()
+            .map(Recipient::is_valid)
+            .collect()
+    }
+
+    /// Send checks a recipient by the rule the SMTP and JMAP envelopes
+    /// are checked with, so a control character stops Send here instead
+    /// of failing the message in the Outbox.
+    #[test]
+    fn an_address_with_a_control_character_is_not_valid() {
+        assert_eq!(valid("kai@example.test"), [true]);
+        assert_eq!(valid("kai\u{1b}@example.test"), [false]);
+        assert_eq!(valid("Kai <kai@exam\u{7}ple.test>"), [false]);
     }
 }

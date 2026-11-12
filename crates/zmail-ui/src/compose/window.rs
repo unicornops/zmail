@@ -7,7 +7,8 @@
 //!
 //! Escape, the window's close button, or sending closes the window. The
 //! draft is saved first, so closing never loses anything: the draft stays
-//! in Drafts. Status and errors show as toasts in the window itself.
+//! in Drafts, and the main window says so. Status and errors show as
+//! toasts in the window itself.
 
 use std::sync::Arc;
 

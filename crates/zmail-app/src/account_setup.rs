@@ -285,16 +285,11 @@ fn prompt_account(protocol: ProtocolKind, allow_cleartext: bool) -> Result<NewAc
     })
 }
 
-/// Refuses an identity address that can't be one: it needs a local part
-/// and a domain, and no spaces or control characters.
+/// Refuses an identity address Zmail could not send from, by the rule the
+/// SMTP and JMAP envelopes are checked with
+/// ([`zmail_core::participants::is_valid_address`]).
 fn check_address(address: &str) -> Result<()> {
-    let valid = address
-        .split_once('@')
-        .is_some_and(|(local, domain)| !local.is_empty() && !domain.is_empty())
-        && !address
-            .chars()
-            .any(|ch| ch.is_whitespace() || ch.is_control() || matches!(ch, '<' | '>' | ','));
-    if !valid {
+    if !zmail_core::participants::is_valid_address(address) {
         bail!("{} is not an email address", line(address));
     }
     Ok(())
@@ -586,6 +581,7 @@ mod tests {
             "ada@",
             "a da@example.com",
             "a@b>\r\n",
+            "ada@example..com",
         ] {
             assert!(check_address(address).is_err(), "{address}");
         }

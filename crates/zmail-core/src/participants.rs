@@ -118,9 +118,10 @@ pub fn envelope_address(recipient: &str) -> String {
 /// text on both sides; no control characters, whitespace, angle brackets
 /// or commas, so it stands in an SMTP envelope (`MAIL FROM:<...>`,
 /// `RCPT TO:<...>`) as it is; and a domain that neither starts nor ends
-/// with a dot nor has two in a row. The GUI's recipient chips and the
-/// TUI's address check apply the same rule, except that they let control
-/// characters other than whitespace through.
+/// with a dot nor has two in a row. The GUI's Send and the CLI's identity
+/// addresses check with this too; the TUI's address check applies the
+/// same rule, except that it lets control characters other than
+/// whitespace through.
 pub fn is_valid_address(address: &str) -> bool {
     let Some((local, domain)) = address.split_once('@') else {
         return false;
