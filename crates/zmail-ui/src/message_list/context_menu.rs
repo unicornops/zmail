@@ -1,4 +1,4 @@
-//! The right-click menu on thread and search rows.
+//! The right-click menu on thread and search rows, and on draft rows.
 //!
 //! It acts on the clicked row, or on the whole selection when the clicked
 //! row is part of it: a right-click on a row outside the selection selects
@@ -6,12 +6,16 @@
 //! action as the keyboard shortcut and the bulk bar, so the change goes
 //! through `MailActions` and can be undone. Move to… opens the folder
 //! picker where the menu was.
+//!
+//! A draft row's menu opens that draft, as a click does, and offers
+//! Discard Draft…, which asks before deleting it, as Delete does there.
 
 use gpui::{
-    AnyElement, Context, DismissEvent, Focusable, IntoElement, Modifiers, Pixels, Point, Window,
+    AnyElement, Context, DismissEvent, Entity, Focusable, IntoElement, Modifiers, Pixels, Point,
+    Window,
 };
 
-use super::MessageListView;
+use super::{MessageListEvent, MessageListView};
 use crate::ListMode;
 use crate::actions::{Archive, Delete, ToggleFlag, ToggleRead};
 use crate::components::{Menu, MenuEntry, overlay_at};
@@ -108,6 +112,49 @@ impl MessageListView {
                 .on_select(dispatch(Box::new(ToggleRead))),
             )
         });
+        self.show_context_menu(menu, position, window, cx);
+    }
+
+    /// A right-click on the draft row at `index`, at `position` in the
+    /// window.
+    pub(super) fn open_draft_context_menu(
+        &mut self,
+        index: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(draft_id) = self.state.drafts.get(index).map(|draft| draft.id) else {
+            return;
+        };
+        if self.state.selected_draft_id != Some(draft_id) {
+            self.state.selected_draft_id = Some(draft_id);
+            cx.emit(MessageListEvent::OpenDraft(draft_id));
+        }
+        window.focus(&self.focus_handle, cx);
+        let focus_handle = self.focus_handle.clone();
+        let menu = Menu::build(window, cx, |menu| {
+            menu.entry(
+                MenuEntry::new("Discard Draft…")
+                    .icon("trash-2")
+                    .shortcut("secondary-backspace")
+                    .on_select(move |window, cx| {
+                        focus_handle.dispatch_action(&Delete, window, cx);
+                    }),
+            )
+        });
+        self.show_context_menu(menu, position, window, cx);
+    }
+
+    /// Shows `menu` at `position` with focus in it, and gives focus back to
+    /// the list when it closes (unless the entry chosen moved it on).
+    fn show_context_menu(
+        &mut self,
+        menu: Entity<Menu>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let subscription =
             cx.subscribe_in(&menu, window, |list, menu, _: &DismissEvent, window, cx| {
                 // Move to… hands focus to the picker; otherwise it comes

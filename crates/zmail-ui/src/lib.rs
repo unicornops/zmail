@@ -571,7 +571,11 @@ struct WorkspaceView {
     all_mailboxes: Vec<MailboxSummary>,
     /// The selected account's mailboxes.
     mailboxes: Vec<MailboxSummary>,
+    /// The drafts Drafts lists: being written, or failed to send.
     drafts: Vec<DraftSummary>,
+    /// Every draft not sent yet, so the Outbox rows can name theirs.
+    unsent_drafts: Vec<DraftSummary>,
+    /// The messages not sent yet; a sent message leaves the Outbox.
     outbox_jobs: Vec<OutboxJobSummary>,
     search_results: Vec<SearchHit>,
     /// The query that produced `search_results`, shown in the list header

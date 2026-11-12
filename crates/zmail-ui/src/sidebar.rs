@@ -218,6 +218,12 @@ impl SidebarView {
         }
     }
 
+    /// What the sidebar shows now.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &SidebarState {
+        &self.state
+    }
+
     /// Replaces what the sidebar shows; re-renders only when it changed.
     pub(crate) fn set_state(&mut self, state: SidebarState, cx: &mut Context<Self>) {
         if self.state != state {

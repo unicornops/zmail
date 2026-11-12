@@ -29,10 +29,10 @@ use gpui::{
 use zmail_core::APP_NAME;
 
 use crate::actions::{
-    AddAccount, AddAttachment, Archive, Delete, FocusSearch, Forward, GoBack, Hide, HideOthers,
-    Minimize, NewMessage, OpenSettings, Quit, Reply, ReplyAll, RetryOutbox, SaveAttachments,
-    SaveDraft, SearchAllAccounts, SearchInAccount, SearchInFolder, Send, ShowAll, ShowBcc, ShowCc,
-    ShowDrafts, ShowKeyboardShortcuts, ShowMail, ShowOutbox, SyncAccount, SyncAll,
+    AddAccount, AddAttachment, Archive, Delete, DiscardDraft, FocusSearch, Forward, GoBack, Hide,
+    HideOthers, Minimize, NewMessage, OpenSettings, Quit, Reply, ReplyAll, RetryOutbox,
+    SaveAttachments, SaveDraft, SearchAllAccounts, SearchInAccount, SearchInFolder, Send, ShowAll,
+    ShowBcc, ShowCc, ShowDrafts, ShowKeyboardShortcuts, ShowMail, ShowOutbox, SyncAccount, SyncAll,
     ToggleCommandPalette, ToggleDensity, ToggleFlag, ToggleRead, ToggleSidebar, ToggleTheme, Undo,
     Zoom,
 };
@@ -297,6 +297,7 @@ impl MenuModel {
                 MenuModelItem::Separator,
                 command("Send", Send),
                 command("Save Draft", SaveDraft),
+                command("Discard Draft…", DiscardDraft),
                 command("Attach Files…", AddAttachment),
                 command("Add Cc", ShowCc),
                 command("Add Bcc", ShowBcc),

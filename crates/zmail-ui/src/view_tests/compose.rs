@@ -641,8 +641,12 @@ fn a_draft_is_edited_in_one_place(cx: &mut TestAppContext) {
         1
     );
 
-    // Once the window closes, the pane edits it again.
-    let (_, mut w) = compose_window(&view, cx);
+    // Once the window closes, the pane edits it again. (An empty draft
+    // would go with the window.)
+    let (compose, mut w) = compose_window(&view, cx);
+    let (_, _, body) = inputs(&compose, &mut w);
+    focus(&body, &mut w);
+    w.simulate_input("Kept");
     keys("escape", &mut w);
     cx.run_until_parked();
     assert_eq!(
