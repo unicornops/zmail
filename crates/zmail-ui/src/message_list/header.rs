@@ -516,9 +516,11 @@ impl MessageListView {
                 count_noun(self.state.search_results.len(), "result", "results"),
                 self.state.search_query,
                 if self.state.searching_server {
-                    " \u{2022} searching the server\u{2026}"
+                    " \u{2022} searching the server\u{2026}".to_owned()
+                } else if let Some(servers) = self.state.search_scope.failed_servers() {
+                    format!(" \u{2022} couldn\u{2019}t search {servers}")
                 } else {
-                    ""
+                    String::new()
                 }
             ),
             ListMode::Drafts => count_noun(self.state.drafts.len(), "draft", "drafts"),

@@ -162,6 +162,9 @@ pub enum InitialView {
     /// The reader on this thread, scrolled down a little once its message
     /// has been laid out (a web view clipped by the list, on macOS).
     ThreadScrolled(i64),
+    /// The reader on this thread, saying its message could not be
+    /// downloaded.
+    ThreadDownloadFailed(i64),
     /// The Add Account window over the inbox, at its provider step.
     AddAccount,
     /// The first-run onboarding at this step, even when accounts exist
@@ -629,6 +632,9 @@ struct WorkspaceView {
     detail_mode: DetailMode,
     /// The last error. It stays until the user dismisses it.
     store_error: Option<String>,
+    /// The conversation whose message bodies failed to download: the
+    /// reader says so, with Retry.
+    body_download_failed: Option<i64>,
     /// What a screen reader is told about changes nothing has focus on:
     /// sync status and search result counts.
     announcer: a11y::Announcer,

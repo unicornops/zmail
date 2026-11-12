@@ -52,6 +52,7 @@ mod reader_safety;
 mod search;
 mod send_checks;
 mod settings;
+mod silent_failures;
 mod store_unlock;
 mod text_scale;
 

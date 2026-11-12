@@ -118,6 +118,8 @@ pub(crate) enum FixtureView {
     /// The reader on a message with several attachments of different
     /// types, one of them a program.
     ReaderAttachments,
+    /// The reader on a conversation whose message could not be downloaded.
+    ReaderDownloadFailed,
     /// The `accounts` view with the command palette open and "arch" typed:
     /// commands and folders across accounts, matched letters highlighted.
     CommandPalette,
@@ -257,6 +259,7 @@ impl FixtureView {
             "reader-safety-caution" => Self::ReaderSafetyCaution,
             "reader-safety-danger" => Self::ReaderSafetyDanger,
             "reader-attachments" => Self::ReaderAttachments,
+            "reader-download-failed" => Self::ReaderDownloadFailed,
             "command-palette" => Self::CommandPalette,
             "cheat-sheet" => Self::CheatSheet,
             "settings-accounts" => Self::SettingsAccounts,
@@ -553,6 +556,12 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         FixtureView::ReaderAttachments => {
             InitialView::Thread(thread_id(store, account_id, "inbox", ATTACHMENTS_SUBJECT)?)
         }
+        FixtureView::ReaderDownloadFailed => InitialView::ThreadDownloadFailed(thread_id(
+            store,
+            account_id,
+            "inbox",
+            "Q4 roadmap review",
+        )?),
         FixtureView::ReaderReply => {
             InitialView::Reply(thread_id(store, account_id, "inbox", "Q4 roadmap review")?)
         }
@@ -1751,6 +1760,7 @@ mod tests {
             "reader-safety-caution",
             "reader-safety-danger",
             "reader-attachments",
+            "reader-download-failed",
             "command-palette",
             "cheat-sheet",
             "settings-accounts",

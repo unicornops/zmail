@@ -129,6 +129,9 @@ pub(crate) struct ReaderState {
     pub(crate) sender_warnings: SenderWarnings,
     /// Messages whose remote content the user chose to load this session.
     pub(crate) remote_content_messages: std::collections::HashSet<i64>,
+    /// The conversation's message bodies could not be downloaded: a
+    /// banner over it says so, with Retry.
+    pub(crate) download_failed: bool,
 }
 
 pub(crate) struct ReaderView {
@@ -721,6 +724,20 @@ impl Render for ReaderView {
                         ),
                     )
                 }),
+            )
+            .when_some(
+                thread
+                    .filter(|_| shows_list && self.state.download_failed)
+                    .map(|thread| thread.id),
+                |this, thread_id| {
+                    this.child(
+                        div()
+                            .flex_none()
+                            .px_4()
+                            .pt_3()
+                            .child(banners::download_failed_banner(thread_id)),
+                    )
+                },
             )
             .child(if self.state.selected_count > 1 {
                 render_selection_summary(self.state.selected_count, &colors)

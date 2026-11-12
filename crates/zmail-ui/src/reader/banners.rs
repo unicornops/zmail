@@ -1,5 +1,6 @@
 //! The reader's banners on each message: the sender-safety banner and the
-//! remote-content notice.
+//! remote-content notice; and, over a conversation whose message bodies
+//! could not be downloaded, one that says so with Retry.
 //!
 //! Remote content (ADR 0006, Rob's decision) is blocked by default. A
 //! message that references any shows a neutral notice with "Load remote
@@ -40,6 +41,7 @@ use zmail_security::{
 
 use crate::actions::{
     AlwaysLoadRemoteContent, BlockRemoteContent, DismissSenderWarning, LoadRemoteContent,
+    RetryDownload,
 };
 use crate::components::{Banner, BannerTone, Button, ButtonSize};
 
@@ -57,6 +59,30 @@ pub(crate) fn message_banners(
         .into_iter()
         .chain(remote_content_banner(message, remote_allowed).map(IntoElement::into_any_element))
         .collect()
+}
+
+/// The banner over a conversation whose message bodies could not be
+/// downloaded (offline, say): the reader shows the stored previews, and
+/// Retry fetches the bodies again.
+pub(crate) fn download_failed_banner(thread_id: i64) -> Banner {
+    Banner::new(
+        ("download-failed", thread_id as u64),
+        "Zmail is showing the preview it has. Check your connection, then try again.",
+    )
+    .tone(BannerTone::Caution)
+    .title("Couldn't download this message")
+    .action(
+        div()
+            .debug_selector(|| "reader-download-retry".into())
+            .child(
+                Button::new("reader-download-retry", "Retry")
+                    .icon("refresh-cw")
+                    .size(ButtonSize::Small)
+                    .on_click(move |_, window, cx| {
+                        window.dispatch_action(Box::new(RetryDownload { thread_id }), cx);
+                    }),
+            ),
+    )
 }
 
 /// What a message's remote content is allowed to do, as its banner says.

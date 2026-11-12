@@ -145,6 +145,10 @@ pub(crate) const ACTIONS_NOT_IN_MENUS: &[(&str, &str)] = &[
         "the Load remote content button on one message's banner",
     ),
     (
+        "zmail::RetryDownload",
+        "the Retry button on the reader's download-failed banner",
+    ),
+    (
         "zmail::AlwaysLoadRemoteContent",
         "the Always for this sender button on one message's banner",
     ),

@@ -229,6 +229,15 @@ pub struct DismissSenderWarning {
     pub message_id: i64,
 }
 
+/// Retry on the reader's "Couldn't download this message" banner: fetch
+/// the conversation's message bodies again.
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = zmail, no_json)]
+pub struct RetryDownload {
+    /// Thread id.
+    pub thread_id: i64,
+}
+
 /// "Load remote content" on a message's remote-content banner: allows it
 /// for that message until Zmail quits (ADR 0006).
 #[derive(Clone, Debug, PartialEq, Eq, Action)]
@@ -281,6 +290,10 @@ pub(crate) const ACTIONS_WITHOUT_KEYS: &[(&str, &str)] = &[
     (
         "zmail::LoadRemoteContent",
         "needs a message argument; it is the remote-content banner's button",
+    ),
+    (
+        "zmail::RetryDownload",
+        "needs a conversation argument; it is the download-failed banner's button",
     ),
     (
         "zmail::AlwaysLoadRemoteContent",

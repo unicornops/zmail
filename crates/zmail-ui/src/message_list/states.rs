@@ -150,10 +150,17 @@ impl MessageListView {
             "list-search-empty",
             empty_state(
                 &format!("No results in {place}"),
-                &format!(
-                    "Nothing matches \u{201c}{}\u{201d}.",
-                    self.state.search_query
-                ),
+                &match scope.failed_servers() {
+                    Some(servers) => format!(
+                        "Nothing in local mail matches \u{201c}{}\u{201d}, and Zmail \
+                         couldn\u{2019}t search {servers}, so there may be more.",
+                        self.state.search_query
+                    ),
+                    None => format!(
+                        "Nothing matches \u{201c}{}\u{201d}.",
+                        self.state.search_query
+                    ),
+                },
                 "search",
                 Some(action),
                 colors,
