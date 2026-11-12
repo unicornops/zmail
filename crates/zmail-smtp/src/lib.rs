@@ -59,7 +59,7 @@ impl Timeouts {
 }
 
 /// Connection settings for an SMTP submission attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SubmissionConfig {
     /// SMTP hostname.
     pub host: String,
@@ -76,6 +76,20 @@ pub struct SubmissionConfig {
     pub security: SubmissionSecurity,
     /// EHLO hostname sent by the client.
     pub hello_name: String,
+}
+
+impl std::fmt::Debug for SubmissionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubmissionConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("secret", &self.secret.as_ref().map(|_| "[redacted]"))
+            .field("auth", &self.auth)
+            .field("security", &self.security)
+            .field("hello_name", &self.hello_name)
+            .finish()
+    }
 }
 
 /// Plain-text message submitted through SMTP.
@@ -447,6 +461,14 @@ mod tests {
             Credentials::XOauth2 { username, secret }
                 if username == "user@example.test" && secret == "the-secret"
         ));
+    }
+
+    #[test]
+    fn debug_output_never_shows_the_secret() {
+        let output = format!("{:?}", config(AuthKind::Password));
+        assert!(!output.contains("the-secret"), "{output}");
+        assert!(output.contains("[redacted]"), "{output}");
+        assert!(output.contains("smtp.example.test"), "{output}");
     }
 
     #[test]

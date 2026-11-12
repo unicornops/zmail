@@ -162,7 +162,9 @@ mod tests {
     fn a_redirect_with_the_wrong_state_is_refused() {
         let port = free_port();
         let sign_in = BrowserSignIn::new(client(port));
-        let waiting = std::thread::spawn(move || sign_in.wait(Duration::from_secs(10)));
+        // A forged state is answered with a 400 and the wait goes on, so
+        // only the deadline ends it here.
+        let waiting = std::thread::spawn(move || sign_in.wait(Duration::from_secs(1)));
         // The listener binds when waiting starts; retry until it does.
         let mut stream = None;
         for _ in 0..100 {
@@ -178,11 +180,12 @@ mod tests {
             .expect("the redirect is sent");
         let mut answer = String::new();
         let _ = stream.read_to_string(&mut answer);
+        assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
         let error = waiting
             .join()
             .expect("the wait ends")
-            .expect_err("a forged state is refused");
-        assert!(format!("{error:#}").contains("state"), "{error:#}");
+            .expect_err("a forged state never signs in");
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
     }
 
     #[test]
