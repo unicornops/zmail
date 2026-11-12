@@ -12,6 +12,7 @@
 
 ### Bug Fixes
 
+* **ui:** let Tab reach the buttons inside a pane, with F6 and Ctrl+Tab for panes ([#450](https://github.com/unicornops/zmail/issues/450)) ([2ee9826](https://github.com/unicornops/zmail/commit/2ee982654e53dd06bfa5a2c1a44eb96a48a3fb36))
 * **ui:** say when a message download or a server search fails ([#449](https://github.com/unicornops/zmail/issues/449)) ([39a976a](https://github.com/unicornops/zmail/commit/39a976aba772b459a4ca5573a9348544a55d7cee))
 * ask before deleting for good, and keep mail commands off the Outbox ([#442](https://github.com/unicornops/zmail/issues/442)) ([3816608](https://github.com/unicornops/zmail/commit/38166085d06fdb528b3a758aeab4562f1eeb14c7))
 * **ui:** keep deep conversations open, drop sent mail from Drafts, add Discard Draft ([#439](https://github.com/unicornops/zmail/issues/439)) ([414a24e](https://github.com/unicornops/zmail/commit/414a24ec47971b695db8c07dd8453fa3d4d4fd75))
