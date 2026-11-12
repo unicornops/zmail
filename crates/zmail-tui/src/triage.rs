@@ -9,6 +9,11 @@
 //! made on any screen. A conversation is the unit, as in the GUI: in an
 //! index that lists single messages, a command acts on the message's
 //! whole conversation, and the status line says so.
+//!
+//! `D` moves to the Trash at once, with Undo. From the Trash itself, or on
+//! an account with no Trash, it would delete for good, so it asks first
+//! ("Delete N conversations for good? ... (y/n)"); anything but `y` keeps
+//! them ([`zmail_actions::MailActions::permanent_deletes`] decides).
 
 use std::{collections::BTreeSet, time::Instant};
 
@@ -25,7 +30,7 @@ use crate::{
 /// A triage command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Triage {
-    /// Delete to the Trash.
+    /// Delete to the Trash (asking first when it would be for good).
     Delete,
     /// Archive.
     Archive,
@@ -234,9 +239,17 @@ impl App {
             .filter_map(|&thread_id| self.store.thread_state(thread_id).ok().flatten())
             .collect();
         match command {
-            Triage::Delete => self.change(&thread_ids, |actions, ids, events| {
-                actions.delete_threads(ids, &mut log(events))
-            }),
+            Triage::Delete => match self.actions.permanent_deletes(&thread_ids) {
+                Ok(0) => self.delete_now(&thread_ids),
+                Ok(permanent) => {
+                    self.status = None;
+                    self.prompt = Some(Prompt::DeleteForGood {
+                        thread_ids,
+                        permanent,
+                    });
+                }
+                Err(error) => self.report(error),
+            },
             Triage::Archive => self.change(&thread_ids, |actions, ids, events| {
                 actions.archive_threads(ids, &mut log(events))
             }),
@@ -260,6 +273,23 @@ impl App {
                 });
             }
             Triage::Save => self.open_save(thread_ids, &states),
+        }
+    }
+
+    fn delete_now(&mut self, thread_ids: &[i64]) {
+        self.change(thread_ids, |actions, ids, events| {
+            actions.delete_threads(ids, &mut log(events))
+        });
+    }
+
+    /// The answer to "Delete … for good?": `y` deletes, anything else
+    /// keeps them.
+    pub(crate) fn delete_for_good_key(&mut self, thread_ids: &[i64], key: KeyEvent) {
+        self.prompt = None;
+        if matches!(key.code, KeyCode::Char('y' | 'Y')) {
+            self.delete_now(thread_ids);
+        } else {
+            self.status = Some("Nothing deleted".to_owned());
         }
     }
 
@@ -674,5 +704,43 @@ mod tests {
         assert_eq!(save.chosen(), None, "two match");
         let save = prompt(&["Projects", "Projects/Website"], "web");
         assert_eq!(save.chosen().map(|folder| folder.mailbox_id), Some(1));
+    }
+}
+
+/// "Delete 3 conversations for good? This can't be undone. (y/n)", for
+/// `permanent` of `total` conversations that `D` would destroy rather than
+/// move to the Trash. Short enough for an 80-column status line.
+pub(crate) fn delete_for_good_question(permanent: usize, total: usize) -> String {
+    let what = if permanent == 1 && total == 1 {
+        "this conversation".to_owned()
+    } else {
+        count_noun(permanent, "conversation", "conversations")
+    };
+    let rest = total.saturating_sub(permanent);
+    let others = if rest == 0 {
+        String::new()
+    } else {
+        format!(", {rest} to the Trash")
+    };
+    format!("Delete {what} for good{others}? This can't be undone. (y/n)")
+}
+
+#[cfg(test)]
+mod question_tests {
+    use super::delete_for_good_question;
+
+    #[test]
+    fn the_question_names_the_count_and_fits_80_columns() {
+        assert_eq!(
+            delete_for_good_question(1, 1),
+            "Delete this conversation for good? This can't be undone. (y/n)"
+        );
+        let mixed = delete_for_good_question(3, 5);
+        assert_eq!(
+            mixed,
+            "Delete 3 conversations for good, 2 to the Trash? This can't be undone. (y/n)"
+        );
+        // The status line's brackets take two columns.
+        assert!(mixed.chars().count() + 2 <= 80);
     }
 }

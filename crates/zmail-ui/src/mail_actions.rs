@@ -84,6 +84,12 @@ impl MailActions {
         self.inner.delete_threads(thread_ids, &mut emit(cx))
     }
 
+    /// How many of the threads a delete would destroy for good rather
+    /// than move to the trash. Changes nothing.
+    pub(crate) fn permanent_deletes(&self, thread_ids: &[i64]) -> Result<usize> {
+        self.inner.permanent_deletes(thread_ids)
+    }
+
     /// Flags or unflags the threads.
     pub(crate) fn set_threads_flagged(
         &mut self,

@@ -28,7 +28,12 @@
 //! [`reply`] works out what a reply or forward draft starts with, for both
 //! frontends.
 
-use std::{collections::VecDeque, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context as _, Result, bail};
 use zmail_core::{
@@ -342,7 +347,8 @@ impl MailActions {
 
     /// Deletes the threads: into the trash mailbox when the account has
     /// one, otherwise (or from the trash itself) for good. Only the first
-    /// kind can be undone.
+    /// kind can be undone; [`Self::permanent_deletes`] says beforehand
+    /// whether any would be the second.
     pub fn delete_threads(
         &mut self,
         thread_ids: &[i64],
@@ -377,6 +383,34 @@ impl MailActions {
         };
         self.record(change, label, events);
         result
+    }
+
+    /// How many of the threads [`Self::delete_threads`] would destroy
+    /// for good rather than move to the trash: those in their account's
+    /// trash mailbox, and those of an account that has none. A frontend
+    /// asks before such a delete, which cannot be undone; a plain move to
+    /// the trash goes at once. Nothing is changed.
+    ///
+    /// The store is asked about each thread's place once, in batches, and
+    /// about each account's trash once.
+    pub fn permanent_deletes(&self, thread_ids: &[i64]) -> Result<usize> {
+        let mut trash_of_account: HashMap<i64, Option<i64>> = HashMap::new();
+        let mut permanent = 0;
+        for thread in self.store.thread_marks(thread_ids, None)? {
+            let trash = match trash_of_account.get(&thread.account_id) {
+                Some(trash) => *trash,
+                None => {
+                    let trash = self.store.mailbox_id_by_role(thread.account_id, "trash")?;
+                    trash_of_account.insert(thread.account_id, trash);
+                    trash
+                }
+            };
+            // As `LocalStore::delete_thread` decides.
+            if trash.is_none_or(|trash| trash == thread.mailbox_id) {
+                permanent += 1;
+            }
+        }
+        Ok(permanent)
     }
 
     /// Flags or unflags the threads.

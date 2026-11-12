@@ -385,23 +385,23 @@ fn recipient_line(summary: &str, identity_name: &str) -> (String, String, Option
 
 /// How sending a queued message is going, in plain words.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct OutboxStatus {
-    pub(super) text: String,
+pub(crate) struct OutboxStatus {
+    pub(crate) text: String,
     /// The last attempt failed.
-    pub(super) failed: bool,
+    pub(crate) failed: bool,
     /// Offer "Retry now": the message is waiting for a retry, or gave up.
-    pub(super) can_retry: bool,
+    pub(crate) can_retry: bool,
     /// The server refused the account's sign-in: offer Re-authenticate
     /// instead of Retry now, which cannot help until then.
-    pub(super) needs_reauth: bool,
+    pub(crate) needs_reauth: bool,
     /// A recipient's key no longer matches their contact card: offer to
     /// trust the new key instead of Retry now, which stops again.
-    pub(super) key_change: Option<PinnedKeyChanged>,
+    pub(crate) key_change: Option<PinnedKeyChanged>,
 }
 
 /// "Sending…", "Failed — retrying in 5 min", "Couldn't send" and so on,
 /// instead of the job's state name and attempt count.
-pub(super) fn outbox_status(
+pub(crate) fn outbox_status(
     job: &OutboxJobSummary,
     now: &chrono::DateTime<chrono::Local>,
 ) -> OutboxStatus {

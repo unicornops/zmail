@@ -72,6 +72,7 @@ mod attachments;
 mod cheat_sheet;
 mod command_palette;
 mod compose;
+mod delete_confirm;
 mod drag;
 mod fonts;
 mod keymap;
@@ -82,6 +83,7 @@ mod message_list;
 mod motion;
 mod move_picker;
 mod notifications;
+mod outbox_detail;
 mod pane;
 mod preferences;
 mod reader;
@@ -173,6 +175,9 @@ pub enum InitialView {
     MultiSelect,
     /// The outbox list.
     Outbox,
+    /// The Trash with this thread open, asking whether to delete it for
+    /// good.
+    DeleteForGood(i64),
     /// The last mailbox with this query searched in it.
     Search(&'static str),
     /// The last mailbox with the command palette open and this query typed
@@ -499,6 +504,8 @@ pub(crate) enum ListMode {
 pub(crate) enum DetailMode {
     Reader,
     Compose,
+    /// The selected Outbox message, beside the Outbox.
+    Outbox,
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +528,7 @@ struct WorkspaceView {
     message_list: Entity<MessageListView>,
     reader: Entity<ReaderView>,
     compose: Entity<ComposeView>,
+    outbox_detail: Entity<outbox_detail::OutboxDetailView>,
     /// The first-run onboarding, which fills the window instead of the
     /// panes until it finishes. Present when the window opened with no
     /// account.
@@ -538,6 +546,8 @@ struct WorkspaceView {
     palette_modal: components::ModalState,
     /// The keyboard shortcut cheat sheet's modal.
     shortcuts_modal: components::ModalState,
+    /// The question before a delete that cannot be undone.
+    delete_confirm: delete_confirm::DeleteConfirm,
     /// What the open cheat sheet lists, read from the keymap as it opened.
     shortcut_groups: Vec<cheat_sheet::ShortcutGroup>,
     /// Opening and saving attachments: the warning before opening a

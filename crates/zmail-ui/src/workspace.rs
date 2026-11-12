@@ -58,6 +58,7 @@ use crate::mail_actions::{MARK_READ_DELAY, MailActions, MailEvent, UndoEntry, Un
 use crate::message_list::{
     AccountLabel, ListMailbox, ListSelection, MessageListEvent, MessageListState, MessageListView,
 };
+use crate::outbox_detail::{OutboxDetailEvent, OutboxDetailState, OutboxDetailView};
 use crate::pane::{Pane, dispatch_from};
 use crate::reader::{ReaderState, ReaderView};
 use crate::sidebar::{
@@ -138,6 +139,7 @@ impl WorkspaceView {
                 network: zmail_autodiscover::Network::system(),
             });
         }
+        let outbox_detail = cx.new(OutboxDetailView::new);
         let search_query = cx.new(|cx| {
             TextInput::new(cx)
                 .compact()
@@ -163,6 +165,7 @@ impl WorkspaceView {
             cx.subscribe_in(&sidebar, window, Self::on_sidebar_event),
             cx.subscribe_in(&message_list, window, Self::on_message_list_event),
             cx.subscribe_in(&compose, window, Self::on_compose_event),
+            cx.subscribe_in(&outbox_detail, window, Self::on_outbox_detail_event),
             // Whatever changed in the shell, the panes get the new state.
             cx.observe_self(|this, cx| this.sync_panes(cx)),
         ];
@@ -179,6 +182,7 @@ impl WorkspaceView {
             message_list,
             reader,
             compose,
+            outbox_detail,
             onboarding: None,
             search_query,
             app_menu,
@@ -200,6 +204,7 @@ impl WorkspaceView {
             command_palette: None,
             palette_modal: components::ModalState::new(cx),
             shortcuts_modal: components::ModalState::new(cx),
+            delete_confirm: crate::delete_confirm::DeleteConfirm::new(cx),
             shortcut_groups: Vec::new(),
             search_results: Vec::new(),
             announcer: Default::default(),
@@ -429,6 +434,17 @@ impl WorkspaceView {
                 }
             }
             InitialView::Outbox => view.show_outbox(&ShowOutbox, window, cx),
+            InitialView::DeleteForGood(thread_id) => {
+                if let Ok(Some(thread)) = view.store.thread_view(thread_id) {
+                    view.select_mailbox(thread.mailbox_id, cx);
+                    view.show_thread(thread_id, thread.mailbox_id, cx);
+                    view.refresh_from_store(cx);
+                    // Once the main window is up.
+                    cx.defer_in(window, move |view, window, cx| {
+                        view.request_delete(vec![thread_id], window, cx);
+                    });
+                }
+            }
             // Once the main window is up.
             InitialView::Settings(section) => cx.defer_in(window, move |_, _, cx| {
                 crate::settings::open(Some(section), cx);
@@ -624,6 +640,22 @@ impl WorkspaceView {
         };
         self.reader
             .update(cx, |reader, cx| reader.set_state(reader_state, cx));
+
+        let job = self
+            .selected_outbox_job_id
+            .and_then(|job_id| self.outbox_jobs.iter().find(|job| job.id == job_id))
+            .cloned();
+        let outbox_state = OutboxDetailState {
+            draft: job.as_ref().and_then(|job| {
+                self.unsent_drafts
+                    .iter()
+                    .find(|draft| draft.id == job.draft_id)
+                    .cloned()
+            }),
+            job,
+        };
+        self.outbox_detail
+            .update(cx, |detail, cx| detail.set_state(outbox_state, cx));
     }
 
     // -----------------------------------------------------------------------
@@ -926,11 +958,19 @@ impl WorkspaceView {
     }
 
     /// The thread the conversation commands act on: the selected thread,
-    /// while the reader shows it.
+    /// while the reader shows it beside the mail or search results (never
+    /// beside Drafts or the Outbox, whose rows are not conversations).
     fn command_thread_id(&self) -> Option<i64> {
-        matches!(self.detail_mode, DetailMode::Reader)
+        self.shows_conversations()
             .then_some(self.selected_thread_id)
             .flatten()
+    }
+
+    /// Whether the conversation commands have conversations to act on: the
+    /// list shows mail or search results, and the reader is beside it.
+    fn shows_conversations(&self) -> bool {
+        matches!(self.list_mode, ListMode::Mail | ListMode::Search)
+            && matches!(self.detail_mode, DetailMode::Reader)
     }
 
     /// Show a status message that dismisses itself after
@@ -1412,8 +1452,15 @@ impl WorkspaceView {
             }
         }
         self.list_mode = list_mode;
-        if matches!(list_mode, ListMode::Mail) {
-            self.detail_mode = DetailMode::Reader;
+        // The Outbox shows its selected message beside it; the mail list
+        // shows the reader.
+        match list_mode {
+            ListMode::Mail => self.detail_mode = DetailMode::Reader,
+            ListMode::Outbox => self.detail_mode = DetailMode::Outbox,
+            ListMode::Search if self.detail_mode == DetailMode::Outbox => {
+                self.detail_mode = DetailMode::Reader;
+            }
+            ListMode::Search | ListMode::Drafts => {}
         }
         cx.notify();
     }
@@ -2214,7 +2261,7 @@ impl WorkspaceView {
     /// The conversations the commands act on: the selected conversation,
     /// while the reader shows it.
     fn command_thread_ids(&self) -> Vec<i64> {
-        if self.list_selection.is_multiple() && matches!(self.detail_mode, DetailMode::Reader) {
+        if self.list_selection.is_multiple() && self.shows_conversations() {
             return self.list_selection.thread_ids.clone();
         }
         self.command_thread_id().into_iter().collect()
@@ -2286,7 +2333,7 @@ impl WorkspaceView {
 
     /// [`Self::change_threads`] on `thread_ids`, for example conversations
     /// dropped on a sidebar folder.
-    fn change_these_threads(
+    pub(crate) fn change_these_threads(
         &mut self,
         thread_ids: Vec<i64>,
         cx: &mut Context<Self>,
@@ -2363,16 +2410,21 @@ impl WorkspaceView {
         });
     }
 
-    /// Delete: the selected conversations, or in Drafts the selected
-    /// draft (after asking).
+    /// Delete: the selected conversations (after asking, when any would
+    /// go for good rather than to Trash), in Drafts the selected draft and
+    /// in the Outbox the selected message (both after asking).
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
-        if self.list_mode == ListMode::Drafts {
-            self.discard_selected_draft(window, cx);
-            return;
+        match self.list_mode {
+            ListMode::Drafts => return self.discard_selected_draft(window, cx),
+            ListMode::Outbox => {
+                return self
+                    .outbox_detail
+                    .update(cx, |detail, cx| detail.request_delete(window, cx));
+            }
+            ListMode::Mail | ListMode::Search => {}
         }
-        self.change_threads(cx, |actions, thread_ids, cx| {
-            actions.delete_threads(thread_ids, cx)
-        });
+        let thread_ids = self.command_thread_ids();
+        self.request_delete(thread_ids, window, cx);
     }
 
     fn toggle_flag(&mut self, _: &ToggleFlag, _: &mut Window, cx: &mut Context<Self>) {
@@ -2785,6 +2837,7 @@ impl WorkspaceView {
         match self.detail_mode {
             DetailMode::Reader => self.reader.focus_handle(cx),
             DetailMode::Compose => self.compose.focus_handle(cx),
+            DetailMode::Outbox => self.outbox_detail.focus_handle(cx),
         }
     }
 
@@ -2830,6 +2883,7 @@ impl WorkspaceView {
                 DetailMode::Compose => self
                     .compose
                     .update(cx, |compose, cx| compose.focus_pane(window, cx)),
+                DetailMode::Outbox => window.focus(&self.outbox_detail.focus_handle(cx), cx),
             },
         }
         cx.notify();
@@ -2992,6 +3046,9 @@ impl WorkspaceView {
                     self.focus_pane(Pane::Detail, window, cx);
                 }
             }
+            MessageListEvent::DeleteThread(thread_id) => {
+                self.request_delete(vec![*thread_id], window, cx);
+            }
             MessageListEvent::LoadMoreResults => self.load_more_search_results(cx),
             MessageListEvent::FilterSearch(filter) => {
                 self.apply_search_filter(*filter, window, cx);
@@ -3049,6 +3106,86 @@ impl WorkspaceView {
                 } else {
                     self.detail_mode = DetailMode::Reader;
                 }
+            }
+        }
+    }
+
+    fn on_outbox_detail_event(
+        &mut self,
+        _: &Entity<OutboxDetailView>,
+        event: &OutboxDetailEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match *event {
+            OutboxDetailEvent::Retry(job_id) => {
+                self.selected_outbox_job_id = Some(job_id);
+                self.retry_selected_outbox(window, cx);
+            }
+            OutboxDetailEvent::Reauthenticate(account_id) => {
+                crate::settings::reauthenticate_account(account_id, cx);
+            }
+            OutboxDetailEvent::Edit {
+                job_id,
+                draft_id,
+                take_back,
+            } => {
+                if take_back && !self.take_back_outbox_message(job_id, draft_id, cx) {
+                    return;
+                }
+                self.open_draft_in_window(draft_id, false, window, cx);
+                self.refresh_from_store(cx);
+                cx.notify();
+            }
+            OutboxDetailEvent::Delete {
+                job_id,
+                draft_id,
+                take_back,
+            } => {
+                if take_back && !self.take_back_outbox_message(job_id, draft_id, cx) {
+                    return;
+                }
+                match self
+                    .mail_actions
+                    .update(cx, |actions, cx| actions.delete_draft(draft_id, cx))
+                {
+                    Ok(()) => self.toasts.update(cx, |toasts, cx| {
+                        toasts.push(Toast::new("Message deleted"), cx);
+                    }),
+                    Err(error) => self.show_error(error.to_string(), cx),
+                }
+                self.refresh_from_store(cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Takes a message waiting in the Outbox back, as Undo Send does.
+    /// Says so and returns `false` when it is too late.
+    fn take_back_outbox_message(
+        &mut self,
+        job_id: i64,
+        draft_id: i64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match self
+            .mail_actions
+            .update(cx, |actions, cx| actions.cancel_send(job_id, draft_id, cx))
+        {
+            Ok(true) => true,
+            Ok(false) => {
+                self.toasts.update(cx, |toasts, cx| {
+                    toasts.push(
+                        Toast::new("Too late: the message has started sending.")
+                            .kind(ToastKind::Error),
+                        cx,
+                    );
+                });
+                false
+            }
+            Err(error) => {
+                self.show_error(error.to_string(), cx);
+                false
             }
         }
     }
@@ -3122,6 +3259,7 @@ impl WorkspaceView {
         let detail: AnyView = match self.detail_mode {
             DetailMode::Reader => self.reader.clone().into(),
             DetailMode::Compose => self.compose.clone().into(),
+            DetailMode::Outbox => self.outbox_detail.clone().into(),
         };
         let panes = div()
             .relative()
@@ -3383,6 +3521,7 @@ impl Render for WorkspaceView {
             .children(self.render_command_palette(cx))
             .children(self.announcer.render("workspace-announcement"))
             .children(self.render_keyboard_shortcuts(cx))
+            .children(self.render_delete_confirm(cx))
             .child(self.toasts.clone());
         // The Linux client-side decoration frame (nothing elsewhere); it
         // also paints the window background.

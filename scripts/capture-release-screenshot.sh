@@ -129,6 +129,8 @@ MATRIX=(
   "accounts-light accounts light 1440 920"
   "multi-select-dark multi-select dark 1440 920"
   "multi-select-light multi-select light 1440 920"
+  "delete-for-good-dark delete-for-good dark 1440 920"
+  "delete-for-good-light delete-for-good light 1440 920"
   "search-dark search dark 1440 920"
   "search-light search light 1440 920"
   "search-filters-dark search-filters dark 1440 920"
