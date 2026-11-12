@@ -8,8 +8,10 @@
 //!   the account (`LocalStore::set_account_disk_budget`). A new limit
 //!   clears the oldest right away, in the background; they download again
 //!   when opened.
-//! - **Re-authenticate** asks for the password again, or for OAuth2
-//!   accounts runs the browser sign-in again with the stored client. A new
+//! - **Re-authenticate** asks for the password again, for OAuth2
+//!   accounts runs the browser sign-in again with the stored client, and
+//!   for a Proton account whose session Proton has ended runs Proton's
+//!   sign-in again for that account, keeping its mail. A new
 //!   password is tested against the incoming server before it replaces
 //!   the saved one (`zmail_setup::check`); when the test fails, the dialog
 //!   says why and offers Save anyway.
@@ -30,7 +32,12 @@
 //!
 //! The sidebar's Fix… on a failing account opens this section on that
 //! account ([`AccountsSettings::focus_account`]), as does Re-authenticate
-//! on an Outbox message the server refused for the account's sign-in.
+//! on an Outbox message the server refused for the account's sign-in. The
+//! banner there reads what kind of failure it is
+//! (`zmail_setup::accounts::sync_failure`): one only signing in again
+//! fixes offers Re-authenticate; a server that couldn't be reached says
+//! so plainly ("Can't reach imap.example.com") and offers Try again; any
+//! other shows the error with both.
 
 use std::sync::Arc;
 
@@ -45,8 +52,8 @@ use zmail_core::{
 };
 use zmail_setup::{
     accounts::{
-        RemoveError, budget_label, budget_options, removal_blocker, removal_description,
-        removal_lines,
+        RemoveError, SyncFailure, budget_label, budget_options, removal_blocker,
+        removal_description, removal_lines, server_host, sync_failure, unreachable_sentence,
     },
     check::{CheckPart, check_label, stored_account},
     identity_editor::AccountIdentities,
@@ -78,10 +85,10 @@ fn reauth_advice(reason: ReauthReason, auth: AuthKind, google: bool) -> &'static
     match (reason, auth) {
         (ReauthReason::GrantExpired, _) if google => zmail_setup::google::EXPIRED_ADVICE,
         (ReauthReason::GrantExpired, _) => {
-            "Your provider no longer accepts zmail's saved sign-in: it expired, or access was revoked. Sign in again to carry on."
+            "Your provider no longer accepts Zmail's saved sign-in: it expired, or access was revoked. Sign in again to carry on."
         }
         (ReauthReason::SendRefused, AuthKind::OAuth2) => {
-            "Signing in again asks your provider for permission to send mail as well as read it. Microsoft 365 accounts added before zmail asked for that need it once. Messages waiting in the Outbox send once you have signed in."
+            "Signing in again asks your provider for permission to send mail as well as read it. Microsoft 365 accounts added before Zmail asked for that need it once. Messages waiting in the Outbox send once you have signed in."
         }
         (ReauthReason::SendRefused, _) => {
             "The outgoing server no longer accepts the saved password. Enter the current one, or a new app password. Messages waiting in the Outbox send once you have signed in."
@@ -465,10 +472,54 @@ impl AccountsSettings {
                 cx.notify();
             }
             AuthKind::OAuth2 => self.sign_in_again(account_id, cx),
-            // Signing in to Proton again arrives with Proton onboarding
-            // (#237); until then no Proton account can exist here.
-            AuthKind::ProtonSession => {}
+            AuthKind::ProtonSession => self.sign_in_to_proton_again(account_id, cx),
         }
+    }
+
+    /// Re-authenticate on a Proton account: Proton's sign-in again for
+    /// this account, once Proton has ended its session. While the session
+    /// is still in use it would write its own refresh token over the new
+    /// one, so until then this only says there is nothing to do.
+    fn sign_in_to_proton_again(&mut self, account_id: i64, cx: &mut Context<Self>) {
+        let Some(card) = self.cards.iter().find(|card| card.account.id == account_id) else {
+            return;
+        };
+        // The last failure, still standing (a retry may be under way):
+        // the session ended, or was never kept.
+        let status = &card.account.sync_status;
+        let ended = (status.phase == SyncPhase::Failed || status.failure_count > 0)
+            && status
+                .last_error_message
+                .as_deref()
+                .is_some_and(|error| sync_failure(error) == SyncFailure::SignIn);
+        if !ended {
+            cx.emit(SettingsEvent::Status(
+                "Proton hasn't ended Zmail's session, so there is nothing to sign in to again. If it does, this account says so here, and Re-authenticate signs you in again, keeping your mail.".to_owned(),
+            ));
+            return;
+        }
+        #[cfg(feature = "proton")]
+        crate::account_setup::open_proton_sign_in_again(account_id, cx);
+        #[cfg(not(feature = "proton"))]
+        cx.emit(SettingsEvent::Error(
+            "This build of Zmail has no Proton Mail support, so it can't sign in to Proton. A build with Proton keeps the account and signs in again.".to_owned(),
+        ));
+    }
+
+    /// Try again: syncs the account now, instead of waiting for its next
+    /// attempt.
+    pub(crate) fn try_again(&mut self, account_id: i64, cx: &mut Context<Self>) {
+        let Some(card) = self.cards.iter().find(|card| card.account.id == account_id) else {
+            return;
+        };
+        let name = card.account.display_name.clone();
+        match SettingsHost::get(cx).sync_service.sync_account(account_id) {
+            Ok(_) => cx.emit(SettingsEvent::Status(format!("Trying {name} again."))),
+            Err(error) => cx.emit(SettingsEvent::Error(format!(
+                "Could not start syncing {name}: {error:#}"
+            ))),
+        }
+        self.refresh(cx);
     }
 
     /// The Re-authenticate dialog's Save and Sync: tests the new password
@@ -841,6 +892,13 @@ impl AccountsSettings {
         let (status_icon, status_color, _) = sync_badge(status.phase, colors);
         let failing = matches!(status.phase, SyncPhase::Failed | SyncPhase::Backoff);
         let status_text = match (&status.last_error_message, failing) {
+            // A server that couldn't be reached is said plainly; the error
+            // is in the Fix… banner's details.
+            (Some(error), true) if sync_failure(error) == SyncFailure::Unreachable => format!(
+                "{}: {}",
+                status.phase.label(),
+                unreachable_sentence(server_host(&account.endpoint).as_deref())
+            ),
             (Some(error), true) => format!("{}: {error}", status.phase.label()),
             _ => format!("{} \u{2022} {}", status.phase.label(), status.detail),
         };
@@ -998,42 +1056,71 @@ impl AccountsSettings {
             .find(|card| Some(card.account.id) == self.focused_account)?;
         let status = &card.account.sync_status;
         let name = &card.account.display_name;
-        let (title, error) = if matches!(status.phase, SyncPhase::Failed | SyncPhase::Backoff) {
-            (
-                format!("{name} can't sync"),
-                status
+        let (title, error, failure) =
+            if matches!(status.phase, SyncPhase::Failed | SyncPhase::Backoff) {
+                let error = status
                     .last_error_message
                     .clone()
-                    .unwrap_or_else(|| "The last sync failed.".to_owned()),
-            )
-        } else {
-            (format!("{name} can't send"), card.refused_send.clone()?)
-        };
-        // A failure only signing in again fixes says why and how, with the
-        // stored error under Show details; any other shows the error.
+                    .unwrap_or_else(|| "The last sync failed.".to_owned());
+                let failure = sync_failure(&error);
+                (format!("{name} can't sync"), error, failure)
+            } else {
+                // The Outbox's refusals are all sign-in ones.
+                let error = card.refused_send.clone()?;
+                (format!("{name} can't send"), error, SyncFailure::SignIn)
+            };
+        // A failure only signing in again fixes says why and how, a server
+        // that couldn't be reached says so plainly, both with the stored
+        // error under Show details; any other shows the error.
         let reason = ReauthReason::of_message(&error);
-        let title = match reason {
-            Some(ReauthReason::GrantExpired) => format!("{name}'s sign-in has expired"),
+        let title = match (reason, failure) {
+            (Some(ReauthReason::GrantExpired), _) => format!("{name}'s sign-in has expired"),
+            (_, SyncFailure::Unreachable) => format!("{name} can't connect"),
             _ => title,
         };
-        let banner = match reason {
-            Some(reason) => Banner::new(
+        let banner = match (reason, failure) {
+            (Some(reason), _) => Banner::new(
                 "account-fix",
                 reauth_advice(reason, card.auth, card.google_oauth),
             )
             .detail("Error", error),
-            None => Banner::new("account-fix", error),
+            (None, SyncFailure::SignIn) => Banner::new(
+                "account-fix",
+                "The server refused Zmail's sign-in. If you changed your password, or your provider wants a new app password, sign in again.",
+            )
+            .detail("Error", error),
+            (None, SyncFailure::Unreachable) => Banner::new(
+                "account-fix",
+                unreachable_sentence(server_host(&card.account.endpoint).as_deref()),
+            )
+            .detail("Error", error),
+            (None, SyncFailure::Other) => Banner::new("account-fix", error),
         };
         let account_id = card.account.id;
-        let banner = banner.tone(BannerTone::Caution).title(title).action(
-            div().debug_selector(|| "account-fix-reauth".into()).child(
-                Button::new("account-fix-reauth", "Re-authenticate")
-                    .size(ButtonSize::Small)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.reauthenticate(account_id, window, cx)
-                    })),
-            ),
-        );
+        let mut banner = banner.tone(BannerTone::Caution).title(title);
+        if failure != SyncFailure::SignIn {
+            banner = banner.action(
+                div().debug_selector(|| "account-fix-retry".into()).child(
+                    Button::new("account-fix-retry", "Try again")
+                        .size(ButtonSize::Small)
+                        .icon("refresh-cw")
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.try_again(account_id, cx)),
+                        ),
+                ),
+            );
+        }
+        if failure != SyncFailure::Unreachable {
+            banner = banner.action(
+                div().debug_selector(|| "account-fix-reauth".into()).child(
+                    Button::new("account-fix-reauth", "Re-authenticate")
+                        .size(ButtonSize::Small)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.reauthenticate(account_id, window, cx)
+                        })),
+                ),
+            );
+        }
         // An expired Google sign-in links to the guide's fix.
         let banner = if reason == Some(ReauthReason::GrantExpired) && card.google_oauth {
             banner.action(

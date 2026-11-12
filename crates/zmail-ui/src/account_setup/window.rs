@@ -38,6 +38,45 @@ pub(crate) struct AddAccountWindow {
 
 /// Opens the window, or brings the open one forward with `notice`.
 pub(super) fn open(notice: Option<SharedString>, cx: &mut App) {
+    open_window_with(notice, cx);
+}
+
+/// Opens the window on signing in to the Proton account `account_id`
+/// again. An open window is reused unless its flow has stored an account.
+#[cfg(feature = "proton")]
+pub(super) fn open_sign_in_again(account_id: i64, cx: &mut App) {
+    let Some(handle) = open_window_with(None, cx) else {
+        return;
+    };
+    let _ = handle.update(cx, |this, window, cx| {
+        window.set_window_title(SIGN_IN_AGAIN_TITLE);
+        this.setup.update(cx, |setup, cx| {
+            if setup.account_id.is_none() {
+                setup.sign_in_to_proton_again(account_id, window, cx);
+            }
+        });
+    });
+}
+
+/// The window's title while it signs in to an account again.
+#[cfg(feature = "proton")]
+const SIGN_IN_AGAIN_TITLE: &str = "Sign In Again";
+
+/// Shows `message` in every main window, and re-reads their store.
+#[cfg(feature = "proton")]
+pub(super) fn show_status_everywhere(message: &str, cx: &mut App) {
+    for_each_workspace(cx, |view, cx| {
+        view.refresh_from_store(cx);
+        view.show_status(message.to_owned(), cx);
+    });
+}
+
+/// Opens the window, or brings the open one forward with `notice`, and
+/// returns it.
+fn open_window_with(
+    notice: Option<SharedString>,
+    cx: &mut App,
+) -> Option<WindowHandle<AddAccountWindow>> {
     if let Some(OpenWindow(handle)) = cx.try_global::<OpenWindow>() {
         let handle = *handle;
         let notice = notice.clone();
@@ -49,7 +88,7 @@ pub(super) fn open(notice: Option<SharedString>, cx: &mut App) {
             }
         });
         if reused.is_ok() {
-            return;
+            return Some(handle);
         }
     }
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
@@ -74,10 +113,14 @@ pub(super) fn open(notice: Option<SharedString>, cx: &mut App) {
         move |window, cx| cx.new(|cx| AddAccountWindow::new(notice, window, cx)),
     );
     match opened {
-        Ok(handle) => cx.set_global(OpenWindow(handle)),
+        Ok(handle) => {
+            cx.set_global(OpenWindow(handle));
+            Some(handle)
+        }
         Err(error) => {
             let message = format!("The Add Account window could not open: {error:#}");
             cx.defer(move |cx| for_each_workspace(cx, |view, cx| view.show_error(&message, cx)));
+            None
         }
     }
 }
@@ -151,6 +194,18 @@ impl AddAccountWindow {
     }
 }
 
+impl AddAccountWindow {
+    /// What the title bar says.
+    fn title(&self, cx: &App) -> &'static str {
+        #[cfg(feature = "proton")]
+        if self.setup.read(cx).signing_in_again().is_some() {
+            return SIGN_IN_AGAIN_TITLE;
+        }
+        let _ = cx;
+        WINDOW_TITLE
+    }
+}
+
 impl Render for AddAccountWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ComponentTheme::get(cx);
@@ -171,7 +226,7 @@ impl Render for AddAccountWindow {
                                 .flex_1()
                                 .px(px(SPACE_2))
                                 .type_style(TYPE_BODY_STRONG)
-                                .child(WINDOW_TITLE),
+                                .child(self.title(cx)),
                         ),
                     )
                     .child(div().flex_1().min_h_0().child(self.setup.clone())),

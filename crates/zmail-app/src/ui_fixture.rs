@@ -125,6 +125,9 @@ pub(crate) enum FixtureView {
     /// OAuth client, whose sign-in Google stopped accepting
     /// (`invalid_grant`, as a Testing app's does after 7 days).
     SettingsAccountsExpired,
+    /// Settings → Accounts on an account whose server can't be reached,
+    /// with Try again.
+    SettingsAccountsOffline,
     /// Settings → Accounts on a JMAP account whose identity differs from
     /// the server's (changed on both sides) and with an identity the
     /// server no longer lists.
@@ -243,6 +246,7 @@ impl FixtureView {
             "cheat-sheet" => Self::CheatSheet,
             "settings-accounts" => Self::SettingsAccounts,
             "settings-accounts-expired" => Self::SettingsAccountsExpired,
+            "settings-accounts-offline" => Self::SettingsAccountsOffline,
             "settings-accounts-identities" => Self::SettingsAccountsIdentities,
             "settings-identity-edit" => Self::SettingsIdentityEdit,
             "settings-identity-add" => Self::SettingsIdentityAdd,
@@ -426,6 +430,16 @@ pub(crate) fn seed(store: &LocalStore, view: FixtureView, now: u64) -> Result<In
         }
         FixtureView::SettingsAccountsExpired => {
             InitialView::SettingsAccount(seed_expired_google_account(store, now)?)
+        }
+        FixtureView::SettingsAccountsOffline => {
+            store
+                .record_sync_failure(
+                    account_id,
+                    "Sync failed after retry",
+                    "timed out while connecting to the IMAP server",
+                )
+                .context("failed to record the fixture sync failure")?;
+            InitialView::SettingsAccount(account_id)
         }
         FixtureView::SettingsAccountsIdentities => {
             InitialView::SettingsAccount(seed_jmap_identities(store)?)
@@ -1666,6 +1680,7 @@ mod tests {
             "cheat-sheet",
             "settings-accounts",
             "settings-accounts-expired",
+            "settings-accounts-offline",
             "settings-accounts-identities",
             "settings-identity-edit",
             "settings-identity-add",

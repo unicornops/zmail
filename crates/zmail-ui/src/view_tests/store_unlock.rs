@@ -188,6 +188,14 @@ fn a_lost_key_offers_start_over(cx: &mut TestAppContext) {
     let handle = unlock_window(cx).expect("the window explains");
     assert_eq!(phase(handle, cx), UnlockPhase::Unreadable);
 
+    // Try Again looks for the key again; it is still not there.
+    handle
+        .update(cx, |view, _, cx| view.retry(cx))
+        .expect("the window is open");
+    settle(cx);
+    assert!(opened.borrow().is_none());
+    assert_eq!(phase(handle, cx), UnlockPhase::Unreadable);
+
     handle
         .update(cx, |view, _, cx| view.start_over(cx))
         .expect("the window is open");
@@ -277,7 +285,11 @@ fn every_phase_shows_its_actions(cx: &mut TestAppContext) {
         ),
         (
             UnlockPhase::Unreadable,
-            &["store-unlock-quit", "store-unlock-start-over"][..],
+            &[
+                "store-unlock-quit",
+                "store-unlock-start-over",
+                "store-unlock-retry",
+            ][..],
         ),
         (
             UnlockPhase::Replaced,

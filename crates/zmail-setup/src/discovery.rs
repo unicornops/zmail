@@ -98,7 +98,7 @@ pub const SKIPPED_NOTE: &str = "Skipped: you chose not to ask Mozilla";
 /// What the consent question explains, for `domain`.
 pub fn consent_explanation(domain: &str) -> String {
     format!(
-        "To look them up, zmail sends your mail domain, {domain}, to Mozilla at autoconfig.thunderbird.net. It doesn't send your address or your password."
+        "To look them up, Zmail sends your mail domain, {domain}, to Mozilla at autoconfig.thunderbird.net. It doesn't send your address or your password."
     )
 }
 
@@ -127,7 +127,7 @@ pub fn describe_server(server: &ServerSettings) -> String {
 /// Where settings came from, as a sentence ending.
 pub fn describe_source(source: &Source) -> String {
     match source {
-        Source::Provider(provider) => format!("zmail's built-in {provider} settings"),
+        Source::Provider(provider) => format!("Zmail's built-in {provider} settings"),
         Source::DnsSrv {
             record,
             outside_domain: true,

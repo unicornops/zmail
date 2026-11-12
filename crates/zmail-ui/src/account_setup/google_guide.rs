@@ -31,7 +31,7 @@ impl AccountSetupView {
             .gap(px(SPACE_4))
             .child(heading(
                 "Use your own Google OAuth client",
-                "An app password is quicker. If you can't use one, create a free OAuth client in Google Cloud: about ten minutes, once. zmail never sees your Google password.",
+                "An app password is quicker. If you can't use one, create a free OAuth client in Google Cloud: about ten minutes, once. Zmail never sees your Google password.",
                 colors,
             ))
             .child(

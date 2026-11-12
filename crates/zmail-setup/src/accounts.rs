@@ -9,6 +9,9 @@
 //!   still to fetch, for the account's details.
 //! - [`remove_account`] removes an account's local data and every keychain
 //!   secret it has.
+//! - [`sync_failure`] reads what kind of failure an account's last sync
+//!   error is (signing in, an unreachable server, anything else), for
+//!   what Fix… offers.
 //!
 //! The first sync starts through `SyncService::sync_account`. Built with
 //! `SyncService::with_sync_lock`, a frontend that doesn't hold the store's
@@ -304,6 +307,84 @@ pub fn backfill(account: &AccountSummary) -> Option<Backfill> {
 }
 
 // ---------------------------------------------------------------------------
+// Why an account can't sync
+// ---------------------------------------------------------------------------
+
+/// What kind of failure an account's last sync error is, read from the
+/// stored message: what Fix… offers depends on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncFailure {
+    /// The server refused the sign-in, or the saved one has ended: only
+    /// signing in again fixes it.
+    SignIn,
+    /// The server could not be reached (offline, a timeout, a name that
+    /// doesn't resolve): trying again later may be all it needs.
+    Unreachable,
+    /// Anything else.
+    Other,
+}
+
+/// What the stored sync error `message` says went wrong. The message is
+/// the top of the error chain only (`SyncService` records `{error}`), so
+/// this goes by the sentences Zmail's own adapters lead with.
+pub fn sync_failure(message: &str) -> SyncFailure {
+    if zmail_core::reauth::ReauthReason::of_message(message).is_some()
+        || crate::check::refused_text(message)
+    {
+        return SyncFailure::SignIn;
+    }
+    let text = message.to_ascii_lowercase();
+    // A Proton session that has ended, or was never kept.
+    if text.contains("proton session")
+        && (text.contains("sign in again") || text.contains("no stored"))
+    {
+        return SyncFailure::SignIn;
+    }
+    // The JMAP adapter words a refused session and an unreachable server
+    // the same way ("failed to connect to the JMAP endpoint"), so it is
+    // not counted here.
+    let unreachable = [
+        "timed out while connecting",
+        "timed out while establishing",
+        "failed to lookup address",
+        "dns error",
+        "connection refused",
+        "network is unreachable",
+        "no route to host",
+        "connection reset",
+        "failed to connect to the smtp server",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+        || (text.starts_with("failed to connect to ") && !text.contains("jmap endpoint"));
+    if unreachable {
+        SyncFailure::Unreachable
+    } else {
+        SyncFailure::Other
+    }
+}
+
+/// The incoming server's host name, from a stored account's endpoint (an
+/// IMAP or JMAP URL), for "Can't reach imap.example.com".
+pub fn server_host(endpoint: &str) -> Option<String> {
+    // A bare `host:port` parses as a URL whose scheme is the host.
+    let host = |text: &str| {
+        url::Url::parse(text)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+    };
+    host(endpoint).or_else(|| host(&format!("imaps://{endpoint}")))
+}
+
+/// The plain sentence for a server that couldn't be reached.
+pub fn unreachable_sentence(host: Option<&str>) -> String {
+    let server = host.unwrap_or("the mail server");
+    format!(
+        "Can't reach {server}. Check that this computer is online. Zmail keeps trying on its own, or you can try again now."
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Removing and signing in again
 // ---------------------------------------------------------------------------
 
@@ -555,6 +636,55 @@ mod tests {
                 is_primary: true,
             }],
         }
+    }
+
+    #[test]
+    fn sync_failures_are_told_apart_by_what_the_adapters_say() {
+        use super::{SyncFailure, server_host, sync_failure, unreachable_sentence};
+        let expired = zmail_core::reauth::ReauthRequired::new(
+            zmail_core::reauth::ReauthReason::GrantExpired,
+            "invalid_grant",
+        );
+        for message in [
+            expired.to_string(),
+            "IMAP authentication failed".to_owned(),
+            "the Proton session for account 3 has ended; sign in again".to_owned(),
+            "no stored Proton session for account 3".to_owned(),
+        ] {
+            assert_eq!(sync_failure(&message), SyncFailure::SignIn, "{message}");
+        }
+        for message in [
+            "timed out while connecting to the IMAP server",
+            "timed out while establishing IMAP TLS",
+            "failed to connect to imap.example.test:993",
+            "failed to connect to the SMTP server using implicit TLS",
+        ] {
+            assert_eq!(sync_failure(message), SyncFailure::Unreachable, "{message}");
+        }
+        for message in [
+            // A refused JMAP session and an unreachable one read the same.
+            "failed to connect to the JMAP endpoint https://jmap.example.test/",
+            "failed to list IMAP mailboxes",
+            "",
+        ] {
+            assert_eq!(sync_failure(message), SyncFailure::Other, "{message}");
+        }
+        assert_eq!(
+            server_host("imaps://imap.example.test:993").as_deref(),
+            Some("imap.example.test")
+        );
+        assert_eq!(
+            server_host("https://api.fastmail.com/jmap/session").as_deref(),
+            Some("api.fastmail.com")
+        );
+        assert_eq!(
+            server_host("imap1.mail.zmail.dev:993").as_deref(),
+            Some("imap1.mail.zmail.dev")
+        );
+        assert!(
+            unreachable_sentence(Some("imap.example.test"))
+                .starts_with("Can't reach imap.example.test.")
+        );
     }
 
     #[test]

@@ -3,9 +3,9 @@
   Check them, or change them if your provider says otherwise.
 
   Incoming (IMAP): imap.mail.me.com:993 · TLS
-      Found in zmail's built-in iCloud settings
+      Found in Zmail's built-in iCloud settings
   Outgoing (SMTP): smtp.mail.me.com:587 · STARTTLS
-      Found in zmail's built-in iCloud settings
+      Found in Zmail's built-in iCloud settings
 
      Protocol : < IMAP and SMTP >
   IMAP server : imap.mail.me.com

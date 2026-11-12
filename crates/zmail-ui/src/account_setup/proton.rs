@@ -16,7 +16,13 @@
 //!
 //! The account is stored once signed in, with the session (never the
 //! password) in the keychain, and the flow carries on with the colour and
-//! first-sync steps. Every step runs on the sync runtime; the view shows a
+//! first-sync steps.
+//!
+//! The same steps sign in to an existing Proton account again, once Proton
+//! has ended its session ([`AccountSetupView::sign_in_to_proton_again`],
+//! from Settings → Accounts' Re-authenticate): the new session goes into
+//! that account's keychain slots, so its mail stays and nothing downloads
+//! again. Every step runs on the sync runtime; the view shows a
 //! spinner and keeps the user on the step until it answers. The steps
 //! themselves are `zmail_setup::proton`'s, shared with the terminal UI;
 //! this file draws them.
@@ -42,9 +48,58 @@ use crate::styles::{SPACE_2, SPACE_4, UiColors};
 pub(crate) struct ProtonFlow {
     pub(crate) core: shared::ProtonFlow,
     task: Option<Task<()>>,
+    /// The existing account this sign-in is for, when signing in again.
+    pub(crate) again: Option<SignInAgain>,
+}
+
+/// An existing Proton account to sign in to again.
+#[derive(Debug, Clone)]
+pub(crate) struct SignInAgain {
+    pub(crate) account_id: i64,
+    pub(crate) name: String,
 }
 
 impl AccountSetupView {
+    /// Signs in to the existing Proton account `account_id` again: the
+    /// sign-in step, with its address filled in and nothing to go back to.
+    pub(crate) fn sign_in_to_proton_again(
+        &mut self,
+        account_id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = cx.global::<AccountSetupServices>().store.clone();
+        let Some(account) = store
+            .list_accounts()
+            .ok()
+            .and_then(|accounts| accounts.into_iter().find(|found| found.id == account_id))
+        else {
+            return;
+        };
+        self.proton_abort(cx);
+        self.form.provider = None;
+        self.form.use_oauth = false;
+        self.form.protocol = ProtocolKind::Proton;
+        self.form.errors.clear();
+        self.form
+            .set_text(AccountField::Email, &account.username, cx);
+        self.form.set_text(AccountField::Password, "", cx);
+        self.proton.core.error = None;
+        self.proton.again = Some(SignInAgain {
+            account_id,
+            name: account.display_name,
+        });
+        self.history.clear();
+        self.stage = Stage::ProtonSignIn;
+        self.focus_stage(window, cx);
+        cx.notify();
+    }
+
+    /// The account this flow signs in to again, if it does.
+    pub(crate) fn signing_in_again(&self) -> Option<&SignInAgain> {
+        self.proton.again.as_ref()
+    }
+
     /// The provider step's Proton Mail tile.
     pub(crate) fn choose_proton(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.form.provider = None;
@@ -86,7 +141,9 @@ impl AccountSetupView {
             return;
         }
         let services = cx.global::<AccountSetupServices>().clone();
-        if let Some(duplicate) = shared::duplicate(&services.store, &email) {
+        if self.proton.again.is_none()
+            && let Some(duplicate) = shared::duplicate(&services.store, &email)
+        {
             self.proton.core.error = Some(duplicate);
             cx.notify();
             return;
@@ -145,7 +202,10 @@ impl AccountSetupView {
                     .set_text(AccountField::ProtonMailboxPassword, "", cx);
                 self.go(Stage::ProtonMailboxPassword, window, cx);
             }
-            ProtonAction::SignedIn(account) => self.proton_store(account, window, cx),
+            ProtonAction::SignedIn(account) => match self.proton.again.clone() {
+                Some(again) => self.proton_store_again(again, account, window, cx),
+                None => self.proton_store(account, window, cx),
+            },
         }
     }
 
@@ -207,6 +267,71 @@ impl AccountSetupView {
         cx.notify();
     }
 
+    /// Keeps the new session for the account signed in to again, then
+    /// syncs it, with the messages refused for the old session sent again,
+    /// and closes the flow.
+    fn proton_store_again(
+        &mut self,
+        again: SignInAgain,
+        account: zmail_proton::SignedInAccount,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sign_in) = self.proton.core.sign_in().cloned() else {
+            return;
+        };
+        let services = cx.global::<AccountSetupServices>().clone();
+        let store_session = match shared::store_signed_in_again(
+            &services.store,
+            &services.secrets,
+            &sign_in,
+            again.account_id,
+            &account,
+        ) {
+            Ok(store_session) => store_session,
+            Err(message) => {
+                // Signed in to another account: sign that session out and
+                // start again from the password.
+                self.proton_abort(cx);
+                self.proton.core.error = Some(message);
+                self.history.clear();
+                self.stage = Stage::ProtonSignIn;
+                self.focus_stage(window, cx);
+                cx.notify();
+                return;
+            }
+        };
+        let run = services.sync_service.run_proton(store_session);
+        self.proton.core.busy = true;
+        self.proton.task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = run.await.and_then(|stored| stored);
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.proton.core.busy = false;
+                if let Err(error) = result {
+                    this.proton.core.error = Some(format!("{error:#}"));
+                    cx.notify();
+                    return;
+                }
+                this.form.set_text(AccountField::Password, "", cx);
+                this.form
+                    .set_text(AccountField::ProtonMailboxPassword, "", cx);
+                this.proton.core.done();
+                let services = cx.global::<AccountSetupServices>().clone();
+                let account_id = again.account_id;
+                let _ = services.sync_service.sync_account(account_id);
+                let _ = services.sync_service.sync_watchers();
+                // Messages refused for the old session go now.
+                let _ = services.sync_service.retry_refused_sends(account_id);
+                let message = format!("Signed in to Proton again. {} is syncing.", again.name);
+                cx.defer(move |cx| super::window::show_status_everywhere(&message, cx));
+                cx.emit(AccountSetupEvent::Finished {
+                    account_id: Some(account_id),
+                });
+            });
+        }));
+        cx.notify();
+    }
+
     /// Leaves a sign-in that did not finish: signs its session out.
     pub(crate) fn proton_abort(&mut self, cx: &mut Context<Self>) {
         self.proton.task = None;
@@ -219,15 +344,24 @@ impl AccountSetupView {
 
     /// The Proton sign-in step.
     pub(crate) fn render_proton_sign_in(&self, colors: &UiColors) -> AnyElement {
+        let (title, detail) = match &self.proton.again {
+            Some(again) => (
+                "Sign in to Proton Mail again".to_owned(),
+                format!(
+                    "Proton ended Zmail's session for {}. Sign in to carry on: its mail stays on this computer and nothing downloads again.",
+                    again.name
+                ),
+            ),
+            None => (
+                "Sign in to Proton Mail".to_owned(),
+                "Use your Proton address or username and your Proton password.".to_owned(),
+            ),
+        };
         div()
             .flex()
             .flex_col()
             .gap(px(SPACE_4))
-            .child(heading(
-                "Sign in to Proton Mail",
-                "Use your Proton address or username and your Proton password.",
-                colors,
-            ))
+            .child(heading(title, detail, colors))
             .child(
                 Banner::new("account-setup-proton-risk", RISK_NOTE)
                     .tone(BannerTone::Caution)

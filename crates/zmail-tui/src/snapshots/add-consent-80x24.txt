@@ -13,7 +13,7 @@
   Ask Mozilla's database?
   example.test doesn't publish its mail settings. Thunderbird's provider
   database (ISPDB) has the settings of many mail providers. To look them up,
-  zmail sends your mail domain, example.test, to Mozilla at
+  Zmail sends your mail domain, example.test, to Mozilla at
   autoconfig.thunderbird.net. It doesn't send your address or your password. Y
   asks it; N doesn't.
 

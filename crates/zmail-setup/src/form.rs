@@ -618,7 +618,7 @@ pub fn validate_account_form(
             if !IMAP_SECURITY.contains(&form.imap_security) {
                 errors.push((
                     AccountField::ImapSecurity,
-                    "zmail can't use STARTTLS for IMAP yet. Choose TLS (usually port 993)."
+                    "Zmail can't use STARTTLS for IMAP yet. Choose TLS (usually port 993)."
                         .to_owned(),
                 ));
             }
@@ -755,7 +755,7 @@ pub fn build_account_from_form(
             let scheme = match form.imap_security {
                 Security::Tls => "imaps",
                 Security::None => "imap",
-                Security::StartTls => bail!("zmail can't use STARTTLS for IMAP yet"),
+                Security::StartTls => bail!("Zmail can't use STARTTLS for IMAP yet"),
             };
             let endpoint = format!("{scheme}://{host}:{}", parse_port(&form.imap_port)?);
             let username = or_default(&form.imap_username, &address);
