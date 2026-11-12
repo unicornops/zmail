@@ -286,6 +286,41 @@ encrypted to every key that can encrypt. A key that fails is treated as
 not unlocked. This check has no upstream counterpart in Bridge; it is
 there because the crypto library changed.
 
+**Unprotected keys never unlock (November 10, 2026).** gopenpgp's
+`Key.Unlock` refuses a key that is not locked ("gopenpgp: key is not
+locked"), so under Bridge every key is tied to the account: a user key
+opens with the salted key password, an address key with a token the user
+keys signed. rPGP's `remove_password` leaves unprotected key material as
+it is and reports success, so `Key::unlock` checks first that the primary
+key and every secret subkey is password-protected and refuses the key
+otherwise. Without the check a server could list a key of its own, with no
+protection, among the user's keys, and any passphrase would "unlock" it.
+Zmail is stricter than gopenpgp in one case: gopenpgp accepts a key with
+some parts locked and some not, Zmail refuses it. Proton's clients lock
+every part of a key.
+
+**SRP password hash versions, as Bridge (November 11, 2026).** Bridge
+signs in through go-proton-api's `NewClientWithLoginWithHVToken`, which
+passes the `Version` from `/auth/v4/info` straight to go-srp's `NewAuth`.
+`HashPassword` there answers versions 0 to 4 and fails for any other
+number ("pmapi: unsupported auth version"). `proton-srp` takes the same
+versions (`SrpHashVersion::try_from`), and Zmail passes the server's
+version to it unchanged. Versions 3 and 4 hash the password with bcrypt
+and the salt the server sends. Versions 0 to 2 are Proton's older methods
+and use bcrypt as well, salted with the MD5 of the lower-cased username
+(version 2 first strips `-`, `.` and `_` from it; version 0 first hashes
+username and password together with SHA-512). Every version costs one
+bcrypt per password guess, so a server that asks for an old version gets
+no cheaper attack, and refusing the old versions would only lock out
+accounts that still use them.
+
+**Decrypted data is bounded (November 10, 2026).** A compressed OpenPGP
+message expands as it is read. Zmail reads at most 128 MiB of plaintext
+from one body or attachment (five times Proton's 25 MB limit for a message
+with its attachments), 1 MiB from a contact card and 64 KiB from an
+address-key token, and fails the decryption beyond that, as any other
+message that does not decrypt.
+
 **Verifying keys (October 24, 2026).** go-crypto, under gopenpgp and so
 under Bridge, checks a certificate's self-signatures when it reads one
 (`openpgp/keys.go` `ReadEntity`, `addUserID`, `addSubkey`, and

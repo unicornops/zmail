@@ -552,6 +552,24 @@ pub(crate) mod fixtures {
             .expect("key")
     }
 
+    /// The key with every secret part locked with `password`, as the API
+    /// serves keys (an unprotected key never unlocks).
+    pub(crate) fn locked(key: &SignedSecretKey, password: &str) -> SignedSecretKey {
+        let mut key = key.clone();
+        let password = Password::from(password);
+        let mut rng = rand::rng();
+        key.primary_key
+            .set_password(&mut rng, &password)
+            .expect("lock primary");
+        for subkey in &mut key.secret_subkeys {
+            subkey
+                .key
+                .set_password(&mut rng, &password)
+                .expect("lock subkey");
+        }
+        key
+    }
+
     /// What a binding signature says.
     #[derive(Clone, Copy)]
     pub(crate) struct Binding {

@@ -785,6 +785,43 @@ async fn refuses_a_server_that_cannot_prove_the_password() {
     assert!(matches!(error, Error::InvalidServerProof), "{error:?}");
 }
 
+/// Every password hash version go-srp answers (0 to 4) gets a proof, as
+/// under Bridge; any other version gets none.
+#[tokio::test]
+async fn answers_the_srp_versions_bridge_answers() {
+    for version in 0u8..=5 {
+        let server = MockServer::start(move |request, _| match request.path.as_str() {
+            "/auth/v4/info" => Reply::json(
+                200,
+                serde_json::json!({
+                    "Version": version,
+                    "Modulus": crate::srp_modulus::tests::TEST_MODULUS_CLEAR_SIGN,
+                    "ServerEphemeral": BASE64.encode([1u8; 256]),
+                    "Salt": BASE64.encode([2u8; 10]),
+                    "SRPSession": "s",
+                }),
+            ),
+            _ => api_error(422, 8002, "Incorrect login credentials"),
+        })
+        .await;
+        let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+        let error = manager.login("zmail", PASSWORD).await.expect_err("login");
+        let requests = server.requests();
+        if version <= 4 {
+            assert!(
+                matches!(error, Error::PasswordWrong(_)),
+                "{version}: {error:?}"
+            );
+            assert_eq!(requests.len(), 2, "{version}");
+            assert_eq!(requests[1].path, "/auth/v4");
+        } else {
+            assert!(matches!(error, Error::Srp(_)), "{version}: {error:?}");
+            // Only the challenge was fetched; no proof was sent.
+            assert_eq!(requests.len(), 1);
+        }
+    }
+}
+
 #[tokio::test]
 async fn refuses_an_unsigned_modulus() {
     let server = MockServer::start(|_, _| {
