@@ -9,7 +9,10 @@
 //!   clears the oldest right away, in the background; they download again
 //!   when opened.
 //! - **Re-authenticate** asks for the password again, or for OAuth2
-//!   accounts runs the browser sign-in again with the stored client.
+//!   accounts runs the browser sign-in again with the stored client. A new
+//!   password is tested against the incoming server before it replaces
+//!   the saved one (`zmail_setup::check`); when the test fails, the dialog
+//!   says why and offers Save anyway.
 //! - **Remove** confirms in a dialog that says what goes: the account's
 //!   local data and its keychain secrets, never the mail on the server.
 //!   It also lists unsent Outbox messages and drafts, which exist only
@@ -29,9 +32,11 @@
 //! account ([`AccountsSettings::focus_account`]), as does Re-authenticate
 //! on an Outbox message the server refused for the account's sign-in.
 
+use std::sync::Arc;
+
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, IntoElement, Render, Role,
-    SharedString, Subscription, Window, div, prelude::*, px, rgb,
+    SharedString, Subscription, Task, Window, div, prelude::*, px, rgb,
 };
 use zmail_core::{
     AccountColor, AccountSummary, AuthKind, OutboxJobState, SyncPhase,
@@ -43,6 +48,7 @@ use zmail_setup::{
         RemoveError, budget_label, budget_options, removal_blocker, removal_description,
         removal_lines,
     },
+    check::{CheckPart, check_label, stored_account},
     identity_editor::AccountIdentities,
 };
 use zmail_store::AccountRemovalImpact;
@@ -54,7 +60,8 @@ use super::{
     SettingsEvent, SettingsHost, dotted_label, section_heading, setting_row, setting_text,
     update_workspace,
 };
-use crate::a11y::AccessibleExt;
+use crate::a11y::{A11yFlags, AccessibleExt, Politeness, readable};
+use crate::account_setup::SignInCheck;
 use crate::components::{
     Banner, BannerTone, Button, ButtonSize, ComponentTheme, Modal, ModalState, Select, SelectEvent,
     TextInput, TextInputEvent,
@@ -127,6 +134,12 @@ pub(crate) struct AccountsSettings {
     reauth: ModalState,
     reauth_account: Option<(i64, String)>,
     password: Entity<TextInput>,
+    /// The new password's sign-in test while it runs: what it is doing.
+    reauth_checking: Option<String>,
+    reauth_check: Option<Task<()>>,
+    /// Why the new password's sign-in test failed; the dialog then offers
+    /// Save anyway.
+    reauth_failure: Option<String>,
     /// The Remove confirmation.
     remove: ModalState,
     removal: Option<PendingRemoval>,
@@ -161,6 +174,9 @@ impl AccountsSettings {
             reauth: ModalState::new(cx),
             reauth_account: None,
             password,
+            reauth_checking: None,
+            reauth_check: None,
+            reauth_failure: None,
             remove: ModalState::new(cx),
             removal: None,
             remove_cancel: cx.focus_handle(),
@@ -443,6 +459,7 @@ impl AccountsSettings {
         match card.auth {
             AuthKind::Password => {
                 self.reauth_account = Some((account_id, card.account.display_name.clone()));
+                self.reauth_failure = None;
                 self.password.update(cx, |input, cx| input.set_text("", cx));
                 self.reauth.open(window, cx);
                 cx.notify();
@@ -454,8 +471,55 @@ impl AccountsSettings {
         }
     }
 
-    /// Save the password typed in the Re-authenticate dialog and sync.
+    /// The Re-authenticate dialog's Save and Sync: tests the new password
+    /// against the incoming server, then saves it.
     pub(crate) fn save_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((account_id, _)) = self.reauth_account.clone() else {
+            return;
+        };
+        let password = self.password.read(cx).text().to_owned();
+        if password.is_empty() || self.reauth_checking.is_some() {
+            return;
+        }
+        let target = SettingsHost::get(cx)
+            .store
+            .sync_target(account_id)
+            .ok()
+            .flatten();
+        let Some(target) = target else {
+            return self.commit_password(window, cx);
+        };
+        let account = Arc::new(stored_account(&target));
+        self.reauth_failure = None;
+        self.reauth_checking = Some(check_label(&account, CheckPart::Incoming));
+        let running = SignInCheck::get(cx).spawn(
+            account,
+            Arc::from(password.as_str()),
+            CheckPart::Incoming,
+            cx,
+        );
+        self.reauth_check = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = running.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.reauth_checking = None;
+                this.reauth_check = None;
+                match result {
+                    Ok(()) => this.commit_password(window, cx),
+                    Err(failure) => {
+                        this.reauth_failure = Some(failure.summary());
+                        this.password
+                            .update(cx, |input, cx| input.focus(window, cx));
+                        cx.notify();
+                    }
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Saves the password typed in the Re-authenticate dialog, tested or
+    /// not (Save anyway), and syncs.
+    pub(crate) fn commit_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((account_id, name)) = self.reauth_account.clone() else {
             return;
         };
@@ -754,6 +818,9 @@ impl AccountsSettings {
 
     fn cancel_dialogs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.password.update(cx, |input, cx| input.set_text("", cx));
+        self.reauth_checking = None;
+        self.reauth_check = None;
+        self.reauth_failure = None;
         self.reauth.close(window, cx);
         self.remove.close(window, cx);
         self.reauth_account = None;
@@ -988,21 +1055,65 @@ impl AccountsSettings {
             return None;
         }
         let (_, name) = self.reauth_account.as_ref()?;
+        let colors = ComponentTheme::get(cx).colors;
+        let checking = self.reauth_checking.is_some();
+        // While the password is tested: what is happening. After a failed
+        // test: why, read out as it appears.
+        let status = match (&self.reauth_checking, &self.reauth_failure) {
+            (Some(label), _) => Some(
+                div()
+                    .debug_selector(|| "reauth-checking".into())
+                    .type_style(TYPE_CAPTION)
+                    .text_color(rgb(colors.muted))
+                    .child(readable("reauth-checking", format!("{label}…")))
+                    .into_any_element(),
+            ),
+            (None, Some(failure)) => {
+                let text = SharedString::from(failure.clone());
+                Some(
+                    div()
+                        .id("reauth-failure")
+                        .debug_selector(|| "reauth-failure".into())
+                        .accessible(Role::Alert, text.clone())
+                        .aria_value(text.clone())
+                        .a11y_flags(A11yFlags {
+                            live: Some(Politeness::Assertive),
+                            ..A11yFlags::default()
+                        })
+                        .type_style(TYPE_CAPTION)
+                        .text_color(rgb(colors.danger))
+                        .child(text)
+                        .into_any_element(),
+                )
+            }
+            (None, None) => None,
+        };
+        let failed = self.reauth_failure.is_some();
         Some(
             Modal::new("reauth-dialog", self.reauth.focus_handle())
                 .title(format!("Sign in to {name} again"))
                 .description(
-                    "Zmail keeps the password in your system keychain. If your provider uses app passwords, enter a new one here.",
+                    "Zmail keeps the password in your system keychain. If your provider uses app passwords, enter a new one here. Zmail tests it before saving it.",
                 )
                 .child(self.password.clone())
+                .children(status)
                 .footer(
                     Button::new("reauth-cancel", "Cancel")
                         .on_click(cx.listener(|this, _, window, cx| this.cancel_dialogs(window, cx))),
                 )
+                .when(failed, |this| {
+                    this.footer(
+                        div().debug_selector(|| "reauth-save-anyway".into()).child(
+                            Button::new("reauth-save-anyway", "Save anyway")
+                                .on_click(cx.listener(|this, _, window, cx| this.commit_password(window, cx))),
+                        ),
+                    )
+                })
                 .footer(
                     div().debug_selector(|| "reauth-save".into()).child(
                         Button::new("reauth-save", "Save and Sync")
                             .primary()
+                            .disabled(checking)
                             .on_click(cx.listener(|this, _, window, cx| this.save_password(window, cx))),
                     ),
                 )

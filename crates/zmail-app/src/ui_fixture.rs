@@ -162,6 +162,30 @@ pub(crate) enum FixtureView {
 /// The `search-filters` view's query: words to highlight and two chips.
 const SEARCH_FILTERS_QUERY: &str = "search is:unread after:30d";
 
+/// Matches a fixture view name against its arms and, for a name with no
+/// arm, lists every name from the same arms, so the error cannot drift from
+/// the views it accepts.
+macro_rules! fixture_views {
+    ($value:ident { $($name:literal => $view:expr,)+ }) => {
+        match $value {
+            $($name => Ok($view),)+
+            other => bail!(
+                "unknown fixture view {other}; expected {}",
+                one_of(&[$($name),+])
+            ),
+        }
+    };
+}
+
+/// Lists names as "a, b or c".
+fn one_of(names: &[&str]) -> String {
+    match names.split_last() {
+        Some((last, [])) => (*last).to_owned(),
+        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 impl FixtureView {
     /// Whether the view simulates a Windows contrast theme.
     pub(crate) fn high_contrast(self) -> bool {
@@ -169,7 +193,7 @@ impl FixtureView {
     }
 
     pub(crate) fn parse(value: &str) -> Result<Self> {
-        Ok(match value {
+        fixture_views!(value {
             "empty" => Self::Empty,
             "inbox" => Self::Inbox,
             "inbox-compact" => Self::InboxCompact,
@@ -197,12 +221,13 @@ impl FixtureView {
             "onboarding-google-guide" => Self::Onboarding(OnboardingStep::GoogleGuide),
             "onboarding-google-guide-invalid" => {
                 Self::Onboarding(OnboardingStep::GoogleGuideInvalid)
-            }
+            },
             "onboarding-discovering" => Self::Onboarding(OnboardingStep::Discovering),
             "onboarding-consent" => Self::Onboarding(OnboardingStep::Consent),
             "onboarding-result" => Self::Onboarding(OnboardingStep::Result),
             "onboarding-manual" => Self::Onboarding(OnboardingStep::Manual),
             "onboarding-manual-cleartext" => Self::Onboarding(OnboardingStep::ManualCleartext),
+            "onboarding-sign-in-refused" => Self::Onboarding(OnboardingStep::SignInRefused),
             "onboarding-colour" => Self::Onboarding(OnboardingStep::Colour),
             "onboarding-syncing" => Self::Onboarding(OnboardingStep::Syncing),
             "sidebar" => Self::Sidebar,
@@ -232,9 +257,6 @@ impl FixtureView {
             "unlock-keychain" => Self::Unlock(UnlockFixture::Keychain),
             "unlock-unreadable" => Self::Unlock(UnlockFixture::Unreadable),
             "unlock-replaced" => Self::Unlock(UnlockFixture::Replaced),
-            other => bail!(
-                "unknown fixture view {other}; expected empty, inbox, inbox-compact, inbox-empty, inbox-high-contrast, syncing, outbox, outbox-compact, reader, reader-expanded, reader-long, reader-reply, reader-selection, reader-link-warning, reader-html, reader-html-menu, reader-html-scrolled, compose, compose-invalid, compose-reply-to, undo-send, account-setup, onboarding-provider, onboarding-credentials, onboarding-google-guide, onboarding-google-guide-invalid, onboarding-discovering, onboarding-consent, onboarding-result, onboarding-manual, onboarding-manual-cleartext, onboarding-colour, onboarding-syncing, sidebar, accounts, multi-select, search, search-filters, reader-safety-info, reader-safety-caution, reader-safety-danger, reader-attachments, command-palette, cheat-sheet, settings-accounts, settings-accounts-expired, settings-accounts-identities, settings-identity-edit, settings-identity-add, settings-identity-remove, settings-identity-hidden, settings-appearance, settings-keyboard, settings-privacy, settings-sending, settings-about, unlock-encrypting, unlock-keychain, unlock-unreadable or unlock-replaced"
-            ),
         })
     }
 }
@@ -1651,6 +1673,7 @@ mod tests {
             "settings-identity-hidden",
             "onboarding-google-guide",
             "onboarding-google-guide-invalid",
+            "onboarding-sign-in-refused",
             "settings-appearance",
             "settings-keyboard",
             "settings-privacy",
@@ -1659,7 +1682,16 @@ mod tests {
         ] {
             FixtureView::parse(name)?;
         }
-        assert!(FixtureView::parse("settings").is_err());
+        let unknown = FixtureView::parse("settings")
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(
+            unknown.starts_with("unknown fixture view settings; expected empty, inbox, "),
+            "{unknown}"
+        );
+        assert!(unknown.contains(", settings-about, "), "{unknown}");
+        assert!(!unknown.contains(", settings, "), "{unknown}");
         assert_eq!(parse_theme(None)?, None);
         assert_eq!(parse_theme(Some("system"))?, None);
         assert_eq!(parse_theme(Some("light"))?, Some(ThemeAppearance::Light));

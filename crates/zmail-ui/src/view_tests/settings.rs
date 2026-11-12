@@ -9,12 +9,14 @@ use zmail_core::{
 };
 use zmail_store::LocalStore;
 
+use super::onboarding::fake_sign_in_check;
 use super::{Harness, Setup, click, drawn, focus, keys, open_workspace, open_workspace_with};
 use crate::InitialView;
 use crate::actions::ToggleDensity;
 use crate::components::{ComponentTheme, Select};
 use crate::layout::SinglePane;
 use crate::settings::{self, SettingsSection, SettingsWindow};
+use zmail_setup::check::CheckPart;
 use zmail_setup::identity_editor::IdentityField;
 
 /// The open Settings window's root, and a test context for that window.
@@ -487,6 +489,7 @@ fn reauthenticate_saves_a_new_password_in_the_keychain(cx: &mut TestAppContext) 
         |_| {},
     );
     let account_id = harness.store.list_accounts().expect("accounts")[0].id;
+    let check = fake_sign_in_check(cx);
     let (root, mut window_cx) = settings_window(cx);
     let accounts = root.read_with(&window_cx, |root, _| root.accounts().clone());
     click_selector(&format!("reauth-{account_id}"), &mut window_cx);
@@ -496,6 +499,11 @@ fn reauthenticate_saves_a_new_password_in_the_keychain(cx: &mut TestAppContext) 
         input.set_text("new-app-password", cx)
     });
     click("reauth-save", &mut window_cx);
+    // The new password was tested against the incoming server first.
+    assert_eq!(
+        check.tested.lock().expect("lock").as_slice(),
+        [(CheckPart::Incoming, "new-app-password".to_owned())]
+    );
     assert!(!accounts.read_with(&window_cx, |accounts, _| accounts.reauth_open()));
     let saved = cx.update(|_, cx| {
         settings::SettingsHost::get(cx)
@@ -508,6 +516,51 @@ fn reauthenticate_saves_a_new_password_in_the_keychain(cx: &mut TestAppContext) 
         password.read_with(&window_cx, |input, _| input.text().is_empty()),
         "the password does not stay in the field"
     );
+}
+
+#[gpui::test]
+fn a_new_password_the_server_refuses_is_kept_out_of_the_keychain(cx: &mut TestAppContext) {
+    let (_view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Settings(SettingsSection::Accounts),
+        |_| {},
+    );
+    let account_id = harness.store.list_accounts().expect("accounts")[0].id;
+    let secret = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            settings::SettingsHost::get(cx)
+                .secrets
+                .get_account_secret(account_id)
+                .ok()
+        })
+    };
+    let before = secret(cx);
+    let check = fake_sign_in_check(cx);
+    check.fail(CheckPart::Incoming, true);
+    let (root, mut window_cx) = settings_window(cx);
+    let accounts = root.read_with(&window_cx, |root, _| root.accounts().clone());
+    click_selector(&format!("reauth-{account_id}"), &mut window_cx);
+    let password = accounts.read_with(&window_cx, |accounts, _| accounts.password_input().clone());
+    password.update(&mut window_cx, |input, cx| input.set_text("typo", cx));
+    click("reauth-save", &mut window_cx);
+
+    // The dialog stays open with the reason, and the saved password is
+    // untouched.
+    assert!(accounts.read_with(&window_cx, |accounts, _| accounts.reauth_open()));
+    assert!(window_cx.debug_bounds("reauth-failure").is_some());
+    assert_eq!(secret(cx), before);
+    assert_eq!(
+        password.read_with(&window_cx, |input, _| input.text().to_owned()),
+        "typo",
+        "the field stays as typed, to correct"
+    );
+
+    // Save anyway keeps it all the same, for a server that is down.
+    click("reauth-save-anyway", &mut window_cx);
+    assert!(!accounts.read_with(&window_cx, |accounts, _| accounts.reauth_open()));
+    assert_eq!(secret(cx).as_deref(), Some("typo"));
+    assert_eq!(check.parts(), [CheckPart::Incoming]);
 }
 
 #[gpui::test]

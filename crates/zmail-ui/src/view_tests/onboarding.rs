@@ -2,7 +2,8 @@
 //! Account window, autodiscovery with its ISPDB consent, the manual form
 //! and the cleartext opt-in.
 //!
-//! Discovery runs against a fake network ([`fake_network`]), so nothing
+//! Discovery runs against a fake network ([`fake_network`]) and the
+//! sign-in test against a fake check ([`fake_sign_in_check`]), so nothing
 //! here leaves the machine; the stored accounts use `example.test` hosts,
 //! which never resolve, for the first sync the store starts.
 
@@ -15,10 +16,11 @@ use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size}
 use url::Url;
 use zmail_autodiscover::{Fetch, FetchResponse, Network, PortProbe, Security};
 use zmail_core::{AccountColor, ProtocolKind};
+use zmail_setup::check::{CheckFailure, CheckPart};
 
 use super::{Harness, Setup, click, drawn, keys, open_workspace, open_workspace_on, text};
 use crate::account_setup::{
-    AccountField, AccountSetupServices, AccountSetupView, Stage, open_window,
+    AccountField, AccountSetupServices, AccountSetupView, SignInCheck, Stage, open_window,
 };
 use crate::pane::Pane;
 use crate::{InitialView, OnboardingStep, WorkspaceView};
@@ -68,6 +70,73 @@ fn fake_network(web: &Arc<FakeWeb>, cx: &mut VisualTestContext) {
         probe: Arc::new(NoPorts),
     };
     cx.update(|_, cx| cx.global_mut::<AccountSetupServices>().network = network);
+}
+
+/// What the fake sign-in test answers, and what it was asked.
+#[derive(Default)]
+pub(super) struct FakeCheck {
+    /// The answer for each half: a failure for that half, else success.
+    pub(super) failures: Mutex<Vec<CheckFailure>>,
+    /// The halves tested, with the secret each was tested with.
+    pub(super) tested: Mutex<Vec<(CheckPart, String)>>,
+}
+
+impl FakeCheck {
+    /// The halves tested so far.
+    pub(super) fn parts(&self) -> Vec<CheckPart> {
+        self.tested
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|(part, _)| *part)
+            .collect()
+    }
+
+    /// Makes the next tests of `part` fail: the server refused the
+    /// sign-in, or could not be reached.
+    pub(super) fn fail(&self, part: CheckPart, refused: bool) {
+        self.failures.lock().expect("lock").push(CheckFailure {
+            part,
+            server: "imap.example.test:993".to_owned(),
+            message: if refused {
+                "IMAP authentication failed: [AUTHENTICATIONFAILED] Invalid credentials".to_owned()
+            } else {
+                "timed out while connecting to the IMAP server".to_owned()
+            },
+            refused,
+        });
+    }
+
+    /// Makes every test pass from now on.
+    pub(super) fn pass(&self) {
+        self.failures.lock().expect("lock").clear();
+    }
+}
+
+/// Points the sign-in test at a fake that passes until told otherwise.
+pub(super) fn fake_sign_in_check(cx: &mut VisualTestContext) -> Arc<FakeCheck> {
+    let fake = Arc::new(FakeCheck::default());
+    let answers = fake.clone();
+    cx.update(|_, cx| {
+        cx.set_global(SignInCheck(Arc::new(move |_, secret, part| {
+            answers
+                .tested
+                .lock()
+                .expect("lock")
+                .push((part, secret.to_owned()));
+            match answers
+                .failures
+                .lock()
+                .expect("lock")
+                .iter()
+                .find(|failure| failure.part == part)
+            {
+                Some(failure) => Err(failure.clone()),
+                None => Ok(()),
+            }
+        })));
+    });
+    fake
 }
 
 /// An autoconfig file for example.test.
@@ -321,6 +390,7 @@ fn discovery_asks_before_ispdb_and_falls_back_to_the_manual_form(cx: &mut TestAp
     let (view, cx, harness) = open_workspace(cx, Setup::NoAccount);
     let web = Arc::new(FakeWeb::default());
     fake_network(&web, cx);
+    fake_sign_in_check(cx);
     let setup = onboarding(&view, cx);
     keys("secondary-enter", cx);
     click("account-setup-provider-other", cx);
@@ -397,6 +467,7 @@ fn discovered_settings_are_shown_with_their_source_then_stored(cx: &mut TestAppC
         ..FakeWeb::default()
     });
     fake_network(&web, cx);
+    let check = fake_sign_in_check(cx);
     let setup = onboarding(&view, cx);
     keys("secondary-enter", cx);
     click("account-setup-provider-other", cx);
@@ -412,6 +483,15 @@ fn discovered_settings_are_shown_with_their_source_then_stored(cx: &mut TestAppC
         "discovery stopped at the domain's own file"
     );
     click("account-setup-add", cx);
+    // The sign-in was tested on both servers, with the password, before
+    // the account was stored.
+    assert_eq!(
+        check.tested.lock().expect("lock").as_slice(),
+        [
+            (CheckPart::Incoming, "secret".to_owned()),
+            (CheckPart::Outgoing, "secret".to_owned())
+        ]
+    );
     assert_eq!(stage(&setup, cx), Stage::Colour);
     let account = only_account(&harness);
     assert_eq!(account.protocol, ProtocolKind::Imap);
@@ -432,6 +512,121 @@ fn discovered_settings_are_shown_with_their_source_then_stored(cx: &mut TestAppC
     click("account-setup-done", cx);
     assert!(cx.read_entity(&view, |view, _| view.onboarding.is_none()));
     assert_eq!(super::focused_pane(&view, cx), Some(Pane::MessageList));
+}
+
+#[gpui::test]
+fn a_refused_sign_in_marks_the_password_and_stores_nothing(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::NoAccount);
+    let check = fake_sign_in_check(cx);
+    check.fail(CheckPart::Incoming, true);
+    let setup = onboarding(&view, cx);
+    keys("secondary-enter", cx);
+    click("account-setup-provider-icloud", cx);
+    fill(&setup, AccountField::Email, "me@example.test", cx);
+    fill(&setup, AccountField::Password, "wrong", cx);
+    click("account-setup-continue", cx);
+
+    // The preset's servers were tried: the incoming one refused, so the
+    // outgoing one was not tried, and the password says why where it was
+    // typed. Nothing is stored, and the form stays editable.
+    assert_eq!(check.parts(), [CheckPart::Incoming]);
+    assert_eq!(stage(&setup, cx), Stage::Credentials);
+    assert_eq!(errors(&setup, cx), [AccountField::Password]);
+    let error = cx.read_entity(&setup, |setup, _| {
+        setup.form.errors[&AccountField::Password].clone()
+    });
+    assert!(
+        error.starts_with("The incoming server refused the sign-in (imap.example.test:993)"),
+        "{error}"
+    );
+    assert!(drawn("account-setup-check-failed".into(), cx));
+    assert!(drawn("account-setup-save-anyway".into(), cx));
+    assert!(harness.store.list_accounts().expect("accounts").is_empty());
+
+    // The right password passes the test and stores the account.
+    check.pass();
+    // The password field has the focus: typing replaces the wrong one
+    // and clears its error.
+    keys("secondary-a", cx);
+    cx.simulate_input("right");
+    assert!(errors(&setup, cx).is_empty(), "typing clears the error");
+    click("account-setup-continue", cx);
+    assert_eq!(stage(&setup, cx), Stage::Colour);
+    assert_eq!(
+        check.tested.lock().expect("lock").last(),
+        Some(&(CheckPart::Outgoing, "right".to_owned()))
+    );
+    assert_eq!(only_account(&harness).username, "me@example.test");
+}
+
+#[gpui::test]
+fn a_server_that_cannot_be_reached_can_be_saved_anyway(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::NoAccount);
+    let web = Arc::new(FakeWeb {
+        pages: HashMap::from([(AUTOCONFIG_URL.to_owned(), autoconfig())]),
+        ..FakeWeb::default()
+    });
+    fake_network(&web, cx);
+    let check = fake_sign_in_check(cx);
+    check.fail(CheckPart::Incoming, false);
+    let setup = onboarding(&view, cx);
+    keys("secondary-enter", cx);
+    click("account-setup-provider-other", cx);
+    fill(&setup, AccountField::Email, "me@example.test", cx);
+    fill(&setup, AccountField::Password, "secret", cx);
+    click("account-setup-continue", cx);
+    assert_eq!(stage(&setup, cx), Stage::Result);
+    click("account-setup-add", cx);
+
+    // A connection failure is fixed in the server settings: the manual
+    // form, with the incoming host marked.
+    assert_eq!(stage(&setup, cx), Stage::Manual);
+    assert_eq!(errors(&setup, cx), [AccountField::ImapHost]);
+    assert!(harness.store.list_accounts().expect("accounts").is_empty());
+
+    // Offline, Save anyway stores the account untested.
+    cx.simulate_resize(size(px(1200.), px(1600.)));
+    cx.run_until_parked();
+    let tested = check.parts().len();
+    click("account-setup-save-anyway", cx);
+    assert_eq!(check.parts().len(), tested, "nothing more was tested");
+    assert_eq!(stage(&setup, cx), Stage::Colour);
+    assert_eq!(
+        only_account(&harness).endpoint,
+        "imaps://imap.example.test:993"
+    );
+}
+
+#[gpui::test]
+fn a_password_refused_on_the_server_step_is_fixed_there(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::NoAccount);
+    let web = Arc::new(FakeWeb {
+        pages: HashMap::from([(AUTOCONFIG_URL.to_owned(), autoconfig())]),
+        ..FakeWeb::default()
+    });
+    fake_network(&web, cx);
+    let check = fake_sign_in_check(cx);
+    check.fail(CheckPart::Outgoing, true);
+    let setup = onboarding(&view, cx);
+    keys("secondary-enter", cx);
+    click("account-setup-provider-other", cx);
+    fill(&setup, AccountField::Email, "me@example.test", cx);
+    fill(&setup, AccountField::Password, "secret", cx);
+    click("account-setup-continue", cx);
+    click("account-setup-add", cx);
+
+    // The outgoing server refused: the result step stays, and shows the
+    // password to correct, without discovering again.
+    assert_eq!(check.parts(), [CheckPart::Incoming, CheckPart::Outgoing]);
+    assert_eq!(stage(&setup, cx), Stage::Result);
+    assert_eq!(errors(&setup, cx), [AccountField::Password]);
+    assert!(harness.store.list_accounts().expect("accounts").is_empty());
+    check.pass();
+    fill(&setup, AccountField::Password, "smtp-secret", cx);
+    click("account-setup-add", cx);
+    assert_eq!(stage(&setup, cx), Stage::Colour);
+    assert_eq!(web.requested.lock().expect("lock").len(), 1);
+    only_account(&harness);
 }
 
 #[gpui::test]
@@ -468,6 +663,7 @@ fn every_onboarding_fixture_step_renders(cx: &mut TestAppContext) {
         OnboardingStep::Result,
         OnboardingStep::Manual,
         OnboardingStep::ManualCleartext,
+        OnboardingStep::SignInRefused,
         OnboardingStep::Colour,
         OnboardingStep::Syncing,
     ] {
@@ -485,12 +681,17 @@ fn every_onboarding_fixture_step_renders(cx: &mut TestAppContext) {
             OnboardingStep::Consent => Stage::Consent,
             OnboardingStep::Result => Stage::Result,
             OnboardingStep::Manual | OnboardingStep::ManualCleartext => Stage::Manual,
+            OnboardingStep::SignInRefused => Stage::Credentials,
             OnboardingStep::Colour => Stage::Colour,
             OnboardingStep::Syncing => Stage::Syncing,
         };
         assert_eq!(stage(&setup, window_cx), expected, "{step:?}");
         if step == OnboardingStep::ManualCleartext {
             assert!(drawn("account-setup-cleartext".into(), window_cx));
+        }
+        if step == OnboardingStep::SignInRefused {
+            assert_eq!(errors(&setup, window_cx), [AccountField::Password]);
+            assert!(drawn("account-setup-save-anyway".into(), window_cx));
         }
         if step == OnboardingStep::GoogleGuideInvalid {
             assert_eq!(
