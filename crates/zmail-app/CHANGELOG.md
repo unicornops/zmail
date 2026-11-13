@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.1](https://github.com/unicornops/zmail/compare/v0.34.0...v0.34.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **deps:** Bump signal-hook from 0.3.18 to 0.4.6 ([#453](https://github.com/unicornops/zmail/issues/453)) ([16201bc](https://github.com/unicornops/zmail/commit/16201bc15d0f08f9aa9f244ae5e6cffee7503529))
+
 ## [0.34.0](https://github.com/unicornops/zmail/compare/v0.33.1...v0.34.0) (2026-11-12)
 
 
