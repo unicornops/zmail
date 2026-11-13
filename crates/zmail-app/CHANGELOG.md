@@ -5,6 +5,7 @@
 
 ### Bug Fixes
 
+* **deps:** update ammonia to 4.2.5 (RUSTSEC-2026-0533) ([#477](https://github.com/unicornops/zmail/issues/477)) ([01c3aab](https://github.com/unicornops/zmail/commit/01c3aab70d6dc87fe75ef1acb4a955512e2fe709))
 * **deps:** Bump signal-hook from 0.3.18 to 0.4.6 ([#453](https://github.com/unicornops/zmail/issues/453)) ([16201bc](https://github.com/unicornops/zmail/commit/16201bc15d0f08f9aa9f244ae5e6cffee7503529))
 
 ## [0.34.0](https://github.com/unicornops/zmail/compare/v0.33.1...v0.34.0) (2026-11-12)
