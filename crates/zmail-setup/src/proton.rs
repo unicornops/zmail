@@ -352,9 +352,12 @@ pub fn store_signed_in<S: SignInSteps>(
     crate::accounts::forget_stale_secrets(store, secrets.as_ref(), account_id)?;
     let store = store.clone();
     let session = sign_in.store(secrets.clone(), account_id);
+    let secrets = secrets.clone();
     let stored = async move {
         if let Err(error) = session.await {
             let _ = store.delete_account(account_id);
+            // Whatever part of the session did go in.
+            let _ = secrets.clear_account_secrets(account_id);
             return Err(error.context("Could not keep the Proton session"));
         }
         Ok(())

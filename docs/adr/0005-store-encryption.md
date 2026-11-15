@@ -14,6 +14,10 @@ encrypted store was is refused instead of encrypted (§4), an interrupted
 rotation deletes a key only when the marker agrees (§3), and the blob
 migration never leaves the attachment directory (§4, step 4).
 
+Amended again in November 2026 (#475): account secrets in the keychain
+are named by their store as well as their account, and a store never
+hands out an account id twice (§3, "Account secrets").
+
 ## Context
 
 Everything Zmail keeps lives in one data directory:
@@ -31,7 +35,8 @@ Everything Zmail keeps lives in one data directory:
 - `zmail-app backup` writes `VACUUM INTO` copies of the database.
 
 Account secrets already live in the OS keychain (`zmail-security`,
-service `dev.zmail.desktop`); nothing else is encrypted.
+service `dev.zmail.desktop`; named per store since #475, §3); nothing
+else is encrypted.
 
 The threat model is **a stolen, lost or imaged disk, or a copied data
 directory** (a backup, a synced folder, a disposed laptop), read by
@@ -224,6 +229,56 @@ explicit export, as is `export-account` (mbox).
   encrypted store from opening, and the next start tries again. The
   marker is what §4 and the rotation below check; it is not needed to
   open an encrypted store, whose key and sidecar decide that as before.
+- **Account secrets, per store** (#475). Every store on a machine shares
+  the one keychain (a second data directory with `ZMAIL_DATA_DIR`, a new
+  store after `reset-store` or Start Over), and every store numbers its
+  accounts from 1. Until #475 an account's secrets were named by its row
+  id alone (`account-<id>`, `account-<id>-<slot>`), so adding an account
+  to a second store cleared the first store's account with the same id
+  (#430 clears a new id's slots before storing). Now:
+  - Each store has a random 128-bit **store id**, kept in its own
+    database (`store_identity`, created at the first open with this
+    schema). Every account entry is
+    `store-<store id>-account-<account id>-<slot>`, built only by
+    `zmail_security::StoreSecrets`, which the app gets from
+    `LocalStore::account_secrets`; the OS keychain type is not a secret
+    store itself, so no other name can be built. The store id is not
+    the key id: a rotation changes the key id and would have to rename
+    every entry, while the store id is copied with the database by
+    rotation, migration and backups (a restored backup is the same
+    store, and reads the same secrets). It is not secret, but lives
+    inside the encrypted database, so only the key's holder can change
+    it. A copied data directory is the same store as far as the keychain
+    goes; a second store should be a new one.
+  - Within a store an account id is never handed out twice:
+    `last_account_id` beside the store id remembers the highest id given,
+    as SQLite's `AUTOINCREMENT` would (rebuilding `accounts` with
+    `AUTOINCREMENT` in a migration would cascade-delete every row that
+    refers to an account, since migrations run with foreign keys on).
+    Clearing a new id's slots stays, for a store restored from a backup,
+    and touches only this store's entries. Removing an account clears
+    every slot in `SecretSlot::ALL`, which is generated from the same
+    list as the slots themselves.
+  - **Moving existing secrets.** The accounts already in a store when it
+    first opens with this schema are marked `legacy_keychain_names`;
+    accounts added later, in that store or any other, never are. Opening
+    the account secrets moves each marked account's secrets: for each
+    slot, copy the old entry to the new name (unless the new name already
+    has one, which is newer and kept), read it back, then delete the old
+    entry; the mark goes once every slot has moved. A crash or a keychain
+    error part way leaves each secret under one name or the other and
+    the account marked, so reading a secret moves it then, and the next
+    start finishes the move. Only marked accounts ever read, move or
+    delete an old name, so a store made after the upgrade can't take or
+    delete the secrets of a store that has not opened since. If two
+    stores from before #475 both have an account with the same id, they
+    already shared one entry; the first to open takes it, and the other
+    account signs in again.
+  - Not covered: a pre-#475 backup restored after the upgrade gets a new
+    store id, so its accounts sign in again (the live store took the old
+    entries). The secrets of a store that was moved aside (`reset-store`,
+    Start Over) stay in the keychain, so the store still works if its key
+    turns up; Zmail has no command to delete them yet.
 - Creation order is crash-safe: generate, write to the keychain, read it
   back and compare, write the sidecar, and only then write encrypted
   data. Zmail never deletes the keychain entry except when the user
@@ -373,8 +428,10 @@ Zmail. Something that can write the data directory but not read the
 keychain (a synced or restored folder, another OS on the same disk,
 another program of the same user on macOS) could put one there: its
 account rows would point at another server, and Zmail would sign in to
-it with the passwords in the keychain, which are named by account row id
-only. So when the marker exists and the file is plaintext, Zmail does
+it with the passwords in the keychain. (Before #475 those were named by
+account row id only. A planted store now has a new store id, but its
+accounts would be marked as from before #475 and could still take
+secrets left under the old names.) So when the marker exists and the file is plaintext, Zmail does
 not open it, does not encrypt it and makes no key for it, whatever the
 sidecar says:
 
@@ -542,7 +599,8 @@ alongside this.
 
 - `zmail-security` gains the `vault` module: the store key and its
   keychain slot (`store-<key id>`, a store-level entry beside the
-  per-account `SecretSlot`s), the store's marker (`store-at-<location>`),
+  per-account `SecretSlot`s, which are named by the store id since #475:
+  the `keychain` module), the store's marker (`store-at-<location>`),
   the sidecar, HKDF subkeys and the blob format. Direct dependencies on `aes-gcm` (with `stream`), `hkdf`,
   `hmac`, `sha2` and `zeroize`, all already in `Cargo.lock`.
 - `LocalStore::open` takes the store key; the app resolves it from the

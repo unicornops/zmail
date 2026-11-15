@@ -33,3 +33,8 @@ proton = ["dep:zmail-proton", "zmail-sync/proton"]
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The SQLCipher fixture's key: a store written before #475
+# (tests/keychain_scope.rs).
+zmail-security = { path = "../zmail-security", features = ["test-fixtures"] }

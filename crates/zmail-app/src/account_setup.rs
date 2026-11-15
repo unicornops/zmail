@@ -7,7 +7,7 @@ use zmail_core::{
     AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutgoingConfig, ProtocolKind,
     SubmissionSecurity,
 };
-use zmail_security::{KeyringSecretStore, SecretSlot, SecretStore};
+use zmail_security::{SecretSlot, SecretStore};
 use zmail_setup::check::CheckPart;
 use zmail_store::LocalStore;
 use zmail_sync::BackgroundRuntime;
@@ -24,7 +24,7 @@ pub(crate) fn add_account(
     force: bool,
 ) -> Result<()> {
     let store = Arc::new(crate::open_store().context("failed to open the local store")?);
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+    let secrets = crate::keychain_secrets(&store)?;
     // Every answer is checked as it is given, and the connection before
     // anything is stored: a mistake leaves nothing behind.
     let NewAccountAnswers {
@@ -100,6 +100,9 @@ fn store_checked_account(
             })?;
     }
     let account_id = store.insert_account(account)?;
+    // As the window and the terminal UI do: nothing left under the new
+    // id in this store's keychain entries is read as the new account's.
+    zmail_setup::accounts::forget_stale_secrets(store, secrets, account_id)?;
     let kept = secret
         .store(store, secrets, account_id)
         .and_then(|()| match budget_mb {

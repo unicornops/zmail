@@ -275,33 +275,31 @@ impl fmt::Display for StoreLocation {
     }
 }
 
-impl StoreKeychain for crate::KeyringSecretStore {
+/// Store keys and markers in a keychain of named entries: the OS
+/// keychain, or [`crate::InMemoryKeychain`] in tests that share one
+/// between stores.
+impl<K: crate::Keychain + ?Sized> StoreKeychain for K {
     fn save_store_key(&self, key: &StoreKey) -> anyhow::Result<()> {
-        store_entry(key.id)?
-            .set_password(&key.secret_hex())
+        self.write_entry(&store_entry_name(key.id), &key.secret_hex())
             .with_context(|| format!("failed to store the mail store key {}", key.id))
     }
 
     fn load_store_key(&self, id: KeyId) -> anyhow::Result<Option<StoreKey>> {
-        match store_entry(id)?.get_password() {
-            Ok(secret) => {
+        match self
+            .read_entry(&store_entry_name(id))
+            .with_context(|| format!("failed to load the mail store key {id}"))?
+        {
+            Some(secret) => {
                 let secret = Zeroizing::new(secret);
                 StoreKey::from_secret_hex(id, &secret).map(Some)
             }
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => {
-                Err(error).with_context(|| format!("failed to load the mail store key {id}"))
-            }
+            None => Ok(None),
         }
     }
 
     fn delete_store_key(&self, id: KeyId) -> anyhow::Result<()> {
-        match store_entry(id)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => {
-                Err(error).with_context(|| format!("failed to delete the mail store key {id}"))
-            }
-        }
+        self.delete_entry(&store_entry_name(id))
+            .with_context(|| format!("failed to delete the mail store key {id}"))
     }
 
     fn save_store_marker(
@@ -309,8 +307,7 @@ impl StoreKeychain for crate::KeyringSecretStore {
         location: &StoreLocation,
         marker: &StoreKeyRecord,
     ) -> anyhow::Result<()> {
-        marker_entry(location)?
-            .set_password(&marker.marker_text())
+        self.write_entry(&marker_entry_name(location), &marker.marker_text())
             .context("failed to store the mail store's marker")
     }
 
@@ -318,18 +315,15 @@ impl StoreKeychain for crate::KeyringSecretStore {
         &self,
         location: &StoreLocation,
     ) -> anyhow::Result<Option<StoreKeyRecord>> {
-        match marker_entry(location)?.get_password() {
-            Ok(text) => StoreKeyRecord::from_marker_text(&text).map(Some),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(error).context("failed to load the mail store's marker"),
-        }
+        self.read_entry(&marker_entry_name(location))
+            .context("failed to load the mail store's marker")?
+            .map(|text| StoreKeyRecord::from_marker_text(&text))
+            .transpose()
     }
 
     fn delete_store_marker(&self, location: &StoreLocation) -> anyhow::Result<()> {
-        match marker_entry(location)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error).context("failed to delete the mail store's marker"),
-        }
+        self.delete_entry(&marker_entry_name(location))
+            .context("failed to delete the mail store's marker")
     }
 }
 
@@ -378,18 +372,14 @@ impl StoreKeychain for crate::InMemorySecretStore {
     }
 }
 
-/// The keychain entry for a store's marker.
-fn marker_entry(location: &StoreLocation) -> anyhow::Result<keyring::Entry> {
-    keyring::Entry::new(crate::KEYRING_SERVICE, &format!("store-at-{location}"))
-        .map_err(anyhow::Error::from)
-        .context("failed to prepare secure storage for the mail store's marker")
+/// The keychain entry name of a store's marker.
+fn marker_entry_name(location: &StoreLocation) -> String {
+    format!("store-at-{location}")
 }
 
-/// The keychain entry for a store key.
-fn store_entry(id: KeyId) -> anyhow::Result<keyring::Entry> {
-    keyring::Entry::new(crate::KEYRING_SERVICE, &format!("store-{id}"))
-        .map_err(anyhow::Error::from)
-        .context("failed to prepare secure storage for the mail store key")
+/// The keychain entry name of a store key.
+fn store_entry_name(id: KeyId) -> String {
+    format!("store-{id}")
 }
 
 /// The non-secret record beside the database: which key opens the store,

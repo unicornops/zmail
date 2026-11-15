@@ -13,7 +13,7 @@ use zmail_core::{
     AppBootstrap, AuthKind, CachePolicySummary, DraftUpdate, NewAccount, NewDraft, NewIdentity,
     OutgoingConfig, ProtocolKind, ThemeAppearance, ThemeSummary, UpstreamPins,
 };
-use zmail_security::{InMemorySecretStore, KeyringSecretStore, SecretStore};
+use zmail_security::{InMemorySecretStore, OsKeychain, SecretStore};
 use zmail_store::{LocalStore, MigrationProgress, StoreOpenError};
 use zmail_sync::{BackgroundRuntime, SyncService};
 use zmail_theme::ThemeFamily;
@@ -222,9 +222,9 @@ fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
         ZmailAssets,
         bootstrap,
         store_path()?,
-        Arc::new(KeyringSecretStore),
+        Arc::new(OsKeychain),
         move |store| {
-            let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+            let secrets = keychain_secrets(&store)?;
             // Only one process syncs a store (ADR 0007): when a terminal UI
             // already does, this window reads the store and leaves sync to
             // it, and takes sync over if it quits first.
@@ -265,7 +265,7 @@ fn launch_tui() -> Result<()> {
          opens without its key",
     )?);
     let runtime = BackgroundRuntime::start(4)?;
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+    let secrets = keychain_secrets(&store)?;
     let sync =
         SyncService::with_sync_lock(runtime.handle().clone(), store.clone(), secrets.clone())?;
     #[cfg(feature = "proton")]
@@ -469,7 +469,7 @@ fn list_mailboxes(account_id: i64) -> Result<()> {
 fn sync_accounts(account_id: Option<i64>, force: bool) -> Result<()> {
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(open_store().context("failed to open the local store")?);
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+    let secrets = keychain_secrets(&store)?;
     sync_accounts_in(&runtime, store, secrets, account_id, force)
 }
 
@@ -497,7 +497,7 @@ fn sync_accounts_in(
 fn index_account(account_id: i64, force: bool) -> Result<()> {
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(open_store().context("failed to open the local store")?);
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+    let secrets = keychain_secrets(&store)?;
     let sync_service = syncing_service(&runtime, store.clone(), secrets, force, "index")?;
 
     let report = sync_service.index_account_and_wait(account_id)?;
@@ -523,7 +523,7 @@ fn search_threads(account_id: i64, query: &str, server: bool) -> Result<()> {
     let store = Arc::new(open_store().context("failed to open the local store")?);
     if server {
         let runtime = BackgroundRuntime::start(2)?;
-        let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+        let secrets = keychain_secrets(&store)?;
         // The server search only reads from the server, so it runs beside
         // another Zmail that syncs; mail it finds that the store lacks is
         // then left to that Zmail's sync.
@@ -829,7 +829,7 @@ fn compose_draft(account_id: i64, identity_id: Option<i64>, force: bool) -> Resu
 
     if prompt_yes_no("Queue this draft for send now", false)? {
         let runtime = BackgroundRuntime::start(4)?;
-        let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+        let secrets = keychain_secrets(&store)?;
         println!(
             "{}",
             send_draft_in(&runtime, store, secrets, draft_id, force)?
@@ -862,7 +862,7 @@ fn show_draft(draft_id: i64) -> Result<()> {
 fn send_draft(draft_id: i64, force: bool) -> Result<()> {
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(open_store().context("failed to open the local store")?);
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+    let secrets = keychain_secrets(&store)?;
     println!(
         "{}",
         send_draft_in(&runtime, store, secrets, draft_id, force)?
@@ -910,7 +910,7 @@ fn list_outbox(account_id: Option<i64>) -> Result<()> {
 fn retry_outbox_job(job_id: i64, force: bool) -> Result<()> {
     let store = Arc::new(open_store().context("failed to open the local store")?);
     let runtime = BackgroundRuntime::start(4)?;
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+    let secrets = keychain_secrets(&store)?;
     println!(
         "{}",
         retry_outbox_job_in(&runtime, store, secrets, job_id, force)?
@@ -960,7 +960,7 @@ fn remove_attachment(attachment_id: i64) -> Result<()> {
 fn process_outbox(account_id: Option<i64>, force: bool) -> Result<()> {
     let runtime = BackgroundRuntime::start(4)?;
     let store = Arc::new(open_store().context("failed to open the local store")?);
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+    let secrets = keychain_secrets(&store)?;
     let processed = process_outbox_in(&runtime, store, secrets, account_id, force)?;
     println!("Processed {processed} due outbox job(s).");
     Ok(())
@@ -1059,7 +1059,7 @@ fn empty_trash(account_id: i64, yes: bool, force: bool) -> Result<()> {
     }
 
     let runtime = BackgroundRuntime::start(4)?;
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+    let secrets = keychain_secrets(&store)?;
     let sync_service = command_sync_service(&runtime, store.clone(), secrets, force)?;
     let secret = runtime
         .handle()
@@ -1254,6 +1254,14 @@ fn syncing_service(
     Ok(service)
 }
 
+/// The account secrets of `store` in the OS keychain, named by the store
+/// so another store's never mix with them (#475).
+fn keychain_secrets(store: &LocalStore) -> Result<Arc<dyn SecretStore>> {
+    store
+        .account_secrets(Arc::new(OsKeychain))
+        .context("failed to read the store's keychain details")
+}
+
 /// Opens the encrypted store with its key from the OS keychain (ADR 0005),
 /// encrypting a plaintext store first and printing its progress.
 fn open_store() -> Result<LocalStore> {
@@ -1266,7 +1274,7 @@ fn open_store() -> Result<LocalStore> {
 /// `keychain_help`.
 fn open_store_explaining(keychain_help: &'static str) -> Result<LocalStore> {
     let path = store_path()?;
-    match LocalStore::unlock(&path, &KeyringSecretStore, &print_progress) {
+    match LocalStore::unlock(&path, &OsKeychain, &print_progress) {
         Ok((store, report)) => {
             if let Some(report) = report {
                 eprintln!(
@@ -1312,7 +1320,7 @@ fn print_progress(step: MigrationProgress) {
 /// one (ADR 0005 §3). Refuses while the store is open anywhere.
 fn rotate_store_key() -> Result<()> {
     let path = store_path()?;
-    let new = LocalStore::rotate_key(&path, &KeyringSecretStore, &print_progress)
+    let new = LocalStore::rotate_key(&path, &OsKeychain, &print_progress)
         .map_err(|error| anyhow::Error::from(error).context("the key was not changed"))?;
     println!(
         "The mail store is now encrypted with a new key ({new}); the old key is deleted. \
@@ -1325,7 +1333,7 @@ fn rotate_store_key() -> Result<()> {
 /// creates a new one. Refuses while the store can still be unlocked.
 fn reset_unreadable_store() -> Result<()> {
     let path = store_path()?;
-    match LocalStore::unlock(&path, &KeyringSecretStore, &|_| {}) {
+    match LocalStore::unlock(&path, &OsKeychain, &|_| {}) {
         Ok(_) => bail!("the mail store unlocks with its key; there is nothing to reset"),
         Err(StoreOpenError::Unreadable { .. }) => {}
         Err(error) => return Err(anyhow::Error::from(error).context("not resetting the store")),

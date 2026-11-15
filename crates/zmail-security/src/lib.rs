@@ -2,6 +2,7 @@
 
 pub mod attachment_safety;
 pub mod html;
+pub mod keychain;
 pub mod links;
 pub mod sender_safety;
 pub mod sender_warning;
@@ -15,6 +16,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use keyring::Entry;
+
+pub use keychain::{InMemoryKeychain, Keychain, StoreId, StoreSecrets};
 
 /// Default remote content stance.
 pub const REMOTE_CONTENT_POLICY: &str = "Blocked by default.";
@@ -36,56 +39,63 @@ pub struct SanitizedHtml {
     pub has_remote_content: bool,
 }
 
-/// Named per-account secret slots.
-///
-/// The `Password` slot is the original single per-account secret; the
-/// OAuth2 slots hold the provider client secret and the granted tokens so
-/// background sync can refresh access tokens without user interaction.
-/// The Proton slots hold a Proton session (ADR 0004): the session UID, its
-/// refresh token and the salted key password that unlocks the account's
-/// keys. A Proton account never stores its login password.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SecretSlot {
-    /// Account password or app password.
-    Password,
-    /// OAuth2 provider application client secret (confidential clients only).
-    ClientSecret,
-    /// Current OAuth2 bearer access token.
-    AccessToken,
-    /// OAuth2 refresh token used to obtain new access tokens.
-    RefreshToken,
-    /// Proton session UID (`x-pm-uid`).
-    ProtonUid,
-    /// Proton session refresh token.
-    ProtonRefreshToken,
-    /// Proton salted key password (the bcrypt-derived secret that unlocks
-    /// the user keys, never the login password).
-    ProtonKeyPass,
+/// Defines [`SecretSlot`], [`SecretSlot::ALL`] and [`SecretSlot::as_str`]
+/// from one list, so a slot can't be left out of `ALL`: removing an
+/// account clears every slot in it, and a slot missing from it would
+/// outlive its account in the keychain.
+macro_rules! secret_slots {
+    (
+        $(#[$meta:meta])*
+        pub enum SecretSlot {
+            $($(#[doc = $doc:literal])* $slot:ident => $name:literal,)+
+        }
+    ) => {
+        $(#[$meta])*
+        pub enum SecretSlot {
+            $($(#[doc = $doc])* $slot,)+
+        }
+
+        impl SecretSlot {
+            /// Every slot an account can have a secret in.
+            pub const ALL: [Self; [$($name),+].len()] = [$(Self::$slot),+];
+
+            /// Returns the stable key fragment identifying the slot.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$slot => $name,)+
+                }
+            }
+        }
+    };
 }
 
-impl SecretSlot {
-    /// Every slot an account can have a secret in.
-    pub const ALL: [Self; 7] = [
-        Self::Password,
-        Self::ClientSecret,
-        Self::AccessToken,
-        Self::RefreshToken,
-        Self::ProtonUid,
-        Self::ProtonRefreshToken,
-        Self::ProtonKeyPass,
-    ];
-
-    /// Returns the stable key fragment identifying the slot.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Password => "password",
-            Self::ClientSecret => "client-secret",
-            Self::AccessToken => "access-token",
-            Self::RefreshToken => "refresh-token",
-            Self::ProtonUid => "proton-uid",
-            Self::ProtonRefreshToken => "proton-refresh-token",
-            Self::ProtonKeyPass => "proton-key-pass",
-        }
+secret_slots! {
+    /// Named per-account secret slots.
+    ///
+    /// The `Password` slot is the original single per-account secret; the
+    /// OAuth2 slots hold the provider client secret and the granted tokens so
+    /// background sync can refresh access tokens without user interaction.
+    /// The Proton slots hold a Proton session (ADR 0004): the session UID, its
+    /// refresh token and the salted key password that unlocks the account's
+    /// keys. A Proton account never stores its login password. Each slot's
+    /// key fragment names its keychain entry ([`keychain::account_entry_name`]).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum SecretSlot {
+        /// Account password or app password.
+        Password => "password",
+        /// OAuth2 provider application client secret (confidential clients only).
+        ClientSecret => "client-secret",
+        /// Current OAuth2 bearer access token.
+        AccessToken => "access-token",
+        /// OAuth2 refresh token used to obtain new access tokens.
+        RefreshToken => "refresh-token",
+        /// Proton session UID (`x-pm-uid`).
+        ProtonUid => "proton-uid",
+        /// Proton session refresh token.
+        ProtonRefreshToken => "proton-refresh-token",
+        /// Proton salted key password (the bcrypt-derived secret that unlocks
+        /// the user keys, never the login password).
+        ProtonKeyPass => "proton-key-pass",
     }
 }
 
@@ -108,15 +118,16 @@ pub trait SecretStore: Send + Sync {
     fn get_account_secret_from_slot(&self, account_id: i64, slot: SecretSlot) -> Result<String>;
     /// Removes the secret for an account in a named slot.
     fn delete_account_secret_in_slot(&self, account_id: i64, slot: SecretSlot) -> Result<()>;
-    /// Removes every secret kept for `account_id`, in every slot.
+    /// Removes every secret kept for `account_id`, in every slot
+    /// ([`SecretSlot::ALL`]): what removing an account does.
     ///
-    /// Secrets are named by the account's row id, and a store hands an id
-    /// out again after its account is removed, as does a new store sharing
-    /// the keychain. So this runs before a new account's secrets are
-    /// stored: whatever an earlier account with the id left behind (a
-    /// removal whose keychain delete failed, another store's account) is
-    /// never read as the new account's. Every slot is tried; the first
-    /// failure is returned.
+    /// It also runs before a new account's secrets are stored. Secrets
+    /// are named by the store and the account's id, and a store never
+    /// hands an id out twice, but a store restored from a backup can hand
+    /// out again an id that an account added after the backup had: what
+    /// that account left behind is never read as the new account's.
+    /// Only this store's entries are touched. Every slot is tried; the
+    /// first failure is returned.
     fn clear_account_secrets(&self, account_id: i64) -> Result<()> {
         let mut cleared = Ok(());
         for slot in SecretSlot::ALL {
@@ -129,82 +140,53 @@ pub trait SecretStore: Send + Sync {
     }
 }
 
-/// OS keychain-backed implementation used by the desktop app.
+/// The OS keychain (macOS login keychain, Windows Credential Manager,
+/// Secret Service on Linux), under Zmail's service `dev.zmail.desktop`.
+///
+/// It holds the store keys and markers ([`vault::StoreKeychain`]) and,
+/// through [`StoreSecrets`], the account secrets of every store on the
+/// machine; it is never a [`SecretStore`] itself, so no account secret is
+/// named without its store.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct KeyringSecretStore;
+pub struct OsKeychain;
 
-impl KeyringSecretStore {
-    /// Persists the secret for an account in a named slot.
-    fn set_slot(&self, account_id: i64, slot: SecretSlot, secret: &str) -> Result<()> {
-        entry_for_slot(account_id, slot)?
+impl Keychain for OsKeychain {
+    fn read_entry(&self, name: &str) -> Result<Option<String>> {
+        match entry(name)?.get_password() {
+            Ok(secret) => Ok(Some(secret)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to read {name} from the keychain"))
+            }
+        }
+    }
+
+    fn write_entry(&self, name: &str, secret: &str) -> Result<()> {
+        entry(name)?
             .set_password(secret)
-            .with_context(|| {
-                format!("failed to store {slot:?} credentials for account {account_id}")
-            })
+            .with_context(|| format!("failed to write {name} to the keychain"))
     }
 
-    /// Loads the secret for an account from a named slot.
-    fn get_slot(&self, account_id: i64, slot: SecretSlot) -> Result<String> {
-        entry_for_slot(account_id, slot)?
-            .get_password()
-            .with_context(|| {
-                format!("failed to load {slot:?} credentials for account {account_id}")
-            })
-    }
-
-    /// Removes the secret for an account in a named slot.
-    fn delete_slot(&self, account_id: i64, slot: SecretSlot) -> Result<()> {
-        match entry_for_slot(account_id, slot)?.delete_credential() {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error).with_context(|| {
-                format!("failed to delete {slot:?} credentials for account {account_id}")
-            }),
+    fn delete_entry(&self, name: &str) -> Result<()> {
+        match entry(name)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to delete {name} from the keychain"))
+            }
         }
     }
 }
 
-impl SecretStore for KeyringSecretStore {
-    fn set_account_secret(&self, account_id: i64, secret: &str) -> Result<()> {
-        entry_for(account_id)?
-            .set_password(secret)
-            .with_context(|| format!("failed to store credentials for account {account_id}"))
-    }
-
-    fn get_account_secret(&self, account_id: i64) -> Result<String> {
-        entry_for(account_id)?
-            .get_password()
-            .with_context(|| format!("failed to load credentials for account {account_id}"))
-    }
-
-    fn delete_account_secret(&self, account_id: i64) -> Result<()> {
-        match entry_for(account_id)?.delete_credential() {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error)
-                .with_context(|| format!("failed to delete credentials for account {account_id}")),
-        }
-    }
-
-    fn set_account_secret_in_slot(
-        &self,
-        account_id: i64,
-        slot: SecretSlot,
-        secret: &str,
-    ) -> Result<()> {
-        self.set_slot(account_id, slot, secret)
-    }
-
-    fn get_account_secret_from_slot(&self, account_id: i64, slot: SecretSlot) -> Result<String> {
-        self.get_slot(account_id, slot)
-    }
-
-    fn delete_account_secret_in_slot(&self, account_id: i64, slot: SecretSlot) -> Result<()> {
-        self.delete_slot(account_id, slot)
-    }
+/// The OS keychain entry `name` under Zmail's service.
+fn entry(name: &str) -> Result<Entry> {
+    Entry::new(KEYRING_SERVICE, name)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("failed to prepare secure storage for {name}"))
 }
 
-/// In-memory secret store used by tests and local fixtures.
+/// One store's account secrets and its store key in memory, for tests and
+/// fixtures with a single store. Tests with several stores sharing a
+/// keychain use [`InMemoryKeychain`] and [`StoreSecrets`], as the app does.
 #[derive(Debug, Default)]
 pub struct InMemorySecretStore {
     secrets: Mutex<HashMap<(i64, SecretSlot), String>>,
@@ -276,30 +258,6 @@ impl SecretStore for InMemorySecretStore {
     fn delete_account_secret_in_slot(&self, account_id: i64, slot: SecretSlot) -> Result<()> {
         self.lock().remove(&(account_id, slot));
         Ok(())
-    }
-}
-
-fn entry_for(account_id: i64) -> Result<Entry> {
-    Entry::new(KEYRING_SERVICE, &format!("account-{account_id}"))
-        .map_err(anyhow::Error::from)
-        .with_context(|| format!("failed to prepare secure storage for account {account_id}"))
-}
-
-/// Builds the keyring entry for a named slot.
-///
-/// The password slot keeps the original `account-{id}` entry so existing
-/// installs keep working; token slots append a stable suffix.
-fn entry_for_slot(account_id: i64, slot: SecretSlot) -> Result<Entry> {
-    match slot {
-        SecretSlot::Password => entry_for(account_id),
-        slot => Entry::new(
-            KEYRING_SERVICE,
-            &format!("account-{account_id}-{}", slot.as_str()),
-        )
-        .map_err(anyhow::Error::from)
-        .with_context(|| {
-            format!("failed to prepare secure storage for account {account_id} {slot:?}")
-        }),
     }
 }
 

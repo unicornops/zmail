@@ -121,15 +121,16 @@ pub fn store_authorized_account(
     Ok((account_id, format!("{} added.", account.display_name)))
 }
 
-/// Clears whatever the keychain still holds under a new account's id, in
-/// every slot, before the account's own secrets go in.
+/// Clears whatever this store's keychain entries still hold under a new
+/// account's id, in every slot, before the account's own secrets go in.
 ///
-/// Secrets are named by account id, and an id is handed out again after
-/// its account is removed (or by another store sharing the keychain). An
+/// Secrets are named by the store and the account id, and a store never
+/// hands an id out twice, but a store restored from a backup can: an
 /// earlier account's token left under the id would otherwise be read as
-/// the new account's and sent to the new account's server. An account
-/// whose slots can't be cleared is not kept.
-pub(crate) fn forget_stale_secrets(
+/// the new account's and sent to the new account's server. Another
+/// store's entries are never touched (#475). An account whose slots
+/// can't be cleared is not kept.
+pub fn forget_stale_secrets(
     store: &LocalStore,
     secrets: &dyn SecretStore,
     account_id: i64,
@@ -470,18 +471,8 @@ pub fn remove_account(
     store
         .delete_account(account_id)
         .map_err(RemoveError::LocalData)?;
-    let mut forgot = secrets.delete_account_secret(account_id);
-    for slot in [
-        SecretSlot::Password,
-        SecretSlot::ClientSecret,
-        SecretSlot::AccessToken,
-        SecretSlot::RefreshToken,
-        SecretSlot::ProtonUid,
-        SecretSlot::ProtonRefreshToken,
-        SecretSlot::ProtonKeyPass,
-    ] {
-        forgot = forgot.and(secrets.delete_account_secret_in_slot(account_id, slot));
-    }
+    // Every slot there is (`SecretSlot::ALL`), in this store only.
+    let forgot = secrets.clear_account_secrets(account_id);
     if let Some((sync_service, uid, refresh_token)) = proton_session {
         sync_service.sign_out_proton_session(account_id, uid, refresh_token);
     }
