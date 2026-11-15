@@ -2237,10 +2237,14 @@ mod tests {
         let (store, initial_view) = seeded(FixtureView::SearchFilters)?;
         assert_eq!(initial_view, InitialView::Search(SEARCH_FILTERS_QUERY));
         let unified = MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Inbox));
-        let hits = store.search_threads_in(
+        // `after:30d` counts from the seeding clock, not from today.
+        let now = chrono::DateTime::from_timestamp(i64::try_from(NOW)?, 0)
+            .context("the fixture clock is a valid time")?;
+        let hits = store.search_threads_in_at(
             &zmail_core::SearchScope::Folder(unified),
             SEARCH_FILTERS_QUERY,
             50,
+            &now,
         )?;
         assert!(hits.len() > 1, "{hits:?}");
         assert!(hits.iter().all(|hit| hit.unread_count > 0));

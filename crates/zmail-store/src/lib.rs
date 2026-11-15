@@ -33,6 +33,7 @@ pub use zmail_security::vault::{
     BlobVault, StoreKey, StoreKeyRecord, StoreKeychain, StoreLocation,
 };
 
+mod account_secrets;
 mod address_history;
 mod connection;
 mod encryption;
@@ -232,6 +233,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0032_outbox_send_unconfirmed",
         OUTBOX_SEND_UNCONFIRMED_SCHEMA,
+    ),
+    (
+        "0033_account_secrets_per_store",
+        account_secrets::ACCOUNT_SECRETS_SCHEMA,
     ),
 ];
 
@@ -807,6 +812,7 @@ impl LocalStore {
             ephemeral_dir: None,
         };
         store.apply_migrations()?;
+        store.ensure_store_identity()?;
         store.rebuild_address_history_if_pending()?;
         Ok(store)
     }
@@ -867,9 +873,13 @@ impl LocalStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the account creation transaction")?;
 
+        // The id comes from the store's own count, so a removed account's
+        // id (and its keychain entries) never goes to a new account.
         transaction.execute(
-            r#"
+            &format!(
+                r#"
             INSERT INTO accounts(
+                id,
                 display_name,
                 protocol_kind,
                 auth_kind,
@@ -885,8 +895,10 @@ impl LocalStore {
                 submission_hello_name,
                 updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            VALUES ({next_id}, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             "#,
+                next_id = account_secrets::NEXT_ACCOUNT_ID
+            ),
             params![
                 account.display_name,
                 account.protocol.as_str(),

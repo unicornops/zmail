@@ -79,7 +79,7 @@ The local store lives in a platform data directory, independent of the launch di
 - macOS: `~/Library/Application Support/zmail`
 - Windows: `%APPDATA%\zmail`
 
-Set the `ZMAIL_DATA_DIR` environment variable to override the store directory. A legacy `.zmail-dev/zmail.sqlite3` store in the current directory is migrated to the platform data directory on first run; if the migration fails, the app keeps using the legacy store so no data is lost.
+Set the `ZMAIL_DATA_DIR` environment variable to override the store directory. Each store keeps its own account passwords and sign-ins in the system keychain, named by an id the store keeps, so stores in different directories (or a new store after `zmail-app reset-store`) never read, replace or remove each other's, even though their accounts are numbered alike. Copying a store's directory copies its id: the copy and the original then share their keychain entries, so make a new store rather than a copy when you want a second one. A legacy `.zmail-dev/zmail.sqlite3` store in the current directory is migrated to the platform data directory on first run; if the migration fails, the app keeps using the legacy store so no data is lost.
 
 
 ## What Zmail has
