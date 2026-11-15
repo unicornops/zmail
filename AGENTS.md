@@ -16,7 +16,10 @@ The app is organised as a Rust workspace with separate crates for UI, store, syn
 
 ## Important Files
 
-- `README.md`: current project status, commands, and platform notes
+- `README.md`: project status, downloads and screenshots, linking to the docs below
+- `docs/install.md`: installing, checking downloads, first run, upgrading, SSH and headless use, data directory, runtime platform notes
+- `docs/features.md`, `docs/cli.md`, `docs/tui.md` and `docs/search.md`: the feature list and Settings → Mail, the command line, the terminal UI and the search language
+- `docs/development.md`: building from source, the live mail harness, build platform notes and the design documents
 - `PLAN.md`: product phases and scope
 - `docs/phase5-hardening.md`: current hardening and packaging status
 - `docs/upstream/zed.md`: pinned upstream GPUI and Zed context

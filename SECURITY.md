@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Zmail is alpha software. Only the latest release receives security fixes; please update before reporting, and check that the problem is still there.
+Zmail is beta software. Only the latest release receives security fixes; please update before reporting, and check that the problem is still there.
 
 ## Reporting a vulnerability
 
@@ -29,4 +29,4 @@ Please give us a reasonable time to fix a problem before you publish it. Zmail i
 - Anything that needs an attacker who already runs code as your user or can read Zmail's memory (see "What this does not protect" in [ADR 0005](./docs/adr/0005-store-encryption.md)).
 - Problems in a mail provider's servers, or in Proton's private API.
 - Vulnerabilities in dependencies that Zmail does not reach; report those upstream (advisories are checked in CI with `cargo deny`).
-- Unsigned Windows and Linux downloads: this is known and documented in the README.
+- Unsigned Windows and Linux downloads: this is known and documented in the [install guide](./docs/install.md#check-your-download).
