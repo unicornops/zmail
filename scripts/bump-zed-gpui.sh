@@ -220,7 +220,7 @@ if [[ -n "$pr_rev" ]]; then
   from_text="the head of Zed [PR #${ZED_PR}](${ZED_URL}/pull/${ZED_PR})"
   release_links=""
   compare_link="- The pin was the head of [Zed PR #${ZED_PR}](${ZED_URL}/pull/${ZED_PR}) (\`${pr_rev:0:12}\` on a fork), which ${target_tag} contains."
-  deviation_note="- [ ] End the ADR 0003 deviation: delete \"Deviation From ADR 0003\" in \`docs/upstream/zed.md\` and its notes in \`AGENTS.md\`, \`README.md\` and ADR 0003, the fork's \`allow-git\` entry in \`deny.toml\`, and the pull request wording in the \`Cargo.toml\` comments."
+  deviation_note="- [ ] End the ADR 0003 deviation: delete \"Deviation From ADR 0003\" in \`docs/upstream/zed.md\` and its notes in \`AGENTS.md\`, \`docs/features.md\`, \`docs/development.md\` and ADR 0003, the fork's \`allow-git\` entry in \`deny.toml\`, and the pull request wording in the \`Cargo.toml\` comments."
 else
   compare_link="- [Full diff ${current_tag}...${target_tag}](${ZED_URL}/compare/${current_tag}...${target_tag}) (GPUI lives in \`crates/gpui*\`)"
   deviation_note=""

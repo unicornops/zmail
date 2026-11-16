@@ -1,372 +1,83 @@
 # Zmail
 
-> [!WARNING]
-> **Zmail is alpha software and is in no way ready for real use.** Expect bugs, missing features, breaking changes between releases and, at worst, lost or corrupted local data. Do not rely on it as your only mail client, keep your mail on the server, and keep backups of anything that matters. Native Proton Mail support is experimental on top of that (see below).
+Zmail is a fast, local-first email client for the desktop and the terminal, written in Rust. It speaks IMAP, JMAP and SMTP, keeps an encrypted copy of your mail on your computer so browsing never waits for the network, and treats every message as untrusted. The desktop app is built on GPUI and reads unchanged Zed theme files; the terminal UI works like Pine and Alpine.
 
-Zmail is a Rust desktop email client focused on speed, standards compliance, security, and large-mailbox performance. The UI is built on GPUI, unchanged Zed theme files are supported through a thin local compatibility layer, and the local data path is designed so network activity never blocks mailbox browsing.
+> [!NOTE]
+> **Zmail is beta software.** Reading, searching and sending mail over IMAP, JMAP and SMTP, the encrypted local store, the desktop app on macOS, Windows and Linux, and the terminal UI all work and are tested in CI against live test mail servers, but expect bugs and some changes between releases. Keep your mail on the server and back up anything that matters; native Proton Mail support is still marked Experimental.
 
-## Install
+<p>
+  <img src="docs/images/reader-light.png" alt="Zmail's desktop app in the light theme: the sidebar with accounts and folders, the Inbox, and a conversation open in the reader" width="49%">
+  <img src="docs/images/reader-dark.png" alt="The same view in the dark theme" width="49%">
+</p>
 
-Releases are on the [Releases page](https://github.com/unicornops/zmail/releases). Pick the asset for your system:
+The terminal UI (`zmail-app tui`), on the same store and accounts:
 
-| System | Asset | Notes |
-| --- | --- | --- |
-| macOS | `Zmail-<version>.dmg` | Open it and drag Zmail to Applications. |
-| macOS | `zmail-macos.app.zip` | The same app in a zip. |
-| macOS | `zmail-macos.tar.gz` | Only the `zmail-app` binary, handy for the terminal UI. |
-| Debian and Ubuntu (x86-64) | `zmail-linux-x86_64.deb` | `sudo apt install ./zmail-linux-x86_64.deb`. Installs `zmail-app`, a desktop entry and the AppArmor profile described below. |
-| Other Linux (x86-64) | `zmail-linux-x86_64.tar.gz` | `zmail-app`, `LICENSE` and `licenses/`. Unpack it and put `zmail-app` on your `PATH`. |
-| Windows (x86-64) | `zmail-windows-x86_64.msi` | The installer. |
-| Windows (x86-64) | `zmail-windows-x86_64.zip` | `zmail-app.exe` without an installer. |
+```text
+  ZMAIL 0.0.0-test               MESSAGE INDEX       Folder: INBOX  Conv 1 of 4
+  N*        11:35  Grace Hopper         (2) Launch plan for the terminal UI
+  N     Yesterday  Harbour News         Harbour newsletter, issue 42
+    @         Mon  山田 太郎            東京オフィスの会議 📅 next week
+           25 Sep  Billing              Invoice fdp.exe
 
-The macOS assets are built on an Apple silicon runner; their names do not say so. Apart from the DMG, asset names carry no version, so keep track of the release tag you downloaded from.
-
-**Check your download.** Each release has `SHA256SUMS-Linux`, `SHA256SUMS-macOS` and `SHA256SUMS-Windows`, listing the assets built on that system. Download the one for your asset into the same folder, then check just that file:
-
-```bash
-grep zmail-linux-x86_64.deb SHA256SUMS-Linux | sha256sum --check          # Linux
-grep zmail-macos.tar.gz SHA256SUMS-macOS | shasum -a 256 --check          # macOS
+                  [Folder "INBOX" opened with 4 conversations]
+? Help       > [ViewMsg]  N NextMsg    Spc NextPage U Undo       F Forward
+< FldrList   P PrevMsg    - PrevPage   D Delete     R Reply      O OTHER CMDS
 ```
 
-On Windows, compare the output of `Get-FileHash .\zmail-windows-x86_64.msi` (PowerShell) with the line in `SHA256SUMS-Windows`. A checksum from the same release page shows the download is intact. It does not show who built it.
+Screenshots and the terminal snapshot show synthetic test mail: the desktop ones come from CI's UI screenshot job, the terminal one from the terminal UI's snapshot tests (an 80x24 screen, empty rows left out).
 
-**What is signed.**
+## Download
 
-- The macOS DMG is signed with an Apple Developer ID and notarised by Apple.
-- The Windows MSI and zip are **not** signed. Windows SmartScreen warns about an unknown publisher; that is expected, and the checksum above is your check.
-- The `.deb` and the Linux tarball are **not** signed.
+Get the latest release from **[GitHub Releases](https://github.com/unicornops/zmail/releases/latest)**:
 
-**HTML mail on Linux** needs the `libwebkit2gtk-4.1-0` package (the `.deb` recommends it) and, on Ubuntu 24.04, an AppArmor profile that lets its sandbox start. The `.deb` installs and loads the profile. With the tarball, copy [`crates/zmail-app/packaging/apparmor/zmail`](./crates/zmail-app/packaging/apparmor/zmail) to `/etc/apparmor.d/zmail` and run `sudo apparmor_parser -r /etc/apparmor.d/zmail`. Without it, mail shows as plain text and Zmail says why. "Platform Notes" below has the details.
-
-## First run
-
-Start the desktop app from your applications menu or Start menu, or run `zmail-app` with no arguments. With no account yet, the window shows a welcome screen: choose your provider, sign in, and Zmail finds the server settings, tests the connection, saves the account and starts the first sync. Gmail needs an app password or an OAuth client of your own, and the Add Account flow explains both. Add more accounts later from the sidebar, the menus or Settings.
-
-For the terminal UI, run `zmail-app tui` (on macOS the `zmail-macos.tar.gz` binary is the easy way to get `zmail-app`). With no account yet, it opens on the Main Menu and `S` goes straight to adding one; the steps are the desktop app's (see "Terminal UI" below). The desktop app and the terminal UI share one store and one set of accounts.
-
-Zmail needs the system keychain (Keychain on macOS, Credential Manager on Windows, a Secret Service such as GNOME Keyring or KWallet on Linux). It holds the key that unlocks the local store and your account passwords.
-
-## Upgrade
-
-Zmail does not update itself yet. Your accounts and mail stay in the data directory (see "Where Zmail keeps its data"), and the store is migrated when the new version first opens it. Close every Zmail window and `zmail-app tui` first, and copy the data directory somewhere safe if the mail in it matters: going back to an older version is not supported.
-
-- **macOS DMG or zip:** replace Zmail in Applications with the new one.
-- **`.deb`:** download the new `.deb` and run `sudo apt install ./zmail-linux-x86_64.deb` again.
-- **Linux tarball:** unpack the new one over the old `zmail-app`. If you added the AppArmor profile by hand, copy the repository's current one when it changes.
-- **Windows:** run the new MSI, or replace `zmail-app.exe` from the zip.
-- **From source:** `git pull`, then build again.
-
-## Using Zmail over SSH or on a headless machine
-
-Zmail keeps its store key and account secrets in the OS keychain and has no passphrase or plaintext fallback. Over SSH to a Linux machine with no desktop login there is no Secret Service, so `zmail-app tui` stops and says the keychain did not answer.
-
-[`scripts/zmail-tui-headless.sh`](./scripts/zmail-tui-headless.sh) is a launcher for that case. It starts a private D-Bus session and gnome-keyring on it, asks for a keyring password (you choose it on first run; it is never stored), then runs `zmail-app tui`. It needs `dbus-daemon`, `busctl`, `gnome-keyring` and `flock`:
-
-```bash
-sudo apt install dbus-daemon gnome-keyring      # Debian and Ubuntu
-scripts/zmail-tui-headless.sh                   # start the terminal UI
-scripts/zmail-tui-headless.sh --status          # show the bus and keyring state
-scripts/zmail-tui-headless.sh --lock            # lock the keyring and stop the bus
-```
-
-The script is not in the release archives; copy it from this repository to the machine. The trade-off: the keyring stays unlocked until you run `--lock` or the machine restarts, so any process running as your user can read Zmail's secrets in that time. Lock it when you are done on a shared machine. Browser sign-in (OAuth) cannot reach a Zmail running over SSH, so add such accounts on a computer with a browser, or use an app password.
-
-## Where Zmail keeps its data
-
-The local store lives in a platform data directory, independent of the launch directory:
-
-- Linux: `$XDG_DATA_HOME/zmail` (default `~/.local/share/zmail`)
-- macOS: `~/Library/Application Support/zmail`
-- Windows: `%APPDATA%\zmail`
-
-Set the `ZMAIL_DATA_DIR` environment variable to override the store directory. Each store keeps its own account passwords and sign-ins in the system keychain, named by an id the store keeps, so stores in different directories (or a new store after `zmail-app reset-store`) never read, replace or remove each other's, even though their accounts are numbered alike. Copying a store's directory copies its id: the copy and the original then share their keychain entries, so make a new store rather than a copy when you want a second one. A legacy `.zmail-dev/zmail.sqlite3` store in the current directory is migrated to the platform data directory on first run; if the migration fails, the app keeps using the legacy store so no data is lost.
-
-
-## What Zmail has
-
-What is built so far (Zmail is alpha, so expect gaps and rough edges):
-
-- three-pane GPUI shell with local-first mailbox, thread, and preview browsing
-- hydrated thread reader with safe HTML fallback rendering and remote-content blocking
-- on macOS and Windows, HTML mail renders formatted in a locked-down web view inside the reader (`WKWebView`, or the system's WebView2 runtime on Windows; [ADR 0006](./docs/adr/0006-html-email-renderer.md)): JavaScript off, every load blocked except Zmail's own, links confirmed in Zmail's dialog, Zmail's menus and dialogs drawn above it through GPUI's native window composition (Zed PR #62379); remote images load only when you allow them, and then Zmail fetches them itself (https only, never from private addresses, raster images only, at most 100 per message) so the web view never connects anywhere; each message's More menu switches to the Simple (text) view, and `ZMAIL_WEB_RENDERER=0` turns it off. On Linux the same locked-down page renders in WebKitGTK 4.1 (the `libwebkit2gtk-4.1-0` package, which the `.deb` recommends; 2.52.0 or newer): live inside the reader on X11, and as a picture of the page with working links and selection on Wayland. Zmail loads WebKitGTK only when it shows a formatted message and never runs it without its bubblewrap sandbox: without the library, below the minimum version, inside a snap or Flatpak, or where the sandbox cannot start (Ubuntu 24.04 restricts the user namespaces it needs), messages show as text with the reason. Windows without the WebView2 runtime keeps the text view
-- SQLite-backed local mirror, encrypted at rest with SQLCipher ([ADR 0005](./docs/adr/0005-store-encryption.md)), with migrations, paging, and persisted sync state
-- local mailbox operations for read or unread, flag, move, archive, delete, and full-text search
-- real IMAP and JMAP account sync behind a dedicated Tokio background runtime
-- account setup in the app itself (first-run onboarding, then the Add Account window), with provider presets (Gmail, Microsoft 365), background access-token refresh, and XOAUTH2 for IMAP sync, SMTP submission, and JMAP bearer authentication
-- Gmail signs in with an app password by default; zmail has no Google OAuth client of its own yet, so [`docs/gmail-oauth.md`](./docs/gmail-oauth.md) (and the guide in the Add Account flow) walks through creating your own
-- **experimental** native Proton Mail accounts (paid plans) that follow Proton Mail Bridge's behaviour without needing Bridge: sign-in with 2FA and human verification, sync (the newest mail first, older mail fetched in the background), live updates, actions and end-to-end encrypted sending ([ADR 0004](./docs/adr/0004-proton-native.md)). zmail is an independent client on Proton's private API and signs in with Proton Mail Bridge's app version, because Proton's sign-in accepts no other client, so Proton may change or block it; build with `--no-default-features` to leave it out
-- received attachment download and save-as for IMAP and JMAP accounts
-- full-text search with query operators; IMAP message bodies are fetched and indexed in the background, newest first, within the account's disk budget, pausing on battery power (Linux) unless allowed
-- compose, autosave, attachment handling, outbox retry, SMTP submission, and JMAP submission support
-- multiple identities from day one, with JMAP identity discovery and manual identity setup for generic accounts
-- OS keychain-backed credential storage
-- per-account cache policy persisted with each configured account
-- unchanged Zed theme file parsing and semantic theme mapping
-- coalesced UI refresh polling so background sync and outbox jobs do not flood the GUI thread
-- multi-platform GitHub Actions builds plus Release Please automation starting at `0.0.1`
-- Tagged releases also attach a Linux screenshot captured from the live mail harness by the Release Please workflow chain
-- pull requests that change the UI get a `ui-screenshots` CI artefact: every main UI state in light and dark plus narrow and wide windows, captured from seeded fixture data (see `AGENTS.md`)
-- release archives ship platform binaries plus a Linux `.deb`, a macOS DMG (Developer ID signed and notarised), and a Windows MSI installer; the Windows and Linux downloads are not signed (see "Install")
-- a terminal UI for reading, triaging and writing mail (with saving attachments, sender-safety warnings, a `:` command palette and a user keymap file), `zmail-app tui` ([ADR 0007](./docs/adr/0007-terminal-ui.md); see "Terminal UI" below): Pine/Alpine-style screens on the same encrypted store, every string from mail filtered for escape sequences before it reaches the terminal; delete, archive, save to a folder, flag and mark read with undo, sharing the desktop app's mail actions; Pico-style compose, reply and forward with drafts, attachments, undo-send and an Outbox; and Setup → Accounts to add (with autodiscovery, a connection test, OAuth through the browser, and Proton sign-in in builds with Proton), change and delete accounts, through the same account setup code as the desktop app (`zmail-setup`)
-- screen-reader roles, names and announcements through AccessKit (VoiceOver, UI Automation, AT-SPI), Windows contrast themes and macOS Increase Contrast, reduced motion, text size up to 200% and 24px pointer targets; not yet checked with a real screen reader (see [`docs/phase5-hardening.md`](./docs/phase5-hardening.md#accessibility))
-- Phase 5 hardening and release policy documentation
-
-
-## Workspace
-
-- [`PLAN.md`](./PLAN.md): master delivery plan
-- [`docs/upstream/zed.md`](./docs/upstream/zed.md): Zed and GPUI upstream pin record (GPUI is normally pinned to a Zed stable release tag and bumped by a weekly workflow; for now it is pinned to Zed PR #62379 for the web renderer)
-- [`docs/adr/0001-jmap-client-strategy.md`](./docs/adr/0001-jmap-client-strategy.md): JMAP implementation decision
-- [`docs/adr/0003-gpui-zed-stable-pin.md`](./docs/adr/0003-gpui-zed-stable-pin.md): GPUI pinned to Zed stable release tags
-- [`docs/phase5-hardening.md`](./docs/phase5-hardening.md): accessibility, performance, crash policy, packaging, and release process
-- [`docs/performance.md`](./docs/performance.md): performance budgets, how they are measured, and the latest numbers
-- [`themes/phase0-dark.json`](./themes/phase0-dark.json): sample unchanged Zed-format theme file
-
-## Building from source
-
-These are for developers. Most people want "Install" above.
-
-Format and verify the workspace:
-
-```bash
-cargo fmt --all
-cargo check --workspace
-cargo test --workspace
-```
-
-Run the stricter CI-equivalent verification locally:
-
-```bash
-cargo clippy --workspace --all-targets -- -D warnings
-cargo deny check licenses advisories bans sources
-cargo audit
-```
-
-Run the live Docker-backed mail harness tests:
-
-```bash
-scripts/mail-harness.sh up
-cargo test -p zmail-test-support --test live_mail_harness -- --ignored --nocapture
-cargo test -p zmail-test-support --test live_jmap_harness -- --ignored --nocapture
-scripts/mail-harness.sh down
-```
-
-Add and sync an account from the command line (the desktop app and the terminal UI add accounts themselves):
-
-```bash
-cargo run -p zmail-app -- add-imap
-cargo run -p zmail-app -- add-jmap
-```
-
-Inspect configured accounts or trigger sync:
-
-```bash
-cargo run -p zmail-app -- list-accounts
-cargo run -p zmail-app -- sync all
-cargo run -p zmail-app -- sync 1
-```
-
-Only one Zmail process syncs a store at a time (see "Terminal UI" below). While the desktop app or `zmail-app tui` syncs it, `sync`, `index` and `process-outbox` say so and exit with an error, and `send`, `retry-outbox`, `compose`, `add-imap`, `add-jmap` and `empty-trash` do their part (queue the message, store the account, empty the Trash on the server) and leave the syncing and sending to that Zmail, which does it within seconds. `--force` runs them here anyway, beside it. Commands that only read the store, such as `list-accounts`, `search` and `read`, work regardless; `search --server` asks the server too, and leaves fetching what it finds to the Zmail that syncs.
-
-Search or operate on locally mirrored mail:
-
-```bash
-cargo run -p zmail-app -- search 1 incident
-cargo run -p zmail-app -- read 42
-cargo run -p zmail-app -- flag 42
-cargo run -p zmail-app -- mark-read 42
-cargo run -p zmail-app -- move 42 7
-cargo run -p zmail-app -- archive 42
-cargo run -p zmail-app -- delete 42
-```
-
-Search queries (in the app's search field and the `search` command) combine
-words, `"quoted phrases"` and operators, all of which must match:
-`from:`, `to:`, `subject:`, `has:attachment`, `is:unread`, `is:read`,
-`is:flagged`, `in:<mailbox name or role>`, and `before:`/`after:` with a
-`YYYY-MM-DD` date or a relative one such as `7d`, `2w`, `3m` or `1y`. A
-leading `-` negates any of them:
-
-```bash
-cargo run -p zmail-app -- search 1 'from:alice "budget review" -in:junk after:30d'
-```
-
-In the app, a search starts in the folder the list shows (the Unified
-Inbox counts as one folder: every account's inbox). The scope control under
-the list header, the empty state and the Edit menu widen it to the folder's
-account or to every account (Secondary+Alt+1, 2 and 3 pick folder, account
-and all accounts). Each new search starts in the folder again. An `in:`
-operator in the query names the folder itself and takes the folder's place
-in the scope control. The `search` command searches one account.
-
-The desktop app indexes bodies in the background; `zmail-app index ID` runs
-one indexing pass for an account in the foreground and prints its progress.
-Until every body is indexed, a search with free text also asks the server
-(IMAP `UID SEARCH`, JMAP `Email/query`); its extra hits are listed after the
-local ones and marked "found on server". The server search follows the
-scope: in folder scope IMAP searches only that folder's mailboxes, and a
-search across accounts asks each account's server separately, so one
-offline account does not stop the others' results. `zmail-app search --server ID QUERY`
-does the same from the command line.
-
-Launch the desktop client:
-
-```bash
-cargo run -p zmail-app
-```
-
-
-## Terminal UI
-
-Read, triage and write mail, and set accounts up, in a terminal, on the same store as the desktop app ([ADR 0007](./docs/adr/0007-terminal-ui.md)):
-
-```bash
-zmail-app tui
-zmail-app launch-tui-fixture   # synthetic mail, no sync, nothing saved, a keychain in memory
-```
-
-From a source checkout, use `cargo run -p zmail-app -- tui` and so on.
-
-It is in every build (the `tui` feature, on by default) and unlocks the store with its key from the system keychain, like the desktop app; over SSH that needs the keychain service running on that machine (Secret Service on Linux), or it says so and stops; see "Using Zmail over SSH or on a headless machine" above for a launcher. With no account yet, the status line says so and, on the Main Menu where it starts, `S` goes straight to adding one (later accounts: `S`, then `A` for Accounts, then `A`).
-
-The screens work like Pine and Alpine: a title bar, the screen, a status line, and a command bar that lists the keys that work there (`O` shows more). Letters work in either case.
-
-| Key | Does |
+| System | File |
 | --- | --- |
-| `M` | Main Menu |
-| `L` | Folder List (each account is a collection) |
-| `I` | Message Index of the current folder |
-| `<` / `>`, Enter | up a level, open |
-| `P` / `N` | previous and next item (or message, in Message Text) |
-| `-` / Space | previous and next page |
-| `W` | WhereIs: search the index as you type (the search language above; Enter also asks the server), find a folder, or find text in a message |
-| `/` | list conversations or single messages |
-| `V` | preview pane beside the index, in terminals 120 columns or wider |
-| Tab, Enter | in Message Text, move to a numbered link and open it after seeing its real address |
-| `V` | in Message Text, the Attachment Index: the conversation's attachments (name, type, size), to save |
-| `C` | compose (wherever `C` is free); `R` reply and `F` forward in the Message Index and Message Text |
-| `T` | the Outbox (from the Main Menu; also under Local in the Folder List) |
-| `S` | Setup (from the Main Menu; with no account yet it goes straight to adding one); `A` there opens Accounts |
-| `:` | the command palette: every command of the screen with its key, filtered as you type (the desktop app's fuzzy matcher), Enter runs one; not in Compose or the account forms, where `:` is text |
-| `Q` | quit, after asking |
+| macOS (Apple silicon) | `Zmail-<version>.dmg` (signed and notarised), or `zmail-macos.app.zip`; `zmail-macos.tar.gz` is the `zmail-app` binary alone, handy for the terminal UI |
+| Windows (x86-64) | `zmail-windows-x86_64.msi` (installer), or `zmail-windows-x86_64.zip` |
+| Debian and Ubuntu (x86-64) | `zmail-linux-x86_64.deb` |
+| Other Linux (x86-64) | `zmail-linux-x86_64.tar.gz` |
 
-**Triage** works in the Message Index on the message under the cursor and in Message Text on the open one. Each command acts on the whole conversation, as in the desktop app (also when the index lists single messages), and the status line says what it did with its undo key ("Conversation moved to Trash. U Undo").
+Each release also has `SHA256SUMS-Linux`, `SHA256SUMS-macOS` and `SHA256SUMS-Windows`, and every file has a build provenance attestation you can check with `gh attestation verify FILE --repo unicornops/zmail`. The Windows and Linux downloads are not signed. [Installing Zmail](./docs/install.md) explains each file, how to check a download, HTML mail on Linux, upgrading, and where Zmail keeps its data.
 
-| Key | Does |
+## Features
+
+- Desktop app for macOS, Windows and Linux, and a terminal UI, sharing one store and one set of accounts.
+- IMAP, JMAP and SMTP, with OAuth2 sign-in; account setup finds the server settings and tests the sign-in before saving. Native Proton Mail accounts (paid plans) are Experimental.
+- Local-first: the mail is mirrored into a SQLCipher-encrypted store, so browsing, search and mail actions never wait for the network; sync and sending run in the background.
+- Full-text search with operators such as `from:`, `has:attachment` and `after:30d`, asking the server too until every message is indexed.
+- HTML mail in a locked-down web view with remote content blocked until you allow it, or as plain text; sender-safety warnings for look-alike domains and misleading names.
+- Compose with drafts, attachments, undo-send and an outbox; multiple identities.
+- Passwords and the store key in the system keychain; no telemetry.
+
+[What Zmail has](./docs/features.md) is the full list.
+
+## Quick start
+
+1. Install Zmail from the [latest release](https://github.com/unicornops/zmail/releases/latest).
+2. Start it from your applications menu or Start menu, or run `zmail-app`. With no account yet, it shows a welcome screen: choose your provider and sign in, and Zmail finds the server settings, tests the connection, saves the account and starts the first sync.
+3. Gmail needs an app password or an OAuth client of your own; the Add Account flow explains both.
+4. For the terminal UI, run `zmail-app tui`; `S` on its Main Menu adds an account.
+
+Zmail needs the system keychain: Keychain on macOS, Credential Manager on Windows, or a Secret Service such as GNOME Keyring or KWallet on Linux. Over SSH, see [Using Zmail over SSH or on a headless machine](./docs/install.md#using-zmail-over-ssh-or-on-a-headless-machine).
+
+## Documentation
+
+| Read | For |
 | --- | --- |
-| `D` | delete: to the Trash at once (for good, with no undo, when the account has no Trash); in Message Text, the next message opens |
-| `E` | archive |
-| `S` | save to a folder of the same account: Tab completes the name and then goes through the matches, `Ctrl-T` lists the folders to pick from |
-| `*` | flag, or unflag |
-| `K` | mark read, or unread |
-| `U` or `Z` | undo the last of these, whichever screen it was done on |
-| `;` | select the message under the cursor, or not (an `X` in the first column) |
-| `A` | apply the next command (`D`, `E`, `S`, `*` or `K`) to every selected message; `;` there unselects them all |
+| [Installing Zmail](./docs/install.md) | downloads, checking them, first run, upgrading, SSH and headless machines, where data is kept, platform notes |
+| [What Zmail has](./docs/features.md) | the full feature list, and Settings → Mail |
+| [Terminal UI](./docs/tui.md) | keys, triage, compose, accounts, and the keymap file for your own keys |
+| [The command line](./docs/cli.md) | every `zmail-app` command, with examples |
+| [Searching mail](./docs/search.md) | the search language, search scope and server search |
+| [Gmail with your own OAuth client](./docs/gmail-oauth.md) | signing in to Gmail with OAuth |
+| [Development](./docs/development.md) | building from source, tests, the live mail harness, UI screenshots, design documents |
+| [Architecture decisions](./docs/adr/) | the ADRs: JMAP, GPUI pin, Proton Mail, store encryption, HTML mail, terminal UI |
+| [Performance](./docs/performance.md) | performance budgets and the latest numbers |
+| [Hardening and release policy](./docs/phase5-hardening.md) | accessibility, crash reporting, packaging, signing and releases |
+| [Security policy](./SECURITY.md) | how to report a vulnerability |
+| [Changelog](./CHANGELOG.md) | what changed in each release |
 
-**Sender-safety warnings** appear above a message's text in Message Text (and the preview pane), with the desktop app's words and evidence from the same code (`zmail_security::sender_warning`): "Possible impersonation" for a sender's domain that imitates a well-known one (with look-alike letters from other alphabets too), "Name shows another address" for a display name that shows an address or website on another domain, "Mixed alphabets in the sender's domain", "Replies go somewhere else" for a Reply-To on an unrelated domain, and "Sent through a mailing list" (a name like `'alice@example.com' via Dev Team` sent from the list), "Replies go to a related address" and "International sender domain" (all three left out with the desktop app's "Fewer warnings" setting). `X` (Looks safe, on the first page of the command bar while a warning shows) hides the warning in view for that message only, as the desktop app's button does, in both frontends.
-
-**Attachments** are saved from the Attachment Index (`V` in Message Text). `S` or Enter saves the one under the cursor: the path starts in the folder last saved to (else Downloads, else the home folder) with the attachment's name made safe for a file (`zmail_security::attachment_safety`), Tab completes it, and a folder there saves into that folder. A file that is already there is replaced only after asking. `A` saves them all into a folder, numbering a name that is taken (`report (1).pdf`), as the desktop app's Save All does. The attachment is decrypted to a temporary file beside the destination and renamed into place (`AttachmentBlob::save_to`), so a failed save leaves nothing partial. Names and types from the mail are filtered before they are drawn. The terminal never opens or launches an attachment: save it, and open it yourself.
-
-Opening a message in Message Text marks it read once it has been open for 1.5 seconds, as the desktop app's reader does. The changes go through the same mail actions as the desktop app (`zmail-actions`): each is written to the store at once and sent to the server by whichever Zmail syncs.
-
-**Writing mail** works like Pico: header fields (From when the account has several addresses, To, Cc, Bcc, Attchmnt, Subject), then the message text in an editor (`ratatui-textarea`). Up and Down, Enter and Tab move between the fields; Tab in To, Cc and Bcc completes an address from the ones you have used (the desktop app's suggestions, best first), again to go through the matches. `C` asks "Continue postponed composition?" when there are postponed messages. `R` replies to the message (in Message Text, the newest one that starts on screen), asking "Reply to all recipients?" when others got it too; `F` forwards it. Replies and forwards start exactly as in the desktop app (`zmail_actions::reply`: recipients, `Re:`/`Fwd:`, the quote or the forwarded headers), with the quoted text filtered for the terminal before it enters the editor. As in the desktop app, a reply goes to the message's `Reply-To` when it has one, comes from the address the message was sent to (an alias included; change it in From), and names the message it answers in `In-Reply-To` and `References`, so it threads for the recipients; a forward takes the message's attachments along, to keep or remove.
-
-| Key | Does |
-| --- | --- |
-| `Ctrl-X` | send, after asking; the message waits for the undo-send delay set in the desktop app, and until then `U` takes it back and opens it again |
-| `Ctrl-O` | postpone: keep the draft for later |
-| `Ctrl-C` | cancel: deletes the draft, after asking if you changed it (an unchanged postponed draft stays) |
-| `Ctrl-K` / `Ctrl-U` | cut the line (a header field's text, or the attachment under the cursor on Attchmnt), put back what was cut |
-| `Ctrl-J` or `Ctrl-A` | attach a file: its path, with Tab completion, or `Ctrl-T` to browse. Windows shows `^A` on the command bar, where `Ctrl-J` may arrive as Enter |
-| `Ctrl-R` | insert a file's text into the message |
-| `Ctrl-W` | find text in the message |
-| `Ctrl-T` | your addresses (most used first) in To, Cc and Bcc; the file browser on Attchmnt |
-| `Ctrl-G` | help |
-| `Ctrl-_` | edit the message text in `$VISUAL` or `$EDITOR` (most terminals send the same key for `Ctrl-7` and `Ctrl-/`), only when Setup turns it on |
-
-The external editor is off by default. Setup says what turning it on means: while the editor is open, the draft is unencrypted in a temporary file, in a new folder only you can open (0700 on Unix, the file 0600; on Windows your own temporary folder), and Zmail overwrites every file in that folder and removes it when the editor exits, also when it fails or never starts.
-
-Drafts autosave to the encrypted store a second after typing pauses, as in the desktop app, and attachments are copied into it encrypted, shown by their filtered names and sizes. Send goes through the same path as the desktop app (`SyncService::queue_draft_and_send_after`), so whichever Zmail holds the sync lock sends it from the outbox. The **Outbox** (`T`) lists messages waiting to send and those that couldn't be sent, in the desktop app's words: `R` sends a failed one again, `D` takes back one that hasn't started sending (it returns to the postponed messages); a refused sign-in or a changed recipient key is settled in the desktop app. The postponed messages are listed under Local in the Folder List too, where Enter continues one and `D` deletes it.
-
-**Accounts** (`S`, then `A`) is Alpine's collection list for mail accounts: `A` adds one, `C` changes the one under the cursor (a new password, the browser sign-in again for OAuth accounts, the cache budget), `D` deletes it from this computer after asking (its local data and every keychain secret it has; the mail on the server stays). The steps of adding one are the desktop app's, from the same code (`zmail-setup`):
-
-1. Your email address. Gmail, Outlook.com, Fastmail and iCloud addresses use Zmail's own settings; any other domain is looked up step by step, each step's progress on screen (DNS records, the domain's own setup file, JMAP, Mozilla's database only after asking, since that sends the domain to Mozilla, the domain's mail servers, the usual server names). `E` skips to typing the servers. With Proton built in, a Proton address (or `Ctrl-P`) goes to Proton's sign-in instead.
-2. How you sign in: a password, an app password (with the provider's own hint and help page), or OAuth in the browser with a client of your own. Zmail ships no OAuth client; for Gmail the step lists how to make one in Google Cloud, as the desktop app's guide does.
-3. The servers, found or guessed, all editable: host, port and security for IMAP and SMTP, or the JMAP session URL. TLS is the default; an unencrypted connection needs its own opt-in, with a warning.
-4. For OAuth, the browser opens at the provider's sign-in page, and the address is always shown too, in full, to open by hand. The provider sends the sign-in back to `127.0.0.1` on the computer the browser runs on, so over SSH (`SSH_CONNECTION` or `SSH_TTY` set) it can't reach this Zmail; the terminal says so plainly and opens no browser: use an app password, or add the account on the computer you're at. Esc stops waiting and frees the port.
-5. A connection test: Zmail signs in to the incoming server (IMAP, or the JMAP session) and the outgoing one (SMTP), sends nothing, and says which one failed and why, back on the step where it is fixed.
-6. Your identity: the name and address mail goes out with, prefilled, and a signature.
-7. Saved: the password goes to the system keychain and nowhere else, and the first sync starts here when this Zmail syncs, otherwise in the Zmail window that does (within seconds). The screen follows the first sync.
-
-Proton sign-in (builds with Proton) asks for your Proton username and password, under the desktop app's note on what a third-party Proton client means (Zmail signs in as Proton Mail Bridge), then the two-factor code and the mailbox password when the account has them. When Proton asks for human verification, Zmail opens Proton's page in the browser (and shows its address) and signs in again once you press Enter.
-
-In the forms, Up, Down and Tab move between fields, Enter goes to the next one or continues from the last, Space changes a choice, `Ctrl-U` clears a field, Esc goes back a step and `Ctrl-C` cancels. Password fields show `[hidden]` once typed, never the text or its length. Everything a server, DNS or Proton returns (discovery results and errors, connection errors) is filtered for the terminal before it is drawn.
-
-**Your own keys.** A keymap file rebinds keys on each screen. It is `tui-keymap.json` in the store's folder (see "Where Zmail keeps its data": `~/.local/share/zmail/tui-keymap.json` on Linux, `~/Library/Application Support/zmail/tui-keymap.json` on macOS, `%APPDATA%\zmail\tui-keymap.json` on Windows, or in `ZMAIL_DATA_DIR`), read when the terminal UI starts; Help (`?`) shows its path and what it binds. The format is the desktop app's keymap format (Zed's): a JSON array of sections, each with an optional `context`, the screen, and `bindings` from keys to commands:
-
-```json
-[
-  { "context": "MessageIndex", "bindings": { "x": "Delete", "d": null } },
-  { "context": "MessageText", "bindings": { "ctrl-s": "LooksSafe" } },
-  { "bindings": { "ctrl-p": "Palette" } }
-]
-```
-
-- Screens (`context`): `MainMenu`, `FolderList`, `MessageIndex`, `MessageText`, `AttachmentIndex`, `Setup`, `Help`, `Postponed`, `Outbox` and `Accounts`. A section without one applies on all of them, and a section for the screen wins over it. Compose and the account forms aren't keymapped: their keys are text.
-- Keys as Zed writes them: `x`, `ctrl-x`, `alt-x`, `shift-tab`, `enter`, `space`, `tab`, `backspace`, `up`, `pageup`, `home`, `f1` to `f12`, or a character such as `<` or `*`. Letters work in either case. Esc and `ctrl-l` (redraw) are the terminal's own and can't be bound.
-- Commands: `Help`, `Back`, `Select`, `Prev`, `Next`, `PageUp`, `PageDown`, `Home`, `End`, `WhereIs`, `Threads`, `Preview`, `MainMenu`, `FolderList`, `Index`, `Setup`, `Compose`, `Reply`, `Forward`, `Outbox`, `Retry`, `CancelSend`, `DeleteDraft`, `AddressBook`, `Quit`, `OtherCmds`, `NextLink`, `PrevLink`, `Mark`, `Copy`, `Delete`, `Undo`, `Archive`, `Save`, `Flag`, `ReadState`, `ToggleSelected`, `Apply`, `Accounts`, `AddAccount`, `ChangeAccount`, `DeleteAccount`, `Attachments`, `SaveAttachment`, `SaveAllAttachments`, `LooksSafe` and `Palette`. `null` makes the key do nothing on that screen.
-- A key you bind replaces what Zmail had on it there; Zmail's other keys keep working. The command bar, the Main Menu, Help and the palette show your key for a command, and a command whose only key you took is left off the bar but stays in the palette (`:`). A command that doesn't work on a screen says so when its key is pressed.
-- A file that isn't valid JSON, or names an unknown screen, key or command, is ignored as a whole (nothing of it applies), and the status line and Help say why; the terminal UI always starts.
-
-The mouse works too: a click opens what it is on (a click on the index's first column selects), the wheel scrolls, and the command bar's entries can be clicked.
-
-**Copy and paste** work as in Zellij. Drag to select text inside one pane (the preview pane and the index are separate); it is copied when you let go. Double-click selects a word, triple-click a line, and dragging past the top or bottom scrolls. Wrapped lines are copied as the line they came from. Without a mouse, `Ctrl-Space` sets a mark in Message Text, the arrow keys select, and `y` or `Ctrl-C` copies. Copies go to the clipboard with OSC 52 (iTerm2, kitty, WezTerm, Alacritty, foot, Windows Terminal; tmux needs `set-clipboard on`); on a Mac outside SSH they go through `pbcopy`, since Terminal.app has no OSC 52. Setup can set a copy command instead (`wl-copy`, `xclip -selection clipboard`; run without a shell), send OSC 52 to the primary selection, or turn the mouse off. Hold Shift while dragging to use the terminal's own selection. Pastes (bracketed paste) go only into text fields such as WhereIs and Compose's fields, as text (a list pasted into To, one address per line, becomes a comma list); anywhere else they are ignored, so pasted text never runs commands.
-
-Only one Zmail process syncs a store at a time, through a lock beside it (`<store>.sync.lock`). When the desktop app is already open, the terminal UI shows what it syncs, says "Sync runs in another Zmail window", and takes sync over if the window closes first; the same holds the other way round. The command-line commands that sync or send respect the lock too (see above). New mail shows in the status line and rings the terminal bell (Setup turns the bell off).
-
-## Mail Harness
-
-Phase 2b adds a repo-owned Docker Compose harness at [`docker/mail-harness/docker-compose.yml`](./docker/mail-harness/docker-compose.yml). It uses GreenMail for IMAP/SMTP and Apache James behind a local proxy for JMAP, with deterministic seeded state and automated account provisioning.
-
-- IMAP endpoint: `imap://127.0.0.1:3143`
-- SMTP endpoint: `127.0.0.1:3025`
-- JMAP endpoint: `http://127.0.0.1:4080`
-- mailbox login: `phase2`
-- mailbox password: `phase2-password`
-- mailbox address: `phase2@localhost`
-- sender login: `sender`
-- sender password: `sender-password`
-- sender address: `sender@localhost`
-- JMAP login: `jmap@localhost`
-- JMAP password: `jmap-password`
-
-The ignored integration tests start and stop the harness automatically. `live_mail_harness` verifies IMAP/SMTP round-tripping against GreenMail, `live_jmap_harness` verifies JMAP sync plus SMTP-delivered mail visibility against James, `live_tui_send` sends from the terminal UI's Compose, and `live_tui_setup` adds an account in the terminal UI's Setup → Accounts (connection test and first sync included).
-
-## Platform Notes
-
-On macOS, the first GPUI build may require Apple's Metal Toolchain. If `cargo check -p zmail-app` reports that the `metal` tool is missing, install it with:
-
-```bash
-xcodebuild -downloadComponent MetalToolchain
-```
-
-GitHub Actions now builds `zmail-app` on `ubuntu-latest`, `macos-latest`, and `windows-latest`, and publishes tagged release archives from the same matrix.
-
-On Linux, the desktop dependency stack also needs D-Bus, Fontconfig, and FreeType development headers. The same packages used in CI are:
-
-```bash
-sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev
-```
-
-HTML mail on Linux (ADR 0006) uses WebKitGTK 4.1 at runtime; nothing is needed to build. To see formatted mail, install `libwebkit2gtk-4.1-0` (Debian 13, Ubuntu 24.04 and later; `webkit2gtk4.1` on Fedora). Its sandbox, bubblewrap, needs unprivileged user namespaces: it works on Debian, Fedora and Ubuntu 26.04, but not in most containers, and Ubuntu 24.04 allows them only to programs with an AppArmor profile that grants them. The `.deb` installs one for `/usr/bin/zmail-app` (`/etc/apparmor.d/zmail`, which confines nothing and only allows user namespaces, like the profiles Ubuntu ships for Epiphany); a tarball install on Ubuntu 24.04 needs the same profile, from `crates/zmail-app/packaging/apparmor/zmail`, copied to `/etc/apparmor.d/zmail` and loaded with `sudo apparmor_parser -r /etc/apparmor.d/zmail`. The `.deb` loads it when it is installed (if AppArmor is present; on other systems nothing happens) and unloads it when Zmail is removed. Where the sandbox cannot start, Zmail shows mail as text and says why; it never runs the engine without it. `ZMAIL_WEB_DEBUG=1` logs each step of the web renderer.
-
-Window chrome: Zmail draws its own title bar with the toolbar inside it. On macOS the system title bar is transparent around the traffic lights; on Windows the caption buttons are drawn (Snap Layouts still work); on Linux Zmail draws a header bar, shadow and resize edges (client-side decorations) on GNOME and other desktops, and keeps the window manager's title bar on KDE and on X11 without a compositor or `_GTK_FRAME_EXTENTS` support. `ZMAIL_WINDOW_DECORATIONS=server` or `=client` overrides the choice (GNOME on Wayland has no server-side decorations, so it always gets the drawn ones).
-
-GPUI draws through wgpu, which needs a Vulkan driver (the `libvulkan1` loader plus Mesa or a vendor driver) or, as a fallback, EGL/OpenGL at runtime. Desktop distributions ship these already; headless runs such as the release screenshot use Mesa's lavapipe software driver (`mesa-vulkan-drivers`).
-
-The Rust toolchain in [`rust-toolchain.toml`](./rust-toolchain.toml) follows the one Zed pins for the GPUI release tag, so rustup selects it automatically.
-
-## Licensing
+## Licence
 
 Zmail is licensed under GPL-3.0-only. Dependency policy is enforced through [`deny.toml`](./deny.toml) and prepared for `cargo-about` via [`about.toml`](./about.toml).
 
