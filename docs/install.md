@@ -18,6 +18,8 @@ Releases are on the [Releases page](https://github.com/unicornops/zmail/releases
 
 The macOS assets are built on an Apple silicon runner; their names do not say so. Apart from the DMG, asset names carry no version, so keep track of the release tag you downloaded from.
 
+The Linux assets need glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later); 0.34.0 and 0.34.1 needed glibc 2.43 by mistake and do not start on Ubuntu 24.04 ([#483](https://github.com/unicornops/zmail/issues/483)).
+
 ## Check your download
 
 **Checksums.** Each release has `SHA256SUMS-Linux`, `SHA256SUMS-macOS` and `SHA256SUMS-Windows`, listing the assets built on that system. Download the one for your asset into the same folder, then check just that file:

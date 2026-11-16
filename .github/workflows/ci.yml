@@ -101,6 +101,10 @@ jobs:
                       scripts/capture-linux-web-screenshots.sh|scripts/x11-capture-session.sh)
                         app_code=true
                         ;;
+                      # The Build job's glibc check.
+                      scripts/check-linux-glibc.sh|scripts/test-check-linux-glibc.sh)
+                        app_code=true
+                        ;;
                     esac
                   done < <(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
 
@@ -253,7 +257,9 @@ jobs:
             fail-fast: false
             matrix:
                 include:
-                    - os: ubuntu-latest
+                    # The image release-please.yml builds the Linux release
+                    # on, so the glibc check below sees what users get (#483).
+                    - os: ubuntu-24.04
                       artifact_name: zmail-linux
                       binary_path: target/release/zmail-app
                     - os: macos-latest
@@ -303,6 +309,14 @@ jobs:
 
             - name: Build release binary
               run: cargo build -p zmail-app --release --locked
+
+            # The Linux binary must not need a newer glibc than the release
+            # supports (scripts/check-linux-glibc.sh, #483).
+            - name: Check the glibc requirement
+              if: runner.os == 'Linux'
+              run: |
+                  scripts/test-check-linux-glibc.sh
+                  scripts/check-linux-glibc.sh target/release/zmail-app
 
             # The quality job runs the workspace tests on Linux only, but
             # SQLCipher's crypto provider differs per platform (CommonCrypto
