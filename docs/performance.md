@@ -293,3 +293,163 @@ runs each on a busier container, load 9–20): mark read 17.8–19.3 ms
 against 34.2–36.1 ms, archive 18.7–21.1 ms against 39.1–43.1 ms, the
 scrollbar jump 11.1–12.8 ms against 12.7–13.2 ms, and every other median
 within noise of the table above.
+
+## Writing a stretch of older Proton mail (2026-11-16, #478)
+
+A Proton account's older mail arrives in stretches of 1,024 messages
+(8 pages of 128, metadata only), each written with
+`LocalStore::merge_account_snapshot`, or with
+`LocalStore::apply_mail_delta` while the history is listed again after a
+refresh request (ADR 0004). #478 reported the download slowing down as
+the mirror grew. This is what one stretch costs to write, and where the
+time goes.
+
+### How it is measured
+
+```sh
+ZMAIL_BACKFILL_SIZES=10000,100000,1000000 cargo bench -p zmail-store --bench backfill
+```
+
+`crates/zmail-store/benches/backfill.rs` grows a synthetic account in an
+encrypted store on disk to each size in turn and writes the next
+stretches into it, timing each phase of the write
+(`zmail_store::merge_profile`). The account is shaped like a Proton
+mailbox (`zmail_test_support::proton_mirror_stretch`): every message is
+in All Mail and in one of Inbox, Archive, Sent, Trash or Spam, one in
+four also carries one of six labels, so a million messages are 2.25
+million message rows in 2.03 million threads; a fifth of the messages
+are in conversations of two to six, some of which straddle two
+stretches; mail comes from 4,000 contacts (a few of them most of the
+time) and 20,000 bulk senders, and 12% of it is sent mail to one to
+three contacts. Messages are metadata only, as the backfill lists them:
+no bodies. Without `ZMAIL_BACKFILL_SIZES` it runs 10,000 and 100,000,
+which takes about 20 seconds; the million takes about three minutes
+(over six before the fix).
+
+AMD Ryzen 5 3600 (6 cores, 12 threads), Linux dev container, release
+profile, Rust 1.98.1. All times are milliseconds for one stretch of
+1,024 messages; the merge is the median of three stretches, the deltas
+one run each. The container was quiet for the "after" run (load
+average under 2) and shared with a compile for part of the "before"
+run; treat differences under about 20% as noise (the commit alone
+varied between 60 and 130 ms).
+
+### Before (`main` at ff1de94, 0.34.2, with the timing added)
+
+`merge_account_snapshot`, 1,024 messages new to the mirror:
+
+| Mirror | match stored threads | compare and write | mailbox counters | address history | search index | commit | other | total |
+|---|---|---|---|---|---|---|---|---|
+| 10,000 | 10.2 | 78.5 | 5.2 | 47.2 | 10.9 | 71.3 | 1.1 | 224 |
+| 100,000 | 73.3 | 76.8 | 125 | 610 | 11.5 | 81.4 | 7.7 | 985 |
+| 1,000,000 | 840 | 79.2 | 1,500 | 6,438 | 11.3 | 72.2 | 175 | 9,115 |
+
+`apply_mail_delta`, the same kind of stretch as a relist writes it:
+
+| Mirror | 1,024 messages new to the mirror | 1,024 messages already held, unchanged |
+|---|---|---|
+| 10,000 | 273 | 196 |
+| 100,000 | 976 | 268 |
+| 1,000,000 | 9,277 | 1,208 |
+
+Three steps read the whole mirror on every stretch, and each grew in
+step with it:
+
+- **The address history rebuild**, #478's main suspect: 62% of the write
+  at 100,000 messages and 71% at a million. It grouped every message of
+  the account by its address headers.
+- **The mailbox counters**: 13% and 16%. Each changed mailbox's threads
+  were counted twice, once for the total and once for unread, and a
+  stretch changes the largest mailboxes (All Mail, Archive, Inbox).
+- **Matching the stored threads**: 7% and 9%, which #478 did not list.
+  The merge loaded the id of every thread in each mailbox it touched to
+  find the few it needed. Most of "other" at a million was dropping that
+  map. It is also all of the growth of the unchanged relist, which
+  skips the other two.
+
+Writing the messages, the search index and the commit did not grow.
+The write of a stretch took about 0.13 s plus 9 s per million messages
+mirrored, so a backfill was quadratic: about 2.2 hours of writing in all
+for 1.32 million messages.
+
+### After
+
+`merge_account_snapshot`, 1,024 messages new to the mirror:
+
+| Mirror | match stored threads | compare and write | mailbox counters | address history | search index | commit | other | total |
+|---|---|---|---|---|---|---|---|---|
+| 10,000 | 3.1 | 77.0 | 0.06 | 4.6 | 10.6 | 74.9 | 0.7 | 171 |
+| 100,000 | 3.4 | 78.4 | 0.07 | 6.5 | 10.7 | 82.9 | 0.7 | 183 |
+| 1,000,000 | 3.4 | 78.2 | 0.06 | 5.6 | 10.7 | 109 | 0.7 | 208 |
+
+`apply_mail_delta`:
+
+| Mirror | 1,024 messages new to the mirror | 1,024 messages already held, unchanged |
+|---|---|---|
+| 10,000 | 190 | 193 |
+| 100,000 | 187 | 192 |
+| 1,000,000 | 246 | 195 |
+
+A stretch now costs about 0.2 s to write whatever the mirror holds
+(9.1 s to 0.2 s at a million messages), about four and a half minutes in
+all for 1.32 million. The only phase that still moved between 10,000
+and a million is the commit (75 to 109 ms, within its run-to-run
+spread). The store's other calls of one backfill sync (status,
+progress, checkpoints, the mailbox list) take 1.5 ms together at every
+size.
+
+What changed (ADR 0004 has the reasoning): stored threads are found one
+by one through the index; counters move by what the write added; and
+the address history adds the addresses of the added message rows
+instead of rebuilding, which gives the same rows because its counts are
+sums and its last use and display name are maxima. A write that removes
+or changes mail still counts and rebuilds.
+
+### In CI
+
+`merge::incremental_tests` in `zmail-store` runs with the ordinary
+tests, so on every pull request:
+
+- `writing_a_stretch_costs_the_same_in_a_small_and_a_large_mirror`
+  counts the SQLite virtual machine steps of writing a stretch into
+  mirrors of 2,048 and 32,768 messages, for the merge and for both
+  kinds of delta, and fails if the larger takes more than a quarter
+  more. It counts work, not time, so it does not depend on the runner:
+  the same build gives the same counts (821,965 and 817,408 steps for
+  the merge). Counting and rebuilding on every stretch, as before, takes
+  1.37 million and 4.24 million steps, and the test checks that too, so
+  the measure is known to see the regression it guards against.
+- `any_sequence_of_writes_matches_counting_and_rebuilding_every_time`
+  applies random sequences of stretches, event batches (new mail,
+  moves, deletions, read changes, a message back under a new id, a
+  changed sender, removed mailboxes, changed addresses), full resyncs
+  and local deletes, moves and read changes to two stores, one of which
+  counts and rebuilds after every write as before, and compares the
+  counters and every address history row after each step.
+
+### What this does not show
+
+- **The download rate of a real account.** #478's figures (57 to 66
+  seconds for each stretch between 65,000 and 265,000 messages) are far
+  more than the write cost measured here: about 0.7 s at 65,000 and
+  2.5 s at 265,000 before the fix, on this machine and this synthetic
+  data. So at those sizes most of each stretch was spent elsewhere,
+  which leaves the requests (a stretch is the event poll, the addresses,
+  the labels and 8 metadata pages, one after another) and their retries;
+  nothing here measures them. The write would have reached about 12 s
+  a stretch by 1.32 million messages. Real mail has longer headers than
+  the synthetic account and some stored bodies, so its rebuild was
+  probably slower than measured here, but not by the factor of 20 the
+  observed times would need.
+- **Full snapshots.** `replace_account_snapshot`, which IMAP and JMAP
+  syncs and a Proton first sync use, still rebuilds the address history
+  and counts the mailboxes when mail changed; #478 does not change it.
+  Writing a mirror of about 104,000 messages again with one new message
+  took 8.6 s here, of which the rebuild was 0.63 s and comparing every
+  stored thread with the snapshot 7.7 s (one set of queries per thread,
+  as `benches/README.md` notes).
+- **A write that removes mail** (a message moved or deleted on another
+  device arrives as an event) still rebuilds the address history, about
+  6.5 s at a million messages, and counts the threads of each mailbox
+  the message left, as before.
+

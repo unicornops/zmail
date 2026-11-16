@@ -9,6 +9,14 @@
 //! newer ones keeps both. A [`MailDelta`] is merged the same way, and its
 //! messages also leave the places they no longer have; nothing else is
 //! read or rewritten.
+//!
+//! What a partial write costs depends on what it holds, not on how much
+//! mail the mirror has (#478): stored conversations are found one by one
+//! through the index, a mailbox's counters move by what was added, and
+//! the address history takes the added messages' addresses. Only a write
+//! that removes mail (a delta whose messages leave a place, a removed
+//! mailbox) counts its mailboxes again and rebuilds the history, as a
+//! full snapshot does. The `incremental_tests` hold it to that.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,9 +28,12 @@ use zmail_core::{
 };
 
 use crate::{
-    ExistingMailbox, HEADER_COLUMNS, LocalStore, address_history, flush_search_index,
-    headers_from_row, identity_id_map, load_account_mailbox_ids, load_pending_op_remote_ids,
-    load_stored_message_attachments, load_stored_thread, merge_mailbox_threads,
+    ExistingMailbox, HEADER_COLUMNS, LocalStore, PartialMerge,
+    address_history::{self, MirrorChanges},
+    flush_search_index, headers_from_row, identity_id_map, load_account_mailbox_ids,
+    load_pending_op_remote_ids, load_stored_message_attachments, load_stored_thread,
+    merge_mailbox_threads,
+    merge_profile::{Lap, MergePhase},
     primary_identity_id, thread_message_snapshots,
 };
 
@@ -53,12 +64,18 @@ impl LocalStore {
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin the snapshot merge transaction")?;
+        let mut lap = Lap::start();
         let context = MergeContext::load(&transaction, account_id)?;
-        let changed = merge_mailboxes(&transaction, &context, &snapshot.mailboxes)?;
-        finish(&transaction, account_id, &changed)?;
+        lap.mark(MergePhase::Context);
+        let mut changed = Changed::default();
+        merge_mailboxes(&transaction, &context, &snapshot.mailboxes, &mut changed)?;
+        finish(&transaction, account_id, changed)?;
+        let mut lap = Lap::start();
         transaction
             .commit()
-            .context("failed to commit the snapshot merge transaction")
+            .context("failed to commit the snapshot merge transaction")?;
+        lap.mark(MergePhase::Commit);
+        Ok(())
     }
 
     /// Applies changes to some messages of an account, touching only those
@@ -91,8 +108,13 @@ impl LocalStore {
         if let Some(identities) = &delta.identities {
             crate::replace_account_identities(&transaction, account_id, identities)?;
         }
-        let mut changed = apply_mailbox_changes(&transaction, account_id, delta)?;
+        let mut lap = Lap::start();
+        let mut changed = Changed::default();
+        for mailbox_id in apply_mailbox_changes(&transaction, account_id, delta)? {
+            changed.removed_from(mailbox_id);
+        }
         let context = MergeContext::load(&transaction, account_id)?;
+        lap.mark(MergePhase::Context);
 
         let mut places: HashMap<&str, HashSet<(&str, &str)>> = HashMap::new();
         for mailbox in &delta.mailboxes {
@@ -141,13 +163,14 @@ impl LocalStore {
                         )
                         .context("failed to remove a message during the mail delta")?;
                     touched_threads.insert(row.thread_id);
-                    changed.insert(row.mailbox_id);
+                    changed.removed_from(row.mailbox_id);
                 }
             }
         }
         for thread_id in touched_threads {
             settle_thread(&transaction, thread_id)?;
         }
+        lap.mark(MergePhase::Leave);
 
         let mut mailboxes = delta.mailboxes.clone();
         for message in mailboxes
@@ -159,11 +182,13 @@ impl LocalStore {
                 stored.apply_to(message);
             }
         }
-        changed.extend(merge_mailboxes(&transaction, &context, &mailboxes)?);
-        finish(&transaction, account_id, &changed)?;
+        merge_mailboxes(&transaction, &context, &mailboxes, &mut changed)?;
+        finish(&transaction, account_id, changed)?;
+        let mut lap = Lap::start();
         transaction
             .commit()
             .context("failed to commit the mail delta transaction")?;
+        lap.mark(MergePhase::Commit);
         Ok(unknown)
     }
 }
@@ -269,16 +294,67 @@ impl MergeContext {
     }
 }
 
+/// What a partial write changed, for [`finish`] to follow.
+#[derive(Default)]
+struct Changed {
+    /// The mailboxes whose threads changed, and how to bring each one's
+    /// counters up to date.
+    mailboxes: HashMap<i64, Counters>,
+    /// What happened to the mail the address history counts.
+    history: MirrorChanges,
+}
+
+/// How a changed mailbox's thread counters are brought up to date.
+enum Counters {
+    /// Mail left the mailbox: its threads are counted again.
+    Count,
+    /// Threads were only added or rewritten: the counters move by this
+    /// many threads, and threads with unread messages.
+    Move { threads: i64, unread: i64 },
+}
+
+impl Changed {
+    /// Mail was removed from the mailbox, or the mailbox itself was.
+    fn removed_from(&mut self, mailbox_id: i64) {
+        self.mailboxes.insert(mailbox_id, Counters::Count);
+        self.history.needs_rebuild();
+    }
+
+    /// Threads were merged into the mailbox.
+    fn merged_into(&mut self, mailbox_id: i64, new_threads: i64, unread_threads: i64) {
+        match self.mailboxes.entry(mailbox_id).or_insert(Counters::Move {
+            threads: 0,
+            unread: 0,
+        }) {
+            Counters::Count => {}
+            Counters::Move { threads, unread } => {
+                *threads += new_threads;
+                *unread += unread_threads;
+            }
+        }
+    }
+}
+
+/// Whether the address history skips a mailbox with this role.
+fn is_junk(role: Option<&str>) -> bool {
+    role.is_some_and(|role| role.eq_ignore_ascii_case("junk") || role.eq_ignore_ascii_case("spam"))
+}
+
 /// Merges partial mailboxes into the mirror, creating missing mailboxes,
-/// and returns the ids of the mailboxes whose threads changed.
+/// and records what changed in `changed`.
 fn merge_mailboxes(
     transaction: &Transaction<'_>,
     context: &MergeContext,
     mailboxes: &[MailboxSnapshot],
-) -> Result<HashSet<i64>> {
-    let mut changed_mailboxes = HashSet::new();
+    changed: &mut Changed,
+) -> Result<()> {
     for (sort_order, mailbox) in mailboxes.iter().enumerate() {
-        let mailbox_id = match context.existing_mailboxes.get(&mailbox.name) {
+        let existing = context.existing_mailboxes.get(&mailbox.name);
+        let junk = is_junk(match existing {
+            Some(existing) => existing.role.as_deref(),
+            None => mailbox.role.as_deref(),
+        });
+        let mailbox_id = match existing {
             Some(existing) => existing.id,
             None => {
                 transaction
@@ -307,38 +383,58 @@ fn merge_mailboxes(
             continue;
         }
 
+        let mut lap = Lap::start();
+        let (threads, stored_threads) =
+            combine_with_stored_threads(transaction, mailbox_id, &mailbox.threads)?;
         let combined = MailboxSnapshot {
             name: mailbox.name.clone(),
             role: mailbox.role.clone(),
             delimiter: mailbox.delimiter.clone(),
             parent: mailbox.parent.clone(),
-            threads: combine_with_stored_threads(transaction, mailbox_id, &mailbox.threads)?,
+            threads,
         };
-        let (_, changed) = merge_mailbox_threads(
+        lap.mark(MergePhase::Match);
+        let merged = merge_mailbox_threads(
             transaction,
             mailbox_id,
             &combined,
             &context.identity_map,
             context.fallback_identity_id,
             &context.pending_remote_ids,
+            Some(PartialMerge {
+                stored_threads,
+                junk,
+                changes: &mut changed.history,
+            }),
         )?;
-        if changed {
-            changed_mailboxes.insert(mailbox_id);
+        if merged.changed {
+            changed.merged_into(mailbox_id, merged.new_threads, merged.unread_threads);
         }
     }
-    Ok(changed_mailboxes)
+    Ok(())
 }
 
-/// Refreshes the changed mailboxes' counters, the address history when
-/// mail changed, and the search index.
-fn finish(
-    transaction: &Transaction<'_>,
-    account_id: i64,
-    changed_mailboxes: &HashSet<i64>,
-) -> Result<()> {
-    for mailbox_id in changed_mailboxes {
-        transaction
-            .execute(
+/// Brings the changed mailboxes' counters up to date, the address history
+/// when mail changed, and the search index.
+fn finish(transaction: &Transaction<'_>, account_id: i64, changed: Changed) -> Result<()> {
+    let mut lap = Lap::start();
+    #[cfg(test)]
+    let count_all = address_history::ALWAYS_REBUILD.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let count_all = false;
+    for (mailbox_id, counters) in &changed.mailboxes {
+        match counters {
+            Counters::Move { threads, unread } if !count_all => transaction.execute(
+                r#"
+                UPDATE mailboxes
+                SET
+                    total_threads = MAX(total_threads + ?2, 0),
+                    unread_threads = MAX(unread_threads + ?3, 0)
+                WHERE id = ?1
+                "#,
+                params![mailbox_id, threads, unread],
+            ),
+            _ => transaction.execute(
                 r#"
                 UPDATE mailboxes
                 SET
@@ -352,13 +448,18 @@ fn finish(
                 WHERE id = ?1
                 "#,
                 params![mailbox_id],
-            )
-            .context("failed to refresh the mailbox counters during the snapshot merge")?;
+            ),
+        }
+        .context("failed to refresh the mailbox counters during the snapshot merge")?;
     }
-    if !changed_mailboxes.is_empty() {
-        address_history::rebuild_account_address_history(transaction, account_id)?;
+    lap.mark(MergePhase::Counters);
+    if !changed.mailboxes.is_empty() {
+        address_history::apply_mirror_changes(transaction, account_id, changed.history)?;
     }
-    flush_search_index(transaction)
+    lap.mark(MergePhase::AddressHistory);
+    flush_search_index(transaction)?;
+    lap.mark(MergePhase::SearchIndex);
+    Ok(())
 }
 
 /// One stored copy of a message: where it is, and whether it has a body.
@@ -528,17 +629,19 @@ fn newest_first_senders(messages: &[MessageSnapshot]) -> String {
 }
 
 /// Each incoming thread joined with the messages its stored counterpart
-/// already holds, so the rewrite in `merge_mailbox_threads` keeps them.
+/// already holds, so the rewrite in `merge_mailbox_threads` keeps them;
+/// and those counterparts' row ids by remote thread id.
 fn combine_with_stored_threads(
     transaction: &Transaction<'_>,
     mailbox_id: i64,
     incoming: &[ThreadSnapshot],
-) -> Result<Vec<ThreadSnapshot>> {
+) -> Result<(Vec<ThreadSnapshot>, HashMap<String, i64>)> {
     let mut statement = transaction.prepare_cached(
         "SELECT id FROM threads WHERE mailbox_id = ?1 AND remote_thread_id = ?2 \
          ORDER BY id ASC LIMIT 1",
     )?;
     let mut combined = Vec::with_capacity(incoming.len());
+    let mut stored_threads = HashMap::new();
     for thread in incoming.iter().filter(|thread| !thread.messages.is_empty()) {
         let stored_id: Option<i64> = statement
             .query_map(params![mailbox_id, thread.remote_thread_id], |row| {
@@ -548,11 +651,18 @@ fn combine_with_stored_threads(
             .transpose()
             .context("failed to look up the stored thread during the snapshot merge")?;
         combined.push(match stored_id {
-            Some(stored_id) => combine_thread(transaction, stored_id, thread)?,
+            Some(stored_id) => {
+                // A thread without a remote id is never matched for the
+                // write, as in a full snapshot.
+                if !thread.remote_thread_id.is_empty() {
+                    stored_threads.insert(thread.remote_thread_id.clone(), stored_id);
+                }
+                combine_thread(transaction, stored_id, thread)?
+            }
             None => combine(thread, Vec::new(), None),
         });
     }
-    Ok(combined)
+    Ok((combined, stored_threads))
 }
 
 fn combine_thread(
@@ -644,6 +754,9 @@ fn combine(
         messages,
     }
 }
+
+#[cfg(test)]
+mod incremental_tests;
 
 #[cfg(test)]
 mod tests {

@@ -7,14 +7,27 @@
 //! Each `address_history` row is one address of one account, with two
 //! groups of counts:
 //!
-//! - **Mirror counts** are rebuilt from the mirrored mail whenever a sync
-//!   changes it ([`rebuild_account_address_history`]). A message whose
-//!   sender is one of the account's identities counts as *sent* to each of
-//!   its recipients; any other message counts as *received* from its
-//!   sender. Junk is skipped, so spam senders are never suggested. The
-//!   mirror is rebuilt rather than counted message by message because
-//!   moved and re-synced messages come back with new remote ids and would
-//!   otherwise count twice.
+//! - **Mirror counts** follow the mirrored mail. A message whose sender is
+//!   one of the account's identities counts as *sent* to each of its
+//!   recipients; any other message counts as *received* from its sender.
+//!   Junk is skipped, so spam senders are never suggested. The counts are
+//!   always what [`rebuild_account_address_history`] would work out from
+//!   the mirror as it stands, which is how a moved or re-synced message,
+//!   back under a new remote id, never counts twice: nothing is counted
+//!   for a message, only for the rows the mirror holds.
+//!
+//!   A sync that removes or changes mail, and every full snapshot, runs
+//!   that rebuild, which reads all of the account's mail. A partial write
+//!   that only adds message rows (a stretch of a Proton account's older
+//!   mail, or new mail from its events) adds just those rows' addresses
+//!   instead ([`MirrorChanges`], [`apply_mirror_changes`]), so its cost
+//!   does not grow with the mirror (#478). Counts add up, and the last use
+//!   and the display name are each the greatest of what was seen, so
+//!   adding rows gives exactly what the rebuild would. Whatever else can
+//!   change the result marks the account's history stale, and the next
+//!   sync that changes mail rebuilds it: deleting or moving a conversation
+//!   here, and a change to the account's own addresses (triggers, see
+//!   [`ADDRESS_HISTORY_INCREMENTAL_SCHEMA`]).
 //! - **Outbox counts** go up by one for every recipient of each message
 //!   delivered from this device ([`record_outbox_recipients`]), so a
 //!   recipient is suggested at once, before the sent copy syncs back.
@@ -29,7 +42,9 @@ use std::collections::HashMap;
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Transaction, params};
-use zmail_core::{AddressSuggestion, participants::parse_address_list, time::parse_timestamp};
+use zmail_core::{
+    AddressSuggestion, MessageSnapshot, participants::parse_address_list, time::parse_timestamp,
+};
 
 use crate::LocalStore;
 
@@ -56,6 +71,68 @@ INSERT OR REPLACE INTO app_settings(key, value) VALUES ('address_history_rebuild
 /// `app_settings` key set while the history still has to be built from
 /// the existing mirror.
 const REBUILD_PENDING_KEY: &str = "address_history_rebuild";
+
+/// Lets partial writes add to the history instead of rebuilding it (#478).
+///
+/// `mirror_named_at` is when the mail that gave `display_name` was
+/// received, so a write that adds older mail knows not to take its names.
+/// An `address_history_stale:<account id>` row in `app_settings` marks a
+/// history that no longer matches the mirror, for the next sync that
+/// changes mail to rebuild: the triggers set it when a conversation is
+/// deleted or moved to another mailbox (junk does not count) and when the
+/// account's own addresses change (they decide what counts as sent).
+/// Every existing account starts stale, so its first such sync fills in
+/// `mirror_named_at`. The mark goes with the account.
+pub(crate) const ADDRESS_HISTORY_INCREMENTAL_SCHEMA: &str = r#"
+ALTER TABLE address_history ADD COLUMN mirror_named_at TEXT;
+
+INSERT OR REPLACE INTO app_settings(key, value)
+SELECT 'address_history_stale:' || id, '1' FROM accounts;
+
+CREATE TRIGGER IF NOT EXISTS address_history_stale_thread_delete AFTER DELETE ON threads
+BEGIN
+    INSERT OR REPLACE INTO app_settings(key, value)
+    SELECT 'address_history_stale:' || account_id, '1' FROM mailboxes WHERE id = old.mailbox_id;
+END;
+CREATE TRIGGER IF NOT EXISTS address_history_stale_thread_move
+AFTER UPDATE OF mailbox_id ON threads
+BEGIN
+    INSERT OR REPLACE INTO app_settings(key, value)
+    SELECT 'address_history_stale:' || account_id, '1' FROM mailboxes WHERE id = new.mailbox_id;
+END;
+CREATE TRIGGER IF NOT EXISTS address_history_stale_identity_insert AFTER INSERT ON identities
+BEGIN
+    INSERT OR REPLACE INTO app_settings(key, value)
+    VALUES ('address_history_stale:' || new.account_id, '1');
+END;
+CREATE TRIGGER IF NOT EXISTS address_history_stale_identity_update
+AFTER UPDATE OF email_address ON identities
+BEGIN
+    INSERT OR REPLACE INTO app_settings(key, value)
+    VALUES ('address_history_stale:' || new.account_id, '1');
+END;
+CREATE TRIGGER IF NOT EXISTS address_history_stale_identity_delete AFTER DELETE ON identities
+BEGIN
+    INSERT OR REPLACE INTO app_settings(key, value)
+    SELECT 'address_history_stale:' || id, '1' FROM accounts WHERE id = old.account_id;
+END;
+CREATE TRIGGER IF NOT EXISTS address_history_stale_account_delete AFTER DELETE ON accounts
+BEGIN
+    DELETE FROM app_settings WHERE key = 'address_history_stale:' || old.id;
+END;
+"#;
+
+/// The `app_settings` key that marks an account's history stale.
+fn stale_key(account_id: i64) -> String {
+    format!("address_history_stale:{account_id}")
+}
+
+/// Whether the account's history may no longer match its mirror.
+fn is_stale(conn: &Connection, account_id: i64) -> Result<bool> {
+    Ok(conn
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM app_settings WHERE key = ?1)")?
+        .query_row(params![stale_key(account_id)], |row| row.get(0))?)
+}
 
 /// Weight of one message sent to an address.
 const SENT_WEIGHT: f64 = 4.0;
@@ -90,8 +167,11 @@ impl Tally {
         self.sent += sent;
         self.received += received;
         self.last_used_at = self.last_used_at.max(at);
+        // The newest name wins, and of two equally new the greater one, so
+        // the result never depends on the order the uses come in.
         if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty())
-            && (self.display_name.is_empty() || at > self.named_at)
+            && (self.display_name.is_empty()
+                || (at, name) > (self.named_at, self.display_name.as_str()))
         {
             self.display_name = name.to_owned();
             self.named_at = at;
@@ -148,26 +228,14 @@ pub(crate) fn rebuild_account_address_history(
                 .get::<_, Option<String>>(3)?
                 .as_deref()
                 .and_then(parse_utc);
-            let senders = parse_address_list(&sender);
-            let is_outgoing = senders
-                .iter()
-                .any(|participant| own.contains(&participant.key()));
-            if is_outgoing {
-                for recipient in parse_address_list(&recipients) {
-                    tally(&mut tallies, &own, &recipient, at, count, 0);
-                }
-            } else {
-                for sender in senders {
-                    tally(&mut tallies, &own, &sender, at, 0, count);
-                }
-            }
+            tally_messages(&mut tallies, &own, &sender, &recipients, at, count);
         }
     }
 
     transaction.execute(
         r#"
         UPDATE address_history
-        SET sent_count = 0, received_count = 0, mirror_last_used_at = NULL
+        SET sent_count = 0, received_count = 0, mirror_last_used_at = NULL, mirror_named_at = NULL
         WHERE account_id = ?1
         "#,
         params![account_id],
@@ -176,15 +244,17 @@ pub(crate) fn rebuild_account_address_history(
         let mut upsert = transaction.prepare(
             r#"
             INSERT INTO address_history(
-                account_id, address, display_name, sent_count, received_count, mirror_last_used_at
+                account_id, address, display_name, sent_count, received_count,
+                mirror_last_used_at, mirror_named_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT(account_id, address) DO UPDATE SET
                 display_name = CASE WHEN excluded.display_name = ''
                     THEN address_history.display_name ELSE excluded.display_name END,
                 sent_count = excluded.sent_count,
                 received_count = excluded.received_count,
-                mirror_last_used_at = excluded.mirror_last_used_at
+                mirror_last_used_at = excluded.mirror_last_used_at,
+                mirror_named_at = excluded.mirror_named_at
             "#,
         )?;
         for (address, tally) in &tallies {
@@ -195,6 +265,7 @@ pub(crate) fn rebuild_account_address_history(
                 tally.sent,
                 tally.received,
                 format_utc(tally.last_used_at),
+                format_utc(tally.named_at),
             ])?;
         }
     }
@@ -205,7 +276,234 @@ pub(crate) fn rebuild_account_address_history(
         "#,
         params![account_id],
     )?;
+    transaction.execute(
+        "DELETE FROM app_settings WHERE key = ?1",
+        params![stale_key(account_id)],
+    )?;
+    #[cfg(test)]
+    REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Rebuilds run on this thread, for tests that a write did or did not
+    /// need one.
+    pub(crate) static REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Makes every partial write that changes mail rebuild the history and
+    /// count its mailboxes again, as all of them did before #478, for
+    /// tests that compare the two.
+    pub(crate) static ALWAYS_REBUILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// One message row the history counts: its address headers and when it
+/// was received.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct AddressUse {
+    pub(crate) sender: String,
+    pub(crate) recipients: String,
+    pub(crate) received_at: String,
+}
+
+impl AddressUse {
+    fn of(message: &MessageSnapshot) -> Self {
+        Self {
+            sender: message.sender.clone(),
+            recipients: message.recipients.clone(),
+            received_at: message.received_at.clone(),
+        }
+    }
+}
+
+/// What a partial write did to the mail the history counts: the message
+/// rows it added, or that only a rebuild can follow it.
+#[derive(Debug, Default)]
+pub(crate) struct MirrorChanges {
+    added: Vec<AddressUse>,
+    rebuild: bool,
+}
+
+impl MirrorChanges {
+    /// Mail left the mirror or changed in a way adding rows cannot
+    /// express.
+    pub(crate) fn needs_rebuild(&mut self) {
+        self.rebuild = true;
+    }
+
+    /// The messages of a conversation new to a mailbox. Junk is not
+    /// counted.
+    pub(crate) fn added<'a>(
+        &mut self,
+        junk: bool,
+        messages: impl IntoIterator<Item = &'a MessageSnapshot>,
+    ) {
+        if junk || self.rebuild {
+            return;
+        }
+        for message in messages {
+            self.add(AddressUse::of(message));
+        }
+    }
+
+    /// A stored conversation rewritten: `stored` are the rows it had and
+    /// `messages` the rows it has now. Rows it kept change nothing; a row
+    /// it lost, or one whose addresses or time changed, needs a rebuild.
+    pub(crate) fn rewritten<'a>(
+        &mut self,
+        junk: bool,
+        stored: Vec<AddressUse>,
+        messages: impl IntoIterator<Item = &'a MessageSnapshot>,
+    ) {
+        if junk || self.rebuild {
+            return;
+        }
+        let mut kept: HashMap<AddressUse, usize> = HashMap::new();
+        for row in stored {
+            *kept.entry(row).or_default() += 1;
+        }
+        for message in messages {
+            let row = AddressUse::of(message);
+            match kept.get_mut(&row) {
+                Some(count) if *count > 0 => *count -= 1,
+                _ => self.add(row),
+            }
+        }
+        if kept.values().any(|count| *count > 0) {
+            self.rebuild = true;
+        }
+    }
+
+    fn add(&mut self, row: AddressUse) {
+        // Adding a row gives what the rebuild gives when times compare the
+        // same as text and as instants: the rebuild takes the greatest
+        // `received_at` of equal headers as text. That holds for whole
+        // seconds in UTC, which is how the adapters that write partially
+        // (Proton) format them; anything else is left to the rebuild.
+        if is_utc_seconds(&row.received_at) {
+            self.added.push(row);
+        } else {
+            self.rebuild = true;
+        }
+    }
+}
+
+/// Whether `value` is `YYYY-MM-DDTHH:MM:SS+00:00`.
+fn is_utc_seconds(value: &str) -> bool {
+    value.len() == 25 && value.ends_with("+00:00") && parse_timestamp(value).is_some()
+}
+
+/// The address headers of a mailbox's stored conversation, for
+/// [`MirrorChanges::rewritten`].
+pub(crate) fn stored_address_uses(conn: &Connection, thread_id: i64) -> Result<Vec<AddressUse>> {
+    conn.prepare_cached(
+        "SELECT sender, recipients, received_at FROM messages WHERE thread_id = ?1",
+    )?
+    .query_map(params![thread_id], |row| {
+        Ok(AddressUse {
+            sender: row.get(0)?,
+            recipients: row.get(1)?,
+            received_at: row.get(2)?,
+        })
+    })?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .context("failed to load a conversation's address headers")
+}
+
+/// Brings an account's mirror counts up to date after a partial write
+/// that changed mail: adds the rows it added, or rebuilds when it did
+/// more than add, or when the history was already stale.
+pub(crate) fn apply_mirror_changes(
+    transaction: &Transaction<'_>,
+    account_id: i64,
+    changes: MirrorChanges,
+) -> Result<()> {
+    #[cfg(test)]
+    let changes = MirrorChanges {
+        rebuild: changes.rebuild || ALWAYS_REBUILD.with(std::cell::Cell::get),
+        ..changes
+    };
+    if changes.rebuild || is_stale(transaction, account_id)? {
+        return rebuild_account_address_history(transaction, account_id);
+    }
+    if changes.added.is_empty() {
+        return Ok(());
+    }
+
+    let own = own_addresses(transaction, Some(account_id))?;
+    let mut tallies: HashMap<String, Tally> = HashMap::new();
+    for row in &changes.added {
+        let at = parse_utc(&row.received_at);
+        tally_messages(&mut tallies, &own, &row.sender, &row.recipients, at, 1);
+    }
+    // The same row the rebuild would write for the mail before and these
+    // rows together: counts add up, and the last use and the name (with
+    // its time) are the greater of the two. Times are stored as UTC
+    // seconds, so they compare as text.
+    let mut upsert = transaction.prepare_cached(
+        r#"
+        INSERT INTO address_history(
+            account_id, address, display_name, sent_count, received_count,
+            mirror_last_used_at, mirror_named_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ON CONFLICT(account_id, address) DO UPDATE SET
+            display_name = CASE
+                WHEN excluded.display_name = '' THEN address_history.display_name
+                WHEN address_history.mirror_named_at IS NULL THEN excluded.display_name
+                WHEN excluded.mirror_named_at IS NULL THEN address_history.display_name
+                WHEN (excluded.mirror_named_at, excluded.display_name)
+                    > (address_history.mirror_named_at, address_history.display_name)
+                    THEN excluded.display_name
+                ELSE address_history.display_name END,
+            mirror_named_at = CASE
+                WHEN excluded.display_name = '' THEN address_history.mirror_named_at
+                ELSE MAX(COALESCE(address_history.mirror_named_at, excluded.mirror_named_at),
+                         COALESCE(excluded.mirror_named_at, address_history.mirror_named_at)) END,
+            sent_count = address_history.sent_count + excluded.sent_count,
+            received_count = address_history.received_count + excluded.received_count,
+            mirror_last_used_at = MAX(
+                COALESCE(address_history.mirror_last_used_at, excluded.mirror_last_used_at),
+                COALESCE(excluded.mirror_last_used_at, address_history.mirror_last_used_at))
+        "#,
+    )?;
+    for (address, tally) in &tallies {
+        upsert.execute(params![
+            account_id,
+            address,
+            tally.display_name,
+            tally.sent,
+            tally.received,
+            format_utc(tally.last_used_at),
+            format_utc(tally.named_at),
+        ])?;
+    }
+    Ok(())
+}
+
+/// Adds `count` messages with these address headers, the newest received
+/// at `at`, to `tallies`: sent to each recipient when the sender is one of
+/// the account's own addresses, otherwise received from the sender.
+fn tally_messages(
+    tallies: &mut HashMap<String, Tally>,
+    own: &[String],
+    sender: &str,
+    recipients: &str,
+    at: Option<DateTime<Utc>>,
+    count: i64,
+) {
+    let senders = parse_address_list(sender);
+    let is_outgoing = senders
+        .iter()
+        .any(|participant| own.contains(&participant.key()));
+    if is_outgoing {
+        for recipient in parse_address_list(recipients) {
+            tally(tallies, own, &recipient, at, count, 0);
+        }
+    } else {
+        for sender in senders {
+            tally(tallies, own, &sender, at, 0, count);
+        }
+    }
 }
 
 /// Adds one use of `participant` to `tallies`, unless it has no address or

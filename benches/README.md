@@ -5,6 +5,13 @@
 CI so the quality job stays fast; run them manually around store or
 sync changes.
 
+A second harness, `cargo bench -p zmail-store --bench backfill`
+(`crates/zmail-store/benches/backfill.rs`), times one stretch of a
+Proton account's older mail written into mirrors of 10,000, 100,000 and
+(with `ZMAIL_BACKFILL_SIZES=10000,100000,1000000`) a million messages,
+phase by phase, and prints Markdown tables. Its numbers and what they
+showed (#478) are in [`docs/performance.md`](../docs/performance.md).
+
 ## What is measured
 
 - `snapshot_first_apply` — applying a snapshot to a fresh store (the

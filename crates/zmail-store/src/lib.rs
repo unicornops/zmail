@@ -41,6 +41,7 @@ mod identities;
 mod key_trust;
 mod lock;
 mod merge;
+pub mod merge_profile;
 mod quarantine;
 mod remote_content;
 mod rotation;
@@ -54,6 +55,7 @@ pub use encryption::{
 };
 pub use identities::{HiddenIdentity, IdentityLink, IdentityMergeReport};
 pub use lock::SyncLock;
+use merge_profile::{Lap, MergePhase};
 pub use remote_content::RemoteContentSender;
 
 /// A received attachment's encrypted blob (ADR 0005), from
@@ -237,6 +239,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0033_account_secrets_per_store",
         account_secrets::ACCOUNT_SECRETS_SCHEMA,
+    ),
+    (
+        "0034_address_history_incremental",
+        address_history::ADDRESS_HISTORY_INCREMENTAL_SCHEMA,
     ),
 ];
 
@@ -3459,15 +3465,19 @@ impl LocalStore {
                 }
             };
 
-            let (kept_thread_ids, threads_changed) = merge_mailbox_threads(
+            let merged = merge_mailbox_threads(
                 &transaction,
                 mailbox_id,
                 mailbox,
                 &identity_map,
                 fallback_identity_id,
                 &pending_remote_ids,
+                None,
             )?;
-            let pruned = prune_mailbox_threads(&transaction, mailbox_id, &kept_thread_ids)?;
+            let threads_changed = merged.changed;
+            let mut lap = Lap::start();
+            let pruned = prune_mailbox_threads(&transaction, mailbox_id, &merged.kept)?;
+            lap.mark(MergePhase::Leave);
             mail_changed |= threads_changed || pruned;
             if threads_changed || pruned {
                 transaction
@@ -3486,6 +3496,7 @@ impl LocalStore {
                     )
                     .context("failed to refresh the mailbox counters during the snapshot merge")?;
             }
+            lap.mark(MergePhase::Counters);
         }
 
         let snapshot_names: HashSet<&str> = snapshot
@@ -3506,13 +3517,18 @@ impl LocalStore {
 
         // Autocomplete follows the mail: the history is rebuilt from the
         // mirror whenever the snapshot changed it.
+        let mut lap = Lap::start();
         if mail_changed {
             address_history::rebuild_account_address_history(&transaction, account_id)?;
         }
+        lap.mark(MergePhase::AddressHistory);
         flush_search_index(&transaction)?;
+        lap.mark(MergePhase::SearchIndex);
         transaction
             .commit()
-            .context("failed to commit the snapshot transaction")
+            .context("failed to commit the snapshot transaction")?;
+        lap.mark(MergePhase::Commit);
+        Ok(())
     }
 
     /// Stores a checkpoint in the middle of a sync, once a write it
@@ -6792,11 +6808,39 @@ fn load_account_mailbox_ids(
     Ok(pairs.into_iter().collect())
 }
 
-/// Merges the snapshot threads for one mailbox and returns the ids kept.
+/// What a partial write hands [`merge_mailbox_threads`], so merging a few
+/// conversations into a large mailbox reads only those (#478).
+struct PartialMerge<'a> {
+    /// The stored thread of each incoming conversation that has one, by
+    /// remote thread id.
+    stored_threads: std::collections::HashMap<String, i64>,
+    /// Whether the mailbox is junk, which the address history skips.
+    junk: bool,
+    /// Collects what the merge does to the mail the address history
+    /// counts.
+    changes: &'a mut address_history::MirrorChanges,
+}
+
+/// What [`merge_mailbox_threads`] did to a mailbox.
+struct MergedThreads {
+    /// The row ids of the snapshot's threads.
+    kept: HashSet<i64>,
+    /// Whether any thread was written.
+    changed: bool,
+    /// Threads added to the mailbox.
+    new_threads: i64,
+    /// The change in the number of threads with unread messages.
+    unread_threads: i64,
+}
+
+/// Merges the snapshot threads for one mailbox.
 ///
 /// Locally changed read and flag state is preserved only for messages with
 /// a queued write-back operation; everywhere else the server snapshot is
 /// authoritative, so changes made by other clients become visible.
+///
+/// A full snapshot (`partial` is `None`) is matched against every thread
+/// of the mailbox, read in one pass.
 fn merge_mailbox_threads(
     transaction: &Transaction<'_>,
     mailbox_id: i64,
@@ -6804,10 +6848,14 @@ fn merge_mailbox_threads(
     identity_map: &std::collections::HashMap<String, i64>,
     fallback_identity_id: i64,
     pending_remote_ids: &HashSet<String>,
-) -> Result<(HashSet<i64>, bool)> {
-    let mut existing_threads: std::collections::HashMap<String, i64> =
-        std::collections::HashMap::new();
-    {
+    mut partial: Option<PartialMerge<'_>>,
+) -> Result<MergedThreads> {
+    let mut lap = Lap::start();
+    let mut existing_threads: std::collections::HashMap<String, i64> = partial
+        .as_mut()
+        .map(|partial| std::mem::take(&mut partial.stored_threads))
+        .unwrap_or_default();
+    if partial.is_none() {
         let mut statement = transaction
             .prepare("SELECT id, remote_thread_id FROM threads WHERE mailbox_id = ?1")?;
         let rows = statement.query_map(params![mailbox_id], |row| {
@@ -6824,19 +6872,25 @@ fn merge_mailbox_threads(
         }
     }
 
+    lap.mark(MergePhase::Match);
+
     let mut kept_thread_ids: HashSet<i64> = HashSet::new();
     let mut changed = false;
+    let mut new_threads = 0i64;
+    let mut unread_threads = 0i64;
     for thread in &mailbox.threads {
         if thread.messages.is_empty() {
             continue;
         }
 
         let existing_thread_id = existing_threads.get(&thread.remote_thread_id).copied();
+        let mut was_unread = false;
         let (thread_flagged, thread_had_attachments, message_flags) = match existing_thread_id {
             Some(existing_id) => {
                 let stored_thread = load_stored_thread(transaction, existing_id)?
                     .context("the stored thread vanished during the snapshot merge")?;
                 let had_attachments = stored_thread.has_attachments;
+                was_unread = stored_thread.unread_count > 0;
                 (
                     load_thread_flag(transaction, existing_id)?,
                     had_attachments,
@@ -6899,6 +6953,18 @@ fn merge_mailbox_threads(
             continue;
         }
         changed = true;
+        new_threads += i64::from(existing_thread_id.is_none());
+        unread_threads += i64::from(unread_count > 0) - i64::from(was_unread);
+        if let Some(partial) = partial.as_mut() {
+            match existing_thread_id {
+                Some(existing_id) => partial.changes.rewritten(
+                    partial.junk,
+                    address_history::stored_address_uses(transaction, existing_id)?,
+                    &thread.messages,
+                ),
+                None => partial.changes.added(partial.junk, &thread.messages),
+            }
+        }
 
         // Lazy adapters sync headers without bodies, and hydration is local
         // state the server snapshot cannot re-supply. When a changed thread is
@@ -7113,8 +7179,14 @@ fn merge_mailbox_threads(
         }
         kept_thread_ids.insert(thread_row_id);
     }
+    lap.mark(MergePhase::Write);
 
-    Ok((kept_thread_ids, changed))
+    Ok(MergedThreads {
+        kept: kept_thread_ids,
+        changed,
+        new_threads,
+        unread_threads,
+    })
 }
 
 /// Returns `true` when the stored thread already matches the merged
