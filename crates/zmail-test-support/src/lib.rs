@@ -2,6 +2,7 @@
 //! the Proton API test double.
 
 mod proton_harness;
+mod proton_mirror;
 
 use std::{
     fs,
@@ -25,6 +26,7 @@ pub use proton_harness::{
     PROTON_HARNESS_URL, PROTON_HARNESS_USERNAME, ProtonHarness, ProtonHarnessAddress,
     ProtonHarnessLabel, ProtonHarnessLabelKind, ProtonHarnessMessage, ProtonHarnessState,
 };
+pub use proton_mirror::{PROTON_STRETCH_MESSAGES, proton_mirror_relist, proton_mirror_stretch};
 
 /// Parameters for a generated mailbox dataset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

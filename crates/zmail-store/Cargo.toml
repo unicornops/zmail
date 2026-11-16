@@ -34,6 +34,9 @@ workspace = true
 
 [dev-dependencies]
 divan = "0.1"
+# The progress handler counts the work a write does, for the scaling guard
+# of the partial merges (src/merge/incremental_tests.rs). Tests only.
+rusqlite = { workspace = true, features = ["hooks"] }
 # Fixed keys for the SQLCipher compatibility fixture (tests/sqlcipher_compat.rs).
 zmail-security = { path = "../zmail-security", features = ["test-fixtures"] }
 # The large-mailbox and reader-stress datasets for the benchmarks.
@@ -41,4 +44,8 @@ zmail-test-support = { path = "../zmail-test-support" }
 
 [[bench]]
 name = "store"
+harness = false
+
+[[bench]]
+name = "backfill"
 harness = false

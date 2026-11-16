@@ -199,10 +199,36 @@ ID of the one before, from `stage_metadata.go`) but splits it up
   same way. Only an empty mirror is ever replaced (the first sync).
 
 This sends fewer requests per second than Bridge's sync, with the same
-endpoints and page size. Two steps of a write still grow with the
-account: rebuilding the address-autocomplete history after mail changed
-(one grouped query over the account's messages), and recounting the
-threads of each touched mailbox (an indexed count per mailbox).
+endpoints and page size.
+
+What a backfill stretch or an event batch costs to write does not grow
+with the account (#478). Until 0.34.2 three steps of every write read
+the whole mirror: matching the incoming conversations against every
+thread of each mailbox, recounting the threads of each touched mailbox,
+and rebuilding the address-autocomplete history from every message. At
+a million messages that was about nine seconds for each stretch of
+1,024, and a backfill was quadratic. Now:
+
+- stored conversations are found one at a time through the
+  `(mailbox, remote thread id)` index;
+- a mailbox's counters move by the threads the write added and by the
+  threads that gained or lost unread mail; a mailbox that mail left is
+  counted again;
+- the address history takes the addresses of the message rows the write
+  added. Its counts are sums and its last use and display name are
+  maxima, so adding rows gives exactly what the rebuild from the whole
+  mirror gives. A write that removes or changes mail still rebuilds, as
+  every full snapshot does, and so does the first write after something
+  else changed what the rebuild would find: a conversation deleted or
+  moved in Zmail, or a change to the account's own addresses. Triggers
+  mark the account's history stale for those
+  (`crates/zmail-store/src/address_history.rs`).
+
+`docs/performance.md` has the measurements. The store's tests compare
+random sequences of stretches, event batches, resyncs and local changes
+against counting and rebuilding after every write, and fail if writing a
+stretch into a mirror sixteen times larger takes more than a quarter
+more work (`crates/zmail-store/src/merge/incremental_tests.rs`).
 
 ### Crypto: `proton-srp` for SRP, a port onto `pgp` for keys
 
