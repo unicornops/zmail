@@ -10,8 +10,8 @@ set -euo pipefail
 # release PR and never reach the changelog. This script bridges the gap:
 #
 #   1. When a release PR is open on the release-please branch, the pending
-#      changelog section is regenerated from every conventional feat/fix
-#      commit in the release window - app-crate and sub-crate alike - and
+#      changelog section is regenerated from every conventional feat, fix
+#      or perf commit in the release window - app-crate and sub-crate alike - and
 #      pushed to the PR branch.
 #   2. When no release PR is open but the window holds unreleased
 #      conventional commits, the release PR is bootstrapped exactly as
@@ -57,7 +57,8 @@ manifest_version() {
 }
 
 # -----------------------------------------------------------------------------
-# Collect the release window: every conventional feat/fix commit since the
+# Collect the release window: every conventional feat, fix or perf commit
+# since the
 # last release tag. git log emits records separated by US (0x1e), each
 # holding "sha<TAB>subject" then the commit body.
 # -----------------------------------------------------------------------------
@@ -68,13 +69,13 @@ if ! git rev-parse -q --verify "refs/tags/${PREV_TAG}" >/dev/null; then
   exit 1
 fi
 
-declare -a FEATURE_ENTRIES=() FIX_ENTRIES=() BREAKING_ENTRIES=()
+declare -a FEATURE_ENTRIES=() FIX_ENTRIES=() PERF_ENTRIES=() BREAKING_ENTRIES=()
 HAS_FEATURE=0
 HAS_FIX=0
 HAS_BREAKING=0
 
 # Conventional subject: type(scope)!: description
-CONVENTIONAL_RX='^(feat|fix)(\(([^)]+)\))?(!)?: (.+)$'
+CONVENTIONAL_RX='^(feat|fix|perf)(\(([^)]+)\))?(!)?: (.+)$'
 
 add_entry() {
   local sha="$1" subject="$2" scope="$3" closes_issue="$4" kind="$5"
@@ -103,6 +104,7 @@ add_entry() {
     breaking) BREAKING_ENTRIES+=("$entry") ;;
     feature) FEATURE_ENTRIES+=("$entry") ;;
     fix) FIX_ENTRIES+=("$entry") ;;
+    perf) PERF_ENTRIES+=("$entry") ;;
   esac
 }
 
@@ -135,6 +137,11 @@ while IFS= read -r -d $'\x1e' header; do
   elif [ "$type" == "feat" ]; then
     HAS_FEATURE=1
     add_entry "$sha" "$subject" "$scope" "$closes_issue" feature
+  elif [ "$type" == "perf" ]; then
+    # A perf commit ships like a fix (patch bump) under its own heading,
+    # as Release Please does.
+    HAS_FIX=1
+    add_entry "$sha" "$subject" "$scope" "$closes_issue" perf
   else
     HAS_FIX=1
     add_entry "$sha" "$subject" "$scope" "$closes_issue" fix
@@ -147,7 +154,8 @@ if [ "$HAS_BREAKING" -eq 0 ] && [ "$HAS_FEATURE" -eq 0 ] && [ "$HAS_FIX" -eq 0 ]
 fi
 
 # -----------------------------------------------------------------------------
-# Next version: breaking bumps major, feat bumps minor, fix bumps patch.
+# Next version: breaking bumps major, feat bumps minor, fix and perf bump
+# patch.
 # -----------------------------------------------------------------------------
 IFS='.' read -r MAJOR MINOR PATCH <<<"$PREV_VERSION"
 if [ "$HAS_BREAKING" -eq 1 ]; then
@@ -185,6 +193,12 @@ SECTION_FILE="$(mktemp)"
     echo "### Bug Fixes"
     echo ""
     printf '%s\n' "${FIX_ENTRIES[@]}"
+    echo ""
+  fi
+  if [ "${#PERF_ENTRIES[@]}" -gt 0 ]; then
+    echo "### Performance Improvements"
+    echo ""
+    printf '%s\n' "${PERF_ENTRIES[@]}"
     echo ""
   fi
 } > "$SECTION_FILE"
