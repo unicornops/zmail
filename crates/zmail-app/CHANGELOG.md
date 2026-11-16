@@ -5,8 +5,8 @@
 
 ### Bug Fixes
 
-* **release:** build the Linux binary on Ubuntu 24.04 so it runs on glibc 2.39 ([#484](https://github.com/unicornops/zmail/issues/484)) ([3dd6ca5](https://github.com/unicornops/zmail/commit/3dd6ca504db8e398b9eb7ec05da65899646b32bb)), closes [#483](https://github.com/unicornops/zmail/issues/483)
-* **security:** scope keychain entries to their store ([#475](https://github.com/unicornops/zmail/issues/475)) ([#479](https://github.com/unicornops/zmail/issues/479)) ([c490df0](https://github.com/unicornops/zmail/commit/c490df0a0efe3f576f7921fcf4b6f18e053bedb0))
+* **release:** build the Linux binary on Ubuntu 24.04 so it runs on glibc 2.39 ([#484](https://github.com/unicornops/zmail/issues/484)) ([3dd6ca5](https://github.com/unicornops/zmail/commit/3dd6ca504db8e398b9eb7ec05da65899646b32bb))
+* **security:** scope keychain entries to their store (#475) ([#479](https://github.com/unicornops/zmail/issues/479)) ([c490df0](https://github.com/unicornops/zmail/commit/c490df0a0efe3f576f7921fcf4b6f18e053bedb0))
 
 ## [0.34.1](https://github.com/unicornops/zmail/compare/v0.34.0...v0.34.1) (2026-11-13)
 
