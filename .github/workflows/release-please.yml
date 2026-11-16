@@ -202,7 +202,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pinned, not ubuntu-latest: the binary needs the glibc of the
+          # image it is built on, and 26.04's (2.43) does not run on
+          # Ubuntu 24.04 (#483). scripts/check-linux-glibc.sh holds the
+          # minimum.
+          - os: ubuntu-24.04
             archive_name: zmail-linux-x86_64
             artifact_path: zmail-linux-x86_64.tar.gz
             binary_name: zmail-app
@@ -330,6 +334,13 @@ jobs:
           # a second --release; --locked keeps the Cargo.lock authoritative.
           cargo deb -p zmail-app --locked
           mv target/debian/*.deb zmail-linux-x86_64.deb
+
+      # Fails the release when the tarball's or the .deb's zmail-app needs
+      # a newer glibc than the documented minimum, or the .deb does not
+      # depend on it (#483). archive/ holds what went into the tarball.
+      - name: Check the Linux binaries' glibc requirement
+        if: runner.os == 'Linux'
+        run: scripts/check-linux-glibc.sh archive/zmail-app zmail-linux-x86_64.deb
 
       # Everything that installs or runs third-party code on macOS (Homebrew,
       # the icon tools) happens before the Developer ID certificate is
