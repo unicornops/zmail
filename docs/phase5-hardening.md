@@ -174,7 +174,7 @@ Release Please's `cargo-workspace` plugin counts only commits that touch the rel
 
 The gap is closed by the **Complete Release Changelog** job in the release workflow, which runs `scripts/render-release-pr.sh` after Release Please on every push to `main`:
 
-1. When Release Please has a release PR open, the job regenerates the pending changelog section from every conventional `feat`/`fix` commit in the release window, app-crate and sub-crate alike, and pushes the completion to the release-please branch.
+1. When Release Please has a release PR open, the job regenerates the pending changelog section from every conventional `feat`, `fix` or `perf` commit in the release window, app-crate and sub-crate alike, and pushes the completion to the release-please branch.
 2. When no release PR is open but the window holds unreleased conventional commits, the job bootstraps the release PR exactly as Release Please would (version bump, manifest, `Cargo.lock`, changelog, `autorelease: pending` label).
 3. Otherwise it is a no-op.
 
