@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.34.3](https://github.com/unicornops/zmail/compare/v0.34.2...v0.34.3) (2026-11-17)
+
+
+### Bug Fixes
+
+* **release:** count perf commits when deciding and describing a release ([#487](https://github.com/unicornops/zmail/issues/487)) ([ebd186f](https://github.com/unicornops/zmail/commit/ebd186fc43be80e13435d698b61682854b2d1f51))
+
+### Performance Improvements
+
+* **store:** stop reading the whole mirror for every backfill stretch (#478) ([#486](https://github.com/unicornops/zmail/issues/486)) ([de9aee9](https://github.com/unicornops/zmail/commit/de9aee91ff170724be1f36a9fc13d11861f6cf3c))
+
 ## [0.34.2](https://github.com/unicornops/zmail/compare/v0.34.1...v0.34.2) (2026-11-16)
 
 
