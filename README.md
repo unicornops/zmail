@@ -62,6 +62,8 @@ Zmail needs the system keychain: Keychain on macOS, Credential Manager on Window
 
 ## Documentation
 
+The documentation is published at [docs.zmail.unicornops.ie](https://docs.zmail.unicornops.ie/) (the latest release, with `main` under `/dev/`), built from the pages below.
+
 | Read | For |
 | --- | --- |
 | [Installing Zmail](./docs/install.md) | downloads, checking them, first run, upgrading, SSH and headless machines, where data is kept, platform notes |

@@ -37,7 +37,7 @@ scripts/docs-site/build-site.sh target/docs-site
 | --- | --- |
 | [`build-site.sh OUT`](../scripts/docs-site/build-site.sh) | The deployable site: `/` and `/dev/`, then `check.sh`. `--dev-ref REF` (where `/dev/`'s source links point), `--release TAG` or `--release none`, `--no-check`. |
 | [`build.sh OUT`](../scripts/docs-site/build.sh) | One copy from the working tree: `--ref REF`, `--site-url /dev/`, `--title`, `--banner`, `--canonical-url`, `--noindex`. Any mdBook warning fails it. |
-| [`check.sh OUT`](../scripts/docs-site/check.sh) | Offline: links between pages, anchors and images, plus no resources from other origins. `--external` checks links to other sites online. |
+| [`check.sh OUT`](../scripts/docs-site/check.sh) | Offline: links between pages, anchors and images, plus no resources from other origins. `--external` checks links to other sites online, and links to this repository's files against the local clone ([`repo_links.py`](../scripts/docs-site/repo_links.py)). |
 | [`stage.py`](../scripts/docs-site/stage.py) | Copies the pages and their images into one tree and rewrites the links (see its header). |
 | [`head.py`](../scripts/docs-site/head.py) | Adds the canonical link and, for `/dev/`, the noindex tag to each built page. |
 | [`test_stage.py`](../scripts/docs-site/test_stage.py) | Self-test for `stage.py`'s link rewriting and, with mdBook installed, `build.sh`: `python3 -I scripts/docs-site/test_stage.py`. |
