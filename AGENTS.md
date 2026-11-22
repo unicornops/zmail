@@ -151,7 +151,7 @@ PATH="$PWD/target/docs-tools:$PATH" scripts/docs-site/build-site.sh target/docs-
 python3 -I scripts/docs-site/test_stage.py
 ```
 
-`build-site.sh` builds the latest release at `/` and the working tree at `/dev/`, and fails on any mdBook warning, broken link or anchor between pages, or resource loaded from another origin. CI's Docs Site workflow runs the same on every pull request.
+`build-site.sh` builds the latest release at `/` and the working tree at `/dev/`, and fails on any mdBook warning, broken link or anchor between pages, or resource loaded from another origin. CI's Docs Site workflow runs the same on every pull request. Every image in `docs/images` is a screenshot named after a UI screenshot matrix state (`scripts/docs-site/capture-screenshots.sh --check` checks it): each release captures them and `/` uses the release's copies (`docs/site.md`, Screenshots).
 
 Dependabot (`.github/dependabot.yml`) opens weekly update pull requests for Cargo (`fix(deps)`, minor and patch grouped) and GitHub Actions (`ci(deps)`), plus security updates for Dependabot alerts. It skips the GPUI pin and the `pgp` and `proton-srp` forks; move those by hand. The fuzz crate's own lockfile gets one grouped `test(deps)` pull request a month.
 

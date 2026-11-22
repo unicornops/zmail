@@ -22,7 +22,7 @@ The Linux assets need glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later); 0.
 
 ## Check your download
 
-**Checksums.** Each release has `SHA256SUMS-Linux`, `SHA256SUMS-macOS` and `SHA256SUMS-Windows`, listing the assets built on that system. Download the one for your asset into the same folder, then check just that file:
+**Checksums.** Each release has `SHA256SUMS-Linux`, `SHA256SUMS-macOS` and `SHA256SUMS-Windows`, listing the assets built on that system (and, from releases after 0.34.4, `SHA256SUMS-Screenshots` for the screenshots it also publishes: `zmail-linux-screenshot.png` and the documentation's `zmail-docs-*.png`). Download the one for your asset into the same folder, then check just that file:
 
 ```bash
 grep zmail-linux-x86_64.deb SHA256SUMS-Linux | sha256sum --check          # Linux

@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
-"""Self-test for stage.py's link rewriting, on a made-up repository.
+"""Self-test for the site scripts, on made-up repositories and releases.
 
     python3 -I scripts/docs-site/test_stage.py
 
-With mdbook on PATH (or MDBOOK set) it also builds a copy at /dev/ with
-build.sh and checks what mdBook does with the staged links. CI runs it in
-the docs workflow.
+Covers stage.py's link rewriting, head.py, repo_links.py, and the release
+screenshots: screenshots.py's naming and checks, and release-screenshots.sh
+against a stand-in for gh. With mdbook on PATH (or MDBOOK set) it also
+builds a copy at /dev/ with build.sh and checks what mdBook does with the
+staged links, and builds the whole site from HEAD with build-site.sh, with
+and without a release's screenshots. CI runs it in the docs workflow.
 """
 
+import hashlib
 import importlib.util
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 
 # No __pycache__ next to the scripts.
 sys.dont_write_bytecode = True
@@ -32,6 +38,8 @@ def load(name):
 stage = load("stage")
 head = load("head")
 repo_links = load("repo_links")
+screenshots = load("screenshots")
+REPO = os.path.dirname(os.path.dirname(HERE))
 
 BLOB = "https://github.com/unicornops/zmail/blob/v1.2.3/"
 TREE = "https://github.com/unicornops/zmail/tree/v1.2.3/"
@@ -275,6 +283,261 @@ class RepoLinksTest(unittest.TestCase):
         )
 
 
+def png(width=200, height=120, colour=(10, 20, 30)):
+    """A small, well-formed RGB PNG."""
+
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+    rows = (b"\x00" + bytes(colour) * width) * height
+    return (
+        screenshots.PNG_SIGNATURE
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+
+def write_bytes(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(data)
+
+
+def read_bytes(path):
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def write_assets(folder, assets, listed=None):
+    """Writes assets ({name: bytes}) and a SHA256SUMS-Screenshots listing
+    listed ({name: bytes}, default: the assets themselves)."""
+    os.makedirs(folder, exist_ok=True)
+    for name, data in assets.items():
+        write_bytes(os.path.join(folder, name), data)
+    listed = assets if listed is None else listed
+    with open(os.path.join(folder, screenshots.SUMS), "w", encoding="utf-8") as handle:
+        for name, data in listed.items():
+            handle.write(f"{hashlib.sha256(data).hexdigest()}  {name}\n")
+
+
+class ScreenshotPlanTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def images(self, *names):
+        folder = os.path.join(self.tmp, "images")
+        for name in names:
+            write_bytes(os.path.join(folder, name), b"png")
+        return folder
+
+    def test_each_image_is_a_state_and_an_asset(self):
+        folder = self.images("reader-light.png", "onboarding-provider-light.png")
+        self.assertEqual(
+            screenshots.plan(folder, {"reader-light", "onboarding-provider-light", "inbox-dark"}),
+            [
+                ("onboarding-provider-light", "zmail-docs-onboarding-provider-light.png"),
+                ("reader-light", "zmail-docs-reader-light.png"),
+            ],
+        )
+
+    def test_an_image_that_is_no_state_fails(self):
+        folder = self.images("reader-light.png", "diagram.svg", "Reader.PNG", "no-such-state.png")
+        with self.assertRaises(ValueError) as caught:
+            screenshots.plan(folder, {"reader-light"})
+        for name in ("diagram.svg", "Reader.PNG", "no-such-state.png"):
+            self.assertIn(name, str(caught.exception))
+        self.assertNotIn("reader-light.png", str(caught.exception))
+
+    def test_this_repository_s_images_are_all_matrix_states(self):
+        listed = subprocess.run(
+            ["bash", os.path.join(REPO, "scripts", "capture-release-screenshot.sh"), "--list"],
+            check=True, capture_output=True, text=True,
+        ).stdout.split()
+        entries = screenshots.plan(os.path.join(REPO, "docs", "images"), set(listed))
+        self.assertIn(("reader-light", "zmail-docs-reader-light.png"), entries)
+        subprocess.run(
+            [os.path.join(HERE, "capture-screenshots.sh"), "--check"],
+            check=True, stderr=subprocess.DEVNULL,
+        )
+
+
+class ScreenshotApplyTest(unittest.TestCase):
+    """screenshots.py apply: only verified, well-formed assets replace an
+    image; anything else keeps the committed copy."""
+
+    COMMITTED = b"committed"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.images = os.path.join(self.tmp, "site", "docs", "images")
+        self.assets = os.path.join(self.tmp, "assets")
+        for name in ("reader-light.png", "reader-dark.png"):
+            write_bytes(os.path.join(self.images, name), self.COMMITTED)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def apply(self):
+        with open(os.devnull, "w", encoding="utf-8") as log:
+            return screenshots.apply(self.images, self.assets, log=log)
+
+    def image(self, name):
+        return read_bytes(os.path.join(self.images, name))
+
+    def test_verified_assets_replace_the_images(self):
+        light, dark = png(colour=(255, 255, 255)), png(colour=(0, 0, 0))
+        write_assets(self.assets, {
+            "zmail-docs-reader-light.png": light,
+            "zmail-docs-reader-dark.png": dark,
+            # An asset for an image the site does not show is ignored.
+            "zmail-docs-inbox-dark.png": png(),
+        })
+        self.assertEqual(self.apply(), (2, 2))
+        self.assertEqual(self.image("reader-light.png"), light)
+        self.assertEqual(self.image("reader-dark.png"), dark)
+        self.assertFalse(os.path.exists(os.path.join(self.images, "inbox-dark.png")))
+
+    def test_no_assets_keeps_every_image(self):
+        self.assertEqual(self.apply(), (0, 2))
+        os.makedirs(self.assets)
+        write_bytes(os.path.join(self.assets, "zmail-docs-reader-light.png"), png())
+        # No SHA256SUMS-Screenshots: nothing is trusted.
+        self.assertEqual(self.apply(), (0, 2))
+        self.assertEqual(self.image("reader-light.png"), self.COMMITTED)
+
+    def test_a_missing_asset_keeps_its_image(self):
+        write_assets(self.assets, {"zmail-docs-reader-light.png": png()})
+        self.assertEqual(self.apply(), (1, 2))
+        self.assertEqual(self.image("reader-dark.png"), self.COMMITTED)
+
+    def test_a_checksum_mismatch_is_rejected(self):
+        write_assets(
+            self.assets,
+            {"zmail-docs-reader-light.png": png(colour=(1, 2, 3))},
+            listed={"zmail-docs-reader-light.png": png(colour=(3, 2, 1))},
+        )
+        self.assertEqual(self.apply(), (0, 2))
+        self.assertEqual(self.image("reader-light.png"), self.COMMITTED)
+
+    def test_an_unlisted_asset_is_rejected(self):
+        write_assets(self.assets, {"zmail-docs-reader-light.png": png()}, listed={})
+        self.assertEqual(self.apply(), (0, 2))
+
+    def test_what_is_not_a_sane_png_is_rejected(self):
+        good = png()
+        bad_crc = bytearray(good)
+        bad_crc[40] ^= 0xFF
+        cases = {
+            "text": b"<html>not a picture</html>",
+            "truncated": good[:-12],
+            "bad CRC": bytes(bad_crc),
+            "trailing data": good + b"<script>",
+            "too small": png(width=10, height=10),
+            "too large": png(width=9000, height=120),
+        }
+        for label, data in cases.items():
+            with self.subTest(label):
+                shutil.rmtree(self.assets, ignore_errors=True)
+                write_assets(self.assets, {"zmail-docs-reader-light.png": data})
+                self.assertIsNotNone(screenshots.png_problem(data))
+                self.assertEqual(self.apply(), (0, 2))
+                self.assertEqual(self.image("reader-light.png"), self.COMMITTED)
+        self.assertIsNone(screenshots.png_problem(good))
+
+    def test_a_symlink_is_rejected(self):
+        target = os.path.join(self.tmp, "elsewhere.png")
+        write_bytes(target, png())
+        write_assets(self.assets, {}, listed={"zmail-docs-reader-light.png": png()})
+        os.symlink(target, os.path.join(self.assets, "zmail-docs-reader-light.png"))
+        self.assertEqual(self.apply(), (0, 2))
+
+
+# Stands in for the GitHub CLI: serves the files in FAKE_GH_RELEASE as the
+# release's assets, and fails `attestation verify` for the names in
+# FAKE_GH_UNATTESTED (comma-separated).
+FAKE_GH = """#!/usr/bin/env python3
+import fnmatch, os, shutil, sys
+args = sys.argv[1:]
+release = os.environ.get("FAKE_GH_RELEASE", "")
+if args[:2] == ["release", "view"]:
+    if not os.path.isdir(release):
+        sys.exit("release not found")
+    print("\\n".join(sorted(os.listdir(release))))
+elif args[:2] == ["release", "download"]:
+    dest = args[args.index("--dir") + 1]
+    patterns = [args[i + 1] for i, a in enumerate(args) if a == "--pattern"]
+    for name in os.listdir(release):
+        if any(fnmatch.fnmatch(name, p) for p in patterns):
+            shutil.copy(os.path.join(release, name), dest)
+elif args[:2] == ["attestation", "verify"]:
+    bad = os.environ.get("FAKE_GH_UNATTESTED", "").split(",")
+    sys.exit(1 if os.path.basename(args[2]) in bad else 0)
+else:
+    sys.exit("unexpected: " + " ".join(args))
+"""
+
+
+class ReleaseScreenshotsTest(unittest.TestCase):
+    """release-screenshots.sh against a stand-in for gh."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.gh = os.path.join(self.tmp, "gh")
+        with open(self.gh, "w", encoding="utf-8") as handle:
+            handle.write(FAKE_GH)
+        os.chmod(self.gh, 0o755)
+        self.release = os.path.join(self.tmp, "release")
+        self.dest = os.path.join(self.tmp, "dest")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def run_script(self, gh=None, unattested=""):
+        env = dict(os.environ, GH=gh or self.gh, FAKE_GH_RELEASE=self.release, FAKE_GH_UNATTESTED=unattested)
+        return subprocess.run(
+            [os.path.join(HERE, "release-screenshots.sh"), "v1.2.3", self.dest],
+            env=env, capture_output=True, text=True,
+        )
+
+    def test_downloads_and_keeps_attested_files(self):
+        write_assets(self.release, {"zmail-docs-reader-light.png": png(), "zmail-docs-reader-dark.png": png()})
+        write_bytes(os.path.join(self.release, "zmail-linux-x86_64.deb"), b"deb")
+        result = self.run_script(unattested="zmail-docs-reader-dark.png")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            sorted(os.listdir(self.dest)),
+            [screenshots.SUMS, "zmail-docs-reader-light.png"],
+        )
+        self.assertIn("zmail-docs-reader-dark.png has no valid build provenance attestation", result.stdout)
+
+    def test_an_older_release_has_none(self):
+        os.makedirs(self.release)
+        write_bytes(os.path.join(self.release, "zmail-linux-screenshot.png"), png())
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("has no SHA256SUMS-Screenshots", result.stderr)
+        self.assertFalse(os.path.exists(self.dest))
+
+    def test_unattested_checksums_mean_nothing_is_used(self):
+        write_assets(self.release, {"zmail-docs-reader-light.png": png()})
+        result = self.run_script(unattested=screenshots.SUMS)
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(os.path.exists(self.dest))
+
+    def test_no_gh_and_no_release(self):
+        result = self.run_script(gh=os.path.join(self.tmp, "no-such-gh"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no GitHub CLI", result.stderr)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("could not read release v1.2.3", result.stderr)
+        self.assertFalse(os.path.exists(self.dest))
+
+
 class Page(str):
     """A page's HTML, shortened in failure messages."""
 
@@ -333,6 +596,68 @@ class BuildTest(unittest.TestCase):
             # only the 404 page, served from any depth, needs the prefix.
             self.assertIn('<base href="/dev/">', html("404.html"))
             self.assertFalse(os.path.exists(os.path.join(out, "book.toml")))
+
+
+def in_git_checkout():
+    return subprocess.run(
+        ["git", "-C", REPO, "cat-file", "-e", "HEAD:scripts/docs-site/build.sh"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
+@unittest.skipUnless(MDBOOK and in_git_checkout(), "needs mdbook and a git checkout")
+class BuildSiteScreenshotsTest(unittest.TestCase):
+    """build-site.sh with / built from HEAD: the release's screenshots
+    replace the committed copies in /, never in /dev/."""
+
+    def build(self, out, screenshots_mode):
+        subprocess.run(
+            [
+                os.path.join(HERE, "build-site.sh"),
+                "--release", "HEAD",
+                "--screenshots", screenshots_mode,
+                "--no-check",
+                out,
+            ],
+            check=True,
+            env=dict(os.environ, MDBOOK=MDBOOK),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def test_assets_are_used_in_the_release_copy_only(self):
+        def released(name):
+            return subprocess.run(
+                ["git", "-C", REPO, "show", f"HEAD:docs/images/{name}"],
+                check=True, capture_output=True,
+            ).stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            committed = os.path.join(REPO, "docs", "images")
+            names = sorted(n for n in os.listdir(committed) if n.endswith(".png"))
+            assets = {screenshots.asset_name(n): png(colour=(i, 0, 0)) for i, n in enumerate(names)}
+            # One bad asset: its image keeps the committed copy.
+            bad = screenshots.asset_name(names[0])
+            listed = dict(assets, **{bad: b"something else"})
+            write_assets(os.path.join(tmp, "assets"), assets, listed=listed)
+
+            out = os.path.join(tmp, "site")
+            self.build(out, os.path.join(tmp, "assets"))
+            for name in names:
+                site_copy = read_bytes(os.path.join(out, "docs", "images", name))
+                if screenshots.asset_name(name) == bad:
+                    self.assertEqual(site_copy, released(name), name)
+                else:
+                    self.assertEqual(site_copy, assets[screenshots.asset_name(name)], name)
+                self.assertEqual(
+                    read_bytes(os.path.join(out, "dev", "docs", "images", name)),
+                    read_bytes(os.path.join(committed, name)),
+                    name,
+                )
+
+            self.build(out, "none")
+            for name in names:
+                self.assertEqual(read_bytes(os.path.join(out, "docs", "images", name)), released(name), name)
 
 
 if __name__ == "__main__":

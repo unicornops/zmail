@@ -70,12 +70,19 @@ jobs:
   # starts no `release` workflows, so it is called from here. Its deploy
   # job reads the Cloudflare secrets from its own environment; nothing is
   # passed from this workflow.
+  #
+  # It waits for publish_release_assets, so the release's documentation
+  # screenshots (zmail-docs-*.png) are uploaded before / is built from
+  # them, and it runs whatever that job's result: a missing platform or
+  # screenshot only means / keeps the committed images for it. The build
+  # reads the assets and their attestations with this read-only token.
   docs_site:
     name: Docs Site
-    needs: release_please
-    if: needs.release_please.outputs.release_created == 'true'
+    needs: [release_please, publish_release_assets]
+    if: ${{ !cancelled() && needs.release_please.outputs.release_created == 'true' }}
     permissions:
       contents: read
+      attestations: read
     uses: ./.github/workflows/docs.yml
 
   # What to build and where it goes: the tag release-please just created,
@@ -143,17 +150,24 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Building $ref (upload to a release: $publish)"
 
+  # The release screenshot (zmail-linux-screenshot.png) and the
+  # documentation's screenshots (zmail-docs-<image> for each image in
+  # docs/images, docs/site.md), for a release-please release and for a
+  # dry run, which uploads nothing. A manual rebuild of an existing
+  # release takes none.
   release_screenshot:
     name: Release Screenshot
-    needs: release_please
-    if: needs.release_please.outputs.release_created == 'true'
+    needs: release_target
+    if: |
+      !cancelled() && needs.release_target.result == 'success' &&
+      (github.event_name == 'push' || inputs.dry_run == true)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.release_please.outputs.release_sha }}
+          ref: ${{ needs.release_target.outputs.ref }}
           persist-credentials: false
 
       # GPUI renders through wgpu, which loads the Vulkan loader (libvulkan1)
@@ -180,6 +194,7 @@ jobs:
           restore-keys: cargo-git-${{ runner.os }}-
 
       - name: Build release binary
+        id: build
         run: cargo build -p zmail-app --release --locked
 
       - name: Capture Linux screenshot
@@ -190,6 +205,31 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: xvfb-run -a --server-args="-screen 0 1600x1000x24" bash scripts/capture-release-screenshot.sh artifacts/zmail-linux-screenshot.png
 
+      - name: Upload the screenshot for publishing
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zmail-linux-screenshot
+          path: artifacts/zmail-linux-screenshot.png
+          if-no-files-found: error
+
+      # Fixture data in the screenshot matrix, no harness or network, so it
+      # runs even when the release screenshot above failed. The script
+      # fails first if an image in docs/images is not a matrix state.
+      - name: Capture the documentation screenshots
+        id: docs_screenshots
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          ZMAIL_CAPTURE_LOG_DIR: ${{ runner.temp }}/docs-screenshot-logs
+        run: xvfb-run -a --server-args="-screen 0 2560x1440x24" bash scripts/docs-site/capture-screenshots.sh artifacts/docs-screenshots
+
+      - name: Upload the documentation screenshots for publishing
+        if: ${{ !cancelled() && steps.docs_screenshots.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zmail-docs-screenshots
+          path: artifacts/docs-screenshots/zmail-docs-*.png
+          if-no-files-found: error
+
       - name: Upload capture logs
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -198,14 +238,8 @@ jobs:
           path: |
             /tmp/zmail-release-screenshot-app.log
             /tmp/zmail-release-screenshot-openbox.log
+            ${{ runner.temp }}/docs-screenshot-logs
           if-no-files-found: ignore
-
-      - name: Upload the screenshot for publishing
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: zmail-linux-screenshot
-          path: artifacts/zmail-linux-screenshot.png
-          if-no-files-found: error
 
   build_release_assets:
     needs: release_target
@@ -581,11 +615,12 @@ jobs:
 
   # The only job that can write to a release. It runs no project or
   # dependency code: it takes the built files from the artefacts, writes
-  # SHA256SUMS-<OS> for each platform, attests every asset's build
-  # provenance and uploads them. A platform whose build failed is left out
-  # and the job fails after uploading the rest, so "Re-run failed jobs"
-  # (or release-backfill.yml for Windows) completes the release. A dry run
-  # stops after the checksums.
+  # SHA256SUMS-<OS> for each platform and SHA256SUMS-Screenshots for the
+  # screenshots, attests every asset's build provenance and uploads them.
+  # A platform whose build failed is left out and the job fails after
+  # uploading the rest, so "Re-run failed jobs" (or release-backfill.yml
+  # for Windows) completes the release. A dry run stops after the
+  # checksums.
   #
   # Verify a downloaded asset with the GitHub CLI:
   #   gh attestation verify zmail-linux-x86_64.deb --repo unicornops/zmail
@@ -643,13 +678,29 @@ jobs:
           collect Linux zmail-linux-x86_64 zmail-linux-x86_64.tar.gz zmail-linux-x86_64.deb
           collect macOS zmail-macos zmail-macos.tar.gz zmail-macos.app.zip 'Zmail-*.dmg'
           collect Windows zmail-windows-x86_64 zmail-windows-x86_64.zip zmail-windows-x86_64.msi
-          # Only a release-please run takes a screenshot.
+          # Only a release-please run (or a dry run) takes screenshots.
+          # The documentation site uses the zmail-docs-*.png ones, checked
+          # against SHA256SUMS-Screenshots and their attestations; without
+          # them it keeps the committed images.
           if [ "$SCREENSHOT_RESULT" != "skipped" ]; then
+            shots=()
             if [ -f dist/zmail-linux-screenshot/zmail-linux-screenshot.png ]; then
               cp dist/zmail-linux-screenshot/zmail-linux-screenshot.png release/
+              shots+=(zmail-linux-screenshot.png)
             else
               echo "::error::No release screenshot; it is not published"
               incomplete=true
+            fi
+            docs_shots=(dist/zmail-docs-screenshots/zmail-docs-*.png)
+            if [ "${#docs_shots[@]}" -gt 0 ]; then
+              cp "${docs_shots[@]}" release/
+              shots+=("${docs_shots[@]##*/}")
+            else
+              echo "::error::No documentation screenshots; they are not published, and the site keeps the committed images"
+              incomplete=true
+            fi
+            if [ "${#shots[@]}" -gt 0 ]; then
+              (cd release && sha256sum "${shots[@]}") > release/SHA256SUMS-Screenshots
             fi
           fi
           if [ "$BUILD_RESULT" != "success" ]; then
