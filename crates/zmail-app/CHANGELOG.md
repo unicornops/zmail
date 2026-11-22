@@ -6,6 +6,7 @@
 ### Bug Fixes
 
 * **deps:** replace chrono with jiff (RUSTSEC-2026-0543) ([#493](https://github.com/unicornops/zmail/issues/493)) ([643642b](https://github.com/unicornops/zmail/commit/643642ba848c0ae70a132fa2a738e1a8ca45fdf4))
+* **deps:** bump url to 2.5.9 (RUSTSEC-2026-0592) ([#492](https://github.com/unicornops/zmail/issues/492)) ([76b97b6](https://github.com/unicornops/zmail/commit/76b97b64bdb679167e18ae4c248548dc951d6d32))
 
 ## [0.34.3](https://github.com/unicornops/zmail/compare/v0.34.2...v0.34.3) (2026-11-17)
 
