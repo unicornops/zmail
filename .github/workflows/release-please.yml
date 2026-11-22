@@ -67,23 +67,31 @@ jobs:
 
   # Rebuilds and deploys the documentation site so / is the new release
   # (docs.yml, docs/site.md). The release is made with GITHUB_TOKEN, which
-  # starts no `release` workflows, so it is called from here. Its deploy
-  # job reads the Cloudflare secrets from its own environment; nothing is
-  # passed from this workflow.
+  # starts no `release` workflows, so the Docs Site workflow is started
+  # from here, on main, exactly as a run by hand: a workflow started with
+  # workflow_dispatch is one of the few GITHUB_TOKEN may start. It is not
+  # called as a reusable workflow, because a called job did not get the
+  # docs-site environment's secrets (the 0.34.5 release deployed nothing).
+  # Nothing is passed to it but "skip the check of outside links"; its
+  # deploy job reads the Cloudflare secrets from its own environment.
   #
   # It waits for publish_release_assets, so the release's documentation
   # screenshots (zmail-docs-*.png) are uploaded before / is built from
   # them, and it runs whatever that job's result: a missing platform or
-  # screenshot only means / keeps the committed images for it. The build
-  # reads the assets and their attestations with this read-only token.
+  # screenshot only means / keeps the committed images for it.
   docs_site:
-    name: Docs Site
+    name: Start the Docs Site workflow
     needs: [release_please, publish_release_assets]
     if: ${{ !cancelled() && needs.release_please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
     permissions:
-      contents: read
-      attestations: read
-    uses: ./.github/workflows/docs.yml
+      actions: write
+    steps:
+      - name: Start Docs Site on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run docs.yml --ref main -f external_links=false
 
   # What to build and where it goes: the tag release-please just created,
   # or a manual run's tag_name. Anything that will be uploaded must be a
