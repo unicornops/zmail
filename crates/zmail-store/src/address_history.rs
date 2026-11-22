@@ -40,10 +40,11 @@
 use std::collections::HashMap;
 
 use anyhow::{Context as _, Result};
-use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Transaction, params};
 use zmail_core::{
-    AddressSuggestion, MessageSnapshot, participants::parse_address_list, time::parse_timestamp,
+    AddressSuggestion, MessageSnapshot,
+    participants::parse_address_list,
+    time::{Stamp, parse_timestamp},
 };
 
 use crate::LocalStore;
@@ -156,14 +157,14 @@ fn recency_weight(age_days: i64) -> f64 {
 struct Tally {
     display_name: String,
     /// The timestamp `display_name` came from, so the newest name wins.
-    named_at: Option<DateTime<Utc>>,
+    named_at: Option<Stamp>,
     sent: i64,
     received: i64,
-    last_used_at: Option<DateTime<Utc>>,
+    last_used_at: Option<Stamp>,
 }
 
 impl Tally {
-    fn add(&mut self, name: Option<&str>, at: Option<DateTime<Utc>>, sent: i64, received: i64) {
+    fn add(&mut self, name: Option<&str>, at: Option<Stamp>, sent: i64, received: i64) {
         self.sent += sent;
         self.received += received;
         self.last_used_at = self.last_used_at.max(at);
@@ -189,12 +190,12 @@ fn own_addresses(conn: &Connection, account_id: Option<i64>) -> Result<Vec<Strin
         .context("failed to load the identity addresses")
 }
 
-fn parse_utc(value: &str) -> Option<DateTime<Utc>> {
-    parse_timestamp(value).map(|at| at.with_timezone(&Utc))
+fn parse_utc(value: &str) -> Option<Stamp> {
+    parse_timestamp(value)
 }
 
-fn format_utc(at: Option<DateTime<Utc>>) -> Option<String> {
-    at.map(|at| at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+fn format_utc(at: Option<Stamp>) -> Option<String> {
+    at.map(Stamp::format_utc)
 }
 
 /// Rebuilds an account's mirror counts from its mirrored mail.
@@ -488,7 +489,7 @@ fn tally_messages(
     own: &[String],
     sender: &str,
     recipients: &str,
-    at: Option<DateTime<Utc>>,
+    at: Option<Stamp>,
     count: i64,
 ) {
     let senders = parse_address_list(sender);
@@ -512,7 +513,7 @@ fn tally(
     tallies: &mut HashMap<String, Tally>,
     own: &[String],
     participant: &zmail_core::participants::Participant,
-    at: Option<DateTime<Utc>>,
+    at: Option<Stamp>,
     sent: i64,
     received: i64,
 ) {
@@ -632,7 +633,7 @@ impl LocalStore {
     /// most used addresses. Every account's history is searched; the
     /// user's own addresses are left out.
     pub fn address_suggestions(&self, query: &str, limit: usize) -> Result<Vec<AddressSuggestion>> {
-        self.address_suggestions_at(query, limit, Utc::now())
+        self.address_suggestions_at(query, limit, Stamp::now())
     }
 
     /// [`Self::address_suggestions`] ranked as of `now`.
@@ -640,7 +641,7 @@ impl LocalStore {
         &self,
         query: &str,
         limit: usize,
-        now: DateTime<Utc>,
+        now: Stamp,
     ) -> Result<Vec<AddressSuggestion>> {
         let conn = self.connection()?;
         let query = query.trim().to_lowercase();
@@ -691,7 +692,7 @@ impl LocalStore {
             .map(|(address, tally)| {
                 let age_days = tally
                     .last_used_at
-                    .map_or(i64::MAX, |last| (now - last).num_days());
+                    .map_or(i64::MAX, |last| now.seconds_since(last) / 86_400);
                 let score = (SENT_WEIGHT * tally.sent as f64
                     + RECEIVED_WEIGHT * tally.received as f64)
                     * recency_weight(age_days);
@@ -720,10 +721,10 @@ impl LocalStore {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Utc};
     use zmail_core::{
         AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, NewDraft, ProtocolKind,
         ThreadSnapshot,
+        time::{Stamp, parse_timestamp},
     };
 
     use crate::LocalStore;
@@ -784,8 +785,8 @@ mod tests {
         }
     }
 
-    fn at(value: &str) -> DateTime<Utc> {
-        value.parse().expect("a valid timestamp")
+    fn at(value: &str) -> Stamp {
+        parse_timestamp(value).expect("a valid timestamp")
     }
 
     // Characterisation (issue #489): how the history reads `received_at`

@@ -117,7 +117,7 @@ impl MessageRow {
         id: SharedString,
         thread: &ThreadSummary,
         own_addresses: &[&str],
-        now: &chrono::DateTime<chrono::Local>,
+        now: &zmail_core::time::ZonedDateTime,
         hour_cycle: HourCycle,
     ) -> Self {
         let (name, address) = sender_identity(&thread.latest_sender);
@@ -136,7 +136,7 @@ impl MessageRow {
             snippet: thread.preview.clone(),
             snippet_tone: SnippetTone::Muted,
             date: format_list_date(&thread.latest_message_at, now, hour_cycle),
-            date_tooltip: format_full_date(&thread.latest_message_at, &now.timezone(), hour_cycle),
+            date_tooltip: format_full_date(&thread.latest_message_at, now.time_zone(), hour_cycle),
             unread: thread.unread_count > 0,
             message_count: thread.message_count,
             is_flagged: thread.is_flagged,
@@ -153,7 +153,7 @@ impl MessageRow {
         id: SharedString,
         hit: &SearchHit,
         highlighter: &SearchHighlighter,
-        now: &chrono::DateTime<chrono::Local>,
+        now: &zmail_core::time::ZonedDateTime,
         hour_cycle: HourCycle,
     ) -> Self {
         let (name, address) = sender_identity(&hit.latest_sender);
@@ -173,7 +173,7 @@ impl MessageRow {
             snippet,
             snippet_tone: SnippetTone::Muted,
             date: format_list_date(&hit.latest_message_at, now, hour_cycle),
-            date_tooltip: format_full_date(&hit.latest_message_at, &now.timezone(), hour_cycle),
+            date_tooltip: format_full_date(&hit.latest_message_at, now.time_zone(), hour_cycle),
             unread: hit.unread_count > 0,
             // Search hits do not carry a message count.
             message_count: 0,
@@ -194,7 +194,7 @@ impl MessageRow {
     pub(super) fn draft(
         id: SharedString,
         draft: &DraftSummary,
-        now: &chrono::DateTime<chrono::Local>,
+        now: &zmail_core::time::ZonedDateTime,
         hour_cycle: HourCycle,
     ) -> Self {
         let (sender, avatar_name, avatar_address) =
@@ -228,7 +228,7 @@ impl MessageRow {
                 SnippetTone::Muted
             },
             date: format_list_date(&draft.updated_at, now, hour_cycle),
-            date_tooltip: format_full_date(&draft.updated_at, &now.timezone(), hour_cycle),
+            date_tooltip: format_full_date(&draft.updated_at, now.time_zone(), hour_cycle),
             unread: false,
             message_count: 0,
             is_flagged: false,
@@ -245,7 +245,7 @@ impl MessageRow {
         id: SharedString,
         job: &OutboxJobSummary,
         draft: Option<&DraftSummary>,
-        now: &chrono::DateTime<chrono::Local>,
+        now: &zmail_core::time::ZonedDateTime,
         hour_cycle: HourCycle,
     ) -> Self {
         let (sender, avatar_name, avatar_address) = recipient_line(
@@ -277,7 +277,7 @@ impl MessageRow {
             date_tooltip: job
                 .last_error_message
                 .clone()
-                .unwrap_or_else(|| format_full_date(updated_at, &now.timezone(), hour_cycle)),
+                .unwrap_or_else(|| format_full_date(updated_at, now.time_zone(), hour_cycle)),
             unread: false,
             message_count: 0,
             is_flagged: false,
@@ -403,7 +403,7 @@ pub(crate) struct OutboxStatus {
 /// instead of the job's state name and attempt count.
 pub(crate) fn outbox_status(
     job: &OutboxJobSummary,
-    now: &chrono::DateTime<chrono::Local>,
+    now: &zmail_core::time::ZonedDateTime,
 ) -> OutboxStatus {
     let status = |text: &str, failed, can_retry| OutboxStatus {
         text: text.to_owned(),
@@ -449,9 +449,9 @@ pub(crate) fn outbox_status(
                 .next_attempt_at
                 .as_deref()
                 .and_then(parse_timestamp)
-                .map(|at| at.with_timezone(&chrono::Utc) - now.with_timezone(&chrono::Utc));
+                .map(|at| at.seconds_since(now.into()));
             let text = match wait {
-                Some(wait) if wait.num_seconds() > 0 => {
+                Some(wait) if wait > 0 => {
                     format!("Failed \u{2014} retrying in {}", short_duration(wait))
                 }
                 _ => "Failed \u{2014} retrying now".to_owned(),
@@ -469,8 +469,8 @@ pub(crate) fn outbox_status(
 
 /// "30 sec", "5 min", "2 h", "3 days": rounded up, so a wait never
 /// reads shorter than it is.
-fn short_duration(duration: chrono::TimeDelta) -> String {
-    let seconds = duration.num_seconds().max(1);
+fn short_duration(seconds: i64) -> String {
+    let seconds = seconds.max(1);
     let ceil = |unit: i64| (seconds + unit - 1) / unit;
     if seconds < 60 {
         format!("{seconds} sec")
@@ -937,7 +937,7 @@ mod tests {
     }
 
     fn row(thread: &ThreadSummary) -> MessageRow {
-        let now = chrono::Local::now();
+        let now = zmail_core::time::now();
         MessageRow::thread(
             "thread-row-7".into(),
             thread,
@@ -997,9 +997,9 @@ mod tests {
     #[test]
     fn a_thread_summary_reads_as_the_plan_describes() {
         let received = "2026-03-20T10:42:00Z";
-        let now = parse_timestamp(received)
+        let now = zmail_core::time::clock_at(received)
             .expect("valid timestamp")
-            .with_timezone(&chrono::Local);
+            .with_time_zone(zmail_core::time::system_zone());
         let summary = ThreadSummary {
             id: 9,
             mailbox_id: 1,
@@ -1051,7 +1051,7 @@ mod tests {
 
     #[test]
     fn search_hits_are_labelled_with_their_mailbox() {
-        let now = chrono::Local::now();
+        let now = zmail_core::time::now();
         let hit = SearchHit {
             account_id: 1,
             mailbox_id: 1,
@@ -1087,7 +1087,7 @@ mod tests {
 
     #[test]
     fn search_hits_mark_the_query_in_subject_and_snippet() {
-        let now = chrono::Local::now();
+        let now = zmail_core::time::now();
         let hit = SearchHit {
             account_id: 1,
             mailbox_id: 1,
@@ -1129,9 +1129,9 @@ mod tests {
 
     #[test]
     fn outbox_status_reads_in_plain_words() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-18T10:00:00Z")
+        let now = zmail_core::time::clock_at("2026-10-18T10:00:00Z")
             .expect("a timestamp")
-            .with_timezone(&chrono::Local);
+            .with_time_zone(zmail_core::time::system_zone());
         let text = |state, next: Option<&str>| outbox_status(&job(state, next), &now).text;
         assert_eq!(text(OutboxJobState::Queued, None), "Waiting to send");
         assert_eq!(text(OutboxJobState::Sending, None), "Sending\u{2026}");
@@ -1179,9 +1179,9 @@ mod tests {
 
     #[test]
     fn a_refused_sign_in_asks_to_sign_in_again_instead_of_retrying() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-18T10:00:00Z")
+        let now = zmail_core::time::clock_at("2026-10-18T10:00:00Z")
             .expect("a timestamp")
-            .with_timezone(&chrono::Local);
+            .with_time_zone(zmail_core::time::system_zone());
         let mut refused = job(OutboxJobState::Failed, None);
         refused.last_error_message = Some(
             ReauthRequired::new(
@@ -1198,9 +1198,9 @@ mod tests {
 
     #[test]
     fn an_interrupted_send_asks_to_check_sent_and_can_be_retried() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-18T10:00:00Z")
+        let now = zmail_core::time::clock_at("2026-10-18T10:00:00Z")
             .expect("a timestamp")
-            .with_timezone(&chrono::Local);
+            .with_time_zone(zmail_core::time::system_zone());
         let mut interrupted = job(OutboxJobState::Failed, None);
         interrupted.last_error_message = Some(zmail_core::INTERRUPTED_SEND_MESSAGE.to_owned());
         let status = outbox_status(&interrupted, &now);
@@ -1217,9 +1217,9 @@ mod tests {
 
     #[test]
     fn a_changed_recipient_key_asks_for_a_decision_instead_of_retrying() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-18T10:00:00Z")
+        let now = zmail_core::time::clock_at("2026-10-18T10:00:00Z")
             .expect("a timestamp")
-            .with_timezone(&chrono::Local);
+            .with_time_zone(zmail_core::time::system_zone());
         let change =
             PinnedKeyChanged::new("kai@example.test", ["AB".repeat(20)], ["CD".repeat(20)]);
         let mut changed = job(OutboxJobState::Failed, None);
@@ -1256,7 +1256,7 @@ mod tests {
 
     #[test]
     fn a_failed_outbox_row_says_so_in_the_danger_colour() {
-        let now = chrono::Local::now();
+        let now = zmail_core::time::now();
         let draft = DraftSummary {
             id: 4,
             account_id: 1,

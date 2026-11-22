@@ -82,7 +82,7 @@ fn the_terminal_ui_sends_through_the_outbox() -> Result<()> {
             over_ssh: false,
             macos: false,
         },
-        clock: Arc::new(|| chrono::Local::now().fixed_offset()),
+        clock: Arc::new(zmail_core::time::now_at_fixed_offset),
         hour_cycle: HourCycle::H24,
         version: "0.0.0-test".to_owned(),
         arrivals: None,

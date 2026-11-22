@@ -12,8 +12,8 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
+use zmail_core::time::{Stamp, parse_netscape_date, parse_rfc2822};
 
 /// One stored cookie.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +59,7 @@ impl CookieJar {
         request_path: &str,
         set_cookie: impl IntoIterator<Item = &'a str>,
     ) {
-        let now = Utc::now().timestamp();
+        let now = Stamp::now().seconds();
         let mut cookies = self.lock();
         for header in set_cookie {
             let Some(cookie) = parse_set_cookie(header, host, request_path, now) else {
@@ -74,7 +74,7 @@ impl CookieJar {
 
     /// Returns the `Cookie` header value for a request, if any cookie applies.
     pub(crate) fn header_for(&self, path: &str, secure: bool) -> Option<String> {
-        let now = Utc::now().timestamp();
+        let now = Stamp::now().seconds();
         let mut cookies = self.lock();
         cookies.retain(|cookie| !cookie.is_expired(now));
         // RFC 6265 section 5.4: longer paths first.
@@ -93,7 +93,7 @@ impl CookieJar {
 
     /// Returns the persistent (non-session, unexpired) cookies.
     pub fn snapshot(&self) -> Vec<StoredCookie> {
-        let now = Utc::now().timestamp();
+        let now = Stamp::now().seconds();
         self.lock()
             .iter()
             .filter(|cookie| cookie.expires.is_some() && !cookie.is_expired(now))
@@ -103,7 +103,7 @@ impl CookieJar {
 
     /// Adds cookies from an earlier [`CookieJar::snapshot`].
     pub fn restore(&self, cookies: impl IntoIterator<Item = StoredCookie>) {
-        let now = Utc::now().timestamp();
+        let now = Stamp::now().seconds();
         let mut stored = self.lock();
         for cookie in cookies {
             if cookie.is_expired(now) {
@@ -204,13 +204,10 @@ fn domain_matches(host: &str, domain: &str) -> bool {
 
 /// Parses the `Expires` date formats servers actually send.
 fn parse_cookie_date(value: &str) -> Option<i64> {
-    if let Ok(date) = DateTime::parse_from_rfc2822(value) {
-        return Some(date.timestamp());
-    }
-    // `Wed, 21-Oct-2015 07:28:00 GMT` (the Netscape format).
-    NaiveDateTime::parse_from_str(value, "%a, %d-%b-%Y %H:%M:%S GMT")
-        .ok()
-        .map(|date| date.and_utc().timestamp())
+    parse_rfc2822(value)
+        // `Wed, 21-Oct-2015 07:28:00 GMT` (the Netscape format).
+        .or_else(|| parse_netscape_date(value))
+        .map(Stamp::seconds)
 }
 
 #[cfg(test)]

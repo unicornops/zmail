@@ -1455,7 +1455,7 @@ fn install_panic_hook(log_path: &std::path::Path) {
             .name()
             .map(str::to_owned)
             .unwrap_or_else(|| "unnamed".to_owned());
-        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let timestamp = zmail_core::time::now().strftime("%Y-%m-%d %H:%M:%S%.3f");
         let _ = hardening::private_file()
             .create(true)
             .append(true)

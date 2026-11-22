@@ -560,7 +560,7 @@ impl ReaderView {
                     (0..0, 1)
                 };
                 let context = MessageContext {
-                    now: chrono::Local::now(),
+                    now: zmail_core::time::now(),
                     hour_cycle: self.hour_cycle,
                     own_addresses: &self.state.own_addresses,
                     colors,

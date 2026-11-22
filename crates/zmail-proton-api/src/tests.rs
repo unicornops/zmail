@@ -272,7 +272,7 @@ async fn sends_identity_session_and_auth_headers() {
     assert_eq!(request.header("x-pm-uid"), Some("uid-1"));
     assert_eq!(request.header("authorization"), Some("Bearer access-1"));
     assert_eq!(
-        manager.server_time().map(|time| time.timestamp()),
+        manager.server_time().map(|time| time.seconds()),
         Some(1_792_490_400)
     );
 }

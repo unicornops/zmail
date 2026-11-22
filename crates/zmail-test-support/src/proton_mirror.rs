@@ -157,9 +157,9 @@ fn place(position: usize, own_address: &str) -> Placed {
             has_remote_content: false,
             is_read: mix(hash ^ 0x4ead) % 100 < 85,
             is_flagged: mix(hash ^ 0xf1a6) % 100 < 3,
-            received_at: chrono::DateTime::from_timestamp(at, 0)
-                .unwrap_or_default()
-                .to_rfc3339(),
+            received_at: zmail_core::time::Stamp::from_seconds(at)
+                .unwrap_or(zmail_core::time::Stamp::EPOCH)
+                .format_rfc3339_utc(),
             attachments: Vec::new(),
             headers: MessageHeaders {
                 captured: false,

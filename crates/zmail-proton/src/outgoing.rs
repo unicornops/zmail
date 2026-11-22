@@ -10,7 +10,6 @@
 //! message. Zmail's own code, written with the MIME helpers of the
 //! `message.rs` port.
 
-use chrono::Utc;
 use zmail_core::threading::format_message_ids;
 use zmail_proton_api::EmailAddress;
 
@@ -60,7 +59,7 @@ pub(crate) fn build_mime_body(source: &MimeSource<'_>, attachments: &[OutgoingFi
         header.set("Reply-To", &address_list(source.reply_to));
     }
     header.set("Subject", &q_encode(source.subject));
-    header.set("Date", &rfc1123z(Utc::now()));
+    header.set("Date", &rfc1123z(zmail_core::time::Stamp::now()));
     if let Some(message_id) = source.message_id {
         header.set("Message-ID", &format_message_ids(&[message_id]));
     }

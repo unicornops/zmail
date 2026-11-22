@@ -35,6 +35,13 @@ ignore-dev-dependencies = false
 #   used under GPL-3.0-only) and crates/gpui/examples/window_shadow.rs
 #   (Apache License 2.0, crates/zmail-ui/LICENSE-APACHE) in Zed v1.24.2,
 #   Copyright Zed Industries, Inc.
+# - crates/zmail-core/src/time/text.rs
+#   The timestamp grammars (RFC 3339, RFC 2822, strftime-style numbers)
+#   follow src/format/parse.rs and src/format/scan.rs of chrono 0.4.45
+#   (https://github.com/chronotope/chrono), Copyright (c) 2014-2025 Kang
+#   Seonghoon and contributors, licensed under MIT or Apache-2.0 (used
+#   under MIT), so that stored and wire timestamps read as they did when
+#   Zmail used that crate (issue #489).
 #
 # Proton Mail support (issue #237, docs/adr/0004-proton-native.md). Every
 # file listed in docs/upstream/proton-ports.toml starts with a header naming

@@ -323,13 +323,11 @@ const READER_THREAD: &str = "t-roadmap";
 /// Today's messages may lie a little in the future; they still show as
 /// today's times.
 pub(crate) fn anchor_time() -> u64 {
-    let now = chrono::Local::now();
-    let anchor = now
-        .date_naive()
-        .and_hms_opt(10, 0, 0)
-        .and_then(|time| time.and_local_timezone(chrono::Local).earliest())
-        .unwrap_or(now);
-    u64::try_from(anchor.timestamp()).unwrap_or_default()
+    let now = zmail_core::time::now();
+    let anchor = zmail_core::time::Date::of(&now)
+        .time_in(10, now.time_zone())
+        .unwrap_or_else(|| now.timestamp().as_second());
+    u64::try_from(anchor).unwrap_or_default()
 }
 
 /// Seeds `store` for `view` and returns the view the window should open on.
@@ -2238,7 +2236,7 @@ mod tests {
         assert_eq!(initial_view, InitialView::Search(SEARCH_FILTERS_QUERY));
         let unified = MailboxSelection::Virtual(VirtualMailbox::Unified(MailboxRole::Inbox));
         // `after:30d` counts from the seeding clock, not from today.
-        let now = chrono::DateTime::from_timestamp(i64::try_from(NOW)?, 0)
+        let now = zmail_core::time::clock_at(&zmail_core::time::utc_timestamp(NOW))
             .context("the fixture clock is a valid time")?;
         let hits = store.search_threads_in_at(
             &zmail_core::SearchScope::Folder(unified),

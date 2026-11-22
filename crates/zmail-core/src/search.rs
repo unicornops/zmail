@@ -28,7 +28,7 @@
 
 use std::ops::Range;
 
-use chrono::{Days, Months, NaiveDate, NaiveTime, TimeDelta, TimeZone};
+use crate::time::{Date, TimeZone};
 
 /// A parsed search query: every clause must match.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -114,7 +114,7 @@ impl SearchText {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DateSpec {
     /// A calendar day, written `YYYY-MM-DD`.
-    Day(NaiveDate),
+    Day(Date),
     /// A day relative to today, written `7d`, `2w`, `3m` or `1y`.
     Ago {
         /// How many units back.
@@ -140,21 +140,21 @@ pub enum DateUnit {
 impl DateSpec {
     /// Resolves the boundary to a calendar day, given today's date in the
     /// viewer's time zone. Returns `None` when the result falls outside
-    /// chrono's date range.
-    pub fn resolve(self, today: NaiveDate) -> Option<NaiveDate> {
+    /// the calendar's range (see [`Date`]).
+    pub fn resolve(self, today: Date) -> Option<Date> {
         match self {
             Self::Day(day) => Some(day),
             Self::Ago { amount, unit } => match unit {
-                DateUnit::Days => today.checked_sub_days(Days::new(u64::from(amount))),
-                DateUnit::Weeks => today.checked_sub_days(Days::new(u64::from(amount) * 7)),
-                DateUnit::Months => today.checked_sub_months(Months::new(amount)),
-                DateUnit::Years => today.checked_sub_months(Months::new(amount.checked_mul(12)?)),
+                DateUnit::Days => today.checked_sub_days(u64::from(amount)),
+                DateUnit::Weeks => today.checked_sub_days(u64::from(amount) * 7),
+                DateUnit::Months => today.checked_sub_months(amount),
+                DateUnit::Years => today.checked_sub_months(amount.checked_mul(12)?),
             },
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
-        if let Ok(day) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        if let Some(day) = Date::parse(value) {
             return Some(Self::Day(day));
         }
         let unit = match value.chars().last()?.to_ascii_lowercase() {
@@ -297,14 +297,8 @@ pub fn mailbox_matches(value: &str, name: &str, role: Option<&str>) -> bool {
 
 /// The Unix time at which `day` starts in `zone`. Days that skip midnight
 /// (a daylight-saving jump) start at the first valid local time after it.
-pub fn day_start_unix<Tz: TimeZone>(day: NaiveDate, zone: &Tz) -> Option<i64> {
-    let midnight = day.and_time(NaiveTime::MIN);
-    (0..=2)
-        .find_map(|hours| {
-            zone.from_local_datetime(&(midnight + TimeDelta::hours(hours)))
-                .earliest()
-        })
-        .map(|start| start.timestamp())
+pub fn day_start_unix(day: Date, zone: &TimeZone) -> Option<i64> {
+    day.start_in(zone)
 }
 
 /// Parses one clause from the start of `input` (which has no leading
@@ -453,8 +447,8 @@ mod tests {
         }
     }
 
-    fn day(year: i32, month: u32, day: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(year, month, day).expect("valid date")
+    fn day(year: i32, month: u8, day: u8) -> Date {
+        Date::new(year, month, day).expect("valid date")
     }
 
     #[test]
@@ -622,15 +616,19 @@ mod tests {
 
     #[test]
     fn day_starts_follow_the_zone() {
-        let day = NaiveDate::from_ymd_opt(2026, 6, 1).expect("valid date");
-        let plus_one = chrono::FixedOffset::east_opt(3600).expect("valid offset");
-        assert_eq!(day_start_unix(day, &chrono::Utc), Some(1_780_272_000));
-        assert_eq!(day_start_unix(day, &plus_one), Some(1_780_268_400));
+        let day = day(2026, 6, 1);
+        assert_eq!(day_start_unix(day, &TimeZone::UTC), Some(1_780_272_000));
+        assert_eq!(day_start_unix(day, &fixed(3600)), Some(1_780_268_400));
     }
 
     // Characterisation (issue #489): what `before:`/`after:` values parsed
     // and resolved to before the workspace moved off chrono. Only `spec`,
     // `resolved` and `day_start` know the time library.
+
+    /// A zone fixed `seconds` east of UTC.
+    fn fixed(seconds: i32) -> TimeZone {
+        TimeZone::fixed(jiff::tz::Offset::from_seconds(seconds).expect("valid offset"))
+    }
 
     /// A date value as `day YYYY-MM-DD` or `N units ago`.
     fn spec(value: &str) -> Option<String> {
@@ -642,7 +640,7 @@ mod tests {
 
     /// The day a date value means on `today` (`YYYY-MM-DD`).
     fn resolved(value: &str, today: &str) -> Option<String> {
-        let today = NaiveDate::parse_from_str(today, "%Y-%m-%d").expect("valid test date");
+        let today = Date::parse(today).expect("valid test date");
         DateSpec::parse(value)
             .expect("a date value")
             .resolve(today)
@@ -652,9 +650,8 @@ mod tests {
     /// When `day` (`YYYY-MM-DD`) starts in a zone `offset_minutes` east of
     /// UTC.
     fn day_start(day: &str, offset_minutes: i32) -> Option<i64> {
-        let day = NaiveDate::parse_from_str(day, "%Y-%m-%d").expect("valid test date");
-        let zone = chrono::FixedOffset::east_opt(offset_minutes * 60).expect("valid offset");
-        day_start_unix(day, &zone)
+        let day = Date::parse(day).expect("valid test date");
+        day_start_unix(day, &fixed(offset_minutes * 60))
     }
 
     #[test]
@@ -810,6 +807,36 @@ mod tests {
                 *expected,
                 "{day} at {offset_minutes} min"
             );
+        }
+    }
+
+    /// Day boundaries in zones with daylight saving. The expected values
+    /// are what chrono's `Local` gave under the same `TZ`, measured before
+    /// the move off it (issue #489).
+    #[test]
+    fn days_start_with_daylight_saving_time() {
+        // (zone, day, the Unix time it starts)
+        let cases = [
+            ("Europe/Dublin", "2026-01-15", 1_768_435_200),
+            ("Europe/Dublin", "2026-07-01", 1_782_860_400),
+            ("Europe/Dublin", "2026-03-29", 1_774_742_400),
+            ("Europe/Dublin", "2026-10-25", 1_792_882_800),
+            ("America/New_York", "2026-03-08", 1_772_946_000),
+            ("America/New_York", "2026-11-01", 1_793_505_600),
+            // Midnight is skipped: the day starts when the clocks jump.
+            ("America/Havana", "2025-03-09", 1_741_496_400),
+            ("America/Sao_Paulo", "2018-11-04", 1_541_300_400),
+            ("Asia/Kathmandu", "1986-01-01", 504_901_800),
+            // Midnight comes twice: the second time.
+            ("America/Havana", "2025-11-02", 1_762_059_600),
+            // A day that never happened starts with the next one.
+            ("Pacific/Apia", "2011-12-30", 1_325_239_200),
+            ("Pacific/Apia", "2011-12-31", 1_325_239_200),
+        ];
+        for (zone, day, expected) in cases {
+            let zone = TimeZone::get(zone).expect("the time zone database has the zone");
+            let day = Date::parse(day).expect("valid test date");
+            assert_eq!(day_start_unix(day, &zone), Some(expected), "{day}");
         }
     }
 

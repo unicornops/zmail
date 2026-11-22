@@ -1823,7 +1823,7 @@ impl SyncService {
                             target.auth,
                             &job.target.identity_email,
                             &job.message,
-                            parse_timestamp(&since).map(|since| since.timestamp()),
+                            parse_timestamp(&since).map(|since| since.seconds()),
                         )
                         .await
                     }

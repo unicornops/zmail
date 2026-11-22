@@ -19,19 +19,17 @@ use std::{
 };
 
 use anyhow::Result;
-use chrono::{DateTime, TimeZone, Utc};
 use zmail_core::{
     AccountSyncSnapshot, HydratedBody, ProtocolKind, ThreadSnapshot,
     search::{SearchQuery, SearchTerm, SearchText, day_start_unix, mailbox_matches},
+    time::{Date, TimeZone, ZonedDateTime, clock_at, parse_timestamp},
 };
 use zmail_store::LocalStore;
 use zmail_test_support::SyntheticMailboxSpec;
 
 /// "Now" for every query: dates in the dataset run back two years from it.
-fn now() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0)
-        .single()
-        .expect("valid time")
+fn now() -> ZonedDateTime {
+    clock_at("2026-10-01T00:00:00Z").expect("valid time")
 }
 
 fn seeded(
@@ -110,8 +108,8 @@ fn oracle_thread(mailbox: &str, role: Option<String>, thread: &ThreadSnapshot) -
         attachment: thread.has_attachments,
         times: messages
             .iter()
-            .filter_map(|message| DateTime::parse_from_rfc3339(&message.received_at).ok())
-            .map(|time| time.timestamp())
+            .filter_map(|message| parse_timestamp(&message.received_at))
+            .map(|time| time.seconds())
             .collect(),
     }
 }
@@ -142,7 +140,7 @@ fn column_matches(column: &[String], text: &SearchText) -> bool {
 /// subjects (each thread's subject is unique through its `T<n>` tag).
 fn oracle(threads: &[OracleThread], query: &str) -> BTreeSet<String> {
     let parsed = SearchQuery::parse(query);
-    let today = now().date_naive();
+    let today = Date::of(&now());
     threads
         .iter()
         .filter(|thread| {
@@ -177,7 +175,7 @@ fn oracle(threads: &[OracleThread], query: &str) -> BTreeSet<String> {
                     SearchTerm::Before(spec) | SearchTerm::After(spec) => {
                         let Some(boundary) = spec
                             .resolve(today)
-                            .and_then(|day| day_start_unix(day, &Utc))
+                            .and_then(|day| day_start_unix(day, &TimeZone::UTC))
                         else {
                             return true;
                         };

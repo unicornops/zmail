@@ -8,7 +8,6 @@ mod push;
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Utc};
 use jmap_client::{
     client::Client,
     core::{
@@ -1146,11 +1145,11 @@ async fn fetch_email_query(client: &Client) -> Result<JmapQueryResult> {
 /// `inMailbox` (resolved by mailbox name or role), and `before`/`after`
 /// at the start of the day in `now`'s zone; negation wraps a condition in
 /// a `NOT` operator. The store re-checks the non-text clauses locally.
-pub async fn search_emails<Tz: chrono::TimeZone>(
+pub async fn search_emails(
     target: &SyncTarget,
     secret: &str,
     query: &zmail_core::search::SearchQuery,
-    now: &DateTime<Tz>,
+    now: &zmail_core::time::ZonedDateTime,
     max_hits: usize,
 ) -> Result<Vec<zmail_core::ServerHitRef>> {
     if target.protocol != ProtocolKind::Jmap {
@@ -1184,17 +1183,17 @@ pub async fn search_emails<Tz: chrono::TimeZone>(
 /// Builds the `Email/query` filter for a query (see [`search_emails`]).
 /// Returns `None` when the query cannot match anything (an `in:` naming no
 /// mailbox).
-fn search_filter<Tz: chrono::TimeZone>(
+fn search_filter(
     query: &zmail_core::search::SearchQuery,
     mailboxes: &[JmapMailbox],
-    now: &DateTime<Tz>,
+    now: &zmail_core::time::ZonedDateTime,
 ) -> Option<jmap_client::core::query::Filter<email::query::Filter>> {
     use email::query::Filter;
     use jmap_client::core::query::Filter as Operator;
     use zmail_core::search::{SearchTerm, day_start_unix, mailbox_matches};
 
-    let today = now.date_naive();
-    let zone = now.timezone();
+    let today = zmail_core::time::Date::of(now);
+    let zone = now.time_zone();
     let mut conditions: Vec<Operator<Filter>> = Vec::new();
     for clause in &query.clauses {
         let condition: Operator<Filter> = match &clause.term {
@@ -1237,7 +1236,7 @@ fn search_filter<Tz: chrono::TimeZone>(
             SearchTerm::Before(spec) | SearchTerm::After(spec) => {
                 let Some(boundary) = spec
                     .resolve(today)
-                    .and_then(|day| day_start_unix(day, &zone))
+                    .and_then(|day| day_start_unix(day, zone))
                 else {
                     continue;
                 };
@@ -1821,8 +1820,8 @@ fn mailbox_role(role: jmap_client::mailbox::Role) -> Option<String> {
 }
 
 fn timestamp_to_rfc3339(timestamp: i64) -> String {
-    if let Some(datetime) = DateTime::<Utc>::from_timestamp(timestamp, 0) {
-        datetime.to_rfc3339()
+    if let Some(stamp) = zmail_core::time::Stamp::from_seconds(timestamp) {
+        stamp.format_rfc3339_utc()
     } else {
         "1970-01-01T00:00:00Z".to_owned()
     }
@@ -1866,7 +1865,6 @@ mod tests {
 
     #[test]
     fn search_filters_map_every_operator() {
-        use chrono::TimeZone;
         let mailboxes = vec![
             super::JmapMailbox {
                 id: "mb-inbox".to_owned(),
@@ -1883,10 +1881,7 @@ mod tests {
                 parent: None,
             },
         ];
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 6, 15, 12, 0, 0)
-            .single()
-            .expect("valid time");
+        let now = zmail_core::time::clock_at("2026-06-15T12:00:00Z").expect("valid time");
         let filter = |query: &str| {
             super::search_filter(
                 &zmail_core::search::SearchQuery::parse(query),

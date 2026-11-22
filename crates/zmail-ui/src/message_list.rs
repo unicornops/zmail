@@ -776,7 +776,7 @@ impl MessageListView {
         let start = range.start;
         let count = self.thread_count();
         let threads = self.thread_rows(range, cx);
-        let now = chrono::Local::now();
+        let now = zmail_core::time::now();
         let density = self.density_tokens(cx);
         let own_addresses = self
             .state
@@ -890,7 +890,7 @@ impl MessageListView {
             self.asked_for_more_at = Some(loaded);
             cx.emit(MessageListEvent::LoadMoreResults);
         }
-        let now = chrono::Local::now();
+        let now = zmail_core::time::now();
         let density = self.density_tokens(cx);
         let highlighter = SearchHighlighter::new(&self.state.search_query);
         // Results from several accounts name their account, as rows of
@@ -974,7 +974,7 @@ impl MessageListView {
         if self.state.drafts.is_empty() {
             return self.render_no_drafts(colors);
         }
-        let now = chrono::Local::now();
+        let now = zmail_core::time::now();
         let density = self.density_tokens(cx);
         let count = self.state.drafts.len();
         div()
@@ -1024,7 +1024,7 @@ impl MessageListView {
         if self.state.outbox_jobs.is_empty() {
             return self.render_empty_outbox(colors);
         }
-        let now = chrono::Local::now();
+        let now = zmail_core::time::now();
         let density = self.density_tokens(cx);
         let count = self.state.outbox_jobs.len();
         div()

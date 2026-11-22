@@ -18,9 +18,9 @@
 //! Decrypting a Proton message and rebuilding it as RFC 822.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use chrono::{DateTime, TimeZone, Utc};
 use rand::Rng;
 use zeroize::Zeroizing;
+use zmail_core::time::{Stamp, parse_rfc2822};
 use zmail_proton_api::{Attachment, EmailAddress, Headers, KeyRing, Message};
 
 /// Bridge's `InternalIDDomain`.
@@ -300,13 +300,11 @@ fn message_header(msg: &Message) -> PartHeader {
     // SanitizeDate.
     let date = header
         .get("Date")
-        .and_then(|date| DateTime::parse_from_rfc2822(date.trim()).ok());
-    if date.is_none_or(|date| date.timestamp() < 0) {
+        .and_then(|date| parse_rfc2822(date.trim()));
+    if date.is_none_or(|date| date.seconds() < 0) {
         header.set_if_needed("Date", &rfc1123z(sanitize_message_date(meta.time)));
         if !header.has("X-Original-Date") {
-            let original = date
-                .map(|date| date.with_timezone(&Utc))
-                .unwrap_or_else(|| sanitize_message_date(0));
+            let original = date.unwrap_or_else(|| sanitize_message_date(0));
             header.set("X-Original-Date", &rfc1123z(original));
         }
     }
@@ -317,7 +315,7 @@ fn message_header(msg: &Message) -> PartHeader {
     }
     header.set_if_needed(
         "X-Pm-Date",
-        &rfc1123z(Utc.timestamp_opt(meta.time, 0).single().unwrap_or_default()),
+        &rfc1123z(Stamp::from_seconds(meta.time).unwrap_or(Stamp::EPOCH)),
     );
     // AddMessageIDReference.
     let references = header.values("References");
@@ -333,18 +331,17 @@ fn message_header(msg: &Message) -> PartHeader {
 }
 
 /// `SanitizeMessageDate`: dates before the epoch become RFC 822's own.
-fn sanitize_message_date(seconds: i64) -> DateTime<Utc> {
-    match Utc.timestamp_opt(seconds, 0).single() {
+fn sanitize_message_date(seconds: i64) -> Stamp {
+    // 13 August 1982 at midnight UTC.
+    const RFC_822: i64 = 398_044_800;
+    match Stamp::from_seconds(seconds) {
         Some(date) if seconds > 0 => date,
-        _ => Utc
-            .with_ymd_and_hms(1982, 8, 13, 0, 0, 0)
-            .single()
-            .unwrap_or_default(),
+        _ => Stamp::from_seconds(RFC_822).unwrap_or(Stamp::EPOCH),
     }
 }
 
-pub(crate) fn rfc1123z(date: DateTime<Utc>) -> String {
-    date.format("%a, %d %b %Y %H:%M:%S %z").to_string()
+pub(crate) fn rfc1123z(date: Stamp) -> String {
+    date.format_rfc1123z()
 }
 
 /// `getTextPartHeader`.

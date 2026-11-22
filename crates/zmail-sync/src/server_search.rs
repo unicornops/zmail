@@ -161,7 +161,7 @@ impl SyncService {
                     &target,
                     &secret,
                     &parsed,
-                    &chrono::Local::now(),
+                    &zmail_core::time::now(),
                     SERVER_SEARCH_MAX_HITS,
                 )
                 .await?

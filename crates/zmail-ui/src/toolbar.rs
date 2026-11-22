@@ -16,12 +16,15 @@
 //! rest in the app menu (the menu bar on macOS, the title bar's app-menu
 //! button elsewhere) and the keymap.
 
-use chrono::{DateTime, Utc};
 use gpui::{
     App, Context, Entity, FocusHandle, IntoElement, MouseButton, RenderOnce, Role, Window, div,
     prelude::*, px,
 };
-use zmail_core::{AccountSummary, SyncPhase, text::count_noun, time::parse_timestamp};
+use zmail_core::{
+    AccountSummary, SyncPhase,
+    text::count_noun,
+    time::{Stamp, parse_timestamp},
+};
 
 use super::WorkspaceView;
 use crate::a11y::AccessibleExt;
@@ -44,7 +47,7 @@ impl WorkspaceView {
             focus_handle: self.focus_handle.clone(),
             search: self.search_query.clone(),
             sidebar_shown: self.sidebar_shown(),
-            sync: sync_indicator(&self.accounts, Utc::now()),
+            sync: sync_indicator(&self.accounts, Stamp::now()),
         }
     }
 }
@@ -186,10 +189,7 @@ const MAX_ERROR_CHARS: usize = 80;
 /// status (never from the server). A problem outranks a sync in progress,
 /// so a failing account stays visible while another one syncs. `None`
 /// when there are no accounts.
-pub(crate) fn sync_indicator(
-    accounts: &[AccountSummary],
-    now: DateTime<Utc>,
-) -> Option<SyncIndicator> {
+pub(crate) fn sync_indicator(accounts: &[AccountSummary], now: Stamp) -> Option<SyncIndicator> {
     if accounts.is_empty() {
         return None;
     }
@@ -256,7 +256,7 @@ pub(crate) fn sync_indicator(
                 .filter_map(|account| account.sync_status.last_success_at.as_deref())
                 .filter_map(parse_timestamp)
                 .max()
-                .map(|at| updated_ago(at.with_timezone(&Utc), now))
+                .map(|at| updated_ago(at, now))
                 .unwrap_or_else(|| "Not synced yet".to_owned()),
         },
     };
@@ -282,8 +282,8 @@ pub(crate) fn sync_announcement(
 
 /// "Updated just now", "Updated 5 min ago", "Updated 3 hours ago",
 /// "Updated yesterday" or "Updated 4 days ago".
-fn updated_ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let seconds = (now - at).num_seconds().max(0);
+fn updated_ago(at: Stamp, now: Stamp) -> String {
+    let seconds = now.seconds_since(at).max(0);
     let minutes = seconds / 60;
     let hours = minutes / 60;
     let days = hours / 24;
@@ -316,7 +316,6 @@ fn truncate(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, TimeZone};
     use zmail_core::{CachePolicySummary, ProtocolKind, SyncStatusSummary};
 
     use super::*;
@@ -337,8 +336,8 @@ mod tests {
         }
     }
 
-    fn now() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 17, 12, 0, 0).unwrap()
+    fn now() -> Stamp {
+        parse_timestamp("2026-10-17T12:00:00Z").expect("a timestamp")
     }
 
     fn label(accounts: &[AccountSummary]) -> (SyncState, String) {
@@ -401,15 +400,20 @@ mod tests {
 
     #[test]
     fn relative_times_read_naturally() {
-        let ago = |delta: Duration| updated_ago(now() - delta, now());
-        assert_eq!(ago(Duration::seconds(20)), "Updated just now");
-        assert_eq!(ago(Duration::minutes(59)), "Updated 59 min ago");
-        assert_eq!(ago(Duration::minutes(61)), "Updated 1 hour ago");
-        assert_eq!(ago(Duration::hours(5)), "Updated 5 hours ago");
-        assert_eq!(ago(Duration::hours(30)), "Updated yesterday");
-        assert_eq!(ago(Duration::days(4)), "Updated 4 days ago");
+        let ago = |seconds: i64| {
+            let at = Stamp::from_seconds(now().seconds() - seconds).expect("a timestamp");
+            updated_ago(at, now())
+        };
+        const MINUTE: i64 = 60;
+        const HOUR: i64 = 60 * MINUTE;
+        assert_eq!(ago(20), "Updated just now");
+        assert_eq!(ago(59 * MINUTE), "Updated 59 min ago");
+        assert_eq!(ago(61 * MINUTE), "Updated 1 hour ago");
+        assert_eq!(ago(5 * HOUR), "Updated 5 hours ago");
+        assert_eq!(ago(30 * HOUR), "Updated yesterday");
+        assert_eq!(ago(4 * 24 * HOUR), "Updated 4 days ago");
         // Clock skew never shows a future time.
-        assert_eq!(ago(Duration::minutes(-5)), "Updated just now");
+        assert_eq!(ago(-5 * MINUTE), "Updated just now");
     }
 
     #[test]

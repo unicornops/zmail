@@ -43,7 +43,6 @@ ammonia = "4.2.4"
 anyhow = "1"
 async-imap = { version = "0.12.0", default-features = false, features = ["runtime-tokio"] }
 base64 = "0.23.1"
-chrono = "0.4"
 # The terminal UI's terminal layer (ADR 0007): raw mode, the alternate
 # screen, key, mouse and bracketed-paste events on Linux, macOS and Windows
 # terminals. The version ratatui's backend uses.
@@ -73,6 +72,10 @@ html5ever = "0.40.1"
 # HMAC-SHA256 for the store's opaque attachment file names (ADR 0005);
 # already in the tree through pgp.
 hmac = "0.13.0"
+# The clock, the system time zone and its daylight-saving rules, for
+# zmail-core's `time` module, which is the only place that names it. The
+# text of stored and wire timestamps is zmail-core's own (issue #489).
+jiff = "1.0.2"
 # Exactly 0.4.1: 0.4.2 and later put every capability jmap-client knows
 # (contacts, calendars, Sieve, quota, principals...) in each request's
 # `using`, which RFC 8620 section 3.6.1 has servers reject

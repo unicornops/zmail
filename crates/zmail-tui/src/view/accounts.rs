@@ -228,7 +228,7 @@ fn sync_details(out: &mut Lines, app: &App, account: &AccountSummary) {
     if !status.detail.is_empty() && status.detail != label {
         rows.push(("Last report", sanitize_line(&status.detail)));
     }
-    let zone = app.now().timezone();
+    let zone = app.now().time_zone().clone();
     rows.push((
         "Last synced",
         status.last_success_at.as_deref().map_or_else(

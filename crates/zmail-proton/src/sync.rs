@@ -31,7 +31,6 @@ use std::{
 };
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use zmail_core::{MailboxSnapshot, MessageHeaders, MessageSnapshot, ThreadSnapshot};
 use zmail_proton_api::{Client, EmailAddress, Label, LabelType, MessageFilter, MessageMetadata};
 
@@ -346,8 +345,8 @@ fn format_addresses(addresses: &[EmailAddress]) -> String {
 }
 
 fn timestamp(seconds: i64) -> String {
-    DateTime::<Utc>::from_timestamp(seconds, 0)
-        .map(|time| time.to_rfc3339())
+    zmail_core::time::Stamp::from_seconds(seconds)
+        .map(zmail_core::time::Stamp::format_rfc3339_utc)
         .unwrap_or_else(|| "1970-01-01T00:00:00+00:00".to_owned())
 }
 

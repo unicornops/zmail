@@ -89,9 +89,9 @@ impl SyntheticMailboxSpec {
                                 let (first, last, domain) = random.person();
                                 let (to_first, to_last, to_domain) = random.person();
                                 let at = start + position as i64 * 3_600;
-                                let received_at = chrono::DateTime::from_timestamp(at, 0)
-                                    .unwrap_or_default()
-                                    .to_rfc3339();
+                                let received_at = zmail_core::time::Stamp::from_seconds(at)
+                                    .unwrap_or(zmail_core::time::Stamp::EPOCH)
+                                    .format_rfc3339_utc();
                                 let body = random.body(self.average_body_bytes);
                                 let preview = body.chars().take(120).collect::<String>();
                                 let hydrated =

@@ -52,7 +52,7 @@ pub(super) fn render_header(
     let date = format_list_date(&message.received_at, &context.now, context.hour_cycle);
     let full_date = format_full_date(
         &message.received_at,
-        &context.now.timezone(),
+        context.now.time_zone(),
         context.hour_cycle,
     );
     let summary = recipient_summary(&message.recipients, context.own_addresses);
@@ -232,7 +232,7 @@ pub(super) fn render_details(message: &ThreadMessage, context: &MessageContext<'
     let colors = &context.colors;
     let full_date = format_full_date(
         &message.received_at,
-        &context.now.timezone(),
+        context.now.time_zone(),
         context.hour_cycle,
     );
     let to = parse_address_list(&message.recipients)

@@ -26,7 +26,7 @@ use zmail_core::{
     is_interrupted_send,
     preferences::ReadingPanePosition,
     text::count_noun,
-    time::{HourCycle, format_full_date, next_local_midnight},
+    time::{HourCycle, duration_between, format_full_date, next_local_midnight},
 };
 use zmail_notify::ThreadRef;
 use zmail_security::SecretStore;
@@ -525,9 +525,8 @@ impl WorkspaceView {
         window
             .spawn(cx, async move |cx| {
                 loop {
-                    let now = chrono::Local::now();
-                    let until_midnight = (next_local_midnight(&now) - now)
-                        .to_std()
+                    let now = zmail_core::time::now();
+                    let until_midnight = duration_between(&now, &next_local_midnight(&now))
                         .unwrap_or(Duration::from_secs(60));
                     cx.background_executor()
                         .timer(until_midnight + Duration::from_secs(1))
@@ -691,7 +690,7 @@ impl WorkspaceView {
         self.thread_view_cache = None;
         match self.store.list_accounts() {
             Ok(accounts) => {
-                let now = chrono::Utc::now();
+                let now = zmail_core::time::Stamp::now();
                 let before = sync_indicator(&self.accounts, now);
                 let after = sync_indicator(&accounts, now);
                 if let Some(text) = sync_announcement(before.as_ref(), after.as_ref()) {
@@ -2114,7 +2113,11 @@ impl WorkspaceView {
             latest_message,
             &self.identities,
             reply_all,
-            &format_full_date(&latest_message.received_at, &chrono::Local, self.hour_cycle),
+            &format_full_date(
+                &latest_message.received_at,
+                &zmail_core::time::system_zone(),
+                self.hour_cycle,
+            ),
         )?;
         self.create_thread_draft(start, cx)
     }
@@ -2135,7 +2138,11 @@ impl WorkspaceView {
             &thread.mailbox_name,
             latest_message,
             &self.identities,
-            &format_full_date(&latest_message.received_at, &chrono::Local, self.hour_cycle),
+            &format_full_date(
+                &latest_message.received_at,
+                &zmail_core::time::system_zone(),
+                self.hour_cycle,
+            ),
         );
         let attachments = std::mem::take(&mut start.attachments);
         Ok((self.create_thread_draft(start, cx)?, attachments))

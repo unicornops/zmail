@@ -216,8 +216,8 @@ Each phase also refreshes the screenshot matrix (Phase 1.8) and attaches it to t
    - Mark the avatar and date `flex_none`. Give the text column `min_w_0()`, and use
      `truncate()` / `line_clamp(1)`.
    - Apply the same fixes to search, draft, and outbox rows.
-3. **Readable dates.** Add `zmail_core::time::format_list_date(ts, now, locale)` (chrono is
-   already a workspace dependency), with tests for each tier, year boundaries, the
+3. **Readable dates.** Add `zmail_core::time::format_list_date(ts, now, locale)` (on the
+   workspace's time library: chrono then, jiff behind `zmail_core::time` since #489), with tests for each tier, year boundaries, the
    12/24-hour setting, and time zones. Use it in the list and reader. Schedule a
    re-render at midnight.
 4. **Sender display.** Move `sender_identity()` from `reader.rs` into core. Rows show the
