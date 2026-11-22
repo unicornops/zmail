@@ -1,0 +1,34 @@
+# mdBook configuration for the documentation site (docs/site.md).
+# scripts/docs-site/build.sh copies this file to the top of the tree that
+# stage.py writes and builds it there; docs/SUMMARY.md is the table of
+# contents. build.sh sets the title and site-url for each copy of the site.
+[book]
+title = "Zmail"
+description = "Zmail, a fast, local-first email client for the desktop and the terminal"
+language = "en"
+# The staged tree mirrors the repository with this file at its top, so the
+# book's source is its own folder and {path} in the edit link below is the
+# page's path in the repository (mdBook writes it as ./docs/install.md;
+# browsers drop the ./ when they follow the link).
+src = "."
+
+[build]
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/unicornops/zmail"
+# Edits always go to main, also from the copy of the latest release.
+edit-url-template = "https://github.com/unicornops/zmail/edit/main/{path}"
+# Only the 404 page uses it; everything else links relatively.
+site-url = "/"
+# Part titles already group the pages; numbers ("4.2.") add nothing.
+no-section-label = true
+
+[output.html.search]
+enable = true
+
+# No Rust playground: a ```rust block would otherwise get a Run button and
+# every page showing one would ask play.rust-lang.org for its crate list.
+# The site loads nothing from other origins (docs/site.md).
+[output.html.playground]
+runnable = false

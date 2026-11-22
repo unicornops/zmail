@@ -91,7 +91,7 @@ Run this on each platform before claiming screen-reader support works, and note 
 5. **Actions.** Press Ctrl+E (Cmd+E) to archive. The "Conversation archived" toast should be announced without moving focus. Press Ctrl+Z (Cmd+Z) to undo.
 6. **Search.** Press Ctrl+F (Cmd+F) and type a word that matches, then press Enter. The result count should be announced ("3 results").
 7. **Palette.** Press Ctrl+K (Cmd+K) and type "arch". Each Down press should announce the highlighted command ("Archive, 2 of 5"). Escape closes it.
-8. **Compose.** Press Ctrl+N (Cmd+N). The To, Subject and Message fields should each read their name. Add a recipient, then Tab to the chip's Remove button, which should read "Remove <name>".
+8. **Compose.** Press Ctrl+N (Cmd+N). The To, Subject and Message fields should each read their name. Add a recipient, then Tab to the chip's Remove button, which should read "Remove" and the recipient's name.
 9. **Errors.** In Add Account (Ctrl+Shift+A, Cmd+Shift+A), press Continue with the fields empty. The field error should be announced at once.
 10. **Settings.** Press Ctrl+, (Cmd+,). Up and Down in the section list should read each tab, and Tab should move into the section, whose controls each read a name.
 11. **High contrast (Windows).** Turn on a contrast theme (Settings → Accessibility → Contrast themes) and switch back to Zmail. The window should redraw in the theme's colours, and the selected row should stay readable.

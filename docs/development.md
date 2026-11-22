@@ -18,6 +18,7 @@ Building Zmail from source, testing it, and where the design documents are. Most
 - [`docs/phase5-hardening.md`](./phase5-hardening.md): accessibility, performance, crash policy, packaging, and release process
 - [`docs/performance.md`](./performance.md): performance budgets, how they are measured, and the latest numbers; [`benches/README.md`](../benches/README.md) has the store benchmarks
 - [`docs/oauth2-live-verification.md`](./oauth2-live-verification.md): checking OAuth2 sign-in against real providers by hand
+- [`docs/site.md`](./site.md): the documentation site: building it locally, how it is deployed, and adding a page (new pages go in [`docs/SUMMARY.md`](./SUMMARY.md))
 - [`fuzz/README.md`](../fuzz/README.md): fuzzing the mail parsing
 - [`themes/phase0-dark.json`](../themes/phase0-dark.json): sample unchanged Zed-format theme file
 

@@ -20,6 +20,7 @@ The app is organised as a Rust workspace with separate crates for UI, store, syn
 - `docs/install.md`: installing, checking downloads, first run, upgrading, SSH and headless use, data directory, runtime platform notes
 - `docs/features.md`, `docs/cli.md`, `docs/tui.md` and `docs/search.md`: the feature list and Settings → Mail, the command line, the terminal UI and the search language
 - `docs/development.md`: building from source, the live mail harness, build platform notes and the design documents
+- `docs/site.md`: the documentation site built from these files with mdBook (`scripts/docs-site/`); a new page must be added to `docs/SUMMARY.md`, its table of contents
 - `PLAN.md`: product phases and scope
 - `docs/phase5-hardening.md`: current hardening and packaging status
 - `docs/upstream/zed.md`: pinned upstream GPUI and Zed context
@@ -141,6 +142,16 @@ Dependency policy:
 cargo deny check licenses advisories bans sources
 cargo audit
 ```
+
+Documentation site (`docs/site.md`; x86-64 Linux, needs the release tags):
+
+```bash
+scripts/docs-site/install-tools.sh target/docs-tools   # pinned mdBook and lychee
+PATH="$PWD/target/docs-tools:$PATH" scripts/docs-site/build-site.sh target/docs-site
+python3 -I scripts/docs-site/test_stage.py
+```
+
+`build-site.sh` builds the latest release at `/` and the working tree at `/dev/`, and fails on any mdBook warning, broken link or anchor between pages, or resource loaded from another origin. CI's Docs Site workflow runs the same on every pull request.
 
 Dependabot (`.github/dependabot.yml`) opens weekly update pull requests for Cargo (`fix(deps)`, minor and patch grouped) and GitHub Actions (`ci(deps)`), plus security updates for Dependabot alerts. It skips the GPUI pin and the `pgp` and `proton-srp` forks; move those by hand. The fuzz crate's own lockfile gets one grouped `test(deps)` pull request a month.
 

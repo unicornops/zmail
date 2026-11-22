@@ -1,0 +1,213 @@
+name: Docs Site
+
+# Builds the documentation site (docs/site.md) with mdBook, checks its links
+# and deploys it to Cloudflare Pages:
+#
+# - every pull request: build and check (offline: links between pages,
+#   anchors, images, no third-party resources). Every pull request, not
+#   only docs changes, because the docs link into the code (scripts,
+#   crates, config) and moving a file there breaks them. No deploy, no
+#   secrets.
+# - push to main that changes the docs or this tooling: build, check and
+#   deploy (/dev/ is main).
+# - a new release: release-please.yml calls this workflow once the release
+#   exists, so / moves to it. (A release made with GITHUB_TOKEN starts no
+#   `release` workflows, so `on: release` would never fire.)
+# - weekly, and by hand: also check the links to other sites, which come
+#   and go, so they never block a pull request.
+#
+# CI builds the site and wrangler uploads exactly what CI checked (direct
+# upload); Cloudflare's Git integration is not used. The deploy job skips
+# with a notice until the one-time setup in docs/site.md is done.
+on:
+    pull_request:
+    push:
+        branches: [main]
+        paths:
+            - docs/**
+            - README.md
+            - AGENTS.md
+            - SECURITY.md
+            - CHANGELOG.md
+            - benches/README.md
+            - scripts/docs-site/**
+            - .github/workflows/docs.yml
+    workflow_call:
+    workflow_dispatch:
+    schedule:
+        # Tuesdays, 05:23 UTC.
+        - cron: "23 5 * * 2"
+
+permissions:
+    contents: read
+
+jobs:
+    build:
+        name: Build docs site
+        if: github.event_name != 'schedule'
+        runs-on: ubuntu-24.04
+        timeout-minutes: 15
+        # One build of main at a time, in order, so an older build never
+        # deploys after a newer one; a newer push to a pull request cancels
+        # its older build.
+        concurrency:
+            group: docs-build-${{ github.event.pull_request.number || github.ref }}
+            cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+        outputs:
+            commit: ${{ steps.commit.outputs.sha }}
+        env:
+            # /dev/'s links to repository files: the pull request's head, or
+            # the branch (main when deploying).
+            DEV_REF: ${{ github.event.pull_request.head.sha || github.ref_name }}
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  # Deploys build main as it is now, not the commit that
+                  # started the run, so the last deploy is always the
+                  # newest whatever order the runs finish in.
+                  ref: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && 'main' || '' }}
+                  # The release tags: / is built from the newest release.
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Record the commit built
+              id: commit
+              run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+            - name: Install mdBook and lychee
+              run: |
+                  scripts/docs-site/install-tools.sh "$RUNNER_TEMP/docs-tools"
+                  echo "$RUNNER_TEMP/docs-tools" >> "$GITHUB_PATH"
+
+            - name: Lint the site scripts
+              run: shellcheck scripts/docs-site/*.sh
+
+            # Offline: stage.py's link rewriting on a made-up repository,
+            # then build.sh on this one.
+            - name: Site script self-test
+              run: python3 -I scripts/docs-site/test_stage.py
+
+            - name: Build and check the site
+              run: scripts/docs-site/build-site.sh --dev-ref "$DEV_REF" target/docs-site
+
+            - name: Upload the site
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: docs-site
+                  path: target/docs-site
+                  if-no-files-found: error
+                  retention-days: 7
+
+            - name: Say why the site is not deployed
+              if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.CLOUDFLARE_PAGES_PROJECT == ''
+              run: echo "::notice title=Docs site not deployed::The CLOUDFLARE_PAGES_PROJECT repository variable is not set, so the deploy job is skipped. See 'One-time setup' in docs/site.md."
+
+    deploy:
+        name: Deploy docs site
+        needs: build
+        # Only main in this repository, never a pull request (forks get no
+        # secrets anyway) and only once the Pages project is configured.
+        if: >-
+            github.event_name != 'pull_request' &&
+            github.ref == 'refs/heads/main' &&
+            github.repository == 'unicornops/zmail' &&
+            vars.CLOUDFLARE_PAGES_PROJECT != ''
+        runs-on: ubuntu-24.04
+        timeout-minutes: 15
+        # The secrets live in this environment, which only main may use.
+        environment: docs-site
+        concurrency:
+            group: docs-deploy
+            cancel-in-progress: false
+        env:
+            CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+            CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+            PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+            COMMIT: ${{ needs.build.outputs.commit }}
+
+        steps:
+            - name: Check the Cloudflare credentials
+              id: credentials
+              run: |
+                  if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+                    echo "::notice title=Docs site not deployed::CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID is not set in the docs-site environment. See 'One-time setup' in docs/site.md."
+                    echo "ready=false" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "ready=true" >> "$GITHUB_OUTPUT"
+                  fi
+
+            # Only wrangler's pinned package.json and lockfile.
+            - name: Checkout the deploy tooling
+              if: steps.credentials.outputs.ready == 'true'
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  ref: ${{ needs.build.outputs.commit }}
+                  sparse-checkout: scripts/docs-site/deploy
+                  sparse-checkout-cone-mode: false
+                  persist-credentials: false
+
+            - name: Download the site
+              if: steps.credentials.outputs.ready == 'true'
+              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+              with:
+                  name: docs-site
+                  path: ${{ runner.temp }}/docs-site
+
+            - name: Install Node.js
+              if: steps.credentials.outputs.ready == 'true'
+              uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+              with:
+                  node-version: 24
+
+            # Exactly the lockfile's packages, each checked against its
+            # integrity hash; no install scripts run.
+            - name: Install wrangler
+              if: steps.credentials.outputs.ready == 'true'
+              working-directory: scripts/docs-site/deploy
+              run: npm ci --ignore-scripts --no-audit --no-fund
+
+            # Replaces the whole site with this build (/ and /dev/).
+            - name: Deploy to Cloudflare Pages
+              if: steps.credentials.outputs.ready == 'true'
+              working-directory: scripts/docs-site/deploy
+              env:
+                  # No usage metrics sent to Cloudflare.
+                  WRANGLER_SEND_METRICS: "false"
+                  SITE: ${{ runner.temp }}/docs-site
+              run: |
+                  npx --no-install wrangler pages deploy "$SITE" \
+                    --project-name "$PROJECT" \
+                    --branch main \
+                    --commit-hash "$COMMIT" \
+                    --commit-message "Docs site from main at ${COMMIT:0:12}"
+
+    external_links:
+        name: Docs site external links
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        runs-on: ubuntu-24.04
+        timeout-minutes: 20
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Install mdBook and lychee
+              run: |
+                  scripts/docs-site/install-tools.sh "$RUNNER_TEMP/docs-tools"
+                  echo "$RUNNER_TEMP/docs-tools" >> "$GITHUB_PATH"
+
+            - name: Build the site
+              run: scripts/docs-site/build-site.sh --no-check --dev-ref "$GITHUB_REF_NAME" target/docs-site
+
+            # Links to GitHub (source files at a tag or main, releases,
+            # issues) are most of them; the token keeps GitHub from
+            # rate-limiting the check.
+            - name: Check links to other sites
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: scripts/docs-site/check.sh --external target/docs-site
