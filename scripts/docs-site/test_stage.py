@@ -31,6 +31,7 @@ def load(name):
 
 stage = load("stage")
 head = load("head")
+repo_links = load("repo_links")
 
 BLOB = "https://github.com/unicornops/zmail/blob/v1.2.3/"
 TREE = "https://github.com/unicornops/zmail/tree/v1.2.3/"
@@ -210,6 +211,68 @@ class HeadTest(unittest.TestCase):
     def test_helper_pages_are_never_indexed(self):
         for page in ["404.html", "print.html", "toc.html"]:
             self.assertEqual(head.tags_for(page, "https://docs.example/", False), [head.NOINDEX])
+
+
+class RepoLinksTest(unittest.TestCase):
+    """repo_links.py against a small git repository."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.repo = os.path.join(self.tmp, "repo")
+        self.site = os.path.join(self.tmp, "site")
+        os.makedirs(os.path.join(self.repo, "scripts", "with space"))
+        os.makedirs(self.site)
+        for path in ("Cargo.toml", "scripts/run.sh", "scripts/with space/a.txt"):
+            with open(os.path.join(self.repo, path), "w", encoding="utf-8") as handle:
+                handle.write("x\n")
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+        for args in (
+            ["init", "-q", "-b", "main"],
+            ["add", "-A"],
+            ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "one"],
+            ["tag", "v1.2.3"],
+            ["branch", "docs/a-branch"],
+        ):
+            subprocess.run(["git", "-C", self.repo, *args], check=True, env=env)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def check(self, *hrefs):
+        with open(os.path.join(self.site, "index.html"), "w", encoding="utf-8") as handle:
+            handle.write("".join(f'<a href="{href}">x</a>' for href in hrefs))
+        found = repo_links.links(self.site)
+        cache = {}
+        return sorted(
+            rest for (kind, rest) in found
+            if not repo_links.resolves(self.repo, kind, rest, cache)
+        )
+
+    def test_files_and_folders_at_a_tag_a_branch_and_a_branch_with_a_slash(self):
+        github = "https://github.com/unicornops/zmail"
+        self.assertEqual(
+            self.check(
+                f"{github}/blob/v1.2.3/Cargo.toml",
+                f"{github}/blob/main/scripts/run.sh#L3",
+                f"{github}/tree/main/scripts",
+                f"{github}/blob/docs/a-branch/scripts/with%20space/a.txt",
+                f"{github}/tree/v1.2.3/",
+                "https://github.com/someone/else/blob/main/missing.txt",
+            ),
+            [],
+        )
+
+    def test_a_missing_file_a_missing_ref_and_the_wrong_kind_are_broken(self):
+        github = "https://github.com/unicornops/zmail"
+        self.assertEqual(
+            self.check(
+                f"{github}/blob/main/gone.txt",
+                f"{github}/blob/v9.9.9/Cargo.toml",
+                f"{github}/tree/main/Cargo.toml",
+                f"{github}/blob/main/scripts",
+            ),
+            ["main/Cargo.toml", "main/gone.txt", "main/scripts", "v9.9.9/Cargo.toml"],
+        )
 
 
 class Page(str):

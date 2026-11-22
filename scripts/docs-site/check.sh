@@ -12,10 +12,14 @@ set -euo pipefail
 # anything (a script, stylesheet, image or font) from another origin.
 # This is the check pull requests get.
 #
-# With --external, online: every http(s) link, including those to source
-# files on GitHub, must answer. Outside sites come and go, so this runs on
-# a schedule rather than on pull requests. Set GITHUB_TOKEN so GitHub does
-# not rate-limit the requests.
+# With --external, online: every http(s) link to another site must
+# answer. Outside sites come and go, so this runs on a schedule rather
+# than on pull requests. Links to this repository on github.com are not
+# fetched, because there are hundreds and GitHub answers a burst of them
+# with 503: links to its files at a ref are looked up in the local clone
+# (repo_links.py, which needs the tags fetched), and the changelog's
+# links to commits, comparisons, issues and pull requests, which the
+# release tooling writes, are left out. Set GITHUB_TOKEN for the rest.
 #
 # LYCHEE names the lychee binary (default: lychee on PATH;
 # install-tools.sh fetches the pinned version).
@@ -40,12 +44,19 @@ if [[ "${external}" == "true" ]]; then
   if [[ -n "${origin}" ]]; then
     own=(--exclude "^${origin//./\\.}")
   fi
+  status=0
+  python3 -I "$(dirname "${BASH_SOURCE[0]}")/repo_links.py" "${site}" || status=1
   # Fragments are not checked online: GitHub draws line anchors (#L10)
-  # with JavaScript, so they never appear in the HTML lychee reads.
-  exec "${lychee}" --no-progress --format detailed \
+  # with JavaScript, so they never appear in the HTML lychee reads. One
+  # host gets two requests at a time, a second apart, and a failed
+  # request waits before it is tried again.
+  "${lychee}" --no-progress --format detailed \
     --scheme https --scheme http --exclude-loopback "${own[@]}" \
-    --max-concurrency 8 --max-retries 3 \
-    --root-dir "${site}" "${site}/**/*.html"
+    --exclude '^https://github\.com/unicornops/zmail/(blob|tree|commit|compare|issues|pull)/' \
+    --max-concurrency 8 --host-concurrency 2 --host-request-interval 1s \
+    --max-retries 3 --retry-wait-time 10 \
+    --root-dir "${site}" "${site}/**/*.html" || status=1
+  exit "${status}"
 fi
 
 # Third-party resources: anything a page loads from an absolute or
