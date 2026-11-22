@@ -1964,6 +1964,26 @@ mod tests {
     #[test]
     fn timestamps_render_to_rfc3339() {
         assert!(timestamp_to_rfc3339(1_700_000_000).contains('T'));
+        // Characterisation (issue #489): `received_at` as it was written
+        // before the workspace moved off chrono.
+        let cases: &[(i64, &str)] = &[
+            (0, "1970-01-01T00:00:00+00:00"),
+            (-1, "1969-12-31T23:59:59+00:00"),
+            (951_782_400, "2000-02-29T00:00:00+00:00"),
+            (1_700_000_000, "2023-11-14T22:13:20+00:00"),
+            (1_792_060_920, "2026-10-15T10:42:00+00:00"),
+            (253_402_300_799, "9999-12-31T23:59:59+00:00"),
+            (253_402_300_800, "+10000-01-01T00:00:00+00:00"),
+            (-62_167_219_200, "0000-01-01T00:00:00+00:00"),
+            (-62_167_219_201, "-0001-12-31T23:59:59+00:00"),
+            (8_210_266_876_799, "+262142-12-31T23:59:59+00:00"),
+            (8_210_266_876_800, "1970-01-01T00:00:00Z"),
+            (i64::MAX, "1970-01-01T00:00:00Z"),
+            (i64::MIN, "1970-01-01T00:00:00Z"),
+        ];
+        for (seconds, expected) in cases {
+            assert_eq!(timestamp_to_rfc3339(*seconds), *expected, "{seconds}");
+        }
     }
 
     /// Same newsletter as the IMAP adapter's HTML-only fixture, so both

@@ -416,4 +416,537 @@ mod tests {
         assert_eq!(HourCycle::for_locale("POSIX"), HourCycle::H24);
         assert_eq!(HourCycle::for_locale(""), HourCycle::H24);
     }
+
+    // Characterisation (issue #489). The tables below pin what the stored
+    // formats parsed to and what the labels read before the workspace moved
+    // off chrono, so neither can drift with the time library. Only `clock`,
+    // `stamp` and `midnight_after` know which library that is.
+
+    /// `now` as the viewer's clock, in a zone fixed at its offset.
+    fn clock(now: &str) -> DateTime<FixedOffset> {
+        DateTime::parse_from_rfc3339(now).expect("valid test clock")
+    }
+
+    /// A parsed timestamp as whole seconds since the epoch and the
+    /// nanoseconds after them. A leap second (`:60`) is the last second of
+    /// its minute with a further full second of nanoseconds.
+    fn stamp(value: &str) -> Option<(i64, u32)> {
+        parse_timestamp(value).map(|at| (at.timestamp(), at.timestamp_subsec_nanos()))
+    }
+
+    fn midnight_after(now: &str) -> String {
+        next_local_midnight(&clock(now)).to_rfc3339()
+    }
+
+    #[test]
+    fn stored_timestamps_parse_as_before() {
+        const AT: i64 = 1_792_060_920; // 2026-10-15T10:42:00Z
+        let cases: &[(&str, Option<(i64, u32)>)] = &[
+            // The shapes the adapters and the store write.
+            ("2026-10-15T10:42:00+00:00", Some((AT, 0))),
+            ("2026-10-15T10:42:00Z", Some((AT, 0))),
+            ("2026-10-15 10:42:00", Some((AT, 0))),
+            // Offsets.
+            ("2026-10-15T16:12:00+05:30", Some((AT, 0))),
+            ("2026-10-15T02:42:00-08:00", Some((AT, 0))),
+            ("2026-10-15T10:42:00-00:00", Some((AT, 0))),
+            ("2026-10-16T10:41:00+23:59", Some((AT, 0))),
+            ("2026-10-14T10:43:00-23:59", Some((AT, 0))),
+            ("2026-10-15T10:42:00\u{2212}00:00", Some((AT, 0))),
+            // Case, the space separator and surrounding white space.
+            ("2026-10-15t10:42:00z", Some((AT, 0))),
+            ("2026-10-15 10:42:00Z", Some((AT, 0))),
+            ("2026-10-15 10:42:00+00:00", Some((AT, 0))),
+            ("  2026-10-15T10:42:00Z\n", Some((AT, 0))),
+            ("\t2026-10-15 10:42:00 ", Some((AT, 0))),
+            // Fractions of a second, cut to nanoseconds.
+            ("2026-10-15T10:42:00.5Z", Some((AT, 500_000_000))),
+            ("2026-10-15T10:42:00.000000001Z", Some((AT, 1))),
+            ("2026-10-15T10:42:00.123456789987Z", Some((AT, 123_456_789))),
+            (
+                "2026-10-15T10:42:00.25+05:30",
+                Some((AT - 19_800, 250_000_000)),
+            ),
+            // Leap seconds, in any minute.
+            ("2026-12-31T23:59:60Z", Some((1_798_761_599, 1_000_000_000))),
+            ("2026-10-15T10:42:60Z", Some((AT + 59, 1_000_000_000))),
+            (
+                "2026-10-15T10:42:60.25+01:00",
+                Some((AT - 3_541, 1_250_000_000)),
+            ),
+            ("2026-10-15 10:42:60", Some((AT + 59, 1_000_000_000))),
+            // The ends of the four-digit years, and a leap day.
+            ("0000-01-01T00:00:00Z", Some((-62_167_219_200, 0))),
+            ("0000-01-01T00:00:00+23:59", Some((-62_167_305_540, 0))),
+            ("1969-12-31T23:59:59Z", Some((-1, 0))),
+            ("1970-01-01T00:00:00Z", Some((0, 0))),
+            ("2024-02-29T12:00:00Z", Some((1_709_208_000, 0))),
+            ("9999-12-30T21:59:59Z", Some((253_402_207_199, 0))),
+            // SQLite's form is read loosely: one-digit fields, any white
+            // space, a signed year.
+            ("2026-10-15  10:42:00", Some((AT, 0))),
+            ("2026-10-15\t10:42:00", Some((AT, 0))),
+            ("2026-1-5 1:2:3", Some((1_767_574_923, 0))),
+            ("+2026-10-15 10:42:00", Some((AT, 0))),
+            ("-0001-10-15 10:42:00", Some((-62_173_919_880, 0))),
+            ("2026 - 10 - 15 10 : 42 : 00", None),
+            ("2026-10-15 10:42:00.5", None),
+            ("2026-10-15 10:42", None),
+            ("2026-10-15T10:42:00", None),
+            // Not timestamps.
+            ("", None),
+            ("not a date", None),
+            ("2026-10-15", None),
+            ("1792060920", None),
+            ("2026-10-15T10:42Z", None),
+            ("2026-10-15T10:42:00+0000", None),
+            ("2026-10-15T10:42:00+00", None),
+            ("2026-10-15T10:42:00 +00:00", None),
+            ("2026-10-15T10:42:00 Z", None),
+            ("2026-10-15T10:42:00Z[UTC]", None),
+            ("2026-10-15T10:42:00ZZ", None),
+            ("2026-10-15T10:42:00,5Z", None),
+            ("2026-10-15T10:42:00.Z", None),
+            ("20261015T104200Z", None),
+            ("2026-1-05T10:42:00Z", None),
+            ("02026-10-15T10:42:00Z", None),
+            ("+2026-10-15T10:42:00Z", None),
+            ("2026-10-15T10:42:00+5:30", None),
+            ("Thu, 15 Oct 2026 10:42:00 +0000", None),
+            // Out of range fields.
+            ("2026-13-01T00:00:00Z", None),
+            ("2026-00-10T00:00:00Z", None),
+            ("2026-02-29T00:00:00Z", None),
+            ("2026-04-31T00:00:00Z", None),
+            ("2026-10-15T24:00:00Z", None),
+            ("2026-10-15T10:60:00Z", None),
+            ("2026-10-15T10:42:61Z", None),
+            ("2026-10-15T10:42:00+24:00", None),
+            ("2026-10-15T10:42:00+00:60", None),
+            ("2026-10-15 24:00:00", None),
+            ("2026-02-30 10:42:00", None),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(stamp(value), *expected, "{value:?}");
+        }
+    }
+
+    /// Instants past what the replacement time library can hold: the last
+    /// 26 hours of the year 9999 and, in SQLite's form, signed years of
+    /// more than four digits.
+    #[test]
+    fn timestamps_at_the_far_end_of_the_calendar() {
+        assert_eq!(stamp("9999-12-30T22:00:00Z"), Some((253_402_207_200, 0)));
+        assert_eq!(stamp("9999-12-31T23:59:59Z"), Some((253_402_300_799, 0)));
+        assert_eq!(
+            stamp("9999-12-31T23:59:59-23:59"),
+            Some((253_402_387_139, 0))
+        );
+        assert_eq!(stamp("+12026-10-15 10:42:00"), Some((317_361_580_920, 0)));
+        assert_eq!(stamp("12026-10-15 10:42:00"), None);
+    }
+
+    #[test]
+    fn list_and_full_dates_read_as_before() {
+        use HourCycle::{H12, H24};
+        // (timestamp, the viewer's clock, hour cycle, list label, full date)
+        let cases: &[(&str, &str, HourCycle, &str, &str)] = &[
+            // Today, on either clock.
+            (
+                "2026-10-15T10:42:00+00:00",
+                "2026-10-15T16:30:00+00:00",
+                H24,
+                "10:42",
+                "Thu 15 Oct 2026, 10:42",
+            ),
+            (
+                "2026-10-15T10:42:00+00:00",
+                "2026-10-15T16:30:00+00:00",
+                H12,
+                "10:42 AM",
+                "Thu 15 Oct 2026, 10:42 AM",
+            ),
+            (
+                "2026-10-15T00:05:00Z",
+                "2026-10-15T16:30:00+00:00",
+                H12,
+                "12:05 AM",
+                "Thu 15 Oct 2026, 12:05 AM",
+            ),
+            (
+                "2026-10-15T12:00:00Z",
+                "2026-10-15T16:30:00+00:00",
+                H12,
+                "12:00 PM",
+                "Thu 15 Oct 2026, 12:00 PM",
+            ),
+            (
+                "2026-10-15T13:07:00Z",
+                "2026-10-15T16:30:00+00:00",
+                H12,
+                "1:07 PM",
+                "Thu 15 Oct 2026, 1:07 PM",
+            ),
+            (
+                "2026-10-15T09:07:00Z",
+                "2026-10-15T16:30:00+00:00",
+                H24,
+                "09:07",
+                "Thu 15 Oct 2026, 09:07",
+            ),
+            (
+                "2026-10-15T23:59:59Z",
+                "2026-10-15T16:30:00+00:00",
+                H24,
+                "23:59",
+                "Thu 15 Oct 2026, 23:59",
+            ),
+            // Seconds, fractions and leap seconds do not show.
+            (
+                "2026-10-15T10:42:59.999Z",
+                "2026-10-15T16:30:00+00:00",
+                H24,
+                "10:42",
+                "Thu 15 Oct 2026, 10:42",
+            ),
+            (
+                "2026-10-15T10:42:60Z",
+                "2026-10-15T16:30:00+00:00",
+                H24,
+                "10:42",
+                "Thu 15 Oct 2026, 10:42",
+            ),
+            (
+                "2026-10-14T23:59:60Z",
+                "2026-10-15T16:30:00+00:00",
+                H24,
+                "Yesterday",
+                "Wed 14 Oct 2026, 23:59",
+            ),
+            // SQLite's form and surrounding white space.
+            (
+                "2026-10-15 10:42:00",
+                "2026-10-15T16:30:00+00:00",
+                H24,
+                "10:42",
+                "Thu 15 Oct 2026, 10:42",
+            ),
+            (
+                " 2026-10-15T10:42:00Z ",
+                "2026-10-15T16:30:00+00:00",
+                H24,
+                "10:42",
+                "Thu 15 Oct 2026, 10:42",
+            ),
+            // The viewer's offset moves the time and the day.
+            (
+                "2026-10-15T10:42:00Z",
+                "2026-10-15T22:00:00+05:30",
+                H24,
+                "16:12",
+                "Thu 15 Oct 2026, 16:12",
+            ),
+            (
+                "2026-10-15T10:42:00Z",
+                "2026-10-15T22:00:00+05:45",
+                H12,
+                "4:27 PM",
+                "Thu 15 Oct 2026, 4:27 PM",
+            ),
+            (
+                "2026-10-15T10:42:00Z",
+                "2026-10-15T08:00:00-08:00",
+                H24,
+                "02:42",
+                "Thu 15 Oct 2026, 02:42",
+            ),
+            (
+                "2026-10-15T01:42:00Z",
+                "2026-10-15T08:00:00-08:00",
+                H24,
+                "Yesterday",
+                "Wed 14 Oct 2026, 17:42",
+            ),
+            (
+                "2026-10-15T22:42:00Z",
+                "2026-10-16T09:00:00+02:00",
+                H24,
+                "00:42",
+                "Fri 16 Oct 2026, 00:42",
+            ),
+            (
+                "2026-10-15T08:00:00-07:00",
+                "2026-10-15T20:00:00+02:00",
+                H24,
+                "17:00",
+                "Thu 15 Oct 2026, 17:00",
+            ),
+            (
+                "2026-10-15T10:42:00Z",
+                "2026-10-16T00:30:00+14:00",
+                H24,
+                "00:42",
+                "Fri 16 Oct 2026, 00:42",
+            ),
+            (
+                "2026-10-15T10:42:00Z",
+                "2026-10-14T23:30:00-12:00",
+                H24,
+                "22:42",
+                "Wed 14 Oct 2026, 22:42",
+            ),
+            // Yesterday, the weekdays of the last week, then dates.
+            (
+                "2026-10-14T00:00:00Z",
+                "2026-10-15T00:00:00+00:00",
+                H24,
+                "Yesterday",
+                "Wed 14 Oct 2026, 00:00",
+            ),
+            (
+                "2026-10-13T23:59:59Z",
+                "2026-10-15T00:00:00+00:00",
+                H24,
+                "Tue",
+                "Tue 13 Oct 2026, 23:59",
+            ),
+            (
+                "2026-10-12T12:00:00Z",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "Mon",
+                "Mon 12 Oct 2026, 12:00",
+            ),
+            (
+                "2026-10-11T12:00:00Z",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "Sun",
+                "Sun 11 Oct 2026, 12:00",
+            ),
+            (
+                "2026-10-10T12:00:00Z",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "Sat",
+                "Sat 10 Oct 2026, 12:00",
+            ),
+            (
+                "2026-10-09T00:00:00Z",
+                "2026-10-15T23:59:59+00:00",
+                H24,
+                "Fri",
+                "Fri 9 Oct 2026, 00:00",
+            ),
+            (
+                "2026-10-08T23:59:59Z",
+                "2026-10-15T00:00:00+00:00",
+                H24,
+                "8 Oct",
+                "Thu 8 Oct 2026, 23:59",
+            ),
+            (
+                "2026-01-01T00:00:00Z",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "1 Jan",
+                "Thu 1 Jan 2026, 00:00",
+            ),
+            (
+                "2025-12-31T23:59:59Z",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "31 Dec 2025",
+                "Wed 31 Dec 2025, 23:59",
+            ),
+            // Across a new year, a leap day and a month end.
+            (
+                "2026-12-31T22:00:00Z",
+                "2027-01-01T09:00:00+00:00",
+                H24,
+                "Yesterday",
+                "Thu 31 Dec 2026, 22:00",
+            ),
+            (
+                "2026-12-26T22:00:00Z",
+                "2027-01-01T09:00:00+00:00",
+                H24,
+                "Sat",
+                "Sat 26 Dec 2026, 22:00",
+            ),
+            (
+                "2026-12-25T22:00:00Z",
+                "2027-01-01T09:00:00+00:00",
+                H24,
+                "25 Dec 2026",
+                "Fri 25 Dec 2026, 22:00",
+            ),
+            (
+                "2026-12-31T23:00:00Z",
+                "2027-01-01T12:00:00+03:00",
+                H24,
+                "02:00",
+                "Fri 1 Jan 2027, 02:00",
+            ),
+            (
+                "2024-02-29T12:00:00Z",
+                "2024-03-01T12:00:00+00:00",
+                H24,
+                "Yesterday",
+                "Thu 29 Feb 2024, 12:00",
+            ),
+            (
+                "2024-02-28T12:00:00Z",
+                "2024-03-05T12:00:00+00:00",
+                H12,
+                "Wed",
+                "Wed 28 Feb 2024, 12:00 PM",
+            ),
+            // The future: today's time, or the date.
+            (
+                "2026-10-15T23:00:00Z",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "23:00",
+                "Thu 15 Oct 2026, 23:00",
+            ),
+            (
+                "2026-10-16T00:00:00Z",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "16 Oct",
+                "Fri 16 Oct 2026, 00:00",
+            ),
+            (
+                "2027-01-01T00:00:00Z",
+                "2026-12-31T12:00:00+00:00",
+                H24,
+                "1 Jan 2027",
+                "Fri 1 Jan 2027, 00:00",
+            ),
+            // Long ago.
+            (
+                "1970-01-01T00:00:00Z",
+                "2026-10-15T12:00:00+00:00",
+                H12,
+                "1 Jan 1970",
+                "Thu 1 Jan 1970, 12:00 AM",
+            ),
+            (
+                "1969-07-20T20:17:40Z",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "20 Jul 1969",
+                "Sun 20 Jul 1969, 20:17",
+            ),
+            (
+                "0999-03-05T04:05:06Z",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "5 Mar 0999",
+                "Tue 5 Mar 0999, 04:05",
+            ),
+            (
+                "0000-01-01T00:00:00Z",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "1 Jan 0000",
+                "Sat 1 Jan 0000, 00:00",
+            ),
+            (
+                "0000-01-01T00:00:00+01:00",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "31 Dec -0001",
+                "Fri 31 Dec -0001, 23:00",
+            ),
+            // Not a timestamp: shown as it is.
+            (
+                "yesterday-ish",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "yesterday-ish",
+                "yesterday-ish",
+            ),
+            (
+                "2026-10-15T10:42",
+                "2026-10-15T12:00:00+00:00",
+                H24,
+                "2026-10-15T10:42",
+                "2026-10-15T10:42",
+            ),
+            ("", "2026-10-15T12:00:00+00:00", H12, "", ""),
+        ];
+        for (timestamp, now, hour_cycle, list, full) in cases {
+            let now = clock(now);
+            assert_eq!(
+                format_list_date(timestamp, &now, *hour_cycle),
+                *list,
+                "list date of {timestamp:?} at {now}"
+            );
+            assert_eq!(
+                format_full_date(timestamp, &now.timezone(), *hour_cycle),
+                *full,
+                "full date of {timestamp:?} at {now}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_next_midnight_is_found_as_before() {
+        let cases = [
+            ("2026-10-15T00:00:00+00:00", "2026-10-16T00:00:00+00:00"),
+            ("2026-10-15T23:59:59+00:00", "2026-10-16T00:00:00+00:00"),
+            ("2026-10-15T10:42:17.5+05:30", "2026-10-16T00:00:00+05:30"),
+            ("2026-10-15T10:42:17-08:00", "2026-10-16T00:00:00-08:00"),
+            ("2026-12-31T23:59:30+01:00", "2027-01-01T00:00:00+01:00"),
+            ("2024-02-28T12:00:00-05:00", "2024-02-29T00:00:00-05:00"),
+            ("2026-02-28T12:00:00+13:45", "2026-03-01T00:00:00+13:45"),
+        ];
+        for (now, expected) in cases {
+            assert_eq!(midnight_after(now), expected, "{now}");
+        }
+    }
+
+    #[test]
+    fn utc_timestamps_are_written_as_before() {
+        let cases: &[(u64, &str)] = &[
+            (0, "1970-01-01T00:00:00Z"),
+            (1, "1970-01-01T00:00:01Z"),
+            (59, "1970-01-01T00:00:59Z"),
+            (86_399, "1970-01-01T23:59:59Z"),
+            (951_782_400, "2000-02-29T00:00:00Z"),
+            (1_709_251_199, "2024-02-29T23:59:59Z"),
+            (1_792_060_920, "2026-10-15T10:42:00Z"),
+            (1_798_761_599, "2026-12-31T23:59:59Z"),
+            (1_798_761_600, "2027-01-01T00:00:00Z"),
+            (2_147_483_648, "2038-01-19T03:14:08Z"),
+            (4_102_444_800, "2100-01-01T00:00:00Z"),
+            (253_402_207_199, "9999-12-30T21:59:59Z"),
+            // No such time: the epoch.
+            (u64::MAX, "1970-01-01T00:00:00Z"),
+            (i64::MAX as u64, "1970-01-01T00:00:00Z"),
+        ];
+        for (seconds, expected) in cases {
+            assert_eq!(super::utc_timestamp(*seconds), *expected, "{seconds}");
+        }
+    }
+
+    /// Past what the replacement time library can hold (see
+    /// `timestamps_at_the_far_end_of_the_calendar`).
+    #[test]
+    fn utc_timestamps_at_the_far_end_of_the_calendar() {
+        assert_eq!(
+            super::utc_timestamp(253_402_207_200),
+            "9999-12-30T22:00:00Z"
+        );
+        assert_eq!(
+            super::utc_timestamp(253_402_300_799),
+            "9999-12-31T23:59:59Z"
+        );
+        assert_eq!(
+            super::utc_timestamp(253_402_300_800),
+            "+10000-01-01T00:00:00Z"
+        );
+    }
 }

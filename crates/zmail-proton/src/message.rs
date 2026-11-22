@@ -763,6 +763,354 @@ mod tests {
             .expect("parses")
     }
 
+    /// The `Date`, `X-Original-Date` and `X-Pm-Date` fields of the rebuilt
+    /// header of a message stored with the header field `date` and Proton's
+    /// own time `time`.
+    fn date_fields(date: Option<&str>, time: i64) -> [Option<String>; 3] {
+        let mut json = base_message();
+        json["Time"] = time.into();
+        let headers = json["ParsedHeaders"].as_object_mut().expect("headers");
+        match date {
+            Some(date) => headers.insert("Date".to_owned(), date.into()),
+            None => headers.remove("Date"),
+        };
+        let header = message_header(&message(json));
+        ["Date", "X-Original-Date", "X-Pm-Date"].map(|name| header.get(name).map(str::to_owned))
+    }
+
+    // Characterisation (issue #489): the date fields of rebuilt messages
+    // as they were before the workspace moved off chrono.
+    #[test]
+    fn date_fields_are_written_as_before() {
+        type Fields = [Option<&'static str>; 3];
+        // (the stored `Date`, Proton's time, [Date, X-Original-Date, X-Pm-Date])
+        let cases: &[(Option<&str>, i64, Fields)] = &[
+            (
+                Some("Thu, 15 Oct 2026 10:42:00 +0000"),
+                1_792_490_400,
+                [
+                    Some("Thu, 15 Oct 2026 10:42:00 +0000"),
+                    None,
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("Thu, 15 Oct 2026 10:42:00 +0530 (IST)"),
+                1_792_490_400,
+                [
+                    Some("Thu, 15 Oct 2026 10:42:00 +0530 (IST)"),
+                    None,
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("15 Oct 26 10:42 EST"),
+                1_792_490_400,
+                [
+                    Some("15 Oct 26 10:42 EST"),
+                    None,
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("  Thu, 15 Oct 2026 10:42:00 GMT\r\n"),
+                1_792_490_400,
+                [
+                    Some("  Thu, 15 Oct 2026 10:42:00 GMT\r\n"),
+                    None,
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("Thu, 15 Oct 2026 10:42:60 +0000"),
+                1_792_490_400,
+                [
+                    Some("Thu, 15 Oct 2026 10:42:60 +0000"),
+                    None,
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("Thu, 01 Jan 1970 00:00:00 +0000"),
+                1_792_490_400,
+                [
+                    Some("Thu, 01 Jan 1970 00:00:00 +0000"),
+                    None,
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("15 Oct 12026 10:42:00 +0000"),
+                1_792_490_400,
+                [
+                    Some("15 Oct 12026 10:42:00 +0000"),
+                    None,
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("not a date"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some(""),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                None,
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("Thu, 15 Oct 2026 10:42:00 UTC"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("Thu, 15 Oct 2026 10:42:00"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("Fri, 15 Oct 2026 10:42:00 +0000"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("Thu, 15 Oct 2026 10:42:00 +0000 (a) (b) "),
+                1_792_490_400,
+                [
+                    Some("Thu, 15 Oct 2026 10:42:00 +0000 (a) (b) "),
+                    None,
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("2026-10-15T10:42:00Z"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("Wed, 31 Dec 1969 23:59:59 +0000"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Wed, 31 Dec 1969 23:59:59 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("Thu, 1 Jan 1970 00:00:00 +0100"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Wed, 31 Dec 1969 23:00:00 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("Sun, 20 Jul 1969 20:17:40 -0400"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Mon, 21 Jul 1969 00:17:40 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("31 Dec 1969 23:59:60 +0000"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Wed, 31 Dec 1969 23:59:60 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("15 Oct 50 10:42:00 +0000"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Sun, 15 Oct 1950 10:42:00 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("1 Jan 0001 00:00:00 +0000"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Mon, 01 Jan 0001 00:00:00 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("1 Jan 0000 00:00:00 +0000"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Sat, 01 Jan 0000 00:00:00 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("not a date"),
+                0,
+                [
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Thu, 01 Jan 1970 00:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("not a date"),
+                1,
+                [
+                    Some("Thu, 01 Jan 1970 00:00:01 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Thu, 01 Jan 1970 00:00:01 +0000"),
+                ],
+            ),
+            (
+                Some("not a date"),
+                -5,
+                [
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Wed, 31 Dec 1969 23:59:55 +0000"),
+                ],
+            ),
+            (
+                Some("not a date"),
+                951_782_400,
+                [
+                    Some("Tue, 29 Feb 2000 00:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Tue, 29 Feb 2000 00:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("not a date"),
+                253_402_207_199,
+                [
+                    Some("Thu, 30 Dec 9999 21:59:59 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Thu, 30 Dec 9999 21:59:59 +0000"),
+                ],
+            ),
+            (
+                Some("not a date"),
+                i64::MAX,
+                [
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Thu, 01 Jan 1970 00:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("not a date"),
+                i64::MIN,
+                [
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Thu, 01 Jan 1970 00:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("Thu, 15 Oct 2026 10:42:00 +0000"),
+                0,
+                [
+                    Some("Thu, 15 Oct 2026 10:42:00 +0000"),
+                    None,
+                    Some("Thu, 01 Jan 1970 00:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("Thu, 15 Oct 2026 10:42:00 +0000"),
+                -86_400,
+                [
+                    Some("Thu, 15 Oct 2026 10:42:00 +0000"),
+                    None,
+                    Some("Wed, 31 Dec 1969 00:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("1 Jan 0000 00:00:00 +0100"),
+                1_792_490_400,
+                [
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                    Some("Fri, 31 Dec -0001 23:00:00 +0000"),
+                    Some("Tue, 20 Oct 2026 10:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("not a date"),
+                253_402_207_200,
+                [
+                    Some("Thu, 30 Dec 9999 22:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Thu, 30 Dec 9999 22:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("not a date"),
+                253_402_300_800,
+                [
+                    Some("Sat, 01 Jan +10000 00:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Sat, 01 Jan +10000 00:00:00 +0000"),
+                ],
+            ),
+            (
+                Some("not a date"),
+                -62_167_219_201,
+                [
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Fri, 13 Aug 1982 00:00:00 +0000"),
+                    Some("Fri, 31 Dec -0001 23:59:59 +0000"),
+                ],
+            ),
+        ];
+        for (date, time, expected) in cases {
+            let fields = date_fields(*date, *time);
+            assert_eq!(
+                fields.each_ref().map(|field| field.as_deref()),
+                *expected,
+                "{date:?} at {time}"
+            );
+        }
+    }
+
     #[test]
     fn rebuilds_a_simple_message() {
         let mut decrypted = DecryptedMessage {
