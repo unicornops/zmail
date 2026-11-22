@@ -4,6 +4,6 @@
   "description": "The pinned wrangler that deploys the documentation site to Cloudflare Pages (docs/site.md).",
   "license": "GPL-3.0-only",
   "dependencies": {
-    "wrangler": "4.158.0"
+    "wrangler": "4.165.0"
   }
 }
