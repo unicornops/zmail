@@ -230,9 +230,9 @@ fn serve(mut stream: TcpStream, base: &str, state: &Mutex<State>) {
             }
             Some("Email/query") => {
                 let after = call[1]["filter"]["after"].as_str().map(|after| {
-                    chrono::DateTime::parse_from_rfc3339(after)
+                    zmail_core::time::parse_timestamp(after)
                         .expect("a UTCDate")
-                        .timestamp()
+                        .seconds()
                 });
                 let position = call[1]["position"].as_u64().unwrap_or(0) as usize;
                 let ids = state

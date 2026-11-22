@@ -219,7 +219,7 @@ impl OutboxDetailView {
             .map(|draft| draft.recipient_summary.clone())
             .filter(|to| !to.is_empty())
             .unwrap_or_else(|| "No recipients".to_owned());
-        let status = outbox_status(job, &chrono::Local::now());
+        let status = outbox_status(job, &zmail_core::time::now());
         let allowed = allowed(job, draft);
         let (job_id, draft_id, account_id) = (job.id, job.draft_id, job.account_id);
 

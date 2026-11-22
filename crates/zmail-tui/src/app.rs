@@ -12,7 +12,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{DateTime, FixedOffset};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -56,7 +55,7 @@ pub const PREVIEW_MIN_WIDTH: u16 = 120;
 pub const NO_ACCOUNTS: &str = "No accounts yet: press S to add one";
 
 /// The current time with the viewer's UTC offset.
-pub type Clock = Arc<dyn Fn() -> DateTime<FixedOffset> + Send + Sync>;
+pub type Clock = Arc<dyn Fn() -> zmail_core::time::ZonedDateTime + Send + Sync>;
 
 /// What the terminal and session can do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -820,7 +819,7 @@ impl App {
     }
 
     /// The current time.
-    pub(crate) fn now(&self) -> DateTime<FixedOffset> {
+    pub(crate) fn now(&self) -> zmail_core::time::ZonedDateTime {
         (self.clock)()
     }
 
@@ -1032,7 +1031,7 @@ impl App {
     }
 
     fn load_conversation(&mut self, thread_id: i64, account_id: i64) -> Option<Conversation> {
-        let zone = *self.now().offset();
+        let zone = self.now().time_zone().clone();
         match message::load(&self.store, thread_id, account_id, &zone, self.hour_cycle) {
             Ok(Some(conversation)) => {
                 if conversation.missing_bodies && self.hydrating.insert(thread_id) {

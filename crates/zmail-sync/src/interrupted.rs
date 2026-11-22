@@ -214,7 +214,7 @@ impl SyncService {
                 let secret = self.outbox_secret(job, &target).await?;
                 let claimed_at = claimed_at
                     .and_then(parse_timestamp)
-                    .map(|claimed_at| claimed_at.timestamp());
+                    .map(|claimed_at| claimed_at.seconds());
                 let trace = zmail_jmap::find_submitted_message(
                     &job.target.endpoint,
                     &job.target.username,

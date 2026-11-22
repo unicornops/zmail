@@ -13,10 +13,12 @@
 //!
 //! [`MailActions::retry_outbox_job`]: zmail_actions::MailActions::retry_outbox_job
 
-use chrono::{DateTime, FixedOffset};
 use zmail_core::{
     DraftSummary, OutboxJobState, OutboxJobSummary, is_interrupted_send,
-    key_change::PinnedKeyChanged, reauth::ReauthReason, text::count_noun, time::parse_timestamp,
+    key_change::PinnedKeyChanged,
+    reauth::ReauthReason,
+    text::count_noun,
+    time::{Stamp, parse_timestamp},
 };
 use zmail_security::terminal::sanitize_line;
 
@@ -64,7 +66,7 @@ fn short_duration(seconds: i64) -> String {
 }
 
 /// Where `job` stands, in the GUI's words, and what can be done about it.
-fn status(job: &OutboxJobSummary, now: &DateTime<FixedOffset>) -> (String, bool, bool, bool) {
+fn status(job: &OutboxJobSummary, now: Stamp) -> (String, bool, bool, bool) {
     let refused = job
         .last_error_message
         .as_deref()
@@ -93,10 +95,10 @@ fn status(job: &OutboxJobSummary, now: &DateTime<FixedOffset>) -> (String, bool,
             .next_attempt_at
             .as_deref()
             .and_then(parse_timestamp)
-            .map(|at| at.with_timezone(&chrono::Utc) - now.with_timezone(&chrono::Utc))
+            .map(|at| at.seconds_since(now))
         {
-            Some(wait) if wait.num_seconds() > 0 => (
-                format!("Sending in {}", short_duration(wait.num_seconds())),
+            Some(wait) if wait > 0 => (
+                format!("Sending in {}", short_duration(wait)),
                 false,
                 false,
                 true,
@@ -124,12 +126,11 @@ fn status(job: &OutboxJobSummary, now: &DateTime<FixedOffset>) -> (String, bool,
                 .next_attempt_at
                 .as_deref()
                 .and_then(parse_timestamp)
-                .map(|at| at.with_timezone(&chrono::Utc) - now.with_timezone(&chrono::Utc));
+                .map(|at| at.seconds_since(now));
             let text = match wait {
-                Some(wait) if wait.num_seconds() > 0 => format!(
-                    "Failed \u{2014} retrying in {}",
-                    short_duration(wait.num_seconds())
-                ),
+                Some(wait) if wait > 0 => {
+                    format!("Failed \u{2014} retrying in {}", short_duration(wait))
+                }
                 _ => "Failed \u{2014} retrying now".to_owned(),
             };
             (text, true, true, false)
@@ -145,13 +146,13 @@ impl App {
             Err(error) => return self.report(error),
         };
         // The store's times are the system clock's.
-        let now = chrono::Utc::now().fixed_offset();
+        let now = Stamp::now();
         self.outbox = jobs
             .into_iter()
             .filter(|job| job.state != OutboxJobState::Sent)
             .map(|job| {
                 let draft = self.store.draft_detail(job.draft_id).ok().flatten();
-                let (status, failed, can_retry, can_cancel) = status(&job, &now);
+                let (status, failed, can_retry, can_cancel) = status(&job, now);
                 OutboxRow {
                     to: draft
                         .as_ref()

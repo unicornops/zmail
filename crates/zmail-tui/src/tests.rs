@@ -11,7 +11,6 @@ use std::{
     sync::{Arc, mpsc},
 };
 
-use chrono::{DateTime, FixedOffset};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -40,13 +39,16 @@ mod warnings;
 /// Thursday 15 October 2026, 12:00 UTC.
 const NOW: &str = "2026-10-15T12:00:00+00:00";
 
-fn now() -> DateTime<FixedOffset> {
-    DateTime::parse_from_rfc3339(NOW).expect("a valid time")
+fn now() -> zmail_core::time::ZonedDateTime {
+    zmail_core::time::clock_at(NOW).expect("a valid time")
 }
 
 /// `minutes` before [`NOW`], as the store keeps times.
 fn ago(minutes: i64) -> String {
-    (now() - chrono::Duration::minutes(minutes)).to_rfc3339()
+    let now = zmail_core::time::Stamp::from(&now()).seconds();
+    zmail_core::time::Stamp::from_seconds(now - minutes * 60)
+        .expect("a valid time")
+        .format_rfc3339_utc()
 }
 
 struct Mail {

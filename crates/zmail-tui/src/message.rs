@@ -15,7 +15,6 @@
 use std::ops::Range;
 
 use anyhow::{Context, Result};
-use chrono::FixedOffset;
 use zmail_core::{
     ThreadMessage,
     preferences::SenderWarnings,
@@ -108,7 +107,7 @@ pub fn load(
     store: &LocalStore,
     thread_id: i64,
     account_id: i64,
-    zone: &FixedOffset,
+    zone: &zmail_core::time::TimeZone,
     hour_cycle: HourCycle,
 ) -> Result<Option<Conversation>> {
     let Some(view) = store.thread_view(thread_id)? else {
@@ -169,7 +168,7 @@ fn add_message(
     store: &LocalStore,
     conversation: &mut Conversation,
     message: &ThreadMessage,
-    zone: &FixedOffset,
+    zone: &zmail_core::time::TimeZone,
     hour_cycle: HourCycle,
     level: SenderWarnings,
 ) -> Result<()> {

@@ -31,7 +31,6 @@ use std::{
 };
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use zmail_core::{MailboxSnapshot, MessageHeaders, MessageSnapshot, ThreadSnapshot};
 use zmail_proton_api::{Client, EmailAddress, Label, LabelType, MessageFilter, MessageMetadata};
 
@@ -346,8 +345,8 @@ fn format_addresses(addresses: &[EmailAddress]) -> String {
 }
 
 fn timestamp(seconds: i64) -> String {
-    DateTime::<Utc>::from_timestamp(seconds, 0)
-        .map(|time| time.to_rfc3339())
+    zmail_core::time::Stamp::from_seconds(seconds)
+        .map(zmail_core::time::Stamp::format_rfc3339_utc)
         .unwrap_or_else(|| "1970-01-01T00:00:00+00:00".to_owned())
 }
 
@@ -413,6 +412,32 @@ impl ThreadAccumulator {
 mod tests {
     use super::*;
     use crate::mailbox::tests::label;
+
+    // Characterisation (issue #489): `received_at` as it was written before
+    // the workspace moved off chrono.
+    #[test]
+    fn message_times_are_written_as_before() {
+        let cases: &[(i64, &str)] = &[
+            (0, "1970-01-01T00:00:00+00:00"),
+            (1, "1970-01-01T00:00:01+00:00"),
+            (-1, "1969-12-31T23:59:59+00:00"),
+            (59, "1970-01-01T00:00:59+00:00"),
+            (951_782_400, "2000-02-29T00:00:00+00:00"),
+            (1_792_490_400, "2026-10-20T10:00:00+00:00"),
+            (253_402_207_199, "9999-12-30T21:59:59+00:00"),
+            (-62_167_219_200, "0000-01-01T00:00:00+00:00"),
+            (i64::MAX, "1970-01-01T00:00:00+00:00"),
+            (i64::MIN, "1970-01-01T00:00:00+00:00"),
+            (253_402_207_200, "9999-12-30T22:00:00+00:00"),
+            (253_402_300_800, "+10000-01-01T00:00:00+00:00"),
+            (-62_167_219_201, "-0001-12-31T23:59:59+00:00"),
+            (8_210_266_876_799, "+262142-12-31T23:59:59+00:00"),
+            (8_210_266_876_800, "1970-01-01T00:00:00+00:00"),
+        ];
+        for (seconds, expected) in cases {
+            assert_eq!(timestamp(*seconds), *expected, "{seconds}");
+        }
+    }
 
     fn meta(
         id: &str,

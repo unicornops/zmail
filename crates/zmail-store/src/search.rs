@@ -14,11 +14,11 @@
 //! have a message from Alice and a message on or after that day, not
 //! necessarily the same message.
 
-use chrono::{DateTime, TimeZone};
 use rusqlite::types::Value;
 use zmail_core::{
     MailboxSelection, SearchScope,
     search::{SearchQuery, SearchTerm, SearchText, day_start_unix, mailbox_role_alias},
+    time::{Date, ZonedDateTime},
 };
 
 /// A query compiled to SQL. `sql` selects the [`zmail_core::SearchHit`]
@@ -49,15 +49,15 @@ pub(crate) enum HitSource<'a> {
 ///
 /// Returns `None` when no clause is searchable (for example a query of
 /// only punctuation), which callers treat as no results.
-pub(crate) fn compile_search<Tz: TimeZone>(
+pub(crate) fn compile_search(
     query: &SearchQuery,
     scope: &SearchScope,
     limit: usize,
-    now: &DateTime<Tz>,
+    now: &ZonedDateTime,
     source: HitSource<'_>,
 ) -> Option<CompiledSearch> {
-    let today = now.date_naive();
-    let zone = now.timezone();
+    let today = Date::of(now);
+    let zone = now.time_zone();
 
     let mut include = Vec::new();
     let mut exclude = Vec::new();
@@ -113,10 +113,10 @@ pub(crate) fn compile_search<Tz: TimeZone>(
                 } else {
                     ">="
                 };
-                // A boundary outside chrono's range cannot narrow anything.
+                // A boundary off the calendar cannot narrow anything.
                 if let Some(boundary) = spec
                     .resolve(today)
-                    .and_then(|day| day_start_unix(day, &zone))
+                    .and_then(|day| day_start_unix(day, zone))
                 {
                     push_condition(
                         &mut conditions,
@@ -248,15 +248,12 @@ pub(crate) fn fts_phrase(text: &SearchText) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{FixedOffset, Utc};
+    use zmail_core::time::clock_at;
 
     use super::*;
 
     fn compile(query: &str) -> Option<CompiledSearch> {
-        let now = Utc
-            .with_ymd_and_hms(2026, 3, 31, 12, 0, 0)
-            .single()
-            .expect("valid time");
+        let now = clock_at("2026-03-31T12:00:00Z").expect("valid time");
         compile_search(
             &SearchQuery::parse(query),
             &SearchScope::Account(7),
@@ -375,11 +372,8 @@ mod tests {
 
     #[test]
     fn dates_bind_day_boundaries_in_the_viewer_zone() {
-        let dublin_summer = FixedOffset::east_opt(3600).expect("valid offset");
-        let now = dublin_summer
-            .with_ymd_and_hms(2026, 6, 15, 9, 0, 0)
-            .single()
-            .expect("valid time");
+        // Dublin in summer.
+        let now = clock_at("2026-06-15T09:00:00+01:00").expect("valid time");
         let compiled = compile_search(
             &SearchQuery::parse("after:2026-06-01 before:7d"),
             &SearchScope::Account(1),
@@ -430,7 +424,7 @@ mod tests {
 
 #[cfg(test)]
 mod store_tests {
-    use chrono::{FixedOffset, TimeZone, Utc};
+    use zmail_core::time::clock_at;
     use zmail_core::{
         AccountSyncSnapshot, MailboxSnapshot, MessageAttachment, MessageSnapshot, ProtocolKind,
         ThreadSnapshot,
@@ -586,10 +580,7 @@ mod store_tests {
     /// Runs a search "now" (2026-03-31 12:00 UTC) and returns the matching
     /// subjects in result order.
     fn search(store: &LocalStore, account_id: i64, query: &str) -> Vec<String> {
-        let now = Utc
-            .with_ymd_and_hms(2026, 3, 31, 12, 0, 0)
-            .single()
-            .expect("valid time");
+        let now = clock_at("2026-03-31T12:00:00Z").expect("valid time");
         let mut subjects = store
             .search_threads_at(account_id, query, 50, &now)
             .unwrap_or_else(|error| panic!("`{query}` should run: {error:#}"))
@@ -717,11 +708,7 @@ mod store_tests {
     fn day_boundaries_follow_the_viewer_zone() {
         let (store, account) = seeded();
         // 2026-03-30T09:00Z is still 29 March in UTC-10.
-        let hawaii = FixedOffset::west_opt(10 * 3600).expect("valid offset");
-        let now = hawaii
-            .with_ymd_and_hms(2026, 3, 31, 0, 0, 0)
-            .single()
-            .expect("valid time");
+        let now = clock_at("2026-03-31T00:00:00-10:00").expect("valid time");
         let hits = store
             .search_threads_at(account, "before:2026-03-30 after:2026-03-29", 10, &now)
             .expect("search should run");
@@ -839,10 +826,7 @@ mod store_tests {
     }
 
     fn search_in(store: &LocalStore, scope: &zmail_core::SearchScope, query: &str) -> Vec<String> {
-        let now = Utc
-            .with_ymd_and_hms(2026, 3, 31, 12, 0, 0)
-            .single()
-            .expect("valid time");
+        let now = clock_at("2026-03-31T12:00:00Z").expect("valid time");
         let mut subjects = store
             .search_threads_in_at(scope, query, 50, &now)
             .unwrap_or_else(|error| panic!("`{query}` should run: {error:#}"))

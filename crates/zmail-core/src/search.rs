@@ -28,7 +28,7 @@
 
 use std::ops::Range;
 
-use chrono::{Days, Months, NaiveDate, NaiveTime, TimeDelta, TimeZone};
+use crate::time::{Date, TimeZone};
 
 /// A parsed search query: every clause must match.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -114,7 +114,7 @@ impl SearchText {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DateSpec {
     /// A calendar day, written `YYYY-MM-DD`.
-    Day(NaiveDate),
+    Day(Date),
     /// A day relative to today, written `7d`, `2w`, `3m` or `1y`.
     Ago {
         /// How many units back.
@@ -140,21 +140,21 @@ pub enum DateUnit {
 impl DateSpec {
     /// Resolves the boundary to a calendar day, given today's date in the
     /// viewer's time zone. Returns `None` when the result falls outside
-    /// chrono's date range.
-    pub fn resolve(self, today: NaiveDate) -> Option<NaiveDate> {
+    /// the calendar's range (see [`Date`]).
+    pub fn resolve(self, today: Date) -> Option<Date> {
         match self {
             Self::Day(day) => Some(day),
             Self::Ago { amount, unit } => match unit {
-                DateUnit::Days => today.checked_sub_days(Days::new(u64::from(amount))),
-                DateUnit::Weeks => today.checked_sub_days(Days::new(u64::from(amount) * 7)),
-                DateUnit::Months => today.checked_sub_months(Months::new(amount)),
-                DateUnit::Years => today.checked_sub_months(Months::new(amount.checked_mul(12)?)),
+                DateUnit::Days => today.checked_sub_days(u64::from(amount)),
+                DateUnit::Weeks => today.checked_sub_days(u64::from(amount) * 7),
+                DateUnit::Months => today.checked_sub_months(amount),
+                DateUnit::Years => today.checked_sub_months(amount.checked_mul(12)?),
             },
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
-        if let Ok(day) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        if let Some(day) = Date::parse(value) {
             return Some(Self::Day(day));
         }
         let unit = match value.chars().last()?.to_ascii_lowercase() {
@@ -297,14 +297,8 @@ pub fn mailbox_matches(value: &str, name: &str, role: Option<&str>) -> bool {
 
 /// The Unix time at which `day` starts in `zone`. Days that skip midnight
 /// (a daylight-saving jump) start at the first valid local time after it.
-pub fn day_start_unix<Tz: TimeZone>(day: NaiveDate, zone: &Tz) -> Option<i64> {
-    let midnight = day.and_time(NaiveTime::MIN);
-    (0..=2)
-        .find_map(|hours| {
-            zone.from_local_datetime(&(midnight + TimeDelta::hours(hours)))
-                .earliest()
-        })
-        .map(|start| start.timestamp())
+pub fn day_start_unix(day: Date, zone: &TimeZone) -> Option<i64> {
+    day.start_in(zone)
 }
 
 /// Parses one clause from the start of `input` (which has no leading
@@ -453,8 +447,8 @@ mod tests {
         }
     }
 
-    fn day(year: i32, month: u32, day: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(year, month, day).expect("valid date")
+    fn day(year: i32, month: u8, day: u8) -> Date {
+        Date::new(year, month, day).expect("valid date")
     }
 
     #[test]
@@ -622,10 +616,228 @@ mod tests {
 
     #[test]
     fn day_starts_follow_the_zone() {
-        let day = NaiveDate::from_ymd_opt(2026, 6, 1).expect("valid date");
-        let plus_one = chrono::FixedOffset::east_opt(3600).expect("valid offset");
-        assert_eq!(day_start_unix(day, &chrono::Utc), Some(1_780_272_000));
-        assert_eq!(day_start_unix(day, &plus_one), Some(1_780_268_400));
+        let day = day(2026, 6, 1);
+        assert_eq!(day_start_unix(day, &TimeZone::UTC), Some(1_780_272_000));
+        assert_eq!(day_start_unix(day, &fixed(3600)), Some(1_780_268_400));
+    }
+
+    // Characterisation (issue #489): what `before:`/`after:` values parsed
+    // and resolved to before the workspace moved off chrono. Only `spec`,
+    // `resolved` and `day_start` know the time library.
+
+    /// A zone fixed `seconds` east of UTC.
+    fn fixed(seconds: i32) -> TimeZone {
+        TimeZone::fixed(jiff::tz::Offset::from_seconds(seconds).expect("valid offset"))
+    }
+
+    /// A date value as `day YYYY-MM-DD` or `N units ago`.
+    fn spec(value: &str) -> Option<String> {
+        DateSpec::parse(value).map(|spec| match spec {
+            DateSpec::Day(day) => format!("day {day}"),
+            DateSpec::Ago { amount, unit } => format!("{amount} {unit:?} ago"),
+        })
+    }
+
+    /// The day a date value means on `today` (`YYYY-MM-DD`).
+    fn resolved(value: &str, today: &str) -> Option<String> {
+        let today = Date::parse(today).expect("valid test date");
+        DateSpec::parse(value)
+            .expect("a date value")
+            .resolve(today)
+            .map(|day| day.to_string())
+    }
+
+    /// When `day` (`YYYY-MM-DD`) starts in a zone `offset_minutes` east of
+    /// UTC.
+    fn day_start(day: &str, offset_minutes: i32) -> Option<i64> {
+        let day = Date::parse(day).expect("valid test date");
+        day_start_unix(day, &fixed(offset_minutes * 60))
+    }
+
+    #[test]
+    fn date_values_parse_as_before() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("2026-01-31", Some("day 2026-01-31")),
+            ("2024-02-29", Some("day 2024-02-29")),
+            ("0001-01-01", Some("day 0001-01-01")),
+            ("0000-01-01", Some("day 0000-01-01")),
+            ("9999-12-31", Some("day 9999-12-31")),
+            // Read loosely: short fields, a signed year, white space
+            // before a number (in a quoted value).
+            ("2026-1-5", Some("day 2026-01-05")),
+            ("2026-01-5", Some("day 2026-01-05")),
+            ("26-1-5", Some("day 0026-01-05")),
+            ("+2026-01-31", Some("day 2026-01-31")),
+            ("-0001-01-31", Some("day -0001-01-31")),
+            ("-1-1-1", Some("day -0001-01-01")),
+            (" 2026-01-31", Some("day 2026-01-31")),
+            ("2026- 1- 5", Some("day 2026-01-05")),
+            ("2026 -01-31", None),
+            ("2026-01-31 ", None),
+            // Not days.
+            ("2026-13-01", None),
+            ("2026-00-01", None),
+            ("2026-02-29", None),
+            ("2026-01-32", None),
+            ("2026-01-00", None),
+            ("2026-01", None),
+            ("2026", None),
+            ("20260131", None),
+            ("2026/01/31", None),
+            ("2026-01-31T00:00:00Z", None),
+            ("2026-001-31", None),
+            ("2026-01-031", None),
+            ("02026-01-31", None),
+            ("31-01-2026", None),
+            ("yesterday", None),
+            ("", None),
+            // Relative dates.
+            ("7d", Some("7 Days ago")),
+            ("2W", Some("2 Weeks ago")),
+            ("3m", Some("3 Months ago")),
+            ("1Y", Some("1 Years ago")),
+            ("0d", Some("0 Days ago")),
+            ("007d", Some("7 Days ago")),
+            ("4294967295d", Some("4294967295 Days ago")),
+            ("4294967296d", None),
+            ("d", None),
+            ("-7d", None),
+            ("+7d", None),
+            ("7 d", None),
+            ("1.5d", None),
+            ("7h", None),
+            ("7dd", None),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(spec(value).as_deref(), *expected, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn relative_dates_resolve_as_before() {
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            ("2026-01-31", "2026-03-31", Some("2026-01-31")),
+            ("0d", "2026-03-31", Some("2026-03-31")),
+            ("1d", "2026-03-01", Some("2026-02-28")),
+            ("1d", "2024-03-01", Some("2024-02-29")),
+            ("1d", "2026-01-01", Some("2025-12-31")),
+            ("30d", "2026-03-31", Some("2026-03-01")),
+            ("365d", "2026-03-31", Some("2025-03-31")),
+            ("366d", "2025-01-01", Some("2024-01-01")),
+            ("1w", "2026-03-31", Some("2026-03-24")),
+            ("52w", "2026-03-31", Some("2025-04-01")),
+            // Months and years land on the same day of the month, or its
+            // last day when the month is shorter.
+            ("1m", "2026-03-31", Some("2026-02-28")),
+            ("1m", "2024-03-31", Some("2024-02-29")),
+            ("1m", "2026-03-30", Some("2026-02-28")),
+            ("1m", "2026-03-28", Some("2026-02-28")),
+            ("1m", "2026-05-31", Some("2026-04-30")),
+            ("1m", "2026-01-15", Some("2025-12-15")),
+            ("3m", "2026-03-31", Some("2025-12-31")),
+            ("12m", "2024-02-29", Some("2023-02-28")),
+            ("13m", "2026-03-31", Some("2025-02-28")),
+            ("1y", "2026-03-31", Some("2025-03-31")),
+            ("1y", "2024-02-29", Some("2023-02-28")),
+            ("4y", "2024-02-29", Some("2020-02-29")),
+            ("100y", "2026-03-31", Some("1926-03-31")),
+            ("2026y", "2026-03-31", Some("0000-03-31")),
+            ("10000y", "2026-03-31", Some("-7974-03-31")),
+            ("24312m", "2026-03-31", Some("0000-03-31")),
+            ("740000d", "2026-03-31", Some("0000-03-12")),
+            // Too far back to be a date at all.
+            ("4294967295d", "2026-03-31", None),
+            ("4294967295w", "2026-03-31", None),
+            ("4294967295m", "2026-03-31", None),
+            ("4294967295y", "2026-03-31", None),
+            ("357913942y", "2026-03-31", None),
+        ];
+        for (value, today, expected) in cases {
+            assert_eq!(
+                resolved(value, today).as_deref(),
+                *expected,
+                "{value} on {today}"
+            );
+        }
+    }
+
+    /// Days further back than the replacement time library's calendar
+    /// (year -9999).
+    #[test]
+    fn relative_dates_before_the_year_minus_9999() {
+        assert_eq!(
+            resolved("12025y", "2026-03-31").as_deref(),
+            Some("-9999-03-31")
+        );
+        assert_eq!(
+            resolved("12026y", "2026-03-31").as_deref(),
+            Some("-10000-03-31")
+        );
+        assert_eq!(
+            resolved("200000y", "2026-03-31").as_deref(),
+            Some("-197974-03-31")
+        );
+        assert_eq!(
+            resolved("5000000d", "2026-03-31").as_deref(),
+            Some("-11664-09-17")
+        );
+        assert_eq!(spec("+12026-01-31").as_deref(), Some("day +12026-01-31"));
+        assert_eq!(spec("-12026-01-31").as_deref(), Some("day -12026-01-31"));
+    }
+
+    #[test]
+    fn days_start_as_before() {
+        let cases: &[(&str, i32, Option<i64>)] = &[
+            ("2026-06-01", 0, Some(1_780_272_000)),
+            ("2026-06-01", 60, Some(1_780_268_400)),
+            ("2026-06-01", -300, Some(1_780_290_000)),
+            ("2026-06-01", 330, Some(1_780_252_200)),
+            ("2026-06-01", 14 * 60, Some(1_780_221_600)),
+            ("2026-06-01", -12 * 60, Some(1_780_315_200)),
+            ("1970-01-01", 0, Some(0)),
+            ("1970-01-01", 60, Some(-3_600)),
+            ("1969-12-31", 0, Some(-86_400)),
+            ("2024-02-29", 0, Some(1_709_164_800)),
+            ("0000-01-01", 0, Some(-62_167_219_200)),
+            ("9999-12-30", 0, Some(253_402_128_000)),
+        ];
+        for (day, offset_minutes, expected) in cases {
+            assert_eq!(
+                day_start(day, *offset_minutes),
+                *expected,
+                "{day} at {offset_minutes} min"
+            );
+        }
+    }
+
+    /// Day boundaries in zones with daylight saving. The expected values
+    /// are what chrono's `Local` gave under the same `TZ`, measured before
+    /// the move off it (issue #489).
+    #[test]
+    fn days_start_with_daylight_saving_time() {
+        // (zone, day, the Unix time it starts)
+        let cases = [
+            ("Europe/Dublin", "2026-01-15", 1_768_435_200),
+            ("Europe/Dublin", "2026-07-01", 1_782_860_400),
+            ("Europe/Dublin", "2026-03-29", 1_774_742_400),
+            ("Europe/Dublin", "2026-10-25", 1_792_882_800),
+            ("America/New_York", "2026-03-08", 1_772_946_000),
+            ("America/New_York", "2026-11-01", 1_793_505_600),
+            // Midnight is skipped: the day starts when the clocks jump.
+            ("America/Havana", "2025-03-09", 1_741_496_400),
+            ("America/Sao_Paulo", "2018-11-04", 1_541_300_400),
+            ("Asia/Kathmandu", "1986-01-01", 504_901_800),
+            // Midnight comes twice: the second time.
+            ("America/Havana", "2025-11-02", 1_762_059_600),
+            // A day that never happened starts with the next one.
+            ("Pacific/Apia", "2011-12-30", 1_325_239_200),
+            ("Pacific/Apia", "2011-12-31", 1_325_239_200),
+        ];
+        for (zone, day, expected) in cases {
+            let zone = TimeZone::get(zone).expect("the time zone database has the zone");
+            let day = Date::parse(day).expect("valid test date");
+            assert_eq!(day_start_unix(day, &zone), Some(expected), "{day}");
+        }
     }
 
     #[test]

@@ -1021,7 +1021,7 @@ impl App {
         message_id: Option<i64>,
         reply_all: bool,
     ) {
-        let zone = *self.now().offset();
+        let zone = self.now().time_zone().clone();
         let result = self
             .reply_message(thread_id, message_id)
             .and_then(|(subject, mailbox, message)| {
@@ -1045,7 +1045,7 @@ impl App {
             self.status = Some("No messages here".to_owned());
             return;
         };
-        let zone = *self.now().offset();
+        let zone = self.now().time_zone().clone();
         let result = self
             .reply_message(thread_id, message_id)
             .and_then(|(subject, mailbox, message)| {

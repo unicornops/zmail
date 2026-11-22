@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-chrono.workspace = true
 futures-util.workspace = true
 # `websockets` adds the RFC 8887 push fallback (tokio-tungstenite).
 jmap-client = { workspace = true, features = ["websockets"] }

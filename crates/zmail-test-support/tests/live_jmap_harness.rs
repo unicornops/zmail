@@ -1687,7 +1687,9 @@ fn jmap_identities_import_keep_local_edits_and_push_back() -> Result<()> {
 
     // An alias the account may send from, and a server identity for it,
     // made on the server as another client would.
-    let stamp = chrono::Utc::now().timestamp_millis();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
     let alias = format!("identity-{stamp}@localhost");
     add_james_alias(&alias)?;
     let created = jmap_call(
@@ -1871,7 +1873,9 @@ fn the_identity_editor_edits_adds_and_removes_identities_on_james() -> Result<()
 
     // A server identity for an alias, made as another client would, and
     // imported by a sync.
-    let stamp = chrono::Utc::now().timestamp_millis();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
     let alias = format!("editor-{stamp}@localhost");
     add_james_alias(&alias)?;
     let created = jmap_call(
@@ -1902,7 +1906,7 @@ fn the_identity_editor_edits_adds_and_removes_identities_on_james() -> Result<()
             over_ssh: false,
             macos: false,
         },
-        clock: Arc::new(|| chrono::Local::now().fixed_offset()),
+        clock: Arc::new(zmail_core::time::now_at_fixed_offset),
         hour_cycle: zmail_core::time::HourCycle::H24,
         version: "0.0.0-test".to_owned(),
         arrivals: None,

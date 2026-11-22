@@ -113,7 +113,7 @@ pub fn run(launch: Launch) -> Result<()> {
         sync: launch.sync,
         runtime: Some(launch.runtime),
         env: Environment::detect(),
-        clock: Arc::new(|| chrono::Local::now().fixed_offset()),
+        clock: Arc::new(zmail_core::time::now_at_fixed_offset),
         hour_cycle: HourCycle::from_env(),
         version: launch.version,
         arrivals: Some(arrivals),

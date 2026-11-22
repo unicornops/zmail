@@ -3106,12 +3106,12 @@ impl LocalStore {
 
     /// [`LocalStore::search_threads`] with an explicit clock and time zone
     /// for `before:`/`after:`, for tests.
-    pub fn search_threads_at<Tz: chrono::TimeZone>(
+    pub fn search_threads_at(
         &self,
         account_id: i64,
         query: &str,
         limit: usize,
-        now: &chrono::DateTime<Tz>,
+        now: &zmail_core::time::ZonedDateTime,
     ) -> Result<Vec<SearchHit>> {
         self.search_threads_in_at(&SearchScope::Account(account_id), query, limit, now)
     }
@@ -3134,7 +3134,7 @@ impl LocalStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        self.search_threads_in_at(scope, query, limit, &chrono::Local::now())
+        self.search_threads_in_at(scope, query, limit, &zmail_core::time::now())
     }
 
     /// [`LocalStore::search_threads_in`] with an explicit clock and time
@@ -3145,12 +3145,12 @@ impl LocalStore {
     /// follow, marked [`SearchHit::from_server`], when they are in scope,
     /// pass the query's non-text clauses and the local index did not
     /// already find them.
-    pub fn search_threads_in_at<Tz: chrono::TimeZone>(
+    pub fn search_threads_in_at(
         &self,
         scope: &SearchScope,
         query: &str,
         limit: usize,
-        now: &chrono::DateTime<Tz>,
+        now: &zmail_core::time::ZonedDateTime,
     ) -> Result<Vec<SearchHit>> {
         let parsed = zmail_core::search::SearchQuery::parse(query);
         let conn = self.connection()?;
@@ -12571,7 +12571,7 @@ mod tests {
         let due =
             zmail_core::time::parse_timestamp(job.next_attempt_at.as_deref().expect("a due time"))
                 .expect("the due time parses")
-                .timestamp() as u64;
+                .seconds() as u64;
         assert!(due >= before + 10, "due {due}, queued at {before}");
         assert_eq!(state(draft_id), DraftState::Queued);
         assert!(

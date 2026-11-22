@@ -40,10 +40,11 @@
 use std::collections::HashMap;
 
 use anyhow::{Context as _, Result};
-use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Transaction, params};
 use zmail_core::{
-    AddressSuggestion, MessageSnapshot, participants::parse_address_list, time::parse_timestamp,
+    AddressSuggestion, MessageSnapshot,
+    participants::parse_address_list,
+    time::{Stamp, parse_timestamp},
 };
 
 use crate::LocalStore;
@@ -156,14 +157,14 @@ fn recency_weight(age_days: i64) -> f64 {
 struct Tally {
     display_name: String,
     /// The timestamp `display_name` came from, so the newest name wins.
-    named_at: Option<DateTime<Utc>>,
+    named_at: Option<Stamp>,
     sent: i64,
     received: i64,
-    last_used_at: Option<DateTime<Utc>>,
+    last_used_at: Option<Stamp>,
 }
 
 impl Tally {
-    fn add(&mut self, name: Option<&str>, at: Option<DateTime<Utc>>, sent: i64, received: i64) {
+    fn add(&mut self, name: Option<&str>, at: Option<Stamp>, sent: i64, received: i64) {
         self.sent += sent;
         self.received += received;
         self.last_used_at = self.last_used_at.max(at);
@@ -189,12 +190,12 @@ fn own_addresses(conn: &Connection, account_id: Option<i64>) -> Result<Vec<Strin
         .context("failed to load the identity addresses")
 }
 
-fn parse_utc(value: &str) -> Option<DateTime<Utc>> {
-    parse_timestamp(value).map(|at| at.with_timezone(&Utc))
+fn parse_utc(value: &str) -> Option<Stamp> {
+    parse_timestamp(value)
 }
 
-fn format_utc(at: Option<DateTime<Utc>>) -> Option<String> {
-    at.map(|at| at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+fn format_utc(at: Option<Stamp>) -> Option<String> {
+    at.map(Stamp::format_utc)
 }
 
 /// Rebuilds an account's mirror counts from its mirrored mail.
@@ -488,7 +489,7 @@ fn tally_messages(
     own: &[String],
     sender: &str,
     recipients: &str,
-    at: Option<DateTime<Utc>>,
+    at: Option<Stamp>,
     count: i64,
 ) {
     let senders = parse_address_list(sender);
@@ -512,7 +513,7 @@ fn tally(
     tallies: &mut HashMap<String, Tally>,
     own: &[String],
     participant: &zmail_core::participants::Participant,
-    at: Option<DateTime<Utc>>,
+    at: Option<Stamp>,
     sent: i64,
     received: i64,
 ) {
@@ -632,7 +633,7 @@ impl LocalStore {
     /// most used addresses. Every account's history is searched; the
     /// user's own addresses are left out.
     pub fn address_suggestions(&self, query: &str, limit: usize) -> Result<Vec<AddressSuggestion>> {
-        self.address_suggestions_at(query, limit, Utc::now())
+        self.address_suggestions_at(query, limit, Stamp::now())
     }
 
     /// [`Self::address_suggestions`] ranked as of `now`.
@@ -640,7 +641,7 @@ impl LocalStore {
         &self,
         query: &str,
         limit: usize,
-        now: DateTime<Utc>,
+        now: Stamp,
     ) -> Result<Vec<AddressSuggestion>> {
         let conn = self.connection()?;
         let query = query.trim().to_lowercase();
@@ -691,7 +692,7 @@ impl LocalStore {
             .map(|(address, tally)| {
                 let age_days = tally
                     .last_used_at
-                    .map_or(i64::MAX, |last| (now - last).num_days());
+                    .map_or(i64::MAX, |last| now.seconds_since(last) / 86_400);
                 let score = (SENT_WEIGHT * tally.sent as f64
                     + RECEIVED_WEIGHT * tally.received as f64)
                     * recency_weight(age_days);
@@ -720,10 +721,10 @@ impl LocalStore {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Utc};
     use zmail_core::{
         AccountSyncSnapshot, MailboxSnapshot, MessageSnapshot, NewDraft, ProtocolKind,
         ThreadSnapshot,
+        time::{Stamp, parse_timestamp},
     };
 
     use crate::LocalStore;
@@ -784,8 +785,89 @@ mod tests {
         }
     }
 
-    fn at(value: &str) -> DateTime<Utc> {
-        value.parse().expect("a valid timestamp")
+    fn at(value: &str) -> Stamp {
+        parse_timestamp(value).expect("a valid timestamp")
+    }
+
+    // Characterisation (issue #489): how the history reads `received_at`
+    // and writes its own times, as it did before the workspace moved off
+    // chrono.
+    #[test]
+    fn last_used_times_are_written_as_before() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("2026-10-15T10:42:00+00:00", Some("2026-10-15T10:42:00Z")),
+            ("2026-10-15T10:42:00Z", Some("2026-10-15T10:42:00Z")),
+            ("2026-10-15 10:42:00", Some("2026-10-15T10:42:00Z")),
+            ("2026-10-15T16:12:00+05:30", Some("2026-10-15T10:42:00Z")),
+            ("2026-10-15T02:42:00-08:00", Some("2026-10-15T10:42:00Z")),
+            ("2026-10-15T00:30:00+01:00", Some("2026-10-14T23:30:00Z")),
+            ("2027-01-01T00:30:00+01:00", Some("2026-12-31T23:30:00Z")),
+            ("2026-10-15T10:42:00.999Z", Some("2026-10-15T10:42:00Z")),
+            ("2026-12-31T23:59:60Z", Some("2026-12-31T23:59:60Z")),
+            ("2026-10-15T10:42:60.5+05:30", Some("2026-10-15T05:12:60Z")),
+            ("1969-12-31T23:59:59Z", Some("1969-12-31T23:59:59Z")),
+            ("0000-01-01T00:00:00Z", Some("0000-01-01T00:00:00Z")),
+            ("0000-01-01T00:00:00+01:00", Some("-0001-12-31T23:00:00Z")),
+            ("9999-12-31T23:59:59Z", Some("9999-12-31T23:59:59Z")),
+            ("9999-12-31T23:59:59-01:00", Some("+10000-01-01T00:59:59Z")),
+            ("2026-10-15T10:42:00", None),
+            ("Thu, 15 Oct 2026 10:42:00 +0000", None),
+            ("", None),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(
+                super::format_utc(super::parse_utc(value)).as_deref(),
+                *expected,
+                "{value:?}"
+            );
+        }
+        // Equal instants are equal however they were written, and a leap
+        // second comes after the second before it.
+        let order = [
+            "2026-12-31T23:59:59Z",
+            "2026-12-31T23:59:59.5Z",
+            "2026-12-31T23:59:60Z",
+            "2027-01-01T00:59:60.5+01:00",
+            "2027-01-01T00:00:00Z",
+        ];
+        for pair in order.windows(2) {
+            assert!(
+                super::parse_utc(pair[0]) < super::parse_utc(pair[1]),
+                "{pair:?}"
+            );
+        }
+        assert_eq!(
+            super::parse_utc("2026-10-15T10:42:00Z"),
+            super::parse_utc("2026-10-15T12:42:00+02:00")
+        );
+    }
+
+    #[test]
+    fn whole_utc_seconds_are_recognised_as_before() {
+        let cases = [
+            ("2026-10-15T10:42:00+00:00", true),
+            ("2026-10-15t10:42:00+00:00", true),
+            ("2026-10-15 10:42:00+00:00", true),
+            ("2026-12-31T23:59:60+00:00", true),
+            ("0000-01-01T00:00:00+00:00", true),
+            ("9999-12-31T23:59:59+00:00", true),
+            ("2026-10-15T10:42:00Z", false),
+            ("2026-10-15T10:42:00-00:00", false),
+            ("2026-10-15T10:42:00+01:00", false),
+            ("2026-10-15T10:42:00.000+00:00", false),
+            ("2026-10-15T10:42:0.0+00:00", false),
+            (" 2026-10-15T10:42:00+00:00", false),
+            ("2026-10-15T10:42:61+00:00", false),
+            ("2026-02-30T10:42:00+00:00", false),
+            ("2026-10-15T24:00:00+00:00", false),
+            ("2026-10-15T10:42:00 +00:00", false),
+            ("2026-10-15 10:42:00 +00:00", false),
+            ("not a timestamp at all+00:00", false),
+            ("", false),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(super::is_utc_seconds(value), expected, "{value:?}");
+        }
     }
 
     /// An account whose Inbox has three messages from Alice and one from

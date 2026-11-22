@@ -341,7 +341,7 @@ impl Client {
     /// Undoes earlier label actions (`UndoActions`); expired tokens are an
     /// error, as upstream.
     async fn undo_actions(&self, tokens: &[UndoToken]) -> Result<(), Error> {
-        let now = chrono::Utc::now().timestamp();
+        let now = zmail_core::time::Stamp::now().seconds();
         for token in tokens {
             if token.valid_until < now {
                 return Err(Error::Config("undo token expired".to_owned()));

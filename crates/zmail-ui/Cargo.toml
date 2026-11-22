@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-chrono.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 serde_json.workspace = true

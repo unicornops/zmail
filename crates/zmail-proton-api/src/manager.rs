@@ -23,7 +23,6 @@ use std::{
     },
 };
 
-use chrono::{DateTime, Utc};
 use reqwest::{
     Method, StatusCode,
     header::{
@@ -32,6 +31,7 @@ use reqwest::{
     redirect,
 };
 use serde::{Serialize, de::DeserializeOwned};
+use zmail_core::time::{Stamp, parse_rfc2822};
 
 use crate::{
     config::{CONNECT_TIMEOUT, ClientConfig, POOL_IDLE_TIMEOUT, READ_TIMEOUT},
@@ -148,10 +148,10 @@ impl Manager {
 
     /// The server's clock as of the last response, from its `Date` header
     /// (go-proton-api feeds this to gopenpgp's `UpdateTime`).
-    pub fn server_time(&self) -> Option<DateTime<Utc>> {
+    pub fn server_time(&self) -> Option<Stamp> {
         match self.inner.server_time.load(Ordering::Relaxed) {
             0 => None,
-            seconds => DateTime::from_timestamp(seconds, 0),
+            seconds => Stamp::from_seconds(seconds),
         }
     }
 
@@ -275,11 +275,11 @@ impl Manager {
         if let Some(date) = headers
             .get(DATE)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| DateTime::parse_from_rfc2822(value).ok())
+            .and_then(parse_rfc2822)
         {
             self.inner
                 .server_time
-                .store(date.timestamp(), Ordering::Relaxed);
+                .store(date.seconds(), Ordering::Relaxed);
         }
         let body = match response.bytes().await {
             Ok(body) => body.to_vec(),

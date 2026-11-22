@@ -11,7 +11,6 @@
 //! items, one per chunk of its body: the first has the header and the
 //! first chunk, the last the attachments, and together they draw one card.
 
-use chrono::{DateTime, Local};
 use gpui::{
     AccessibleAction, AnyElement, Context, FontWeight, IntoElement, Role, div, prelude::*, px, rgb,
 };
@@ -41,7 +40,7 @@ const SNIPPET_CHARS: usize = 200;
 
 /// What every message of the conversation renders with.
 pub(super) struct MessageContext<'a> {
-    pub(super) now: DateTime<Local>,
+    pub(super) now: zmail_core::time::ZonedDateTime,
     pub(super) hour_cycle: HourCycle,
     pub(super) own_addresses: &'a [String],
     pub(super) colors: UiColors,
@@ -157,7 +156,7 @@ pub(super) fn message_label(message: &ThreadMessage, context: &MessageContext<'_
     let (sender_name, _) = sender_identity(&message.sender);
     let date = format_full_date(
         &message.received_at,
-        &context.now.timezone(),
+        context.now.time_zone(),
         context.hour_cycle,
     );
     let state = if message.is_read {
