@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.5](https://github.com/unicornops/zmail/compare/v0.34.4...v0.34.5) (2026-11-22)
+
+
+### Bug Fixes
+
+* **docs-site:** use each release's own screenshots on the documentation site ([#500](https://github.com/unicornops/zmail/issues/500)) ([36cdf05](https://github.com/unicornops/zmail/commit/36cdf05bb028a6df7504a7c931a731f252a0d968))
+
 ## [0.34.4](https://github.com/unicornops/zmail/compare/v0.34.3...v0.34.4) (2026-11-22)
 
 
