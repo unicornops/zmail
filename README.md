@@ -24,7 +24,7 @@ The terminal UI (`zmail-app tui`), on the same store and accounts:
 < FldrList   P PrevMsg    - PrevPage   D Delete     R Reply      O OTHER CMDS
 ```
 
-Screenshots and the terminal snapshot show synthetic test mail: the desktop ones come from CI's UI screenshot job, the terminal one from the terminal UI's snapshot tests (an 80x24 screen, empty rows left out).
+Screenshots and the terminal snapshot show synthetic test mail: the desktop ones from the UI screenshot matrix, captured for each release ([how they are kept current](./docs/site.md#screenshots)), the terminal one from the terminal UI's snapshot tests (an 80x24 screen, empty rows left out).
 
 ## Download
 
