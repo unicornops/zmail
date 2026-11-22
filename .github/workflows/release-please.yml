@@ -65,6 +65,19 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN != '' && secrets.RELEASE_PLEASE_TOKEN || github.token }}
         run: scripts/render-release-pr.sh
 
+  # Rebuilds and deploys the documentation site so / is the new release
+  # (docs.yml, docs/site.md). The release is made with GITHUB_TOKEN, which
+  # starts no `release` workflows, so it is called from here. Its deploy
+  # job reads the Cloudflare secrets from its own environment; nothing is
+  # passed from this workflow.
+  docs_site:
+    name: Docs Site
+    needs: release_please
+    if: needs.release_please.outputs.release_created == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docs.yml
+
   # What to build and where it goes: the tag release-please just created,
   # or a manual run's tag_name. Anything that will be uploaded must be a
   # release tag (vX.Y.Z) with an existing release, and is checked out as

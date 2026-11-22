@@ -68,6 +68,22 @@ updates:
         patterns:
           - "*"
 
+  # wrangler, which deploys the documentation site (docs/site.md), with its
+  # lockfile. mdBook and lychee are pinned in
+  # scripts/docs-site/install-tools.sh and bumped by hand.
+  - package-ecosystem: npm
+    directory: /scripts/docs-site/deploy
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      docs-site-deploy:
+        patterns:
+          - "*"
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

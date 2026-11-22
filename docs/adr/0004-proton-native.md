@@ -401,7 +401,7 @@ replace a key the user pinned. Zmail stops the send instead, with a
 and the served ones; the outbox shows the message as needing the user,
 like a refused sign-in. Its "Trust New Key…" action shows both
 fingerprints and asks the user to compare them with the recipient another
-way; "Trust the new key for <recipient>" records a local, account-scoped
+way; "Trust the new key for `<recipient>`" records a local, account-scoped
 trust for exactly that address and that served fingerprint (the
 `recipient_key_trust` table) and sends again. A later change to yet
 another key stops the send again, and the contact card on the server is
