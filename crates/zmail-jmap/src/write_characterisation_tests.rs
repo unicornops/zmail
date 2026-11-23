@@ -383,7 +383,7 @@ fn serve(mut stream: TcpStream, base: &str, state: &Mutex<State>) {
 /// `serde_json` keeps it or sorts it depending on a feature that other
 /// crates of the workspace turn on, so the pinned text must not depend
 /// on it.
-fn canonical(value: &Value) -> String {
+pub(crate) fn canonical(value: &Value) -> String {
     match value {
         Value::Object(members) => {
             let mut members = members.iter().collect::<Vec<_>>();

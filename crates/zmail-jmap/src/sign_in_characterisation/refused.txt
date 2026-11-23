@@ -1,0 +1,48 @@
+# wrong credentials (401) (signing in to http://server/jmap/session)
+  error: failed to connect to the JMAP endpoint http://server/jmap/session: Server failed: 401 Unauthorized
+  taken for refused credentials: true
+  requests: ["/jmap/session with credentials"]
+# wrong credentials (401) (signing in to http://server)
+  error: failed to connect to the JMAP endpoint http://server: Server failed: 401 Unauthorized
+  taken for refused credentials: true
+  requests: ["/.well-known/jmap", "/.well-known/jmap with credentials"]
+# a wrong URL (404) (signing in to http://server/jmap/session)
+  error: failed to connect to the JMAP endpoint http://server/jmap/session: Server failed: 404 Not Found
+  taken for refused credentials: false
+  requests: ["/jmap/session with credentials"]
+# a wrong URL (404) (signing in to http://server)
+  error: failed to connect to the JMAP endpoint http://server: Server failed: 404 Not Found
+  taken for refused credentials: false
+  requests: ["/.well-known/jmap", "/.well-known/jmap with credentials"]
+# a page that is not JSON (signing in to http://server/jmap/session)
+  error: failed to connect to the JMAP endpoint http://server/jmap/session: Parse error: expected value at line 1 column 1
+  taken for refused credentials: false
+  requests: ["/jmap/session with credentials"]
+# a page that is not JSON (signing in to http://server)
+  error: failed to connect to the JMAP endpoint http://server: Parse error: expected value at line 1 column 1
+  taken for refused credentials: false
+  requests: ["/.well-known/jmap", "/.well-known/jmap with credentials"]
+# JSON that is not a session (signing in to http://server/jmap/session)
+  error: failed to connect to the JMAP endpoint http://server/jmap/session: Parse error: missing field `capabilities` at line 1 column 14
+  taken for refused credentials: false
+  requests: ["/jmap/session with credentials"]
+# JSON that is not a session (signing in to http://server)
+  error: failed to connect to the JMAP endpoint http://server: Parse error: missing field `capabilities` at line 1 column 14
+  taken for refused credentials: false
+  requests: ["/.well-known/jmap", "/.well-known/jmap with credentials"]
+# problem details (403) (signing in to http://server/jmap/session)
+  error: failed to connect to the JMAP endpoint http://server/jmap/session: Request failed: about:blank (status 403): Forbidden. Details: This account may not use JMAP
+  taken for refused credentials: false
+  requests: ["/jmap/session with credentials"]
+# problem details (403) (signing in to http://server)
+  error: failed to connect to the JMAP endpoint http://server: Request failed: about:blank (status 403): Forbidden. Details: This account may not use JMAP
+  taken for refused credentials: false
+  requests: ["/.well-known/jmap", "/.well-known/jmap with credentials"]
+# a server error (503) (signing in to http://server/jmap/session)
+  error: failed to connect to the JMAP endpoint http://server/jmap/session: Server failed: 503 Service Unavailable
+  taken for refused credentials: false
+  requests: ["/jmap/session with credentials"]
+# a server error (503) (signing in to http://server)
+  error: failed to connect to the JMAP endpoint http://server: Server failed: 503 Service Unavailable
+  taken for refused credentials: false
+  requests: ["/.well-known/jmap", "/.well-known/jmap with credentials"]

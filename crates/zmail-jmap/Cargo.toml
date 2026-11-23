@@ -22,5 +22,9 @@ zmail-core = { path = "../zmail-core" }
 zmail-security = { path = "../zmail-security" }
 zmail-smtp = { path = "../zmail-smtp" }
 
+[dev-dependencies]
+# The loopback WebSocket server of the push tests.
+tokio-tungstenite.workspace = true
+
 [lints]
 workspace = true

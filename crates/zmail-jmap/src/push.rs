@@ -43,6 +43,32 @@ const WS_READY_WAIT: Duration = Duration::from_secs(2);
 const PUSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Largest single server-sent event accepted, mirroring `jmap-client`.
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
+/// The intervals and waits of a push session. They are constants in the
+/// app ([`PushTimings::DEFAULT`]); the tests shorten them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PushTimings {
+    /// See [`PUSH_PING_INTERVAL`].
+    pub(crate) ping_interval: Duration,
+    /// See [`STALL_GRACE`].
+    pub(crate) stall_grace: Duration,
+    /// See [`WS_READY_ATTEMPTS`].
+    pub(crate) ws_ready_attempts: usize,
+    /// See [`WS_READY_WAIT`].
+    pub(crate) ws_ready_wait: Duration,
+    /// See [`PUSH_CONNECT_TIMEOUT`].
+    pub(crate) connect_timeout: Duration,
+}
+
+impl PushTimings {
+    pub(crate) const DEFAULT: Self = Self {
+        ping_interval: PUSH_PING_INTERVAL,
+        stall_grace: STALL_GRACE,
+        ws_ready_attempts: WS_READY_ATTEMPTS,
+        ws_ready_wait: WS_READY_WAIT,
+        connect_timeout: PUSH_CONNECT_TIMEOUT,
+    };
+}
+
 /// Data types the push subscription asks for.
 const PUSH_TYPES: [DataType; 2] = [DataType::Email, DataType::Mailbox];
 /// `StateChange` type names that mean the mail mirror may be stale.
@@ -99,6 +125,20 @@ pub async fn watch_mail_changes<F>(
     target: &SyncTarget,
     secret: &str,
     preference: PushPreference,
+    on_event: F,
+) -> Result<PushEnd>
+where
+    F: FnMut(PushEvent) + Send,
+{
+    watch_with(target, secret, preference, PushTimings::DEFAULT, on_event).await
+}
+
+/// [`watch_mail_changes`] with the timings given.
+pub(crate) async fn watch_with<F>(
+    target: &SyncTarget,
+    secret: &str,
+    preference: PushPreference,
+    timings: PushTimings,
     mut on_event: F,
 ) -> Result<PushEnd>
 where
@@ -116,7 +156,7 @@ where
         .is_some_and(|capabilities| capabilities.supports_push());
 
     if preference != PushPreference::WebSocket {
-        match run_event_source(&client, &account_id, &mut on_event).await {
+        match run_event_source(&client, &account_id, timings, &mut on_event).await {
             Ok(end) => return Ok(end),
             // Only a stream that could not be opened falls back; a stream
             // that opened and then failed is a transport error to retry.
@@ -135,7 +175,7 @@ where
         bail!("the JMAP server does not offer WebSocket push");
     }
 
-    run_websocket(&client, &account_id, &mut on_event).await
+    run_websocket(&client, &account_id, timings, &mut on_event).await
 }
 
 enum EventSourceError {
@@ -148,6 +188,7 @@ enum EventSourceError {
 async fn run_event_source<F>(
     client: &Client,
     account_id: &str,
+    timings: PushTimings,
     on_event: &mut F,
 ) -> Result<PushEnd, EventSourceError>
 where
@@ -157,7 +198,7 @@ where
     let url = event_source_url(
         client.session_url(),
         session.event_source_url(),
-        PUSH_PING_INTERVAL,
+        timings.ping_interval,
     )
     .map_err(EventSourceError::Open)?;
 
@@ -167,7 +208,7 @@ where
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     let allowed_host = url.host_str().map(str::to_owned);
     let http = reqwest::Client::builder()
-        .connect_timeout(PUSH_CONNECT_TIMEOUT)
+        .connect_timeout(timings.connect_timeout)
         .default_headers(headers)
         // Credentials only ever go to the host the session named.
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
@@ -205,7 +246,7 @@ where
     }
 
     on_event(PushEvent::Connected(PushTransport::EventSource));
-    let mut stall_timeout = PUSH_PING_INTERVAL + STALL_GRACE;
+    let mut stall_timeout = timings.ping_interval + timings.stall_grace;
     let mut parser = SseParser::default();
     let mut body = response.bytes_stream();
     loop {
@@ -231,7 +272,7 @@ where
                     // The server may pick its own interval and announces it
                     // in the ping data; the stall timeout follows it.
                     if let Some(interval) = ping_interval(&event.data) {
-                        stall_timeout = interval.max(MIN_PING_INTERVAL) + STALL_GRACE;
+                        stall_timeout = interval.max(MIN_PING_INTERVAL) + timings.stall_grace;
                     }
                 }
                 // RFC 8620 names the event "state"; servers that omit the
@@ -250,7 +291,12 @@ where
     }
 }
 
-async fn run_websocket<F>(client: &Client, account_id: &str, on_event: &mut F) -> Result<PushEnd>
+async fn run_websocket<F>(
+    client: &Client,
+    account_id: &str,
+    timings: PushTimings,
+    on_event: &mut F,
+) -> Result<PushEnd>
 where
     F: FnMut(PushEvent) + Send,
 {
@@ -265,9 +311,9 @@ where
     // connection that never pushes). A request is therefore repeated until
     // the server answers, and push is only enabled once it is reading.
     let mut reading = false;
-    for _ in 0..WS_READY_ATTEMPTS {
+    for _ in 0..timings.ws_ready_attempts {
         send_heartbeat(client).await?;
-        if await_response(&mut stream, WS_READY_WAIT).await? {
+        if await_response(&mut stream, timings.ws_ready_wait).await? {
             reading = true;
             break;
         }
@@ -283,17 +329,17 @@ where
     // messages in order, so the answer to a request sent after it shows the
     // subscription is in place before the caller is told it is connected.
     send_heartbeat(client).await?;
-    if !await_response(&mut stream, PUSH_CONNECT_TIMEOUT).await? {
+    if !await_response(&mut stream, timings.connect_timeout).await? {
         bail!("the JMAP WebSocket did not answer after enabling push");
     }
     on_event(PushEvent::Connected(PushTransport::WebSocket));
 
     // `jmap-client` hides WebSocket pings and pongs, so liveness is checked
     // with a cheap request whose response must come back in time.
-    let stall_timeout = PUSH_PING_INTERVAL + STALL_GRACE;
+    let stall_timeout = timings.ping_interval + timings.stall_grace;
     let mut heartbeat = tokio::time::interval_at(
-        tokio::time::Instant::now() + PUSH_PING_INTERVAL,
-        PUSH_PING_INTERVAL,
+        tokio::time::Instant::now() + timings.ping_interval,
+        timings.ping_interval,
     );
     let mut last_message = Instant::now();
     loop {

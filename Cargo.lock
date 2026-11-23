@@ -10687,6 +10687,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "url",
  "zmail-core",
  "zmail-security",

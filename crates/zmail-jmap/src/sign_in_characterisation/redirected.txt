@@ -1,0 +1,4 @@
+# a session URL that redirects to another host (signing in to http://server/jmap/session)
+  error: failed to connect to the JMAP endpoint http://server/jmap/session: Transport error: error following redirect for url (http://server/jmap/session)
+  taken for refused credentials: false
+  requests: ["/jmap/session with credentials"]

@@ -1,0 +1,26 @@
+# no WebSocket capability (WebSocket)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  error: the JMAP server does not offer WebSocket push
+# a WebSocket without push (WebSocket)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  error: the JMAP server does not offer WebSocket push
+# a handshake refused (401) (WebSocket)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /ws [authorization: yes; sec-websocket-protocol: jmap]
+  error: failed to open the JMAP WebSocket: WebSockets error: HTTP error: 401 Unauthorized
+# a handshake refused (404) (WebSocket)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /ws [authorization: yes; sec-websocket-protocol: jmap]
+  error: failed to open the JMAP WebSocket: WebSockets error: HTTP error: 404 Not Found
+# a server that never answers (WebSocket)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /ws [authorization: yes; sec-websocket-protocol: jmap]
+  sent: ws: {"@type":"Request","id":"0","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"s0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  sent: ws: {"@type":"Request","id":"1","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"s0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  sent: ws: {"@type":"Request","id":"2","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"s0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  error: the JMAP WebSocket never answered a request

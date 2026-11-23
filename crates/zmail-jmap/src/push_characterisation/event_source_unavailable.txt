@@ -1,0 +1,56 @@
+# no event source (404) (Auto)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  end: Unsupported
+# no event source (404) (EventSource)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  error: the JMAP event source answered HTTP 404 Not Found
+# credentials refused (401) (Auto)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  end: Unsupported
+# credentials refused (401) (EventSource)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  error: the JMAP event source answered HTTP 401 Unauthorized
+# a server error (503) (Auto)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  end: Unsupported
+# a server error (503) (EventSource)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  error: the JMAP event source answered HTTP 503 Service Unavailable
+# an answer that is no event stream (Auto)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  end: Unsupported
+# an answer that is no event stream (EventSource)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  error: the JMAP event source did not answer with text/event-stream
+# no event source, and a WebSocket without push (Auto)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  end: Unsupported
+# no event source, and WebSocket push (Auto)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  sent: GET /ws [authorization: yes; sec-websocket-protocol: jmap]
+  sent: ws: {"@type":"Request","id":"0","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"s0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  sent: ws: {"@type":"WebSocketPushEnable","dataTypes":["Email","Mailbox"]}
+  sent: ws: {"@type":"Request","id":"1","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"s0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  event: Connected(WebSocket)
+  event: MailChanged
+  end: Closed(WebSocket)

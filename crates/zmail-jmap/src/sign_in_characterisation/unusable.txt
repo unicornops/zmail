@@ -1,0 +1,15 @@
+# the endpoint "not a url"
+  error: invalid JMAP endpoint not a url: relative URL without a base
+# the endpoint "ftp://example.com/jmap"
+  error: JMAP endpoints should be absolute HTTP or HTTPS URLs
+# the endpoint "example.com"
+  error: invalid JMAP endpoint example.com: relative URL without a base
+# an access token with a line break
+  error: the OAuth access token contains characters that cannot be sent to the server; sign in to the account again
+  requests: []
+# an access token with a control character
+  error: the OAuth access token contains characters that cannot be sent to the server; sign in to the account again
+  requests: []
+# a Proton account
+  error: Proton accounts do not sign in over JMAP
+  requests: []

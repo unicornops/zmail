@@ -1,0 +1,24 @@
+# a stream of events that ends (Auto)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  event: Connected(EventSource)
+  event: MailChanged
+  event: MailChanged
+  event: MailChanged
+  event: MailChanged
+  event: MailChanged
+  end: Closed(EventSource)
+# a stream that goes quiet (EventSource)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  event: Connected(EventSource)
+  event: MailChanged
+  error: the JMAP event source was silent for 1s
+# a stream that closes at once (Auto)
+  sent: GET /.well-known/jmap [accept: */*]
+  sent: GET /.well-known/jmap [accept: */*; authorization: yes; user-agent: jmap-client/0.4.1]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-client/0.4.1]
+  event: Connected(EventSource)
+  end: Closed(EventSource)

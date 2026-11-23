@@ -1,0 +1,28 @@
+# one account, primary for everything
+  accounts: ["a1"]
+  primaryAccounts: {"urn:ietf:params:jmap:contacts":"a1","urn:ietf:params:jmap:mail":"a1","urn:ietf:params:jmap:submission":"a1"}
+  every call is made in: {"a1"}
+# two accounts, one primary for everything
+  accounts: ["a1", "a2"]
+  primaryAccounts: {"urn:ietf:params:jmap:contacts":"a2","urn:ietf:params:jmap:mail":"a2","urn:ietf:params:jmap:submission":"a2"}
+  every call is made in: {"a2"}
+# different primary accounts for mail and for submission
+  accounts: ["a1", "a2"]
+  primaryAccounts: {"urn:ietf:params:jmap:mail":"a1","urn:ietf:params:jmap:submission":"a2"}
+  every call is made in: {"a1", "a2"}
+# mail in one account, contacts and calendars in another
+  accounts: ["a1", "a2"]
+  primaryAccounts: {"urn:ietf:params:jmap:calendars":"a2","urn:ietf:params:jmap:contacts":"a2","urn:ietf:params:jmap:mail":"a1","urn:ietf:params:jmap:principals":"a2","urn:ietf:params:jmap:quota":"a2","urn:ietf:params:jmap:submission":"a1"}
+  every call is made in: {"a1", "a2"}
+# a primary account for contacts only
+  accounts: ["a1", "a2"]
+  primaryAccounts: {"urn:ietf:params:jmap:contacts":"a2"}
+  every call is made in: {"a2"}
+# no primary accounts
+  accounts: ["a1"]
+  primaryAccounts: {}
+  every call is made in: {""}
+# no accounts at all
+  accounts: []
+  primaryAccounts: {}
+  every call is made in: {""}

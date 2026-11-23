@@ -1,0 +1,2 @@
+# a server that never answers
+  error: failed to connect to the JMAP endpoint http://server/jmap/session: Transport error: error sending request for url (http://server/jmap/session#/.well-known/jmap)
