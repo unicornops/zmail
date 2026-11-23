@@ -497,8 +497,9 @@ impl EmailUpdate {
 
     /// Takes the email out of the mailbox `mailbox_id`
     /// (`"mailboxIds/<id>": null`), leaving it where else it is. The
-    /// server refuses this when it is in no other mailbox and the same
-    /// update adds none.
+    /// server must refuse this when the email is in no other mailbox
+    /// and the same update adds none; do not rely on it. Apache James
+    /// 3.9 answers `updated` and destroys the email.
     pub fn remove_from_mailbox(self, mailbox_id: &str) -> Self {
         self.member("mailboxIds", mailbox_id, Value::Null)
     }

@@ -1,0 +1,20 @@
+{
+  "methodResponses": [
+    [
+      "Email/set",
+      {
+        "accountId": "8f1f47ffc1606d1e0ecc6bfdf08f41d8023639e20c706d3a14db1ca4875865e9",
+        "newState": "a0c80205-f9ef-4ad2-8657-9457606b39e4",
+        "notUpdated": {
+          "1": {
+            "description": "Message update is invalid: List((,List(JsonValidationError(List(Value associated with keywords/$seen is invalid: Keywords partial updates requires a JsBoolean(true) (set) or a JsNull (unset)),List()))))",
+            "type": "invalidPatch"
+          }
+        },
+        "oldState": "a0c80205-f9ef-4ad2-8657-9457606b39e4"
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "2c9f1b12-b35a-43e6-9af2-0106fb53a943"
+}

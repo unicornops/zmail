@@ -2822,7 +2822,7 @@ fn james_answers_the_write_calls_for_the_jmap_wire_fixtures() -> Result<()> {
         .with_context(|| format!("James imported the probe: {imported}"))?
         .to_owned();
     fixture(
-        "email-import.not-created",
+        "method-error.email-import-invalid-mailbox",
         james.raw(
             "Email/import",
             serde_json::json!({"emails": {
@@ -2862,20 +2862,21 @@ fn james_answers_the_write_calls_for_the_jmap_wire_fixtures() -> Result<()> {
         "email-set.mailboxes-replaced",
         update(serde_json::json!({"mailboxIds": {&inbox: true}}))?,
     );
-    // An email must stay in a mailbox.
+    // An email must stay in a mailbox (RFC 8621 section 4.1.1). James
+    // 3.9 answers `updated` and the email is gone.
     fixture(
         "email-set.no-mailbox",
         update(serde_json::json!({format!("mailboxIds/{inbox}"): null}))?,
     );
     fixture(
-        "email-set.not-found",
+        "email-set.not-an-id",
         james.raw(
             "Email/set",
             serde_json::json!({"update": {"no-such-email": {"keywords/$seen": true}}}),
         )?,
     );
     fixture(
-        "method-error.email-set-state-mismatch",
+        "email-set.if-in-state-not-checked",
         james.raw(
             "Email/set",
             serde_json::json!({"ifInState": "not-the-state",
@@ -2898,7 +2899,7 @@ fn james_answers_the_write_calls_for_the_jmap_wire_fixtures() -> Result<()> {
         )?,
     );
     fixture(
-        "email-copy",
+        "method-error.email-copy",
         james.raw(
             "Email/copy",
             serde_json::json!({"fromAccountId": james.account_id,

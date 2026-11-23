@@ -1,0 +1,23 @@
+{
+  "methodResponses": [
+    [
+      "Mailbox/set",
+      {
+        "accountId": "8f1f47ffc1606d1e0ecc6bfdf08f41d8023639e20c706d3a14db1ca4875865e9",
+        "destroyed": [
+          "8"
+        ],
+        "newState": "3a24c9f0-ccd7-4e7d-a6f1-481dc15c5410",
+        "notDestroyed": {
+          "no-such-mailbox": {
+            "description": "no-such-mailbox is not a mailboxId: For input string: \"no-such-mailbox\"",
+            "type": "invalidArguments"
+          }
+        },
+        "oldState": "a5db2215-5e7a-42c6-87b6-c91ef8a73995"
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "2c9f1b12-b35a-43e6-9af2-0106fb53a943"
+}

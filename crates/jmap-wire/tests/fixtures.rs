@@ -820,3 +820,91 @@ fn the_write_answers_say_what_was_done_and_why_not() {
     assert_eq!((bare.size, bare.content_type), (None, None));
     assert!(bare.extra.contains_key("expires"));
 }
+
+/// What Apache James 3.9 answered to the write calls (captures; see
+/// the README in `james-3.9`).
+#[test]
+fn what_james_answered_to_the_writes_is_read() {
+    let james = |name: &str| fixture("james-3.9", name);
+    let set = |name: &str| first::<SetResponse<EmailRecord>>(&james(name), "Email/set");
+
+    assert!(
+        set("email-set.keyword-set.json")
+            .outcome_of_update("1")
+            .is_done()
+    );
+    assert!(
+        set("email-set.keyword-cleared.json")
+            .outcome_of_update("1")
+            .is_done()
+    );
+    assert!(
+        set("email-set.mailbox-moved.json")
+            .outcome_of_update("1")
+            .is_done()
+    );
+    assert!(
+        set("email-set.mailboxes-replaced.json")
+            .outcome_of_update("1")
+            .is_done()
+    );
+    // `false` is no way to clear a keyword on James.
+    let refused = set("email-set.keyword-false.json");
+    let refusal = refused.outcome_of_update("1").refusal().expect("refused");
+    assert_eq!(refusal.error_type, SetErrorType::InvalidPatch);
+    assert!(
+        refusal
+            .description
+            .as_deref()
+            .is_some_and(|text| text.contains("JsNull (unset)")),
+        "{refusal:?}"
+    );
+    assert_eq!(
+        set("email-set.not-an-id.json")
+            .outcome_of_update("no-such-email")
+            .refusal()
+            .map(|error| &error.error_type),
+        Some(&SetErrorType::InvalidPatch)
+    );
+    assert_eq!(
+        set("email-set.if-in-state-not-checked.json")
+            .outcome_of_update("1")
+            .refusal()
+            .map(|error| &error.error_type),
+        Some(&SetErrorType::NotFound)
+    );
+
+    let import: EmailImportResponse = first(&james("email-import.created.json"), "Email/import");
+    let email = import.outcome_of("k0").done().expect("imported");
+    assert_eq!(
+        (email.id.as_deref(), email.blob_id.as_deref(), email.size),
+        (Some("1"), Some("1"), Some(278))
+    );
+    let error: MethodError = first(
+        &james("method-error.email-import-invalid-mailbox.json"),
+        "error",
+    );
+    assert_eq!(error.error_type, MethodErrorType::InvalidArguments);
+    let error: MethodError = first(&james("method-error.email-copy.json"), "error");
+    assert_eq!(error.error_type, MethodErrorType::UnknownMethod);
+
+    let created: SetResponse<MailboxRecord> =
+        first(&james("mailbox-set.created.json"), "Mailbox/set");
+    let mailbox = created.outcome_of_create("k0").done().expect("created");
+    assert!(mailbox.id.is_some() && mailbox.my_rights.is_some());
+    let destroyed: SetResponse<MailboxRecord> =
+        first(&james("mailbox-set.destroyed.json"), "Mailbox/set");
+    assert!(destroyed.outcome_of_destroy("8").is_done());
+    assert_eq!(
+        destroyed
+            .outcome_of_destroy("no-such-mailbox")
+            .refusal()
+            .map(|error| error.error_type.as_str()),
+        Some("invalidArguments"),
+        "not a SetError type of the RFCs, and kept"
+    );
+
+    let upload: UploadedBlob = read(&james("upload.json"));
+    assert_eq!(upload.size, Some(278));
+    assert_eq!(upload.content_type.as_deref(), Some("message/rfc822"));
+}

@@ -1,0 +1,36 @@
+{
+  "methodResponses": [
+    [
+      "Mailbox/set",
+      {
+        "accountId": "8f1f47ffc1606d1e0ecc6bfdf08f41d8023639e20c706d3a14db1ca4875865e9",
+        "created": {
+          "k0": {
+            "id": "8",
+            "isSubscribed": true,
+            "myRights": {
+              "mayAddItems": true,
+              "mayCreateChild": true,
+              "mayDelete": true,
+              "mayReadItems": true,
+              "mayRemoveItems": true,
+              "mayRename": true,
+              "maySetKeywords": true,
+              "maySetSeen": true,
+              "maySubmit": true
+            },
+            "sortOrder": 1000,
+            "totalEmails": 0,
+            "totalThreads": 0,
+            "unreadEmails": 0,
+            "unreadThreads": 0
+          }
+        },
+        "newState": "a5db2215-5e7a-42c6-87b6-c91ef8a73995",
+        "oldState": "ace3151e-c94b-4750-9696-a054f2e1c4e2"
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "2c9f1b12-b35a-43e6-9af2-0106fb53a943"
+}
