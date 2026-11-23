@@ -41,6 +41,10 @@ zmail-proton = { path = "../zmail-proton", optional = true }
 signal-hook.workspace = true
 
 [dev-dependencies]
+# The documentation screenshots (`src/tests/screenshot.rs`): the test
+# screen's buffer drawn into a PNG with pinned fonts.
+png.workspace = true
+swash.workspace = true
 # A fixed store key, so a second test process can open the same store
 # (the sync-lock test).
 zmail-security = { path = "../zmail-security", features = ["test-fixtures"] }

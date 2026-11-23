@@ -33,6 +33,8 @@ mod attachments;
 mod compose;
 mod keymap;
 mod palette;
+mod screenshot;
+mod screenshots;
 mod triage;
 mod warnings;
 

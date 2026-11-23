@@ -220,9 +220,12 @@ jobs:
           path: artifacts/zmail-linux-screenshot.png
           if-no-files-found: error
 
-      # Fixture data in the screenshot matrix, no harness or network, so it
-      # runs even when the release screenshot above failed. The script
-      # fails first if an image in docs/images is not a matrix state.
+      # Fixture data, no harness, so it runs even when the release
+      # screenshot above failed: the desktop images from the screenshot
+      # matrix, the terminal UI's (docs/images/tui-*.png) rendered by
+      # zmail-tui's tests with pinned fonts it fetches and checks
+      # (capture-tui-screenshots.sh). The script fails first if an image
+      # in docs/images is not a state it can capture.
       - name: Capture the documentation screenshots
         id: docs_screenshots
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

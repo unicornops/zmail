@@ -95,7 +95,7 @@ jobs:
                   echo "$RUNNER_TEMP/docs-tools" >> "$GITHUB_PATH"
 
             - name: Lint the site scripts
-              run: shellcheck scripts/docs-site/*.sh
+              run: shellcheck scripts/docs-site/*.sh scripts/capture-tui-screenshots.sh
 
             # Offline: stage.py's link rewriting on a made-up repository,
             # then build.sh on this one.
