@@ -477,18 +477,20 @@ async fn a_full_sync_stores_what_it_stored_before() {
     }
 }
 
-/// An incremental sync of each recorded server: the first two emails
-/// arrive later, the third is destroyed, and the ones in the light
-/// answer changed their keywords or mailboxes.
+/// An incremental sync of each recorded server: the first emails arrive
+/// later, the next is destroyed, and the ones in the light answer
+/// changed their keywords or mailboxes.
 #[tokio::test]
 async fn an_incremental_sync_stores_what_it_stored_before() {
     for server in replayable() {
         let replay = Replay::start(&server);
         let ids = replay.email_ids();
-        if ids.len() < 4 {
+        if ids.len() < 3 {
             continue;
         }
-        let (late, destroyed) = (&ids[..2], &ids[2]);
+        // Of a larger set, the second late email stays unreported.
+        let late_count = if ids.len() > 3 { 2 } else { 1 };
+        let (late, destroyed) = (&ids[..late_count], &ids[late_count]);
         replay.with_state(|state| state.hidden.extend(late.iter().cloned()));
         let first = replay.sync(None, &[]).await.expect("the first sync runs");
 

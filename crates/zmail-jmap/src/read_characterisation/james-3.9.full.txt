@@ -1,0 +1,233 @@
+JmapSync {
+    snapshot: AccountSyncSnapshot {
+        checkpoint: "{\"mailbox_query_state\":\"b76b2968-32c1-4038-a234-56247016a53a\",\"email_query_state\":\"q-0\",\"email_state\":\"dce49a39-1882-4935-b2fa-b102e06a516f\",\"mailbox_ids\":{\"1\":\"INBOX\",\"2\":\"Outbox\",\"3\":\"Sent\",\"4\":\"Trash\",\"5\":\"Drafts\",\"6\":\"Archive\",\"7\":\"Spam\"}}",
+        detail: "JMAP sync complete against http://server with mailbox sync, email sync, identity support, EmailSubmission",
+        identities: None,
+        mailboxes: [
+            MailboxSnapshot {
+                name: "INBOX",
+                role: Some(
+                    "inbox",
+                ),
+                delimiter: None,
+                parent: None,
+                threads: [
+                    ThreadSnapshot {
+                        remote_thread_id: "1",
+                        subject: "jmap-wire probe café mixed",
+                        participants: "Probe Sender <probe@phase2b.test>",
+                        preview: "Plain alternative of the probe.",
+                        is_flagged: false,
+                        has_attachments: true,
+                        unread_count: 1,
+                        latest_message_at: "2026-11-23T19:08:00+00:00",
+                        messages: [
+                            MessageSnapshot {
+                                remote_id: "1",
+                                identity_email: "probe@phase2b.test",
+                                sender: "Probe Sender <probe@phase2b.test>",
+                                reply_to: Some(
+                                    "Replies <replies@phase2b.test>",
+                                ),
+                                recipients: "jmap@localhost, ada@phase2b.test, Bo Example <bo@phase2b.test>",
+                                subject: "jmap-wire probe café mixed",
+                                body_preview: "Plain alternative of the probe.",
+                                body_text: Some(
+                                    "Plain alternative of the probe.",
+                                ),
+                                sanitized_html: None,
+                                raw_html: Some(
+                                    "<html><body><p>HTML alternative of the probe.</p><img src=\"cid:probe-logo@phase2b.test\"><img src=\"https://tracker.example.test/probe.gif\"></body></html>",
+                                ),
+                                has_remote_content: true,
+                                is_read: false,
+                                is_flagged: false,
+                                received_at: "2026-11-23T19:08:00+00:00",
+                                attachments: [
+                                    MessageAttachment {
+                                        filename: "probe-logo@phase2b.test",
+                                        content_type: "image/png",
+                                        size_bytes: 15,
+                                        storage_path: "blobs/incoming-jmap-1-0-probe-logo_phase2b.test",
+                                        content_id: Some(
+                                            "probe-logo@phase2b.test",
+                                        ),
+                                        inline_only: true,
+                                    },
+                                    MessageAttachment {
+                                        filename: "report.csv",
+                                        content_type: "text/csv",
+                                        size_bytes: 15,
+                                        storage_path: "blobs/incoming-jmap-1-1-report.csv",
+                                        content_id: None,
+                                        inline_only: false,
+                                    },
+                                ],
+                                headers: MessageHeaders {
+                                    captured: true,
+                                    message_id: Some(
+                                        "jmap-wire-probe-mixed@phase2b.test",
+                                    ),
+                                    in_reply_to: [
+                                        "jmap-wire-probe-root@phase2b.test",
+                                    ],
+                                    references: [
+                                        "jmap-wire-probe-root@phase2b.test",
+                                        "jmap-wire-probe-mid@phase2b.test",
+                                    ],
+                                    cc: "Cy <cy@phase2b.test>",
+                                    delivered_to: [
+                                        "jmap@localhost",
+                                    ],
+                                },
+                            },
+                        ],
+                    },
+                    ThreadSnapshot {
+                        remote_thread_id: "2",
+                        subject: "jmap-wire probe html only",
+                        participants: "News <news@phase2b.test>",
+                        preview: "Probe HTML only.",
+                        is_flagged: false,
+                        has_attachments: false,
+                        unread_count: 1,
+                        latest_message_at: "2026-11-23T19:08:00+00:00",
+                        messages: [
+                            MessageSnapshot {
+                                remote_id: "2",
+                                identity_email: "news@phase2b.test",
+                                sender: "News <news@phase2b.test>",
+                                reply_to: None,
+                                recipients: "jmap@localhost",
+                                subject: "jmap-wire probe html only",
+                                body_preview: "Probe HTML only.",
+                                body_text: None,
+                                sanitized_html: Some(
+                                    "<h1>Probe</h1><p>HTML only.</p>\n",
+                                ),
+                                raw_html: Some(
+                                    "<html><body><h1>Probe</h1><p>HTML only.</p></body></html>\r\n",
+                                ),
+                                has_remote_content: false,
+                                is_read: false,
+                                is_flagged: false,
+                                received_at: "2026-11-23T19:08:00+00:00",
+                                attachments: [],
+                                headers: MessageHeaders {
+                                    captured: true,
+                                    message_id: Some(
+                                        "jmap-wire-probe-html@phase2b.test",
+                                    ),
+                                    in_reply_to: [],
+                                    references: [],
+                                    cc: "",
+                                    delivered_to: [
+                                        "jmap@localhost",
+                                    ],
+                                },
+                            },
+                        ],
+                    },
+                    ThreadSnapshot {
+                        remote_thread_id: "3",
+                        subject: "(no subject)",
+                        participants: "probe@phase2b.test",
+                        preview: "jmap-wire probe bare: no subject, no MIME headers.",
+                        is_flagged: false,
+                        has_attachments: false,
+                        unread_count: 1,
+                        latest_message_at: "2026-11-23T19:08:00+00:00",
+                        messages: [
+                            MessageSnapshot {
+                                remote_id: "3",
+                                identity_email: "probe@phase2b.test",
+                                sender: "probe@phase2b.test",
+                                reply_to: None,
+                                recipients: "jmap@localhost",
+                                subject: "(no subject)",
+                                body_preview: "jmap-wire probe bare: no subject, no MIME headers.",
+                                body_text: Some(
+                                    "jmap-wire probe bare: no subject, no MIME headers.",
+                                ),
+                                sanitized_html: None,
+                                raw_html: None,
+                                has_remote_content: false,
+                                is_read: false,
+                                is_flagged: false,
+                                received_at: "2026-11-23T19:08:00+00:00",
+                                attachments: [],
+                                headers: MessageHeaders {
+                                    captured: true,
+                                    message_id: Some(
+                                        "jmap-wire-probe-bare@phase2b.test",
+                                    ),
+                                    in_reply_to: [],
+                                    references: [],
+                                    cc: "",
+                                    delivered_to: [
+                                        "jmap@localhost",
+                                    ],
+                                },
+                            },
+                        ],
+                    },
+                ],
+            },
+            MailboxSnapshot {
+                name: "Archive",
+                role: Some(
+                    "archive",
+                ),
+                delimiter: None,
+                parent: None,
+                threads: [],
+            },
+            MailboxSnapshot {
+                name: "Drafts",
+                role: Some(
+                    "drafts",
+                ),
+                delimiter: None,
+                parent: None,
+                threads: [],
+            },
+            MailboxSnapshot {
+                name: "Outbox",
+                role: Some(
+                    "outbox",
+                ),
+                delimiter: None,
+                parent: None,
+                threads: [],
+            },
+            MailboxSnapshot {
+                name: "Sent",
+                role: Some(
+                    "sent",
+                ),
+                delimiter: None,
+                parent: None,
+                threads: [],
+            },
+            MailboxSnapshot {
+                name: "Trash",
+                role: Some(
+                    "trash",
+                ),
+                delimiter: None,
+                parent: None,
+                threads: [],
+            },
+            MailboxSnapshot {
+                name: "Spam",
+                role: Some(
+                    "junk",
+                ),
+                delimiter: None,
+                parent: None,
+                threads: [],
+            },
+        ],
+    },
+    identities: None,
+}

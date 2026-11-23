@@ -1,0 +1,78 @@
+headers: [
+    (
+        "1",
+        MessageHeaders {
+            captured: true,
+            message_id: Some(
+                "jmap-wire-probe-mixed@phase2b.test",
+            ),
+            in_reply_to: [
+                "jmap-wire-probe-root@phase2b.test",
+            ],
+            references: [
+                "jmap-wire-probe-root@phase2b.test",
+                "jmap-wire-probe-mid@phase2b.test",
+            ],
+            cc: "Cy <cy@phase2b.test>",
+            delivered_to: [
+                "jmap@localhost",
+            ],
+        },
+    ),
+    (
+        "2",
+        MessageHeaders {
+            captured: true,
+            message_id: Some(
+                "jmap-wire-probe-html@phase2b.test",
+            ),
+            in_reply_to: [],
+            references: [],
+            cc: "",
+            delivered_to: [
+                "jmap@localhost",
+            ],
+        },
+    ),
+    (
+        "3",
+        MessageHeaders {
+            captured: true,
+            message_id: Some(
+                "jmap-wire-probe-bare@phase2b.test",
+            ),
+            in_reply_to: [],
+            references: [],
+            cc: "",
+            delivered_to: [
+                "jmap@localhost",
+            ],
+        },
+    ),
+]
+hits: [
+    ServerHitRef {
+        mailbox_name: None,
+        remote_id: "1",
+    },
+    ServerHitRef {
+        mailbox_name: None,
+        remote_id: "2",
+    },
+    ServerHitRef {
+        mailbox_name: None,
+        remote_id: "3",
+    },
+]
+moves: OpApplyReport {
+    applied: [
+        1,
+    ],
+    failed: [
+        (
+            2,
+            "the JMAP account has no mailbox named No such mailbox",
+        ),
+    ],
+}
+moved to: {"1":{"mailboxIds":{"1":true}}}
