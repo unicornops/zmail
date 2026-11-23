@@ -12,19 +12,11 @@ Zmail is a fast, local-first email client for the desktop and the terminal, writ
 
 The terminal UI (`zmail-app tui`), on the same store and accounts:
 
-```text
-  ZMAIL 0.0.0-test               MESSAGE INDEX       Folder: INBOX  Conv 1 of 4
-  N*        11:35  Grace Hopper         (2) Launch plan for the terminal UI
-  N     Yesterday  Harbour News         Harbour newsletter, issue 42
-    @         Mon  山田 太郎            東京オフィスの会議 📅 next week
-           25 Sep  Billing              Invoice fdp.exe
+<p>
+  <img src="docs/images/tui-message-index.png" alt="Zmail's terminal UI in a dark terminal: the Message Index of the Work inbox on the left, with four conversations (one flagged, two unread, one from a Japanese sender with a Japanese subject), and the preview pane on the right showing the selected two-message conversation and its numbered link; the command bar of keys along the bottom" width="100%">
+</p>
 
-                  [Folder "INBOX" opened with 4 conversations]
-? Help       > [ViewMsg]  N NextMsg    Spc NextPage U Undo       F Forward
-< FldrList   P PrevMsg    - PrevPage   D Delete     R Reply      O OTHER CMDS
-```
-
-Screenshots and the terminal snapshot show synthetic test mail: the desktop ones from the UI screenshot matrix, captured for each release ([how they are kept current](./docs/site.md#screenshots)), the terminal one from the terminal UI's snapshot tests (an 80x24 screen, empty rows left out).
+Screenshots show synthetic test mail, captured for each release ([how they are kept current](./docs/site.md#screenshots)): the desktop ones from the UI screenshot matrix, the terminal ones from the terminal UI's snapshot tests. [Terminal UI](./docs/tui.md) has more screens, and the Message Index as text.
 
 ## Download
 

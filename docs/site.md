@@ -22,14 +22,14 @@ Zmail's documentation site, `https://docs.zmail.unicornops.ie/`, is built with [
 
 ## Screenshots
 
-Every image in [`docs/images`](./images) is a screenshot named after the UI screenshot matrix state it shows (`scripts/capture-release-screenshot.sh --list`): `reader-light.png` is the state `reader-light`. They are synthetic fixture data, never real mail.
+Every image in [`docs/images`](./images) is a screenshot named after the state it shows. Images named `tui-*.png` are the terminal UI, states of [`scripts/capture-tui-screenshots.sh`](../scripts/capture-tui-screenshots.sh) `--list` (`tui-message-index.png` is the state `tui-message-index`, see [Terminal UI screenshots](#terminal-ui-screenshots)); every other image is the desktop app, a UI screenshot matrix state (`scripts/capture-release-screenshot.sh --list`): `reader-light.png` is the state `reader-light`. They are synthetic fixture data, never real mail.
 
-1. **Release.** The release workflow's Release Screenshot job builds the release and runs [`capture-screenshots.sh`](../scripts/docs-site/capture-screenshots.sh), which captures one matrix state per image in the release's `docs/images` (no mail server, no network). Publish Release Assets uploads each as `zmail-docs-<image>` (`zmail-docs-reader-light.png` and so on), lists them, with `zmail-linux-screenshot.png`, in `SHA256SUMS-Screenshots`, and attests every one of them like the other assets.
+1. **Release.** The release workflow's Release Screenshot job builds the release and runs [`capture-screenshots.sh`](../scripts/docs-site/capture-screenshots.sh), which captures one state per image in the release's `docs/images`: the desktop ones with the matrix, the terminal UI's with `capture-tui-screenshots.sh` (no mail server; the network only to fetch the terminal UI's pinned fonts). Publish Release Assets uploads each as `zmail-docs-<image>` (`zmail-docs-reader-light.png` and so on), lists them, with `zmail-linux-screenshot.png`, in `SHA256SUMS-Screenshots`, and attests every one of them like the other assets.
 2. **Site.** After the assets are uploaded, the release workflow starts the Docs Site workflow on `main`. `build-site.sh` builds `/` from the tag as before, then [`release-screenshots.sh`](../scripts/docs-site/release-screenshots.sh) downloads the tag's `zmail-docs-*.png` and `SHA256SUMS-Screenshots` with `gh` and the job's read-only token, and checks each file's build provenance attestation (made by `release-please.yml` in this repository on a GitHub-hosted runner). [`screenshots.py`](../scripts/docs-site/screenshots.py) then checks each against `SHA256SUMS-Screenshots`, and that it is a well-formed PNG (every chunk's checksum, nothing after the end, under 10 MB, 100 to 8192 pixels a side), before putting it over the committed copy in the built `/`. The build log and the job summary say how many screenshots came from the release.
 3. **Fallback.** An image without a usable asset keeps the committed copy, with the reason in the log: releases up to 0.34.4 have no such assets, and a failed download, a failed check or no `gh` (a local build without it, for example) never fails the build or leaves a broken image. A bad attestation also leaves a warning on the run.
 4. **`/dev/`** always uses the committed copies. `main`'s UI may be ahead of the last release, so neither set shows it exactly; the committed copies are what the working tree has, so a pull request that changes or adds an image sees it in its own site build.
 
-Adding an image to the docs adds it to the next release's capture. Name it after a matrix state (add the state to the fixture and the script's `MATRIX` first if needed); the Docs Site workflow runs `capture-screenshots.sh --check` on every pull request and fails when an image in `docs/images` is not a state.
+Adding an image to the docs adds it to the next release's capture. Name it after a matrix state (add the state to the fixture and the script's `MATRIX` first if needed), or for the terminal UI after a `tui-` state (see below); the Docs Site workflow runs `capture-screenshots.sh --check` on every pull request and fails when an image in `docs/images` is not a state of its kind.
 
 **Refreshing the committed copies.** Nothing commits screenshots automatically. Every so often, or after a release that changes what they show, replace them with the latest release's, checked the same way, and commit the result in a pull request:
 
@@ -39,6 +39,24 @@ git diff --stat docs/images
 ```
 
 The README keeps pointing at the committed copies rather than at `releases/latest/download/` addresses, so it never shows an image that is missing from a release.
+
+### Terminal UI screenshots
+
+The terminal UI's images (`tui-message-index.png`, `tui-message-text.png`, `tui-compose-reply.png`) are not taken from a terminal. [`capture-tui-screenshots.sh OUT`](../scripts/capture-tui-screenshots.sh) runs an ignored test in `zmail-tui` ([`src/tests/screenshots.rs`](../crates/zmail-tui/src/tests/screenshots.rs)) that draws each screen on ratatui's test terminal, exactly as the snapshot tests do and from the same synthetic mail and fixed clock, with Zmail's version from `crates/zmail-app/Cargo.toml` in the title bar, and renders the screen's cells into a PNG ([`src/tests/screenshot.rs`](../crates/zmail-tui/src/tests/screenshot.rs)):
+
+- Each character is placed by its cell, so the columns always line up: a wide character (Japanese, emoji) takes exactly two cells. Box-drawing lines are drawn as lines, so they join.
+- Colours, bold, reverse video, underline, dim and italic (slanted) come from each cell's style. The colours are one fixed palette in the colours of Zmail's dark theme, defined in `screenshot.rs`: a dark terminal, whatever the reader's page theme. A real terminal's colours and font differ.
+- The fonts are JetBrains Mono, with Noto Sans JP and Noto Emoji (monochrome) for what it lacks, all under the SIL Open Font Licence. The script fetches them from `google/fonts` at a pinned commit and checks their SHA-256; they are used only to draw the images and are not in the repository or the app.
+- The images are 2x (30 pixels per em), so they stay sharp on high-density screens.
+- The same commit and fonts give the same bytes on every run: no timestamps, no hinting, no system fonts. The renderer has unit tests (cell placement, wide characters, reverse video, the palette, byte-identical output), and a test checks the script's `--list` names exactly the screens in `screenshots.rs`.
+
+It needs cargo and the network (for the fonts, cached in `target/tui-screenshot-fonts`, or `ZMAIL_TUI_FONT_DIR`), but no terminal or X server. To add a screen, add it to `SCREENSHOTS` in `screenshots.rs` and to the script's `tui-states` list, then render it into `docs/images` and look at it:
+
+```bash
+scripts/capture-tui-screenshots.sh docs/images tui-message-index
+```
+
+Otherwise the committed copies are refreshed from a release like the others, with `refresh-images.sh`.
 
 ## Building it locally
 
@@ -61,7 +79,7 @@ scripts/docs-site/build-site.sh target/docs-site
 | [`stage.py`](../scripts/docs-site/stage.py) | Copies the pages and their images into one tree and rewrites the links (see its header). |
 | [`screenshots.py`](../scripts/docs-site/screenshots.py) | Maps `docs/images` to matrix states and release asset names, and checks downloaded screenshots before they replace an image (see its header). |
 | [`release-screenshots.sh TAG DIR`](../scripts/docs-site/release-screenshots.sh) | Downloads a release's documentation screenshots and checks their attestations. |
-| [`capture-screenshots.sh OUT`](../scripts/docs-site/capture-screenshots.sh) | Captures the documentation screenshots under an X server (the release workflow runs it); `--check` only checks every image is a matrix state. |
+| [`capture-screenshots.sh OUT`](../scripts/docs-site/capture-screenshots.sh) | Captures the documentation screenshots under an X server (the release workflow runs it), the terminal UI's through `capture-tui-screenshots.sh`; `--check` only checks every image is a state it can capture. |
 | [`refresh-images.sh [TAG]`](../scripts/docs-site/refresh-images.sh) | Replaces the committed screenshots with a release's. |
 | [`head.py`](../scripts/docs-site/head.py) | Adds the canonical link and, for `/dev/`, the noindex tag to each built page. |
 | [`test_stage.py`](../scripts/docs-site/test_stage.py) | Self-test for `stage.py`'s link rewriting, the screenshot checks and `release-screenshots.sh` (against a stand-in for `gh`) and, with mdBook installed, `build.sh` and `build-site.sh`: `python3 -I scripts/docs-site/test_stage.py`. |

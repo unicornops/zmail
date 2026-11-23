@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """The documentation's screenshots: from docs/images to release assets and back.
 
-    python3 -I scripts/docs-site/screenshots.py plan IMAGES_DIR [STATES_FILE]
+    python3 -I scripts/docs-site/screenshots.py plan IMAGES_DIR [STATES_FILE [TUI_STATES_FILE]]
     python3 -I scripts/docs-site/screenshots.py apply IMAGES_DIR ASSETS_DIR
 
-Every image in docs/images is a screenshot named after the UI screenshot
-matrix state it shows (scripts/capture-release-screenshot.sh --list):
-docs/images/reader-light.png is the state reader-light. The release
+Every image in docs/images is a screenshot named after the state it shows.
+An image whose name starts with tui- is the terminal UI, a state of
+scripts/capture-tui-screenshots.sh --list (docs/images/tui-message-index.png
+is the state tui-message-index); any other is the desktop app, a UI
+screenshot matrix state of scripts/capture-release-screenshot.sh --list
+(docs/images/reader-light.png is the state reader-light). The release
 workflow captures those states and publishes each as a release asset named
 zmail-docs-<image> (zmail-docs-reader-light.png), listed with its SHA-256 in
 the release's SHA256SUMS-Screenshots. docs/site.md explains the flow.
 
 plan prints "STATE ASSET" for each image in IMAGES_DIR, and fails on a file
 that cannot be a screenshot: not a .png, or, with STATES_FILE (the matrix's
-states, one per line, from capture-release-screenshot.sh --list), named
-after no state in it.
+states, one per line) and TUI_STATES_FILE (the terminal UI's, likewise; no
+terminal UI states when left out), named after no state of its kind.
 
 apply puts the release's screenshots over the images in IMAGES_DIR (the
 built site's docs/images, or the repository's when refreshing the committed
@@ -36,12 +39,14 @@ import tempfile
 import zlib
 
 ASSET_PREFIX = "zmail-docs-"
+# Images named tui-* are the terminal UI's (capture-tui-screenshots.sh).
+TUI_PREFIX = "tui-"
 SUMS = "SHA256SUMS-Screenshots"
 STATE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 # A screenshot is a few hundred kilobytes; the matrix's largest window is
-# 1920x1080.
+# 1920x1080, and the terminal UI's widest image about 2200 pixels.
 MAX_BYTES = 10 * 1024 * 1024
 MIN_SIDE = 100
 MAX_SIDE = 8192
@@ -52,27 +57,41 @@ def asset_name(image):
     return ASSET_PREFIX + image
 
 
-def plan(images_dir, states=None):
+def is_tui(state):
+    """Whether state is a terminal UI screenshot's."""
+    return state.startswith(TUI_PREFIX)
+
+
+def plan(images_dir, states=None, tui_states=None):
     """[(state, asset)] for each image in images_dir; raises ValueError
-    naming every file that cannot be a screenshot, or whose state is not
-    in states (when given)."""
+    naming every file that cannot be a screenshot, or, when states is
+    given, whose state is not one of its kind: a tui- image's must be in
+    tui_states (none when not given), any other's in states."""
     entries, bad = [], []
     for name in sorted(os.listdir(images_dir)):
         state, ext = os.path.splitext(name)
+        if states is None:
+            known = True
+        elif is_tui(state):
+            known = state in (tui_states or ())
+        else:
+            known = state in states
         if (
             ext != ".png"
             or not STATE.match(state)
             or not os.path.isfile(os.path.join(images_dir, name))
-            or (states is not None and state not in states)
+            or not known
         ):
             bad.append(name)
             continue
         entries.append((state, asset_name(name)))
     if bad:
         raise ValueError(
-            "each image here must be a screenshot named after a UI screenshot "
-            "matrix state (scripts/capture-release-screenshot.sh --list), so "
-            "the release can capture it; these are not: " + ", ".join(bad)
+            "each image here must be a screenshot named after a state the "
+            "release can capture: a UI screenshot matrix state "
+            "(scripts/capture-release-screenshot.sh --list), or for the "
+            "terminal UI a tui- state (scripts/capture-tui-screenshots.sh "
+            "--list); these are not: " + ", ".join(bad)
         )
     if not entries:
         raise ValueError("no screenshots")
@@ -188,13 +207,16 @@ def apply(images_dir, assets_dir, log=sys.stderr):
 
 
 def main(argv):
-    if len(argv) in (2, 3) and argv[0] == "plan":
-        states = None
-        if len(argv) == 3:
-            with open(argv[2], encoding="utf-8") as handle:
-                states = {line.strip() for line in handle if line.strip()}
+    if len(argv) in (2, 3, 4) and argv[0] == "plan":
+
+        def read_states(path):
+            with open(path, encoding="utf-8") as handle:
+                return {line.strip() for line in handle if line.strip()}
+
+        states = read_states(argv[2]) if len(argv) >= 3 else None
+        tui_states = read_states(argv[3]) if len(argv) == 4 else None
         try:
-            entries = plan(argv[1], states)
+            entries = plan(argv[1], states, tui_states)
         except ValueError as error:
             print(f"screenshots.py: {argv[1]}: {error}", file=sys.stderr)
             return 1

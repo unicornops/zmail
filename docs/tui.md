@@ -9,9 +9,30 @@ zmail-app launch-tui-fixture   # synthetic mail, no sync, nothing saved, a keych
 
 From a source checkout, use `cargo run -p zmail-app -- tui` and so on.
 
-Every screen has text snapshots at 80x24 and 160x48 in [`crates/zmail-tui/src/snapshots`](../crates/zmail-tui/src/snapshots), drawn from the same synthetic mail; they show what each screen looks like.
-
 It is in every build (the `tui` feature, on by default) and unlocks the store with its key from the system keychain, like the desktop app; over SSH that needs the keychain service running on that machine (Secret Service on Linux), or it says so and stops; see [Using Zmail over SSH or on a headless machine](./install.md#using-zmail-over-ssh-or-on-a-headless-machine) for a launcher. With no account yet, the status line says so and, on the Main Menu where it starts, `S` goes straight to adding one (later accounts: `S`, then `A` for Accounts, then `A`).
+
+<p>
+  <img src="./images/tui-message-index.png" alt="The Message Index of the Work inbox in a dark terminal, 120 columns wide: four conversations on the left (one flagged, two unread, one from a Japanese sender with a Japanese subject), and the preview pane on the right showing the selected two-message conversation and its numbered link; the command bar of keys along the bottom" width="100%">
+</p>
+<p>
+  <img src="./images/tui-message-text.png" alt="Message Text: an HTML newsletter shown as text, its two links numbered in the text and listed with their real addresses under Links, one of them showing www.bank.example but going to evil.example" width="49%">
+  <img src="./images/tui-compose-reply.png" alt="Compose Message: a reply to Grace Hopper with the To, Cc, Bcc, attachment and subject fields, a line typed above the quoted message, and the Pico-style command bar" width="49%">
+</p>
+
+The same Message Index as text, at 80x24 (from its snapshot test, with the empty rows left out):
+
+```text
+  ZMAIL 0.0.0-test               MESSAGE INDEX       Folder: INBOX  Conv 1 of 4
+  N*        11:35  Grace Hopper         (2) Launch plan for the terminal UI
+  N     Yesterday  Harbour News         Harbour newsletter, issue 42
+    @         Mon  山田 太郎            東京オフィスの会議 📅 next week
+           25 Sep  Billing              Invoice fdp.exe
+                  [Folder "INBOX" opened with 4 conversations]
+? Help       > [ViewMsg]  N NextMsg    Spc NextPage U Undo       F Forward
+< FldrList   P PrevMsg    - PrevPage   D Delete     R Reply      O OTHER CMDS
+```
+
+The screenshots and text show synthetic test mail. Every screen has text snapshots at 80x24 and 160x48 in [`crates/zmail-tui/src/snapshots`](../crates/zmail-tui/src/snapshots), drawn from the same synthetic mail; they show what each screen looks like. The screenshots are made from those tests too, in a dark terminal with fixed colours, so a terminal with another colour scheme or font looks different ([how they are made](./site.md#terminal-ui-screenshots)).
 
 ## Screens and keys
 

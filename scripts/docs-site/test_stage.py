@@ -352,13 +352,46 @@ class ScreenshotPlanTest(unittest.TestCase):
             self.assertIn(name, str(caught.exception))
         self.assertNotIn("reader-light.png", str(caught.exception))
 
-    def test_this_repository_s_images_are_all_matrix_states(self):
-        listed = subprocess.run(
-            ["bash", os.path.join(REPO, "scripts", "capture-release-screenshot.sh"), "--list"],
-            check=True, capture_output=True, text=True,
-        ).stdout.split()
-        entries = screenshots.plan(os.path.join(REPO, "docs", "images"), set(listed))
+    def test_terminal_ui_images_are_terminal_ui_states(self):
+        folder = self.images("reader-light.png", "tui-message-index.png", "tui-gone.png", "tui-x.png")
+        with self.assertRaises(ValueError) as caught:
+            # tui-x is a matrix state here, but a tui- image is the
+            # terminal UI's and must be one of its states.
+            screenshots.plan(folder, {"reader-light", "tui-x"}, {"tui-message-index"})
+        self.assertIn("tui-gone.png", str(caught.exception))
+        self.assertIn("tui-x.png", str(caught.exception))
+        self.assertNotIn("tui-message-index.png", str(caught.exception))
+        folder = self.images("reader-light.png", "tui-message-index.png")
+        os.remove(os.path.join(folder, "tui-gone.png"))
+        os.remove(os.path.join(folder, "tui-x.png"))
+        self.assertEqual(
+            screenshots.plan(folder, {"reader-light"}, {"tui-message-index"}),
+            [
+                ("reader-light", "zmail-docs-reader-light.png"),
+                ("tui-message-index", "zmail-docs-tui-message-index.png"),
+            ],
+        )
+        with self.assertRaises(ValueError):
+            screenshots.plan(folder, {"reader-light"})
+        with self.assertRaises(ValueError):
+            # A desktop image is never a terminal UI state.
+            screenshots.plan(folder, {"tui-message-index"}, {"reader-light", "tui-message-index"})
+
+    def test_this_repository_s_images_are_all_states(self):
+        def listed(script):
+            return set(subprocess.run(
+                ["bash", os.path.join(REPO, "scripts", script), "--list"],
+                check=True, capture_output=True, text=True,
+            ).stdout.split())
+
+        tui_states = listed("capture-tui-screenshots.sh")
+        self.assertTrue(tui_states)
+        self.assertTrue(all(screenshots.is_tui(state) for state in tui_states))
+        matrix_states = listed("capture-release-screenshot.sh")
+        self.assertFalse(any(screenshots.is_tui(state) for state in matrix_states))
+        entries = screenshots.plan(os.path.join(REPO, "docs", "images"), matrix_states, tui_states)
         self.assertIn(("reader-light", "zmail-docs-reader-light.png"), entries)
+        self.assertIn(("tui-message-index", "zmail-docs-tui-message-index.png"), entries)
         subprocess.run(
             [os.path.join(HERE, "capture-screenshots.sh"), "--check"],
             check=True, stderr=subprocess.DEVNULL,
