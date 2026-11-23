@@ -36,6 +36,7 @@
   - [ADR 0005: Store encryption](./adr/0005-store-encryption.md)
   - [ADR 0006: HTML mail renderer](./adr/0006-html-email-renderer.md)
   - [ADR 0007: Terminal UI](./adr/0007-terminal-ui.md)
+  - [ADR 0008: Zmail's own JMAP client library](./adr/0008-own-jmap-client-library.md)
 
 # Project
 

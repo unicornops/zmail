@@ -8,13 +8,14 @@ Building Zmail from source, testing it, and where the design documents are. Most
 - [`docs/upstream/zed.md`](./upstream/zed.md): Zed and GPUI upstream pin record (GPUI is normally pinned to a Zed stable release tag and bumped by a weekly workflow; for now it is pinned to Zed PR #62379 for the web renderer)
 - [`docs/upstream/proton.md`](./upstream/proton.md): Proton Mail Bridge and go-proton-api upstream pins and ported files
 - [`docs/adr/`](./adr/): architecture decision records:
-  - [ADR 0001](./adr/0001-jmap-client-strategy.md): JMAP implementation decision
+  - [ADR 0001](./adr/0001-jmap-client-strategy.md): the first JMAP implementation decision, superseded by ADR 0008
   - [ADR 0002](./adr/0002-message-encryption-protocol.md): message encryption protocol
   - [ADR 0003](./adr/0003-gpui-zed-stable-pin.md): GPUI pinned to Zed stable release tags
   - [ADR 0004](./adr/0004-proton-native.md): native Proton Mail
   - [ADR 0005](./adr/0005-store-encryption.md): encryption of the local store at rest
   - [ADR 0006](./adr/0006-html-email-renderer.md): rendering HTML mail safely
   - [ADR 0007](./adr/0007-terminal-ui.md): the terminal UI
+  - [ADR 0008](./adr/0008-own-jmap-client-library.md): Zmail's own JMAP client library, `crates/jmap-wire`
 - [`docs/phase5-hardening.md`](./phase5-hardening.md): accessibility, performance, crash policy, packaging, and release process
 - [`docs/performance.md`](./performance.md): performance budgets, how they are measured, and the latest numbers; [`benches/README.md`](../benches/README.md) has the store benchmarks
 - [`docs/oauth2-live-verification.md`](./oauth2-live-verification.md): checking OAuth2 sign-in against real providers by hand
