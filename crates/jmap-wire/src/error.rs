@@ -95,6 +95,16 @@ pub enum Error {
     /// for a capability.
     #[error("the JMAP session has no {0}")]
     Session(String),
+    /// A result reference in a request cannot resolve (RFC 8620 section
+    /// 3.7): it names no earlier call of the same request, or a call of
+    /// another method. Nothing was sent.
+    #[error("the result reference in {argument} cannot resolve: {reason}")]
+    InvalidResultReference {
+        /// The argument that holds the reference, with its `#`.
+        argument: String,
+        /// What is wrong with it.
+        reason: String,
+    },
 }
 
 impl Error {
@@ -103,6 +113,39 @@ impl Error {
             what: what.into(),
             source,
         }
+    }
+
+    /// The method-level error, when that is what this is.
+    pub fn as_method_error(&self) -> Option<&MethodError> {
+        match self {
+            Self::Method(error) => Some(error),
+            _ => None,
+        }
+    }
+
+    /// Whether the server refused the request for its size, so that the
+    /// same call with fewer ids or objects may succeed: the
+    /// `requestTooLarge` method error (RFC 8620 sections 5.1 and 5.3),
+    /// or the request-level `limit` problem for `maxSizeRequest`
+    /// (section 3.6.1).
+    pub fn is_request_too_large(&self) -> bool {
+        match self {
+            Self::Method(error) => error.error_type == MethodErrorType::RequestTooLarge,
+            Self::Problem(problem) => {
+                problem.kind() == ProblemKind::Limit
+                    && problem.limit.as_deref() == Some("maxSizeRequest")
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the answer was larger than the client's response size
+    /// limit ([`ClientBuilder::max_response_bytes`]), so that asking
+    /// for less in one call may succeed.
+    ///
+    /// [`ClientBuilder::max_response_bytes`]: crate::ClientBuilder::max_response_bytes
+    pub fn is_response_too_large(&self) -> bool {
+        matches!(self, Self::Transport(error) if error.kind() == TransportErrorKind::TooLarge)
     }
 }
 

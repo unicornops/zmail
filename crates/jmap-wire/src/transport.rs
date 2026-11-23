@@ -42,6 +42,26 @@ pub struct HttpRequest {
     pub max_response_bytes: usize,
 }
 
+impl HttpRequest {
+    /// A request to `url` with no headers and no body, the default
+    /// timeout ([`DEFAULT_TIMEOUT`](crate::DEFAULT_TIMEOUT)) and the
+    /// default response size limit
+    /// ([`DEFAULT_MAX_RESPONSE_BYTES`](crate::DEFAULT_MAX_RESPONSE_BYTES));
+    /// set the fields from there. For exchanges of your own over a
+    /// client's [`transport`](crate::Client::transport), and for
+    /// testing an [`HttpTransport`].
+    pub fn new(method: HttpMethod, url: Url) -> Self {
+        Self {
+            method,
+            url,
+            headers: Vec::new(),
+            body: Vec::new(),
+            timeout: crate::DEFAULT_TIMEOUT,
+            max_response_bytes: crate::DEFAULT_MAX_RESPONSE_BYTES,
+        }
+    }
+}
+
 impl fmt::Debug for HttpRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpRequest")

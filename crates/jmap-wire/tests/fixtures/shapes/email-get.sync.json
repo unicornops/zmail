@@ -1,0 +1,202 @@
+{
+  "methodResponses": [
+    ["Email/get", {
+      "accountId": "a1",
+      "state": "em-41",
+      "list": [
+        {
+          "id": "e1",
+          "threadId": "t1",
+          "mailboxIds": {"mb-inbox": true},
+          "keywords": {"$seen": true},
+          "from": [{"name": "Ada Example", "email": "ada@example.test"}],
+          "replyTo": null,
+          "to": [{"name": null, "email": "me@example.test"}, {"name": "Bo", "email": "bo@example.test"}],
+          "cc": null,
+          "subject": "Plain text only",
+          "preview": "Server preview of the plain message",
+          "hasAttachment": false,
+          "attachments": [],
+          "bodyValues": {
+            "1": {"value": "Hello,\n\nthis is plain text.   \nBye\n", "isEncodingProblem": false, "isTruncated": false}
+          },
+          "textBody": [{"partId": "1", "blobId": "b-e1-1", "size": 38, "name": null, "type": "text/plain", "charset": "utf-8", "disposition": null, "cid": null, "language": null, "location": null}],
+          "htmlBody": [{"partId": "1", "blobId": "b-e1-1", "size": 38, "name": null, "type": "text/plain", "charset": "utf-8", "disposition": null, "cid": null, "language": null, "location": null}],
+          "receivedAt": "2026-11-03T16:15:05Z",
+          "messageId": ["m1@example.test"],
+          "inReplyTo": null,
+          "references": null,
+          "header:Delivered-To:all": [" me@example.test", " <ME@example.test>", " alias@example.test"],
+          "header:X-Original-To:all": []
+        },
+        {
+          "id": "e2",
+          "threadId": "t2",
+          "mailboxIds": {"mb-inbox": true},
+          "keywords": {},
+          "from": null,
+          "replyTo": null,
+          "to": null,
+          "cc": null,
+          "subject": null,
+          "preview": "",
+          "hasAttachment": false,
+          "attachments": [],
+          "bodyValues": {
+            "1": {"value": "<html><body><h1>Your new dashboard</h1><p>Faster exports</p><img src=\"https://tracker.example.test/open.gif\"><script>alert(1)</script></body></html>", "isEncodingProblem": false, "isTruncated": false}
+          },
+          "textBody": [{"partId": "1", "blobId": "b-e2-1", "size": 140, "type": "text/html", "charset": "utf-8"}],
+          "htmlBody": [{"partId": "1", "blobId": "b-e2-1", "size": 140, "type": "text/html", "charset": "utf-8"}],
+          "receivedAt": "2026-11-04T09:30:00.123+01:00",
+          "messageId": ["m2@example.test"],
+          "inReplyTo": null,
+          "references": null,
+          "header:Delivered-To:all": [],
+          "header:X-Original-To:all": [" alias@example.test"]
+        },
+        {
+          "id": "e3",
+          "threadId": "t3",
+          "mailboxIds": {"mb-inbox": true},
+          "keywords": {"$flagged": true, "$seen": false, "$answered": true},
+          "from": [{"name": "Cy Example", "email": "cy@example.test"}],
+          "replyTo": [{"name": "Replies", "email": "replies@example.test"}],
+          "to": [{"name": "Me", "email": "me@example.test"}],
+          "cc": [{"name": "Dee", "email": "dee@example.test"}, {"name": null, "email": "eve@example.test"}],
+          "subject": "Report with attachments",
+          "preview": "Server preview of the report",
+          "hasAttachment": true,
+          "attachments": [
+            {"partId": "3", "blobId": "b-e3-logo", "size": 68, "name": null, "type": "image/png", "charset": null, "disposition": "inline", "cid": " <logo@example.test> ", "language": null, "location": null},
+            {"partId": "4", "blobId": "b-e3-report", "size": 2048, "name": "Q3 report: final/v2.pdf", "type": "application/pdf", "charset": null, "disposition": "attachment", "cid": null, "language": null, "location": null},
+            {"partId": "5", "blobId": "b-e3-anon", "size": 10, "name": null, "type": "application/octet-stream", "charset": null, "disposition": "attachment", "cid": null},
+            {"partId": "6", "blobId": null, "size": 10, "name": "no-blob.bin", "type": "application/octet-stream"},
+            {"partId": "7", "blobId": "b-e3-huge", "size": 26214401, "name": "huge.iso", "type": "application/octet-stream"},
+            {"partId": "8", "blobId": "b-e3-untyped", "size": 5, "name": "   ", "cid": "<   >"},
+            {"partId": "9", "blobId": "b-e3-notes", "size": 12, "name": "notes.txt", "cid": "notes@example.test"},
+            {"partId": "10", "blobId": "b-missing", "size": 12, "name": "gone.txt", "type": "text/plain"}
+          ],
+          "bodyValues": {
+            "1": {"value": "Please find the report attached.\n", "isEncodingProblem": false, "isTruncated": false},
+            "2": {"value": "<p>Please find the <b>report</b> attached.</p><img src=\"cid:logo@example.test\"><img src=\"https://tracker.example.test/pixel.gif\">", "isEncodingProblem": false, "isTruncated": false}
+          },
+          "textBody": [{"partId": "1", "blobId": "b-e3-1", "size": 33, "type": "text/plain", "charset": "utf-8"}],
+          "htmlBody": [{"partId": "2", "blobId": "b-e3-2", "size": 120, "type": "text/html", "charset": "utf-8"}],
+          "receivedAt": "2026-11-05T08:00:00Z",
+          "messageId": ["<m3@example.test>"],
+          "inReplyTo": null,
+          "references": null,
+          "header:Delivered-To:all": [" not an address", " me@example.test"],
+          "header:X-Original-To:all": [" me@example.test"]
+        },
+        {
+          "id": "e4",
+          "threadId": "t3",
+          "mailboxIds": {"mb-inbox": true, "mb-archive": true},
+          "keywords": {"$seen": true, "$flagged": true},
+          "from": [{"name": "", "email": "me@example.test"}],
+          "replyTo": [],
+          "to": [{"name": "  ", "email": "cy@example.test"}],
+          "cc": [],
+          "subject": "Re: Report with attachments",
+          "preview": "Thanks",
+          "hasAttachment": false,
+          "attachments": [],
+          "bodyValues": {
+            "1": {"value": "Thanks!  \r\n\r\n> Please find the report attached.\r\n", "isEncodingProblem": false, "isTruncated": false}
+          },
+          "textBody": [{"partId": "1", "type": "text/plain"}],
+          "htmlBody": [{"partId": "1", "type": "text/plain"}],
+          "receivedAt": "2026-11-05T08:00:00Z",
+          "messageId": ["m4@example.test"],
+          "inReplyTo": ["m3@example.test"],
+          "references": ["m3@example.test", " <m0@example.test> "],
+          "header:Delivered-To:all": [],
+          "header:X-Original-To:all": []
+        },
+        {
+          "id": "e5",
+          "mailboxIds": {"mb-zmail": true}
+        },
+        {
+          "id": "e6",
+          "threadId": "t6",
+          "mailboxIds": {"mb-inbox": true, "mb-unknown": true, "mb-archive": false},
+          "from": [{"name": "Fay", "email": "fay@example.test"}, {"name": "Gil", "email": "gil@example.test"}],
+          "to": [{"name": "Me", "email": "me@example.test"}],
+          "subject": "Preview only",
+          "preview": "Only the server preview is known",
+          "hasAttachment": false,
+          "bodyValues": {},
+          "textBody": [{"partId": "1", "type": "text/plain"}],
+          "htmlBody": [{"partId": "1", "type": "text/plain"}],
+          "receivedAt": "2026-11-06T23:59:59-05:00",
+          "messageId": null
+        },
+        {
+          "id": "e7",
+          "threadId": "t7",
+          "mailboxIds": {"mb-custom": true},
+          "keywords": {"$seen": true},
+          "from": [{"name": "Hal", "email": "hal@example.test"}],
+          "to": [{"name": "Me", "email": "me@example.test"}],
+          "subject": "Typed in capitals",
+          "preview": "p7",
+          "hasAttachment": false,
+          "attachments": [],
+          "bodyValues": {
+            "1": {"value": "Untyped part text"},
+            "2": {"value": "<div><b>Fish</b> &amp; <i>chips</i> &lt;today&gt;</div>   ", "isTruncated": true}
+          },
+          "textBody": [{"partId": "2", "type": "TEXT/HTML; charset=UTF-8"}],
+          "htmlBody": [{"partId": "2", "type": "TEXT/HTML; charset=UTF-8"}, {"partId": "1"}],
+          "receivedAt": "2026-10-01T00:00:00Z",
+          "messageId": ["m7@example.test", "second@example.test"]
+        },
+        {
+          "id": "e8",
+          "threadId": "t8",
+          "mailboxIds": {"mb-sent": true},
+          "keywords": {"$seen": true, "$draft": true},
+          "from": [{"name": "Me Myself", "email": "me@example.test"}],
+          "to": [{"name": "Ada Example", "email": "ada@example.test"}],
+          "subject": "Sent by me",
+          "preview": "p8",
+          "hasAttachment": true,
+          "attachments": [],
+          "bodyValues": {"1": {"value": "   \n  \n", "isEncodingProblem": false, "isTruncated": false},
+                         "2": {"value": "   ", "isEncodingProblem": false, "isTruncated": false}},
+          "textBody": [{"partId": "1", "type": "text/plain"}],
+          "htmlBody": [{"partId": "2", "type": "text/html"}],
+          "receivedAt": "2026-11-07T10:00:00Z",
+          "messageId": ["m8@example.test"]
+        },
+        {
+          "id": "e9",
+          "threadId": "t9",
+          "mailboxIds": {"mb-inbox": true},
+          "keywords": {"$forwarded": true},
+          "from": [{"name": "Ida", "email": "ida@example.test"}],
+          "to": [{"name": "Me", "email": "me@example.test"}],
+          "subject": "A long plain body",
+          "preview": "p9",
+          "hasAttachment": false,
+          "attachments": [
+            {"partId": "2", "blobId": "b-e9-inline", "size": 4, "name": "smile.gif", "type": "image/gif", "disposition": "inline", "cid": "smile@example.test"}
+          ],
+          "bodyValues": {
+            "1": {"value": "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit.", "isEncodingProblem": true, "isTruncated": false}
+          },
+          "textBody": [{"partId": "1", "type": "text/plain"}],
+          "htmlBody": [{"partId": "1", "type": "text/plain"}],
+          "receivedAt": "2026-11-08T12:00:00Z",
+          "messageId": ["m9@example.test"],
+          "header:Delivered-To:all": null,
+          "header:X-Original-To:all": null
+        }
+      ],
+      "notFound": []
+    }, "c0"]
+  ],
+  "sessionState": "s1"
+}

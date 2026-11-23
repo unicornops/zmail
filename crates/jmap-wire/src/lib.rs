@@ -6,15 +6,17 @@
 //!    and [result references](ResultReference), the [`Session`] object,
 //!    and the three kinds of error a server reports
 //!    ([`ProblemDetails`], [`MethodError`], [`SetError`]).
-//! 2. **Typed calls**: [`Get`] and [`Set`] for any data type
-//!    ([`Object`]), and the data types of [`mail`] implemented so far.
-//!    Anything without a type is called by name with JSON arguments
+//! 2. **Typed calls**: [`Get`], [`Set`], [`Changes`], [`Query`] and
+//!    [`QueryChanges`] for any data type ([`Object`]), and the data
+//!    types of [`mail`] implemented so far, read into records that
+//!    tolerate what servers leave out, null or add. Anything without a
+//!    type is called by name with JSON arguments
 //!    ([`Request::call_raw`]), in the same request as typed calls.
 //! 3. **A client** ([`Client`]) over a small transport trait
 //!    ([`HttpTransport`]), with [`Credentials`], a [`RedirectPolicy`]
-//!    the caller chooses, a timeout and a response size limit. The
-//!    default transport is [`ReqwestTransport`] (feature `reqwest`, on
-//!    by default).
+//!    the caller chooses, a timeout, a response size limit and gzip
+//!    (feature `gzip`). The default transport is [`ReqwestTransport`]
+//!    (feature `reqwest`). Both features are on by default.
 //!
 //! # `using` holds what the request uses
 //!
@@ -26,13 +28,15 @@
 //!
 //! # Example
 //!
-//! Two calls in one request, the second fed by the first, one typed and
-//! one by name:
+//! Reading mail the idiomatic JMAP way: a query and a get of what it
+//! finds, in one request (RFC 8620 section 3.7).
 //!
 #![cfg_attr(feature = "reqwest", doc = "```no_run")]
 #![cfg_attr(not(feature = "reqwest"), doc = "```ignore")]
-//! use jmap_wire::{Client, Credentials, Get, Request, capability, mail::Identity};
-//! use serde_json::json;
+//! use jmap_wire::{
+//!     Client, Comparator, Credentials, Get, Query, Request, capability,
+//!     mail::{Email, EmailFilterCondition, EmailProperty},
+//! };
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = Client::builder()
@@ -42,30 +46,36 @@
 //! let account = client.primary_account(capability::MAIL)?;
 //!
 //! let mut request = Request::new();
-//! let identities = request.call(Get::<Identity>::new(account))?;
-//! let query = request.call_raw(
-//!     "Email/query",
-//!     json!({"accountId": account, "filter": {"hasKeyword": "$draft"}, "limit": 10}),
-//! );
-//! let drafts = request.call_raw(
-//!     "Email/get",
-//!     json!({
-//!         "accountId": account,
-//!         "#ids": query.result_reference("/ids"),
-//!         "properties": ["subject", "receivedAt"]
-//!     }),
-//! );
-//! // using: core, submission (Identity) and mail (Email), and no other.
-//! assert_eq!(request.using().len(), 3);
+//! let query = request.call(
+//!     Query::<Email>::new(account)
+//!         .filter(EmailFilterCondition::new().has_keyword("$flagged"))
+//!         .sort([Comparator::new("receivedAt").descending()])
+//!         .limit(10),
+//! )?;
+//! let emails = request.call(
+//!     Get::<Email>::new(account)
+//!         .ids_from(query.ids())
+//!         .properties([EmailProperty::Subject, EmailProperty::ReceivedAt]),
+//! )?;
+//! // using: core and mail, and no other.
+//! assert_eq!(request.using().len(), 2);
 //!
-//! let response = client.send(&request).await?;
-//! for identity in response.get(&identities)?.list {
-//!     println!("{:?}", identity.email);
+//! let mut response = client.send(&request).await?;
+//! for email in response.take(&emails)?.list {
+//!     println!("{:?} {:?}", email.received_at, email.subject);
 //! }
-//! println!("{}", response.arguments(&drafts)?["list"]);
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # What a server returns is read leniently
+//!
+//! The records of [`mail`] have every property optional, keep the
+//! properties this crate has no field for, and read a value that is not
+//! of the type the RFC gives it as `None`, keeping its JSON. Servers
+//! differ on `null` against leaving a property out, and now and then on
+//! a type; one odd value then costs one property of one record instead
+//! of the whole answer.
 //!
 //! # Without the default transport
 //!
@@ -88,12 +98,16 @@
 #![warn(missing_docs)]
 
 mod auth;
+mod batch;
 pub mod capability;
+mod changes;
 mod client;
 pub mod discovery;
 mod error;
 pub mod mail;
 mod method;
+mod query;
+mod record;
 mod request;
 #[cfg(feature = "reqwest")]
 mod reqwest_transport;
@@ -102,6 +116,8 @@ mod session;
 mod transport;
 
 pub use auth::{Credentials, TokenError, TokenRequest, TokenSource};
+pub use batch::IdBatches;
+pub use changes::{Changes, ChangesObject, ChangesResponse};
 pub use client::{
     Client, ClientBuilder, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_SESSION_BYTES, DEFAULT_TIMEOUT,
     DEFAULT_USER_AGENT,
@@ -114,7 +130,11 @@ pub use method::{
     Get, GetObject, GetResponse, Method, NoArguments, Object, PatchObject, Properties, Set,
     SetArguments, SetObject, SetResponse,
 };
-pub use request::{Call, Invocation, Raw, Request, ResultReference};
+pub use query::{
+    AddedItem, Comparator, Filter, Operator, Query, QueryChanges, QueryChangesResponse,
+    QueryObject, QueryResponse,
+};
+pub use request::{Call, IdsReference, Invocation, Raw, Request, ResultReference};
 #[cfg(feature = "reqwest")]
 pub use reqwest_transport::ReqwestTransport;
 pub use response::Response;

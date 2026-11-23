@@ -1,0 +1,21 @@
+{
+  "methodResponses": [
+    [
+      "Email/query",
+      {
+        "accountId": "8f1f47ffc1606d1e0ecc6bfdf08f41d8023639e20c706d3a14db1ca4875865e9",
+        "canCalculateChanges": false,
+        "ids": [
+          "3",
+          "2",
+          "1"
+        ],
+        "limit": 256,
+        "position": 0,
+        "queryState": "a6904f19"
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "2c9f1b12-b35a-43e6-9af2-0106fb53a943"
+}

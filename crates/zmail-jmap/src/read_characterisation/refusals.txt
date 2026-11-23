@@ -1,0 +1,36 @@
+Mailbox/get accountNotFound
+  sync:    failed to fetch JMAP mailboxes: Request failed: Account not found
+  search:  failed to fetch JMAP mailboxes: Request failed: Account not found
+  headers: ok
+Email/get serverFail
+  sync:    failed to read the JMAP Email state: Request failed: Server fail
+  search:  ok
+  headers: failed to fetch JMAP email headers: Request failed: Server fail
+Email/query invalidArguments
+  sync:    failed to query JMAP emails: Request failed: Invalid arguments
+  search:  failed to search JMAP emails: Request failed: Invalid arguments
+  headers: ok
+Email/query unsupportedFilter
+  sync:    failed to query JMAP emails: Request failed: Unsupported filter
+  search:  failed to search JMAP emails: Request failed: Unsupported filter
+  headers: ok
+Email/get an error type of a later RFC
+  sync:    failed to read the JMAP Email state: Request failed: Rate limited
+  search:  ok
+  headers: failed to fetch JMAP email headers: Request failed: Rate limited
+problem details: limit
+  sync:    failed to fetch JMAP mailboxes: Request failed: Limit (status 400). Details: Too many calls
+  search:  failed to fetch JMAP mailboxes: Request failed: Limit (status 400). Details: Too many calls
+  headers: failed to fetch JMAP email headers: Request failed: Limit (status 400). Details: Too many calls
+problem details: unknown capability
+  sync:    failed to fetch JMAP mailboxes: Request failed: Unknown capability (status 400). Details: The request used unsupported capabilities
+  search:  failed to fetch JMAP mailboxes: Request failed: Unknown capability (status 400). Details: The request used unsupported capabilities
+  headers: failed to fetch JMAP email headers: Request failed: Unknown capability (status 400). Details: The request used unsupported capabilities
+HTTP 503
+  sync:    failed to fetch JMAP mailboxes: Server failed: 503 Service Unavailable
+  search:  failed to fetch JMAP mailboxes: Server failed: 503 Service Unavailable
+  headers: failed to fetch JMAP email headers: Server failed: 503 Service Unavailable
+not JSON
+  sync:    failed to fetch JMAP mailboxes: the JMAP server's response could not be read: expected value at line 1 column 1
+  search:  failed to fetch JMAP mailboxes: the JMAP server's response could not be read: expected value at line 1 column 1
+  headers: failed to fetch JMAP email headers: the JMAP server's response could not be read: expected value at line 1 column 1

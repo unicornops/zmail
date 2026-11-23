@@ -93,6 +93,64 @@ pub struct ResultReference {
     pub path: String,
 }
 
+/// A [`ResultReference`] that resolves to ids of the data type `O`: what
+/// the `ids_from` of a `/get` takes.
+///
+/// The calls of this crate hand these out with the type filled in
+/// ([`Call::ids`] of a `/query`, [`Call::created`] and [`Call::updated`]
+/// of a `/changes`, [`Call::thread_ids`], [`Call::email_ids`]), so that
+/// feeding a call the ids of another data type does not compile:
+///
+/// ```compile_fail
+/// use jmap_wire::{Get, Query, Request, mail::{Email, Thread}};
+///
+/// let mut request = Request::new();
+/// let query = request.call(Query::<Email>::new("u1"))?;
+/// // Email ids are no Thread ids.
+/// request.call(Get::<Thread>::new("u1").ids_from(query.ids()))?;
+/// # Ok::<(), jmap_wire::Error>(())
+/// ```
+///
+/// A plain [`ResultReference`] converts into one for any type: with a
+/// path written by hand, what it resolves to is the caller's to know.
+#[derive(Debug)]
+pub struct IdsReference<O: ?Sized> {
+    reference: ResultReference,
+    object: PhantomData<fn() -> O>,
+}
+
+impl<O: ?Sized> IdsReference<O> {
+    /// A reference that is taken to resolve to ids of `O`, unchecked.
+    pub fn new(reference: ResultReference) -> Self {
+        Self {
+            reference,
+            object: PhantomData,
+        }
+    }
+
+    /// The reference itself.
+    pub fn as_reference(&self) -> &ResultReference {
+        &self.reference
+    }
+
+    /// The reference itself.
+    pub fn into_reference(self) -> ResultReference {
+        self.reference
+    }
+}
+
+impl<O: ?Sized> Clone for IdsReference<O> {
+    fn clone(&self) -> Self {
+        Self::new(self.reference.clone())
+    }
+}
+
+impl<O: ?Sized> From<ResultReference> for IdsReference<O> {
+    fn from(reference: ResultReference) -> Self {
+        Self::new(reference)
+    }
+}
+
 /// An argument that is either given or taken from an earlier call's
 /// result (RFC 8620 section 3.7).
 #[derive(Debug, Clone, PartialEq)]
@@ -228,11 +286,63 @@ impl Request {
     /// calls of this crate never do.
     pub fn call<M: Method>(&mut self, method: M) -> Result<Call<M>, Error> {
         let name = method.name();
+        let arguments = serde_json::to_value(&method).map_err(Error::Encode)?;
+        self.check_references_of(&arguments, self.method_calls.len())?;
         for capability in method.using() {
             self.need(&capability);
         }
-        let arguments = serde_json::to_value(&method).map_err(Error::Encode)?;
         Ok(self.push(name, arguments))
+    }
+
+    /// Checks every result reference in the request (RFC 8620 section
+    /// 3.7): each must name an earlier call of this request, by its call
+    /// id and its method. A server answers a call whose reference does
+    /// not resolve with `invalidResultReference`; this finds the
+    /// mistakes that can be seen before sending, such as a reference
+    /// taken from a call of another request.
+    ///
+    /// [`call`](Self::call) checks the call it adds, and a
+    /// [`Client`](crate::Client) checks the request before sending it,
+    /// which covers calls made by name.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidResultReference`] for the first that does not.
+    pub fn check_references(&self) -> Result<(), Error> {
+        self.method_calls
+            .iter()
+            .enumerate()
+            .try_for_each(|(index, call)| self.check_references_of(&call.arguments, index))
+    }
+
+    /// Checks the references in `arguments`, the arguments of the call
+    /// at `index` (or of one about to be added there).
+    fn check_references_of(&self, arguments: &Value, index: usize) -> Result<(), Error> {
+        let Some(arguments) = arguments.as_object() else {
+            return Ok(());
+        };
+        for (argument, value) in arguments {
+            if !argument.starts_with('#') {
+                continue;
+            }
+            let invalid = |reason: &str| Error::InvalidResultReference {
+                argument: argument.clone(),
+                reason: reason.to_owned(),
+            };
+            let reference = ResultReference::deserialize(value)
+                .map_err(|_| invalid("it is not a ResultReference object"))?;
+            let earlier = self.method_calls[..index.min(self.method_calls.len())]
+                .iter()
+                .find(|call| call.call_id == reference.result_of)
+                .ok_or_else(|| invalid("it names no earlier call of this request"))?;
+            if earlier.name != reference.name {
+                return Err(invalid("the call it names is of another method"));
+            }
+            if arguments.contains_key(&argument[1..]) {
+                return Err(invalid("the argument is also given outright"));
+            }
+        }
+        Ok(())
     }
 
     /// Adds a method call by name with its arguments as JSON: the way to

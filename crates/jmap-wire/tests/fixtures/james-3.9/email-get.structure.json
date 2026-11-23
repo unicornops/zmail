@@ -1,0 +1,435 @@
+{
+  "methodResponses": [
+    [
+      "Email/get",
+      {
+        "accountId": "8f1f47ffc1606d1e0ecc6bfdf08f41d8023639e20c706d3a14db1ca4875865e9",
+        "list": [
+          {
+            "attachments": [
+              {
+                "blobId": "1_6",
+                "charset": "us-ascii",
+                "cid": "probe-logo@phase2b.test",
+                "disposition": "inline",
+                "header:Content-Type": " image/png",
+                "headers": [
+                  {
+                    "name": "Content-Type",
+                    "value": " image/png"
+                  },
+                  {
+                    "name": "Content-ID",
+                    "value": " <probe-logo@phase2b.test>"
+                  },
+                  {
+                    "name": "Content-Disposition",
+                    "value": " inline"
+                  },
+                  {
+                    "name": "Content-Transfer-Encoding",
+                    "value": " base64"
+                  }
+                ],
+                "partId": "6",
+                "size": 70,
+                "type": "image/png"
+              },
+              {
+                "blobId": "1_7",
+                "charset": "utf-8",
+                "disposition": "attachment",
+                "header:Content-Type": " text/csv; charset=utf-8; name=\"report.csv\"",
+                "headers": [
+                  {
+                    "name": "Content-Type",
+                    "value": " text/csv; charset=utf-8; name=\"report.csv\""
+                  },
+                  {
+                    "name": "Content-Disposition",
+                    "value": " attachment; filename=\"report.csv\""
+                  },
+                  {
+                    "name": "Content-Language",
+                    "value": " en, fr"
+                  },
+                  {
+                    "name": "Content-Location",
+                    "value": " https://files.phase2b.test/report.csv"
+                  }
+                ],
+                "language": [
+                  "en",
+                  "fr"
+                ],
+                "location": "https://files.phase2b.test/report.csv",
+                "name": "report.csv",
+                "partId": "7",
+                "size": 21,
+                "type": "text/csv"
+              }
+            ],
+            "blobId": "1",
+            "bodyStructure": {
+              "charset": "us-ascii",
+              "header:Content-Type": " multipart/mixed; boundary=\"mixed-b\"",
+              "headers": [
+                {
+                  "name": "Return-Path",
+                  "value": " <news@phase2b.test>"
+                },
+                {
+                  "name": "Delivered-To",
+                  "value": " jmap@localhost"
+                },
+                {
+                  "name": "Received",
+                  "value": " from 172.18.0.1 (EHLO localhost) ([172.18.0.1])\r\n          by 212b1dda3d33 (JAMES SMTP Server ) with ESMTP ID 1825a749\r\n          for <jmap@localhost>;\r\n          Mon, 23 Nov 2026 19:08:00 +0000 (UTC)"
+                },
+                {
+                  "name": "From",
+                  "value": " \"Probe Sender\" <probe@phase2b.test>"
+                },
+                {
+                  "name": "Sender",
+                  "value": " Probe Robot <robot@phase2b.test>"
+                },
+                {
+                  "name": "To",
+                  "value": " jmap@localhost, Friends: ada@phase2b.test, \"Bo Example\" <bo@phase2b.test>;"
+                },
+                {
+                  "name": "Cc",
+                  "value": " Cy <cy@phase2b.test>"
+                },
+                {
+                  "name": "Reply-To",
+                  "value": " Replies <replies@phase2b.test>"
+                },
+                {
+                  "name": "Subject",
+                  "value": " =?UTF-8?Q?jmap-wire_probe_caf=C3=A9?= mixed"
+                },
+                {
+                  "name": "Date",
+                  "value": " Tue, 03 Nov 2026 16:15:05 +0100"
+                },
+                {
+                  "name": "Message-ID",
+                  "value": " <jmap-wire-probe-mixed@phase2b.test>"
+                },
+                {
+                  "name": "In-Reply-To",
+                  "value": " <jmap-wire-probe-root@phase2b.test>"
+                },
+                {
+                  "name": "References",
+                  "value": " <jmap-wire-probe-root@phase2b.test> <jmap-wire-probe-mid@phase2b.test>"
+                },
+                {
+                  "name": "List-Unsubscribe",
+                  "value": " <mailto:leave@phase2b.test>, <https://lists.phase2b.test/leave>"
+                },
+                {
+                  "name": "List-Post",
+                  "value": " <mailto:list@phase2b.test>"
+                },
+                {
+                  "name": "Comments",
+                  "value": " first comment"
+                },
+                {
+                  "name": "Comments",
+                  "value": " second comment"
+                },
+                {
+                  "name": "X-Probe",
+                  "value": " one"
+                },
+                {
+                  "name": "X-Probe",
+                  "value": " two"
+                },
+                {
+                  "name": "MIME-Version",
+                  "value": " 1.0"
+                },
+                {
+                  "name": "Content-Type",
+                  "value": " multipart/mixed; boundary=\"mixed-b\""
+                }
+              ],
+              "partId": "1",
+              "size": 903,
+              "subParts": [
+                {
+                  "charset": "us-ascii",
+                  "header:Content-Type": " multipart/alternative; boundary=\"alt-b\"",
+                  "headers": [
+                    {
+                      "name": "Content-Type",
+                      "value": " multipart/alternative; boundary=\"alt-b\""
+                    }
+                  ],
+                  "partId": "2",
+                  "size": 587,
+                  "subParts": [
+                    {
+                      "blobId": "1_3",
+                      "charset": "utf-8",
+                      "header:Content-Type": " text/plain; charset=utf-8",
+                      "headers": [
+                        {
+                          "name": "Content-Type",
+                          "value": " text/plain; charset=utf-8"
+                        }
+                      ],
+                      "partId": "3",
+                      "size": 31,
+                      "type": "text/plain"
+                    },
+                    {
+                      "charset": "us-ascii",
+                      "header:Content-Type": " multipart/related; boundary=\"rel-b\"",
+                      "headers": [
+                        {
+                          "name": "Content-Type",
+                          "value": " multipart/related; boundary=\"rel-b\""
+                        }
+                      ],
+                      "partId": "4",
+                      "size": 427,
+                      "subParts": [
+                        {
+                          "blobId": "1_5",
+                          "charset": "utf-8",
+                          "header:Content-Type": " text/html; charset=utf-8",
+                          "headers": [
+                            {
+                              "name": "Content-Type",
+                              "value": " text/html; charset=utf-8"
+                            }
+                          ],
+                          "partId": "5",
+                          "size": 152,
+                          "type": "text/html"
+                        },
+                        {
+                          "blobId": "1_6",
+                          "charset": "us-ascii",
+                          "cid": "probe-logo@phase2b.test",
+                          "disposition": "inline",
+                          "header:Content-Type": " image/png",
+                          "headers": [
+                            {
+                              "name": "Content-Type",
+                              "value": " image/png"
+                            },
+                            {
+                              "name": "Content-ID",
+                              "value": " <probe-logo@phase2b.test>"
+                            },
+                            {
+                              "name": "Content-Disposition",
+                              "value": " inline"
+                            },
+                            {
+                              "name": "Content-Transfer-Encoding",
+                              "value": " base64"
+                            }
+                          ],
+                          "partId": "6",
+                          "size": 70,
+                          "type": "image/png"
+                        }
+                      ],
+                      "type": "multipart/related"
+                    }
+                  ],
+                  "type": "multipart/alternative"
+                },
+                {
+                  "blobId": "1_7",
+                  "charset": "utf-8",
+                  "disposition": "attachment",
+                  "header:Content-Type": " text/csv; charset=utf-8; name=\"report.csv\"",
+                  "headers": [
+                    {
+                      "name": "Content-Type",
+                      "value": " text/csv; charset=utf-8; name=\"report.csv\""
+                    },
+                    {
+                      "name": "Content-Disposition",
+                      "value": " attachment; filename=\"report.csv\""
+                    },
+                    {
+                      "name": "Content-Language",
+                      "value": " en, fr"
+                    },
+                    {
+                      "name": "Content-Location",
+                      "value": " https://files.phase2b.test/report.csv"
+                    }
+                  ],
+                  "language": [
+                    "en",
+                    "fr"
+                  ],
+                  "location": "https://files.phase2b.test/report.csv",
+                  "name": "report.csv",
+                  "partId": "7",
+                  "size": 21,
+                  "type": "text/csv"
+                }
+              ],
+              "type": "multipart/mixed"
+            },
+            "bodyValues": {
+              "3": {
+                "isEncodingProblem": false,
+                "isTruncated": true,
+                "value": "Plain alternativ"
+              },
+              "5": {
+                "isEncodingProblem": false,
+                "isTruncated": true,
+                "value": "<html><body><p>H"
+              }
+            },
+            "headers": [
+              {
+                "name": "Return-Path",
+                "value": " <news@phase2b.test>"
+              },
+              {
+                "name": "Delivered-To",
+                "value": " jmap@localhost"
+              },
+              {
+                "name": "Received",
+                "value": " from 172.18.0.1 (EHLO localhost) ([172.18.0.1])\r\n          by 212b1dda3d33 (JAMES SMTP Server ) with ESMTP ID 1825a749\r\n          for <jmap@localhost>;\r\n          Mon, 23 Nov 2026 19:08:00 +0000 (UTC)"
+              },
+              {
+                "name": "From",
+                "value": " \"Probe Sender\" <probe@phase2b.test>"
+              },
+              {
+                "name": "Sender",
+                "value": " Probe Robot <robot@phase2b.test>"
+              },
+              {
+                "name": "To",
+                "value": " jmap@localhost, Friends: ada@phase2b.test, \"Bo Example\" <bo@phase2b.test>;"
+              },
+              {
+                "name": "Cc",
+                "value": " Cy <cy@phase2b.test>"
+              },
+              {
+                "name": "Reply-To",
+                "value": " Replies <replies@phase2b.test>"
+              },
+              {
+                "name": "Subject",
+                "value": " =?UTF-8?Q?jmap-wire_probe_caf=C3=A9?= mixed"
+              },
+              {
+                "name": "Date",
+                "value": " Tue, 03 Nov 2026 16:15:05 +0100"
+              },
+              {
+                "name": "Message-ID",
+                "value": " <jmap-wire-probe-mixed@phase2b.test>"
+              },
+              {
+                "name": "In-Reply-To",
+                "value": " <jmap-wire-probe-root@phase2b.test>"
+              },
+              {
+                "name": "References",
+                "value": " <jmap-wire-probe-root@phase2b.test> <jmap-wire-probe-mid@phase2b.test>"
+              },
+              {
+                "name": "List-Unsubscribe",
+                "value": " <mailto:leave@phase2b.test>, <https://lists.phase2b.test/leave>"
+              },
+              {
+                "name": "List-Post",
+                "value": " <mailto:list@phase2b.test>"
+              },
+              {
+                "name": "Comments",
+                "value": " first comment"
+              },
+              {
+                "name": "Comments",
+                "value": " second comment"
+              },
+              {
+                "name": "X-Probe",
+                "value": " one"
+              },
+              {
+                "name": "X-Probe",
+                "value": " two"
+              },
+              {
+                "name": "MIME-Version",
+                "value": " 1.0"
+              },
+              {
+                "name": "Content-Type",
+                "value": " multipart/mixed; boundary=\"mixed-b\""
+              }
+            ],
+            "htmlBody": [
+              {
+                "blobId": "1_5",
+                "charset": "utf-8",
+                "header:Content-Type": " text/html; charset=utf-8",
+                "headers": [
+                  {
+                    "name": "Content-Type",
+                    "value": " text/html; charset=utf-8"
+                  }
+                ],
+                "partId": "5",
+                "size": 152,
+                "type": "text/html"
+              }
+            ],
+            "id": "1",
+            "sender": [
+              {
+                "email": "robot@phase2b.test",
+                "name": "Probe Robot"
+              }
+            ],
+            "sentAt": "2026-11-03T15:15:05Z",
+            "size": 1984,
+            "textBody": [
+              {
+                "blobId": "1_3",
+                "charset": "utf-8",
+                "header:Content-Type": " text/plain; charset=utf-8",
+                "headers": [
+                  {
+                    "name": "Content-Type",
+                    "value": " text/plain; charset=utf-8"
+                  }
+                ],
+                "partId": "3",
+                "size": 31,
+                "type": "text/plain"
+              }
+            ]
+          }
+        ],
+        "notFound": [],
+        "state": "dce49a39-1882-4935-b2fa-b102e06a516f"
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "2c9f1b12-b35a-43e6-9af2-0106fb53a943"
+}

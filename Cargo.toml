@@ -51,6 +51,9 @@ crossterm = { version = "0.29", default-features = false, features = ["bracketed
 # CSS tokenizer for the sanitiser's pass over `style` attributes and
 # `<style>` blocks (ADR 0006); already in the tree through ammonia.
 cssparser = { version = "0.38.0", default-features = false }
+# gzip for jmap-wire's response decompression (its `gzip` feature). Already
+# in the lock through GPUI and rPGP; pure Rust (miniz_oxide).
+flate2 = "1"
 futures-util = "0.3"
 # GPUI is pinned by commit to the head of Zed PR #62379 ("native window
 # composition", from the huacnlee/zed fork) for the macOS web renderer

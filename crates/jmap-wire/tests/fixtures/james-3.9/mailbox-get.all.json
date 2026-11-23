@@ -1,0 +1,170 @@
+{
+  "methodResponses": [
+    [
+      "Mailbox/get",
+      {
+        "accountId": "8f1f47ffc1606d1e0ecc6bfdf08f41d8023639e20c706d3a14db1ca4875865e9",
+        "list": [
+          {
+            "id": "1",
+            "isSubscribed": true,
+            "myRights": {
+              "mayAddItems": true,
+              "mayCreateChild": true,
+              "mayDelete": true,
+              "mayReadItems": true,
+              "mayRemoveItems": true,
+              "mayRename": true,
+              "maySetKeywords": true,
+              "maySetSeen": true,
+              "maySubmit": true
+            },
+            "name": "INBOX",
+            "role": "inbox",
+            "sortOrder": 10,
+            "totalEmails": 3,
+            "totalThreads": 3,
+            "unreadEmails": 3,
+            "unreadThreads": 3
+          },
+          {
+            "id": "6",
+            "isSubscribed": true,
+            "myRights": {
+              "mayAddItems": true,
+              "mayCreateChild": true,
+              "mayDelete": true,
+              "mayReadItems": true,
+              "mayRemoveItems": true,
+              "mayRename": true,
+              "maySetKeywords": true,
+              "maySetSeen": true,
+              "maySubmit": true
+            },
+            "name": "Archive",
+            "role": "archive",
+            "sortOrder": 20,
+            "totalEmails": 0,
+            "totalThreads": 0,
+            "unreadEmails": 0,
+            "unreadThreads": 0
+          },
+          {
+            "id": "5",
+            "isSubscribed": true,
+            "myRights": {
+              "mayAddItems": true,
+              "mayCreateChild": true,
+              "mayDelete": true,
+              "mayReadItems": true,
+              "mayRemoveItems": true,
+              "mayRename": true,
+              "maySetKeywords": true,
+              "maySetSeen": true,
+              "maySubmit": true
+            },
+            "name": "Drafts",
+            "role": "drafts",
+            "sortOrder": 30,
+            "totalEmails": 0,
+            "totalThreads": 0,
+            "unreadEmails": 0,
+            "unreadThreads": 0
+          },
+          {
+            "id": "2",
+            "isSubscribed": true,
+            "myRights": {
+              "mayAddItems": true,
+              "mayCreateChild": true,
+              "mayDelete": true,
+              "mayReadItems": true,
+              "mayRemoveItems": true,
+              "mayRename": true,
+              "maySetKeywords": true,
+              "maySetSeen": true,
+              "maySubmit": true
+            },
+            "name": "Outbox",
+            "role": "outbox",
+            "sortOrder": 40,
+            "totalEmails": 0,
+            "totalThreads": 0,
+            "unreadEmails": 0,
+            "unreadThreads": 0
+          },
+          {
+            "id": "3",
+            "isSubscribed": true,
+            "myRights": {
+              "mayAddItems": true,
+              "mayCreateChild": true,
+              "mayDelete": true,
+              "mayReadItems": true,
+              "mayRemoveItems": true,
+              "mayRename": true,
+              "maySetKeywords": true,
+              "maySetSeen": true,
+              "maySubmit": true
+            },
+            "name": "Sent",
+            "role": "sent",
+            "sortOrder": 50,
+            "totalEmails": 0,
+            "totalThreads": 0,
+            "unreadEmails": 0,
+            "unreadThreads": 0
+          },
+          {
+            "id": "4",
+            "isSubscribed": true,
+            "myRights": {
+              "mayAddItems": true,
+              "mayCreateChild": true,
+              "mayDelete": true,
+              "mayReadItems": true,
+              "mayRemoveItems": true,
+              "mayRename": true,
+              "maySetKeywords": true,
+              "maySetSeen": true,
+              "maySubmit": true
+            },
+            "name": "Trash",
+            "role": "trash",
+            "sortOrder": 60,
+            "totalEmails": 0,
+            "totalThreads": 0,
+            "unreadEmails": 0,
+            "unreadThreads": 0
+          },
+          {
+            "id": "7",
+            "isSubscribed": true,
+            "myRights": {
+              "mayAddItems": true,
+              "mayCreateChild": true,
+              "mayDelete": true,
+              "mayReadItems": true,
+              "mayRemoveItems": true,
+              "mayRename": true,
+              "maySetKeywords": true,
+              "maySetSeen": true,
+              "maySubmit": true
+            },
+            "name": "Spam",
+            "role": "junk",
+            "sortOrder": 70,
+            "totalEmails": 0,
+            "totalThreads": 0,
+            "unreadEmails": 0,
+            "unreadThreads": 0
+          }
+        ],
+        "notFound": [],
+        "state": "b76b2968-32c1-4038-a234-56247016a53a"
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "2c9f1b12-b35a-43e6-9af2-0106fb53a943"
+}

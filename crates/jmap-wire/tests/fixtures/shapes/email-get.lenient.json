@@ -1,0 +1,55 @@
+{
+  "methodResponses": [
+    ["Email/get", {
+      "accountId": "a1",
+      "state": null,
+      "list": [
+        {
+          "id": "x1",
+          "threadId": "tx1",
+          "mailboxIds": {"mb-inbox": true},
+          "keywords": {"$seen": true},
+          "subject": "Odd types",
+          "size": "12 kB",
+          "receivedAt": 1793722505,
+          "from": [{"name": "No Address"}],
+          "to": [{"name": null, "email": null}],
+          "hasAttachment": "false",
+          "preview": null,
+          "futureProperty": {"nested": true},
+          "header:Delivered-To:all": " me@example.test"
+        },
+        {
+          "id": "x2",
+          "mailboxIds": {"mb-inbox": true},
+          "keywords": ["$seen"],
+          "bodyValues": {"1": {"isTruncated": false}, "2": {"value": 7}},
+          "textBody": [{"partId": "1", "type": "text/plain", "size": -1, "futurePartProperty": [1, 2]}],
+          "htmlBody": null,
+          "attachments": [{"partId": "3", "blobId": "b-x2", "name": "a.bin"}, "not a part"]
+        },
+        {
+          "id": "x3",
+          "mailboxIds": {"mb-inbox": 1},
+          "messageId": "one@example.test",
+          "receivedAt": "yesterday",
+          "header:Delivered-To:all": [" me@example.test", null, 7]
+        },
+        {
+          "id": "x4",
+          "threadId": null,
+          "mailboxIds": null,
+          "keywords": null,
+          "from": null,
+          "subject": null,
+          "receivedAt": null,
+          "bodyValues": null,
+          "textBody": null,
+          "attachments": null
+        }
+      ],
+      "notFound": null
+    }, "c0"]
+  ],
+  "sessionState": "s1"
+}

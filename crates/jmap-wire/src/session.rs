@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use url::Url;
 
-use crate::{capability, error::Error, method::null_as_default};
+use crate::{capability, error::Error, method::null_as_default, record::lenient};
 
 /// The JMAP Session object (RFC 8620 section 2).
 ///
@@ -75,32 +75,39 @@ pub struct Account {
 }
 
 /// The limits of `urn:ietf:params:jmap:core` (RFC 8620 section 2). A
-/// limit the server did not state is `None`.
+/// limit the server did not state, or stated as something other than a
+/// whole number, is `None`.
+///
+/// The ones a reader of mail needs: `max_objects_in_get` (how many ids
+/// one `/get` may ask for; [`IdBatches`](crate::IdBatches) splits a
+/// longer list), `max_calls_in_request` (how many method calls one
+/// request may chain) and `max_size_request` (the largest request body,
+/// in octets).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct CoreCapabilities {
     /// The largest upload, in octets.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub max_size_upload: Option<u64>,
     /// How many uploads may run at once.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub max_concurrent_upload: Option<u64>,
     /// The largest API request, in octets.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub max_size_request: Option<u64>,
     /// How many API requests may run at once.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub max_concurrent_requests: Option<u64>,
     /// How many method calls one request may have.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub max_calls_in_request: Option<u64>,
     /// How many records one `/get` may ask for.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub max_objects_in_get: Option<u64>,
     /// How many records one `/set` may create, update and destroy in
     /// all.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub max_objects_in_set: Option<u64>,
     /// The collation algorithms the server can sort with.
     #[serde(default, deserialize_with = "null_as_default")]
@@ -331,6 +338,27 @@ mod tests {
         assert_eq!(core.max_concurrent_requests, Some(8));
         assert_eq!(core.max_objects_in_get, Some(256));
         assert_eq!(core.collation_algorithms.len(), 3);
+    }
+
+    #[test]
+    fn a_limit_that_is_no_whole_number_is_not_known_and_the_others_still_are() {
+        let session: Session = serde_json::from_value(json!({
+            "capabilities": {"urn:ietf:params:jmap:core": {
+                "maxSizeUpload": "50000000",
+                "maxSizeRequest": 1e7,
+                "maxCallsInRequest": -1,
+                "maxObjectsInGet": 500,
+                "maxObjectsInSet": null
+            }},
+            "apiUrl": "/api"
+        }))
+        .expect("decodes");
+        let core = session.core().expect("the limits that can be read");
+        assert_eq!(core.max_objects_in_get, Some(500));
+        assert_eq!(core.max_size_upload, None);
+        assert_eq!(core.max_calls_in_request, None);
+        assert_eq!(core.max_objects_in_set, None);
+        assert!(core.collation_algorithms.is_empty());
     }
 
     #[test]

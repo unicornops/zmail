@@ -1,0 +1,49 @@
+{
+  "methodResponses": [
+    ["Mailbox/get", {
+      "accountId": "a1",
+      "state": "mb-7",
+      "list": [
+        {
+          "id": "mb-inbox", "name": "Inbox", "parentId": null, "role": "inbox", "sortOrder": 10,
+          "totalEmails": 6, "unreadEmails": 4, "totalThreads": 5, "unreadThreads": 3,
+          "myRights": {
+            "mayReadItems": true, "mayAddItems": true, "mayRemoveItems": true,
+            "maySetSeen": true, "maySetKeywords": true, "mayCreateChild": true,
+            "mayRename": false, "mayDelete": false, "maySubmit": true
+          },
+          "isSubscribed": true
+        },
+        {
+          "id": "mb-archive", "name": "Archive", "role": "archive",
+          "totalEmails": 2, "unreadEmails": 0, "totalThreads": 2, "unreadThreads": 0,
+          "myRights": {"mayReadItems": true, "mayAddItems": true},
+          "isSubscribed": false
+        },
+        {
+          "id": "mb-projects", "name": "Projects", "parentId": null, "role": null, "sortOrder": 20
+        },
+        {
+          "id": "mb-zmail", "name": "Zmail", "parentId": "mb-projects", "role": null, "sortOrder": 3
+        },
+        {
+          "id": "mb-orphan", "name": "Orphan", "parentId": "mb-gone", "sortOrder": 30
+        },
+        {
+          "id": "mb-sent", "name": "Sent", "role": "sent", "sortOrder": 11
+        },
+        {
+          "id": "mb-bulk", "name": "Bulk", "role": "JUNK", "sortOrder": 12
+        },
+        {
+          "id": "mb-custom", "name": "Receipts", "role": "x-receipts", "sortOrder": 12
+        },
+        {
+          "id": "mb-nameless", "role": "trash", "sortOrder": 1
+        }
+      ],
+      "notFound": []
+    }, "c0"]
+  ],
+  "sessionState": "s1"
+}
