@@ -55,6 +55,23 @@ impl Response {
         self.arguments_as(call.call_id(), call.name())
     }
 
+    /// The typed answer to `call`, taken out of the response: as
+    /// [`get`](Self::get), but the answer's JSON is moved into the
+    /// typed value instead of copied, which matters for answers as
+    /// large as an `Email/get` with bodies. The answer's arguments are
+    /// left `null`: it can be taken once, and taking or getting it
+    /// again is a decoding error.
+    pub fn take<M: Method>(&mut self, call: &Call<M>) -> Result<M::Response, Error> {
+        self.first(call.call_id(), call.name())?;
+        let arguments = self
+            .method_responses
+            .iter_mut()
+            .find(|response| response.call_id == call.call_id())
+            .map(|response| std::mem::take(&mut response.arguments))
+            .unwrap_or_default();
+        M::Response::deserialize(arguments).map_err(|source| Error::json(call.name(), source))
+    }
+
     /// The arguments of the first answer to `call`, as JSON, with the
     /// same errors as [`get`](Self::get) but for decoding. For calls
     /// made with [`Request::call_raw`](crate::Request::call_raw), and for

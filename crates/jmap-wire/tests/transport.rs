@@ -451,6 +451,65 @@ async fn a_response_over_the_size_limit_is_refused() {
     }
 }
 
+/// Over real sockets with the default transport: `reqwest` hands the
+/// compressed body on as it is, and the client decompresses it within
+/// its limit.
+#[cfg(feature = "gzip")]
+#[tokio::test]
+async fn a_gzipped_response_is_read_and_its_expanded_size_is_what_counts() {
+    use std::io::Write as _;
+
+    let server = jmap_server(|seen| {
+        let padding = if seen.json()["methodCalls"][0][0] == "Big/get" {
+            1024 * 1024
+        } else {
+            2000
+        };
+        let body = json!({
+            "methodResponses": [["Any/get", {"padding": "x".repeat(padding)}, "c0"]],
+            "sessionState": "s1"
+        })
+        .to_string();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(body.as_bytes()).expect("compresses");
+        let mut answer = Answer::new(
+            200,
+            "application/json",
+            encoder.finish().expect("compresses"),
+        );
+        answer
+            .headers
+            .push(("Content-Encoding".to_owned(), "gzip".to_owned()));
+        answer
+    });
+    let client = builder()
+        .max_response_bytes(64 * 1024)
+        .connect(server.url("/session"))
+        .await
+        .expect("the session loads");
+
+    let mut small = Request::new();
+    small.call_raw("Small/get", json!({}));
+    let response = client.send(&small).await.expect("decompressed");
+    assert_eq!(
+        response.method_responses[0].arguments["padding"]
+            .as_str()
+            .map(str::len),
+        Some(2000)
+    );
+    let seen = server.seen();
+    assert_eq!(
+        seen.last().and_then(|seen| seen.header("accept-encoding")),
+        Some("gzip")
+    );
+
+    // About a kilobyte on the wire, a megabyte expanded.
+    let mut big = Request::new();
+    big.call_raw("Big/get", json!({}));
+    let error = client.send(&big).await.expect_err("over the limit");
+    assert!(error.is_response_too_large(), "{error}");
+}
+
 #[tokio::test]
 async fn an_exchange_that_takes_too_long_times_out() {
     let server = jmap_server(|seen| {

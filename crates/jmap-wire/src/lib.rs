@@ -88,12 +88,16 @@
 #![warn(missing_docs)]
 
 mod auth;
+mod batch;
 pub mod capability;
+mod changes;
 mod client;
 pub mod discovery;
 mod error;
 pub mod mail;
 mod method;
+mod query;
+mod record;
 mod request;
 #[cfg(feature = "reqwest")]
 mod reqwest_transport;
@@ -102,6 +106,8 @@ mod session;
 mod transport;
 
 pub use auth::{Credentials, TokenError, TokenRequest, TokenSource};
+pub use batch::IdBatches;
+pub use changes::{Changes, ChangesObject, ChangesResponse};
 pub use client::{
     Client, ClientBuilder, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_SESSION_BYTES, DEFAULT_TIMEOUT,
     DEFAULT_USER_AGENT,
@@ -114,7 +120,11 @@ pub use method::{
     Get, GetObject, GetResponse, Method, NoArguments, Object, PatchObject, Properties, Set,
     SetArguments, SetObject, SetResponse,
 };
-pub use request::{Call, Invocation, Raw, Request, ResultReference};
+pub use query::{
+    AddedItem, Comparator, Filter, Operator, Query, QueryChanges, QueryChangesResponse,
+    QueryObject, QueryResponse,
+};
+pub use request::{Call, IdsReference, Invocation, Raw, Request, ResultReference};
 #[cfg(feature = "reqwest")]
 pub use reqwest_transport::ReqwestTransport;
 pub use response::Response;

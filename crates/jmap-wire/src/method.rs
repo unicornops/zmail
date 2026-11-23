@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use crate::{
     error::SetError,
-    request::{Argument, ResultReference},
+    request::{Argument, Call, IdsReference, ResultReference},
 };
 
 /// A typed method call: its arguments, as they serialise, and the type
@@ -101,18 +101,21 @@ where
 /// assert_eq!(call.name(), "Identity/get");
 /// # Ok::<(), jmap_wire::Error>(())
 /// ```
+///
+/// A data type's own arguments are methods on its `Get`: see
+/// [`Get<Email>`](crate::mail::Email) for those of `Email/get`.
 #[derive(Debug, Clone)]
 pub struct Get<O: GetObject> {
     account_id: String,
     ids: Option<Argument<Vec<String>>>,
-    properties: Option<Vec<String>>,
+    properties: Option<Argument<Vec<String>>>,
     extra: BTreeMap<String, Value>,
     object: PhantomData<fn() -> O>,
 }
 
 impl<O: GetObject> Get<O> {
     /// A `/get` of every record of the type in the account, with every
-    /// property.
+    /// property. Not every data type allows it: `Email/get` needs ids.
     pub fn new(account_id: impl Into<String>) -> Self {
         Self {
             account_id: account_id.into(),
@@ -123,7 +126,9 @@ impl<O: GetObject> Get<O> {
         }
     }
 
-    /// Only the records with these ids.
+    /// Only the records with these ids. A server takes at most its
+    /// `maxObjectsInGet` in one call ([`IdBatches`](crate::IdBatches)
+    /// splits a longer list).
     pub fn ids(mut self, ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.ids = Some(Argument::Value(ids.into_iter().map(Into::into).collect()));
         self
@@ -131,14 +136,29 @@ impl<O: GetObject> Get<O> {
 
     /// Only the records an earlier call's result names (`#ids`, RFC 8620
     /// section 3.7).
-    pub fn ids_from(mut self, reference: ResultReference) -> Self {
-        self.ids = Some(Argument::Reference(reference));
+    ///
+    /// The references the calls of this crate hand out say which data
+    /// type's ids they are ([`IdsReference`]), so the ids of another
+    /// type do not compile here. A plain [`ResultReference`] is taken
+    /// as it is.
+    pub fn ids_from(mut self, reference: impl Into<IdsReference<O>>) -> Self {
+        self.ids = Some(Argument::Reference(reference.into().into_reference()));
         self
     }
 
     /// Only these properties (the id always comes too).
     pub fn properties(mut self, properties: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.properties = Some(properties.into_iter().map(Into::into).collect());
+        self.properties = Some(Argument::Value(
+            properties.into_iter().map(Into::into).collect(),
+        ));
+        self
+    }
+
+    /// Only the properties an earlier call's result names
+    /// (`#properties`), such as the `updatedProperties` of a
+    /// `Mailbox/changes` (RFC 8621 section 2.2).
+    pub fn properties_from(mut self, reference: ResultReference) -> Self {
+        self.properties = Some(Argument::Reference(reference));
         self
     }
 
@@ -159,8 +179,12 @@ impl<O: GetObject> Serialize for Get<O> {
             Some(Argument::Reference(reference)) => map.serialize_entry("#ids", reference)?,
             None => {}
         }
-        if let Some(properties) = &self.properties {
-            map.serialize_entry("properties", properties)?;
+        match &self.properties {
+            Some(Argument::Value(properties)) => map.serialize_entry("properties", properties)?,
+            Some(Argument::Reference(reference)) => {
+                map.serialize_entry("#properties", reference)?;
+            }
+            None => {}
         }
         for (name, value) in &self.extra {
             map.serialize_entry(name, value)?;
@@ -178,6 +202,21 @@ impl<O: GetObject> Method for Get<O> {
 
     fn using(&self) -> Vec<Cow<'static, str>> {
         vec![Cow::Borrowed(O::CAPABILITY)]
+    }
+}
+
+impl<O: GetObject> Call<Get<O>> {
+    /// A reference to the ids in `property` of every record this call
+    /// returns (`/list/*/{property}`, RFC 8620 section 3.7), to feed a
+    /// later `/get`: the `threadId` of each email, say, or the
+    /// `emailIds` of each thread. `T` is the data type those ids are of;
+    /// the mail types have named methods for this
+    /// ([`thread_ids`](Call::thread_ids), [`email_ids`](Call::email_ids)).
+    pub fn ids_in<T: Object>(&self, property: &str) -> IdsReference<T> {
+        IdsReference::new(self.result_reference(format!(
+            "/list/*/{}",
+            property.replace('~', "~0").replace('/', "~1")
+        )))
     }
 }
 
@@ -199,6 +238,17 @@ pub struct GetResponse<R> {
     /// The ids asked for that are no record.
     #[serde(default, deserialize_with = "null_as_default")]
     pub not_found: Vec<String>,
+}
+
+impl<R> Default for GetResponse<R> {
+    fn default() -> Self {
+        Self {
+            account_id: None,
+            state: None,
+            list: Vec::new(),
+            not_found: Vec::new(),
+        }
+    }
 }
 
 /// The changes to one record in a `/set` update: a *PatchObject* (RFC

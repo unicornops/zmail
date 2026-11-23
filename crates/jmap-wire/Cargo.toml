@@ -12,13 +12,18 @@ categories = ["email", "network-programming", "web-programming::http-client"]
 publish = false
 
 [features]
-default = ["reqwest"]
+default = ["reqwest", "gzip"]
+# Asks for gzip-compressed answers (`Accept-Encoding: gzip`) and
+# decompresses them in the client, whatever the transport, with the
+# response size limit applied to the decompressed size.
+gzip = ["dep:flate2"]
 # The default HTTP transport, on reqwest with rustls. Without it the crate
 # is the protocol core alone, for a transport of your own.
 reqwest = ["dep:reqwest"]
 
 [dependencies]
 base64.workspace = true
+flate2 = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
@@ -26,6 +31,7 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+flate2.workspace = true
 tokio.workspace = true
 
 [lints]

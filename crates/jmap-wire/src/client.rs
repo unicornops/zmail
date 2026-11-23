@@ -9,8 +9,9 @@ use url::Url;
 
 use crate::{
     auth::{Credentials, TokenRequest},
+    batch::IdBatches,
     error::{Error, ProblemDetails, RedirectRefusal},
-    method::Method,
+    method::{Get, GetObject, GetResponse, Method},
     request::Request,
     response::Response,
     session::Session,
@@ -24,7 +25,17 @@ use crate::{
 /// otherwise.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// The largest API response read unless
-/// [`ClientBuilder::max_response_bytes`] says otherwise: 64 MiB.
+/// [`ClientBuilder::max_response_bytes`] says otherwise: 64 MiB, counted
+/// after any decompression.
+///
+/// It is there so that a server, or whoever answers in its place, cannot
+/// make a client hold an answer without bound; it is not a limit a
+/// well-behaved exchange should meet. The largest answers are those of
+/// an `Email/get` with body values, which grow with the number of ids
+/// asked for: [`IdBatches`](crate::IdBatches) asks for fewer when an
+/// answer is over the limit, so that only a single record larger than
+/// the limit cannot be read. Raise it for accounts with such mail, or
+/// bound the answers with `maxBodyValueBytes`.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 /// The largest Session object read: 4 MiB.
 pub const DEFAULT_MAX_SESSION_BYTES: usize = 4 * 1024 * 1024;
@@ -98,7 +109,10 @@ impl ClientBuilder {
     /// The largest API response body to read;
     /// [`DEFAULT_MAX_RESPONSE_BYTES`] unless set. A larger one fails
     /// with a [`TooLarge`](crate::TransportErrorKind::TooLarge)
-    /// transport error instead of being held in memory.
+    /// transport error ([`Error::is_response_too_large`]) instead of
+    /// being held in memory. The limit is on the body as received and,
+    /// when it is compressed, on what it expands to as well, so a small
+    /// compressed answer cannot expand without bound.
     pub fn max_response_bytes(mut self, bytes: usize) -> Self {
         self.config.max_response_bytes = bytes;
         self
@@ -256,9 +270,13 @@ impl<T: HttpTransport> Client<T> {
     ///
     /// [`Error::Transport`] when no response arrives, [`Error::Problem`]
     /// or [`Error::Http`] for an HTTP error status, [`Error::Redirect`]
-    /// for a redirect that is not followed, and [`Error::Json`] when the
-    /// body is not a Response object.
+    /// for a redirect that is not followed, [`Error::Json`] when the
+    /// body is not a Response object, and
+    /// [`Error::InvalidResultReference`], before anything is sent, for
+    /// a result reference that cannot resolve
+    /// ([`Request::check_references`]).
     pub async fn send(&self, request: &Request) -> Result<Response, Error> {
+        request.check_references()?;
         let body = serde_json::to_vec(request).map_err(Error::Encode)?;
         let response = exchange(
             &self.transport,
@@ -283,7 +301,68 @@ impl<T: HttpTransport> Client<T> {
     pub async fn call<M: Method>(&self, method: M) -> Result<M::Response, Error> {
         let mut request = Request::new();
         let call = request.call(method)?;
-        self.send(&request).await?.get(&call)
+        self.send(&request).await?.take(&call)
+    }
+
+    /// Fetches the records `ids` with as many `/get` calls as it takes,
+    /// one request each: `get` makes the call for a batch of ids, and
+    /// `batches` says how many ids a call may have, halving when the
+    /// server refuses a call for its size or the answer is over the
+    /// response size limit ([`IdBatches`]). The answer is the calls'
+    /// answers put together, with the state of the last.
+    ///
+    /// ```no_run
+    /// use jmap_wire::{Get, IdBatches, mail::{Email, EmailProperty}};
+    ///
+    /// # async fn example(
+    /// #     client: &jmap_wire::Client<impl jmap_wire::HttpTransport>,
+    /// #     ids: Vec<String>,
+    /// # ) -> Result<(), jmap_wire::Error> {
+    /// let account = client.primary_account(jmap_wire::capability::MAIL)?;
+    /// // Emails with their bodies are large: no more than 50 per call.
+    /// let mut batches = IdBatches::for_session(client.session()).at_most(50);
+    /// let emails = client
+    ///     .get_in_batches(&ids, &mut batches, |batch| {
+    ///         Get::<Email>::new(account)
+    ///             .ids(batch)
+    ///             .properties([EmailProperty::Subject, EmailProperty::TextBody,
+    ///                          EmailProperty::BodyValues])
+    ///             .fetch_text_body_values(true)
+    ///     })
+    ///     .await?;
+    /// println!("{} of {} emails", emails.list.len(), ids.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The first error that is not answered by asking for fewer; a
+    /// batch that fails for its size with a single id fails with that
+    /// error.
+    pub async fn get_in_batches<O: GetObject>(
+        &self,
+        ids: &[String],
+        batches: &mut IdBatches,
+        mut get: impl FnMut(&[String]) -> Get<O>,
+    ) -> Result<GetResponse<O::Record>, Error> {
+        let mut all = GetResponse::default();
+        let mut pending = ids;
+        while !pending.is_empty() {
+            let batch = batches.next(pending);
+            match self.call(get(batch)).await {
+                Ok(answer) => {
+                    pending = &pending[batch.len()..];
+                    all.account_id = answer.account_id.or(all.account_id);
+                    all.state = answer.state.or(all.state);
+                    all.list.extend(answer.list);
+                    all.not_found.extend(answer.not_found);
+                }
+                Err(error) if batches.shrink(batch.len(), &error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(all)
     }
 }
 
@@ -331,6 +410,8 @@ async fn exchange<T: HttpTransport>(
         if method == HttpMethod::Post {
             headers.push(("content-type".to_owned(), "application/json".to_owned()));
         }
+        #[cfg(feature = "gzip")]
+        headers.push(("accept-encoding".to_owned(), "gzip".to_owned()));
         if let Some(user_agent) = &config.user_agent {
             headers.push(("user-agent".to_owned(), user_agent.clone()));
         }
@@ -359,6 +440,8 @@ async fn exchange<T: HttpTransport>(
         }
 
         if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            #[cfg(feature = "gzip")]
+            let response = gzip::decoded(response, max_response_bytes)?;
             return Ok((response, url));
         }
         let refuse = |to: &Url, reason| Error::Redirect {
@@ -403,4 +486,55 @@ fn success(response: HttpResponse) -> Result<HttpResponse, Error> {
     Err(Error::Http {
         status: response.status,
     })
+}
+
+/// Response bodies sent with `Content-Encoding: gzip` (RFC 9110 section
+/// 8.4.1.3), which the client asks for with `Accept-Encoding: gzip`.
+#[cfg(feature = "gzip")]
+mod gzip {
+    use std::io::Read;
+
+    use crate::{
+        error::{TransportError, TransportErrorKind},
+        transport::HttpResponse,
+    };
+
+    /// `response` with its body decompressed, when its headers say it is
+    /// gzip and it is (a transport whose HTTP library decompressed it
+    /// already may leave the header in place). At most `limit` bytes
+    /// are produced: a body that expands to more is
+    /// [`TransportError::too_large`], however small it was.
+    pub(super) fn decoded(
+        mut response: HttpResponse,
+        limit: usize,
+    ) -> Result<HttpResponse, TransportError> {
+        let gzipped = response.header("content-encoding").is_some_and(|encoding| {
+            let encoding = encoding.trim();
+            encoding.eq_ignore_ascii_case("gzip") || encoding.eq_ignore_ascii_case("x-gzip")
+        });
+        if !gzipped || !response.body.starts_with(&[0x1f, 0x8b]) {
+            return Ok(response);
+        }
+        let mut body = Vec::new();
+        // One byte over the limit shows there is more than the limit.
+        let read = flate2::read::MultiGzDecoder::new(response.body.as_slice())
+            .take(limit as u64 + 1)
+            .read_to_end(&mut body)
+            .map_err(|error| {
+                TransportError::new(
+                    TransportErrorKind::Other,
+                    "the response's gzip encoding could not be read",
+                )
+                .with_source(error)
+            })?;
+        if read > limit {
+            return Err(TransportError::too_large(limit));
+        }
+        response.body = body;
+        response.headers.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("content-encoding")
+                && !name.eq_ignore_ascii_case("content-length")
+        });
+        Ok(response)
+    }
 }
