@@ -4,18 +4,18 @@ mod batches;
 mod changes;
 mod identities;
 mod push;
+mod wording;
 
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result, anyhow, bail};
-use jmap_client::{
-    client::Client,
-    core::{
-        query::QueryResponse,
-        response::{EmailGetResponse, MailboxGetResponse},
+use jmap_client::client::Client;
+use jmap_wire::{
+    Comparator, Filter, Get, Query,
+    mail::{
+        AsRaw, Email, EmailAddress, EmailBodyPart, EmailFilterCondition, EmailProperty,
+        EmailRecord, HeaderProperty, Mailbox, UtcDate,
     },
-    email::{self, Property},
-    mailbox::Role,
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -707,31 +707,23 @@ struct SentCopy {
 /// The emails received since shortly before `since` (Unix seconds; every
 /// email when unknown) whose Message-ID is `message_id` (bare).
 async fn find_copies(
-    client: &Client,
+    client: &Connection,
     message_id: &str,
     since: Option<i64>,
 ) -> Result<Vec<SentCopy>> {
     let mut ids = Vec::new();
     let mut position = 0;
     loop {
-        let mut request = client.build();
-        let query = request.query_email();
-        if let Some(since) = since {
-            query.filter(email::query::Filter::after(since - SUBMISSION_CLOCK_SLACK));
-        }
-        query
-            .sort([email::query::Comparator::received_at().descending()])
-            .position(position)
-            .limit(QUERY_PAGE_SIZE);
-        let mut response: QueryResponse = request
-            .send_query_email()
+        let response = client
+            .call(copies_query(client.account_id(), since, position))
             .await
+            .map_err(wording::reported)
             .context("failed to look for the sent message")?;
-        let batch = response.take_ids();
+        let batch = response.ids;
         if batch.is_empty() {
             break;
         }
-        position += batch.len() as i32;
+        position += batch.len() as i64;
         ids.extend(batch);
     }
 
@@ -739,30 +731,19 @@ async fn find_copies(
     let mut batches = batches::GetBatches::new(client, "email's Message-ID");
     let mut pending = ids.as_slice();
     while !pending.is_empty() {
-        let mut response: EmailGetResponse = batches
+        let response = batches
             .next(&mut pending, |batch| {
-                let mut request = client.build();
-                request.get_email().ids(batch.iter()).properties([
-                    Property::Id,
-                    Property::MessageId,
-                    Property::Keywords,
-                ]);
-                request.send_get_email()
+                client.call(copies_get(client.account_id(), batch))
             })
             .await
             .context("failed to look for the sent message")?;
-        copies.extend(response.take_list().into_iter().filter_map(|email| {
-            let matches = email.message_id().is_some_and(|ids| {
+        copies.extend(response.list.into_iter().filter_map(|email| {
+            let matches = email.message_id.as_ref().is_some_and(|ids| {
                 ids.iter()
                     .any(|id| bare_message_id(id).as_deref() == Some(message_id))
             });
-            let id = email.id().filter(|_| matches)?.to_owned();
-            let has = |keyword: &str| {
-                email
-                    .keywords()
-                    .iter()
-                    .any(|set| set.eq_ignore_ascii_case(keyword))
-            };
+            let id = email.id.clone().filter(|_| matches)?;
+            let has = |keyword: &str| email.has_keyword(keyword);
             Some(SentCopy {
                 id,
                 submitted: has(SUBMITTED),
@@ -771,6 +752,33 @@ async fn find_copies(
         }));
     }
     Ok(copies)
+}
+
+/// The `Email/query` for one page of the emails received since shortly
+/// before `since`, newest first.
+fn copies_query(account_id: &str, since: Option<i64>, position: i64) -> Query<Email> {
+    let mut query = Query::<Email>::new(account_id);
+    if let Some(after) = since.and_then(|since| utc_date(since - SUBMISSION_CLOCK_SLACK)) {
+        query = query.filter(EmailFilterCondition::new().after(after));
+    }
+    query
+        .sort([Comparator::new("receivedAt").descending()])
+        .position(position)
+        .limit(QUERY_PAGE_SIZE as u64)
+}
+
+/// The `Email/get` of the Message-ID and keywords of the emails `ids`.
+fn copies_get(account_id: &str, ids: &[String]) -> Get<Email> {
+    Get::<Email>::new(account_id).ids(ids).properties([
+        EmailProperty::Id,
+        EmailProperty::MessageId,
+        EmailProperty::Keywords,
+    ])
+}
+
+/// A time as the `UTCDate` of a filter: `2026-06-01T00:00:00Z`.
+fn utc_date(seconds: i64) -> Option<UtcDate> {
+    zmail_core::time::Stamp::from_seconds(seconds).map(|stamp| UtcDate::new(stamp.format_utc()))
 }
 
 /// Submits the copy an interrupted send imported and never submitted
@@ -1013,9 +1021,12 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// It holds both clients over one session: `jmap-client` fetches it, and
 /// the `jmap-wire` client is given the same session, with the same
 /// credentials, the same-host redirect rule and the same timeout.
-/// Identities, submission and destroying emails go through `jmap-wire`
-/// ([`Connection::send_first`]); everything else still calls
-/// `jmap-client`, which a `Connection` dereferences to.
+/// Identities, submission and destroying emails
+/// ([`Connection::send_first`]) and every read ([`Connection::call`]:
+/// `Mailbox/get`, `Email/query`, `Email/get`, `Email/changes`) go
+/// through `jmap-wire`. Keyword and mailbox changes, import, blob
+/// download and push still call `jmap-client`, which a `Connection`
+/// dereferences to.
 pub(crate) struct Connection {
     legacy: Client,
     wire: jmap_wire::Client<jmap_wire::ReqwestTransport>,
@@ -1034,6 +1045,20 @@ impl Connection {
     /// that the calls on either client act on the same account.
     pub(crate) fn account_id(&self) -> &str {
         self.legacy.default_account_id()
+    }
+
+    /// The session as `jmap-wire` holds it, for the limits it states.
+    pub(crate) fn wire_session(&self) -> &jmap_wire::Session {
+        self.wire.session()
+    }
+
+    /// Sends one typed call in a request of its own and returns its
+    /// answer. A method-level error is [`jmap_wire::Error::Method`].
+    pub(crate) async fn call<M: jmap_wire::Method>(
+        &self,
+        method: M,
+    ) -> jmap_wire::Result<M::Response> {
+        self.wire.call(method).await
     }
 
     /// Sends `request` and returns the first method response as JSON
@@ -1141,30 +1166,30 @@ fn submission_identities(
         .collect())
 }
 
-async fn fetch_mailboxes(client: &Client) -> Result<(Vec<JmapMailbox>, String)> {
-    let mut request = client.build();
-    request.get_mailbox();
-    let mut response: MailboxGetResponse = request
-        .send_get_mailbox()
+async fn fetch_mailboxes(client: &Connection) -> Result<(Vec<JmapMailbox>, String)> {
+    let response = client
+        .call(mailboxes_get(client.account_id()))
         .await
+        .map_err(wording::reported)
         .context("failed to fetch JMAP mailboxes")?;
-    let state = response.take_state();
+    let state = response.state.unwrap_or_default();
 
-    let list = response.take_list();
+    let list = response.list;
     let names = list
         .iter()
-        .filter_map(|mailbox| Some((mailbox.id()?, mailbox.name()?)))
+        .filter_map(|mailbox| Some((mailbox.id.as_deref()?, mailbox.name.as_deref()?)))
         .collect::<HashMap<_, _>>();
     let mut mailboxes = list
         .iter()
         .filter_map(|mailbox| {
             Some(JmapMailbox {
-                id: mailbox.id()?.to_owned(),
-                name: mailbox.name()?.to_owned(),
-                role: mailbox_role(mailbox.role()),
-                sort_order: mailbox.sort_order(),
+                id: mailbox.id.clone()?,
+                name: mailbox.name.clone()?,
+                role: mailbox_role(mailbox.role.as_ref()),
+                sort_order: mailbox.sort_order.unwrap_or(0),
                 parent: mailbox
-                    .parent_id()
+                    .parent_id
+                    .as_deref()
                     .and_then(|parent_id| names.get(parent_id))
                     .map(|name| (*name).to_owned()),
             })
@@ -1174,18 +1199,22 @@ async fn fetch_mailboxes(client: &Client) -> Result<(Vec<JmapMailbox>, String)> 
     Ok((mailboxes, state))
 }
 
-async fn sent_mailbox_ids(client: &Client) -> Result<Vec<String>> {
-    let mut request = client.build();
-    request.get_mailbox();
-    let mut response: MailboxGetResponse = request
-        .send_get_mailbox()
+/// The `Mailbox/get` of every mailbox of the account.
+fn mailboxes_get(account_id: &str) -> Get<Mailbox> {
+    Get::<Mailbox>::new(account_id)
+}
+
+async fn sent_mailbox_ids(client: &Connection) -> Result<Vec<String>> {
+    let response = client
+        .call(mailboxes_get(client.account_id()))
         .await
+        .map_err(wording::reported)
         .context("failed to fetch JMAP mailboxes for submission")?;
     Ok(response
-        .take_list()
+        .list
         .into_iter()
-        .filter(|mailbox| matches!(mailbox.role(), Role::Sent))
-        .filter_map(|mailbox| mailbox.id().map(str::to_owned))
+        .filter(|mailbox| mailbox_role(mailbox.role.as_ref()).as_deref() == Some("sent"))
+        .filter_map(|mailbox| mailbox.id)
         .collect())
 }
 
@@ -1197,30 +1226,25 @@ async fn resolve_identity_id(client: &Connection, identity_email: &str) -> Resul
         .map(|identity| identity.id))
 }
 
-async fn fetch_email_query(client: &Client) -> Result<JmapQueryResult> {
+async fn fetch_email_query(client: &Connection) -> Result<JmapQueryResult> {
     let mut ids = Vec::new();
     let mut position = 0;
     let mut query_state = None;
 
     loop {
-        let mut request = client.build();
-        request
-            .query_email()
-            .sort([email::query::Comparator::received_at()])
-            .position(position)
-            .limit(QUERY_PAGE_SIZE);
-        let mut response: QueryResponse = request
-            .send_query_email()
+        let response = client
+            .call(sync_query(client.account_id(), position))
             .await
+            .map_err(wording::reported)
             .context("failed to query JMAP emails")?;
         if query_state.is_none() {
-            query_state = Some(response.take_query_state());
+            query_state = Some(response.query_state.unwrap_or_default());
         }
-        let batch = response.take_ids();
+        let batch = response.ids;
         if batch.is_empty() {
             break;
         }
-        position += batch.len() as i32;
+        position += batch.len() as i64;
         ids.extend(batch);
     }
 
@@ -1228,6 +1252,15 @@ async fn fetch_email_query(client: &Client) -> Result<JmapQueryResult> {
         ids,
         query_state: query_state.unwrap_or_default(),
     })
+}
+
+/// The `Email/query` for one page of every email of the account, oldest
+/// first.
+fn sync_query(account_id: &str, position: i64) -> Query<Email> {
+    Query::<Email>::new(account_id)
+        .sort([Comparator::new("receivedAt").ascending()])
+        .position(position)
+        .limit(QUERY_PAGE_SIZE as u64)
 }
 
 /// Searches the account on the server with `Email/query` and returns the
@@ -1254,24 +1287,31 @@ pub async fn search_emails(
     let Some(filter) = search_filter(query, &mailboxes, now) else {
         return Ok(Vec::new());
     };
-    let mut request = client.build();
-    request
-        .query_email()
-        .filter(filter)
-        .sort([email::query::Comparator::received_at().descending()])
-        .limit(max_hits);
-    let mut response: QueryResponse = request
-        .send_query_email()
+    let response = client
+        .call(search_query(client.account_id(), filter, max_hits))
         .await
+        .map_err(wording::reported)
         .context("failed to search JMAP emails")?;
     Ok(response
-        .take_ids()
+        .ids
         .into_iter()
         .map(|id| zmail_core::ServerHitRef {
             mailbox_name: None,
             remote_id: id,
         })
         .collect())
+}
+
+/// The `Email/query` for the newest `max_hits` emails `filter` matches.
+fn search_query(
+    account_id: &str,
+    filter: Filter<EmailFilterCondition>,
+    max_hits: usize,
+) -> Query<Email> {
+    Query::<Email>::new(account_id)
+        .filter(filter)
+        .sort([Comparator::new("receivedAt").descending()])
+        .limit(max_hits as u64)
 }
 
 /// Builds the `Email/query` filter for a query (see [`search_emails`]).
@@ -1281,16 +1321,15 @@ fn search_filter(
     query: &zmail_core::search::SearchQuery,
     mailboxes: &[JmapMailbox],
     now: &zmail_core::time::ZonedDateTime,
-) -> Option<jmap_client::core::query::Filter<email::query::Filter>> {
-    use email::query::Filter;
-    use jmap_client::core::query::Filter as Operator;
+) -> Option<Filter<EmailFilterCondition>> {
     use zmail_core::search::{SearchTerm, day_start_unix, mailbox_matches};
 
+    let condition = EmailFilterCondition::new;
     let today = zmail_core::time::Date::of(now);
     let zone = now.time_zone();
-    let mut conditions: Vec<Operator<Filter>> = Vec::new();
+    let mut conditions: Vec<Filter<EmailFilterCondition>> = Vec::new();
     for clause in &query.clauses {
-        let condition: Operator<Filter> = match &clause.term {
+        let filter: Filter<EmailFilterCondition> = match &clause.term {
             SearchTerm::Text(text)
             | SearchTerm::From(text)
             | SearchTerm::To(text)
@@ -1300,24 +1339,24 @@ fn search_filter(
                 }
                 let value = text.value.clone();
                 match &clause.term {
-                    SearchTerm::Text(_) => Filter::text(value),
-                    SearchTerm::From(_) => Filter::from(value),
-                    SearchTerm::To(_) => Filter::to(value),
-                    _ => Filter::subject(value),
+                    SearchTerm::Text(_) => condition().text(value),
+                    SearchTerm::From(_) => condition().from(value),
+                    SearchTerm::To(_) => condition().to(value),
+                    _ => condition().subject(value),
                 }
                 .into()
             }
-            SearchTerm::HasAttachment => Filter::has_attachment(true).into(),
-            SearchTerm::Unread => Filter::not_keyword("$seen").into(),
-            SearchTerm::Read => Filter::has_keyword("$seen").into(),
-            SearchTerm::Flagged => Filter::has_keyword("$flagged").into(),
+            SearchTerm::HasAttachment => condition().has_attachment(true).into(),
+            SearchTerm::Unread => condition().not_keyword("$seen").into(),
+            SearchTerm::Read => condition().has_keyword("$seen").into(),
+            SearchTerm::Flagged => condition().has_keyword("$flagged").into(),
             SearchTerm::Mailbox(value) => {
                 let ids = mailboxes
                     .iter()
                     .filter(|mailbox| {
                         mailbox_matches(value, &mailbox.name, mailbox.role.as_deref())
                     })
-                    .map(|mailbox| Filter::in_mailbox(mailbox.id.clone()))
+                    .map(|mailbox| condition().in_mailbox(mailbox.id.clone()).into())
                     .collect::<Vec<_>>();
                 if ids.is_empty() {
                     if clause.negated {
@@ -1325,29 +1364,30 @@ fn search_filter(
                     }
                     return None;
                 }
-                Operator::or(ids)
+                Filter::or(ids)
             }
             SearchTerm::Before(spec) | SearchTerm::After(spec) => {
                 let Some(boundary) = spec
                     .resolve(today)
                     .and_then(|day| day_start_unix(day, zone))
+                    .and_then(utc_date)
                 else {
                     continue;
                 };
                 if matches!(clause.term, SearchTerm::Before(_)) {
-                    Filter::before(boundary).into()
+                    condition().before(boundary).into()
                 } else {
-                    Filter::after(boundary).into()
+                    condition().after(boundary).into()
                 }
             }
         };
         conditions.push(if clause.negated {
-            Operator::not([condition])
+            Filter::not([filter])
         } else {
-            condition
+            filter
         });
     }
-    Some(Operator::and(conditions))
+    Some(Filter::and(conditions))
 }
 
 /// Fetches email details, downloading attachment blobs into the store's
@@ -1360,56 +1400,35 @@ fn search_filter(
 /// but the download endpoint returns the same bytes. Failures skip the part
 /// rather than failing the sync, mirroring the IMAP adapter's tolerance.
 pub(crate) async fn fetch_emails(
-    client: &Client,
+    client: &Connection,
     ids: &[String],
     blobs: &BlobStore,
 ) -> Result<Vec<JmapEmail>> {
     let mut emails = Vec::with_capacity(ids.len());
-    let mut properties = vec![
-        Property::Id,
-        Property::ThreadId,
-        Property::MailboxIds,
-        Property::Keywords,
-        Property::From,
-        Property::ReplyTo,
-        Property::To,
-        Property::Subject,
-        Property::Preview,
-        Property::HasAttachment,
-        Property::Attachments,
-        Property::BodyValues,
-        Property::TextBody,
-        Property::HtmlBody,
-        Property::ReceivedAt,
-    ];
-    properties.extend(header_properties());
 
     let mut batches = batches::GetBatches::new(client, "email with its body");
     let mut pending = ids;
     while !pending.is_empty() {
-        let mut response: EmailGetResponse = batches
+        let response = batches
             .next(&mut pending, |batch| {
-                let mut request = client.build();
-                let get_request = request.get_email();
-                get_request.ids(batch.iter()).properties(properties.clone());
-                get_request.arguments().fetch_all_body_values(true);
-                request.send_get_email()
+                client.call(emails_get(client.account_id(), batch))
             })
             .await
             .context("failed to fetch JMAP email details")?;
 
-        for email in response.take_list() {
+        for email in response.list {
             let thread_id = email
-                .thread_id()
-                .map(str::to_owned)
-                .or_else(|| email.id().map(str::to_owned))
+                .thread_id
+                .clone()
+                .or_else(|| email.id.clone())
                 .unwrap_or_else(|| "unknown-thread".to_owned());
             let identity_email = email
-                .from()
+                .from
+                .as_ref()
                 .and_then(|addresses| addresses.first())
-                .map(|address| address.email().to_owned())
+                .map(|address| address.email.clone())
                 .unwrap_or_default();
-            let id = email.id().map(str::to_owned).unwrap_or_default();
+            let id = email.id.clone().unwrap_or_default();
 
             let (body_text, sanitized_html, has_remote_content, hydrated_preview) =
                 extract_renderable_bodies(&email);
@@ -1417,27 +1436,33 @@ pub(crate) async fn fetch_emails(
             emails.push(JmapEmail {
                 id,
                 thread_id,
-                mailbox_ids: email.mailbox_ids().into_iter().map(str::to_owned).collect(),
-                from: format_jmap_addresses(email.from()),
-                reply_to: match format_jmap_addresses(email.reply_to()) {
+                mailbox_ids: members(email.mailbox_ids.as_ref()),
+                from: format_jmap_addresses(email.from.as_deref()),
+                reply_to: match format_jmap_addresses(email.reply_to.as_deref()) {
                     value if value == "Unknown" => None,
                     value => Some(value),
                 },
-                recipients: format_jmap_addresses(email.to()),
-                subject: email.subject().unwrap_or("(no subject)").to_owned(),
+                recipients: format_jmap_addresses(email.to.as_deref()),
+                subject: email
+                    .subject
+                    .as_deref()
+                    .unwrap_or("(no subject)")
+                    .to_owned(),
                 preview: hydrated_preview
-                    .or_else(|| email.preview().map(str::to_owned))
+                    .or_else(|| email.preview.clone())
                     .unwrap_or_else(|| "No preview available.".to_owned()),
                 body_text,
                 sanitized_html,
                 raw_html: raw_html_body(&email),
                 received_at: email
-                    .received_at()
+                    .received_at
+                    .as_ref()
+                    .and_then(received_seconds)
                     .map(timestamp_to_rfc3339)
                     .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),
-                unread: !email.keywords().contains(&"$seen"),
-                flagged: email.keywords().contains(&"$flagged"),
-                has_attachments: email.has_attachment()
+                unread: !has_keyword(&email, "$seen"),
+                flagged: has_keyword(&email, "$flagged"),
+                has_attachments: email.has_attachment.unwrap_or(false)
                     || attachments.iter().any(|attachment| !attachment.inline_only),
                 has_remote_content,
                 identity_email,
@@ -1450,16 +1475,69 @@ pub(crate) async fn fetch_emails(
     Ok(emails)
 }
 
+/// The `Email/get` of the emails `ids` with everything a sync stores:
+/// the metadata, the header fields, the body parts and the text of every
+/// text part.
+fn emails_get(account_id: &str, ids: &[String]) -> Get<Email> {
+    let mut properties = vec![
+        EmailProperty::Id,
+        EmailProperty::ThreadId,
+        EmailProperty::MailboxIds,
+        EmailProperty::Keywords,
+        EmailProperty::From,
+        EmailProperty::ReplyTo,
+        EmailProperty::To,
+        EmailProperty::Subject,
+        EmailProperty::Preview,
+        EmailProperty::HasAttachment,
+        EmailProperty::Attachments,
+        EmailProperty::BodyValues,
+        EmailProperty::TextBody,
+        EmailProperty::HtmlBody,
+        EmailProperty::ReceivedAt,
+    ];
+    properties.extend(header_properties());
+    Get::<Email>::new(account_id)
+        .ids(ids)
+        .properties(properties)
+        .fetch_all_body_values(true)
+}
+
+/// The members of a JMAP set (ids or keywords mapped to `true`).
+pub(crate) fn members(set: Option<&BTreeMap<String, bool>>) -> Vec<String> {
+    set.into_iter()
+        .flatten()
+        .filter(|(_, member)| **member)
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Whether the email has `keyword`, written exactly so: servers return
+/// keywords in lower case (RFC 8621 section 4.1.1).
+pub(crate) fn has_keyword(email: &EmailRecord, keyword: &str) -> bool {
+    email
+        .keywords
+        .as_ref()
+        .and_then(|keywords| keywords.get(keyword))
+        .copied()
+        .unwrap_or(false)
+}
+
+/// A `receivedAt` as Unix seconds, when it is a date.
+fn received_seconds(date: &UtcDate) -> Option<i64> {
+    zmail_core::time::parse_timestamp(date.as_str()).map(zmail_core::time::Stamp::seconds)
+}
+
 /// The `Email/get` properties [`email_headers`] reads: the threading ids,
 /// Cc, and the raw `Delivered-To` and `X-Original-To` header fields.
-fn header_properties() -> Vec<Property> {
+fn header_properties() -> Vec<EmailProperty> {
     vec![
-        Property::MessageId,
-        Property::InReplyTo,
-        Property::References,
-        Property::Cc,
-        Property::Header(email::Header::as_raw(DELIVERED_TO, true)),
-        Property::Header(email::Header::as_raw(ORIGINAL_TO, true)),
+        EmailProperty::MessageId,
+        EmailProperty::InReplyTo,
+        EmailProperty::References,
+        EmailProperty::Cc,
+        HeaderProperty::raw(DELIVERED_TO).all().into(),
+        HeaderProperty::raw(ORIGINAL_TO).all().into(),
     ]
 }
 
@@ -1468,22 +1546,17 @@ const ORIGINAL_TO: &str = "X-Original-To";
 
 /// The headers a reply is worked out from, from an email fetched with
 /// [`header_properties`].
-fn email_headers(email: &jmap_client::email::Email) -> MessageHeaders {
-    let ids = |values: Option<&[String]>| -> Vec<String> {
+fn email_headers(email: &EmailRecord) -> MessageHeaders {
+    let ids = |values: Option<&Vec<String>>| -> Vec<String> {
         values
-            .unwrap_or_default()
-            .iter()
+            .into_iter()
+            .flatten()
             .filter_map(|id| bare_message_id(id))
             .collect()
     };
     let mut delivered_to: Vec<String> = Vec::new();
     for name in [DELIVERED_TO, ORIGINAL_TO] {
-        let raw = match email.header(&email::Header::as_raw(name, true)) {
-            Some(email::HeaderValue::AsTextAll(values)) => values.clone(),
-            Some(email::HeaderValue::AsText(value)) => vec![value.clone()],
-            _ => Vec::new(),
-        };
-        for value in raw {
+        for value in email.header_all::<AsRaw>(name).unwrap_or_default() {
             let address = value.trim().trim_start_matches('<').trim_end_matches('>');
             if address.contains('@')
                 && !address.contains(char::is_whitespace)
@@ -1497,10 +1570,10 @@ fn email_headers(email: &jmap_client::email::Email) -> MessageHeaders {
     }
     MessageHeaders {
         captured: true,
-        message_id: ids(email.message_id()).into_iter().next(),
-        in_reply_to: ids(email.in_reply_to()),
-        references: ids(email.references()),
-        cc: match format_jmap_addresses(email.cc()) {
+        message_id: ids(email.message_id.as_ref()).into_iter().next(),
+        in_reply_to: ids(email.in_reply_to.as_ref()),
+        references: ids(email.references.as_ref()),
+        cc: match format_jmap_addresses(email.cc.as_deref()) {
             value if value == "Unknown" => String::new(),
             value => value,
         },
@@ -1524,30 +1597,32 @@ pub async fn fetch_message_headers(
         return Ok(Vec::new());
     }
     let client = connect_client(&target.endpoint, &target.username, secret, target.auth).await?;
-    let mut properties = vec![Property::Id];
-    properties.extend(header_properties());
     let mut headers = Vec::with_capacity(ids.len());
     let mut batches = batches::GetBatches::new(&client, "email's headers");
     let mut pending = ids;
     while !pending.is_empty() {
-        let mut response: EmailGetResponse = batches
+        let response = batches
             .next(&mut pending, |batch| {
-                let mut request = client.build();
-                request
-                    .get_email()
-                    .ids(batch.iter())
-                    .properties(properties.clone());
-                request.send_get_email()
+                client.call(headers_get(client.account_id(), batch))
             })
             .await
             .context("failed to fetch JMAP email headers")?;
-        for email in response.take_list() {
-            if let Some(id) = email.id() {
-                headers.push((id.to_owned(), email_headers(&email)));
+        for email in response.list {
+            if let Some(id) = &email.id {
+                headers.push((id.clone(), email_headers(&email)));
             }
         }
     }
     Ok(headers)
+}
+
+/// The `Email/get` of the reply headers of the emails `ids`.
+fn headers_get(account_id: &str, ids: &[String]) -> Get<Email> {
+    let mut properties = vec![EmailProperty::Id];
+    properties.extend(header_properties());
+    Get::<Email>::new(account_id)
+        .ids(ids)
+        .properties(properties)
 }
 
 /// Downloads one email's attachment parts into the blob directory.
@@ -1556,12 +1631,12 @@ pub async fn fetch_message_headers(
 /// are skipped so a single bad part never fails the account sync.
 async fn download_attachments(
     client: &Client,
-    email: &jmap_client::email::Email,
+    email: &EmailRecord,
     email_id: &str,
     blobs: &BlobStore,
 ) -> Vec<MessageAttachment> {
     let mut attachments = Vec::new();
-    let Some(parts) = email.attachments() else {
+    let Some(parts) = email.attachments.as_deref() else {
         return attachments;
     };
     if parts.is_empty() {
@@ -1572,14 +1647,15 @@ async fn download_attachments(
         if attachments.len() >= MAX_ATTACHMENTS_PER_MESSAGE {
             break;
         }
-        let Some(blob_id) = part.blob_id() else {
+        let Some(blob_id) = part.blob_id.as_deref() else {
             continue;
         };
-        if part.size() > MAX_ATTACHMENT_BYTES {
+        if part.size.unwrap_or(0) > MAX_ATTACHMENT_BYTES as u64 {
             continue;
         }
         let content_id = part
-            .content_id()
+            .cid
+            .as_deref()
             .map(|content_id| {
                 content_id
                     .trim()
@@ -1591,10 +1667,7 @@ async fn download_attachments(
             .filter(|content_id| !content_id.is_empty());
         // A part without a name is kept only for its Content-ID, so HTML
         // can show it through `cid:` (ADR 0006); it is not listed.
-        let named = part
-            .name()
-            .map(str::to_owned)
-            .filter(|name| !name.trim().is_empty());
+        let named = part.name.clone().filter(|name| !name.trim().is_empty());
         let inline_only = named.is_none();
         let Some(filename) = named.or_else(|| content_id.clone()) else {
             continue;
@@ -1617,8 +1690,8 @@ async fn download_attachments(
         attachments.push(MessageAttachment {
             filename,
             content_type: part
-                .content_type()
-                .map(str::to_owned)
+                .content_type
+                .clone()
                 .unwrap_or_else(|| "application/octet-stream".to_owned()),
             size_bytes: contents.len() as u64,
             storage_path,
@@ -1779,10 +1852,10 @@ struct MailboxAccumulator {
 /// part is stored sanitized and its remote references are flagged. HTML is
 /// never stored as `body_text`, so it is never shown raw.
 fn extract_renderable_bodies(
-    email: &jmap_client::email::Email,
+    email: &EmailRecord,
 ) -> (Option<String>, Option<String>, bool, Option<String>) {
-    let text_parts = email.text_body().unwrap_or_default();
-    let html_parts = email.html_body().unwrap_or_default();
+    let text_parts = email.text_body.as_deref().unwrap_or_default();
+    let html_parts = email.html_body.as_deref().unwrap_or_default();
 
     let text_body = body_value_of_type(text_parts.iter().chain(html_parts), email, "text/plain")
         .map(normalize_body_text)
@@ -1818,9 +1891,9 @@ fn extract_renderable_bodies(
 
 /// The original `text/html` part, kept for HTML renderers (ADR 0006)
 /// even when the message also has a plain-text part.
-fn raw_html_body(email: &jmap_client::email::Email) -> Option<String> {
-    let text_parts = email.text_body().unwrap_or_default();
-    let html_parts = email.html_body().unwrap_or_default();
+fn raw_html_body(email: &EmailRecord) -> Option<String> {
+    let text_parts = email.text_body.as_deref().unwrap_or_default();
+    let html_parts = email.html_body.as_deref().unwrap_or_default();
     body_value_of_type(html_parts.iter().chain(text_parts), email, "text/html")
         .filter(|value| !value.trim().is_empty())
 }
@@ -1831,14 +1904,14 @@ fn raw_html_body(email: &jmap_client::email::Email) -> Option<String> {
 /// A part without a `type` is `text/plain`, the MIME default (RFC 2045
 /// section 5.2). Parameters and letter case are ignored.
 fn body_value_of_type<'a>(
-    parts: impl IntoIterator<Item = &'a jmap_client::email::EmailBodyPart>,
-    email: &jmap_client::email::Email,
+    parts: impl IntoIterator<Item = &'a EmailBodyPart>,
+    email: &EmailRecord,
     media_type: &str,
 ) -> Option<String> {
     parts
         .into_iter()
         .filter(|part| {
-            let content_type = part.content_type().unwrap_or("text/plain");
+            let content_type = part.content_type.as_deref().unwrap_or("text/plain");
             content_type
                 .split(';')
                 .next()
@@ -1846,8 +1919,10 @@ fn body_value_of_type<'a>(
                 .trim()
                 .eq_ignore_ascii_case(media_type)
         })
-        .find_map(|part| part.part_id().and_then(|part_id| email.body_value(part_id)))
-        .map(|value| value.value().to_owned())
+        .find_map(|part| {
+            let part_id = part.part_id.as_deref()?;
+            email.body_value(part_id)?.value.clone()
+        })
 }
 
 fn normalize_body_text(text: String) -> String {
@@ -1872,15 +1947,15 @@ fn excerpt(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn format_jmap_addresses(addresses: Option<&[jmap_client::email::EmailAddress]>) -> String {
+fn format_jmap_addresses(addresses: Option<&[EmailAddress]>) -> String {
     match addresses {
         Some(addresses) if !addresses.is_empty() => addresses
             .iter()
-            .map(|address| match address.name() {
+            .map(|address| match address.name.as_deref() {
                 Some(name) if !name.trim().is_empty() => {
-                    format!("{name} <{}>", address.email())
+                    format!("{name} <{}>", address.email)
                 }
-                _ => address.email().to_owned(),
+                _ => address.email.clone(),
             })
             .collect::<Vec<_>>()
             .join(", "),
@@ -1899,18 +1974,10 @@ fn all_recipients(message: &OutgoingMessage) -> Vec<String> {
         .collect()
 }
 
-fn mailbox_role(role: jmap_client::mailbox::Role) -> Option<String> {
-    match role {
-        jmap_client::mailbox::Role::Archive => Some("archive".to_owned()),
-        jmap_client::mailbox::Role::Drafts => Some("drafts".to_owned()),
-        jmap_client::mailbox::Role::Important => Some("important".to_owned()),
-        jmap_client::mailbox::Role::Inbox => Some("inbox".to_owned()),
-        jmap_client::mailbox::Role::Junk => Some("junk".to_owned()),
-        jmap_client::mailbox::Role::Sent => Some("sent".to_owned()),
-        jmap_client::mailbox::Role::Trash => Some("trash".to_owned()),
-        jmap_client::mailbox::Role::Other(value) => Some(value.to_ascii_lowercase()),
-        jmap_client::mailbox::Role::None => None,
-    }
+/// A mailbox's role as the mirror stores it: in lower case, whatever
+/// case the server wrote it in.
+fn mailbox_role(role: Option<&jmap_wire::mail::Role>) -> Option<String> {
+    role.map(|role| role.as_str().to_ascii_lowercase())
 }
 
 fn timestamp_to_rfc3339(timestamp: i64) -> String {
@@ -2093,7 +2160,7 @@ mod tests {
         text_body: serde_json::Value,
         html_body: serde_json::Value,
         body_values: serde_json::Value,
-    ) -> jmap_client::email::Email {
+    ) -> jmap_wire::mail::EmailRecord {
         serde_json::from_value(json!({
             "id": "M1",
             "textBody": text_body,
@@ -2131,7 +2198,7 @@ mod tests {
 
     #[test]
     fn reply_headers_come_from_the_email_properties() {
-        let email: jmap_client::email::Email = serde_json::from_value(json!({
+        let email: jmap_wire::mail::EmailRecord = serde_json::from_value(json!({
             "id": "M2",
             "messageId": ["reply-2@example.test"],
             "inReplyTo": ["reply-1@example.test"],

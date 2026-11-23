@@ -10,10 +10,16 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use jmap_client::{client::Client, core::response::EmailGetResponse, email::Property};
+use jmap_wire::{
+    Changes, Get,
+    mail::{Email, EmailProperty},
+};
 use zmail_core::{BlobStore, MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
 
-use crate::{JmapMailbox, batches::GetBatches, fetch_emails, message_snapshot};
+use crate::{
+    Connection, JmapMailbox, batches::GetBatches, fetch_emails, has_keyword, members,
+    message_snapshot, wording,
+};
 
 /// Changes requested per `Email/changes` call.
 const MAX_CHANGES_PER_CALL: usize = 500;
@@ -37,7 +43,7 @@ pub(crate) struct IncrementalSync {
 /// than a full sync, or the stored mailbox ids no longer map one to one
 /// onto the mirror's mailboxes.
 pub(crate) async fn sync_email_changes(
-    client: &Client,
+    client: &Connection,
     since_state: &str,
     previous_mailbox_ids: &BTreeMap<String, String>,
     details: &[JmapMailbox],
@@ -108,14 +114,18 @@ pub(crate) async fn sync_email_changes(
 ///
 /// The full sync records this before it queries, so changes that land
 /// while it runs are reported by the next `Email/changes` instead of lost.
-pub(crate) async fn fetch_email_state(client: &Client) -> Result<String> {
-    let mut request = client.build();
-    request.get_email().ids(Vec::<String>::new());
-    let mut response: EmailGetResponse = request
-        .send_get_email()
+pub(crate) async fn fetch_email_state(client: &Connection) -> Result<String> {
+    let response = client
+        .call(email_state_get(client.account_id()))
         .await
+        .map_err(wording::reported)
         .context("failed to read the JMAP Email state")?;
-    Ok(response.take_state())
+    Ok(response.state.unwrap_or_default())
+}
+
+/// An `Email/get` of no emails, whose answer has the `Email` state.
+pub(crate) fn email_state_get(account_id: &str) -> Get<Email> {
+    Get::<Email>::new(account_id).ids(Vec::<String>::new())
 }
 
 #[derive(Debug, Default)]
@@ -130,27 +140,35 @@ struct EmailChanges {
 ///
 /// Method errors (`cannotCalculateChanges` and friends) return `None` so
 /// the caller falls back to a full sync; transport errors fail the sync.
-async fn fetch_email_changes(client: &Client, since_state: &str) -> Result<Option<EmailChanges>> {
+async fn fetch_email_changes(
+    client: &Connection,
+    since_state: &str,
+) -> Result<Option<EmailChanges>> {
     let mut changes = EmailChanges {
         new_state: since_state.to_owned(),
         ..EmailChanges::default()
     };
     loop {
-        let mut response = match client
-            .email_changes(changes.new_state.clone(), Some(MAX_CHANGES_PER_CALL))
+        let response = match client
+            .call(email_changes(client.account_id(), &changes.new_state))
             .await
         {
             Ok(response) => response,
-            Err(jmap_client::Error::Method(_)) => return Ok(None),
-            Err(error) => return Err(error).context("failed to fetch JMAP Email changes"),
+            Err(jmap_wire::Error::Method(_)) => return Ok(None),
+            Err(error) => {
+                return Err(wording::reported(error)).context("failed to fetch JMAP Email changes");
+            }
         };
-        changes.created.extend(response.take_created());
-        changes.updated.extend(response.take_updated());
-        changes.destroyed.extend(response.take_destroyed());
-        let more = response.has_more_changes();
-        let new_state = response.take_new_state();
-        // A server that reports more changes without advancing the state
-        // would loop forever; the full sync is the safe answer.
+        changes.created.extend(response.created);
+        changes.updated.extend(response.updated);
+        changes.destroyed.extend(response.destroyed);
+        let more = response.has_more_changes;
+        // A server that names no new state, or reports more changes
+        // without advancing the state, would loop forever; the full sync
+        // is the safe answer.
+        let Some(new_state) = response.new_state else {
+            return Ok(None);
+        };
         if more && new_state == changes.new_state {
             return Ok(None);
         }
@@ -165,6 +183,11 @@ async fn fetch_email_changes(client: &Client, since_state: &str) -> Result<Optio
     }
 }
 
+/// The `Email/changes` since `since_state`.
+pub(crate) fn email_changes(account_id: &str, since_state: &str) -> Changes<Email> {
+    Changes::<Email>::new(account_id, since_state).max_changes(MAX_CHANGES_PER_CALL as u64)
+}
+
 /// The few properties that change on an existing email.
 #[derive(Debug)]
 struct EmailUpdate {
@@ -176,42 +199,42 @@ struct EmailUpdate {
     has_attachments: bool,
 }
 
-async fn fetch_email_updates(client: &Client, ids: &[String]) -> Result<Vec<EmailUpdate>> {
-    let properties = vec![
-        Property::Id,
-        Property::ThreadId,
-        Property::MailboxIds,
-        Property::Keywords,
-        Property::HasAttachment,
-    ];
+async fn fetch_email_updates(client: &Connection, ids: &[String]) -> Result<Vec<EmailUpdate>> {
     let mut updates = Vec::with_capacity(ids.len());
     let mut batches = GetBatches::new(client, "changed email");
     let mut pending = ids;
     while !pending.is_empty() {
-        let mut response: EmailGetResponse = batches
+        let response = batches
             .next(&mut pending, |batch| {
-                let mut request = client.build();
-                request
-                    .get_email()
-                    .ids(batch.iter())
-                    .properties(properties.clone());
-                request.send_get_email()
+                client.call(updates_get(client.account_id(), batch))
             })
             .await
             .context("failed to fetch changed JMAP emails")?;
-        updates.extend(response.take_list().into_iter().filter_map(|email| {
-            let id = email.id()?.to_owned();
+        updates.extend(response.list.into_iter().filter_map(|email| {
+            let id = email.id.clone()?;
             Some(EmailUpdate {
-                thread_id: email.thread_id().unwrap_or(&id).to_owned(),
-                mailbox_ids: email.mailbox_ids().into_iter().map(str::to_owned).collect(),
-                unread: !email.keywords().contains(&"$seen"),
-                flagged: email.keywords().contains(&"$flagged"),
-                has_attachments: email.has_attachment(),
+                thread_id: email.thread_id.clone().unwrap_or_else(|| id.clone()),
+                mailbox_ids: members(email.mailbox_ids.as_ref()),
+                unread: !has_keyword(&email, "$seen"),
+                flagged: has_keyword(&email, "$flagged"),
+                has_attachments: email.has_attachment.unwrap_or(false),
                 id,
             })
         }));
     }
     Ok(updates)
+}
+
+/// The `Email/get` of the few properties that change on the emails
+/// `ids`.
+pub(crate) fn updates_get(account_id: &str, ids: &[String]) -> Get<Email> {
+    Get::<Email>::new(account_id).ids(ids).properties([
+        EmailProperty::Id,
+        EmailProperty::ThreadId,
+        EmailProperty::MailboxIds,
+        EmailProperty::Keywords,
+        EmailProperty::HasAttachment,
+    ])
 }
 
 /// An email to (re)insert into every mailbox it belongs to.

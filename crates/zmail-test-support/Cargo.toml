@@ -37,6 +37,9 @@ crossterm.workspace = true
 url.workspace = true
 zmail-autodiscover = { path = "../zmail-autodiscover" }
 zmail-tui = { path = "../zmail-tui" }
+# The live JMAP tests also read James with the JMAP library alone, to
+# check its decoding against a real server without Zmail's adapter.
+jmap-wire = { path = "../jmap-wire" }
 # The reply tests start their drafts as both frontends do.
 zmail-actions = { path = "../zmail-actions" }
 

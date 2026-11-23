@@ -1,7 +1,8 @@
 //! What the read path stores for recorded server answers, pinned while
 //! the reads moved from `jmap-client` to `jmap-wire` (ADR 0008, step 2,
 //! #132): written and passing against `jmap-client` first, then kept
-//! unchanged across the move.
+//! unchanged across the move. It stays as the regression test of the
+//! mapping from JMAP answers to what the store is given.
 //!
 //! A server on loopback replays the answers under
 //! `crates/jmap-wire/tests/fixtures/<server>` (a directory is replayed
@@ -404,9 +405,12 @@ fn assert_pinned(name: &str, actual: &str) {
         std::fs::write(&path, actual).expect("the pinned text is written");
         return;
     }
-    let pinned = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!("{path:?}: {error}; run with ZMAIL_UPDATE_SNAPSHOTS=1 to write it")
-    });
+    // A checkout that turned the line ends into CRLF pins the same text.
+    let pinned = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| {
+            panic!("{path:?}: {error}; run with ZMAIL_UPDATE_SNAPSHOTS=1 to write it")
+        })
+        .replace("\r\n", "\n");
     assert!(
         pinned == actual,
         "{name} differs from what is pinned.\n--- pinned\n{pinned}\n--- now\n{actual}"

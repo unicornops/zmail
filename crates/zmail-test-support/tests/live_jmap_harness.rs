@@ -2194,6 +2194,9 @@ fn james_answers_the_read_calls_for_the_jmap_wire_fixtures() -> Result<()> {
             .wait_for_email(message_id, |email| has_message_id(email, message_id))
             .map(|email| email["id"].as_str().unwrap_or_default().to_owned())
     };
+    // With the probes, more emails than James returns with their bodies
+    // in one call.
+    deliver_numbered(&james, "jmap-wire filler", 4)?;
     let mixed = probe("jmap-wire-probe-mixed@phase2b.test")?;
     let html = probe("jmap-wire-probe-html@phase2b.test")?;
     let bare = probe("jmap-wire-probe-bare@phase2b.test")?;
@@ -2407,7 +2410,160 @@ fn james_answers_the_read_calls_for_the_jmap_wire_fixtures() -> Result<()> {
                        "properties": ["subject", "threadId"]}, "c1"]
     ]))?;
     println!("JMAP-WIRE-FIXTURE chained.query-get {chained}");
-    Ok(())
+
+    let seven = all_ids["methodResponses"][0][1]["ids"]
+        .as_array()
+        .map(|ids| ids.iter().take(7).cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    read_the_probes_with_jmap_wire(&seven)
+}
+
+/// Reads the probe messages with `jmap-wire` alone, over its own client:
+/// the mailboxes, then a query and a get of what it finds in one
+/// request, and the changes since the state that get reported.
+fn read_the_probes_with_jmap_wire(seven: &[serde_json::Value]) -> Result<()> {
+    use jmap_wire::{
+        Changes, Client, Comparator, Credentials, Get, IdBatches, Query, Request, capability,
+        mail::{Email, EmailFilterCondition, EmailProperty, HeaderProperty, Mailbox, Role, Thread},
+    };
+
+    let runtime = Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let client = Client::builder()
+            .credentials(Credentials::basic(
+                MAIL_HARNESS_JMAP_ACCOUNT,
+                MAIL_HARNESS_JMAP_PASSWORD,
+            ))
+            .connect(format!("{MAIL_HARNESS_JMAP_ENDPOINT}/.well-known/jmap").parse()?)
+            .await?;
+        let account = client.primary_account(capability::MAIL)?.to_owned();
+        ensure!(
+            client
+                .session()
+                .core()
+                .and_then(|core| core.max_objects_in_get)
+                .is_some(),
+            "James states maxObjectsInGet"
+        );
+
+        let mailboxes = client.call(Get::<Mailbox>::new(&account)).await?;
+        let inbox = mailboxes
+            .list
+            .iter()
+            .find(|mailbox| mailbox.role == Some(Role::Inbox))
+            .and_then(|mailbox| mailbox.id.clone())
+            .context("James has an inbox")?;
+
+        // The idiomatic read: a query, the emails it finds and their
+        // threads, in one request.
+        let mut request = Request::new();
+        let query = request.call(
+            Query::<Email>::new(&account)
+                .filter(
+                    EmailFilterCondition::new()
+                        .in_mailbox(&inbox)
+                        .subject("jmap-wire probe"),
+                )
+                .sort([Comparator::new("receivedAt").descending()])
+                .limit(10),
+        )?;
+        let emails = request.call(
+            Get::<Email>::new(&account)
+                .ids_from(query.ids())
+                .properties([
+                    EmailProperty::ThreadId,
+                    EmailProperty::MailboxIds,
+                    EmailProperty::Subject,
+                    EmailProperty::From,
+                    EmailProperty::ReceivedAt,
+                    EmailProperty::TextBody,
+                    EmailProperty::HtmlBody,
+                    EmailProperty::Attachments,
+                    EmailProperty::BodyValues,
+                    HeaderProperty::message_ids("Message-ID").into(),
+                ])
+                .fetch_all_body_values(true)
+                .max_body_value_bytes(16),
+        )?;
+        let threads = request.call(Get::<Thread>::new(&account).ids_from(emails.thread_ids()))?;
+        let mut response = client.send(&request).await?;
+        let found = response.get(&query)?.ids;
+        let state = response.get(&emails)?.state;
+        let emails = response.take(&emails)?.list;
+        let threads = response.take(&threads)?.list;
+        ensure!(found.len() >= 2, "the query finds the probes: {found:?}");
+        ensure!(emails.len() == found.len(), "every email found is returned");
+        ensure!(!threads.is_empty(), "the emails' threads are returned");
+        for email in &emails {
+            ensure!(
+                email.mailbox_list().contains(&inbox.as_str()),
+                "each probe is in the inbox: {email:?}"
+            );
+            ensure!(
+                email.received_at.is_some() && email.thread_id.is_some(),
+                "the properties asked for are returned: {email:?}"
+            );
+        }
+        let html_only = emails
+            .iter()
+            .find(|email| email.subject.as_deref() == Some("jmap-wire probe html only"))
+            .context("the HTML-only probe is among them")?;
+        let part = html_only
+            .text_body
+            .as_ref()
+            .and_then(|parts| parts.first())
+            .context("it has a text body part")?;
+        ensure!(
+            part.content_type.as_deref() == Some("text/html"),
+            "RFC 8621 section 4.1.4: with no text/plain the HTML part is the text body: {part:?}"
+        );
+        let value = part
+            .part_id
+            .as_deref()
+            .and_then(|part_id| html_only.body_value(part_id))
+            .context("its text was fetched")?;
+        ensure!(
+            value.is_truncated() && value.value.as_ref().is_some_and(|text| text.len() <= 16),
+            "maxBodyValueBytes cuts the value off and says so: {value:?}"
+        );
+        ensure!(
+            html_only
+                .header::<jmap_wire::mail::AsMessageIds>("message-id")
+                .is_some_and(|ids| ids == ["jmap-wire-probe-html@phase2b.test"]),
+            "a header field is read in the form it was fetched in: {:?}",
+            html_only.extra
+        );
+
+        // Nothing changed since that answer's state.
+        let state = state.context("James states the Email state")?;
+        let changes = client
+            .call(Changes::<Email>::new(&account, state).max_changes(50))
+            .await?;
+        ensure!(changes.new_state.is_some(), "the changes name a new state");
+
+        // More emails with their bodies than James returns in one call.
+        let ids = seven
+            .iter()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        ensure!(ids.len() == 7, "the account holds seven emails: {ids:?}");
+        let mut batches = IdBatches::for_session(client.session());
+        let fetched = client
+            .get_in_batches(&ids, &mut batches, |batch| {
+                Get::<Email>::new(&account)
+                    .ids(batch)
+                    .properties([EmailProperty::Subject, EmailProperty::BodyValues])
+                    .fetch_all_body_values(true)
+            })
+            .await?;
+        ensure!(
+            fetched.list.len() == 7 && batches.size() <= 5,
+            "the batches halve to what James takes: {} emails, batches of {}",
+            fetched.list.len(),
+            batches.size()
+        );
+        Ok(())
+    })
 }
 
 impl James {
