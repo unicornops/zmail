@@ -9,11 +9,13 @@ use serde_json::Value;
 
 use super::{
     Date, Thread, UtcDate,
+    email_set::{EmailCopy, NewEmail},
     header::{self, HeaderProperty, ParsedForm},
 };
 use crate::{
     capability,
     changes::ChangesObject,
+    copy::CopyObject,
     method::{Get, GetObject, NoArguments, Object, Properties, SetObject, null_as_default},
     query::{Query, QueryChanges, QueryObject},
     record::record,
@@ -71,19 +73,50 @@ use crate::{
 ///
 /// # Changing
 ///
-/// `Email/set` creates, updates (a [`PatchObject`](crate::PatchObject)
-/// on `keywords` and `mailboxIds`, mostly) and destroys emails:
+/// `Email/set` (section 4.6) creates emails ([`NewEmail`]), updates
+/// them ([`EmailUpdate`](super::EmailUpdate): keywords and mailboxes,
+/// which are all of an email that can change) and destroys them, in one
+/// call:
 ///
 /// ```
-/// use jmap_wire::{Request, Set, capability, mail::Email};
+/// use jmap_wire::{Request, Set, capability, mail::{Email, EmailUpdate}};
+/// use serde_json::json;
 ///
 /// let mut set = Set::<Email>::new("u1");
-/// set.destroy(["M1", "M2"]);
+/// // Read, and from the inbox into the archive.
+/// set.update(
+///     "M1",
+///     EmailUpdate::new()
+///         .set_keyword("$seen")
+///         .remove_from_mailbox("inbox")
+///         .add_to_mailbox("archive"),
+/// );
+/// // Unread again: a keyword is cleared with null, never false.
+/// set.update("M2", EmailUpdate::new().clear_keyword("$seen"));
+/// set.destroy(["M3"]);
+/// assert_eq!(
+///     serde_json::to_value(&set)?,
+///     json!({
+///         "accountId": "u1",
+///         "update": {
+///             "M1": {"keywords/$seen": true, "mailboxIds/inbox": null,
+///                    "mailboxIds/archive": true},
+///             "M2": {"keywords/$seen": null}
+///         },
+///         "destroy": ["M3"]
+///     })
+/// );
 /// let mut request = Request::new();
 /// request.call(set)?;
 /// assert_eq!(request.using(), [capability::CORE, capability::MAIL]);
-/// # Ok::<(), jmap_wire::Error>(())
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+///
+/// A message that exists already as RFC 5322 text is uploaded
+/// ([`Client::upload`](crate::Client::upload)) and added with
+/// [`EmailImport`](super::EmailImport) (section 4.8), and
+/// [`CopyMethod`](crate::CopyMethod)`<Email>` copies emails between
+/// accounts (section 4.7).
 #[derive(Debug, Clone, Copy)]
 pub enum Email {}
 
@@ -94,8 +127,14 @@ impl Object for Email {
 
 impl SetObject for Email {
     type Create = NewEmail;
-    type Created = BTreeMap<String, Value>;
+    /// The `id`, `blobId`, `threadId` and `size` of the new email (RFC
+    /// 8621 section 4.6), and whatever else the server says of it.
+    type Created = EmailRecord;
     type Arguments = NoArguments;
+}
+
+impl CopyObject for Email {
+    type Copy = EmailCopy;
 }
 
 impl GetObject for Email {
@@ -735,27 +774,6 @@ impl QueryChanges<Email> {
     /// The `collapseThreads` the query had.
     pub fn collapse_threads(mut self, collapse: bool) -> Self {
         self.arguments().collapse_threads = Some(collapse);
-        self
-    }
-}
-
-/// An email to create with `Email/set` (RFC 8621 section 4.6), property
-/// by property. This crate has no typed setters for an email's
-/// properties yet.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-#[serde(transparent)]
-pub struct NewEmail(Properties);
-
-impl NewEmail {
-    /// An email with no properties set.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Sets a property, such as `mailboxIds`, `keywords`, `subject` or
-    /// `bodyStructure`.
-    pub fn property(mut self, name: impl Into<String>, value: impl Into<Value>) -> Self {
-        self.0.set(name, value);
         self
     }
 }

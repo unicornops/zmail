@@ -1,0 +1,6 @@
+{
+  "methodResponses": [
+    ["error", {"type": "stateMismatch", "description": "The Email state is s9"}, "c0"]
+  ],
+  "sessionState": "x"
+}

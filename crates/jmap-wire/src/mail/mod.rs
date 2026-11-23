@@ -1,20 +1,25 @@
 //! JMAP Mail (RFC 8621): the data types implemented so far.
 //!
-//! - [`Mailbox`] (section 2): `Mailbox/get`, `/changes`, `/query` and
-//!   `/queryChanges`;
+//! - [`Mailbox`] (section 2): `Mailbox/get`, `/changes`, `/query`,
+//!   `/queryChanges` and `/set`;
 //! - [`Thread`] (section 3): `Thread/get` and `/changes`;
 //! - [`Email`] (section 4): `Email/get` with header fields in their
 //!   parsed forms and the body, `Email/query` with its filter and sort,
-//!   `Email/changes`, `Email/queryChanges`, and `Email/set` (destroy and
-//!   patches; no typed properties for creating yet);
+//!   `Email/changes`, `Email/queryChanges`, `Email/set` (creating with
+//!   [`NewEmail`], keyword and mailbox changes with [`EmailUpdate`],
+//!   destroying), `Email/import` ([`EmailImport`]) and `Email/copy`
+//!   ([`CopyMethod`](crate::CopyMethod)`<Email>` with [`EmailCopy`]);
 //! - [`Identity`] (section 6): `Identity/get` and `Identity/set`;
 //! - [`EmailSubmission`] (section 7): `EmailSubmission/get` and
 //!   `EmailSubmission/set`, with `onSuccessUpdateEmail` and
 //!   `onSuccessDestroyEmail`.
 //!
-//! `Mailbox/set`, `Email/copy`, `Email/import`, `Email/parse`,
-//! `SearchSnippet` and `VacationResponse` are to come; until then, call
-//! them by name with [`Request::call_raw`](crate::Request::call_raw).
+//! `Email/parse`, `SearchSnippet` and `VacationResponse` are to come;
+//! until then, call them by name with
+//! [`Request::call_raw`](crate::Request::call_raw). The messages and
+//! attachments themselves travel as blobs:
+//! [`Client::upload`](crate::Client::upload) and
+//! [`Client::download`](crate::Client::download).
 //!
 //! # Records are lenient
 //!
@@ -28,6 +33,7 @@
 //! record.
 
 mod email;
+mod email_set;
 mod header;
 mod identity;
 mod mailbox;
@@ -36,7 +42,10 @@ mod thread;
 
 pub use email::{
     Email, EmailAddress, EmailAddressGroup, EmailBodyPart, EmailBodyValue, EmailFilterCondition,
-    EmailHeader, EmailProperty, EmailQueryArguments, EmailRecord, NewEmail,
+    EmailHeader, EmailProperty, EmailQueryArguments, EmailRecord,
+};
+pub use email_set::{
+    EmailCopy, EmailImport, EmailImportResponse, EmailToImport, EmailUpdate, NewBodyPart, NewEmail,
 };
 pub use header::{
     AsAddresses, AsDate, AsGroupedAddresses, AsMessageIds, AsRaw, AsText, AsUrls, HeaderForm,
@@ -44,7 +53,8 @@ pub use header::{
 };
 pub use identity::{Identity, IdentityRecord, IdentityUpdate, NewIdentity};
 pub use mailbox::{
-    Mailbox, MailboxFilterCondition, MailboxQueryArguments, MailboxRecord, MailboxRights, Role,
+    Mailbox, MailboxFilterCondition, MailboxQueryArguments, MailboxRecord, MailboxRights,
+    MailboxSetArguments, MailboxUpdate, NewMailbox, Role,
 };
 pub use submission::{
     Address, DeliveryStatus, EmailSubmission, EmailSubmissionRecord, EmailSubmissionSetArguments,
@@ -120,5 +130,17 @@ impl Date {
 impl std::fmt::Display for Date {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for Date {
+    fn from(text: &str) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<String> for Date {
+    fn from(text: String) -> Self {
+        Self::new(text)
     }
 }

@@ -1,0 +1,41 @@
+{
+  "methodResponses": [
+    [
+      "Email/set",
+      {
+        "accountId": "a1",
+        "oldState": "s1",
+        "newState": "s2",
+        "created": {
+          "k0": {"id": "e-new", "blobId": "b-new", "threadId": "t-new", "size": 412}
+        },
+        "updated": {
+          "e-read": null,
+          "e-moved": {"mailboxIds": {"mb-archive": true, "mb-label": true}}
+        },
+        "destroyed": ["e-old"],
+        "notCreated": {
+          "k1": {"type": "blobNotFound", "notFound": ["b-gone", "b-gone-too"]},
+          "k2": {"type": "invalidProperties", "properties": ["mailboxIds", "header:Content-Type"], "description": "An email must be in a mailbox"},
+          "k3": {"type": "tooLarge"},
+          "k4": {"type": "overQuota", "description": "The account is over quota"}
+        },
+        "notUpdated": {
+          "e-gone": {"type": "notFound"},
+          "e-false": {"type": "invalidProperties", "properties": ["keywords/$seen"], "description": "keywords/$seen must be true or null"},
+          "e-patch": {"type": "invalidPatch", "description": "mailboxIds/x/y does not exist"},
+          "e-keywords": {"type": "tooManyKeywords"},
+          "e-mailboxes": {"type": "tooManyMailboxes"},
+          "e-forbidden": {"type": "forbidden"},
+          "e-later": {"type": "mailboxLocked", "description": "Try again", "retryAfter": 30}
+        },
+        "notDestroyed": {
+          "e-never": {"type": "notFound"},
+          "e-both": {"type": "willDestroy"}
+        }
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "x"
+}

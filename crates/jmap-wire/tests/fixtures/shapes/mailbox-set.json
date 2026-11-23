@@ -1,0 +1,39 @@
+{
+  "methodResponses": [
+    [
+      "Mailbox/set",
+      {
+        "accountId": "a1",
+        "oldState": "m1",
+        "newState": "m2",
+        "created": {
+          "k0": {
+            "id": "mb-new",
+            "sortOrder": 0,
+            "totalEmails": 0,
+            "unreadEmails": 0,
+            "totalThreads": 0,
+            "unreadThreads": 0,
+            "isSubscribed": true,
+            "myRights": {
+              "mayReadItems": true, "mayAddItems": true, "mayRemoveItems": true,
+              "maySetSeen": true, "maySetKeywords": true, "mayCreateChild": true,
+              "mayRename": true, "mayDelete": true, "maySubmit": true
+            }
+          }
+        },
+        "updated": {"mb-renamed": null},
+        "destroyed": ["mb-empty"],
+        "notCreated": {
+          "k1": {"type": "invalidProperties", "properties": ["name"], "description": "A sibling has this name"}
+        },
+        "notDestroyed": {
+          "mb-parent": {"type": "mailboxHasChild"},
+          "mb-full": {"type": "mailboxHasEmail"}
+        }
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "x"
+}

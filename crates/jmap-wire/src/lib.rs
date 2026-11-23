@@ -99,9 +99,11 @@
 
 mod auth;
 mod batch;
+mod blob;
 pub mod capability;
 mod changes;
 mod client;
+mod copy;
 pub mod discovery;
 mod error;
 pub mod mail;
@@ -117,18 +119,20 @@ mod transport;
 
 pub use auth::{Credentials, TokenError, TokenRequest, TokenSource};
 pub use batch::IdBatches;
+pub use blob::{Blob, BlobDownload, UploadedBlob};
 pub use changes::{Changes, ChangesObject, ChangesResponse};
 pub use client::{
-    Client, ClientBuilder, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_SESSION_BYTES, DEFAULT_TIMEOUT,
-    DEFAULT_USER_AGENT,
+    Client, ClientBuilder, DEFAULT_BLOB_TIMEOUT, DEFAULT_MAX_DOWNLOAD_BYTES,
+    DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_SESSION_BYTES, DEFAULT_TIMEOUT, DEFAULT_USER_AGENT,
 };
+pub use copy::{CopyMethod, CopyObject, CopyResponse};
 pub use error::{
     Error, MethodError, MethodErrorType, ProblemDetails, ProblemKind, RedirectRefusal, Result,
     SetError, SetErrorType, TransportError, TransportErrorKind,
 };
 pub use method::{
     Get, GetObject, GetResponse, Method, NoArguments, Object, PatchObject, Properties, Set,
-    SetArguments, SetObject, SetResponse,
+    SetArguments, SetObject, SetOutcome, SetResponse,
 };
 pub use query::{
     AddedItem, Comparator, Filter, Operator, Query, QueryChanges, QueryChangesResponse,

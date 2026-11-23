@@ -1,0 +1,23 @@
+{
+  "methodResponses": [
+    [
+      "Email/import",
+      {
+        "accountId": "a1",
+        "oldState": "s1",
+        "newState": "s2",
+        "created": {
+          "k0": {"id": "e-imported", "blobId": "b-repaired", "threadId": "t7", "size": 2048}
+        },
+        "notCreated": {
+          "k1": {"type": "alreadyExists", "existingId": "e-there"},
+          "k2": {"type": "invalidProperties", "properties": ["mailboxIds"]},
+          "k3": {"type": "overQuota"},
+          "k4": {"type": "invalidEmail", "description": "Not a message"}
+        }
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "x"
+}

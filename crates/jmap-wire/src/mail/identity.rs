@@ -149,7 +149,7 @@ impl NewIdentity {
 /// use jmap_wire::{PatchObject, Set, mail::{Identity, IdentityUpdate}};
 ///
 /// let mut set = Set::<Identity>::new("u1");
-/// set.update("i1", IdentityUpdate::new().name("Joe").reply_to(None).into());
+/// set.update("i1", IdentityUpdate::new().name("Joe").reply_to(None));
 /// # let _: PatchObject = IdentityUpdate::new().into();
 /// ```
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -287,8 +287,7 @@ mod tests {
                 .name("Joe")
                 .reply_to(Some(vec![EmailAddress::named("Tickets", "t@example.com")]))
                 .bcc(None)
-                .html_signature("<b>Joe</b>")
-                .into(),
+                .html_signature("<b>Joe</b>"),
         );
         set.destroy(["i2"]);
         assert_eq!(

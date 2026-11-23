@@ -1,0 +1,20 @@
+{
+  "methodResponses": [
+    [
+      "Email/set",
+      {
+        "accountId": "a1",
+        "oldState": null,
+        "newState": "s2",
+        "created": null,
+        "updated": {"e-read": null},
+        "destroyed": null,
+        "notCreated": null,
+        "notUpdated": null,
+        "notDestroyed": null
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "x"
+}
