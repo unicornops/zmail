@@ -3555,7 +3555,7 @@ dependencies = [
  "idna",
  "ipnet",
  "jni",
- "rand 0.10.3",
+ "rand 0.10.4",
  "thiserror 2.0.21",
  "tinyvec",
  "tokio",
@@ -3575,7 +3575,7 @@ dependencies = [
  "jni",
  "once_cell",
  "prefix-trie",
- "rand 0.10.3",
+ "rand 0.10.4",
  "ring",
  "thiserror 2.0.21",
  "tinyvec",
@@ -3600,7 +3600,7 @@ dependencies = [
  "ndk-context",
  "once_cell",
  "parking_lot",
- "rand 0.10.3",
+ "rand 0.10.4",
  "resolv-conf",
  "smallvec",
  "system-configuration",
@@ -4436,9 +4436,9 @@ dependencies = [
 
 [[package]]
 name = "libloading"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+checksum = "a1832accd5a4ca2795ace4d05d15c4039be15b62d3b950eff99746a990e3cc10"
 dependencies = [
  "cfg-if",
  "windows-link 0.2.1",
@@ -5825,7 +5825,7 @@ dependencies = [
  "p256",
  "p384",
  "p521",
- "rand 0.10.3",
+ "rand 0.10.4",
  "replace_with",
  "ripemd",
  "rsa",
@@ -6277,7 +6277,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "md-5 0.10.6",
- "rand 0.10.3",
+ "rand 0.10.4",
  "sha2 0.10.9",
  "subtle",
  "thiserror 1.0.69",
@@ -6373,7 +6373,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
- "rand 0.10.3",
+ "rand 0.10.4",
  "rand_pcg",
  "ring",
  "rustc-hash 2.1.3",
@@ -6444,9 +6444,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.3"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
+checksum = "8f6fa277c67e6ea590466f04c3fe82cb509f0864fe470643e5570de9514a9b11"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
@@ -6988,9 +6988,9 @@ dependencies = [
 
 [[package]]
 name = "rpassword"
-version = "7.5.4"
+version = "7.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
+checksum = "1fa2c5d9304b618df61ff17f3d3485c6e1854a3d94902a49abbb8d43dfbe0464"
 dependencies = [
  "libc",
  "rtoolbox",
@@ -7048,9 +7048,9 @@ dependencies = [
 
 [[package]]
 name = "rust-embed"
-version = "8.13.0"
+version = "8.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19afa5b4b6a611de00bd1bdae6ae6f39084c9399f0679c3f52d8469cf335cc23"
+checksum = "e98f580cf7a2863aeb6827800283f52cbe6fb3f3bb7c1843783f903c16dcb8ad"
 dependencies = [
  "rust-embed-impl",
  "rust-embed-utils",
@@ -7059,9 +7059,9 @@ dependencies = [
 
 [[package]]
 name = "rust-embed-impl"
-version = "8.13.0"
+version = "8.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0d8afda6374eac59e066abee06d265247ebbaf3006cf878e2879e8356e34053"
+checksum = "a93e2f69cf224a6c7df7509aa5ba4a23f56828ee41b040e92ac8762371eb9ba7"
 dependencies = [
  "mime_guess",
  "proc-macro2",
@@ -7074,9 +7074,9 @@ dependencies = [
 
 [[package]]
 name = "rust-embed-utils"
-version = "8.13.0"
+version = "8.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d84e8ba78bd384263e5922f084cbe1b081c3b7e69add59c8fb097b879ba968a"
+checksum = "915e33dccbe7deb2b8a342dc4c517503fe85e0230ddbae40a4fb0220493dad9b"
 dependencies = [
  "sha2 0.11.1",
  "walkdir",
@@ -7189,9 +7189,9 @@ checksum = "eec689c0bc40ff2458a5977b6619cb718087084a18e02a131c599b62d05e1a5f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.16"
+version = "0.103.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
+checksum = "e3a0760a887c14823fca5a1c970b01d47c328c696c0c64829d1df50e8f853fd5"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -8251,7 +8251,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -10499,9 +10499,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.9.1"
+version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+checksum = "85ccff8a4805aba1eaa4cd4afcd49f7557dd2cf5fd79ffc37f8959466effc5aa"
 dependencies = [
  "zeroize_derive",
 ]
@@ -10612,7 +10612,7 @@ name = "zmail-auth"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "rand 0.10.3",
+ "rand 0.10.4",
  "reqwest 0.12.28",
  "serde_json",
  "sha2 0.11.1",
@@ -10692,7 +10692,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "mail-parser",
- "rand 0.10.3",
+ "rand 0.10.4",
  "serde",
  "serde_json",
  "tokio",
@@ -10711,7 +10711,7 @@ dependencies = [
  "futures-util",
  "pgp",
  "proton-srp",
- "rand 0.10.3",
+ "rand 0.10.4",
  "reqwest 0.12.28",
  "rustls-native-certs",
  "rustls-webpki",
@@ -10743,7 +10743,7 @@ dependencies = [
  "block2 0.6.2",
  "futures-channel",
  "gpui",
- "libloading 0.9.0",
+ "libloading 0.9.1",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -10769,7 +10769,7 @@ dependencies = [
  "hmac 0.13.0",
  "html5ever",
  "keyring",
- "rand 0.10.3",
+ "rand 0.10.4",
  "serde_json",
  "sha2 0.11.1",
  "thiserror 2.0.21",
