@@ -15,8 +15,16 @@ Changes to `jmap-wire` that its users would notice. The crate is not published y
 - `IdBatches` and `Client::get_in_batches`; `Error::is_request_too_large`, `is_response_too_large`, `as_method_error`.
 - The `gzip` feature (on by default): `Accept-Encoding: gzip`, with the response size limit counted on the decompressed body.
 - `Response::take`, `HttpRequest::new`, `Date`; `GetResponse` can be written back as JSON.
+- Writing mail: `mail::NewEmail` with a setter per property an email may be created with, `mail::NewBodyPart`, and `mail::EmailUpdate`, a typed patch for keywords and mailboxes that clears and removes with `null`.
+- `mail::EmailImport` (`Email/import`), `CopyMethod` (`/copy` for any data type, with `mail::EmailCopy`), and `Mailbox/set` (`mail::NewMailbox`, `mail::MailboxUpdate`, `mail::MailboxSetArguments`).
+- `SetOutcome` and `SetResponse::outcome_of_create`, `outcome_of_update` and `outcome_of_destroy`; `SetError::names_property`, `existing_id` and `blobs_not_found`.
+- Blobs: `Client::upload`, `Client::download` and `Client::download_url`, with `BlobDownload`, `Blob` and `UploadedBlob`; `ClientBuilder::blob_timeout` and `max_download_bytes`; `Error::UploadTooLarge` and `Error::http_status`.
+- `Date` converts from text.
 
 Changes to what was there before:
+
+- `Set::update` takes `impl Into<PatchObject>`, so a typed patch is passed as it is. A call that wrote `.into()` on its patch no longer compiles (the conversion is ambiguous): take the `.into()` away.
+- The `created` records of `Set<Email>` are `mail::EmailRecord`s, where they were maps of JSON values.
 
 - `Get::ids_from` takes `impl Into<IdsReference<O>>`. A `ResultReference` still converts, so calls that pass one compile as before.
 - A request with a result reference that names no earlier call of the same request, a call of another method, or an argument that is also given outright is refused with `Error::InvalidResultReference`: by `Request::call` for the call being added, and by `Client::send` for the whole request. Before, it was sent and the server answered `invalidResultReference`.

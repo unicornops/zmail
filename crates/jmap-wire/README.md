@@ -73,6 +73,50 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+Changing mail: keywords and mailboxes are patched one member at a time, a message that exists as text is uploaded and imported, and an attachment is downloaded by its blob id.
+
+```rust,no_run
+use jmap_wire::{
+    BlobDownload, Client, HttpTransport, Set, SetOutcome,
+    mail::{Email, EmailImport, EmailToImport, EmailUpdate},
+};
+
+async fn example(
+    client: &Client<impl HttpTransport>,
+    account: &str,
+    message: Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Unread, and from the inbox to the archive, leaving the email in
+    // any other mailbox it is in. A keyword is cleared with null.
+    let mut set = Set::<Email>::new(account);
+    set.update(
+        "M1",
+        EmailUpdate::new().clear_keyword("$seen").move_between("inbox-id", "archive-id"),
+    );
+    let answer = client.call(set).await?;
+    match answer.outcome_of_update("M1") {
+        SetOutcome::Done(_) => println!("changed"),
+        SetOutcome::Refused(error) => println!("refused: {error}"),
+        SetOutcome::Unanswered => println!("the server did not say"),
+    }
+
+    // A message as RFC 5322 text: upload it, then import the blob.
+    let blob = client.upload(account, "message/rfc822", message).await?;
+    let mut import = EmailImport::new(account);
+    let creation_id = import.email(EmailToImport::new(blob.blob_id, ["sent-id"]).keywords(["$seen"]));
+    let imported = client.call(import).await?;
+    println!("{:?}", imported.outcome_of(&creation_id));
+
+    // An attachment, never more than 25 MiB of it.
+    let download = BlobDownload::new(account, "blob-id-of-the-part")
+        .name("report.pdf")
+        .max_bytes(25 * 1024 * 1024);
+    let attachment = client.download(&download).await?;
+    println!("{} bytes", attachment.bytes.len());
+    Ok(())
+}
+```
+
 Anything the crate has no type for is called by name, in the same request as typed calls:
 
 ```rust
@@ -115,25 +159,29 @@ assert_eq!(request.using(), [capability::CORE, capability::MAIL]);
 | Splitting a long id list by `maxObjectsInGet`, halving on `requestTooLarge` (`IdBatches`, `Client::get_in_batches`) | done |
 | `Identity/get`, `Identity/set` | done |
 | `EmailSubmission/get`, `EmailSubmission/set` with `onSuccessUpdateEmail` and `onSuccessDestroyEmail` | done |
-| `Email/set` | destroy and patches; no typed properties for creating yet |
-| `Mailbox/set`, `Email/copy`, `Email/import`, `Email/parse`, `SearchSnippet`, `VacationResponse` | by name only (`Request::call_raw`) |
-| Blob upload and download | URL templates only |
+| `Email/set`: creating (every settable property, body parts by blob or inline value), keyword and mailbox changes with a typed patch, destroying, `ifInState` | done |
+| `Email/import`, `Email/copy` (`/copy` for any data type), `Mailbox/set` | done |
+| What a `/set`, `/copy` or import answer says of each record, with the `SetError`s and what they carry | done |
+| Blob upload and download, whole bodies with their own size limit and timeout | done |
+| `Email/parse`, `Blob/copy`, `SearchSnippet`, `VacationResponse` | by name only (`Request::call_raw`) |
 | Push: event source, WebSocket (RFC 8887), `PushSubscription` | URL template only |
 
-It has been run against Apache James 3.9 (through Zmail's live tests), and its decoding is tested against answers recorded from James and the examples of the RFCs (`tests/fixtures`). It has not been run against Fastmail, Stalwart or Cyrus: recorded answers from those are wanted, one directory each.
+It has been run against Apache James 3.9 (through Zmail's live tests, reading and writing), and its decoding is tested against answers recorded from James and the examples of the RFCs (`tests/fixtures`). It has not been run against Fastmail, Stalwart or Cyrus: recorded answers from those are wanted, one directory each.
 
 ## Design notes
 
 - **Redirects.** A transport never follows redirects; the client does, by a `RedirectPolicy`. A redirect that is followed gets the credentials, so the policy says which hosts may see them. The default is the same host only. HTTPS to HTTP is always refused, and so is a redirect that would turn an API POST into a GET.
 - **Secrets.** `Debug` output of credentials and requests has no header values, bodies or query strings; error messages have URLs without their query strings.
 - **Lenient records.** What a server returns is read into records whose properties are all `Option`s. A property that was not asked for, that the server left out or that is `null` is `None`; one whose value is not of the type the RFC gives it is `None` too, with its JSON kept in the record's `extra`; and properties the crate has no field for are kept there. No JSON object fails to decode as a record, so one odd value from one server costs one property of one record, not the whole answer.
-- **Limits.** Each exchange has a timeout (30 seconds by default) and a largest response size (64 MiB by default; 4 MiB for the session), counted after decompression. `IdBatches` asks for fewer records per call when an answer is over the limit.
+- **Limits.** Each API exchange has a timeout (30 seconds by default) and a largest response size (64 MiB by default; 4 MiB for the session), counted after decompression. `IdBatches` asks for fewer records per call when an answer is over the limit.
 - **Compression.** With the `gzip` feature the client sends `Accept-Encoding: gzip` and decompresses answers itself, over any transport, never past the response size limit.
 - **Result references** carry the data type whose ids they resolve to (`query.ids()`, `changes.created()`, `emails.thread_ids()`), so feeding a call the ids of another type does not compile; and a request whose reference names no earlier call of the same request is refused before it is sent.
 - **Nothing is sent twice** by the client on its own, except once after a 401 when the credentials are a token source that can refresh.
 - **Dates** stay the RFC 3339 text the server sent (`mail::UtcDate`); the crate depends on no date library.
 - **Unknown data** is kept, not dropped: capability objects, extra properties on records and errors, and error types from later specifications.
-- **Removing with a patch** is `PatchObject::remove`, which writes `null` as RFC 8620 section 5.3 says (not `false`).
+- **Removing with a patch** is `PatchObject::remove`, which writes `null` as RFC 8620 section 5.3 says (not `false`). `mail::EmailUpdate`, the typed patch for an email's keywords and mailboxes, has no way to write anything else.
+- **Blobs are whole bodies.** An upload is given as bytes and a download returns bytes, each under limits apart from the API's: a download size limit counted after decompression (128 MiB by default, or the download's own), the session's `maxSizeUpload` checked before an upload is sent, and a blob timeout (five minutes by default). There is no streaming yet; `Client::download_url` gives the URL to a caller who must stream a blob to disk with an HTTP client of their own.
+- **Credentials and blobs.** The upload and download URLs are the session's and get the credentials, whatever host they are on. A redirect from them is judged by the `RedirectPolicy` like any other; a download can opt into following a redirect the policy does not allow without credentials (`BlobDownload::follow_redirects_without_credentials`), for a server that answers with a signed link to a storage host.
 
 ## Features
 

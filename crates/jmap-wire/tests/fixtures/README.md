@@ -8,12 +8,14 @@ directory, so a new server is a new directory:
 | --- | --- |
 | `session` | `Session` |
 | `problem` | `ProblemDetails` |
+| `upload` | `UploadedBlob`, the answer to a blob upload |
 | anything else | `Response`; then each method response in it by its name |
 
 A response file's first method response must be what the file's name
 says: `mailbox-get`, `mailbox-changes`, `mailbox-query`, `thread-get`,
 `email-get`, `email-query`, `email-changes`, `email-querychanges`,
-`email-set`, `identity-get`, `identity-set`, `emailsubmission-set`,
+`email-set`, `email-import`, `email-copy`, `mailbox-set`,
+`identity-get`, `identity-set`, `emailsubmission-set`,
 `method-error` (an `error` response), or `chained` (several calls, any
 first). The part of the name after the first `.` says which case it is
 and is not interpreted. Records are also written back as JSON and
@@ -44,14 +46,21 @@ incremental sync is replayed too.
   without a type, a name or a blob; dates with an offset or fractions of
   a second; unknown roles. `email-get.lenient.json` goes further, with
   values of other types than the RFC's and properties from no RFC, which
-  must cost only the property concerned.
+  must cost only the property concerned. The write answers
+  (`email-set.changes.json`, `email-import.json`, `email-copy.json`,
+  `mailbox-set.json`, `upload.json` and their `nulls` and `bare`
+  variants) have every outcome of RFC 8620 section 5.3 and RFC 8621
+  sections 2.5, 4.6 and 4.8: records done, each SetError type with the
+  properties it carries, a type from no RFC, and `null` where a map or a
+  list may be.
 
 ## Adding a server
 
 Record the response bodies of the calls above against a test account
 with synthetic mail, and put them in a directory named after the server
 and its version. The requests Apache James was sent are in
-`james_answers_the_read_calls_for_the_jmap_wire_fixtures`
+`james_answers_the_read_calls_for_the_jmap_wire_fixtures` and
+`james_answers_the_write_calls_for_the_jmap_wire_fixtures`
 (`crates/zmail-test-support/tests/live_jmap_harness.rs`); the same
 messages and calls against another server give fixtures that can be
 compared.
