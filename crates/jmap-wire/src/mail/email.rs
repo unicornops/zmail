@@ -270,6 +270,10 @@ impl EmailRecord {
     /// could not parse it, or the value is not of the form's type; the
     /// JSON itself is [`header_json`](Self::header_json).
     ///
+    /// The convenience properties (`subject`, `from`, `messageId` and
+    /// the rest) are the record's fields; this reads only what was
+    /// fetched as a `header:` property.
+    ///
     /// ```
     /// use jmap_wire::mail::{AsText, AsUrls, EmailRecord};
     /// use serde_json::json;

@@ -1,0 +1,51 @@
+{
+  "methodResponses": [
+    [
+      "Mailbox/get",
+      {
+        "accountId": "8f1f47ffc1606d1e0ecc6bfdf08f41d8023639e20c706d3a14db1ca4875865e9",
+        "list": [
+          {
+            "id": "1",
+            "name": "INBOX",
+            "role": "inbox"
+          },
+          {
+            "id": "6",
+            "name": "Archive",
+            "role": "archive"
+          },
+          {
+            "id": "5",
+            "name": "Drafts",
+            "role": "drafts"
+          },
+          {
+            "id": "2",
+            "name": "Outbox",
+            "role": "outbox"
+          },
+          {
+            "id": "3",
+            "name": "Sent",
+            "role": "sent"
+          },
+          {
+            "id": "4",
+            "name": "Trash",
+            "role": "trash"
+          },
+          {
+            "id": "7",
+            "name": "Spam",
+            "role": "junk"
+          }
+        ],
+        "notFound": [],
+        "state": "b76b2968-32c1-4038-a234-56247016a53a"
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "2c9f1b12-b35a-43e6-9af2-0106fb53a943"
+}

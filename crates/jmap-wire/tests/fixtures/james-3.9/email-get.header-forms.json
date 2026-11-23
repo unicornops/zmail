@@ -1,0 +1,152 @@
+{
+  "methodResponses": [
+    [
+      "Email/get",
+      {
+        "accountId": "8f1f47ffc1606d1e0ecc6bfdf08f41d8023639e20c706d3a14db1ca4875865e9",
+        "list": [
+          {
+            "header:Cc:asAddresses:all": [
+              [
+                {
+                  "email": "cy@phase2b.test",
+                  "name": "Cy"
+                }
+              ]
+            ],
+            "header:Comments:asText:all": [
+              "first comment",
+              "second comment"
+            ],
+            "header:Date:asDate": "2026-11-03T15:15:05Z",
+            "header:Delivered-To:all": [
+              " jmap@localhost"
+            ],
+            "header:From:asAddresses": [
+              {
+                "email": "probe@phase2b.test",
+                "name": "Probe Sender"
+              }
+            ],
+            "header:List-Post:asURLs": [
+              "mailto:list@phase2b.test"
+            ],
+            "header:List-Unsubscribe:asURLs": [
+              "mailto:leave@phase2b.test",
+              "https://lists.phase2b.test/leave"
+            ],
+            "header:Message-ID:asMessageIds": [
+              "jmap-wire-probe-mixed@phase2b.test"
+            ],
+            "header:References:asMessageIds": [
+              "jmap-wire-probe-root@phase2b.test",
+              "jmap-wire-probe-mid@phase2b.test"
+            ],
+            "header:Resent-Date:asDate": null,
+            "header:Subject": " =?UTF-8?Q?jmap-wire_probe_caf=C3=A9?= mixed",
+            "header:Subject:asText": "jmap-wire probe café mixed",
+            "header:To:asAddresses": [
+              {
+                "email": "jmap@localhost"
+              },
+              {
+                "email": "ada@phase2b.test"
+              },
+              {
+                "email": "bo@phase2b.test",
+                "name": "Bo Example"
+              }
+            ],
+            "header:To:asGroupedAddresses": [
+              {
+                "addresses": [
+                  {
+                    "email": "jmap@localhost"
+                  }
+                ],
+                "name": null
+              },
+              {
+                "addresses": [
+                  {
+                    "email": "ada@phase2b.test"
+                  },
+                  {
+                    "email": "bo@phase2b.test",
+                    "name": "Bo Example"
+                  }
+                ],
+                "name": "Friends"
+              }
+            ],
+            "header:X-Absent": null,
+            "header:X-Absent:all": [],
+            "header:X-Absent:asAddresses": null,
+            "header:X-Probe": " two",
+            "header:X-Probe:all": [
+              " one",
+              " two"
+            ],
+            "header:X-Probe:asText:all": [
+              "one",
+              "two"
+            ],
+            "header:subject:asText:all": [
+              "jmap-wire probe café mixed"
+            ],
+            "id": "1"
+          },
+          {
+            "header:Cc:asAddresses:all": [],
+            "header:Comments:asText:all": [],
+            "header:Date:asDate": null,
+            "header:Delivered-To:all": [
+              " jmap@localhost"
+            ],
+            "header:From:asAddresses": [
+              {
+                "email": "probe@phase2b.test"
+              }
+            ],
+            "header:List-Post:asURLs": null,
+            "header:List-Unsubscribe:asURLs": null,
+            "header:Message-ID:asMessageIds": [
+              "jmap-wire-probe-bare@phase2b.test"
+            ],
+            "header:References:asMessageIds": null,
+            "header:Resent-Date:asDate": null,
+            "header:Subject": null,
+            "header:Subject:asText": null,
+            "header:To:asAddresses": [
+              {
+                "email": "jmap@localhost"
+              }
+            ],
+            "header:To:asGroupedAddresses": [
+              {
+                "addresses": [
+                  {
+                    "email": "jmap@localhost"
+                  }
+                ],
+                "name": null
+              }
+            ],
+            "header:X-Absent": null,
+            "header:X-Absent:all": [],
+            "header:X-Absent:asAddresses": null,
+            "header:X-Probe": null,
+            "header:X-Probe:all": [],
+            "header:X-Probe:asText:all": [],
+            "header:subject:asText:all": [],
+            "id": "3"
+          }
+        ],
+        "notFound": [],
+        "state": "dce49a39-1882-4935-b2fa-b102e06a516f"
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "2c9f1b12-b35a-43e6-9af2-0106fb53a943"
+}

@@ -221,8 +221,11 @@ impl<O: GetObject> Call<Get<O>> {
 }
 
 /// The answer to a `/get` (RFC 8620 section 5.1).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase", bound(deserialize = "R: Deserialize<'de>"))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    bound(deserialize = "R: Deserialize<'de>", serialize = "R: Serialize")
+)]
 #[non_exhaustive]
 pub struct GetResponse<R> {
     /// The account the records are of.
