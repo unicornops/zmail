@@ -15,6 +15,21 @@
 //! `Email/changes`) differ in the call id alone: their arguments and
 //! their `using` (core and mail) are what `jmap-client` sent.
 //!
+//! The writes (step 3) differ in the call id, in the creation id of an
+//! import (`k0` where `jmap-client` wrote `i0`), and in two requests
+//! changed on purpose:
+//!
+//! - clearing a keyword patches it to `null` where `jmap-client` wrote
+//!   `false` (RFC 8620 section 5.3);
+//! - a move patches the two mailboxes it names (`mailboxIds/<source>`
+//!   to `null`, `mailboxIds/<target>` to `true`) where the whole
+//!   `mailboxIds` set was replaced by the target. Deleting to the trash
+//!   and a move whose source the server does not know still replace
+//!   the set, as before.
+//!
+//! Blobs are not JMAP requests; their URLs and headers are pinned in
+//! `write_characterisation/import.txt` and `download.txt`.
+//!
 //! Object members come in another order (alphabetical), which JSON
 //! gives no meaning to; the comparison ignores it.
 
@@ -654,4 +669,144 @@ fn answers_jmap_client_refused_are_read() {
     assert!(serde_json::from_value::<jmap_client::email::Email>(future.clone()).is_err());
     let read: jmap_wire::mail::EmailRecord = serde_json::from_value(future).expect("read");
     assert_eq!(read.extra["futureProperty"], true);
+}
+
+// ---- The writes (ADR 0008, step 3) -----------------------------------
+
+fn mailbox(id: &str, name: &str, role: Option<&str>) -> crate::JmapMailbox {
+    crate::JmapMailbox {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        role: role.map(str::to_owned),
+        sort_order: 0,
+        parent: None,
+    }
+}
+
+#[tokio::test]
+async fn setting_a_keyword_is_the_same_request() {
+    use jmap_wire::mail::EmailUpdate;
+
+    let client = connection().await;
+    for keyword in ["$seen", "$flagged"] {
+        let mut request = client.build();
+        request.set_email().update("e1").keyword(keyword, true);
+        let (was, was_using) = old(&request);
+        let (is, is_using) = new(&wire(crate::email_update(
+            client.account_id(),
+            "e1",
+            EmailUpdate::new().set_keyword(keyword),
+        )));
+        assert_eq!(is, was);
+        assert_eq!(is_using, was_using);
+        assert_eq!(is_using, [CORE, MAIL]);
+    }
+}
+
+/// The first fix made on purpose: `null`, where `jmap-client` sends
+/// `false`.
+#[tokio::test]
+async fn clearing_a_keyword_differs_in_null_for_false() {
+    use jmap_wire::mail::EmailUpdate;
+
+    let client = connection().await;
+    for keyword in ["$seen", "$flagged"] {
+        let mut request = client.build();
+        request.set_email().update("e1").keyword(keyword, false);
+        let (mut was, was_using) = old(&request);
+        let (is, is_using) = new(&wire(crate::email_update(
+            client.account_id(),
+            "e1",
+            EmailUpdate::new().clear_keyword(keyword),
+        )));
+        let path = format!("keywords/{keyword}");
+        assert_eq!(was["methodCalls"][0][1]["update"]["e1"][&path], false);
+        assert_eq!(is["methodCalls"][0][1]["update"]["e1"][&path], Value::Null);
+        assert!(
+            is["methodCalls"][0][1]["update"]["e1"]
+                .as_object()
+                .is_some_and(|patch| patch.contains_key(&path)),
+            "the null is written, not left out"
+        );
+        // That value is the whole difference.
+        was["methodCalls"][0][1]["update"]["e1"][&path] = Value::Null;
+        assert_eq!(is, was);
+        assert_eq!(is_using, was_using);
+    }
+}
+
+/// The second fix made on purpose: a move names the two mailboxes it is
+/// about, where `jmap-client`'s helper replaced the set. Where Zmail
+/// still replaces the set, the request is the one it was.
+#[tokio::test]
+async fn a_move_differs_in_patching_two_mailboxes_and_a_delete_does_not() {
+    let client = connection().await;
+    let inbox = mailbox("m-inbox", "Inbox", Some("inbox"));
+    let archive = mailbox("m-archive", "Archive", Some("archive"));
+    let trash = mailbox("m-trash", "Trash", Some("trash"));
+    let junk = mailbox("m-junk", "Junk", Some("junk"));
+    let was = |target: &str| {
+        let mut request = client.build();
+        request.set_email().update("e1").mailbox_ids([target]);
+        old(&request)
+    };
+    let is = |source: Option<&crate::JmapMailbox>, target: &crate::JmapMailbox| {
+        new(&wire(crate::email_update(
+            client.account_id(),
+            "e1",
+            crate::move_update(source, target),
+        )))
+    };
+
+    let (old_move, old_using) = was("m-archive");
+    assert_eq!(
+        arguments(&old_move)["update"]["e1"],
+        json!({"mailboxIds": {"m-archive": true}})
+    );
+    let (new_move, new_using) = is(Some(&inbox), &archive);
+    assert_eq!(
+        arguments(&new_move)["update"]["e1"],
+        json!({"mailboxIds/m-inbox": null, "mailboxIds/m-archive": true})
+    );
+    assert_eq!(new_using, old_using);
+
+    // To the trash or the junk mailbox, and from a mailbox the server
+    // does not have: the same request as before.
+    assert_eq!(is(Some(&inbox), &trash), was("m-trash"));
+    assert_eq!(is(Some(&inbox), &junk), was("m-junk"));
+    assert_eq!(is(None, &archive), was("m-archive"));
+}
+
+#[tokio::test]
+async fn an_import_differs_in_its_creation_id_alone() {
+    let client = connection().await;
+    let mut request = client.build();
+    let import = request
+        .import_email()
+        .account_id(client.account_id())
+        .email("b1")
+        .mailbox_ids(["m-sent"])
+        .keywords([crate::SUBMIT_PENDING]);
+    assert_eq!(import.create_id(), "i0");
+    let (mut was, was_using) = old(&request);
+
+    let (import, creation_id) =
+        crate::import_request(client.account_id(), "b1", &["m-sent".to_owned()]);
+    assert_eq!(creation_id, "k0");
+    let (is, is_using) = new(&wire(import));
+    assert_eq!(
+        arguments(&is),
+        &json!({"accountId": "a1", "emails": {"k0": {
+            "blobId": "b1", "mailboxIds": {"m-sent": true},
+            "keywords": {"$submitpending": true}
+        }}})
+    );
+    let emails = was["methodCalls"][0][1]["emails"]
+        .as_object_mut()
+        .expect("the imports");
+    let only = emails.remove("i0").expect("jmap-client's creation id");
+    emails.insert("k0".to_owned(), only);
+    assert_eq!(is, was);
+    assert_eq!(is_using, was_using);
+    assert_eq!(is_using, [CORE, MAIL]);
 }

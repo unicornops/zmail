@@ -65,6 +65,9 @@ struct State {
     /// section 4.1.1 (a keyword's value "MUST be true") does, instead
     /// of reading it as removing the keyword.
     strict: bool,
+    /// Refuse a patch of one mailbox (`"mailboxIds/x"`) with
+    /// `invalidPatch`, as a server that only takes the whole set would.
+    whole_sets_only: bool,
     fault: Option<Fault>,
     /// Every request, one line each.
     seen: Vec<String>,
@@ -465,8 +468,14 @@ fn answer(
                     _ => {}
                 }
                 let strict = state.strict;
+                let partial = patch
+                    .as_object()
+                    .is_some_and(|patch| patch.keys().any(|path| path.starts_with("mailboxIds/")));
                 match state.emails.get_mut(&id) {
                     None => answer["notUpdated"][&id] = json!({"type": "notFound"}),
+                    Some(_) if state.whole_sets_only && partial => {
+                        answer["notUpdated"][&id] = json!({"type": "invalidPatch"});
+                    }
                     Some(email) => match patched(email, &patch, strict) {
                         Ok(email_now) => {
                             *email = email_now;
@@ -1024,4 +1033,136 @@ async fn attachments_download_as_before() {
         .expect("writes");
     }
     assert_pinned("download.txt", &text);
+}
+
+// ---- The two faults fixed on purpose (ADR 0008, step 3) ---------------
+
+/// Marking unread and unflagging cleared the keyword with
+/// `"keywords/$seen": false`. RFC 8620 section 5.3 removes a key of a
+/// map with `null`, and RFC 8621 section 4.1.1 allows no value but
+/// `true` in `keywords`, so a server that keeps to both refused the
+/// change (`invalidProperties`) and the email stayed read, or flagged,
+/// on the server.
+#[tokio::test]
+async fn marking_unread_and_unflagging_clear_the_keyword_with_null() {
+    let server = Server::start();
+    server.with_state(|state| state.strict = true);
+    let report = apply_pending_ops(
+        &server.target(Arc::default()),
+        "pw",
+        &[
+            op(1, PendingOpKind::MarkUnread, "e1", "Inbox", None),
+            op(2, PendingOpKind::ClearFlagged, "e2", "Inbox", None),
+        ],
+    )
+    .await
+    .expect("the operations run");
+    assert_eq!(report.applied, [1, 2], "{:?}", report.failed);
+
+    let sent = server.with_state(|state| state.seen.join("\n"));
+    assert!(sent.contains(r#"{"e1":{"keywords/$seen":null}}"#), "{sent}");
+    assert!(
+        sent.contains(r#"{"e2":{"keywords/$flagged":null}}"#),
+        "{sent}"
+    );
+    assert!(!sent.contains("false"), "{sent}");
+    server.with_state(|state| {
+        assert_eq!(state.emails["e1"]["keywords"], json!({}));
+        assert_eq!(state.emails["e2"]["keywords"], json!({"$seen": true}));
+    });
+}
+
+/// A move replaced the email's whole `mailboxIds` with the target, so
+/// an email that was in other mailboxes too (labels) lost them. Now it
+/// leaves the mailbox it is moved from and joins the target, and its
+/// other mailboxes are not mentioned. Deleting to the trash still takes
+/// it out of everything else, as RFC 8621 section 4.6 says to.
+#[tokio::test]
+async fn a_move_keeps_an_email_in_its_other_mailboxes() {
+    let mailboxes =
+        |server: &Server| server.with_state(|state| state.emails["e2"]["mailboxIds"].clone());
+    let apply = |server: Server, from: &'static str, to: &'static str| async move {
+        let report = apply_pending_ops(
+            &server.target(Arc::default()),
+            "pw",
+            &[op(1, PendingOpKind::Move, "e2", from, Some(to))],
+        )
+        .await
+        .expect("the operations run");
+        assert_eq!(report.applied, [1], "{:?}", report.failed);
+        server
+    };
+
+    // e2 is in the Inbox and under the label Receipts.
+    let server = apply(Server::start(), "Inbox", "Archive").await;
+    assert_eq!(
+        mailboxes(&server),
+        json!({"m-archive": true, "m-label": true})
+    );
+    let sent = server.with_state(|state| state.seen.join("\n"));
+    assert!(
+        sent.contains(r#"{"e2":{"mailboxIds/m-archive":true,"mailboxIds/m-inbox":null}}"#),
+        "{sent}"
+    );
+    // Undoing it puts it back, the label untouched.
+    let server = apply(server, "Archive", "Inbox").await;
+    assert_eq!(
+        mailboxes(&server),
+        json!({"m-inbox": true, "m-label": true})
+    );
+
+    // An email in one mailbox moves in one update, never in none.
+    let server = Server::start();
+    let report = apply_pending_ops(
+        &server.target(Arc::default()),
+        "pw",
+        &[op(1, PendingOpKind::Move, "e1", "Inbox", Some("Archive"))],
+    )
+    .await
+    .expect("the operations run");
+    assert_eq!(report.applied, [1], "{:?}", report.failed);
+    server.with_state(|state| {
+        assert_eq!(state.emails["e1"]["mailboxIds"], json!({"m-archive": true}));
+    });
+
+    // Deleting is leaving every mailbox for the trash.
+    let server = apply(Server::start(), "Inbox", "Trash").await;
+    assert_eq!(mailboxes(&server), json!({"m-trash": true}));
+}
+
+/// A server that refuses a patch of one mailbox is told the same move
+/// as the whole set, worked out from the mailboxes the email is in, so
+/// the other mailboxes are kept there too.
+#[tokio::test]
+async fn a_move_a_server_refuses_as_a_patch_is_sent_as_the_whole_set() {
+    let server = Server::start();
+    server.with_state(|state| state.whole_sets_only = true);
+    let report = apply_pending_ops(
+        &server.target(Arc::default()),
+        "pw",
+        &[
+            op(1, PendingOpKind::Move, "e2", "Inbox", Some("Archive")),
+            op(2, PendingOpKind::Move, "e1", "Inbox", Some("Archive")),
+        ],
+    )
+    .await
+    .expect("the operations run");
+    assert_eq!(report.applied, [1, 2], "{:?}", report.failed);
+    server.with_state(|state| {
+        assert_eq!(
+            state.emails["e2"]["mailboxIds"],
+            json!({"m-archive": true, "m-label": true})
+        );
+        assert_eq!(state.emails["e1"]["mailboxIds"], json!({"m-archive": true}));
+        let sets = state
+            .seen
+            .iter()
+            .filter(|line| line.contains("Email/set"))
+            .count();
+        assert_eq!(
+            sets, 4,
+            "a patch and a whole set for each: {:?}",
+            state.seen
+        );
+    });
 }

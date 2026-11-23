@@ -10,7 +10,7 @@
 //! connection, a timeout, an answer that is not JSON) are worded by
 //! `jmap-wire`.
 
-use jmap_wire::{Error, MethodError, ProblemDetails, ProblemKind};
+use jmap_wire::{Error, MethodError, ProblemDetails, ProblemKind, SetError};
 
 /// `error` as an [`anyhow::Error`] with the wording above.
 pub(crate) fn reported(error: Error) -> anyhow::Error {
@@ -25,6 +25,21 @@ pub(crate) fn reported(error: Error) -> anyhow::Error {
         // causes, which an error chain would print a second time.
         _ => anyhow::anyhow!("{error}"),
     }
+}
+
+/// A server's refusal to create or change one record, worded as
+/// `jmap-client` worded it: `Set failed: invalidProperties: no such
+/// mailbox (properties: mailboxIds)`. A type `jmap-client` did not know
+/// reads the same way, where the whole answer used to fail to parse.
+pub(crate) fn set_refused(error: &SetError) -> anyhow::Error {
+    let mut text = format!("Set failed: {}", error.error_type);
+    if let Some(description) = &error.description {
+        text.push_str(&format!(": {description}"));
+    }
+    if let Some(properties) = error.properties.as_ref().filter(|names| !names.is_empty()) {
+        text.push_str(&format!(" (properties: {})", properties.join(", ")));
+    }
+    anyhow::anyhow!(text)
 }
 
 /// A method error's type in words: `requestTooLarge` as

@@ -1,44 +1,44 @@
 accepted
-  sent: POST /upload/a1/ (authorization: sent, accept: */*, accept-encoding: none, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
+  sent: POST /upload/a1/ (authorization: sent, accept: application/json, accept-encoding: gzip, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
   sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/import",{"accountId":"a1","emails":{"new0":{"blobId":"b1","keywords":{"$submitpending":true},"mailboxIds":{"m-sent":true}}}}]]
   submitted
   ok
 upload refused with problem details
-  sent: POST /upload/a1/ (authorization: sent, accept: */*, accept-encoding: none, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
+  sent: POST /upload/a1/ (authorization: sent, accept: application/json, accept-encoding: gzip, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
   error: failed to import the outgoing message into JMAP: Request failed: Limit (status 413). Details: Too large
 upload refused with HTTP 500
-  sent: POST /upload/a1/ (authorization: sent, accept: */*, accept-encoding: none, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
+  sent: POST /upload/a1/ (authorization: sent, accept: application/json, accept-encoding: gzip, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
   error: failed to import the outgoing message into JMAP: Server failed: 500 Internal Server Error
 upload answered with something that is not JSON
-  sent: POST /upload/a1/ (authorization: sent, accept: */*, accept-encoding: none, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
-  error: failed to import the outgoing message into JMAP: Parse error: expected value at line 1 column 1
+  sent: POST /upload/a1/ (authorization: sent, accept: application/json, accept-encoding: gzip, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
+  error: failed to import the outgoing message into JMAP: the JMAP server's upload answer could not be read: expected value at line 1 column 1
 upload answered without a blobId
-  sent: POST /upload/a1/ (authorization: sent, accept: */*, accept-encoding: none, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
-  error: failed to import the outgoing message into JMAP: Parse error: missing field `blobId` at line 1 column 18
+  sent: POST /upload/a1/ (authorization: sent, accept: application/json, accept-encoding: gzip, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
+  error: failed to import the outgoing message into JMAP: the JMAP server's upload answer could not be read: missing field `blobId` at line 1 column 18
 the upload's connection drops
-  sent: POST /upload/a1/ (authorization: sent, accept: */*, accept-encoding: none, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
-  error: failed to import the outgoing message into JMAP: Transport error: error sending request for url (http://server/upload/a1/)
+  sent: POST /upload/a1/ (authorization: sent, accept: application/json, accept-encoding: gzip, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
+  error: failed to import the outgoing message into JMAP: the JMAP request could not be sent: the request to http://server/upload/a1/ failed: client error (SendRequest): connection closed before message completed
 import notCreated overQuota
-  sent: POST /upload/a1/ (authorization: sent, accept: */*, accept-encoding: none, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
+  sent: POST /upload/a1/ (authorization: sent, accept: application/json, accept-encoding: gzip, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
   sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/import",{"accountId":"a1","emails":{"new0":{"blobId":"b1","keywords":{"$submitpending":true},"mailboxIds":{"m-sent":true}}}}]]
   error: failed to import the outgoing message into JMAP: Set failed: overQuota
 import notCreated invalidProperties
-  sent: POST /upload/a1/ (authorization: sent, accept: */*, accept-encoding: none, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
+  sent: POST /upload/a1/ (authorization: sent, accept: application/json, accept-encoding: gzip, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
   sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/import",{"accountId":"a1","emails":{"new0":{"blobId":"b1","keywords":{"$submitpending":true},"mailboxIds":{"m-sent":true}}}}]]
   error: failed to import the outgoing message into JMAP: Set failed: invalidProperties: no such mailbox (properties: mailboxIds)
 import notCreated blobNotFound
-  sent: POST /upload/a1/ (authorization: sent, accept: */*, accept-encoding: none, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
+  sent: POST /upload/a1/ (authorization: sent, accept: application/json, accept-encoding: gzip, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
   sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/import",{"accountId":"a1","emails":{"new0":{"blobId":"b1","keywords":{"$submitpending":true},"mailboxIds":{"m-sent":true}}}}]]
   error: failed to import the outgoing message into JMAP: Set failed: blobNotFound
 import notCreated alreadyExists
-  sent: POST /upload/a1/ (authorization: sent, accept: */*, accept-encoding: none, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
+  sent: POST /upload/a1/ (authorization: sent, accept: application/json, accept-encoding: gzip, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
   sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/import",{"accountId":"a1","emails":{"new0":{"blobId":"b1","keywords":{"$submitpending":true},"mailboxIds":{"m-sent":true}}}}]]
   error: failed to import the outgoing message into JMAP: Set failed: alreadyExists
 import created without an id
-  sent: POST /upload/a1/ (authorization: sent, accept: */*, accept-encoding: none, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
+  sent: POST /upload/a1/ (authorization: sent, accept: application/json, accept-encoding: gzip, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
   sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/import",{"accountId":"a1","emails":{"new0":{"blobId":"b1","keywords":{"$submitpending":true},"mailboxIds":{"m-sent":true}}}}]]
   error: JMAP import did not return an email id
 import method error
-  sent: POST /upload/a1/ (authorization: sent, accept: */*, accept-encoding: none, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
+  sent: POST /upload/a1/ (authorization: sent, accept: application/json, accept-encoding: gzip, content-type: application/octet-stream): a message of 10 lines to <ada@example.com>
   sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/import",{"accountId":"a1","emails":{"new0":{"blobId":"b1","keywords":{"$submitpending":true},"mailboxIds":{"m-sent":true}}}}]]
   error: failed to import the outgoing message into JMAP: Request failed: Server fail
