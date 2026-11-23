@@ -1,0 +1,32 @@
+[package]
+name = "jmap-wire"
+version = "0.1.0"
+description = "A layered JMAP client (RFC 8620, RFC 8621): a protocol core that asks only for the capabilities a request uses, with a replaceable HTTP transport"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository = "https://github.com/unicornops/zmail"
+readme = "README.md"
+keywords = ["jmap", "email", "rfc8620", "rfc8621"]
+categories = ["email", "network-programming", "web-programming::http-client"]
+publish = false
+
+[features]
+default = ["reqwest"]
+# The default HTTP transport, on reqwest with rustls. Without it the crate
+# is the protocol core alone, for a transport of your own.
+reqwest = ["dep:reqwest"]
+
+[dependencies]
+base64.workspace = true
+reqwest = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

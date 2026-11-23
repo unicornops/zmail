@@ -1,0 +1,27 @@
+{
+  "sessionState": "2c9f1b12-b35a-43e6-9af2-0106fb53a943",
+  "methodResponses": [
+    [
+      "Identity/get",
+      {
+        "accountId": "0fe275bf13ff761407c17f64b1dfae2f4b3186feea223d7267b79f873a105401",
+        "state": null,
+        "notFound": null,
+        "list": [
+          {
+            "id": "5f0c9ae0-4a51-3f66-b3e8-9d6a4f0b9d62",
+            "name": "",
+            "email": "jmap@localhost",
+            "replyTo": null,
+            "bcc": null,
+            "textSignature": "",
+            "htmlSignature": "",
+            "mayDelete": false,
+            "sortOrder": 100
+          }
+        ]
+      },
+      "c0"
+    ]
+  ]
+}

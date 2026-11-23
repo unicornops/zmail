@@ -4209,6 +4209,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jmap-wire"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "jni"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10667,6 +10680,7 @@ dependencies = [
  "anyhow",
  "futures-util",
  "jmap-client",
+ "jmap-wire",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

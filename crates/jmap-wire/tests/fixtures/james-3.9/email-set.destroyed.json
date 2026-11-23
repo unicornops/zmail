@@ -1,0 +1,23 @@
+{
+  "sessionState": "2c9f1b12-b35a-43e6-9af2-0106fb53a943",
+  "methodResponses": [
+    [
+      "Email/set",
+      {
+        "accountId": "0fe275bf13ff761407c17f64b1dfae2f4b3186feea223d7267b79f873a105401",
+        "oldState": "3f7b6b70-c6a1-11f0-9d6f-1b2a4b6a9c10",
+        "newState": "41a0e4d0-c6a1-11f0-9d6f-1b2a4b6a9c10",
+        "destroyed": [
+          "8a1f2d30-c6a0-11f0-9d6f-1b2a4b6a9c10"
+        ],
+        "notDestroyed": {
+          "not-an-id": {
+            "type": "notFound",
+            "description": "Cannot find message with messageId: not-an-id"
+          }
+        }
+      },
+      "c0"
+    ]
+  ]
+}

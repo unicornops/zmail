@@ -2,13 +2,16 @@
 //! sync (`zmail_core::identity_sync`) and for submission, and updating,
 //! creating or destroying one when the user chooses to.
 //!
-//! Requests and answers go as plain JSON: `jmap-client`'s typed
-//! `Identity/get` sends no method call at all and refuses what some
-//! servers answer (Apache James's, for one), and neither of its helpers
-//! adds the submission capability identities need.
+//! The requests are built and sent with `jmap-wire` (ADR 0008), whose
+//! `using` holds Core and the submission capability identities need, and
+//! nothing else. The answers are read as plain JSON, as servers differ
+//! in what they send (Apache James writes `null` for the state).
 
 use anyhow::{Context, Result, anyhow, bail};
-use jmap_client::{client::Client, email::EmailAddress};
+use jmap_wire::{
+    Get, Request, Set,
+    mail::{EmailAddress, Identity, IdentityUpdate, NewIdentity},
+};
 use serde_json::Value;
 use zmail_core::{
     SyncTarget,
@@ -16,15 +19,13 @@ use zmail_core::{
     participants::{Participant, format_address_list, parse_address_list},
 };
 
-use crate::connect_client;
+use crate::{Connection, connect_client};
 
-/// An `Identity/get` of every identity, with the submission capability it
-/// needs, which `jmap-client` does not add.
-pub(crate) fn identity_get_request(client: &Client) -> jmap_client::core::request::Request<'_> {
-    let mut request = client.build();
-    request.get_identity();
-    request.add_capability(jmap_client::URI::Submission);
-    request
+/// An `Identity/get` of every identity of the account.
+pub(crate) fn get_request(account_id: &str) -> Result<Request> {
+    let mut request = Request::new();
+    request.call(Get::<Identity>::new(account_id))?;
+    Ok(request)
 }
 
 /// The arguments of the `method` answer in `method_response` (`[name,
@@ -65,12 +66,12 @@ pub(crate) fn identity_list(method_response: Option<&Value>) -> Result<&[Value]>
 }
 
 /// The server's identities, for the sync.
-pub(crate) async fn fetch_server_identities(client: &Client) -> Result<Vec<ServerIdentity>> {
+pub(crate) async fn fetch_server_identities(client: &Connection) -> Result<Vec<ServerIdentity>> {
     let response = client
-        .send::<Value>(&identity_get_request(client))
+        .send_first(&get_request(client.account_id())?)
         .await
         .map_err(|error| anyhow!("failed to fetch the JMAP identities: {error}"))?;
-    server_identities(response.method_responses().first())
+    server_identities(response.as_ref())
 }
 
 /// The identities in an `Identity/get` answer; ones without an id or an
@@ -131,25 +132,14 @@ fn reply_to_summary(value: Option<&Value>) -> String {
 fn reply_to_addresses(value: &str) -> Option<Vec<EmailAddress>> {
     let addresses = parse_address_list(value)
         .into_iter()
-        .filter_map(|participant| match (participant.name, participant.email) {
-            (Some(name), Some(email)) => Some(EmailAddress::from((name, email))),
-            (None, Some(email)) => Some(EmailAddress::from(email)),
-            (_, None) => None,
+        .filter_map(|participant| {
+            Some(EmailAddress {
+                name: participant.name,
+                email: participant.email?,
+            })
         })
         .collect::<Vec<_>>();
     (!addresses.is_empty()).then_some(addresses)
-}
-
-/// Sets `values` on an identity being created or updated. An empty
-/// reply-to is sent as `null`, which clears the server's.
-fn set_values(
-    identity: &mut jmap_client::identity::Identity<jmap_client::Set>,
-    values: &IdentityValues,
-) {
-    identity
-        .name(values.name.clone())
-        .text_signature(values.signature.clone())
-        .reply_to(reply_to_addresses(&values.reply_to).map(Vec::into_iter));
 }
 
 /// "Update the server": sets server identity `server_id`'s name, reply-to
@@ -165,15 +155,38 @@ pub async fn update_server_identity(
     update_identity(&client, server_id, values).await
 }
 
-async fn update_identity(client: &Client, server_id: &str, values: &IdentityValues) -> Result<()> {
-    let mut request = client.build();
-    set_values(request.set_identity().update(server_id), values);
-    request.add_capability(jmap_client::URI::Submission);
+/// An `Identity/set` that sets `server_id`'s name, reply-to and text
+/// signature to `values`. An empty reply-to is sent as `null`, which
+/// clears the server's.
+pub(crate) fn update_request(
+    account_id: &str,
+    server_id: &str,
+    values: &IdentityValues,
+) -> Result<Request> {
+    let mut set = Set::<Identity>::new(account_id);
+    set.update(
+        server_id,
+        IdentityUpdate::new()
+            .name(values.name.clone())
+            .text_signature(values.signature.clone())
+            .reply_to(reply_to_addresses(&values.reply_to))
+            .into(),
+    );
+    let mut request = Request::new();
+    request.call(set)?;
+    Ok(request)
+}
+
+async fn update_identity(
+    client: &Connection,
+    server_id: &str,
+    values: &IdentityValues,
+) -> Result<()> {
     let response = client
-        .send::<Value>(&request)
+        .send_first(&update_request(client.account_id(), server_id, values)?)
         .await
         .map_err(|error| anyhow!("failed to update the JMAP identity: {error}"))?;
-    updated(response.method_responses().first(), server_id)
+    updated(response.as_ref(), server_id)
 }
 
 /// Whether an `Identity/set` answer updated `server_id`, or why not.
@@ -212,17 +225,35 @@ pub async fn create_server_identity(
     create_identity(&client, email, values).await
 }
 
-async fn create_identity(client: &Client, email: &str, values: &IdentityValues) -> Result<String> {
-    let mut request = client.build();
-    let identity = request.set_identity().create();
-    identity.email(email);
-    set_values(identity, values);
-    request.add_capability(jmap_client::URI::Submission);
+/// An `Identity/set` that creates an identity for `email` with `values`
+/// (an empty reply-to as `null`).
+pub(crate) fn create_request(
+    account_id: &str,
+    email: &str,
+    values: &IdentityValues,
+) -> Result<Request> {
+    let mut set = Set::<Identity>::new(account_id);
+    set.create(
+        NewIdentity::new(email)
+            .name(values.name.clone())
+            .text_signature(values.signature.clone())
+            .reply_to(reply_to_addresses(&values.reply_to)),
+    );
+    let mut request = Request::new();
+    request.call(set)?;
+    Ok(request)
+}
+
+async fn create_identity(
+    client: &Connection,
+    email: &str,
+    values: &IdentityValues,
+) -> Result<String> {
     let response = client
-        .send::<Value>(&request)
+        .send_first(&create_request(client.account_id(), email, values)?)
         .await
         .map_err(|error| anyhow!("failed to create the JMAP identity: {error}"))?;
-    created(response.method_responses().first())
+    created(response.as_ref())
 }
 
 /// The id of the identity an `Identity/set` answer created, or why it
@@ -264,15 +295,21 @@ pub async fn destroy_server_identity(
     destroy_identity(&client, server_id).await
 }
 
-async fn destroy_identity(client: &Client, server_id: &str) -> Result<()> {
-    let mut request = client.build();
-    request.set_identity().destroy([server_id]);
-    request.add_capability(jmap_client::URI::Submission);
+/// An `Identity/set` that destroys `server_id`.
+pub(crate) fn destroy_request(account_id: &str, server_id: &str) -> Result<Request> {
+    let mut set = Set::<Identity>::new(account_id);
+    set.destroy([server_id]);
+    let mut request = Request::new();
+    request.call(set)?;
+    Ok(request)
+}
+
+async fn destroy_identity(client: &Connection, server_id: &str) -> Result<()> {
     let response = client
-        .send::<Value>(&request)
+        .send_first(&destroy_request(client.account_id(), server_id)?)
         .await
         .map_err(|error| anyhow!("failed to delete the JMAP identity: {error}"))?;
-    destroyed(response.method_responses().first(), server_id)
+    destroyed(response.as_ref(), server_id)
 }
 
 /// Whether an `Identity/set` answer destroyed `server_id`, or why not.

@@ -235,7 +235,7 @@ pub async fn apply_pending_ops(
 }
 
 async fn apply_single_jmap_op(
-    client: &Client,
+    client: &Connection,
     op: &PendingOp,
     mailbox_ids: &HashMap<String, String>,
 ) -> Result<()> {
@@ -363,7 +363,7 @@ pub async fn resubmit_outgoing_message(
 /// Imports `message`'s copy into Sent and submits it from the identity
 /// with `identity_email` ([`submit_or_discard`]).
 async fn import_and_submit(
-    client: &Client,
+    client: &Connection,
     identity_email: &str,
     message: &OutgoingMessage,
 ) -> Result<()> {
@@ -499,7 +499,7 @@ enum SubmitError {
 /// leaves the copy alone: the submission may have happened, and only its
 /// keywords can say.
 async fn submit_or_discard(
-    client: &Client,
+    client: &Connection,
     email_id: &str,
     identity_id: &str,
     message: &OutgoingMessage,
@@ -521,39 +521,48 @@ async fn submit_or_discard(
 /// [`SUBMITTED`] in the same call (`onSuccessUpdateEmail`), so the copy
 /// says whether the submission happened.
 async fn submit_email(
-    client: &Client,
+    client: &Connection,
     email_id: &str,
     identity_id: &str,
     message: &OutgoingMessage,
 ) -> std::result::Result<(), SubmitError> {
-    use jmap_client::core::set::SetObject;
-
-    let mut request = client.build();
-    let submissions = request.set_email_submission();
-    let create_id = submissions
-        .create()
-        .email_id(email_id)
-        .identity_id(identity_id)
-        .envelope(message.from_email.as_str(), all_recipients(message))
-        .create_id()
-        .context("the JMAP EmailSubmission has no creation id")
-        .map_err(SubmitError::Unknown)?;
-    submissions
-        .arguments()
-        .on_success_update_email(&create_id)
-        .keywords([SUBMITTED]);
+    let (request, create_id) =
+        submission_request(client.account_id(), email_id, identity_id, message)
+            .map_err(SubmitError::Unknown)?;
     // Read as plain JSON: the server's implicit `Email/set` answer follows
-    // the submission's, which `jmap-client`'s single-method helper would
-    // take for it.
-    let response = client
-        .send::<serde_json::Value>(&request)
-        .await
-        .map_err(|error| {
-            SubmitError::Unknown(anyhow!(
-                "failed to create the JMAP EmailSubmission: {error}"
-            ))
-        })?;
-    submission_created(response.method_responses().first(), &create_id)
+    // the submission's, under the same call id; the first is the
+    // submission's.
+    let response = client.send_first(&request).await.map_err(|error| {
+        SubmitError::Unknown(anyhow!(
+            "failed to create the JMAP EmailSubmission: {error}"
+        ))
+    })?;
+    submission_created(response.as_ref(), &create_id)
+}
+
+/// The `EmailSubmission/set` that submits the email `email_id` from the
+/// identity `identity_id` to `message`'s recipients and, on success,
+/// replaces the copy's keywords with [`SUBMITTED`]
+/// (`onSuccessUpdateEmail`); with the submission's creation id.
+fn submission_request(
+    account_id: &str,
+    email_id: &str,
+    identity_id: &str,
+    message: &OutgoingMessage,
+) -> Result<(jmap_wire::Request, String)> {
+    use jmap_wire::mail::{EmailSubmission, Envelope, NewEmailSubmission};
+
+    let mut set = jmap_wire::Set::<EmailSubmission>::new(account_id);
+    let create_id = set.create(NewEmailSubmission::new(identity_id, email_id).envelope(
+        Envelope::new(message.from_email.as_str(), all_recipients(message)),
+    ));
+    set.arguments().on_success_update_email(
+        format!("#{create_id}"),
+        jmap_wire::PatchObject::new().set("keywords", serde_json::json!({ SUBMITTED: true })),
+    );
+    let mut request = jmap_wire::Request::new();
+    request.call(set)?;
+    Ok((request, create_id))
 }
 
 /// Whether an `EmailSubmission/set` answer created submission `create_id`,
@@ -607,14 +616,12 @@ fn submission_created(
 
 /// Destroys the emails `ids` (`Email/set`). One the server no longer has
 /// counts as destroyed.
-async fn destroy_emails(client: &Client, ids: &[&str]) -> Result<()> {
-    let mut request = client.build();
-    request.set_email().destroy(ids.iter().copied());
+async fn destroy_emails(client: &Connection, ids: &[&str]) -> Result<()> {
     let response = client
-        .send::<serde_json::Value>(&request)
+        .send_first(&destroy_emails_request(client.account_id(), ids)?)
         .await
         .map_err(|error| anyhow!("failed to destroy the JMAP email: {error}"))?;
-    let arguments = identities::method_arguments(response.method_responses().first(), "Email/set")?;
+    let arguments = identities::method_arguments(response.as_ref(), "Email/set")?;
     for id in ids {
         let destroyed = arguments
             .get("destroyed")
@@ -632,6 +639,15 @@ async fn destroy_emails(client: &Client, ids: &[&str]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The `Email/set` that destroys the emails `ids`.
+fn destroy_emails_request(account_id: &str, ids: &[&str]) -> Result<jmap_wire::Request> {
+    let mut set = jmap_wire::Set::<jmap_wire::mail::Email>::new(account_id);
+    set.destroy(ids.iter().copied());
+    let mut request = jmap_wire::Request::new();
+    request.call(set)?;
+    Ok(request)
 }
 
 /// What a JMAP account shows of a message whose send was interrupted
@@ -987,25 +1003,104 @@ fn jmap_client_url(session: &Url) -> String {
     }
 }
 
+/// How long each request of the ported calls may take, as `jmap-client`'s
+/// default for the calls still on it.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One sign-in to a JMAP account, while Zmail moves from `jmap-client`
+/// to its own JMAP library, `jmap-wire`, step by step (ADR 0008, #132).
+///
+/// It holds both clients over one session: `jmap-client` fetches it, and
+/// the `jmap-wire` client is given the same session, with the same
+/// credentials, the same-host redirect rule and the same timeout.
+/// Identities, submission and destroying emails go through `jmap-wire`
+/// ([`Connection::send_first`]); everything else still calls
+/// `jmap-client`, which a `Connection` dereferences to.
+pub(crate) struct Connection {
+    legacy: Client,
+    wire: jmap_wire::Client<jmap_wire::ReqwestTransport>,
+}
+
+impl std::ops::Deref for Connection {
+    type Target = Client;
+
+    fn deref(&self) -> &Client {
+        &self.legacy
+    }
+}
+
+impl Connection {
+    /// The account every call is made in: the one `jmap-client` uses, so
+    /// that the calls on either client act on the same account.
+    pub(crate) fn account_id(&self) -> &str {
+        self.legacy.default_account_id()
+    }
+
+    /// Sends `request` and returns the first method response as JSON
+    /// (`[name, arguments, call id]`), or `None` when the server gave
+    /// none. A method-level error is such a response, named `error`.
+    pub(crate) async fn send_first(
+        &self,
+        request: &jmap_wire::Request,
+    ) -> jmap_wire::Result<Option<serde_json::Value>> {
+        let response = self.wire.send(request).await?;
+        Ok(response
+            .method_responses
+            .first()
+            .and_then(|first| serde_json::to_value(first).ok()))
+    }
+}
+
+/// The `jmap-wire` credentials for the target's auth kind: HTTP Basic
+/// for a password, the bearer access token for OAuth2.
+fn wire_credentials(
+    auth: AuthKind,
+    username: &str,
+    secret: &str,
+) -> Result<jmap_wire::Credentials> {
+    match auth {
+        AuthKind::Password => Ok(jmap_wire::Credentials::basic(username, secret)),
+        AuthKind::OAuth2 => Ok(jmap_wire::Credentials::bearer(secret)),
+        AuthKind::ProtonSession => bail!("Proton accounts do not sign in over JMAP"),
+    }
+}
+
 pub(crate) async fn connect_client(
     endpoint: &str,
     username: &str,
     secret: &str,
     auth: AuthKind,
-) -> Result<Client> {
+) -> Result<Connection> {
     let credentials = jmap_credentials(auth, username, secret)?;
+    let wire_credentials = wire_credentials(auth, username, secret)?;
     let session = session_url(endpoint).await?;
     let mut client_builder = Client::new().credentials(credentials);
     // Same-host redirects only: a session or API URL that moves to another
     // host would take the credentials with it.
+    let mut redirects = jmap_wire::RedirectPolicy::none();
     if let Some(host) = session.host_str() {
         client_builder = client_builder.follow_redirects([host.to_owned()]);
+        redirects = jmap_wire::RedirectPolicy::hosts([host]);
     }
 
-    client_builder
+    let legacy = client_builder
         .connect(&jmap_client_url(&session))
         .await
-        .with_context(|| format!("failed to connect to the JMAP endpoint {endpoint}"))
+        .with_context(|| format!("failed to connect to the JMAP endpoint {endpoint}"))?;
+    // One session fetch for both clients: `jmap-wire` is handed the one
+    // `jmap-client` just read.
+    let wire = serde_json::to_value(&*legacy.session())
+        .and_then(serde_json::from_value::<jmap_wire::Session>)
+        .map_err(anyhow::Error::from)
+        .and_then(|wire_session| {
+            Ok(jmap_wire::Client::builder()
+                .credentials(wire_credentials)
+                .redirect_policy(redirects)
+                .timeout(REQUEST_TIMEOUT)
+                .with_session(jmap_wire::ReqwestTransport::new()?, session, wire_session)?)
+        })
+        .with_context(|| format!("failed to connect to the JMAP endpoint {endpoint}"))?;
+    Ok(Connection { legacy, wire })
 }
 
 /// Fetches the JMAP session at `endpoint` with the credentials: the
@@ -1020,15 +1115,14 @@ pub async fn check_sign_in(
     Ok(())
 }
 
-async fn fetch_submission_identities(client: &Client) -> Result<Vec<SubmissionIdentity>> {
+async fn fetch_submission_identities(client: &Connection) -> Result<Vec<SubmissionIdentity>> {
     // Read as plain JSON: the identities' ids and addresses are all a
-    // submission needs, and `jmap-client`'s typed response refuses what
-    // some servers send (Apache James's, for one), failing every send.
+    // submission needs.
     let response = client
-        .send::<serde_json::Value>(&identities::identity_get_request(client))
+        .send_first(&identities::get_request(client.account_id())?)
         .await
         .map_err(|error| anyhow!("failed to fetch JMAP identities for submission: {error}"))?;
-    submission_identities(response.method_responses().first())
+    submission_identities(response.as_ref())
 }
 
 /// The identities in an `Identity/get` method response
@@ -1095,7 +1189,7 @@ async fn sent_mailbox_ids(client: &Client) -> Result<Vec<String>> {
         .collect())
 }
 
-async fn resolve_identity_id(client: &Client, identity_email: &str) -> Result<Option<String>> {
+async fn resolve_identity_id(client: &Connection, identity_email: &str) -> Result<Option<String>> {
     let identities = fetch_submission_identities(client).await?;
     Ok(identities
         .into_iter()
@@ -2361,3 +2455,6 @@ mod submission_tests;
 
 #[cfg(test)]
 mod session_tests;
+
+#[cfg(test)]
+mod wire_parity_tests;

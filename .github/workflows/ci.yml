@@ -180,6 +180,16 @@ jobs:
             - name: Workspace tests
               run: cargo test --workspace --locked
 
+            # jmap-wire is a library for others too (ADR 0008): it has to
+            # build and pass alone, without its default HTTP transport,
+            # and document cleanly.
+            - name: jmap-wire on its own
+              env:
+                RUSTDOCFLAGS: -D warnings
+              run: |
+                  cargo test -p jmap-wire --locked --no-default-features
+                  cargo doc -p jmap-wire --no-deps --locked
+
             # The Proton provider in the app is behind the `proton` feature,
             # off by default until the local store is encrypted (#139), so
             # the workspace runs above never build it. Lint the app with it
