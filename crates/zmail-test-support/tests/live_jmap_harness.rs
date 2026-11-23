@@ -2098,3 +2098,346 @@ fn inbox_id(store: &LocalStore, account_id: i64) -> Result<i64> {
         .map(|mailbox| mailbox.id)
         .context("synced JMAP account should contain an INBOX mailbox")
 }
+
+/// A message with every part kind the JMAP read path meets: a
+/// `multipart/alternative` body whose HTML has an inline `cid:` image, a
+/// named attachment, a group address, an encoded-word subject, threading
+/// headers and a list header.
+const JMAP_WIRE_PROBE_MIXED: &str = concat!(
+    "From: \"Probe Sender\" <probe@phase2b.test>\r\n",
+    "Sender: Probe Robot <robot@phase2b.test>\r\n",
+    "To: jmap@localhost, Friends: ada@phase2b.test, \"Bo Example\" <bo@phase2b.test>;\r\n",
+    "Cc: Cy <cy@phase2b.test>\r\n",
+    "Reply-To: Replies <replies@phase2b.test>\r\n",
+    "Subject: =?UTF-8?Q?jmap-wire_probe_caf=C3=A9?= mixed\r\n",
+    "Date: Tue, 03 Nov 2026 16:15:05 +0100\r\n",
+    "Message-ID: <jmap-wire-probe-mixed@phase2b.test>\r\n",
+    "In-Reply-To: <jmap-wire-probe-root@phase2b.test>\r\n",
+    "References: <jmap-wire-probe-root@phase2b.test> <jmap-wire-probe-mid@phase2b.test>\r\n",
+    "List-Unsubscribe: <mailto:leave@phase2b.test>, <https://lists.phase2b.test/leave>\r\n",
+    "List-Post: <mailto:list@phase2b.test>\r\n",
+    "Comments: first comment\r\n",
+    "Comments: second comment\r\n",
+    "X-Probe: one\r\n",
+    "X-Probe: two\r\n",
+    "MIME-Version: 1.0\r\n",
+    "Content-Type: multipart/mixed; boundary=\"mixed-b\"\r\n",
+    "\r\n",
+    "--mixed-b\r\n",
+    "Content-Type: multipart/alternative; boundary=\"alt-b\"\r\n",
+    "\r\n",
+    "--alt-b\r\n",
+    "Content-Type: text/plain; charset=utf-8\r\n",
+    "\r\n",
+    "Plain alternative of the probe.\r\n",
+    "--alt-b\r\n",
+    "Content-Type: multipart/related; boundary=\"rel-b\"\r\n",
+    "\r\n",
+    "--rel-b\r\n",
+    "Content-Type: text/html; charset=utf-8\r\n",
+    "\r\n",
+    "<html><body><p>HTML alternative of the probe.</p>",
+    "<img src=\"cid:probe-logo@phase2b.test\">",
+    "<img src=\"https://tracker.example.test/probe.gif\"></body></html>\r\n",
+    "--rel-b\r\n",
+    "Content-Type: image/png\r\n",
+    "Content-ID: <probe-logo@phase2b.test>\r\n",
+    "Content-Disposition: inline\r\n",
+    "Content-Transfer-Encoding: base64\r\n",
+    "\r\n",
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==\r\n",
+    "--rel-b--\r\n",
+    "--alt-b--\r\n",
+    "--mixed-b\r\n",
+    "Content-Type: text/csv; charset=utf-8; name=\"report.csv\"\r\n",
+    "Content-Disposition: attachment; filename=\"report.csv\"\r\n",
+    "Content-Language: en, fr\r\n",
+    "Content-Location: https://files.phase2b.test/report.csv\r\n",
+    "\r\n",
+    "plan,price\r\n",
+    "starter,9\r\n",
+    "--mixed-b--\r\n",
+);
+
+/// Prints what Apache James answers to the read calls of JMAP Mail, for
+/// the response fixtures of `crates/jmap-wire/tests/fixtures/james-3.9`
+/// (see the README there): each answer is one log line,
+/// `JMAP-WIRE-FIXTURE <name> <JSON>`. Everything in them is the
+/// harness's synthetic mail.
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn james_answers_the_read_calls_for_the_jmap_wire_fixtures() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let james = James::connect(MAIL_HARNESS_JMAP_ACCOUNT, MAIL_HARNESS_JMAP_PASSWORD)?;
+
+    submit_raw_harness_message(JMAP_WIRE_PROBE_MIXED)?;
+    submit_raw_harness_message(concat!(
+        "From: News <news@phase2b.test>\r\n",
+        "To: jmap@localhost\r\n",
+        "Subject: jmap-wire probe html only\r\n",
+        "Message-ID: <jmap-wire-probe-html@phase2b.test>\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: text/html; charset=utf-8\r\n",
+        "\r\n",
+        "<html><body><h1>Probe</h1><p>HTML only.</p></body></html>\r\n",
+    ))?;
+    submit_raw_harness_message(concat!(
+        "From: probe@phase2b.test\r\n",
+        "To: jmap@localhost\r\n",
+        "Message-ID: <jmap-wire-probe-bare@phase2b.test>\r\n",
+        "\r\n",
+        "jmap-wire probe bare: no subject, no MIME headers.\r\n",
+    ))?;
+    let probe = |message_id: &'static str| {
+        james
+            .wait_for_email(message_id, |email| has_message_id(email, message_id))
+            .map(|email| email["id"].as_str().unwrap_or_default().to_owned())
+    };
+    let mixed = probe("jmap-wire-probe-mixed@phase2b.test")?;
+    let html = probe("jmap-wire-probe-html@phase2b.test")?;
+    let bare = probe("jmap-wire-probe-bare@phase2b.test")?;
+    let probes = serde_json::json!([mixed, html, bare]);
+
+    let session: serde_json::Value = james
+        .client
+        .get(format!("{MAIL_HARNESS_JMAP_ENDPOINT}/.well-known/jmap"))
+        .basic_auth(james.user, Some(james.password))
+        .send()?
+        .error_for_status()?
+        .json()?;
+    println!("JMAP-WIRE-FIXTURE session {session}");
+
+    // The properties Zmail's sync asks for, and its arguments.
+    let sync_properties = serde_json::json!([
+        "id",
+        "threadId",
+        "mailboxIds",
+        "keywords",
+        "from",
+        "replyTo",
+        "to",
+        "subject",
+        "preview",
+        "hasAttachment",
+        "attachments",
+        "bodyValues",
+        "textBody",
+        "htmlBody",
+        "receivedAt",
+        "messageId",
+        "inReplyTo",
+        "references",
+        "cc",
+        "header:Delivered-To:all",
+        "header:X-Original-To:all"
+    ]);
+    let state = james.raw("Email/get", serde_json::json!({"ids": []}))?;
+    let since = state["methodResponses"][0][1]["state"].clone();
+    let all_ids = james.raw(
+        "Email/query",
+        serde_json::json!({"sort": [{"property": "receivedAt"}], "position": 0, "limit": 250}),
+    )?;
+    let six = all_ids["methodResponses"][0][1]["ids"]
+        .as_array()
+        .map(|ids| ids.iter().take(6).cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let thread_ids = james.raw(
+        "Email/get",
+        serde_json::json!({"ids": probes, "properties": ["threadId"]}),
+    )?;
+    let threads = thread_ids["methodResponses"][0][1]["list"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(|email| email["threadId"].clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let calls = [
+        ("mailbox-get.all", "Mailbox/get", serde_json::json!({})),
+        (
+            "mailbox-get.ids-null",
+            "Mailbox/get",
+            serde_json::json!({"ids": null}),
+        ),
+        (
+            "mailbox-get.some-properties",
+            "Mailbox/get",
+            serde_json::json!({"ids": null, "properties": ["name", "role", "parentId"]}),
+        ),
+        (
+            "mailbox-query.sorted",
+            "Mailbox/query",
+            serde_json::json!({"filter": {"hasAnyRole": true}, "sort": [{"property": "name"}]}),
+        ),
+        (
+            "mailbox-changes.since-unknown",
+            "Mailbox/changes",
+            serde_json::json!({"sinceState": "nope"}),
+        ),
+        (
+            "email-query.page",
+            "Email/query",
+            serde_json::json!({
+                "sort": [{"property": "receivedAt", "isAscending": false}],
+                "position": 0, "limit": 2, "calculateTotal": true
+            }),
+        ),
+        (
+            "email-query.filtered",
+            "Email/query",
+            serde_json::json!({
+                "filter": {"operator": "AND", "conditions": [
+                    {"text": "probe"},
+                    {"operator": "NOT", "conditions": [{"hasKeyword": "$seen"}]}
+                ]},
+                "sort": [{"property": "receivedAt", "isAscending": false}],
+                "collapseThreads": true
+            }),
+        ),
+        (
+            "email-get.sync",
+            "Email/get",
+            serde_json::json!({
+                "ids": probes, "properties": sync_properties, "fetchAllBodyValues": true
+            }),
+        ),
+        (
+            "email-get.default-properties",
+            "Email/get",
+            serde_json::json!({"ids": probes}),
+        ),
+        (
+            "email-get.light",
+            "Email/get",
+            serde_json::json!({
+                "ids": probes,
+                "properties": ["id", "threadId", "mailboxIds", "keywords", "hasAttachment"]
+            }),
+        ),
+        (
+            "email-get.structure",
+            "Email/get",
+            serde_json::json!({
+                "ids": [mixed],
+                "properties": ["blobId", "size", "sentAt", "sender", "bcc", "headers",
+                               "bodyStructure", "bodyValues", "textBody", "htmlBody", "attachments"],
+                "bodyProperties": ["partId", "blobId", "size", "headers", "name", "type",
+                                   "charset", "disposition", "cid", "language", "location",
+                                   "subParts", "header:Content-Type"],
+                "fetchTextBodyValues": true, "fetchHTMLBodyValues": true, "maxBodyValueBytes": 16
+            }),
+        ),
+        (
+            "email-get.header-forms",
+            "Email/get",
+            serde_json::json!({
+                "ids": [mixed, bare],
+                "properties": [
+                    "header:Subject", "header:Subject:asText", "header:subject:asText:all",
+                    "header:From:asAddresses", "header:To:asAddresses",
+                    "header:To:asGroupedAddresses", "header:Cc:asAddresses:all",
+                    "header:Message-ID:asMessageIds", "header:References:asMessageIds",
+                    "header:Date:asDate", "header:List-Unsubscribe:asURLs",
+                    "header:List-Post:asURLs", "header:Comments:asText:all",
+                    "header:X-Probe", "header:X-Probe:all", "header:X-Probe:asText:all",
+                    "header:X-Absent", "header:X-Absent:all", "header:X-Absent:asAddresses",
+                    "header:Resent-Date:asDate", "header:Delivered-To:all"
+                ]
+            }),
+        ),
+        (
+            "email-get.not-found",
+            "Email/get",
+            serde_json::json!({
+                "ids": [html, "not-an-email-id"], "properties": ["subject", "receivedAt"]
+            }),
+        ),
+        (
+            "email-get.too-many",
+            "Email/get",
+            serde_json::json!({
+                "ids": six, "properties": sync_properties, "fetchAllBodyValues": true
+            }),
+        ),
+        (
+            "email-get.unknown-property",
+            "Email/get",
+            serde_json::json!({
+                "ids": [html], "properties": ["subject", "noSuchProperty"]
+            }),
+        ),
+        (
+            "email-changes.none",
+            "Email/changes",
+            serde_json::json!({"sinceState": since, "maxChanges": 500}),
+        ),
+        (
+            "email-changes.cannot-calculate",
+            "Email/changes",
+            serde_json::json!({"sinceState": "nope"}),
+        ),
+        (
+            "email-querychanges",
+            "Email/queryChanges",
+            serde_json::json!({
+                "sinceQueryState": all_ids["methodResponses"][0][1]["queryState"],
+                "sort": [{"property": "receivedAt"}]
+            }),
+        ),
+        (
+            "thread-get",
+            "Thread/get",
+            serde_json::json!({"ids": threads}),
+        ),
+    ];
+    println!("JMAP-WIRE-FIXTURE email-get.state {state}");
+    for (name, method, arguments) in calls {
+        println!("JMAP-WIRE-FIXTURE {name} {}", james.raw(method, arguments)?);
+    }
+    // Two calls in one request, the second fed by the first (RFC 8620
+    // section 3.7).
+    let chained = james.raw_request(serde_json::json!([
+        ["Email/query", {"accountId": james.account_id, "filter": {"subject": "jmap-wire probe"},
+                         "sort": [{"property": "receivedAt"}]}, "c0"],
+        ["Email/get", {"accountId": james.account_id,
+                       "#ids": {"resultOf": "c0", "name": "Email/query", "path": "/ids"},
+                       "properties": ["subject", "threadId"]}, "c1"]
+    ]))?;
+    println!("JMAP-WIRE-FIXTURE chained.query-get {chained}");
+    Ok(())
+}
+
+impl James {
+    /// One method call, with the account filled in: the whole response
+    /// body, method errors included.
+    fn raw(&self, method: &str, mut arguments: serde_json::Value) -> Result<serde_json::Value> {
+        arguments["accountId"] = serde_json::json!(self.account_id);
+        self.raw_request(serde_json::json!([[method, arguments, "c0"]]))
+    }
+
+    /// The response body to a request with these method calls; a
+    /// request-level error (an HTTP error status with its body) is
+    /// returned as `{"httpStatus": .., "body": ..}`.
+    fn raw_request(&self, method_calls: serde_json::Value) -> Result<serde_json::Value> {
+        let response = self
+            .client
+            .post(&self.api_url)
+            .basic_auth(self.user, Some(self.password))
+            .json(&serde_json::json!({
+                "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+                "methodCalls": method_calls,
+            }))
+            .send()?;
+        let status = response.status();
+        let text = response.text()?;
+        let body = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+        Ok(if status.is_success() {
+            body
+        } else {
+            serde_json::json!({"httpStatus": status.as_u16(), "body": body})
+        })
+    }
+}
