@@ -10,7 +10,7 @@ use url::Url;
 use crate::{
     auth::{Credentials, TokenRequest},
     batch::IdBatches,
-    error::{Error, ProblemDetails, RedirectRefusal},
+    error::{Error, ProblemDetails, RedirectRefusal, TransportError},
     method::{Get, GetObject, GetResponse, Method},
     request::Request,
     response::Response,
@@ -37,6 +37,21 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// the limit cannot be read. Raise it for accounts with such mail, or
 /// bound the answers with `maxBodyValueBytes`.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+/// How long a blob upload or download may take unless
+/// [`ClientBuilder::blob_timeout`] says otherwise: five minutes. Blobs
+/// are attachments and whole messages, which run to tens of megabytes;
+/// the API timeout would cut them off on a slow line.
+pub const DEFAULT_BLOB_TIMEOUT: Duration = Duration::from_secs(300);
+/// The largest blob [`Client::download`] reads unless
+/// [`ClientBuilder::max_download_bytes`] or the download itself
+/// ([`BlobDownload::max_bytes`](crate::BlobDownload::max_bytes)) says
+/// otherwise: 128 MiB, counted after any decompression. A download is
+/// held in memory whole, so this is also the most memory one download
+/// takes.
+pub const DEFAULT_MAX_DOWNLOAD_BYTES: usize = 128 * 1024 * 1024;
+/// The largest answer to an upload that is read: 1 MiB. The answer is a
+/// small JSON object (RFC 8620 section 6.1).
+pub(crate) const MAX_UPLOAD_ANSWER_BYTES: usize = 1024 * 1024;
 /// The largest Session object read: 4 MiB.
 pub const DEFAULT_MAX_SESSION_BYTES: usize = 4 * 1024 * 1024;
 /// The `User-Agent` sent unless [`ClientBuilder::user_agent`] says
@@ -45,11 +60,13 @@ pub const DEFAULT_USER_AGENT: &str = concat!("jmap-wire/", env!("CARGO_PKG_VERSI
 
 /// Everything a client is set up with but its transport and session.
 #[derive(Debug, Clone)]
-struct Config {
+pub(crate) struct Config {
     credentials: Credentials,
     redirects: RedirectPolicy,
-    timeout: Duration,
+    pub(crate) timeout: Duration,
     max_response_bytes: usize,
+    pub(crate) blob_timeout: Duration,
+    pub(crate) max_download_bytes: usize,
     user_agent: Option<String>,
 }
 
@@ -79,14 +96,17 @@ impl ClientBuilder {
                 redirects: RedirectPolicy::default(),
                 timeout: DEFAULT_TIMEOUT,
                 max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+                blob_timeout: DEFAULT_BLOB_TIMEOUT,
+                max_download_bytes: DEFAULT_MAX_DOWNLOAD_BYTES,
                 user_agent: Some(DEFAULT_USER_AGENT.to_owned()),
             },
         }
     }
 
     /// The credentials every request is sent with: to the session URL,
-    /// to the endpoints the session names, and to any redirect the
-    /// [`RedirectPolicy`] allows.
+    /// to the endpoints the session names (the API, upload and download
+    /// URLs, which a session may put on other hosts than its own), and
+    /// to any redirect the [`RedirectPolicy`] allows.
     pub fn credentials(mut self, credentials: Credentials) -> Self {
         self.config.credentials = credentials;
         self
@@ -115,6 +135,28 @@ impl ClientBuilder {
     /// compressed answer cannot expand without bound.
     pub fn max_response_bytes(mut self, bytes: usize) -> Self {
         self.config.max_response_bytes = bytes;
+        self
+    }
+
+    /// How long a blob upload or download may take, connecting and
+    /// reading the body included; [`DEFAULT_BLOB_TIMEOUT`] unless set.
+    /// It is separate from [`timeout`](Self::timeout) because a blob
+    /// takes as long as its size and the line allow, and an API call
+    /// that takes minutes has gone wrong.
+    pub fn blob_timeout(mut self, timeout: Duration) -> Self {
+        self.config.blob_timeout = timeout;
+        self
+    }
+
+    /// The largest blob [`Client::download`] reads;
+    /// [`DEFAULT_MAX_DOWNLOAD_BYTES`] unless set. A larger one fails
+    /// with a [`TooLarge`](crate::TransportErrorKind::TooLarge)
+    /// transport error instead of being held in memory. It is separate
+    /// from [`max_response_bytes`](Self::max_response_bytes), which
+    /// bounds API answers, and one download can set its own
+    /// ([`BlobDownload::max_bytes`](crate::BlobDownload::max_bytes)).
+    pub fn max_download_bytes(mut self, bytes: usize) -> Self {
+        self.config.max_download_bytes = bytes;
         self
     }
 
@@ -195,8 +237,8 @@ impl ClientBuilder {
 /// ```
 #[derive(Debug)]
 pub struct Client<T> {
-    transport: T,
-    config: Config,
+    pub(crate) transport: T,
+    pub(crate) config: Config,
     session_url: Url,
     api_url: Url,
     session: Session,
@@ -281,10 +323,13 @@ impl<T: HttpTransport> Client<T> {
         let response = exchange(
             &self.transport,
             &self.config,
-            HttpMethod::Post,
-            self.api_url.clone(),
-            body,
-            self.config.max_response_bytes,
+            Exchange::json(
+                HttpMethod::Post,
+                self.api_url.clone(),
+                body,
+                self.config.timeout,
+                self.config.max_response_bytes,
+            ),
         )
         .await?
         .0;
@@ -381,10 +426,13 @@ async fn fetch_session<T: HttpTransport>(
     let (response, found_at) = exchange(
         transport,
         config,
-        HttpMethod::Get,
-        session_url,
-        Vec::new(),
-        DEFAULT_MAX_SESSION_BYTES,
+        Exchange::json(
+            HttpMethod::Get,
+            session_url,
+            Vec::new(),
+            config.timeout,
+            DEFAULT_MAX_SESSION_BYTES,
+        ),
     )
     .await?;
     let session = serde_json::from_slice(&success(response)?.body)
@@ -392,30 +440,83 @@ async fn fetch_session<T: HttpTransport>(
     Ok((session, found_at))
 }
 
+/// One HTTP exchange for [`exchange`] to make: an API call, the session,
+/// or a blob.
+pub(crate) struct Exchange<'a> {
+    pub(crate) method: HttpMethod,
+    /// Where it begins; redirects are judged against this.
+    pub(crate) url: Url,
+    pub(crate) body: Vec<u8>,
+    /// The `Content-Type` of the body, for a POST.
+    pub(crate) content_type: Option<&'a str>,
+    pub(crate) accept: &'a str,
+    /// Whether to ask for a gzip-compressed answer. A compressed answer
+    /// is decompressed either way.
+    #[cfg_attr(not(feature = "gzip"), allow(dead_code))]
+    pub(crate) accept_gzip: bool,
+    pub(crate) timeout: Duration,
+    /// The largest body to read, counted after decompression.
+    pub(crate) max_response_bytes: usize,
+    /// Follow a redirect the policy does not allow all the same, from
+    /// there on without credentials.
+    pub(crate) redirects_without_credentials: bool,
+    /// Refuse an answer in a content encoding the client cannot undo,
+    /// instead of handing its bytes on as if they were the content.
+    pub(crate) exact_content: bool,
+}
+
+impl Exchange<'static> {
+    /// An exchange of JSON: the session, or an API request.
+    pub(crate) fn json(
+        method: HttpMethod,
+        url: Url,
+        body: Vec<u8>,
+        timeout: Duration,
+        max_response_bytes: usize,
+    ) -> Self {
+        Self {
+            method,
+            url,
+            content_type: (method == HttpMethod::Post).then_some("application/json"),
+            body,
+            accept: "application/json",
+            accept_gzip: true,
+            timeout,
+            max_response_bytes,
+            redirects_without_credentials: false,
+            exact_content: false,
+        }
+    }
+}
+
 /// One authenticated exchange with its redirects: the response that is
 /// not a redirect, and the URL that gave it.
-async fn exchange<T: HttpTransport>(
+pub(crate) async fn exchange<T: HttpTransport>(
     transport: &T,
     config: &Config,
-    method: HttpMethod,
-    origin: Url,
-    body: Vec<u8>,
-    max_response_bytes: usize,
+    exchange: Exchange<'_>,
 ) -> Result<(HttpResponse, Url), Error> {
+    let origin = exchange.url.clone();
+    let method = exchange.method;
     let mut url = origin.clone();
     let mut token = TokenRequest::Current;
     let mut redirects = 0;
+    // Whether this hop is one the credentials may go to.
+    let mut credentialed = true;
     loop {
-        let mut headers = vec![("accept".to_owned(), "application/json".to_owned())];
-        if method == HttpMethod::Post {
-            headers.push(("content-type".to_owned(), "application/json".to_owned()));
+        let mut headers = vec![("accept".to_owned(), exchange.accept.to_owned())];
+        if let Some(content_type) = exchange.content_type {
+            headers.push(("content-type".to_owned(), content_type.to_owned()));
         }
         #[cfg(feature = "gzip")]
-        headers.push(("accept-encoding".to_owned(), "gzip".to_owned()));
+        if exchange.accept_gzip {
+            headers.push(("accept-encoding".to_owned(), "gzip".to_owned()));
+        }
         if let Some(user_agent) = &config.user_agent {
             headers.push(("user-agent".to_owned(), user_agent.clone()));
         }
-        if let Some(authorization) = config.credentials.authorization(token).await? {
+        if credentialed && let Some(authorization) = config.credentials.authorization(token).await?
+        {
             headers.push(("authorization".to_owned(), authorization));
         }
         let response = transport
@@ -423,15 +524,16 @@ async fn exchange<T: HttpTransport>(
                 method,
                 url: url.clone(),
                 headers,
-                body: body.clone(),
-                timeout: config.timeout,
-                max_response_bytes,
+                body: exchange.body.clone(),
+                timeout: exchange.timeout,
+                max_response_bytes: exchange.max_response_bytes,
             })
             .await?;
 
         // A token the server no longer takes: one fresh one, one more
         // attempt.
         if response.status == 401
+            && credentialed
             && token == TokenRequest::Current
             && config.credentials.can_refresh()
         {
@@ -441,7 +543,10 @@ async fn exchange<T: HttpTransport>(
 
         if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
             #[cfg(feature = "gzip")]
-            let response = gzip::decoded(response, max_response_bytes)?;
+            let response = gzip::decoded(response, exchange.max_response_bytes)?;
+            if exchange.exact_content {
+                refuse_encoded(&response)?;
+            }
             return Ok((response, url));
         }
         let refuse = |to: &Url, reason| Error::Redirect {
@@ -464,17 +569,46 @@ async fn exchange<T: HttpTransport>(
             from: &url,
             to: &next,
         };
-        if !config.redirects.allows(&attempt) {
-            return Err(refuse(&next, RedirectRefusal::Policy));
+        if !credentialed || !config.redirects.allows(&attempt) {
+            if !exchange.redirects_without_credentials || method != HttpMethod::Get {
+                return Err(refuse(&next, RedirectRefusal::Policy));
+            }
+            // Followed, but from here on as anyone would fetch it: the
+            // credentials stay with the hosts the policy allows, even
+            // if a later hop leads back to one.
+            credentialed = false;
         }
         url = next;
     }
 }
 
+/// An error for a response whose body is still in a content encoding:
+/// one that is not gzip, or gzip without the `gzip` feature. Its bytes
+/// are not the content.
+fn refuse_encoded(response: &HttpResponse) -> Result<(), TransportError> {
+    let Some(encoding) = response
+        .header("content-encoding")
+        .map(str::trim)
+        .filter(|encoding| !encoding.is_empty() && !encoding.eq_ignore_ascii_case("identity"))
+    else {
+        return Ok(());
+    };
+    // A transport whose HTTP library undid gzip already may leave the
+    // header in place (see `gzip::decoded`).
+    let gzip = encoding.eq_ignore_ascii_case("gzip") || encoding.eq_ignore_ascii_case("x-gzip");
+    if gzip && cfg!(feature = "gzip") {
+        return Ok(());
+    }
+    Err(TransportError::new(
+        crate::error::TransportErrorKind::Other,
+        "the response is in a content encoding this client does not read",
+    ))
+}
+
 /// The response when its status is a success; otherwise the error it
 /// stands for: problem details when the body is one (RFC 8620 section
 /// 3.6.1), else the status alone.
-fn success(response: HttpResponse) -> Result<HttpResponse, Error> {
+pub(crate) fn success(response: HttpResponse) -> Result<HttpResponse, Error> {
     if (200..300).contains(&response.status) {
         return Ok(response);
     }

@@ -4,11 +4,12 @@
 use std::{fs, path::Path};
 
 use jmap_wire::{
-    ChangesResponse, GetResponse, MethodError, MethodErrorType, ProblemDetails, ProblemKind,
-    QueryChangesResponse, QueryResponse, Response, Session, SetErrorType, SetResponse, capability,
+    ChangesResponse, CopyResponse, GetResponse, MethodError, MethodErrorType, ProblemDetails,
+    ProblemKind, QueryChangesResponse, QueryResponse, Response, Session, SetErrorType, SetOutcome,
+    SetResponse, UploadedBlob, capability,
     mail::{
-        AsRaw, AsUrls, EmailRecord, EmailSubmissionRecord, IdentityRecord, MailboxRecord, Role,
-        ThreadRecord,
+        AsRaw, AsUrls, EmailImportResponse, EmailRecord, EmailSubmissionRecord, IdentityRecord,
+        MailboxRecord, Role, ThreadRecord,
     },
 };
 use serde::de::DeserializeOwned;
@@ -104,7 +105,19 @@ fn decode_method_response(path: &Path, name: &str, arguments: &Value) -> bool {
                 .unwrap_or_else(|error| panic!("{path:?}: {name}: {error}"));
         }
         "Email/set" => {
-            serde_json::from_value::<SetResponse<Value>>(arguments.clone())
+            serde_json::from_value::<SetResponse<EmailRecord>>(arguments.clone())
+                .unwrap_or_else(|error| panic!("{path:?}: {name}: {error}"));
+        }
+        "Mailbox/set" => {
+            serde_json::from_value::<SetResponse<MailboxRecord>>(arguments.clone())
+                .unwrap_or_else(|error| panic!("{path:?}: {name}: {error}"));
+        }
+        "Email/import" => {
+            serde_json::from_value::<EmailImportResponse>(arguments.clone())
+                .unwrap_or_else(|error| panic!("{path:?}: {name}: {error}"));
+        }
+        "Email/copy" => {
+            serde_json::from_value::<CopyResponse<EmailRecord>>(arguments.clone())
                 .unwrap_or_else(|error| panic!("{path:?}: {name}: {error}"));
         }
         "error" => {
@@ -150,6 +163,19 @@ fn every_fixture_of_every_server_decodes() {
                 "problem" => {
                     read::<ProblemDetails>(&path);
                 }
+                // The answer to an upload (RFC 8620 section 6.1), which
+                // is no Response object.
+                "upload" => {
+                    let blob: UploadedBlob = read(&path);
+                    assert!(!blob.blob_id.is_empty(), "{path:?}");
+                    assert!(
+                        holds(
+                            &serde_json::to_value(&blob).expect("encodes"),
+                            &read::<Value>(&path)
+                        ),
+                        "{path:?}"
+                    );
+                }
                 // Any other file is a response body: every method
                 // response in it is decoded by its name, and the first
                 // must be what the file's name says.
@@ -170,6 +196,9 @@ fn every_fixture_of_every_server_decodes() {
                         "email-changes" => "Email/changes",
                         "email-querychanges" => "Email/queryChanges",
                         "email-set" => "Email/set",
+                        "email-import" => "Email/import",
+                        "email-copy" => "Email/copy",
+                        "mailbox-set" => "Mailbox/set",
                         "identity-get" => "Identity/get",
                         "identity-set" => "Identity/set",
                         "emailsubmission-set" => "EmailSubmission/set",
@@ -624,4 +653,258 @@ fn what_james_answered_is_read_in_full() {
     let error: MethodError =
         serde_json::from_value(response.method_responses[0].arguments.clone()).expect("decodes");
     assert_eq!(error.error_type, MethodErrorType::UnknownMethod);
+}
+
+/// The write answers written by hand (`shapes`): every outcome of an
+/// `Email/set`, an `Email/import`, an `Email/copy` and a `Mailbox/set`,
+/// with the SetErrors of RFC 8620 section 5.3 and RFC 8621 sections
+/// 2.5, 4.6 and 4.8 and their properties.
+#[test]
+fn the_write_answers_say_what_was_done_and_why_not() {
+    let set: SetResponse<EmailRecord> =
+        first(&fixture("shapes", "email-set.changes.json"), "Email/set");
+    assert_eq!(set.old_state.as_deref(), Some("s1"));
+    assert_eq!(set.new_state.as_deref(), Some("s2"));
+    let created = set.outcome_of_create("k0").done().expect("created");
+    assert_eq!(
+        (
+            created.id.as_deref(),
+            created.blob_id.as_deref(),
+            created.thread_id.as_deref(),
+            created.size
+        ),
+        (Some("e-new"), Some("b-new"), Some("t-new"), Some(412))
+    );
+    assert_eq!(set.outcome_of_update("e-read"), SetOutcome::Done(None));
+    assert!(
+        set.outcome_of_update("e-moved")
+            .done()
+            .flatten()
+            .is_some_and(|changed| changed["mailboxIds"]["mb-label"] == true),
+        "what the server changed beyond the patch is kept"
+    );
+    assert!(set.outcome_of_destroy("e-old").is_done());
+    assert_eq!(set.outcome_of_update("e-unnamed"), SetOutcome::Unanswered);
+
+    let not_created = |id: &str| set.outcome_of_create(id).refusal().expect("refused");
+    assert_eq!(not_created("k1").error_type, SetErrorType::BlobNotFound);
+    assert_eq!(
+        not_created("k1").blobs_not_found(),
+        ["b-gone", "b-gone-too"]
+    );
+    assert_eq!(
+        not_created("k2").error_type,
+        SetErrorType::InvalidProperties
+    );
+    assert!(not_created("k2").names_property("mailboxIds"));
+    assert!(not_created("k2").names_property("header:Content-Type"));
+    assert!(!not_created("k2").names_property("keywords"));
+    assert_eq!(not_created("k3").error_type, SetErrorType::TooLarge);
+    assert_eq!(not_created("k4").error_type, SetErrorType::OverQuota);
+
+    let not_updated = |id: &str| set.outcome_of_update(id).refusal().expect("refused");
+    assert_eq!(not_updated("e-gone").error_type, SetErrorType::NotFound);
+    assert!(not_updated("e-false").names_property("keywords"));
+    assert_eq!(
+        not_updated("e-patch").error_type,
+        SetErrorType::InvalidPatch
+    );
+    assert_eq!(
+        not_updated("e-keywords").error_type,
+        SetErrorType::TooManyKeywords
+    );
+    assert_eq!(
+        not_updated("e-mailboxes").error_type,
+        SetErrorType::TooManyMailboxes
+    );
+    assert_eq!(
+        not_updated("e-forbidden").error_type,
+        SetErrorType::Forbidden
+    );
+    // A type of no RFC this crate knows is kept, with its properties.
+    assert_eq!(not_updated("e-later").error_type.as_str(), "mailboxLocked");
+    assert_eq!(not_updated("e-later").extra["retryAfter"], 30);
+    assert_eq!(
+        set.outcome_of_destroy("e-both")
+            .refusal()
+            .map(|error| &error.error_type),
+        Some(&SetErrorType::WillDestroy)
+    );
+
+    let nulls: SetResponse<EmailRecord> =
+        first(&fixture("shapes", "email-set.nulls.json"), "Email/set");
+    assert!(nulls.outcome_of_update("e-read").is_done());
+    assert!(nulls.created.is_empty() && nulls.not_updated.is_empty());
+
+    let mismatch: MethodError = first(
+        &fixture("shapes", "method-error.email-set-state-mismatch.json"),
+        "error",
+    );
+    assert_eq!(mismatch.error_type, MethodErrorType::StateMismatch);
+
+    let import: EmailImportResponse =
+        first(&fixture("shapes", "email-import.json"), "Email/import");
+    let imported = import.outcome_of("k0").done().expect("imported");
+    assert_eq!(imported.id.as_deref(), Some("e-imported"));
+    assert_eq!(
+        imported.blob_id.as_deref(),
+        Some("b-repaired"),
+        "the blob id of a message the server repaired is another (RFC 8621 section 4.8)"
+    );
+    let refusal = |id: &str| import.outcome_of(id).refusal().expect("refused");
+    assert_eq!(refusal("k1").existing_id(), Some("e-there"));
+    assert!(refusal("k2").names_property("mailboxIds"));
+    assert_eq!(refusal("k3").error_type, SetErrorType::OverQuota);
+    assert_eq!(refusal("k4").error_type, SetErrorType::InvalidEmail);
+    let nulls: EmailImportResponse = first(
+        &fixture("shapes", "email-import.nulls.json"),
+        "Email/import",
+    );
+    assert_eq!(nulls.outcome_of("k0"), SetOutcome::Unanswered);
+
+    let copy: CopyResponse<EmailRecord> =
+        first(&fixture("shapes", "email-copy.json"), "Email/copy");
+    assert_eq!(copy.from_account_id.as_deref(), Some("a-shared"));
+    assert_eq!(
+        copy.outcome_of("k0")
+            .done()
+            .and_then(|email| email.id.as_deref()),
+        Some("e-copy")
+    );
+    assert_eq!(
+        copy.outcome_of("k1")
+            .refusal()
+            .and_then(|error| error.existing_id()),
+        Some("e-there")
+    );
+    // The implicit destruction of the originals follows under the same
+    // call id.
+    let response: Response = read(&fixture("shapes", "email-copy.json"));
+    assert_eq!(response.responses_to("c0").count(), 2);
+
+    let mailboxes: SetResponse<MailboxRecord> =
+        first(&fixture("shapes", "mailbox-set.json"), "Mailbox/set");
+    let mailbox = mailboxes.outcome_of_create("k0").done().expect("created");
+    assert_eq!(mailbox.id.as_deref(), Some("mb-new"));
+    assert!(
+        mailbox
+            .my_rights
+            .as_ref()
+            .is_some_and(|rights| rights.may_delete)
+    );
+    assert_eq!(
+        mailboxes
+            .outcome_of_destroy("mb-parent")
+            .refusal()
+            .map(|error| &error.error_type),
+        Some(&SetErrorType::MailboxHasChild)
+    );
+    assert_eq!(
+        mailboxes
+            .outcome_of_destroy("mb-full")
+            .refusal()
+            .map(|error| &error.error_type),
+        Some(&SetErrorType::MailboxHasEmail)
+    );
+
+    let upload: UploadedBlob = read(&fixture("shapes", "upload.json"));
+    assert_eq!(
+        (
+            upload.blob_id.as_str(),
+            upload.size,
+            upload.content_type.as_deref()
+        ),
+        ("b-uploaded", Some(2048), Some("message/rfc822"))
+    );
+    let bare: UploadedBlob = read(&fixture("shapes", "upload.bare.json"));
+    assert_eq!((bare.size, bare.content_type), (None, None));
+    assert!(bare.extra.contains_key("expires"));
+}
+
+/// What Apache James 3.9 answered to the write calls (captures; see
+/// the README in `james-3.9`).
+#[test]
+fn what_james_answered_to_the_writes_is_read() {
+    let james = |name: &str| fixture("james-3.9", name);
+    let set = |name: &str| first::<SetResponse<EmailRecord>>(&james(name), "Email/set");
+
+    assert!(
+        set("email-set.keyword-set.json")
+            .outcome_of_update("1")
+            .is_done()
+    );
+    assert!(
+        set("email-set.keyword-cleared.json")
+            .outcome_of_update("1")
+            .is_done()
+    );
+    assert!(
+        set("email-set.mailbox-moved.json")
+            .outcome_of_update("1")
+            .is_done()
+    );
+    assert!(
+        set("email-set.mailboxes-replaced.json")
+            .outcome_of_update("1")
+            .is_done()
+    );
+    // `false` is no way to clear a keyword on James.
+    let refused = set("email-set.keyword-false.json");
+    let refusal = refused.outcome_of_update("1").refusal().expect("refused");
+    assert_eq!(refusal.error_type, SetErrorType::InvalidPatch);
+    assert!(
+        refusal
+            .description
+            .as_deref()
+            .is_some_and(|text| text.contains("JsNull (unset)")),
+        "{refusal:?}"
+    );
+    assert_eq!(
+        set("email-set.not-an-id.json")
+            .outcome_of_update("no-such-email")
+            .refusal()
+            .map(|error| &error.error_type),
+        Some(&SetErrorType::InvalidPatch)
+    );
+    assert_eq!(
+        set("email-set.if-in-state-not-checked.json")
+            .outcome_of_update("1")
+            .refusal()
+            .map(|error| &error.error_type),
+        Some(&SetErrorType::NotFound)
+    );
+
+    let import: EmailImportResponse = first(&james("email-import.created.json"), "Email/import");
+    let email = import.outcome_of("k0").done().expect("imported");
+    assert_eq!(
+        (email.id.as_deref(), email.blob_id.as_deref(), email.size),
+        (Some("1"), Some("1"), Some(278))
+    );
+    let error: MethodError = first(
+        &james("method-error.email-import-invalid-mailbox.json"),
+        "error",
+    );
+    assert_eq!(error.error_type, MethodErrorType::InvalidArguments);
+    let error: MethodError = first(&james("method-error.email-copy.json"), "error");
+    assert_eq!(error.error_type, MethodErrorType::UnknownMethod);
+
+    let created: SetResponse<MailboxRecord> =
+        first(&james("mailbox-set.created.json"), "Mailbox/set");
+    let mailbox = created.outcome_of_create("k0").done().expect("created");
+    assert!(mailbox.id.is_some() && mailbox.my_rights.is_some());
+    let destroyed: SetResponse<MailboxRecord> =
+        first(&james("mailbox-set.destroyed.json"), "Mailbox/set");
+    assert!(destroyed.outcome_of_destroy("8").is_done());
+    assert_eq!(
+        destroyed
+            .outcome_of_destroy("no-such-mailbox")
+            .refusal()
+            .map(|error| error.error_type.as_str()),
+        Some("invalidArguments"),
+        "not a SetError type of the RFCs, and kept"
+    );
+
+    let upload: UploadedBlob = read(&james("upload.json"));
+    assert_eq!(upload.size, Some(278));
+    assert_eq!(upload.content_type.as_deref(), Some("message/rfc822"));
 }

@@ -1,0 +1,27 @@
+{
+  "methodResponses": [
+    [
+      "Email/copy",
+      {
+        "fromAccountId": "a-shared",
+        "accountId": "a1",
+        "oldState": "s1",
+        "newState": "s2",
+        "created": {
+          "k0": {"id": "e-copy", "blobId": "b1", "threadId": "t1", "size": 1024}
+        },
+        "notCreated": {
+          "k1": {"type": "alreadyExists", "existingId": "e-there"},
+          "k2": {"type": "notFound"}
+        }
+      },
+      "c0"
+    ],
+    [
+      "Email/set",
+      {"accountId": "a-shared", "oldState": "f1", "newState": "f2", "destroyed": ["e-original"]},
+      "c0"
+    ]
+  ],
+  "sessionState": "x"
+}

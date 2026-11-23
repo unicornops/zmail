@@ -11,10 +11,10 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{Context, Result, anyhow, bail};
 use jmap_client::client::Client;
 use jmap_wire::{
-    Comparator, Filter, Get, Query,
+    BlobDownload, Comparator, Filter, Get, Query, SetErrorType, SetOutcome,
     mail::{
-        AsRaw, Email, EmailAddress, EmailBodyPart, EmailFilterCondition, EmailProperty,
-        EmailRecord, HeaderProperty, Mailbox, UtcDate,
+        AsRaw, Email, EmailAddress, EmailBodyPart, EmailFilterCondition, EmailImport,
+        EmailProperty, EmailRecord, EmailToImport, EmailUpdate, HeaderProperty, Mailbox, UtcDate,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -195,10 +195,10 @@ pub async fn discover_and_sync(
 
 /// Applies queued mailbox operations to the live JMAP account.
 ///
-/// Read and flag operations update the `$seen` and `$flagged` keywords via
-/// `Email/set`, move operations replace the mailbox ids so the message is
-/// moved rather than copied, and destroy operations rely on the server's
-/// trash handling through `Email/set` destroy.
+/// Read and flag operations set or clear the `$seen` and `$flagged`
+/// keywords, a move changes the email's mailboxes ([`move_update`]), all
+/// through `Email/set` updates, and destroy operations rely on the
+/// server's trash handling through `Email/set` destroy.
 pub async fn apply_pending_ops(
     target: &SyncTarget,
     secret: &str,
@@ -211,20 +211,23 @@ pub async fn apply_pending_ops(
     let client = connect_client(&target.endpoint, &target.username, secret, target.auth).await?;
     let mut report = OpApplyReport::default();
 
+    // The queue names mailboxes as the mirror does, by name; the server
+    // is told their ids. Two mailboxes with one name (#512) resolve to
+    // one of them, as they do in the mirror.
     let needs_mailbox_map = ops.iter().any(|op| matches!(op.kind, PendingOpKind::Move));
-    let mailbox_ids: HashMap<String, String> = if needs_mailbox_map {
+    let mailboxes: HashMap<String, JmapMailbox> = if needs_mailbox_map {
         fetch_mailboxes(&client)
             .await?
             .0
             .into_iter()
-            .map(|mailbox| (mailbox.name, mailbox.id))
+            .map(|mailbox| (mailbox.name.clone(), mailbox))
             .collect()
     } else {
         HashMap::new()
     };
 
     for op in ops {
-        let result = apply_single_jmap_op(&client, op, &mailbox_ids).await;
+        let result = apply_single_jmap_op(&client, op, &mailboxes).await;
         match result {
             Ok(()) => report.applied.push(op.id),
             Err(error) => report.failed.push((op.id, format!("{error:#}"))),
@@ -237,30 +240,32 @@ pub async fn apply_pending_ops(
 async fn apply_single_jmap_op(
     client: &Connection,
     op: &PendingOp,
-    mailbox_ids: &HashMap<String, String>,
+    mailboxes: &HashMap<String, JmapMailbox>,
 ) -> Result<()> {
     let email_id = op.remote_id.as_str();
     match op.kind {
-        PendingOpKind::MarkRead => client
-            .email_set_keyword(email_id, "$seen", true)
-            .await
-            .map(|_| ())
-            .with_context(|| format!("failed to mark JMAP email {email_id} as read")),
-        PendingOpKind::MarkUnread => client
-            .email_set_keyword(email_id, "$seen", false)
-            .await
-            .map(|_| ())
-            .with_context(|| format!("failed to mark JMAP email {email_id} as unread")),
-        PendingOpKind::SetFlagged => client
-            .email_set_keyword(email_id, "$flagged", true)
-            .await
-            .map(|_| ())
-            .with_context(|| format!("failed to flag JMAP email {email_id}")),
-        PendingOpKind::ClearFlagged => client
-            .email_set_keyword(email_id, "$flagged", false)
-            .await
-            .map(|_| ())
-            .with_context(|| format!("failed to unflag JMAP email {email_id}")),
+        PendingOpKind::MarkRead => {
+            update_email(client, email_id, EmailUpdate::new().set_keyword("$seen"))
+                .await
+                .with_context(|| format!("failed to mark JMAP email {email_id} as read"))
+        }
+        PendingOpKind::MarkUnread => {
+            update_email(client, email_id, EmailUpdate::new().clear_keyword("$seen"))
+                .await
+                .with_context(|| format!("failed to mark JMAP email {email_id} as unread"))
+        }
+        PendingOpKind::SetFlagged => {
+            update_email(client, email_id, EmailUpdate::new().set_keyword("$flagged"))
+                .await
+                .with_context(|| format!("failed to flag JMAP email {email_id}"))
+        }
+        PendingOpKind::ClearFlagged => update_email(
+            client,
+            email_id,
+            EmailUpdate::new().clear_keyword("$flagged"),
+        )
+        .await
+        .with_context(|| format!("failed to unflag JMAP email {email_id}")),
         // An email the server no longer has is as good as destroyed: the
         // write-back of a refused send's copy (#406) may find the next
         // attempt removed it first.
@@ -271,20 +276,168 @@ async fn apply_single_jmap_op(
             let Some(target_mailbox) = op.target_mailbox.as_deref() else {
                 bail!("move operation without a target mailbox");
             };
-            let Some(target_id) = mailbox_ids.get(target_mailbox) else {
+            let Some(target) = mailboxes.get(target_mailbox) else {
                 bail!("the JMAP account has no mailbox named {target_mailbox}");
             };
-            // A move replaces the mailbox membership instead of adding a
-            // second mailbox, matching IMAP MOVE semantics.
-            client
-                .email_set_mailboxes(email_id, [target_id.to_owned()])
+            let source = mailboxes.get(&op.source_mailbox);
+            move_email(client, email_id, source, target)
                 .await
-                .map(|_| ())
                 .with_context(|| {
                     format!("failed to move JMAP email {email_id} to {target_mailbox}")
                 })
         }
     }
+}
+
+/// The change to an email's mailboxes that moves it from `source` to
+/// `target`.
+///
+/// A JMAP email can be in several mailboxes at once, which servers use
+/// for labels, so a move changes only the two mailboxes it names: the
+/// email leaves `source` and joins `target`, and stays wherever else it
+/// is. That is one `Email/set` update, so the email is never in no
+/// mailbox on the way (RFC 8620 section 5.3: the entries of a patch are
+/// applied together).
+///
+/// The whole set of mailboxes is replaced by `target` alone in two
+/// cases:
+///
+/// - `target` is the trash or the junk mailbox. RFC 8621 section 4.6
+///   says how an email is deleted to the trash: it is put there "and
+///   remove all other Mailbox ids". An email left under a label as well
+///   would still show there, and be destroyed with the trash; and a
+///   message reported as junk is junk under every label.
+/// - the server has no mailbox with the source's name (renamed or
+///   removed since the move was queued), so there is nothing to take
+///   the email out of. This is what every move did before, and moves
+///   the email all the same.
+fn move_update(source: Option<&JmapMailbox>, target: &JmapMailbox) -> EmailUpdate {
+    let deletes = matches!(target.role.as_deref(), Some("trash" | "junk"));
+    match source {
+        Some(source) if !deletes => EmailUpdate::new().move_between(&source.id, &target.id),
+        _ => EmailUpdate::new().replace_mailboxes([target.id.as_str()]),
+    }
+}
+
+/// Moves the email `email_id` from `source` to `target`
+/// ([`move_update`]).
+///
+/// A server that refuses the per-mailbox patch as a patch (`invalidPatch`,
+/// `invalidProperties` that does not point elsewhere, or the
+/// `invalidArguments` Apache James gives) is asked a
+/// second way: the email's mailboxes are read, and the same change is
+/// sent as the whole set. RFC 8621 section 4.6 gives both forms; this
+/// is for a server that implements only the second, or that checks the
+/// removal before the addition and so sees an email in no mailbox. The
+/// first refusal is reported when the second way fails too.
+async fn move_email(
+    client: &Connection,
+    email_id: &str,
+    source: Option<&JmapMailbox>,
+    target: &JmapMailbox,
+) -> Result<()> {
+    let update = move_update(source, target);
+    let (Some(source), false) = (source, update_replaces_mailboxes(&update)) else {
+        return update_email(client, email_id, update).await;
+    };
+    let refusal = match try_update_email(client, email_id, update).await? {
+        Ok(()) => return Ok(()),
+        Err(refusal) => refusal,
+    };
+    let patch_refused = refusal.set_error.as_ref().is_some_and(|error| {
+        match &error.error_type {
+            SetErrorType::InvalidPatch => true,
+            SetErrorType::InvalidProperties => {
+                error.properties.as_ref().is_none_or(Vec::is_empty)
+                    || error.names_property("mailboxIds")
+            }
+            // Not a SetError type of the RFCs, but what Apache James
+            // answers for an update it cannot read.
+            other => other.as_str() == "invalidArguments",
+        }
+    });
+    if patch_refused && let Ok(Some(mut mailbox_ids)) = email_mailbox_ids(client, email_id).await {
+        mailbox_ids.retain(|id| *id != source.id);
+        if !mailbox_ids.contains(&target.id) {
+            mailbox_ids.push(target.id.clone());
+        }
+        let whole = EmailUpdate::new().replace_mailboxes(mailbox_ids);
+        if matches!(try_update_email(client, email_id, whole).await, Ok(Ok(()))) {
+            return Ok(());
+        }
+    }
+    Err(refusal.error)
+}
+
+/// Whether `update` sets `mailboxIds` as a whole.
+fn update_replaces_mailboxes(update: &EmailUpdate) -> bool {
+    jmap_wire::PatchObject::from(update.clone())
+        .entries()
+        .any(|(path, _)| path == "mailboxIds")
+}
+
+/// The ids of the mailboxes the email `email_id` is in; `None` when the
+/// server no longer has it.
+async fn email_mailbox_ids(client: &Connection, email_id: &str) -> Result<Option<Vec<String>>> {
+    let response = client
+        .call(
+            Get::<Email>::new(client.account_id())
+                .ids([email_id])
+                .properties([EmailProperty::Id, EmailProperty::MailboxIds]),
+        )
+        .await
+        .map_err(wording::reported)?;
+    Ok(response
+        .list
+        .into_iter()
+        .find(|email| email.id.as_deref() == Some(email_id))
+        .map(|email| members(email.mailbox_ids.as_ref())))
+}
+
+/// A server's refusal to update one email: how it is reported, and the
+/// SetError when that is what it was.
+struct UpdateRefused {
+    error: anyhow::Error,
+    set_error: Option<jmap_wire::SetError>,
+}
+
+/// Updates the email `email_id` (`Email/set`).
+async fn update_email(client: &Connection, email_id: &str, update: EmailUpdate) -> Result<()> {
+    try_update_email(client, email_id, update)
+        .await?
+        .map_err(|refusal| refusal.error)
+}
+
+/// Updates the email `email_id` (`Email/set`). The outer error is a
+/// failure of the call; the inner one is the server's answer that it
+/// did not update this email, or that does not say.
+async fn try_update_email(
+    client: &Connection,
+    email_id: &str,
+    update: EmailUpdate,
+) -> Result<std::result::Result<(), UpdateRefused>> {
+    let response = client
+        .call(email_update(client.account_id(), email_id, update))
+        .await
+        .map_err(wording::reported)?;
+    Ok(match response.outcome_of_update(email_id) {
+        SetOutcome::Done(_) => Ok(()),
+        SetOutcome::Refused(error) => Err(UpdateRefused {
+            error: wording::set_refused(error),
+            set_error: Some(error.clone()),
+        }),
+        SetOutcome::Unanswered => Err(UpdateRefused {
+            error: anyhow!("the JMAP server did not say whether it changed email {email_id}"),
+            set_error: None,
+        }),
+    })
+}
+
+/// The `Email/set` that changes the email `email_id` as `update` says.
+fn email_update(account_id: &str, email_id: &str, update: EmailUpdate) -> jmap_wire::Set<Email> {
+    let mut set = jmap_wire::Set::<Email>::new(account_id);
+    set.update(email_id, update);
+    set
 }
 
 /// Submits a composed outgoing message through JMAP `EmailSubmission`:
@@ -372,24 +525,50 @@ async fn import_and_submit(
         .with_context(|| format!("no JMAP identity matches {identity_email}"))?;
     let sent_mailbox_ids = sent_mailbox_ids(client).await?;
     let raw_message = render_rfc822_message(message)?;
-    // Marked until the submission succeeds, so an interrupted send can
-    // tell an imported copy that never went from one that did.
-    let imported = client
-        .email_import_account(
-            client.default_account_id(),
-            raw_message,
-            sent_mailbox_ids,
-            Some([SUBMIT_PENDING]),
-            None,
-        )
+    let email_id = import_message(client, raw_message, &sent_mailbox_ids)
         .await
-        .context("failed to import the outgoing message into JMAP")?;
-    let email_id = imported
-        .id()
-        .map(str::to_owned)
+        .context("failed to import the outgoing message into JMAP")?
         .with_context(|| "JMAP import did not return an email id")?;
 
     submit_or_discard(client, &email_id, &identity_id, message).await
+}
+
+/// Uploads `raw_message` and imports it into `mailbox_ids`
+/// (`Email/import`), marked [`SUBMIT_PENDING`] until the submission
+/// succeeds, so an interrupted send can tell an imported copy that never
+/// went from one that did. Returns the new email's id, `None` when the
+/// server created it without saying which it is.
+async fn import_message(
+    client: &Connection,
+    raw_message: Vec<u8>,
+    mailbox_ids: &[String],
+) -> Result<Option<String>> {
+    let blob = client
+        .upload(raw_message)
+        .await
+        .map_err(wording::reported)?;
+    let (import, creation_id) = import_request(client.account_id(), &blob.blob_id, mailbox_ids);
+    let response = client.call(import).await.map_err(wording::reported)?;
+    match response.outcome_of(&creation_id) {
+        SetOutcome::Done(email) => Ok(email.id.clone()),
+        SetOutcome::Refused(error) => Err(wording::set_refused(error)),
+        SetOutcome::Unanswered => Err(anyhow!(
+            "the JMAP server did not say whether it imported the message"
+        )),
+    }
+}
+
+/// The `Email/import` of the uploaded message `blob_id` into
+/// `mailbox_ids`, marked [`SUBMIT_PENDING`]; with its creation id.
+fn import_request(
+    account_id: &str,
+    blob_id: &str,
+    mailbox_ids: &[String],
+) -> (EmailImport, String) {
+    let mut import = EmailImport::new(account_id);
+    let creation_id =
+        import.email(EmailToImport::new(blob_id, mailbox_ids).keywords([SUBMIT_PENDING]));
+    (import, creation_id)
 }
 
 /// The keyword an outgoing message's copy is imported with until its
@@ -1011,9 +1190,16 @@ fn jmap_client_url(session: &Url) -> String {
     }
 }
 
-/// How long each request of the ported calls may take, as `jmap-client`'s
-/// default for the calls still on it.
+/// How long each API request may take, as `jmap-client`'s default was.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long one upload or download of a blob may take. A whole message
+/// or an attachment of up to [`MAX_ATTACHMENT_BYTES`] does not fit the
+/// ten seconds of an API request on a slow line, which is what
+/// `jmap-client` gave it: the part was then skipped, or the send failed.
+const BLOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// The media type the Sent copy is uploaded as, as `jmap-client` sent
+/// it. `Email/import` reads the blob as a message whatever its label.
+const UPLOAD_CONTENT_TYPE: &str = "application/octet-stream";
 
 /// One sign-in to a JMAP account, while Zmail moves from `jmap-client`
 /// to its own JMAP library, `jmap-wire`, step by step (ADR 0008, #132).
@@ -1021,12 +1207,14 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// It holds both clients over one session: `jmap-client` fetches it, and
 /// the `jmap-wire` client is given the same session, with the same
 /// credentials, the same-host redirect rule and the same timeout.
-/// Identities, submission and destroying emails
-/// ([`Connection::send_first`]) and every read ([`Connection::call`]:
-/// `Mailbox/get`, `Email/query`, `Email/get`, `Email/changes`) go
-/// through `jmap-wire`. Keyword and mailbox changes, import, blob
-/// download and push still call `jmap-client`, which a `Connection`
-/// dereferences to.
+/// Every API call and every blob goes through `jmap-wire`: identities,
+/// submission and destroying emails ([`Connection::send_first`]), the
+/// reads, keyword and mailbox changes and `Email/import`
+/// ([`Connection::call`]), the Sent copy's upload
+/// ([`Connection::upload`]) and attachment downloads
+/// ([`Connection::download`]). Only push still calls `jmap-client`,
+/// which a `Connection` dereferences to, and the session fetch at
+/// sign-in.
 pub(crate) struct Connection {
     legacy: Client,
     wire: jmap_wire::Client<jmap_wire::ReqwestTransport>,
@@ -1059,6 +1247,30 @@ impl Connection {
         method: M,
     ) -> jmap_wire::Result<M::Response> {
         self.wire.call(method).await
+    }
+
+    /// Uploads a message as a blob of the account (RFC 8620 section
+    /// 6.1), within [`BLOB_TIMEOUT`]. One larger than the session's
+    /// `maxSizeUpload` is refused before it is sent.
+    pub(crate) async fn upload(
+        &self,
+        message: Vec<u8>,
+    ) -> jmap_wire::Result<jmap_wire::UploadedBlob> {
+        self.wire
+            .upload(self.account_id(), UPLOAD_CONTENT_TYPE, message)
+            .await
+    }
+
+    /// Downloads an attachment's blob (RFC 8620 section 6.2), within
+    /// [`BLOB_TIMEOUT`] and never reading more than
+    /// [`MAX_ATTACHMENT_BYTES`]: a larger answer is an error, not held
+    /// in memory. The name and type in the URL are the placeholders
+    /// `jmap-client` sent; they only label the server's answer.
+    pub(crate) async fn download(&self, blob_id: &str) -> jmap_wire::Result<Vec<u8>> {
+        let download = BlobDownload::new(self.account_id(), blob_id)
+            .name("none")
+            .max_bytes(MAX_ATTACHMENT_BYTES);
+        Ok(self.wire.download(&download).await?.bytes)
     }
 
     /// Sends `request` and returns the first method response as JSON
@@ -1122,6 +1334,7 @@ pub(crate) async fn connect_client(
                 .credentials(wire_credentials)
                 .redirect_policy(redirects)
                 .timeout(REQUEST_TIMEOUT)
+                .blob_timeout(BLOB_TIMEOUT)
                 .with_session(jmap_wire::ReqwestTransport::new()?, session, wire_session)?)
         })
         .with_context(|| format!("failed to connect to the JMAP endpoint {endpoint}"))?;
@@ -1396,8 +1609,7 @@ fn search_filter(
 /// JMAP delivers bodies with the snapshot (there is no lazy hydration path),
 /// so attachments download during sync as well. Each part resolves through
 /// the email's `attachments` property and downloads over the session's
-/// binary download URL; `jmap-client` 0.4.0 has no `Blob/get` request helper,
-/// but the download endpoint returns the same bytes. Failures skip the part
+/// binary download URL ([`Connection::download`]). Failures skip the part
 /// rather than failing the sync, mirroring the IMAP adapter's tolerance.
 pub(crate) async fn fetch_emails(
     client: &Connection,
@@ -1630,7 +1842,7 @@ fn headers_get(account_id: &str, ids: &[String]) -> Get<Email> {
 /// Parts without a blob id or a name, oversized parts, and failed downloads
 /// are skipped so a single bad part never fails the account sync.
 async fn download_attachments(
-    client: &Client,
+    client: &Connection,
     email: &EmailRecord,
     email_id: &str,
     blobs: &BlobStore,
@@ -1672,12 +1884,11 @@ async fn download_attachments(
         let Some(filename) = named.or_else(|| content_id.clone()) else {
             continue;
         };
+        // A blob the server does not have, refuses or sends more of
+        // than a part may be is skipped.
         let Ok(contents) = client.download(blob_id).await else {
             continue;
         };
-        if contents.len() > MAX_ATTACHMENT_BYTES {
-            continue;
-        }
         let storage_name = format!(
             "incoming-jmap-{email_id}-{index}-{}",
             sanitize_component(&filename)
@@ -2528,3 +2739,6 @@ mod wire_parity_tests;
 
 #[cfg(test)]
 mod read_characterisation_tests;
+
+#[cfg(test)]
+mod write_characterisation_tests;

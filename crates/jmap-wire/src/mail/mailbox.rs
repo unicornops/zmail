@@ -10,7 +10,7 @@ use crate::{
     capability,
     changes::ChangesObject,
     error::error_types,
-    method::{GetObject, Object, Properties},
+    method::{GetObject, Object, PatchObject, Properties, SetArguments, SetObject},
     query::{Query, QueryChanges, QueryObject},
     record::record,
     request::{Call, ResultReference},
@@ -19,8 +19,9 @@ use crate::{
 /// The Mailbox data type (RFC 8621 section 2), for
 /// [`Get`](crate::Get)`<Mailbox>` (all of an account's mailboxes when no
 /// ids are given), [`Changes`](crate::Changes)`<Mailbox>`,
-/// [`Query`]`<Mailbox>` and [`QueryChanges`]`<Mailbox>`. `Mailbox/set`
-/// is not typed yet; call it by name.
+/// [`Query`]`<Mailbox>`, [`QueryChanges`]`<Mailbox>` and
+/// [`Set`](crate::Set)`<Mailbox>` ([`NewMailbox`], [`MailboxUpdate`],
+/// [`MailboxSetArguments`]).
 ///
 /// ```
 /// use jmap_wire::{Get, Request, capability, mail::Mailbox};
@@ -43,6 +44,156 @@ impl GetObject for Mailbox {
 }
 
 impl ChangesObject for Mailbox {}
+
+impl SetObject for Mailbox {
+    type Create = NewMailbox;
+    /// The `id` of the new mailbox and the properties the server set,
+    /// such as `myRights` and the counts.
+    type Created = MailboxRecord;
+    type Arguments = MailboxSetArguments;
+}
+
+/// The argument `Mailbox/set` has beyond the standard ones (RFC 8621
+/// section 2.5).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MailboxSetArguments {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    on_destroy_remove_emails: bool,
+}
+
+impl MailboxSetArguments {
+    /// Whether destroying a mailbox that has emails removes them from
+    /// it, **destroying those that are in no other mailbox**. Unless
+    /// set, such a mailbox is not destroyed (`mailboxHasEmail`).
+    pub fn on_destroy_remove_emails(&mut self, remove: bool) -> &mut Self {
+        self.on_destroy_remove_emails = remove;
+        self
+    }
+}
+
+impl SetArguments for MailboxSetArguments {}
+
+/// A mailbox to create with `Mailbox/set` (RFC 8621 section 2.5).
+///
+/// ```
+/// use jmap_wire::{Set, mail::{Mailbox, MailboxUpdate, NewMailbox}};
+/// use serde_json::json;
+///
+/// let mut set = Set::<Mailbox>::new("u1");
+/// let projects = set.create(NewMailbox::new("Projects"));
+/// // A child of a mailbox made in the same call.
+/// set.create(NewMailbox::new("2026").parent_id(Some(&format!("#{projects}"))));
+/// set.update("mb7", MailboxUpdate::new().name("Old projects"));
+/// set.destroy(["mb9"]);
+/// set.arguments().on_destroy_remove_emails(true);
+/// assert_eq!(
+///     serde_json::to_value(&set)?,
+///     json!({
+///         "accountId": "u1",
+///         "create": {
+///             "k0": {"name": "Projects"},
+///             "k1": {"name": "2026", "parentId": "#k0"}
+///         },
+///         "update": {"mb7": {"name": "Old projects"}},
+///         "destroy": ["mb9"],
+///         "onDestroyRemoveEmails": true
+///     })
+/// );
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct NewMailbox(Properties);
+
+impl NewMailbox {
+    /// A mailbox called `name` at the top level. A name must be unique
+    /// among the mailboxes with the same parent (RFC 8621 section 2).
+    pub fn new(name: impl Into<String>) -> Self {
+        let mut properties = Properties::new();
+        properties.set("name", name.into());
+        Self(properties)
+    }
+
+    /// The parent mailbox: its id, `#` and a creation id of the same
+    /// call, or `None` for the top level.
+    pub fn parent_id(mut self, parent_id: Option<&str>) -> Self {
+        self.0.set("parentId", parent_id);
+        self
+    }
+
+    /// The mailbox's role; at most one mailbox of an account has each.
+    pub fn role(mut self, role: Option<Role>) -> Self {
+        self.0.set_as("role", &role);
+        self
+    }
+
+    /// Where it sorts among its siblings: lower first.
+    pub fn sort_order(mut self, sort_order: u32) -> Self {
+        self.0.set("sortOrder", sort_order);
+        self
+    }
+
+    /// Whether the user is subscribed to it.
+    pub fn is_subscribed(mut self, is_subscribed: bool) -> Self {
+        self.0.set("isSubscribed", is_subscribed);
+        self
+    }
+
+    /// Sets any other property.
+    pub fn property(mut self, name: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.0.set(name, value);
+        self
+    }
+}
+
+/// The changes to one mailbox in a `Mailbox/set` update (RFC 8621
+/// section 2.5), for [`Set::update`](crate::Set::update). The counts
+/// and `myRights` are the server's to set.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[must_use]
+pub struct MailboxUpdate(PatchObject);
+
+impl MailboxUpdate {
+    /// An update that changes nothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Renames the mailbox.
+    pub fn name(self, name: impl Into<String>) -> Self {
+        Self(self.0.set("name", name.into()))
+    }
+
+    /// Moves it under another mailbox, or to the top level with `None`.
+    pub fn parent_id(self, parent_id: Option<&str>) -> Self {
+        Self(self.0.set("parentId", parent_id))
+    }
+
+    /// Changes its role, or takes it away with `None`.
+    pub fn role(self, role: Option<Role>) -> Self {
+        Self(
+            self.0
+                .set("role", serde_json::to_value(role).unwrap_or(Value::Null)),
+        )
+    }
+
+    /// Changes where it sorts among its siblings.
+    pub fn sort_order(self, sort_order: u32) -> Self {
+        Self(self.0.set("sortOrder", sort_order))
+    }
+
+    /// Subscribes the user to it, or unsubscribes them.
+    pub fn is_subscribed(self, is_subscribed: bool) -> Self {
+        Self(self.0.set("isSubscribed", is_subscribed))
+    }
+}
+
+impl From<MailboxUpdate> for PatchObject {
+    fn from(update: MailboxUpdate) -> Self {
+        update.0
+    }
+}
 
 impl QueryObject for Mailbox {
     type Condition = MailboxFilterCondition;
@@ -268,7 +419,79 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{Get, GetResponse, Request, Response};
+    use crate::{Get, GetResponse, Request, Response, Set, SetErrorType};
+
+    /// RFC 8621 section 2.5: the extra argument, and the two SetErrors
+    /// of destroying a mailbox.
+    #[test]
+    fn a_mailbox_set_is_written_and_its_answer_read() {
+        let mut set = Set::<Mailbox>::new("u1");
+        let created = set.create(
+            NewMailbox::new("Receipts")
+                .parent_id(None)
+                .role(None)
+                .sort_order(3)
+                .is_subscribed(true),
+        );
+        set.update(
+            "mb1",
+            MailboxUpdate::new()
+                .name("Archive 2026")
+                .parent_id(Some("mb2"))
+                .role(Some(Role::Archive))
+                .sort_order(1)
+                .is_subscribed(false),
+        );
+        set.destroy(["mb3", "mb4"]);
+        let mut request = Request::new();
+        let call = request.call(set).expect("encodes");
+        assert_eq!(call.name(), "Mailbox/set");
+        assert_eq!(
+            request.method_calls()[0].arguments,
+            json!({
+                "accountId": "u1",
+                "create": {"k0": {"name": "Receipts", "parentId": null, "role": null,
+                                   "sortOrder": 3, "isSubscribed": true}},
+                "update": {"mb1": {"name": "Archive 2026", "parentId": "mb2",
+                                    "role": "archive", "sortOrder": 1, "isSubscribed": false}},
+                "destroy": ["mb3", "mb4"]
+            }),
+            "onDestroyRemoveEmails is left out unless asked for"
+        );
+
+        let response: Response = serde_json::from_value(json!({
+            "methodResponses": [["Mailbox/set", {
+                "accountId": "u1", "oldState": "1", "newState": "2",
+                "created": {"k0": {"id": "mb9", "totalEmails": 0,
+                    "myRights": {"mayReadItems": true}}},
+                "updated": {"mb1": null},
+                "notDestroyed": {
+                    "mb3": {"type": "mailboxHasChild"},
+                    "mb4": {"type": "mailboxHasEmail"}
+                }
+            }, "c0"]],
+            "sessionState": "s"
+        }))
+        .expect("decodes");
+        let answer = response.get(&call).expect("answered");
+        let mailbox = answer.outcome_of_create(&created).done().expect("created");
+        assert_eq!(mailbox.id.as_deref(), Some("mb9"));
+        assert!(
+            mailbox
+                .my_rights
+                .as_ref()
+                .is_some_and(|rights| rights.may_read_items)
+        );
+        assert!(answer.outcome_of_update("mb1").is_done());
+        let refused = |id: &str| {
+            answer
+                .outcome_of_destroy(id)
+                .refusal()
+                .map(|error| error.error_type.clone())
+        };
+        assert_eq!(refused("mb3"), Some(SetErrorType::MailboxHasChild));
+        assert_eq!(refused("mb4"), Some(SetErrorType::MailboxHasEmail));
+    }
 
     /// The `Mailbox/get` call and answer of RFC 8621 section 2.6 (the
     /// RFC elides the second mailbox with `...`).

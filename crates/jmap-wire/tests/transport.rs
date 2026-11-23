@@ -16,9 +16,9 @@ use std::{
 };
 
 use jmap_wire::{
-    Client, ClientBuilder, Credentials, Error, Get, ProblemKind, RedirectPolicy, RedirectRefusal,
-    Request, ReqwestTransport, Set, TokenError, TokenRequest, TokenSource, TransportErrorKind,
-    capability, discovery,
+    BlobDownload, Client, ClientBuilder, Credentials, Error, Get, ProblemKind, RedirectPolicy,
+    RedirectRefusal, Request, ReqwestTransport, Set, TokenError, TokenRequest, TokenSource,
+    TransportErrorKind, capability, discovery,
     mail::{Email, Identity},
 };
 use serde_json::{Value, json};
@@ -930,4 +930,159 @@ async fn discovery_does_not_take_a_sign_in_page_for_the_session() {
     .await
     .expect("falls back");
     assert_eq!(found, front.url("/.well-known/jmap"));
+}
+
+/// A JMAP server that keeps what is uploaded and serves it back, with
+/// one blob larger than the API's response limit and one that is slow.
+fn blob_server() -> Server {
+    let blobs: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+    Server::start("127.0.0.1", move |seen, base| {
+        let mut blobs = blobs.lock().expect("the blobs");
+        match (seen.method.as_str(), seen.target.as_str()) {
+            ("GET", "/session") => Answer::json(session(base)),
+            ("POST", "/upload/a1/") => {
+                let content_type = seen.header("content-type").unwrap_or_default().to_owned();
+                blobs.push(seen.body.clone());
+                let mut answer = Answer::json(json!({
+                    "accountId": "a1", "blobId": format!("b{}", blobs.len() - 1),
+                    "type": content_type, "size": seen.body.len()
+                }));
+                answer.status = 201;
+                answer
+            }
+            ("GET", target) if target.starts_with("/download/a1/slow/") => {
+                let mut answer = Answer::new(200, "text/plain", "slow");
+                answer.delay = Duration::from_millis(600);
+                answer
+            }
+            ("GET", target) if target.starts_with("/download/a1/b") => {
+                let index = target["/download/a1/b".len()..]
+                    .split('/')
+                    .next()
+                    .and_then(|index| index.parse::<usize>().ok());
+                match index.and_then(|index| blobs.get(index)) {
+                    // The type asked for in the URL is what comes back.
+                    Some(bytes) => Answer::new(
+                        200,
+                        if target.ends_with("type=image%2Fpng") {
+                            "image/png"
+                        } else {
+                            "application/octet-stream"
+                        },
+                        bytes.clone(),
+                    ),
+                    None => Answer::new(
+                        404,
+                        "application/problem+json",
+                        r#"{"type":"about:blank","status":404,"detail":"No such blob"}"#,
+                    ),
+                }
+            }
+            _ => Answer::not_found(),
+        }
+    })
+}
+
+/// RFC 8620 sections 6.1 and 6.2 over real sockets with the default
+/// transport: what is uploaded comes back byte for byte, larger than
+/// the API's response limit allows and with headers of its own.
+#[tokio::test]
+async fn a_blob_goes_up_and_comes_back_under_limits_of_its_own() {
+    let server = blob_server();
+    let client = builder()
+        .max_response_bytes(64 * 1024)
+        .connect(server.url("/session"))
+        .await
+        .expect("the session loads");
+    let account = client
+        .primary_account(capability::MAIL)
+        .expect("an account")
+        .to_owned();
+
+    // Every byte value, 300 KiB of them: over the API's 64 KiB.
+    let bytes = (0..300 * 1024).map(|index| index as u8).collect::<Vec<_>>();
+    let blob = client
+        .upload(&account, "image/png", bytes.clone())
+        .await
+        .expect("uploaded");
+    assert_eq!(blob.blob_id, "b0");
+    assert_eq!(blob.size, Some(bytes.len() as u64));
+    assert_eq!(blob.content_type.as_deref(), Some("image/png"));
+
+    let download = BlobDownload::new(&account, &blob.blob_id)
+        .name("every byte.png")
+        .content_type("image/png");
+    let back = client.download(&download).await.expect("downloaded");
+    assert_eq!(back.bytes, bytes, "byte for byte");
+    assert_eq!(back.content_type.as_deref(), Some("image/png"));
+
+    let seen = server.seen();
+    let upload = seen
+        .iter()
+        .find(|seen| seen.target == "/upload/a1/")
+        .expect("the upload");
+    assert_eq!(upload.method, "POST");
+    assert_eq!(upload.header("content-type"), Some("image/png"));
+    assert_eq!(upload.header("accept"), Some("application/json"));
+    assert!(upload.header("authorization").is_some());
+    let fetched = seen
+        .iter()
+        .find(|seen| seen.target.starts_with("/download/"))
+        .expect("the download");
+    assert_eq!(
+        fetched.target,
+        "/download/a1/b0/every%20byte.png?type=image%2Fpng"
+    );
+    assert_eq!(fetched.header("accept"), Some("image/png"));
+    assert_eq!(fetched.header("accept-encoding"), None);
+    assert!(fetched.header("authorization").is_some());
+    assert_eq!(fetched.header("cookie"), None);
+
+    // The download's own limit is kept by the transport: the body is
+    // not read past it.
+    let error = client
+        .download(&BlobDownload::new(&account, "b0").max_bytes(1024))
+        .await
+        .expect_err("over its limit");
+    assert!(error.is_response_too_large(), "{error:?}");
+    // At the limit exactly is fine.
+    client
+        .download(&BlobDownload::new(&account, "b0").max_bytes(bytes.len()))
+        .await
+        .expect("at its limit");
+
+    // A blob the server does not have.
+    let error = client
+        .download(&BlobDownload::new(&account, "b7"))
+        .await
+        .expect_err("no such blob");
+    assert_eq!(error.http_status(), Some(404));
+    assert!(matches!(error, Error::Problem(_)), "{error:?}");
+}
+
+/// A blob may take longer than an API call: the two timeouts are
+/// separate, and a download can have its own.
+#[tokio::test]
+async fn a_slow_blob_is_given_the_blob_timeout_not_the_api_timeout() {
+    let server = blob_server();
+    let client = builder()
+        .timeout(Duration::from_millis(200))
+        .blob_timeout(Duration::from_secs(10))
+        .connect(server.url("/session"))
+        .await
+        .expect("the session loads");
+    let slow = BlobDownload::new("a1", "slow");
+    let blob = client
+        .download(&slow)
+        .await
+        .expect("slower than an API call may be");
+    assert_eq!(blob.bytes, b"slow");
+
+    match client
+        .download(&slow.clone().timeout(Duration::from_millis(100)))
+        .await
+    {
+        Err(Error::Transport(error)) => assert_eq!(error.kind(), TransportErrorKind::Timeout),
+        other => panic!("expected a timeout, got {other:?}"),
+    }
 }

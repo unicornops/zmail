@@ -95,6 +95,15 @@ pub enum Error {
     /// for a capability.
     #[error("the JMAP session has no {0}")]
     Session(String),
+    /// A blob is larger than the server takes in one upload (the
+    /// session's `maxSizeUpload`, RFC 8620 section 2). Nothing was sent.
+    #[error("the upload of {size} bytes is larger than the {limit} bytes the JMAP server takes")]
+    UploadTooLarge {
+        /// The size of the blob, in octets.
+        size: u64,
+        /// The server's `maxSizeUpload`.
+        limit: u64,
+    },
     /// A result reference in a request cannot resolve (RFC 8620 section
     /// 3.7): it names no earlier call of the same request, or a call of
     /// another method. Nothing was sent.
@@ -136,6 +145,17 @@ impl Error {
                     && problem.limit.as_deref() == Some("maxSizeRequest")
             }
             _ => false,
+        }
+    }
+
+    /// The HTTP status of the server's refusal, when the failure is an
+    /// HTTP error status, with problem details or without: 404 for a
+    /// blob that does not exist, say (RFC 8620 section 6.2).
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Http { status } => Some(*status),
+            Self::Problem(problem) => problem.status,
+            _ => None,
         }
     }
 
@@ -537,6 +557,38 @@ pub struct SetError {
     /// `invalidRecipients`, `maxRecipients` or `existingId`.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl SetError {
+    /// For `invalidProperties`: whether `property` is among the
+    /// properties the server names, as itself or as a path into it
+    /// (`keywords` matches `keywords` and `keywords/$seen`). False when
+    /// the server names none.
+    pub fn names_property(&self, property: &str) -> bool {
+        self.properties.iter().flatten().any(|named| {
+            named
+                .strip_prefix(property)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+    }
+
+    /// For `alreadyExists` (RFC 8620 section 5.4, RFC 8621 section
+    /// 4.8): the id of the record that exists already (`existingId`).
+    pub fn existing_id(&self) -> Option<&str> {
+        self.extra.get("existingId")?.as_str()
+    }
+
+    /// For `blobNotFound` (RFC 8621 section 4.6): the blob ids the
+    /// server could not find (`notFound`). Empty when it names none.
+    pub fn blobs_not_found(&self) -> Vec<&str> {
+        self.extra
+            .get("notFound")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect()
+    }
 }
 
 impl fmt::Display for SetError {

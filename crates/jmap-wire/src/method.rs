@@ -325,6 +325,24 @@ impl PatchObject {
     pub fn entries(&self) -> impl Iterator<Item = (&str, &Value)> {
         self.0.iter().map(|(path, value)| (path.as_str(), value))
     }
+
+    /// Takes out the entry for `property` and every entry for a path
+    /// into it. RFC 8620 section 5.3 forbids a patch with both (one
+    /// pointer may not be the prefix of another), so the typed patches
+    /// of this crate drop the earlier ones when a later change covers
+    /// the same property.
+    pub(crate) fn clear_property(&mut self, property: &str) {
+        self.0.retain(|path, _| {
+            path.strip_prefix(property)
+                .is_none_or(|rest| !rest.is_empty() && !rest.starts_with('/'))
+        });
+    }
+
+    /// Takes out the entry that sets `property` as a whole, keeping the
+    /// entries for paths into it.
+    pub(crate) fn clear_whole(&mut self, property: &str) {
+        self.0.remove(property);
+    }
 }
 
 /// A standard `/set` call (RFC 8620 section 5.3): records to create,
@@ -395,9 +413,11 @@ impl<O: SetObject> Set<O> {
         self
     }
 
-    /// Changes the record `id` as `patch` says.
-    pub fn update(&mut self, id: impl Into<String>, patch: PatchObject) -> &mut Self {
-        self.update.insert(id.into(), patch);
+    /// Changes the record `id` as `patch` says: a [`PatchObject`], or
+    /// a data type's own typed patch, such as
+    /// [`EmailUpdate`](crate::mail::EmailUpdate).
+    pub fn update(&mut self, id: impl Into<String>, patch: impl Into<PatchObject>) -> &mut Self {
+        self.update.insert(id.into(), patch.into());
         self
     }
 
@@ -517,6 +537,83 @@ pub struct SetResponse<C> {
     /// Why records were not destroyed, by id.
     #[serde(default, deserialize_with = "null_as_default")]
     pub not_destroyed: BTreeMap<String, SetError>,
+}
+
+/// What a `/set`, `/copy` or `Email/import` answer says of one record of
+/// the call.
+///
+/// A server that keeps to the RFC names every record in exactly one of
+/// the "done" and "not done" halves of its answer. One that names it in
+/// neither has not said: that is [`Unanswered`](Self::Unanswered), which
+/// a caller should treat as "may or may not have happened".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SetOutcome<'a, T> {
+    /// It was done; with what the answer says of the record.
+    Done(T),
+    /// The server refused it.
+    Refused(&'a SetError),
+    /// The answer names the record nowhere.
+    Unanswered,
+}
+
+impl<'a, T> SetOutcome<'a, T> {
+    /// Whether it was done.
+    pub fn is_done(&self) -> bool {
+        matches!(self, Self::Done(_))
+    }
+
+    /// The server's refusal, when it refused.
+    pub fn refusal(&self) -> Option<&'a SetError> {
+        match self {
+            Self::Refused(error) => Some(error),
+            _ => None,
+        }
+    }
+
+    /// What the answer says of the record, when it was done.
+    pub fn done(self) -> Option<T> {
+        match self {
+            Self::Done(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl<C> SetResponse<C> {
+    /// What became of the record created under `creation_id`: the
+    /// properties the server set, or its refusal.
+    pub fn outcome_of_create(&self, creation_id: &str) -> SetOutcome<'_, &C> {
+        match (
+            self.created.get(creation_id),
+            self.not_created.get(creation_id),
+        ) {
+            (Some(created), _) => SetOutcome::Done(created),
+            (None, Some(error)) => SetOutcome::Refused(error),
+            (None, None) => SetOutcome::Unanswered,
+        }
+    }
+
+    /// What became of the update of record `id`: the properties the
+    /// server changed beyond those asked for (if it says), or its
+    /// refusal.
+    pub fn outcome_of_update(&self, id: &str) -> SetOutcome<'_, Option<&Value>> {
+        match (self.updated.get(id), self.not_updated.get(id)) {
+            (Some(updated), _) => SetOutcome::Done(updated.as_ref()),
+            (None, Some(error)) => SetOutcome::Refused(error),
+            (None, None) => SetOutcome::Unanswered,
+        }
+    }
+
+    /// What became of destroying record `id`.
+    pub fn outcome_of_destroy(&self, id: &str) -> SetOutcome<'_, ()> {
+        if self.destroyed.iter().any(|destroyed| destroyed == id) {
+            return SetOutcome::Done(());
+        }
+        match self.not_destroyed.get(id) {
+            Some(error) => SetOutcome::Refused(error),
+            None => SetOutcome::Unanswered,
+        }
+    }
 }
 
 /// A record written as a JSON object property by property: what the
@@ -748,6 +845,74 @@ mod tests {
         assert_eq!(answer.updated.get("a"), Some(&None));
         assert_eq!(answer.destroyed, ["c"]);
         assert_eq!(answer.not_destroyed["b"].error_type, SetErrorType::NotFound);
+    }
+
+    #[test]
+    fn the_outcome_of_each_record_is_done_refused_or_unanswered() {
+        let answer: SetResponse<Value> = serde_json::from_value(json!({
+            "created": {"k0": {"id": "e"}},
+            "notCreated": {"k1": {"type": "overQuota"}},
+            "updated": {"a": null, "b": {"size": 3}},
+            "notUpdated": {"c": {"type": "invalidProperties", "properties": ["keywords/x"]}},
+            "destroyed": ["d"],
+            "notDestroyed": {"e": {"type": "notFound"}}
+        }))
+        .expect("decodes");
+        assert_eq!(
+            answer.outcome_of_create("k0").done(),
+            Some(&json!({"id": "e"}))
+        );
+        assert_eq!(
+            answer
+                .outcome_of_create("k1")
+                .refusal()
+                .map(|error| &error.error_type),
+            Some(&SetErrorType::OverQuota)
+        );
+        assert_eq!(answer.outcome_of_create("k2"), SetOutcome::Unanswered);
+        assert_eq!(answer.outcome_of_update("a"), SetOutcome::Done(None));
+        assert_eq!(
+            answer.outcome_of_update("b"),
+            SetOutcome::Done(Some(&json!({"size": 3})))
+        );
+        assert_eq!(
+            answer
+                .outcome_of_update("c")
+                .refusal()
+                .and_then(|error| error.properties.clone()),
+            Some(vec!["keywords/x".to_owned()])
+        );
+        assert!(!answer.outcome_of_update("z").is_done());
+        assert!(answer.outcome_of_destroy("d").is_done());
+        assert_eq!(
+            answer
+                .outcome_of_destroy("e")
+                .refusal()
+                .map(|error| &error.error_type),
+            Some(&SetErrorType::NotFound)
+        );
+        assert_eq!(answer.outcome_of_destroy("z"), SetOutcome::Unanswered);
+    }
+
+    #[test]
+    fn a_patch_drops_entries_a_later_change_covers() {
+        let mut patch = PatchObject::new()
+            .set("keywords/$seen", true)
+            .set("keywordsOther", 1)
+            .set("mailboxIds/a", true);
+        patch.clear_property("keywords");
+        assert_eq!(
+            serde_json::to_value(&patch).expect("encodes"),
+            json!({"keywordsOther": 1, "mailboxIds/a": true})
+        );
+        let mut patch = PatchObject::new()
+            .set("keywords", json!({}))
+            .set("keywords/a", true);
+        patch.clear_whole("keywords");
+        assert_eq!(
+            serde_json::to_value(&patch).expect("encodes"),
+            json!({"keywords/a": true})
+        );
     }
 
     #[test]

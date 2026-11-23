@@ -2590,6 +2590,591 @@ fn read_the_probes_with_jmap_wire(seven: &[serde_json::Value]) -> Result<()> {
     })
 }
 
+/// Zmail's write-back against James, through `apply_pending_ops` as the
+/// sync runs it: read and unread, flag and unflag, and moves of an
+/// email that is in a second mailbox as well (ADR 0008, step 3). What
+/// James then holds is read back with plain JMAP calls.
+///
+/// Marking unread and unflagging are the two changes that used to send
+/// `false` for the keyword; the moves are the ones that used to strip
+/// the second mailbox.
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn keyword_and_mailbox_changes_from_zmail_reach_james() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let store = Arc::new(LocalStore::open_ephemeral()?);
+    let account_id = store.insert_account(&jmap_account())?;
+    let target = store
+        .sync_target(account_id)?
+        .context("the JMAP target should load")?;
+    let james = James::connect(MAIL_HARNESS_JMAP_ACCOUNT, MAIL_HARNESS_JMAP_PASSWORD)?;
+
+    submit_harness_message(
+        "Phase 2b JMAP write-back",
+        "Changed by the write-back queue.",
+    )?;
+    let email_id = james.wait_for_email("the write-back message", |email| {
+        email["subject"] == "Phase 2b JMAP write-back"
+    })?["id"]
+        .as_str()
+        .context("the email has an id")?
+        .to_owned();
+
+    let mailboxes = james.call("Mailbox/get", serde_json::json!({"ids": null}))?;
+    let mailbox_id = |name: &str| -> Result<String> {
+        mailboxes[1]["list"]
+            .as_array()
+            .and_then(|list| list.iter().find(|mailbox| mailbox["name"] == name))
+            .and_then(|mailbox| mailbox["id"].as_str())
+            .map(str::to_owned)
+            .with_context(|| format!("James has a mailbox named {name}: {mailboxes}"))
+    };
+    let (inbox, archive, trash) = (
+        mailbox_id("INBOX")?,
+        mailbox_id("Archive")?,
+        mailbox_id("Trash")?,
+    );
+
+    // A second mailbox for the email, as a label is on servers that
+    // have them.
+    let created = james.call(
+        "Mailbox/set",
+        serde_json::json!({"create": {"label": {"name": "Receipts"}}}),
+    )?;
+    let label = created[1]["created"]["label"]["id"]
+        .as_str()
+        .with_context(|| format!("James created the mailbox: {created}"))?
+        .to_owned();
+    let labelled = james.call(
+        "Email/set",
+        serde_json::json!({"update": {&email_id: {format!("mailboxIds/{label}"): true}}}),
+    )?;
+    ensure!(
+        labelled[1]["updated"].get(&email_id).is_some(),
+        "James put the email under the label: {labelled}"
+    );
+
+    let runtime = Builder::new_current_thread().enable_all().build()?;
+    let apply = |kind: PendingOpKind, source: &str, target_mailbox: Option<&str>| -> Result<()> {
+        let report = runtime.block_on(zmail_jmap::apply_pending_ops(
+            &target,
+            MAIL_HARNESS_JMAP_PASSWORD,
+            &[PendingOp {
+                id: 1,
+                account_id,
+                kind,
+                source_mailbox: source.to_owned(),
+                remote_id: email_id.clone(),
+                target_mailbox: target_mailbox.map(str::to_owned),
+                attempts: 0,
+                last_error: None,
+            }],
+        ))?;
+        ensure!(
+            report.applied == [1],
+            "James took {kind:?} to {target_mailbox:?}: {:?}",
+            report.failed
+        );
+        Ok(())
+    };
+    let email = || -> Result<serde_json::Value> {
+        let got = james.call(
+            "Email/get",
+            serde_json::json!({"ids": [email_id], "properties": ["keywords", "mailboxIds"]}),
+        )?;
+        Ok(got[1]["list"][0].clone())
+    };
+    let set = |ids: &[&String]| {
+        serde_json::Value::Object(
+            ids.iter()
+                .map(|id| ((*id).clone(), serde_json::Value::Bool(true)))
+                .collect(),
+        )
+    };
+
+    apply(PendingOpKind::MarkRead, "INBOX", None)?;
+    ensure!(email()?["keywords"]["$seen"] == true, "read: {}", email()?);
+    apply(PendingOpKind::MarkUnread, "INBOX", None)?;
+    ensure!(
+        email()?["keywords"].get("$seen").is_none(),
+        "unread again: {}",
+        email()?
+    );
+    apply(PendingOpKind::SetFlagged, "INBOX", None)?;
+    ensure!(
+        email()?["keywords"]["$flagged"] == true,
+        "flagged: {}",
+        email()?
+    );
+    apply(PendingOpKind::ClearFlagged, "INBOX", None)?;
+    ensure!(
+        email()?["keywords"].get("$flagged").is_none(),
+        "unflagged: {}",
+        email()?
+    );
+
+    // Archive: out of the inbox, still under the label.
+    apply(PendingOpKind::Move, "INBOX", Some("Archive"))?;
+    ensure!(
+        email()?["mailboxIds"] == set(&[&archive, &label]),
+        "archived, the label kept: {}",
+        email()?
+    );
+    // Undo.
+    apply(PendingOpKind::Move, "Archive", Some("INBOX"))?;
+    ensure!(
+        email()?["mailboxIds"] == set(&[&inbox, &label]),
+        "back in the inbox, the label kept: {}",
+        email()?
+    );
+    // Delete: the trash alone (RFC 8621 section 4.6).
+    apply(PendingOpKind::Move, "INBOX", Some("Trash"))?;
+    ensure!(
+        email()?["mailboxIds"] == set(&[&trash]),
+        "in the trash alone: {}",
+        email()?
+    );
+    // And an email in one mailbox moves in one update.
+    apply(PendingOpKind::Move, "Trash", Some("INBOX"))?;
+    ensure!(
+        email()?["mailboxIds"] == set(&[&inbox]),
+        "back from the trash: {}",
+        email()?
+    );
+    apply(PendingOpKind::Destroy, "INBOX", None)?;
+    ensure!(email()?.is_null(), "destroyed: {}", email()?);
+    Ok(())
+}
+
+/// The raw message the write probes upload and import.
+const JMAP_WIRE_WRITE_PROBE: &str = concat!(
+    "From: Probe Sender <probe@phase2b.test>\r\n",
+    "To: jmap@localhost\r\n",
+    "Subject: jmap-wire write probe\r\n",
+    "Date: Mon, 23 Nov 2026 10:00:00 +0000\r\n",
+    "Message-ID: <jmap-wire-write-probe@phase2b.test>\r\n",
+    "MIME-Version: 1.0\r\n",
+    "Content-Type: text/plain; charset=utf-8\r\n",
+    "\r\n",
+    "Uploaded as a blob and imported.\r\n",
+);
+
+/// Prints what Apache James answers to the write calls of JMAP Mail, for
+/// the response fixtures of `crates/jmap-wire/tests/fixtures/james-3.9`
+/// (each answer one log line, `JMAP-WIRE-FIXTURE <name> <JSON>`), and
+/// then makes the same writes with `jmap-wire` alone, over its own
+/// client: upload, import, download, keyword and mailbox changes,
+/// `Mailbox/set`, creating a draft and `Email/copy`. What James does
+/// with a call the RFC leaves room on is printed
+/// (`JMAP-WIRE-NOTE`), not asserted.
+#[test]
+#[ignore = "requires docker compose and the Phase 2b live mail harness"]
+fn james_answers_the_write_calls_for_the_jmap_wire_fixtures() -> Result<()> {
+    let _harness_lock = live_harness_lock();
+    let _harness = DockerMailHarness::start()?;
+    let james = James::connect(MAIL_HARNESS_JMAP_ACCOUNT, MAIL_HARNESS_JMAP_PASSWORD)?;
+    let fixture = |name: &str, answer: serde_json::Value| {
+        println!("JMAP-WIRE-FIXTURE {name} {answer}");
+        answer
+    };
+
+    let mailboxes = james.call("Mailbox/get", serde_json::json!({"ids": null}))?;
+    let mailbox_id = |name: &str| -> Result<String> {
+        mailboxes[1]["list"]
+            .as_array()
+            .and_then(|list| list.iter().find(|mailbox| mailbox["name"] == name))
+            .and_then(|mailbox| mailbox["id"].as_str())
+            .map(str::to_owned)
+            .with_context(|| format!("James has a mailbox named {name}: {mailboxes}"))
+    };
+    let (inbox, archive, trash) = (
+        mailbox_id("INBOX")?,
+        mailbox_id("Archive")?,
+        mailbox_id("Trash")?,
+    );
+
+    // The upload's answer is no Response object; it is captured as it
+    // comes.
+    let uploaded: serde_json::Value = james
+        .client
+        .post(&james.upload_url)
+        .basic_auth(james.user, Some(james.password))
+        .header("Content-Type", "message/rfc822")
+        .body(JMAP_WIRE_WRITE_PROBE)
+        .send()?
+        .error_for_status()?
+        .json()?;
+    println!("JMAP-WIRE-FIXTURE upload {uploaded}");
+    let imported = fixture(
+        "email-import.created",
+        james.raw(
+            "Email/import",
+            serde_json::json!({"emails": {"k0": {
+                "blobId": uploaded["blobId"],
+                "mailboxIds": {&inbox: true},
+                "keywords": {"$seen": true}
+            }}}),
+        )?,
+    );
+    let email_id = imported["methodResponses"][0][1]["created"]["k0"]["id"]
+        .as_str()
+        .with_context(|| format!("James imported the probe: {imported}"))?
+        .to_owned();
+    fixture(
+        "method-error.email-import-invalid-mailbox",
+        james.raw(
+            "Email/import",
+            serde_json::json!({"emails": {
+                "k0": {"blobId": "no-such-blob", "mailboxIds": {&inbox: true}},
+                "k1": {"blobId": uploaded["blobId"], "mailboxIds": {"no-such-mailbox": true}}
+            }}),
+        )?,
+    );
+
+    let update = |patch: serde_json::Value| {
+        james.raw(
+            "Email/set",
+            serde_json::json!({"update": {&email_id: patch}}),
+        )
+    };
+    fixture(
+        "email-set.keyword-set",
+        update(serde_json::json!({"keywords/$flagged": true}))?,
+    );
+    fixture(
+        "email-set.keyword-cleared",
+        update(serde_json::json!({"keywords/$flagged": null}))?,
+    );
+    // What Zmail sent to clear a keyword before step 3.
+    fixture(
+        "email-set.keyword-false",
+        update(serde_json::json!({"keywords/$seen": false}))?,
+    );
+    fixture(
+        "email-set.mailbox-moved",
+        update(serde_json::json!({
+            format!("mailboxIds/{inbox}"): null,
+            format!("mailboxIds/{archive}"): true
+        }))?,
+    );
+    fixture(
+        "email-set.mailboxes-replaced",
+        update(serde_json::json!({"mailboxIds": {&inbox: true}}))?,
+    );
+    // An email must stay in a mailbox (RFC 8621 section 4.1.1). James
+    // 3.9 answers `updated` and the email is gone.
+    fixture(
+        "email-set.no-mailbox",
+        update(serde_json::json!({format!("mailboxIds/{inbox}"): null}))?,
+    );
+    fixture(
+        "email-set.not-an-id",
+        james.raw(
+            "Email/set",
+            serde_json::json!({"update": {"no-such-email": {"keywords/$seen": true}}}),
+        )?,
+    );
+    fixture(
+        "email-set.if-in-state-not-checked",
+        james.raw(
+            "Email/set",
+            serde_json::json!({"ifInState": "not-the-state",
+                               "update": {&email_id: {"keywords/$seen": true}}}),
+        )?,
+    );
+    let created = fixture(
+        "mailbox-set.created",
+        james.raw(
+            "Mailbox/set",
+            serde_json::json!({"create": {"k0": {"name": "jmap-wire fixture"}}}),
+        )?,
+    );
+    let fixture_mailbox = created["methodResponses"][0][1]["created"]["k0"]["id"].clone();
+    fixture(
+        "mailbox-set.destroyed",
+        james.raw(
+            "Mailbox/set",
+            serde_json::json!({"destroy": [fixture_mailbox, "no-such-mailbox"]}),
+        )?,
+    );
+    fixture(
+        "method-error.email-copy",
+        james.raw(
+            "Email/copy",
+            serde_json::json!({"fromAccountId": james.account_id,
+                               "create": {"k0": {"id": email_id, "mailboxIds": {&trash: true}}}}),
+        )?,
+    );
+
+    write_to_james_with_jmap_wire(&email_id, &inbox, &archive, &trash)
+}
+
+/// The same writes with `jmap-wire` alone, typed. `email_id` is the
+/// probe imported before, which is in the inbox.
+fn write_to_james_with_jmap_wire(
+    email_id: &str,
+    inbox: &str,
+    archive: &str,
+    trash: &str,
+) -> Result<()> {
+    use jmap_wire::{
+        BlobDownload, Client, CopyMethod, Credentials, Get, Set, SetOutcome, capability,
+        mail::{
+            Email, EmailAddress, EmailCopy, EmailImport, EmailProperty, EmailToImport, EmailUpdate,
+            Mailbox, NewBodyPart, NewEmail, NewMailbox,
+        },
+    };
+
+    let runtime = Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let client = Client::builder()
+            .credentials(Credentials::basic(
+                MAIL_HARNESS_JMAP_ACCOUNT,
+                MAIL_HARNESS_JMAP_PASSWORD,
+            ))
+            .connect(format!("{MAIL_HARNESS_JMAP_ENDPOINT}/.well-known/jmap").parse()?)
+            .await?;
+        let account = client.primary_account(capability::MAIL)?.to_owned();
+        println!(
+            "JMAP-WIRE-NOTE James states maxSizeUpload {:?}",
+            client
+                .session()
+                .core()
+                .and_then(|core| core.max_size_upload)
+        );
+
+        // Upload, import, and the message comes back as it went up.
+        let raw = JMAP_WIRE_WRITE_PROBE
+            .replace("jmap-wire-write-probe@", "jmap-wire-write-probe-2@")
+            .into_bytes();
+        let blob = client
+            .upload(&account, "message/rfc822", raw.clone())
+            .await?;
+        ensure!(
+            blob.size == Some(raw.len() as u64),
+            "James says how much it took: {blob:?} for {} bytes",
+            raw.len()
+        );
+        let mut import = EmailImport::new(&account);
+        let creation_id =
+            import.email(EmailToImport::new(&blob.blob_id, [inbox]).keywords(["$seen"]));
+        let answer = client.call(import).await?;
+        let imported = answer
+            .outcome_of(&creation_id)
+            .done()
+            .with_context(|| format!("James imported the upload: {answer:?}"))?;
+        let second = imported.id.clone().context("the import has an id")?;
+        let message_blob = imported
+            .blob_id
+            .clone()
+            .context("the import says its blob")?;
+
+        let download = BlobDownload::new(&account, &message_blob)
+            .name("probe.eml")
+            .content_type("message/rfc822");
+        let back = client.download(&download).await?;
+        println!(
+            "JMAP-WIRE-NOTE download: {} bytes as {:?}, {} the upload",
+            back.bytes.len(),
+            back.content_type,
+            if back.bytes == raw {
+                "byte for byte"
+            } else {
+                "not byte for byte"
+            }
+        );
+        ensure!(
+            String::from_utf8_lossy(&back.bytes).contains("Uploaded as a blob and imported."),
+            "the download is the message"
+        );
+        let too_large = client
+            .download(&download.clone().max_bytes(16))
+            .await
+            .expect_err("more than 16 bytes");
+        ensure!(
+            too_large.is_response_too_large(),
+            "a download over its limit is refused: {too_large:?}"
+        );
+        let missing = client
+            .download(&BlobDownload::new(&account, "no-such-blob"))
+            .await
+            .expect_err("no such blob");
+        println!(
+            "JMAP-WIRE-NOTE a blob James does not have: HTTP {:?}: {missing}",
+            missing.http_status()
+        );
+        ensure!(
+            missing.http_status().is_some(),
+            "a missing blob is an HTTP error: {missing:?}"
+        );
+
+        // Keywords: set with true, cleared with null.
+        let update = |update: EmailUpdate| {
+            let mut set = Set::<Email>::new(&account);
+            set.update(&second, update);
+            client.call(set)
+        };
+        let keywords = || async {
+            let got = client
+                .call(
+                    Get::<Email>::new(&account)
+                        .ids([&second])
+                        .properties([EmailProperty::Keywords, EmailProperty::MailboxIds]),
+                )
+                .await?;
+            got.list.into_iter().next().context("the email is there")
+        };
+        let answer = update(EmailUpdate::new().set_keyword("$flagged")).await?;
+        ensure!(
+            answer.outcome_of_update(&second).is_done(),
+            "flagged: {answer:?}"
+        );
+        ensure!(
+            keywords().await?.has_keyword("$flagged"),
+            "James flagged it"
+        );
+        let answer = update(
+            EmailUpdate::new()
+                .clear_keyword("$flagged")
+                .clear_keyword("$seen"),
+        )
+        .await?;
+        ensure!(
+            answer.outcome_of_update(&second).is_done(),
+            "a keyword is cleared with null: {answer:?}"
+        );
+        let email = keywords().await?;
+        ensure!(
+            !email.has_keyword("$flagged") && !email.has_keyword("$seen"),
+            "James cleared both: {email:?}"
+        );
+        // Clearing what is not there changes nothing and is no error.
+        let answer = update(EmailUpdate::new().clear_keyword("$flagged")).await?;
+        println!(
+            "JMAP-WIRE-NOTE clearing a keyword the email lacks: {:?}",
+            answer.outcome_of_update(&second)
+        );
+
+        // Mailboxes: a label made with Mailbox/set, a move that keeps
+        // it, and the whole set replaced.
+        let mut set = Set::<Mailbox>::new(&account);
+        let creation_id = set.create(NewMailbox::new("jmap-wire label"));
+        let answer = client.call(set).await?;
+        let label = answer
+            .outcome_of_create(&creation_id)
+            .done()
+            .and_then(|mailbox| mailbox.id.clone())
+            .with_context(|| format!("James made the mailbox: {answer:?}"))?;
+        let answer = update(EmailUpdate::new().add_to_mailbox(&label)).await?;
+        ensure!(
+            answer.outcome_of_update(&second).is_done(),
+            "labelled: {answer:?}"
+        );
+        let answer = update(EmailUpdate::new().move_between(inbox, archive)).await?;
+        println!(
+            "JMAP-WIRE-NOTE a move as two mailbox patches: {:?}",
+            answer.outcome_of_update(&second)
+        );
+        if answer.outcome_of_update(&second).is_done() {
+            let mut now_in = keywords()
+                .await?
+                .mailbox_list()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            now_in.sort();
+            let mut expected = vec![archive.to_owned(), label.clone()];
+            expected.sort();
+            ensure!(now_in == expected, "moved, the label kept: {now_in:?}");
+        }
+        // Out of its only two mailboxes and into another in one patch.
+        let answer = update(
+            EmailUpdate::new()
+                .remove_from_mailbox(archive)
+                .remove_from_mailbox(&label)
+                .add_to_mailbox(inbox),
+        )
+        .await?;
+        println!(
+            "JMAP-WIRE-NOTE leaving every mailbox and joining one in the same patch: {:?}",
+            answer.outcome_of_update(&second)
+        );
+        let answer = update(EmailUpdate::new().replace_mailboxes([trash])).await?;
+        ensure!(
+            answer.outcome_of_update(&second).is_done(),
+            "to the trash: {answer:?}"
+        );
+        ensure!(
+            keywords().await?.mailbox_list() == [trash],
+            "in the trash alone"
+        );
+        // Leaving its only mailbox is refused.
+        let answer = update(EmailUpdate::new().remove_from_mailbox(trash)).await?;
+        println!(
+            "JMAP-WIRE-NOTE leaving the only mailbox: {:?}",
+            answer.outcome_of_update(&second)
+        );
+
+        // What James makes of the rest is noted, not asserted.
+        let mut set = Set::<Email>::new(&account);
+        let draft = set.create(
+            NewEmail::new()
+                .mailbox_ids([inbox])
+                .keywords(["$draft"])
+                .from([EmailAddress::named("Probe", MAIL_HARNESS_JMAP_ACCOUNT)])
+                .to([EmailAddress::new("ada@phase2b.test")])
+                .subject("jmap-wire draft")
+                .text_body(NewBodyPart::text("body"))
+                .body_value("body", "Created with Email/set.")
+                .attachments(
+                    [NewBodyPart::blob(&blob.blob_id, "message/rfc822").name("probe.eml")],
+                ),
+        );
+        match client.call(set).await {
+            Ok(answer) => {
+                println!(
+                    "JMAP-WIRE-NOTE Email/set create: {:?}",
+                    answer.outcome_of_create(&draft)
+                );
+                if let SetOutcome::Done(email) = answer.outcome_of_create(&draft) {
+                    ensure!(email.id.is_some(), "a created email has an id: {email:?}");
+                }
+            }
+            Err(error) => println!("JMAP-WIRE-NOTE Email/set create: {error}"),
+        }
+        let mut copy = CopyMethod::<Email>::new(&account, &account);
+        copy.create(EmailCopy::new(email_id).mailbox_ids([trash]));
+        match client.call(copy).await {
+            Ok(answer) => println!("JMAP-WIRE-NOTE Email/copy: {answer:?}"),
+            Err(error) => println!("JMAP-WIRE-NOTE Email/copy: {error}"),
+        }
+
+        // Tidy up: the emails, then the mailbox.
+        let mut set = Set::<Email>::new(&account);
+        set.destroy([second.as_str(), email_id]);
+        match client.call(set).await {
+            Ok(answer) => println!(
+                "JMAP-WIRE-NOTE destroying the probes: {:?} and {:?}",
+                answer.outcome_of_destroy(&second),
+                answer.outcome_of_destroy(email_id)
+            ),
+            Err(error) => println!("JMAP-WIRE-NOTE destroying the probes: {error}"),
+        }
+        let mut set = Set::<Mailbox>::new(&account);
+        set.destroy([&label]);
+        set.arguments().on_destroy_remove_emails(true);
+        match client.call(set).await {
+            Ok(answer) => println!(
+                "JMAP-WIRE-NOTE Mailbox/set destroy with onDestroyRemoveEmails: {:?}",
+                answer.outcome_of_destroy(&label)
+            ),
+            Err(error) => println!("JMAP-WIRE-NOTE Mailbox/set destroy: {error}"),
+        }
+        Ok(())
+    })
+}
+
 impl James {
     /// One method call, with the account filled in: the whole response
     /// body, method errors included.

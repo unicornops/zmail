@@ -169,8 +169,7 @@ pub(crate) fn update_request(
         IdentityUpdate::new()
             .name(values.name.clone())
             .text_signature(values.signature.clone())
-            .reply_to(reply_to_addresses(&values.reply_to))
-            .into(),
+            .reply_to(reply_to_addresses(&values.reply_to)),
     );
     let mut request = Request::new();
     request.call(set)?;

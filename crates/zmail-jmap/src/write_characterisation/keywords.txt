@@ -1,0 +1,42 @@
+# a server that takes false for removing a keyword
+MarkUnread e1
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":null}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+MarkRead e1
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+SetFlagged e1
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":true}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {"$flagged":true,"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+ClearFlagged e2
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"keywords/$flagged":null}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$seen":true}
+# a server that takes only true or null (RFC 8620 section 5.3)
+MarkUnread e1
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":null}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+MarkRead e1
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+SetFlagged e1
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":true}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {"$flagged":true,"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+ClearFlagged e2
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"keywords/$flagged":null}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$seen":true}

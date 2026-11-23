@@ -1,0 +1,20 @@
+{
+  "methodResponses": [
+    [
+      "Email/set",
+      {
+        "accountId": "8f1f47ffc1606d1e0ecc6bfdf08f41d8023639e20c706d3a14db1ca4875865e9",
+        "newState": "ace3151e-c94b-4750-9696-a054f2e1c4e2",
+        "notUpdated": {
+          "no-such-email": {
+            "description": "Message update is invalid: For input string: \"no-such-email\"",
+            "type": "invalidPatch"
+          }
+        },
+        "oldState": "ace3151e-c94b-4750-9696-a054f2e1c4e2"
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "2c9f1b12-b35a-43e6-9af2-0106fb53a943"
+}

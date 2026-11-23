@@ -1,0 +1,10 @@
+{
+  "methodResponses": [
+    [
+      "Email/import",
+      {"accountId": "a1", "oldState": null, "newState": "s2", "created": null, "notCreated": null},
+      "c0"
+    ]
+  ],
+  "sessionState": "x"
+}

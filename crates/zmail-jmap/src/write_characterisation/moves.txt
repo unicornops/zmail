@@ -1,0 +1,52 @@
+archive an email in one mailbox
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"mailboxIds/m-archive":true,"mailboxIds/m-inbox":null}}}]]
+  applied: [1]
+  e1: in {"m-archive":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+archive an email that is also under a label
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds/m-archive":true,"mailboxIds/m-inbox":null}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-archive":true,"m-label":true} with {"$flagged":true,"$seen":true}
+delete an email that is also under a label
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds":{"m-trash":true}}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-trash":true} with {"$flagged":true,"$seen":true}
+move an email out of its label only
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds/m-archive":true,"mailboxIds/m-label":null}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-archive":true,"m-inbox":true} with {"$flagged":true,"$seen":true}
+move to the mailbox it is in already
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds/m-inbox":null,"mailboxIds/m-label":true}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-label":true} with {"$flagged":true,"$seen":true}
+move from a mailbox the server does not have
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds":{"m-archive":true}}}}]]
+  applied: [1]
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-archive":true} with {"$flagged":true,"$seen":true}
+move to a mailbox the server does not have
+  applied: []
+  failed 1: the JMAP account has no mailbox named No such mailbox
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+move without a target
+  applied: []
+  failed 1: move operation without a target mailbox
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+archive and undo, an email that is also under a label
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds/m-archive":true,"mailboxIds/m-inbox":null}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds/m-archive":null,"mailboxIds/m-inbox":true}}}]]
+  applied: [1, 2]
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+delete and undo, an email that is also under a label
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds":{"m-trash":true}}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds/m-inbox":true,"mailboxIds/m-trash":null}}}]]
+  applied: [1, 2]
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true} with {"$flagged":true,"$seen":true}
