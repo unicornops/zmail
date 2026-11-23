@@ -1,0 +1,123 @@
+notUpdated notFound
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds":{"m-archive":true}}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Set failed: notFound
+  failed 2: failed to move JMAP email e2 to Archive: Set failed: notFound
+  failed 3: failed to flag JMAP email e1: Set failed: notFound
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+notUpdated invalidProperties
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds":{"m-archive":true}}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Set failed: invalidProperties: not a boolean (properties: keywords/$seen)
+  failed 2: failed to move JMAP email e2 to Archive: Set failed: invalidProperties: not a boolean (properties: keywords/$seen)
+  failed 3: failed to flag JMAP email e1: Set failed: invalidProperties: not a boolean (properties: keywords/$seen)
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+notUpdated invalidPatch
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds":{"m-archive":true}}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Set failed: invalidPatch
+  failed 2: failed to move JMAP email e2 to Archive: Set failed: invalidPatch
+  failed 3: failed to flag JMAP email e1: Set failed: invalidPatch
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+notUpdated tooManyKeywords
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds":{"m-archive":true}}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Set failed: tooManyKeywords
+  failed 2: failed to move JMAP email e2 to Archive: Set failed: tooManyKeywords
+  failed 3: failed to flag JMAP email e1: Set failed: tooManyKeywords
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+notUpdated of a type from a later RFC
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds":{"m-archive":true}}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Parse error: data did not match any variant of untagged enum SingleMethodResponse at line 1 column 161
+  failed 2: failed to move JMAP email e2 to Archive: Parse error: data did not match any variant of untagged enum SingleMethodResponse at line 1 column 161
+  failed 3: failed to flag JMAP email e1: Parse error: data did not match any variant of untagged enum SingleMethodResponse at line 1 column 161
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+neither updated nor notUpdated
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds":{"m-archive":true}}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Internal error: Id e1 not found.
+  failed 2: failed to move JMAP email e2 to Archive: Internal error: Id e2 not found.
+  failed 3: failed to flag JMAP email e1: Internal error: Id e1 not found.
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+method error stateMismatch
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds":{"m-archive":true}}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Request failed: State mismatch
+  failed 2: failed to move JMAP email e2 to Archive: Request failed: State mismatch
+  failed 3: failed to flag JMAP email e1: Request failed: State mismatch
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+method error serverFail
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds":{"m-archive":true}}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Request failed: Server fail
+  failed 2: failed to move JMAP email e2 to Archive: Request failed: Server fail
+  failed 3: failed to flag JMAP email e1: Request failed: Server fail
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+method error accountReadOnly
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e2":{"mailboxIds":{"m-archive":true}}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Request failed: Account read only
+  failed 2: failed to move JMAP email e2 to Archive: Request failed: Account read only
+  failed 3: failed to flag JMAP email e1: Request failed: Account read only
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+problem details: limit, for a keyword change
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Request failed: Limit (status 400). Details: Too large
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+HTTP 503, for a keyword change
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Server failed: 503 Service Unavailable
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+not JSON, for a keyword change
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Parse error: expected value at line 1 column 1
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+the connection drops, for a keyword change
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}}]]
+  applied: []
+  failed 1: failed to mark JMAP email e1 as read: Transport error: error sending request for url (http://server/api)
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}
+an email that is gone
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"gone":{"keywords/$seen":true}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","update":{"gone":{"mailboxIds":{"m-archive":true}}}}]]
+  sent: POST /api using ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"] [["Email/set",{"accountId":"a1","destroy":["gone"]}]]
+  applied: [3]
+  failed 1: failed to mark JMAP email gone as read: Set failed: notFound
+  failed 2: failed to move JMAP email gone to Archive: Set failed: notFound
+  e1: in {"m-inbox":true} with {"$seen":true}
+  e2: in {"m-inbox":true,"m-label":true} with {"$flagged":true,"$seen":true}

@@ -1,0 +1,14 @@
+asked: GET /download/a1/blob-plain/none?type=application/octet-stream (authorization: sent, accept: */*, accept-encoding: none)
+asked: GET /download/a1/blob%20needing/escapes/none?type=application/octet-stream (authorization: sent, accept: */*, accept-encoding: none)
+asked: GET /download/a1/blob-inline/none?type=application/octet-stream (authorization: sent, accept: */*, accept-encoding: none)
+asked: GET /download/a1/blob-missing/none?type=application/octet-stream (authorization: sent, accept: */*, accept-encoding: none)
+asked: GET /download/a1/blob-really-huge/none?type=application/octet-stream (authorization: sent, accept: */*, accept-encoding: none)
+asked: GET /download/a1/blob-last/none?type=application/octet-stream (authorization: sent, accept: */*, accept-encoding: none)
+stored: incoming-jmap-e1-0-report.pdf: 11 bytes starting "%PDF-report"
+stored: incoming-jmap-e1-2-logo_example.com: 4 bytes starting "�PNG"
+stored: incoming-jmap-e1-7-last.pdf: 4 bytes starting "last"
+listed in Inbox: MessageAttachment { filename: "report.pdf", content_type: "application/pdf", size_bytes: 11, storage_path: "blobs/incoming-jmap-e1-0-report.pdf", content_id: None, inline_only: false }
+listed in Inbox: MessageAttachment { filename: "logo@example.com", content_type: "application/pdf", size_bytes: 4, storage_path: "blobs/incoming-jmap-e1-2-logo_example.com", content_id: Some("logo@example.com"), inline_only: true }
+listed in Inbox: MessageAttachment { filename: "last.pdf", content_type: "application/pdf", size_bytes: 4, storage_path: "blobs/incoming-jmap-e1-7-last.pdf", content_id: None, inline_only: false }
+every download refused (HTTP 403): the sync succeeds, 0 stored, 0 listed
+every download refused (the connection drops): the sync succeeds, 0 stored, 0 listed
