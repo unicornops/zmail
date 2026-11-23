@@ -2462,10 +2462,11 @@ fn read_the_probes_with_jmap_wire(seven: &[serde_json::Value]) -> Result<()> {
                 .filter(
                     EmailFilterCondition::new()
                         .in_mailbox(&inbox)
-                        .subject("jmap-wire probe"),
+                        .subject("probe"),
                 )
                 .sort([Comparator::new("receivedAt").descending()])
-                .limit(10),
+                // No more than James returns with their bodies at once.
+                .limit(5),
         )?;
         let emails = request.call(
             Get::<Email>::new(&account)
@@ -2490,10 +2491,23 @@ fn read_the_probes_with_jmap_wire(seven: &[serde_json::Value]) -> Result<()> {
         let found = response.get(&query)?.ids;
         let state = response.get(&emails)?.state;
         let emails = response.take(&emails)?.list;
-        let threads = response.take(&threads)?.list;
         ensure!(found.len() >= 2, "the query finds the probes: {found:?}");
         ensure!(emails.len() == found.len(), "every email found is returned");
-        ensure!(!threads.is_empty(), "the emails' threads are returned");
+        // A reference that maps through a list (`/list/*/threadId`):
+        // whether James resolves it is printed, not required.
+        match response.take(&threads) {
+            Ok(threads) => {
+                ensure!(!threads.list.is_empty(), "the emails' threads are returned");
+                println!(
+                    "JMAP-WIRE-NOTE Thread/get by /list/*/threadId: {} threads",
+                    threads.list.len()
+                );
+            }
+            Err(jmap_wire::Error::Method(error)) => {
+                println!("JMAP-WIRE-NOTE Thread/get by /list/*/threadId refused: {error}");
+            }
+            Err(error) => return Err(error.into()),
+        }
         for email in &emails {
             ensure!(
                 email.mailbox_list().contains(&inbox.as_str()),
@@ -2552,10 +2566,20 @@ fn read_the_probes_with_jmap_wire(seven: &[serde_json::Value]) -> Result<()> {
             .get_in_batches(&ids, &mut batches, |batch| {
                 Get::<Email>::new(&account)
                     .ids(batch)
-                    .properties([EmailProperty::Subject, EmailProperty::BodyValues])
+                    .properties([
+                        EmailProperty::Subject,
+                        EmailProperty::Attachments,
+                        EmailProperty::TextBody,
+                        EmailProperty::HtmlBody,
+                        EmailProperty::BodyValues,
+                    ])
                     .fetch_all_body_values(true)
             })
             .await?;
+        println!(
+            "JMAP-WIRE-NOTE seven emails with bodies came in batches of {}",
+            batches.size()
+        );
         ensure!(
             fetched.list.len() == 7 && batches.size() <= 5,
             "the batches halve to what James takes: {} emails, batches of {}",
