@@ -2458,3 +2458,6 @@ mod session_tests;
 
 #[cfg(test)]
 mod wire_parity_tests;
+
+#[cfg(test)]
+mod read_characterisation_tests;

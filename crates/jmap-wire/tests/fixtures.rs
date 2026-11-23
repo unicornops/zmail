@@ -88,6 +88,10 @@ fn every_fixture_of_every_server_decodes() {
                     serde_json::from_value::<MethodError>(error.arguments.clone())
                         .unwrap_or_else(|error| panic!("{path:?}: {error}"));
                 }
+                // The reads: typed decoders come with the types.
+                "mailbox-get" | "email-get" => {
+                    read::<Response>(&path);
+                }
                 other => panic!("{path:?}: no decoder for fixtures named {other}"),
             }
             decoded += 1;

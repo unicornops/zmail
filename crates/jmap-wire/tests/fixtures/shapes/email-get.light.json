@@ -1,0 +1,16 @@
+{
+  "methodResponses": [
+    ["Email/get", {
+      "accountId": "a1",
+      "state": "em-44",
+      "list": [
+        {"id": "e1", "threadId": "t1", "mailboxIds": {"mb-archive": true}, "keywords": {"$seen": true, "$flagged": true}, "hasAttachment": false},
+        {"id": "e3", "threadId": "t3", "mailboxIds": {"mb-inbox": true}, "keywords": {"$seen": true}, "hasAttachment": true},
+        {"id": "e4", "mailboxIds": {"mb-archive": true}},
+        {"id": "e9", "threadId": "t9", "mailboxIds": {"mb-inbox": true, "mb-zmail": true}, "keywords": null, "hasAttachment": null}
+      ],
+      "notFound": []
+    }, "c0"]
+  ],
+  "sessionState": "s1"
+}

@@ -1,0 +1,153 @@
+headers: [
+    (
+        "e1",
+        MessageHeaders {
+            captured: true,
+            message_id: Some(
+                "m1@example.test",
+            ),
+            in_reply_to: [],
+            references: [],
+            cc: "",
+            delivered_to: [
+                "me@example.test",
+                "alias@example.test",
+            ],
+        },
+    ),
+    (
+        "e2",
+        MessageHeaders {
+            captured: true,
+            message_id: Some(
+                "m2@example.test",
+            ),
+            in_reply_to: [],
+            references: [],
+            cc: "",
+            delivered_to: [
+                "alias@example.test",
+            ],
+        },
+    ),
+    (
+        "e3",
+        MessageHeaders {
+            captured: true,
+            message_id: Some(
+                "m3@example.test",
+            ),
+            in_reply_to: [],
+            references: [],
+            cc: "Dee <dee@example.test>, eve@example.test",
+            delivered_to: [
+                "me@example.test",
+            ],
+        },
+    ),
+    (
+        "e4",
+        MessageHeaders {
+            captured: true,
+            message_id: Some(
+                "m4@example.test",
+            ),
+            in_reply_to: [
+                "m3@example.test",
+            ],
+            references: [
+                "m3@example.test",
+                "m0@example.test",
+            ],
+            cc: "",
+            delivered_to: [],
+        },
+    ),
+    (
+        "e5",
+        MessageHeaders {
+            captured: true,
+            message_id: None,
+            in_reply_to: [],
+            references: [],
+            cc: "",
+            delivered_to: [],
+        },
+    ),
+    (
+        "e6",
+        MessageHeaders {
+            captured: true,
+            message_id: None,
+            in_reply_to: [],
+            references: [],
+            cc: "",
+            delivered_to: [],
+        },
+    ),
+    (
+        "e7",
+        MessageHeaders {
+            captured: true,
+            message_id: Some(
+                "m7@example.test",
+            ),
+            in_reply_to: [],
+            references: [],
+            cc: "",
+            delivered_to: [],
+        },
+    ),
+    (
+        "e8",
+        MessageHeaders {
+            captured: true,
+            message_id: Some(
+                "m8@example.test",
+            ),
+            in_reply_to: [],
+            references: [],
+            cc: "",
+            delivered_to: [],
+        },
+    ),
+    (
+        "e9",
+        MessageHeaders {
+            captured: true,
+            message_id: Some(
+                "m9@example.test",
+            ),
+            in_reply_to: [],
+            references: [],
+            cc: "",
+            delivered_to: [],
+        },
+    ),
+]
+hits: [
+    ServerHitRef {
+        mailbox_name: None,
+        remote_id: "e1",
+    },
+    ServerHitRef {
+        mailbox_name: None,
+        remote_id: "e2",
+    },
+    ServerHitRef {
+        mailbox_name: None,
+        remote_id: "e3",
+    },
+]
+moves: OpApplyReport {
+    applied: [
+        1,
+    ],
+    failed: [
+        (
+            2,
+            "the JMAP account has no mailbox named No such mailbox",
+        ),
+    ],
+}
+moved to: {"e1":{"mailboxIds":{"mb-inbox":true}}}
