@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.6](https://github.com/unicornops/zmail/compare/v0.34.5...v0.34.6) (2026-11-23)
+
+
+### Bug Fixes
+
+* **deps:** update async-executor to 1.14.1, replacing the yanked 1.14.0 ([#506](https://github.com/unicornops/zmail/issues/506)) ([5d90efa](https://github.com/unicornops/zmail/commit/5d90efa37e5d5c804cfd83fe980e5157513d9281))
+
 ## [0.34.5](https://github.com/unicornops/zmail/compare/v0.34.4...v0.34.5) (2026-11-22)
 
 
