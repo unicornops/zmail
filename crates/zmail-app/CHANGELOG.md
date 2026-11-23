@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.0](https://github.com/unicornops/zmail/compare/v0.34.7...v0.35.0) (2026-11-23)
+
+
+### Features
+
+* **jmap:** start Zmail's own JMAP client library and move identities, submission and deletion onto it (#132) ([#509](https://github.com/unicornops/zmail/issues/509)) ([08f3523](https://github.com/unicornops/zmail/commit/08f3523aaffadeb97e6a551e9712988941593e8c))
+
 ## [0.34.7](https://github.com/unicornops/zmail/compare/v0.34.6...v0.34.7) (2026-11-23)
 
 
