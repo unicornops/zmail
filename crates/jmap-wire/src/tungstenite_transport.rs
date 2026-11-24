@@ -24,12 +24,17 @@ use crate::{
 /// against the system's root certificates, no redirects, and no headers
 /// but the handshake's own.
 ///
-/// rustls needs a process-wide crypto provider when more than one is
-/// compiled in (`ring` and `aws-lc-rs`, as happens when other crates of
-/// a build turn both on): install one with
-/// `rustls::crypto::CryptoProvider::install_default` before the first
-/// `wss` connection, or give the transport a TLS configuration of your
-/// own ([`with_connector`](Self::with_connector)).
+/// # The rustls crypto provider
+///
+/// The default TLS configuration is built by `tokio-tungstenite` with
+/// rustls's process-wide crypto provider. rustls finds one by itself
+/// only when exactly one is compiled in; with none, or with both `ring`
+/// and `aws-lc-rs` (as happens when other crates of a build turn both
+/// on), **it panics at the first `wss` connection** unless a provider
+/// was installed first. So either install one at start-up
+/// (`rustls::crypto::CryptoProvider::install_default`), or give the
+/// transport a TLS configuration of your own
+/// ([`with_connector`](Self::with_connector)), which needs no default.
 #[derive(Clone, Default)]
 pub struct TungsteniteTransport {
     connector: Option<Connector>,
