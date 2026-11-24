@@ -1,0 +1,70 @@
+# Identity/get
+{"methodCalls":[["Identity/get",{"accountId":"a1"},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:submission"]}
+# Identity/set update, reply-to "Team <team@example.com>, ops@example.com"
+{"methodCalls":[["Identity/set",{"accountId":"a1","update":{"i1":{"name":"Rob","replyTo":[{"email":"team@example.com","name":"Team"},{"email":"ops@example.com","name":null}],"textSignature":"-- Rob"}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:submission"]}
+# Identity/set create, reply-to "Team <team@example.com>, ops@example.com"
+{"methodCalls":[["Identity/set",{"accountId":"a1","create":{"k0":{"email":"help@example.com","name":"Rob","replyTo":[{"email":"team@example.com","name":"Team"},{"email":"ops@example.com","name":null}],"textSignature":"-- Rob"}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:submission"]}
+# Identity/set update, reply-to ""
+{"methodCalls":[["Identity/set",{"accountId":"a1","update":{"i1":{"name":"Rob","replyTo":null,"textSignature":"-- Rob"}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:submission"]}
+# Identity/set create, reply-to ""
+{"methodCalls":[["Identity/set",{"accountId":"a1","create":{"k0":{"email":"help@example.com","name":"Rob","replyTo":null,"textSignature":"-- Rob"}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:submission"]}
+# Identity/set destroy
+{"methodCalls":[["Identity/set",{"accountId":"a1","destroy":["i1"]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:submission"]}
+# Email/import of the Sent copy
+{"methodCalls":[["Email/import",{"accountId":"a1","emails":{"k0":{"blobId":"b1","keywords":{"$submitpending":true},"mailboxIds":{"m-sent":true}}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# EmailSubmission/set
+{"methodCalls":[["EmailSubmission/set",{"accountId":"a1","create":{"k0":{"emailId":"e1","envelope":{"mailFrom":{"email":"rob@example.com","parameters":null},"rcptTo":[{"email":"ada@example.com","parameters":null},{"email":"cy@example.com","parameters":null},{"email":"bea@example.com","parameters":null}]},"identityId":"i1"}},"onSuccessUpdateEmail":{"#k0":{"keywords":{"$submitted":true}}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:submission","urn:ietf:params:jmap:mail"]}
+# Email/set destroy
+{"methodCalls":[["Email/set",{"accountId":"a1","destroy":["e1","e2"]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Mailbox/get
+{"methodCalls":[["Mailbox/get",{"accountId":"a1"},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/query, the sync's page at 0
+{"methodCalls":[["Email/query",{"accountId":"a1","limit":250,"position":0,"sort":[{"isAscending":true,"property":"receivedAt"}]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/query, the sync's page at 250
+{"methodCalls":[["Email/query",{"accountId":"a1","limit":250,"position":250,"sort":[{"isAscending":true,"property":"receivedAt"}]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/query, an interrupted send's copies since Some(1792060920)
+{"methodCalls":[["Email/query",{"accountId":"a1","filter":{"after":"2026-10-14T10:42:00Z"},"limit":250,"position":250,"sort":[{"isAscending":false,"property":"receivedAt"}]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/query, an interrupted send's copies since None
+{"methodCalls":[["Email/query",{"accountId":"a1","limit":250,"position":250,"sort":[{"isAscending":false,"property":"receivedAt"}]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/get, the sync
+{"methodCalls":[["Email/get",{"accountId":"a1","fetchAllBodyValues":true,"ids":["e1","e2"],"properties":["id","threadId","mailboxIds","keywords","from","replyTo","to","subject","preview","hasAttachment","attachments","bodyValues","textBody","htmlBody","receivedAt","messageId","inReplyTo","references","cc","header:Delivered-To:all","header:X-Original-To:all"]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/get, the header backfill
+{"methodCalls":[["Email/get",{"accountId":"a1","ids":["e1","e2"],"properties":["id","messageId","inReplyTo","references","cc","header:Delivered-To:all","header:X-Original-To:all"]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/get, the light fetch after a change
+{"methodCalls":[["Email/get",{"accountId":"a1","ids":["e1","e2"],"properties":["id","threadId","mailboxIds","keywords","hasAttachment"]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/get, an interrupted send's copies
+{"methodCalls":[["Email/get",{"accountId":"a1","ids":["e1","e2"],"properties":["id","messageId","keywords"]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/get, the state before a full sync
+{"methodCalls":[["Email/get",{"accountId":"a1","ids":[]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/changes
+{"methodCalls":[["Email/changes",{"accountId":"a1","maxChanges":500,"sinceState":"em-41"},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/query, the search "budget"
+{"methodCalls":[["Email/query",{"accountId":"a1","filter":{"conditions":[{"text":"budget"}],"operator":"AND"},"limit":40,"sort":[{"isAscending":false,"property":"receivedAt"}]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/query, the search "budget from:alice to:bob subject:plan"
+{"methodCalls":[["Email/query",{"accountId":"a1","filter":{"conditions":[{"text":"budget"},{"from":"alice"},{"to":"bob"},{"subject":"plan"}],"operator":"AND"},"limit":40,"sort":[{"isAscending":false,"property":"receivedAt"}]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/query, the search "-is:unread is:read is:flagged has:attachment"
+{"methodCalls":[["Email/query",{"accountId":"a1","filter":{"conditions":[{"conditions":[{"notKeyword":"$seen"}],"operator":"NOT"},{"hasKeyword":"$seen"},{"hasKeyword":"$flagged"},{"hasAttachment":true}],"operator":"AND"},"limit":40,"sort":[{"isAscending":false,"property":"receivedAt"}]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/query, the search "in:inbox -in:spam -in:nowhere"
+{"methodCalls":[["Email/query",{"accountId":"a1","filter":{"conditions":[{"conditions":[{"inMailbox":"mb-inbox"}],"operator":"OR"},{"conditions":[{"conditions":[{"inMailbox":"mb-junk"}],"operator":"OR"}],"operator":"NOT"}],"operator":"AND"},"limit":40,"sort":[{"isAscending":false,"property":"receivedAt"}]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/query, the search "after:2026-06-01 before:2026-06-10 -after:2025-01-01"
+{"methodCalls":[["Email/query",{"accountId":"a1","filter":{"conditions":[{"after":"2026-06-01T00:00:00Z"},{"before":"2026-06-10T00:00:00Z"},{"conditions":[{"after":"2025-01-01T00:00:00Z"}],"operator":"NOT"}],"operator":"AND"},"limit":40,"sort":[{"isAscending":false,"property":"receivedAt"}]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/query, the search "\"exact phrase\" -budget"
+{"methodCalls":[["Email/query",{"accountId":"a1","filter":{"conditions":[{"text":"exact phrase"},{"conditions":[{"text":"budget"}],"operator":"NOT"}],"operator":"AND"},"limit":40,"sort":[{"isAscending":false,"property":"receivedAt"}]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/query, the search ""
+{"methodCalls":[["Email/query",{"accountId":"a1","filter":{"conditions":[],"operator":"AND"},"limit":40,"sort":[{"isAscending":false,"property":"receivedAt"}]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/set, setting $seen
+{"methodCalls":[["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":true}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/set, clearing $seen
+{"methodCalls":[["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$seen":null}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/set, setting $flagged
+{"methodCalls":[["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":true}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/set, clearing $flagged
+{"methodCalls":[["Email/set",{"accountId":"a1","update":{"e1":{"keywords/$flagged":null}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/set, a move to the archive
+{"methodCalls":[["Email/set",{"accountId":"a1","update":{"e1":{"mailboxIds/m-archive":true,"mailboxIds/m-inbox":null}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/set, a delete to the trash
+{"methodCalls":[["Email/set",{"accountId":"a1","update":{"e1":{"mailboxIds":{"m-trash":true}}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/set, a move to junk
+{"methodCalls":[["Email/set",{"accountId":"a1","update":{"e1":{"mailboxIds":{"m-junk":true}}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+# Email/set, a move from a mailbox the server does not have
+{"methodCalls":[["Email/set",{"accountId":"a1","update":{"e1":{"mailboxIds":{"m-archive":true}}}},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}

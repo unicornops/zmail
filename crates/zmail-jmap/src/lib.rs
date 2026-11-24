@@ -2748,3 +2748,6 @@ mod push_characterisation_tests;
 
 #[cfg(test)]
 mod sign_in_characterisation_tests;
+
+#[cfg(test)]
+mod request_shape_tests;
