@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted on March 20, 2026. Superseded on November 23, 2026 by [ADR 0008](./0008-own-jmap-client-library.md): the escape hatch below was taken (#132), and Zmail is moving to its own JMAP client library in four steps. `jmap-client` stays, pinned, until the last of them.
+Accepted on March 20, 2026. Superseded on November 23, 2026 by [ADR 0008](./0008-own-jmap-client-library.md): the escape hatch below was taken (#132), and Zmail moved to its own JMAP client library, `crates/jmap-wire`, in four steps. The last of them removed `jmap-client` from the workspace; this record is kept as the history of the first decision.
 
 ## Context
 
