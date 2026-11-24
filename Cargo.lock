@@ -10592,7 +10592,7 @@ dependencies = [
 
 [[package]]
 name = "zmail-app"
-version = "0.34.7"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "rpassword",
