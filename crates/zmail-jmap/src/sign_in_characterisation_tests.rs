@@ -450,12 +450,14 @@ async fn the_account_is_chosen_as_pinned() {
             crate::write_characterisation_tests::canonical(&primary)
         )
         .expect("writes");
-        // `jmap-client` takes the first entry of a hash map whose order
-        // changes from one sign-in to the next: every account it picked
-        // in forty sign-ins is listed.
+        // `jmap-client` took the first entry of a hash map whose order
+        // changed from one sign-in to the next, so every account picked
+        // in several sign-ins is listed (it was forty while the choice
+        // was `jmap-client`'s; the pinned text then had two accounts
+        // where it now has one).
         let mut picked = std::collections::BTreeSet::new();
         let mut failure = None;
-        for _ in 0..40 {
+        for _ in 0..5 {
             let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
             let origin = format!("http://{}", listener.local_addr().expect("an address"));
             let body = session(&origin, &accounts, primary.clone()).to_string();

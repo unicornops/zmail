@@ -1,0 +1,13 @@
+{
+  "@type": "Response",
+  "requestId": "R1",
+  "methodResponses": [
+    [
+      "Core/echo", {
+        "hello": true,
+        "high": 5
+      },
+      "b3ff"
+    ]
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "@type": "StateChange",
+  "changed": {
+    "a123": {
+      "Email": "0af7a512ce70"
+    }
+  },
+  "pushState": "ccc"
+}

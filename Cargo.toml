@@ -80,14 +80,6 @@ hmac = "0.13.0"
 # zmail-core's `time` module, which is the only place that names it. The
 # text of stored and wire timestamps is zmail-core's own (issue #489).
 jiff = "1.0.2"
-# Exactly 0.4.1: 0.4.2 and later put every capability jmap-client knows
-# (contacts, calendars, Sieve, quota, principals...) in each request's
-# `using`, which RFC 8620 section 3.6.1 has servers reject
-# (`unknownCapability`), and its convenience methods (email_changes,
-# email_set_keyword, email_import_account...) build such requests
-# internally. 0.4.1 still sends Core and Mail, and already has
-# tokio-tungstenite 0.29 (no webpki-roots 0.26, RUSTSEC-2026-0381).
-jmap-client = { version = "=0.4.1", default-features = false, features = ["async", "rustls"] }
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 # DKIM signing is the sending server's job; leaving out mail-send's default `dkim`
 # feature drops mail-auth and its report-parsing dependencies (zip, hickory DNS).
@@ -151,7 +143,8 @@ thiserror = "2.0.21"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = "0.26.4"
 # The WebSocket binding of JMAP (RFC 8887), behind jmap-wire's
-# `tungstenite` feature; TLS by rustls with the system's roots.
+# `tungstenite` feature; TLS by rustls with the system's roots. 0.29 has
+# no webpki-roots 0.26 (RUSTSEC-2026-0381).
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 unicode-segmentation = "1.13"
 # Display widths for the terminal UI's truncation and wrapping (ADR 0007);

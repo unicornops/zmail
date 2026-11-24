@@ -26,7 +26,9 @@
 //!   timeout.
 //!
 //! A caller that must not hold a large download in memory (saving a
-//! video to disk, say) builds the URL with
+//! video to disk, say) reads it piece by piece with
+//! [`Client::download_stream`], over a transport that can stream
+//! ([`StreamingTransport`]), or builds the URL with
 //! [`Client::download_url`] and fetches it with an HTTP client of its
 //! own.
 //!
@@ -55,9 +57,9 @@ use serde_json::Value;
 use url::Url;
 
 use crate::{
-    client::{Client, Exchange, MAX_UPLOAD_ANSWER_BYTES, exchange, success},
-    error::Error,
-    transport::{HttpMethod, HttpTransport},
+    client::{Client, Exchange, MAX_UPLOAD_ANSWER_BYTES, exchange, open, stream_success, success},
+    error::{Error, TransportError},
+    transport::{BodyStream, HttpMethod, HttpTransport, StreamingTransport},
 };
 
 /// The media type a blob is asked for, or uploaded as, when the caller
@@ -261,6 +263,7 @@ impl<T: HttpTransport> Client<T> {
                 max_response_bytes: MAX_UPLOAD_ANSWER_BYTES,
                 redirects_without_credentials: false,
                 exact_content: false,
+                extra_headers: Vec::new(),
             },
         )
         .await?;
@@ -323,6 +326,7 @@ impl<T: HttpTransport> Client<T> {
                 max_response_bytes: download.max_bytes.unwrap_or(self.config.max_download_bytes),
                 redirects_without_credentials: download.redirects_without_credentials,
                 exact_content: true,
+                extra_headers: Vec::new(),
             },
         )
         .await?;
@@ -347,6 +351,147 @@ impl<T: HttpTransport> Client<T> {
             &download.name,
             &download.content_type,
         )
+    }
+}
+
+/// A blob being downloaded piece by piece
+/// ([`Client::download_stream`]). Dropping it stops the download.
+#[derive(Debug)]
+pub struct BlobStream<B> {
+    body: B,
+    content_type: Option<String>,
+    content_length: Option<u64>,
+    idle: Duration,
+    max_bytes: Option<usize>,
+    read: usize,
+}
+
+impl<B: BodyStream> BlobStream<B> {
+    /// The next piece of the blob, or `None` at its end. Write each to
+    /// wherever the blob is going:
+    ///
+    /// ```no_run
+    /// # async fn example(
+    /// #     client: &jmap_wire::Client<impl jmap_wire::StreamingTransport>,
+    /// #     download: &jmap_wire::BlobDownload,
+    /// #     mut file: impl std::io::Write,
+    /// # ) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut blob = client.download_stream(download).await?;
+    /// while let Some(piece) = blob.chunk().await? {
+    ///     file.write_all(&piece)?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Transport`]: of kind
+    /// [`Timeout`](crate::TransportErrorKind::Timeout) when the server
+    /// sends nothing for the client's
+    /// [`timeout`](crate::ClientBuilder::timeout), of kind
+    /// [`TooLarge`](crate::TransportErrorKind::TooLarge) once the blob
+    /// is over the download's [`max_bytes`](BlobDownload::max_bytes),
+    /// and whatever the transport reports when the connection breaks
+    /// (a body that ends before its length is an error, so a blob read
+    /// to `None` is whole).
+    pub async fn chunk(&mut self) -> Result<Option<Vec<u8>>, Error> {
+        let Some(chunk) = self.body.chunk(Some(self.idle)).await? else {
+            return Ok(None);
+        };
+        self.read = self.read.saturating_add(chunk.len());
+        if let Some(limit) = self.max_bytes.filter(|limit| self.read > *limit) {
+            return Err(TransportError::too_large(limit).into());
+        }
+        Ok(Some(chunk))
+    }
+
+    /// The `Content-Type` the server answered with. Do not trust it to
+    /// say what the bytes are.
+    pub fn content_type(&self) -> Option<&str> {
+        self.content_type.as_deref()
+    }
+
+    /// The size the server announced (`Content-Length`), when it did.
+    pub fn content_length(&self) -> Option<u64> {
+        self.content_length
+    }
+}
+
+impl<T: StreamingTransport> Client<T> {
+    /// Downloads a blob (RFC 8620 section 6.2) without holding it:
+    /// the same request as [`download`](Self::download), with the body
+    /// handed over piece by piece as it arrives, for a blob that goes
+    /// to a file or is larger than memory should hold. It needs a
+    /// transport that can stream ([`StreamingTransport`]), which the
+    /// default one can.
+    ///
+    /// Its limits are a stream's, not a whole body's:
+    ///
+    /// - the server must begin its answer within the client's
+    ///   [`timeout`](crate::ClientBuilder::timeout), and then never be
+    ///   silent for longer than that; how long the whole download takes
+    ///   is not limited, so
+    ///   [`blob_timeout`](crate::ClientBuilder::blob_timeout) and the
+    ///   download's own [`timeout`](BlobDownload::timeout) do not
+    ///   apply;
+    /// - there is no size limit unless the download sets
+    ///   [`max_bytes`](BlobDownload::max_bytes); the client's
+    ///   [`max_download_bytes`](crate::ClientBuilder::max_download_bytes)
+    ///   bounds what is held in memory, which here is one piece;
+    /// - the request asks for no compression, and an answer in a
+    ///   content encoding all the same is an error (the whole-body
+    ///   [`download`](Self::download) undoes gzip).
+    ///
+    /// Redirects and credentials are as for [`download`](Self::download).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Problem`] or [`Error::Http`] when the server refuses
+    /// ([`Error::http_status`] is 404 for a blob it does not have),
+    /// [`Error::Redirect`] for a redirect that is not followed, and
+    /// [`Error::Transport`] when no answer begins in time or the
+    /// download's limit is below the size the server announces.
+    pub async fn download_stream(
+        &self,
+        download: &BlobDownload,
+    ) -> Result<BlobStream<T::Body>, Error> {
+        let idle = self.config.timeout;
+        let (response, _) = open(
+            &self.transport,
+            &self.config,
+            Exchange {
+                method: HttpMethod::Get,
+                url: self.download_url(download)?,
+                body: Vec::new(),
+                content_type: None,
+                accept: &download.content_type,
+                accept_gzip: false,
+                timeout: idle,
+                max_response_bytes: 0,
+                redirects_without_credentials: download.redirects_without_credentials,
+                exact_content: true,
+                extra_headers: Vec::new(),
+            },
+        )
+        .await?;
+        let response = stream_success(response, idle).await?;
+        let content_length = response
+            .header("content-length")
+            .and_then(|length| length.trim().parse::<u64>().ok());
+        if let (Some(limit), Some(length)) = (download.max_bytes, content_length)
+            && length > limit as u64
+        {
+            return Err(TransportError::too_large(limit).into());
+        }
+        Ok(BlobStream {
+            content_type: response.header("content-type").map(str::to_owned),
+            content_length,
+            body: response.body,
+            idle,
+            max_bytes: download.max_bytes,
+            read: 0,
+        })
     }
 }
 

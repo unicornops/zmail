@@ -32,10 +32,6 @@ updates:
       # (deny.toml, Cargo.toml).
       - dependency-name: pgp
       - dependency-name: proton-srp
-      # 0.4.2 and later send every capability in `using`, which servers
-      # reject; see the comment on jmap-client in Cargo.toml.
-      - dependency-name: jmap-client
-        versions: [">= 0.4.2"]
 
   # The fuzz targets' own lockfile (fuzz/README.md): one grouped pull
   # request a month. The parsing crates themselves move with the app's

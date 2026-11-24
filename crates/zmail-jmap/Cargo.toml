@@ -8,11 +8,10 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-futures-util.workspace = true
-# `websockets` adds the RFC 8887 push fallback (tokio-tungstenite).
-jmap-client = { workspace = true, features = ["websockets"] }
-jmap-wire = { path = "../jmap-wire" }
-reqwest = { workspace = true, features = ["stream"] }
+# `tungstenite` is the WebSocket transport of the RFC 8887 push fallback.
+jmap-wire = { path = "../jmap-wire", features = ["tungstenite"] }
+# For the names of HTTP statuses in error messages.
+reqwest.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 serde.workspace = true
@@ -23,6 +22,7 @@ zmail-security = { path = "../zmail-security" }
 zmail-smtp = { path = "../zmail-smtp" }
 
 [dev-dependencies]
+futures-util.workspace = true
 # The loopback WebSocket server of the push tests.
 tokio-tungstenite.workspace = true
 

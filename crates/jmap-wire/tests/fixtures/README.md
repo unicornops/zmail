@@ -9,6 +9,9 @@ directory, so a new server is a new directory:
 | `session` | `Session` |
 | `problem` | `ProblemDetails` |
 | `upload` | `UploadedBlob`, the answer to a blob upload |
+| `statechange` | `StateChange`, a pushed object (RFC 8620 section 7.1) |
+| `websocket` | one message a server sent over a WebSocket (RFC 8887 section 4.3), read with `WebSocketMessage::parse`; the second part of the name says what it must be: `websocket.response`, `websocket.state-change` or `websocket.request-error` |
+| `eventsource` (a `.txt` file) | the body of an event source response (RFC 8620 section 7.3), byte for byte; every event in it must read as a state change or a ping |
 | anything else | `Response`; then each method response in it by its name |
 
 A response file's first method response must be what the file's name
@@ -34,11 +37,13 @@ incremental sync is replayed too.
 
 ## Where they come from
 
-- `rfc`: the examples of RFC 8620 (sections 2.1, 3.6.1.1 and 3.6.2) and
-  RFC 8621 (sections 2.6, 3.1.1, 4.2.1, 4.10, 6.4 and 7.5.1), wrapped in
+- `rfc`: the examples of RFC 8620 (sections 2.1, 3.6.1.1, 3.6.2 and
+  7.1.1), RFC 8621 (sections 2.6, 3.1.1, 4.2.1, 4.10, 6.4 and 7.5.1)
+  and RFC 8887 (section 4.4: the messages the server sends), wrapped in
   a Response object where the RFC shows only the method responses. The
-  elided parts (`...`) are left out, and the two slips in the session
-  example are put right (a missing comma, `maxConcurrentRequest`).
+  elided parts (`...`) are left out, and the slips are put right: in
+  the session example a missing comma and `maxConcurrentRequest`, and
+  in the second pushed StateChange of RFC 8887 a missing comma.
 - `james-3.9`: see the README in that directory.
 - `shapes`: written by hand, not captured from any server. They are the
   shapes the RFCs allow and servers differ on: properties left out,
@@ -52,7 +57,11 @@ incremental sync is replayed too.
   variants) have every outcome of RFC 8620 section 5.3 and RFC 8621
   sections 2.5, 4.6 and 4.8: records done, each SetError type with the
   properties it carries, a type from no RFC, and `null` where a map or a
-  list may be.
+  list may be. The push shapes are a StateChange with `null`, an
+  unknown data type and a vendor property, WebSocket messages without
+  an `@type`, and an event stream (`eventsource.stream.txt`) with a
+  comment, pings, ids, a `retry`, an event without a type, data on two
+  lines and both line endings.
 
 ## Adding a server
 
@@ -64,5 +73,13 @@ and its version. The requests Apache James was sent are in
 (`crates/zmail-test-support/tests/live_jmap_harness.rs`); the same
 messages and calls against another server give fixtures that can be
 compared.
+
+For push, save what the server sends when mail arrives: the body of
+the event source response as `eventsource.<case>.txt` (`curl -N` with
+the session's `eventSourceUrl` filled in), and each WebSocket message
+as its own `websocket.<kind>.<case>.json`. No server's push has been
+recorded yet: CI's Apache James runs both transports in the live tests
+(`event_source_pushes_new_mail`, `websocket_pushes_new_mail`), which
+check that a push arrives, not what it looks like.
 
 No fixture may contain real addresses, tokens or message content.

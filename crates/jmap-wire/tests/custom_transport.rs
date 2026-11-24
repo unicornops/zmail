@@ -671,3 +671,391 @@ mod gzip {
         assert!(result.expect_err("a problem").is_request_too_large());
     }
 }
+
+/// A scripted response: its status, its headers and the pieces of its
+/// body.
+type ScriptedStream = (u16, Vec<(String, String)>, Vec<Vec<u8>>);
+
+/// A transport that can stream: each opened request gets the next
+/// scripted response, whose body comes in the pieces given.
+struct Streams {
+    responses: Mutex<VecDeque<ScriptedStream>>,
+    opened: Mutex<Vec<jmap_wire::StreamRequest>>,
+    session: Value,
+}
+
+#[derive(Debug)]
+struct Pieces {
+    pieces: VecDeque<Vec<u8>>,
+    /// The idle time of each call, as the client asked for it.
+    waits: Vec<Option<std::time::Duration>>,
+}
+
+impl jmap_wire::BodyStream for Pieces {
+    async fn chunk(
+        &mut self,
+        idle: Option<std::time::Duration>,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
+        self.waits.push(idle);
+        // A body with nothing left to say stays silent: the transport's
+        // timer would run out.
+        match self.pieces.pop_front() {
+            Some(piece) if piece == b"<silence>" => Err(TransportError::new(
+                jmap_wire::TransportErrorKind::Timeout,
+                format!("silent for {idle:?}"),
+            )),
+            piece => Ok(piece),
+        }
+    }
+}
+
+impl HttpTransport for Streams {
+    async fn execute(&self, _: HttpRequest) -> Result<HttpResponse, TransportError> {
+        Ok(json_answer(200, self.session.clone()))
+    }
+}
+
+impl jmap_wire::StreamingTransport for Streams {
+    type Body = Pieces;
+
+    async fn open(
+        &self,
+        request: jmap_wire::StreamRequest,
+    ) -> Result<jmap_wire::StreamResponse<Pieces>, TransportError> {
+        self.opened.lock().expect("the log").push(request);
+        let (status, headers, pieces) = self
+            .responses
+            .lock()
+            .expect("the queue")
+            .pop_front()
+            .ok_or_else(|| {
+                TransportError::new(jmap_wire::TransportErrorKind::Other, "no answer scripted")
+            })?;
+        Ok(jmap_wire::StreamResponse::new(
+            status,
+            headers,
+            Pieces {
+                pieces: pieces.into(),
+                waits: Vec::new(),
+            },
+        ))
+    }
+}
+
+fn push_session() -> Value {
+    json!({
+        "capabilities": {
+            "urn:ietf:params:jmap:core": {},
+            "urn:ietf:params:jmap:mail": {},
+            "urn:ietf:params:jmap:websocket": {"url": "wss://ws.example.com/jmap", "supportsPush": true}
+        },
+        "accounts": {"a1": {"name": "ada@example.com"}},
+        "primaryAccounts": {"urn:ietf:params:jmap:mail": "a1"},
+        "apiUrl": "/jmap/api",
+        "eventSourceUrl": "https://push.example.com/events?types={types}&closeafter={closeafter}&ping={ping}",
+        "downloadUrl": "/download/{accountId}/{blobId}/{name}?type={type}",
+        "state": "s1"
+    })
+}
+
+fn header(name: &str, value: &str) -> (String, String) {
+    (name.to_owned(), value.to_owned())
+}
+
+/// The event source and a streamed download over a transport of one's
+/// own, with no network, no timer and no runtime.
+#[test]
+fn the_event_source_and_streamed_downloads_run_over_any_streaming_transport() {
+    use jmap_wire::event_source::{EventSource, EventSourceEvent};
+
+    let event_stream = vec![header("Content-Type", "text/event-stream; charset=utf-8")];
+    let transport = Streams {
+        responses: Mutex::new(
+            [
+                // A redirect on the event source's own host, then the
+                // stream.
+                (307, vec![header("Location", "/events/v2")], Vec::new()),
+                (
+                    200,
+                    event_stream.clone(),
+                    vec![
+                        b"event: state\ndata: {\"@type\":\"StateChange\",\"changed\":".to_vec(),
+                        b"{\"a1\":{\"Email\":\"s2\"}}}\n\nevent: ping\ndata: {\"interval\":120}\n\n"
+                            .to_vec(),
+                        b"<silence>".to_vec(),
+                    ],
+                ),
+                // A redirect to another host is refused.
+                (
+                    307,
+                    vec![header("Location", "https://elsewhere.example.net/events")],
+                    Vec::new(),
+                ),
+                // A download in two pieces.
+                (
+                    200,
+                    vec![header("Content-Length", "6")],
+                    vec![b"abc".to_vec(), b"def".to_vec()],
+                ),
+                // An error status with problem details.
+                (
+                    429,
+                    vec![header("Content-Type", "application/problem+json")],
+                    vec![
+                        br#"{"type":"urn:ietf:params:jmap:error:limit","limit":"maxConcurrentRequests"}"#
+                            .to_vec(),
+                    ],
+                ),
+            ]
+            .into(),
+        ),
+        opened: Mutex::default(),
+        session: push_session(),
+    };
+    let client = now(Client::builder()
+        .credentials(Credentials::bearer("a-token"))
+        .connect_with(
+            &transport,
+            "https://example.com/jmap/session".parse().expect("a URL"),
+        ))
+    .expect("the session loads");
+
+    let source = EventSource::new().types(["Email"]).last_event_id("9");
+    let mut events = now(client.event_source(&source)).expect("opens");
+    let Some(EventSourceEvent::StateChange(change)) = now(events.next()).expect("an event") else {
+        panic!("a state change");
+    };
+    assert_eq!(change.state("a1", "Email"), Some("s2"));
+    assert!(matches!(
+        now(events.next()).expect("an event"),
+        Some(EventSourceEvent::Ping { .. })
+    ));
+    let error = now(events.next()).expect_err("silence");
+    assert!(error.is_timeout(), "{error}");
+
+    let refused = now(client.event_source(&source)).expect_err("another host");
+    assert!(matches!(
+        refused,
+        Error::Redirect {
+            reason: RedirectRefusal::Policy,
+            ..
+        }
+    ));
+
+    let download = jmap_wire::BlobDownload::new("a1", "b1");
+    let mut blob = now(client.download_stream(&download)).expect("opens");
+    assert_eq!(blob.content_length(), Some(6));
+    let mut bytes = Vec::new();
+    while let Some(piece) = now(blob.chunk()).expect("a piece") {
+        bytes.extend(piece);
+    }
+    assert_eq!(bytes, b"abcdef");
+
+    let limited = now(client.download_stream(&download)).expect_err("refused");
+    assert!(matches!(
+        limited,
+        Error::Problem(problem) if problem.limit.as_deref() == Some("maxConcurrentRequests")
+    ));
+
+    let opened = transport.opened.lock().expect("the log").clone();
+    let urls = opened
+        .iter()
+        .map(|request| request.url.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        urls,
+        [
+            "https://push.example.com/events?types=Email&closeafter=no&ping=30",
+            "https://push.example.com/events/v2",
+            "https://push.example.com/events?types=Email&closeafter=no&ping=30",
+            "https://example.com/download/a1/b1/blob?type=application%2Foctet-stream",
+            "https://example.com/download/a1/b1/blob?type=application%2Foctet-stream",
+        ]
+    );
+    // The redirect on the same host carries everything again.
+    for request in &opened[..2] {
+        let sent = |name: &str| {
+            request
+                .headers
+                .iter()
+                .find(|(header, _)| header == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(sent("accept"), Some("text/event-stream"));
+        assert_eq!(sent("cache-control"), Some("no-cache"));
+        assert_eq!(sent("last-event-id"), Some("9"));
+        assert_eq!(sent("authorization"), Some("Bearer a-token"));
+        assert_eq!(sent("accept-encoding"), None);
+        assert_eq!(request.method, HttpMethod::Get);
+    }
+    assert!(!format!("{:?}", opened[0]).contains("a-token"));
+}
+
+/// A WebSocket that answers from a script and keeps what it was sent.
+#[derive(Debug, Default)]
+struct ScriptedSocket {
+    incoming: VecDeque<String>,
+    sent: std::sync::Arc<Mutex<Vec<String>>>,
+}
+
+impl jmap_wire::websocket::WebSocket for ScriptedSocket {
+    async fn send(&mut self, text: String) -> Result<(), TransportError> {
+        self.sent.lock().expect("the log").push(text);
+        Ok(())
+    }
+
+    async fn receive(
+        &mut self,
+        _idle: Option<std::time::Duration>,
+    ) -> Result<Option<String>, TransportError> {
+        Ok(self.incoming.pop_front())
+    }
+
+    async fn close(&mut self) -> Result<(), TransportError> {
+        self.incoming.clear();
+        Ok(())
+    }
+}
+
+/// Refuses the first handshake with 401, then opens a scripted socket.
+struct Sockets {
+    handshakes: Mutex<Vec<jmap_wire::websocket::WebSocketHandshake>>,
+    sent: std::sync::Arc<Mutex<Vec<String>>>,
+}
+
+impl jmap_wire::websocket::WebSocketTransport for Sockets {
+    type Socket = ScriptedSocket;
+
+    async fn connect(
+        &self,
+        handshake: jmap_wire::websocket::WebSocketHandshake,
+    ) -> Result<ScriptedSocket, TransportError> {
+        let mut handshakes = self.handshakes.lock().expect("the log");
+        handshakes.push(handshake);
+        if handshakes.len() == 1 {
+            return Err(
+                TransportError::new(jmap_wire::TransportErrorKind::Other, "refused")
+                    .with_status(401),
+            );
+        }
+        Ok(ScriptedSocket {
+            incoming: [
+                json!({"@type": "Response", "requestId": "r0", "sessionState": "s1",
+                       "methodResponses": [["Core/echo", {"hello": true}, "c0"]]})
+                .to_string(),
+                json!({"@type": "StateChange", "changed": {"a1": {"Email": "s3"}},
+                       "pushState": "p1"})
+                .to_string(),
+            ]
+            .into(),
+            sent: self.sent.clone(),
+        })
+    }
+}
+
+/// Tokens that change when refreshed.
+struct Refreshing;
+
+impl jmap_wire::TokenSource for Refreshing {
+    fn token(
+        &self,
+        request: jmap_wire::TokenRequest,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<String, jmap_wire::TokenError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            Ok(match request {
+                jmap_wire::TokenRequest::Refresh => "fresh",
+                _ => "stale",
+            }
+            .to_owned())
+        })
+    }
+}
+
+/// JMAP over a WebSocket of one's own: no WebSocket library, no
+/// network.
+#[test]
+fn jmap_over_websocket_runs_over_any_websocket_transport() {
+    use jmap_wire::websocket::{PushEnable, WebSocketMessage};
+
+    let http = Scripted::answering([json_answer(200, push_session())]);
+    let client = now(Client::builder()
+        .credentials(Credentials::bearer_source(Refreshing))
+        .timeout(std::time::Duration::from_secs(7))
+        .max_response_bytes(1024 * 1024)
+        .connect_with(
+            &http,
+            "https://example.com/jmap/session".parse().expect("a URL"),
+        ))
+    .expect("the session loads");
+    let sockets = Sockets {
+        handshakes: Mutex::default(),
+        sent: std::sync::Arc::default(),
+    };
+    let mut socket = now(client.connect_websocket(&sockets)).expect("connects after a refresh");
+
+    let handshakes = sockets.handshakes.lock().expect("the log").clone();
+    let tokens = handshakes
+        .iter()
+        .map(|handshake| {
+            handshake
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tokens, ["Bearer stale", "Bearer fresh"]);
+    let handshake = &handshakes[1];
+    assert_eq!(handshake.url.as_str(), "wss://ws.example.com/jmap");
+    assert_eq!(handshake.subprotocol, "jmap");
+    assert_eq!(handshake.timeout, std::time::Duration::from_secs(7));
+    assert_eq!(handshake.max_message_bytes, 1024 * 1024);
+    assert_eq!(handshake.max_frame_bytes, 1024 * 1024);
+    assert!(!format!("{handshake:?}").contains("fresh"));
+
+    let mut request = Request::new();
+    request.call_raw("Core/echo", json!({"hello": true}));
+    assert_eq!(now(socket.send(&request)).expect("sent"), "r0");
+    now(socket.enable_push(&PushEnable::new().data_types(["Email"]))).expect("sent");
+    let sent = sockets
+        .sent
+        .lock()
+        .expect("the log")
+        .iter()
+        .map(|text| serde_json::from_str::<Value>(text).expect("JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sent,
+        [
+            json!({"@type": "Request", "id": "r0", "using": ["urn:ietf:params:jmap:core"],
+                   "methodCalls": [["Core/echo", {"hello": true}, "c0"]]}),
+            json!({"@type": "WebSocketPushEnable", "dataTypes": ["Email"]}),
+        ]
+    );
+
+    assert!(matches!(
+        now(socket.next(None)).expect("a message"),
+        Some(WebSocketMessage::Response { request_id: Some(id), .. }) if id == "r0"
+    ));
+    let Some(WebSocketMessage::StateChange(change)) = now(socket.next(None)).expect("a push")
+    else {
+        panic!("a state change");
+    };
+    assert_eq!(change.push_state.as_deref(), Some("p1"));
+    assert_eq!(now(socket.next(None)).expect("the end"), None);
+
+    // A request whose reference cannot resolve is not sent.
+    let mut bad = Request::new();
+    bad.call_raw(
+        "Email/get",
+        json!({"accountId": "a1",
+               "#ids": {"resultOf": "c9", "name": "Email/query", "path": "/ids"}}),
+    );
+    assert!(matches!(
+        now(socket.send(&bad)),
+        Err(Error::InvalidResultReference { .. })
+    ));
+    assert_eq!(sockets.sent.lock().expect("the log").len(), 2);
+}

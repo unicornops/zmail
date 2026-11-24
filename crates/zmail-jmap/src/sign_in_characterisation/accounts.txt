@@ -9,20 +9,20 @@
 # different primary accounts for mail and for submission
   accounts: ["a1", "a2"]
   primaryAccounts: {"urn:ietf:params:jmap:mail":"a1","urn:ietf:params:jmap:submission":"a2"}
-  every call is made in: {"a1", "a2"}
+  every call is made in: {"a1"}
 # mail in one account, contacts and calendars in another
   accounts: ["a1", "a2"]
   primaryAccounts: {"urn:ietf:params:jmap:calendars":"a2","urn:ietf:params:jmap:contacts":"a2","urn:ietf:params:jmap:mail":"a1","urn:ietf:params:jmap:principals":"a2","urn:ietf:params:jmap:quota":"a2","urn:ietf:params:jmap:submission":"a1"}
-  every call is made in: {"a1", "a2"}
+  every call is made in: {"a1"}
 # a primary account for contacts only
   accounts: ["a1", "a2"]
   primaryAccounts: {"urn:ietf:params:jmap:contacts":"a2"}
-  every call is made in: {"a2"}
+  every call is made in: {"a1"}
 # no primary accounts
   accounts: ["a1"]
   primaryAccounts: {}
-  every call is made in: {""}
+  every call is made in: {"a1"}
 # no accounts at all
   accounts: []
   primaryAccounts: {}
-  every call is made in: {""}
+  sign-in fails: failed to connect to the JMAP endpoint http://server/jmap/session: the JMAP server offers this user no account with mail

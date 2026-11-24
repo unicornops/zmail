@@ -15,19 +15,19 @@
   taken for refused credentials: false
   requests: ["/.well-known/jmap", "/.well-known/jmap with credentials"]
 # a page that is not JSON (signing in to http://server/jmap/session)
-  error: failed to connect to the JMAP endpoint http://server/jmap/session: Parse error: expected value at line 1 column 1
+  error: failed to connect to the JMAP endpoint http://server/jmap/session: the JMAP server's session could not be read: expected value at line 1 column 1
   taken for refused credentials: false
   requests: ["/jmap/session with credentials"]
 # a page that is not JSON (signing in to http://server)
-  error: failed to connect to the JMAP endpoint http://server: Parse error: expected value at line 1 column 1
+  error: failed to connect to the JMAP endpoint http://server: the JMAP server's session could not be read: expected value at line 1 column 1
   taken for refused credentials: false
   requests: ["/.well-known/jmap", "/.well-known/jmap with credentials"]
 # JSON that is not a session (signing in to http://server/jmap/session)
-  error: failed to connect to the JMAP endpoint http://server/jmap/session: Parse error: missing field `capabilities` at line 1 column 14
+  error: failed to connect to the JMAP endpoint http://server/jmap/session: the JMAP server's session could not be read: missing field `apiUrl` at line 1 column 14
   taken for refused credentials: false
   requests: ["/jmap/session with credentials"]
 # JSON that is not a session (signing in to http://server)
-  error: failed to connect to the JMAP endpoint http://server: Parse error: missing field `capabilities` at line 1 column 14
+  error: failed to connect to the JMAP endpoint http://server: the JMAP server's session could not be read: missing field `apiUrl` at line 1 column 14
   taken for refused credentials: false
   requests: ["/.well-known/jmap", "/.well-known/jmap with credentials"]
 # problem details (403) (signing in to http://server/jmap/session)

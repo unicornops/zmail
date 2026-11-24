@@ -6,11 +6,13 @@ use std::{fs, path::Path};
 use jmap_wire::{
     ChangesResponse, CopyResponse, GetResponse, MethodError, MethodErrorType, ProblemDetails,
     ProblemKind, QueryChangesResponse, QueryResponse, Response, Session, SetErrorType, SetOutcome,
-    SetResponse, UploadedBlob, capability,
+    SetResponse, StateChange, UploadedBlob, capability,
+    event_source::{EventSourceEvent, EventStreamParser},
     mail::{
         AsRaw, AsUrls, EmailImportResponse, EmailRecord, EmailSubmissionRecord, IdentityRecord,
         MailboxRecord, Role, ThreadRecord,
     },
+    websocket::WebSocketMessage,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -144,11 +146,54 @@ fn every_fixture_of_every_server_decodes() {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .expect("a file name");
+            let kind = name.split('.').next().unwrap_or_default();
+            // A recorded event stream (RFC 8620 section 7.3), as the
+            // bytes of the response body.
+            if kind == "eventsource" && name.ends_with(".txt") {
+                let bytes = fs::read(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"));
+                let events = EventStreamParser::new()
+                    .feed(&bytes)
+                    .unwrap_or_else(|error| panic!("{path:?}: {error}"));
+                assert!(!events.is_empty(), "{path:?} has no events");
+                for event in events {
+                    assert!(
+                        !matches!(
+                            EventSourceEvent::from_event(event.clone()),
+                            EventSourceEvent::Other(_)
+                        ),
+                        "{path:?}: neither a state change nor a ping: {event:?}"
+                    );
+                }
+                decoded += 1;
+                continue;
+            }
             if !name.ends_with(".json") {
                 continue;
             }
-            let kind = name.split('.').next().unwrap_or_default();
             match kind {
+                // A pushed StateChange object (RFC 8620 section 7.1).
+                "statechange" => {
+                    let sent: Value = read(&path);
+                    let change = StateChange::from_value(sent.clone())
+                        .unwrap_or_else(|error| panic!("{path:?}: {error}"))
+                        .unwrap_or_else(|| panic!("{path:?} is not a StateChange"));
+                    assert!(holds(&change.to_value(), &sent), "{path:?}");
+                }
+                // One message a server sent over a WebSocket (RFC 8887
+                // section 4.3); the second part of the name says which.
+                "websocket" => {
+                    let text = fs::read_to_string(&path)
+                        .unwrap_or_else(|error| panic!("{path:?}: {error}"));
+                    let message = WebSocketMessage::parse(&text);
+                    let expected = name.split('.').nth(1).unwrap_or_default();
+                    let found = match &message {
+                        WebSocketMessage::Response { .. } => "response",
+                        WebSocketMessage::StateChange(_) => "state-change",
+                        WebSocketMessage::RequestError { .. } => "request-error",
+                        _ => "unknown",
+                    };
+                    assert_eq!(found, expected, "{path:?}");
+                }
                 "session" => {
                     let session: Session = read(&path);
                     assert!(session.has_capability(capability::CORE), "{path:?}");
@@ -219,6 +264,53 @@ fn every_fixture_of_every_server_decodes() {
         }
     }
     assert!(decoded >= 40, "only {decoded} fixtures were found");
+}
+
+/// The push examples of RFC 8620 section 7.1.1 and RFC 8887 section
+/// 4.4, and a hand-written event stream with every line ending.
+#[test]
+fn the_push_examples_say_what_the_rfcs_say() {
+    let change = StateChange::from_value(read(&fixture("rfc", "statechange.json")))
+        .expect("an object")
+        .expect("a StateChange");
+    assert_eq!(change.state("a3123", "Email"), Some("d35ecb040aab"));
+    assert_eq!(change.state("a43461d", "Mailbox"), Some("0af7a512ce70"));
+    assert!(change.touches("a3123", ["EmailDelivery"]));
+    assert!(!change.touches("a43461d", ["Email", "EmailDelivery"]));
+    assert_eq!(change.push_state, None);
+
+    let text = fs::read_to_string(fixture("rfc", "websocket.state-change.json")).expect("reads");
+    let WebSocketMessage::StateChange(pushed) = WebSocketMessage::parse(&text) else {
+        panic!("a state change");
+    };
+    assert_eq!(pushed.push_state.as_deref(), Some("bbb"));
+
+    let text = fs::read_to_string(fixture("rfc", "websocket.request-error.json")).expect("reads");
+    let WebSocketMessage::RequestError {
+        request_id,
+        problem,
+    } = WebSocketMessage::parse(&text)
+    else {
+        panic!("a request error");
+    };
+    assert_eq!(request_id, None);
+    assert_eq!(problem.kind(), ProblemKind::NotJson);
+
+    let stream = fs::read(fixture("shapes", "eventsource.stream.txt")).expect("reads");
+    let mut parser = EventStreamParser::new();
+    let events = parser
+        .feed(&stream)
+        .expect("parses")
+        .into_iter()
+        .map(EventSourceEvent::from_event)
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 5, "{events:?}");
+    assert!(matches!(
+        &events[3],
+        EventSourceEvent::StateChange(change) if change.state("a2", "Thread") == Some("t9")
+    ));
+    assert_eq!(parser.last_event_id(), Some("1002"));
+    assert_eq!(parser.retry(), Some(std::time::Duration::from_secs(3)));
 }
 
 #[test]

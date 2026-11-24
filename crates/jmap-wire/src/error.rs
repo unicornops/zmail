@@ -95,6 +95,13 @@ pub enum Error {
     /// for a capability.
     #[error("the JMAP session has no {0}")]
     Session(String),
+    /// The event source answered with something other than an event
+    /// stream (RFC 8620 section 7.3): a sign-in page, say.
+    #[error("the JMAP event source did not answer with text/event-stream")]
+    NotEventStream {
+        /// The `Content-Type` it answered with, if any.
+        content_type: Option<String>,
+    },
     /// A blob is larger than the server takes in one upload (the
     /// session's `maxSizeUpload`, RFC 8620 section 2). Nothing was sent.
     #[error("the upload of {size} bytes is larger than the {limit} bytes the JMAP server takes")]
@@ -159,6 +166,13 @@ impl Error {
         }
     }
 
+    /// Whether the exchange ran out of time: no answer within the
+    /// timeout, or a stream or socket silent for longer than its idle
+    /// time.
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Transport(error) if error.kind() == TransportErrorKind::Timeout)
+    }
+
     /// Whether the answer was larger than the client's response size
     /// limit ([`ClientBuilder::max_response_bytes`]), so that asking
     /// for less in one call may succeed.
@@ -206,6 +220,7 @@ impl fmt::Display for RedirectRefusal {
 pub struct TransportError {
     kind: TransportErrorKind,
     message: String,
+    status: Option<u16>,
     #[source]
     source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
@@ -231,8 +246,23 @@ impl TransportError {
         Self {
             kind,
             message: message.into(),
+            status: None,
             source: None,
         }
+    }
+
+    /// The same error with the HTTP status that caused it: for a
+    /// WebSocket handshake the server answered with something other
+    /// than the upgrade
+    /// ([`WebSocketTransport::connect`](crate::websocket::WebSocketTransport::connect)).
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// The HTTP status behind the error, when a transport gave one.
+    pub fn status(&self) -> Option<u16> {
+        self.status
     }
 
     /// The same error with its underlying cause.

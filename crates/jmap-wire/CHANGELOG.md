@@ -20,8 +20,18 @@ Changes to `jmap-wire` that its users would notice. The crate is not published y
 - `SetOutcome` and `SetResponse::outcome_of_create`, `outcome_of_update` and `outcome_of_destroy`; `SetError::names_property`, `existing_id` and `blobs_not_found`.
 - Blobs: `Client::upload`, `Client::download` and `Client::download_url`, with `BlobDownload`, `Blob` and `UploadedBlob`; `ClientBuilder::blob_timeout` and `max_download_bytes`; `Error::UploadTooLarge` and `Error::http_status`.
 - `Date` converts from text.
+- Push: `StateChange` (RFC 8620 section 7.1), read leniently, with `state` and `touches`.
+- The event source (RFC 8620 section 7.3) in `event_source`: `EventStreamParser`, a server-sent events parser (every line ending, comments, multi-line data, `id`, `retry`, a byte order mark) that bounds lines and events; `EventSource` for `types`, `closeafter`, `ping` and `Last-Event-ID`; `Client::event_source` and `EventStream`, which reads typed events (`EventSourceEvent`) and fails with a timeout when the server is silent for longer than its pings allow. Reconnecting is the caller's; `EventStream::last_event_id` and `retry` are what it needs.
+- `StreamingTransport` and `BodyStream`: an optional second trait of a transport, for a response read as it arrives, with `StreamRequest` (a time for the response to begin, no total timeout, no size limit) and `StreamResponse`. `ReqwestTransport` implements it (`ReqwestBody`).
+- `Client::download_stream` and `BlobStream`: a blob piece by piece, over a transport that can stream.
+- JMAP over WebSocket (RFC 8887) in `websocket`: `request_message`, `PushEnable`, `push_disable_message` and `WebSocketMessage::parse` for the messages; the `WebSocketTransport` and `WebSocket` traits with `WebSocketHandshake`; `Client::websocket_url` and `Client::connect_websocket`; `WebSocketConnection`. The `tungstenite` feature (off by default) adds `TungsteniteTransport` and `TungsteniteSocket`.
+- `Session::websocket` and `WebSocketCapability`; `Credentials::check`; `Error::NotEventStream`, `Error::is_timeout`; `TransportError::with_status` and `status`.
+- Fixtures for push: `statechange*.json`, `websocket.<kind>*.json` and `eventsource*.txt` in a server's directory are decoded like the rest.
 
 Changes to what was there before:
+
+- `Session::event_source_endpoint` writes the commas of `types` and a `*` as they are, where it percent-encoded them (`%2C`, `%2A`). They are the syntax of the value RFC 8620 section 7.3 defines; a server that splits the list before decoding it saw one unknown type.
+- The `reqwest` feature now depends on `tokio` (its timer), which `reqwest` already brought.
 
 - `Set::update` takes `impl Into<PatchObject>`, so a typed patch is passed as it is. A call that wrote `.into()` on its patch no longer compiles (the conversion is ambiguous): take the `.into()` away.
 - The `created` records of `Set<Email>` are `mail::EmailRecord`s, where they were maps of JSON values.

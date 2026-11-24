@@ -77,6 +77,19 @@ impl Credentials {
         Self::BearerSource(Arc::new(source))
     }
 
+    /// Whether fixed credentials can be sent at all: a bearer token
+    /// that is empty or has characters an HTTP header cannot carry is
+    /// [`Error::InvalidCredentials`]. A client refuses such a token
+    /// before every request anyway; this is for saying so before any
+    /// other work. A [`TokenSource`]'s tokens are checked as it gives
+    /// them.
+    pub fn check(&self) -> Result<(), Error> {
+        match self {
+            Self::Bearer(token) => bearer(token).map(drop),
+            _ => Ok(()),
+        }
+    }
+
     /// Whether a 401 is worth a second attempt with a refreshed token.
     pub(crate) fn can_refresh(&self) -> bool {
         matches!(self, Self::BearerSource(_))

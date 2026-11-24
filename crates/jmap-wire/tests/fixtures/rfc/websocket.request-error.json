@@ -1,0 +1,7 @@
+{
+  "@type": "RequestError",
+  "requestId": null,
+  "type": "urn:ietf:params:jmap:error:notJSON",
+  "status": 400,
+  "detail": "The request did not parse as I-JSON."
+}

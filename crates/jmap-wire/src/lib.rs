@@ -1,5 +1,5 @@
-//! A JMAP client library ([RFC 8620] core, [RFC 8621] mail) in layers,
-//! each usable without the ones above it:
+//! A JMAP client library ([RFC 8620] core, [RFC 8621] mail, [RFC 8887]
+//! WebSocket) in layers, each usable without the ones above it:
 //!
 //! 1. **The protocol core**, independent of any HTTP library:
 //!    [`Request`] and [`Response`] envelopes, method calls with call ids
@@ -17,6 +17,21 @@
 //!    the caller chooses, a timeout, a response size limit and gzip
 //!    (feature `gzip`). The default transport is [`ReqwestTransport`]
 //!    (feature `reqwest`). Both features are on by default.
+//! 4. **Push** (RFC 8620 section 7): the [`StateChange`] a server sends
+//!    when data changes, received over the [event source](event_source)
+//!    on a transport that can stream ([`StreamingTransport`]), or over
+//!    [JMAP over WebSocket](websocket), which also carries requests and
+//!    responses. The WebSocket library is the caller's to choose
+//!    ([`websocket::WebSocketTransport`]); the `tungstenite` feature,
+//!    off by default, has one on `tokio-tungstenite`.
+//!
+//! # Choosing an account
+//!
+//! A session names the user's primary account for each capability
+//! ([`Client::primary_account`], [`Session::primary_account`]): ask for
+//! the capability whose methods you are about to call. Every call takes
+//! its account id outright, so any other account of the session is used
+//! by naming it.
 //!
 //! # `using` holds what the request uses
 //!
@@ -81,10 +96,11 @@
 //!
 //! With `default-features = false` the crate has no HTTP library and no
 //! async runtime among its dependencies. Implement [`HttpTransport`] to
-//! bring your own, or use the envelope types alone: [`Request`]
-//! serialises to the JSON to send, and [`Response`] deserialises from
-//! what comes back, over any transport (the WebSocket binding of RFC
-//! 8887 carries the same objects).
+//! bring your own (and [`StreamingTransport`] for the event source),
+//! or use the envelope types alone: [`Request`] serialises to the JSON
+//! to send, and [`Response`] deserialises from what comes back, over
+//! any transport. The [`event_source`] parser and the [`websocket`]
+//! messages need no transport either.
 //!
 //! # Dates
 //!
@@ -93,6 +109,7 @@
 //!
 //! [RFC 8620]: https://www.rfc-editor.org/rfc/rfc8620
 //! [RFC 8621]: https://www.rfc-editor.org/rfc/rfc8621
+//! [RFC 8887]: https://www.rfc-editor.org/rfc/rfc8887
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -106,8 +123,10 @@ mod client;
 mod copy;
 pub mod discovery;
 mod error;
+pub mod event_source;
 pub mod mail;
 mod method;
+mod push;
 mod query;
 mod record;
 mod request;
@@ -116,10 +135,13 @@ mod reqwest_transport;
 mod response;
 mod session;
 mod transport;
+#[cfg(feature = "tungstenite")]
+mod tungstenite_transport;
+pub mod websocket;
 
 pub use auth::{Credentials, TokenError, TokenRequest, TokenSource};
 pub use batch::IdBatches;
-pub use blob::{Blob, BlobDownload, UploadedBlob};
+pub use blob::{Blob, BlobDownload, BlobStream, UploadedBlob};
 pub use changes::{Changes, ChangesObject, ChangesResponse};
 pub use client::{
     Client, ClientBuilder, DEFAULT_BLOB_TIMEOUT, DEFAULT_MAX_DOWNLOAD_BYTES,
@@ -134,18 +156,22 @@ pub use method::{
     Get, GetObject, GetResponse, Method, NoArguments, Object, PatchObject, Properties, Set,
     SetArguments, SetObject, SetOutcome, SetResponse,
 };
+pub use push::StateChange;
 pub use query::{
     AddedItem, Comparator, Filter, Operator, Query, QueryChanges, QueryChangesResponse,
     QueryObject, QueryResponse,
 };
 pub use request::{Call, IdsReference, Invocation, Raw, Request, ResultReference};
 #[cfg(feature = "reqwest")]
-pub use reqwest_transport::ReqwestTransport;
+pub use reqwest_transport::{ReqwestBody, ReqwestTransport};
 pub use response::Response;
-pub use session::{Account, CoreCapabilities, Session};
+pub use session::{Account, CoreCapabilities, Session, WebSocketCapability};
 pub use transport::{
-    HttpMethod, HttpRequest, HttpResponse, HttpTransport, RedirectAttempt, RedirectPolicy,
+    BodyStream, HttpMethod, HttpRequest, HttpResponse, HttpTransport, RedirectAttempt,
+    RedirectPolicy, StreamRequest, StreamResponse, StreamingTransport,
 };
+#[cfg(feature = "tungstenite")]
+pub use tungstenite_transport::{TungsteniteSocket, TungsteniteTransport};
 
 /// The README's examples, compiled as doctests.
 #[cfg(all(doctest, feature = "reqwest"))]

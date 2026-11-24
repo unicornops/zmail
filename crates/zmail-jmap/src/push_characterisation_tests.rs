@@ -39,7 +39,7 @@ const TIMINGS: PushTimings = PushTimings {
     ping_interval: Duration::from_secs(1),
     stall_grace: Duration::from_millis(500),
     ws_ready_attempts: 3,
-    ws_ready_wait: Duration::from_millis(400),
+    ws_ready_wait: Duration::from_millis(1500),
     connect_timeout: Duration::from_secs(10),
 };
 
@@ -410,7 +410,10 @@ fn serve_websocket(stream: TcpStream, websocket: &WebSocket, seen: &Mutex<Vec<St
         let tungstenite::Message::Text(text) = message else {
             continue;
         };
-        if silent {
+        // Once the script has run, only the script's effect is pinned:
+        // whether a heartbeat goes out before the session ends depends
+        // on timing.
+        if silent || scripted {
             continue;
         }
         let frame: Value = serde_json::from_str(text.as_str()).unwrap_or(Value::Null);
