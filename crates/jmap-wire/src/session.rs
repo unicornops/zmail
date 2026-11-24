@@ -133,7 +133,38 @@ impl Session {
         self.capability(capability::CORE)?.ok()
     }
 
-    /// The id of the user's primary account for a capability.
+    /// The id of the user's primary account for a capability (the
+    /// session's `primaryAccounts`, RFC 8620 section 2): the account to
+    /// use for that capability's data unless the user chose another.
+    ///
+    /// This is how to choose an account: ask for the capability whose
+    /// methods you are about to call ([`capability::MAIL`] for mailboxes
+    /// and emails, [`capability::SUBMISSION`] for identities and
+    /// submissions). A session may name different accounts for
+    /// different capabilities, and has others beside (shared ones, say)
+    /// in [`accounts`](Self::accounts); every call of this crate takes
+    /// its account id outright, so any of them can be used.
+    ///
+    /// `None` when the session names no primary account for the
+    /// capability, as the RFC allows when none of the accounts is the
+    /// user's own.
+    ///
+    /// ```
+    /// use jmap_wire::{Session, capability};
+    ///
+    /// let session: Session = serde_json::from_str(r#"{
+    ///     "apiUrl": "/api",
+    ///     "accounts": {"u1": {"name": "john@example.com", "isPersonal": true},
+    ///                  "g7": {"name": "sales@example.com"}},
+    ///     "primaryAccounts": {"urn:ietf:params:jmap:mail": "u1",
+    ///                         "urn:ietf:params:jmap:submission": "u1"}
+    /// }"#)?;
+    /// assert_eq!(session.primary_account(capability::MAIL), Some("u1"));
+    /// assert_eq!(session.primary_account(capability::VACATION_RESPONSE), None);
+    /// // The shared account is used by naming it.
+    /// assert!(session.accounts.contains_key("g7"));
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
     pub fn primary_account(&self, capability: &str) -> Option<&str> {
         self.primary_accounts.get(capability).map(String::as_str)
     }
@@ -177,10 +208,18 @@ impl Session {
     }
 
     /// Where the event source is (RFC 8620 section 7.3): the
-    /// `eventSourceUrl` template with the data types to hear about (`*`
-    /// for all), whether the server should close the connection after
-    /// each state event (`state`) or not (`no`), and the seconds between
-    /// pings (0 for none).
+    /// `eventSourceUrl` template with the data types to hear about (a
+    /// comma-separated list of names, or `*` for all), whether the
+    /// server should close the connection after each state event
+    /// (`state`) or not (`no`), and the seconds between pings (0 for
+    /// none). [`Client::event_source`](crate::Client::event_source)
+    /// opens it.
+    ///
+    /// The commas of `types` and the `*` are written as they are, where
+    /// RFC 6570 would percent-encode them: they are the syntax of the
+    /// value the RFC defines, both are allowed in a URL's query, and a
+    /// server that splits the list before decoding it would otherwise
+    /// see one unknown type. The names themselves are encoded.
     pub fn event_source_endpoint(
         &self,
         session_url: &Url,
@@ -188,16 +227,41 @@ impl Session {
         close_after: &str,
         ping: u32,
     ) -> Result<Url, Error> {
-        let url = expand(
+        let url = expand_keeping(
             &self.event_source_url,
             &[
                 ("types", types),
                 ("closeafter", close_after),
                 ("ping", &ping.to_string()),
             ],
+            b",*",
         );
         resolve(session_url, &url)
     }
+
+    /// The WebSocket capability (RFC 8887 section 3): where the
+    /// server's WebSocket is and whether it pushes there. `None` when
+    /// the server does not advertise it, or advertises it without a
+    /// URL.
+    pub fn websocket(&self) -> Option<WebSocketCapability> {
+        self.capability::<WebSocketCapability>(capability::WEBSOCKET)?
+            .ok()
+            .filter(|websocket| !websocket.url.is_empty())
+    }
+}
+
+/// The `urn:ietf:params:jmap:websocket` capability (RFC 8887 section
+/// 3).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct WebSocketCapability {
+    /// The `wss://` URL to connect to.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub url: String,
+    /// Whether the server pushes state changes over the WebSocket.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub supports_push: bool,
 }
 
 fn resolve(base: &Url, reference: &str) -> Result<Url, Error> {
@@ -222,6 +286,11 @@ fn resolve(base: &Url, reference: &str) -> Result<Url, Error> {
 /// value with everything but unreserved characters percent-encoded, and
 /// a variable that is not given becomes nothing.
 fn expand(template: &str, variables: &[(&str, &str)]) -> String {
+    expand_keeping(template, variables, b"")
+}
+
+/// As [`expand`], with the bytes of `kept` written as they are.
+fn expand_keeping(template: &str, variables: &[(&str, &str)], kept: &[u8]) -> String {
     let mut expanded = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(open) = rest.find('{') {
@@ -235,7 +304,10 @@ fn expand(template: &str, variables: &[(&str, &str)]) -> String {
         let name = &after[..close];
         if let Some((_, value)) = variables.iter().find(|(variable, _)| *variable == name) {
             for byte in value.bytes() {
-                if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                if byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'-' | b'.' | b'_' | b'~')
+                    || kept.contains(&byte)
+                {
                     expanded.push(char::from(byte));
                 } else {
                     expanded.push_str(&format!("%{byte:02X}"));
@@ -457,7 +529,14 @@ mod tests {
                 .event_source_endpoint(&base, "*", "no", 30)
                 .expect("a URL")
                 .as_str(),
-            "https://jmap.example.com/eventsource/?types=%2A&closeafter=no&ping=30"
+            "https://jmap.example.com/eventsource/?types=*&closeafter=no&ping=30"
+        );
+        assert_eq!(
+            session
+                .event_source_endpoint(&base, "Email,Calendar Event", "state", 0)
+                .expect("a URL")
+                .as_str(),
+            "https://jmap.example.com/eventsource/?types=Email,Calendar%20Event&closeafter=state&ping=0"
         );
     }
 

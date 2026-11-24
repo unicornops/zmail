@@ -7,20 +7,20 @@
 //! the local store stays the only thing the UI reads.
 
 use std::{
-    collections::HashMap,
     sync::Once,
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, anyhow, bail};
-use futures_util::StreamExt;
-use jmap_client::{DataType, PushObject, client::Client, client_ws::WebSocketMessage};
-use reqwest::header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
-use serde::Deserialize;
-use url::Url;
+use anyhow::{Result, anyhow, bail};
+use jmap_wire::{
+    Get, StateChange, TungsteniteTransport,
+    event_source::{EventSource, EventSourceEvent},
+    mail::Mailbox,
+    websocket::{PushEnable, WebSocketConnection, WebSocketMessage},
+};
 use zmail_core::{ProtocolKind, SyncTarget};
 
-use crate::connect_client;
+use crate::{Connection, connect_client, wording};
 
 /// Keepalive interval requested from the server.
 ///
@@ -32,19 +32,41 @@ pub const PUSH_PING_INTERVAL: Duration = Duration::from_secs(30);
 /// Slack on top of the ping interval before a silent connection counts as
 /// stalled.
 const STALL_GRACE: Duration = Duration::from_secs(15);
-/// Shortest stall timeout honoured when a server announces its own ping
-/// interval.
-const MIN_PING_INTERVAL: Duration = Duration::from_secs(5);
 /// How often a WebSocket setup request is repeated before giving up, and
 /// how long each attempt waits for the answer.
 const WS_READY_ATTEMPTS: usize = 5;
 const WS_READY_WAIT: Duration = Duration::from_secs(2);
-/// Connection timeout for opening the push stream.
+/// How long connecting the push stream may take, and how long the
+/// WebSocket may take to answer the request that follows enabling push.
 const PUSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-/// Largest single server-sent event accepted, mirroring `jmap-client`.
-const MAX_EVENT_BYTES: usize = 1024 * 1024;
+/// The intervals and waits of a push session. They are constants in the
+/// app ([`PushTimings::DEFAULT`]); the tests shorten them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PushTimings {
+    /// See [`PUSH_PING_INTERVAL`].
+    pub(crate) ping_interval: Duration,
+    /// See [`STALL_GRACE`].
+    pub(crate) stall_grace: Duration,
+    /// See [`WS_READY_ATTEMPTS`].
+    pub(crate) ws_ready_attempts: usize,
+    /// See [`WS_READY_WAIT`].
+    pub(crate) ws_ready_wait: Duration,
+    /// See [`PUSH_CONNECT_TIMEOUT`].
+    pub(crate) connect_timeout: Duration,
+}
+
+impl PushTimings {
+    pub(crate) const DEFAULT: Self = Self {
+        ping_interval: PUSH_PING_INTERVAL,
+        stall_grace: STALL_GRACE,
+        ws_ready_attempts: WS_READY_ATTEMPTS,
+        ws_ready_wait: WS_READY_WAIT,
+        connect_timeout: PUSH_CONNECT_TIMEOUT,
+    };
+}
+
 /// Data types the push subscription asks for.
-const PUSH_TYPES: [DataType; 2] = [DataType::Email, DataType::Mailbox];
+const PUSH_TYPES: [&str; 2] = ["Email", "Mailbox"];
 /// `StateChange` type names that mean the mail mirror may be stale.
 const MAIL_TYPES: [&str; 4] = ["Email", "EmailDelivery", "Mailbox", "Thread"];
 
@@ -99,6 +121,20 @@ pub async fn watch_mail_changes<F>(
     target: &SyncTarget,
     secret: &str,
     preference: PushPreference,
+    on_event: F,
+) -> Result<PushEnd>
+where
+    F: FnMut(PushEvent) + Send,
+{
+    watch_with(target, secret, preference, PushTimings::DEFAULT, on_event).await
+}
+
+/// [`watch_mail_changes`] with the timings given.
+pub(crate) async fn watch_with<F>(
+    target: &SyncTarget,
+    secret: &str,
+    preference: PushPreference,
+    timings: PushTimings,
     mut on_event: F,
 ) -> Result<PushEnd>
 where
@@ -109,14 +145,13 @@ where
     }
 
     let client = connect_client(&target.endpoint, &target.username, secret, target.auth).await?;
-    let account_id = client.default_account_id().to_owned();
     let websocket_push = client
-        .session()
-        .websocket_capabilities()
-        .is_some_and(|capabilities| capabilities.supports_push());
+        .wire_session()
+        .websocket()
+        .is_some_and(|websocket| websocket.supports_push);
 
     if preference != PushPreference::WebSocket {
-        match run_event_source(&client, &account_id, &mut on_event).await {
+        match run_event_source(&client, timings, &mut on_event).await {
             Ok(end) => return Ok(end),
             // Only a stream that could not be opened falls back; a stream
             // that opened and then failed is a transport error to retry.
@@ -135,7 +170,7 @@ where
         bail!("the JMAP server does not offer WebSocket push");
     }
 
-    run_websocket(&client, &account_id, &mut on_event).await
+    run_websocket(&client, timings, &mut on_event).await
 }
 
 enum EventSourceError {
@@ -145,129 +180,122 @@ enum EventSourceError {
     Stream(anyhow::Error),
 }
 
+/// A `jmap-wire` failure of a push connection in words: a transport
+/// failure by its own message, anything else as the rest of Zmail words
+/// it.
+fn push_error(error: jmap_wire::Error) -> anyhow::Error {
+    match error {
+        jmap_wire::Error::Transport(error) => anyhow!("{error}"),
+        other => wording::reported(other),
+    }
+}
+
+/// Why the event source did not open, in the words it always had where
+/// the server answered, and in `jmap-wire`'s where no answer came.
+fn open_error(error: jmap_wire::Error) -> anyhow::Error {
+    if let Some(status) = error.http_status() {
+        return match reqwest::StatusCode::from_u16(status) {
+            Ok(status) => anyhow!("the JMAP event source answered HTTP {status}"),
+            Err(_) => anyhow!("the JMAP event source answered HTTP {status}"),
+        };
+    }
+    match error {
+        // Worded by `jmap-wire` as it was here.
+        error @ jmap_wire::Error::NotEventStream { .. } => anyhow!("{error}"),
+        other => push_error(other).context("failed to open the JMAP event source"),
+    }
+}
+
 async fn run_event_source<F>(
-    client: &Client,
-    account_id: &str,
+    client: &Connection,
+    timings: PushTimings,
     on_event: &mut F,
 ) -> Result<PushEnd, EventSourceError>
 where
     F: FnMut(PushEvent) + Send,
 {
-    let session = client.session();
-    let url = event_source_url(
-        client.session_url(),
-        session.event_source_url(),
-        PUSH_PING_INTERVAL,
-    )
-    .map_err(EventSourceError::Open)?;
-
-    let mut headers = client.headers().clone();
-    headers.remove(CONTENT_TYPE);
-    headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    let allowed_host = url.host_str().map(str::to_owned);
-    let http = reqwest::Client::builder()
-        .connect_timeout(PUSH_CONNECT_TIMEOUT)
-        .default_headers(headers)
-        // Credentials only ever go to the host the session named.
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() > 5 || attempt.url().host_str() != allowed_host.as_deref() {
-                attempt.stop()
-            } else {
-                attempt.follow()
-            }
-        }))
-        .build()
-        .context("failed to build the JMAP event-source client")
-        .map_err(EventSourceError::Open)?;
-
-    let response = http
-        .get(url.clone())
-        .send()
+    // The stream stays open (`closeafter=no`) and asks for Email and
+    // Mailbox changes. A server that says nothing at all, not even the
+    // response's headers, for as long as a stream may be silent after
+    // connecting is taken for one whose event source cannot be opened.
+    let source = EventSource::new()
+        .types(PUSH_TYPES)
+        .ping(timings.ping_interval)
+        .ping_grace(timings.stall_grace)
+        .open_timeout(timings.connect_timeout + timings.ping_interval + timings.stall_grace);
+    // Credentials only ever go to the host the session named for it.
+    let mut events = client
+        .event_source_client()
+        .map_err(|error| EventSourceError::Open(open_error(error)))?
+        .event_source(&source)
         .await
-        .with_context(|| format!("failed to open the JMAP event source {url}"))
-        .map_err(EventSourceError::Open)?;
-    if !response.status().is_success() {
-        return Err(EventSourceError::Open(anyhow!(
-            "the JMAP event source answered HTTP {}",
-            response.status()
-        )));
-    }
-    let is_event_stream = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.trim_start().starts_with("text/event-stream"));
-    if !is_event_stream {
-        return Err(EventSourceError::Open(anyhow!(
-            "the JMAP event source did not answer with text/event-stream"
-        )));
-    }
+        .map_err(|error| EventSourceError::Open(open_error(error)))?;
 
     on_event(PushEvent::Connected(PushTransport::EventSource));
-    let mut stall_timeout = PUSH_PING_INTERVAL + STALL_GRACE;
-    let mut parser = SseParser::default();
-    let mut body = response.bytes_stream();
+    let account_id = client.account_id();
     loop {
-        let chunk = match tokio::time::timeout(stall_timeout, body.next()).await {
-            Err(_elapsed) => {
+        // The server may pick its own ping interval and announces it in
+        // each ping; how long the stream may be silent follows it.
+        let stall_timeout = events.idle_timeout();
+        match events.next().await {
+            Ok(None) => return Ok(PushEnd::Closed(PushTransport::EventSource)),
+            Ok(Some(EventSourceEvent::StateChange(change))) => {
+                if touches_mail(&change, account_id) {
+                    on_event(PushEvent::MailChanged);
+                }
+            }
+            // RFC 8620 names the event "state"; servers that omit the
+            // event field send the default "message" type. One that
+            // cannot be read still means something changed; another
+            // kind of push object does not.
+            Ok(Some(EventSourceEvent::Other(event)))
+                if matches!(event.event.as_str(), "state" | "message")
+                    && StateChange::parse(&event.data).is_err() =>
+            {
+                on_event(PushEvent::MailChanged);
+            }
+            Ok(Some(_)) => {}
+            Err(error) if error.is_timeout() => {
                 return Err(EventSourceError::Stream(anyhow!(
                     "the JMAP event source was silent for {}s",
-                    stall_timeout.as_secs()
+                    stall_timeout.unwrap_or_default().as_secs()
                 )));
             }
-            Ok(None) => return Ok(PushEnd::Closed(PushTransport::EventSource)),
-            Ok(Some(Err(error))) => {
+            Err(error) => {
                 return Err(EventSourceError::Stream(
-                    anyhow!(error).context("the JMAP event source failed"),
+                    push_error(error).context("the JMAP event source failed"),
                 ));
-            }
-            Ok(Some(Ok(chunk))) => chunk,
-        };
-        let events = parser.push(&chunk).map_err(EventSourceError::Stream)?;
-        for event in events {
-            match event.event.as_str() {
-                "ping" => {
-                    // The server may pick its own interval and announces it
-                    // in the ping data; the stall timeout follows it.
-                    if let Some(interval) = ping_interval(&event.data) {
-                        stall_timeout = interval.max(MIN_PING_INTERVAL) + STALL_GRACE;
-                    }
-                }
-                // RFC 8620 names the event "state"; servers that omit the
-                // event field send the default "message" type.
-                "state" | "message" | "" => match StateChange::parse(&event.data) {
-                    Ok(Some(change)) if change.touches_mail(account_id) => {
-                        on_event(PushEvent::MailChanged);
-                    }
-                    Ok(_) => {}
-                    // An unreadable change still means something changed.
-                    Err(_) => on_event(PushEvent::MailChanged),
-                },
-                _ => {}
             }
         }
     }
 }
 
-async fn run_websocket<F>(client: &Client, account_id: &str, on_event: &mut F) -> Result<PushEnd>
+type Socket = WebSocketConnection<jmap_wire::TungsteniteSocket>;
+
+async fn run_websocket<F>(
+    client: &Connection,
+    timings: PushTimings,
+    on_event: &mut F,
+) -> Result<PushEnd>
 where
     F: FnMut(PushEvent) + Send,
 {
     ensure_rustls_provider();
-    let mut stream = client
-        .connect_ws()
+    let account_id = client.account_id();
+    let mut socket = client
+        .wire()
+        .connect_websocket(&TungsteniteTransport::new())
         .await
-        .context("failed to open the JMAP WebSocket")?;
+        .map_err(|error| push_error(error).context("failed to open the JMAP WebSocket"))?;
     // Apache James 3.9 silently drops frames that arrive before its socket
     // handler starts reading, which happens right after the upgrade when
     // the server is busy (a lost WebSocketPushEnable leaves an open
     // connection that never pushes). A request is therefore repeated until
     // the server answers, and push is only enabled once it is reading.
     let mut reading = false;
-    for _ in 0..WS_READY_ATTEMPTS {
-        send_heartbeat(client).await?;
-        if await_response(&mut stream, WS_READY_WAIT).await? {
+    for _ in 0..timings.ws_ready_attempts {
+        send_heartbeat(&mut socket, account_id).await?;
+        if await_response(&mut socket, timings.ws_ready_wait).await? {
             reading = true;
             break;
         }
@@ -275,93 +303,101 @@ where
     if !reading {
         bail!("the JMAP WebSocket never answered a request");
     }
-    client
-        .enable_push_ws(Some(PUSH_TYPES), Option::<String>::None)
+    socket
+        .enable_push(&PushEnable::new().data_types(PUSH_TYPES))
         .await
-        .context("failed to enable JMAP WebSocket push")?;
+        .map_err(|error| push_error(error).context("failed to enable JMAP WebSocket push"))?;
     // The server does not acknowledge WebSocketPushEnable, but it handles
     // messages in order, so the answer to a request sent after it shows the
     // subscription is in place before the caller is told it is connected.
-    send_heartbeat(client).await?;
-    if !await_response(&mut stream, PUSH_CONNECT_TIMEOUT).await? {
+    send_heartbeat(&mut socket, account_id).await?;
+    if !await_response(&mut socket, timings.connect_timeout).await? {
         bail!("the JMAP WebSocket did not answer after enabling push");
     }
     on_event(PushEvent::Connected(PushTransport::WebSocket));
 
-    // `jmap-client` hides WebSocket pings and pongs, so liveness is checked
-    // with a cheap request whose response must come back in time.
-    let stall_timeout = PUSH_PING_INTERVAL + STALL_GRACE;
-    let mut heartbeat = tokio::time::interval_at(
-        tokio::time::Instant::now() + PUSH_PING_INTERVAL,
-        PUSH_PING_INTERVAL,
-    );
+    // Liveness is checked with a cheap request whose response must come
+    // back in time: a WebSocket ping would show the connection is up,
+    // not that the server still answers on it.
+    let stall_timeout = timings.ping_interval + timings.stall_grace;
+    let mut next_heartbeat = Instant::now() + timings.ping_interval;
     let mut last_message = Instant::now();
     loop {
-        tokio::select! {
-            message = stream.next() => match message {
-                None => return Ok(PushEnd::Closed(PushTransport::WebSocket)),
-                Some(Ok(WebSocketMessage::PushNotification(PushObject::StateChange { changed }))) => {
-                    last_message = Instant::now();
-                    if StateChange::from_typed(changed).touches_mail(account_id) {
-                        on_event(PushEvent::MailChanged);
-                    }
-                }
-                Some(Ok(_)) => last_message = Instant::now(),
-                // A push naming a type `jmap-client` does not know fails to
-                // decode; treat it as a change rather than dropping it.
-                Some(Err(jmap_client::Error::Parse(_))) => {
-                    last_message = Instant::now();
+        let until_heartbeat = next_heartbeat.saturating_duration_since(Instant::now());
+        match socket.next(Some(until_heartbeat)).await {
+            Ok(None) => return Ok(PushEnd::Closed(PushTransport::WebSocket)),
+            Ok(Some(WebSocketMessage::StateChange(change))) => {
+                last_message = Instant::now();
+                if touches_mail(&change, account_id) {
                     on_event(PushEvent::MailChanged);
                 }
-                Some(Err(error)) => {
-                    return Err(anyhow!(error).context("the JMAP WebSocket failed"));
-                }
-            },
-            _ = heartbeat.tick() => {
-                if last_message.elapsed() > stall_timeout {
-                    bail!("the JMAP WebSocket was silent for {}s", stall_timeout.as_secs());
-                }
-                send_heartbeat(client).await?;
             }
+            Ok(Some(WebSocketMessage::RequestError { problem, .. })) => {
+                return Err(request_error(problem));
+            }
+            // A message that cannot be read is treated as a change
+            // rather than dropped.
+            Ok(Some(WebSocketMessage::Unknown(_))) => {
+                last_message = Instant::now();
+                on_event(PushEvent::MailChanged);
+            }
+            Ok(Some(_)) => last_message = Instant::now(),
+            // Time for a heartbeat.
+            Err(error) if error.is_timeout() => {
+                if last_message.elapsed() > stall_timeout {
+                    bail!(
+                        "the JMAP WebSocket was silent for {}s",
+                        stall_timeout.as_secs()
+                    );
+                }
+                send_heartbeat(&mut socket, account_id).await?;
+                next_heartbeat += timings.ping_interval;
+            }
+            Err(error) => return Err(push_error(error).context("the JMAP WebSocket failed")),
         }
     }
+}
+
+/// A request-level error the server sent over the WebSocket (RFC 8887
+/// section 4.3.4), which ends the session as a failure to retry.
+fn request_error(problem: jmap_wire::ProblemDetails) -> anyhow::Error {
+    wording::reported(jmap_wire::Error::Problem(Box::new(problem)))
+        .context("the JMAP WebSocket failed")
 }
 
 /// Waits up to `wait` for the next method response on the WebSocket,
 /// returning `false` when none arrives in time. Pushes received meanwhile
 /// are dropped; the caller resyncs on connect anyway.
-async fn await_response<S>(stream: &mut S, wait: Duration) -> Result<bool>
-where
-    S: futures_util::Stream<Item = jmap_client::Result<WebSocketMessage>> + Unpin,
-{
-    let answered = tokio::time::timeout(wait, async {
-        loop {
-            match stream.next().await {
-                Some(Ok(WebSocketMessage::Response(_))) => return Ok(()),
-                Some(Ok(_)) | Some(Err(jmap_client::Error::Parse(_))) => {}
-                Some(Err(error)) => {
-                    return Err(anyhow!(error).context("the JMAP WebSocket failed"));
-                }
-                None => bail!("the JMAP WebSocket closed during setup"),
-            }
+async fn await_response(socket: &mut Socket, wait: Duration) -> Result<bool> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
         }
-    })
-    .await;
-    match answered {
-        Ok(result) => result.map(|()| true),
-        Err(_elapsed) => Ok(false),
+        match socket.next(Some(remaining)).await {
+            Ok(Some(WebSocketMessage::Response { .. })) => return Ok(true),
+            Ok(Some(WebSocketMessage::RequestError { problem, .. })) => {
+                return Err(request_error(problem));
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => bail!("the JMAP WebSocket closed during setup"),
+            Err(error) if error.is_timeout() => return Ok(false),
+            Err(error) => return Err(push_error(error).context("the JMAP WebSocket failed")),
+        }
     }
 }
 
 /// Sends a cheap request (`Mailbox/get` with no ids) whose response proves
 /// the WebSocket is alive and has processed everything sent before it.
-async fn send_heartbeat(client: &Client) -> Result<()> {
-    let mut request = client.build();
-    request.get_mailbox().ids(Vec::<String>::new());
-    client
-        .send_ws(request)
-        .await
-        .context("failed to send the JMAP WebSocket heartbeat")?;
+async fn send_heartbeat(socket: &mut Socket, account_id: &str) -> Result<()> {
+    let mut request = jmap_wire::Request::new();
+    request
+        .call(Get::<Mailbox>::new(account_id).ids(Vec::<String>::new()))
+        .map_err(|error| anyhow!("failed to build the JMAP WebSocket heartbeat: {error}"))?;
+    socket.send(&request).await.map_err(|error| {
+        push_error(error).context("failed to send the JMAP WebSocket heartbeat")
+    })?;
     Ok(())
 }
 
@@ -373,237 +409,14 @@ fn ensure_rustls_provider() {
     });
 }
 
-/// Expands the session's `eventSourceUrl` template (RFC 8620 section 7.3).
-///
-/// The template variables are `types`, `closeafter` and `ping`. The stream
-/// stays open (`closeafter=no`) and asks for Email and Mailbox changes; a
-/// relative template resolves against the session URL.
-fn event_source_url(session_url: &str, template: &str, ping: Duration) -> Result<Url> {
-    let types = PUSH_TYPES
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    let expanded = template
-        .replace("{types}", &types)
-        .replace("{closeafter}", "no")
-        .replace("{ping}", &ping.as_secs().to_string());
-    let base = Url::parse(session_url)
-        .with_context(|| format!("invalid JMAP session URL {session_url}"))?;
-    let url = base
-        .join(&expanded)
-        .with_context(|| format!("invalid JMAP eventSourceUrl {template}"))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        bail!("the JMAP eventSourceUrl must be an HTTP or HTTPS URL");
-    }
-    Ok(url)
-}
-
-/// Reads the interval a ping event announces (`{"interval": 30}`).
-fn ping_interval(data: &str) -> Option<Duration> {
-    #[derive(Deserialize)]
-    struct Ping {
-        interval: u64,
-    }
-    serde_json::from_str::<Ping>(data)
-        .ok()
-        .map(|ping| Duration::from_secs(ping.interval))
-}
-
-/// A decoded `StateChange` push object (RFC 8620 section 7.1).
-///
-/// Type names stay strings so a server announcing a type this client does
-/// not model still decodes.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct StateChange {
-    changed: HashMap<String, HashMap<String, String>>,
-}
-
-impl StateChange {
-    /// Parses push data, returning `None` for other push object types.
-    fn parse(data: &str) -> Result<Option<Self>> {
-        #[derive(Deserialize)]
-        struct Raw {
-            #[serde(rename = "@type")]
-            kind: String,
-            #[serde(default)]
-            changed: HashMap<String, HashMap<String, String>>,
-        }
-        let raw: Raw = serde_json::from_str(data).context("failed to decode JMAP push data")?;
-        Ok((raw.kind == "StateChange").then_some(Self {
-            changed: raw.changed,
-        }))
-    }
-
-    fn from_typed<A, T>(changed: A) -> Self
-    where
-        A: IntoIterator<Item = (String, T)>,
-        T: IntoIterator<Item = (DataType, String)>,
-    {
-        Self {
-            changed: changed
-                .into_iter()
-                .map(|(account, types)| {
-                    let types = types
-                        .into_iter()
-                        .map(|(kind, state)| (kind.to_string(), state))
-                        .collect();
-                    (account, types)
-                })
-                .collect(),
-        }
-    }
-
-    /// Whether the change touches mail data of `account_id`.
-    fn touches_mail(&self, account_id: &str) -> bool {
-        self.changed
-            .get(account_id)
-            .is_some_and(|types| types.keys().any(|kind| MAIL_TYPES.contains(&kind.as_str())))
-    }
-}
-
-/// One dispatched server-sent event.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct SseEvent {
-    event: String,
-    data: String,
-}
-
-/// Incremental `text/event-stream` parser (HTML living standard, section
-/// 9.2.6), restricted to the fields JMAP uses.
-#[derive(Debug, Default)]
-struct SseParser {
-    line: Vec<u8>,
-    event: String,
-    data: String,
-}
-
-impl SseParser {
-    /// Feeds bytes and returns the events they complete.
-    fn push(&mut self, bytes: &[u8]) -> Result<Vec<SseEvent>> {
-        let mut events = Vec::new();
-        for &byte in bytes {
-            if byte != b'\n' {
-                self.line.push(byte);
-                if self.line.len() > MAX_EVENT_BYTES {
-                    bail!("a JMAP event-source line exceeded {MAX_EVENT_BYTES} bytes");
-                }
-                continue;
-            }
-            let mut line = std::mem::take(&mut self.line);
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            if let Some(event) = self.process_line(&line)? {
-                events.push(event);
-            }
-        }
-        Ok(events)
-    }
-
-    fn process_line(&mut self, line: &[u8]) -> Result<Option<SseEvent>> {
-        if line.is_empty() {
-            // A blank line dispatches the event; one without data is
-            // dropped, as the standard says.
-            let event = std::mem::take(&mut self.event);
-            let mut data = std::mem::take(&mut self.data);
-            if data.is_empty() {
-                return Ok(None);
-            }
-            data.pop();
-            return Ok(Some(SseEvent { event, data }));
-        }
-        if line.first() == Some(&b':') {
-            return Ok(None);
-        }
-        let line = String::from_utf8_lossy(line);
-        let (field, value) = match line.split_once(':') {
-            Some((field, value)) => (field, value.strip_prefix(' ').unwrap_or(value)),
-            None => (line.as_ref(), ""),
-        };
-        match field {
-            "event" => self.event = value.to_owned(),
-            "data" => {
-                if self.data.len() + value.len() > MAX_EVENT_BYTES {
-                    bail!("a JMAP event-source event exceeded {MAX_EVENT_BYTES} bytes");
-                }
-                self.data.push_str(value);
-                self.data.push('\n');
-            }
-            // `id` and `retry` only matter for replay, which the caller's
-            // resync on connect replaces.
-            _ => {}
-        }
-        Ok(None)
-    }
+/// Whether a pushed change touches mail data of `account_id`.
+fn touches_mail(change: &StateChange, account_id: &str) -> bool {
+    change.touches(account_id, MAIL_TYPES)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sse_parser_dispatches_events_on_blank_lines() {
-        let mut parser = SseParser::default();
-        let events = parser
-            .push(b"event: state\ndata: {\"a\":1}\n\n: comment\nevent: ping\ndata: x\n\n")
-            .expect("valid stream");
-        assert_eq!(
-            events,
-            vec![
-                SseEvent {
-                    event: "state".to_owned(),
-                    data: "{\"a\":1}".to_owned()
-                },
-                SseEvent {
-                    event: "ping".to_owned(),
-                    data: "x".to_owned()
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn sse_parser_handles_crlf_split_chunks_and_multiline_data() {
-        let mut parser = SseParser::default();
-        assert!(parser.push(b"event: st").expect("partial line").is_empty());
-        assert!(
-            parser
-                .push(b"ate\r\ndata: one\r\nda")
-                .expect("partial event")
-                .is_empty()
-        );
-        let events = parser.push(b"ta:two\r\n\r\n").expect("complete event");
-        assert_eq!(
-            events,
-            vec![SseEvent {
-                event: "state".to_owned(),
-                data: "one\ntwo".to_owned()
-            }]
-        );
-    }
-
-    #[test]
-    fn sse_parser_drops_events_without_data_and_resets_the_type() {
-        let mut parser = SseParser::default();
-        let events = parser
-            .push(b"event: ping\n\ndata: plain\n\n")
-            .expect("valid stream");
-        assert_eq!(
-            events,
-            vec![SseEvent {
-                event: String::new(),
-                data: "plain".to_owned()
-            }]
-        );
-    }
-
-    #[test]
-    fn sse_parser_rejects_oversized_lines() {
-        let mut parser = SseParser::default();
-        let oversized = vec![b'a'; MAX_EVENT_BYTES + 1];
-        assert!(parser.push(&oversized).is_err());
-    }
 
     #[test]
     fn state_changes_touch_mail_only_for_mail_types_of_the_account() {
@@ -612,77 +425,29 @@ mod tests {
         )
         .expect("valid push data")
         .expect("a StateChange");
-        assert!(change.touches_mail("a1"));
-        assert!(!change.touches_mail("a2"), "Identity is not mail data");
-        assert!(!change.touches_mail("a3"), "other accounts are ignored");
+        assert!(touches_mail(&change, "a1"));
+        assert!(!touches_mail(&change, "a2"), "Identity is not mail data");
+        assert!(!touches_mail(&change, "a3"), "other accounts are ignored");
 
-        let delivery = StateChange::parse(
-            r#"{"@type":"StateChange","changed":{"a1":{"EmailDelivery":"d1"}}}"#,
-        )
-        .expect("valid push data")
-        .expect("a StateChange");
-        assert!(delivery.touches_mail("a1"));
+        for kind in MAIL_TYPES {
+            let change = StateChange::parse(&format!(
+                r#"{{"@type":"StateChange","changed":{{"a1":{{"{kind}":"d1"}}}}}}"#
+            ))
+            .expect("valid push data")
+            .expect("a StateChange");
+            assert!(touches_mail(&change, "a1"), "{kind}");
+        }
     }
 
     #[test]
-    fn other_push_objects_are_not_state_changes() {
+    fn a_refused_event_source_is_worded_by_its_status() {
         assert_eq!(
-            StateChange::parse(r#"{"@type":"PushVerification","pushSubscriptionId":"p"}"#)
-                .expect("valid push data"),
-            None
+            open_error(jmap_wire::Error::Http { status: 404 }).to_string(),
+            "the JMAP event source answered HTTP 404 Not Found"
         );
-        assert!(StateChange::parse("not json").is_err());
-    }
-
-    #[test]
-    fn typed_state_changes_convert_to_type_names() {
-        let mut types = HashMap::new();
-        types.insert(DataType::Mailbox, "m2".to_owned());
-        let mut changed = HashMap::new();
-        changed.insert("a1".to_owned(), types);
-        assert!(StateChange::from_typed(changed).touches_mail("a1"));
-    }
-
-    #[test]
-    fn ping_events_announce_their_interval() {
         assert_eq!(
-            ping_interval(r#"{"interval":45}"#),
-            Some(Duration::from_secs(45))
-        );
-        assert_eq!(ping_interval("{}"), None);
-    }
-
-    #[test]
-    fn event_source_templates_expand_and_resolve() {
-        let url = event_source_url(
-            "http://127.0.0.1:4080/.well-known/jmap",
-            "http://127.0.0.1:4080/eventSource?types={types}&closeafter={closeafter}&ping={ping}",
-            Duration::from_secs(30),
-        )
-        .expect("valid template");
-        assert_eq!(
-            url.as_str(),
-            "http://127.0.0.1:4080/eventSource?types=Email,Mailbox&closeafter=no&ping=30"
-        );
-
-        let relative = event_source_url(
-            "https://mail.example.test/.well-known/jmap",
-            "/jmap/eventsource/?types={types}&closeafter={closeafter}&ping={ping}",
-            Duration::from_secs(10),
-        )
-        .expect("relative template");
-        assert_eq!(
-            relative.as_str(),
-            "https://mail.example.test/jmap/eventsource/?types=Email,Mailbox&closeafter=no&ping=10"
-        );
-
-        assert!(
-            event_source_url(
-                "https://mail.example.test/.well-known/jmap",
-                "ftp://mail.example.test/events",
-                Duration::from_secs(10),
-            )
-            .is_err()
+            open_error(jmap_wire::Error::NotEventStream { content_type: None }).to_string(),
+            "the JMAP event source did not answer with text/event-stream"
         );
     }
 }

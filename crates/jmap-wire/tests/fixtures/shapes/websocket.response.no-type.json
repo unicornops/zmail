@@ -1,0 +1,8 @@
+{
+  "methodResponses": [
+    ["Mailbox/get", {"accountId": "a1", "state": "m1", "list": [], "notFound": []}, "c0"]
+  ],
+  "createdIds": null,
+  "sessionState": "s1",
+  "requestId": "r0"
+}

@@ -1,0 +1,2 @@
+# a server that never answers
+  error: failed to connect to the JMAP endpoint http://server/jmap/session: the JMAP request could not be sent: the request to http://server/jmap/session timed out: operation timed out

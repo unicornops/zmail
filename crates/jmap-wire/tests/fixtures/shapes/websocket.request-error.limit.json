@@ -1,0 +1,9 @@
+{
+  "@type": "RequestError",
+  "requestId": "r4",
+  "type": "urn:ietf:params:jmap:error:limit",
+  "status": 400,
+  "limit": "maxConcurrentRequests",
+  "detail": "Too many requests in flight",
+  "vendor:retryAfter": 3
+}

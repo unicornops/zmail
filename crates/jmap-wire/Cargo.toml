@@ -1,7 +1,7 @@
 [package]
 name = "jmap-wire"
 version = "0.1.0"
-description = "A layered JMAP client (RFC 8620, RFC 8621): a protocol core that asks only for the capabilities a request uses, with a replaceable HTTP transport"
+description = "A layered JMAP client (RFC 8620, RFC 8621, RFC 8887): a protocol core that asks only for the capabilities a request uses, with replaceable HTTP and WebSocket transports and push"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -18,16 +18,25 @@ default = ["reqwest", "gzip"]
 # response size limit applied to the decompressed size.
 gzip = ["dep:flate2"]
 # The default HTTP transport, on reqwest with rustls. Without it the crate
-# is the protocol core alone, for a transport of your own.
-reqwest = ["dep:reqwest"]
+# is the protocol core alone, for a transport of your own. tokio is here
+# for its timer alone: the idle timeout of a streamed response.
+reqwest = ["dep:reqwest", "dep:tokio"]
+# A WebSocket transport for JMAP over WebSocket (RFC 8887), on
+# tokio-tungstenite with rustls and the system's root certificates. Off
+# by default: the WebSocket binding itself (messages, the two traits,
+# `Client::connect_websocket`) needs no feature.
+tungstenite = ["dep:tokio-tungstenite", "dep:tokio", "dep:futures-util"]
 
 [dependencies]
 base64.workspace = true
 flate2 = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
 url.workspace = true
 
 [dev-dependencies]

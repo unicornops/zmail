@@ -1,0 +1,23 @@
+: connected
+
+event: ping
+data: {"interval":30}
+
+event: state
+id: 1001
+data: {"@type":"StateChange","changed":{"a1":{"Email":"s2","Mailbox":"m2"}}}
+
+retry: 3000
+
+data: {"@type":"StateChange","changed":{"a1":{"EmailDelivery":"d5"}}}
+
+event: state
+id: 1002
+data: {"@type":"StateChange",
+data:  "changed":{"a2":{"Thread":"t9"}}}
+
+: keep-alive
+
+event: ping
+data: {"interval":30}
+

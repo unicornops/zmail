@@ -9,7 +9,9 @@ Progress:
 - Step 1 (done): the `jmap-wire` crate with its protocol core, transport, session discovery and the Identity, EmailSubmission and `Email/set` types; `zmail-jmap`'s identities, submission and destroying of emails moved onto it.
 - Step 2 (done): the reads. `jmap-wire` gained Mailbox, Thread and Email as typed, lenient data types with `/get`, `/changes`, `/query` and `/queryChanges`, typed result references, batching and gzip; `zmail-jmap`'s `Mailbox/get`, `Email/query`, `Email/get` and `Email/changes` moved onto it. See "Step 2: The Reads" below.
 - Step 3 (done): the writes, import and blobs. `jmap-wire` gained `Email/set` in full with a typed patch, `Email/import`, `/copy`, `Mailbox/set`, and blob upload and download; `zmail-jmap`'s keyword and mailbox changes, the Sent copy's upload and import, and attachment downloads moved onto it, with two faults fixed on the way. See "Step 3: The Writes, Import and Blobs" below.
-- Step 4: push (event source and WebSocket) and sign-in; then `jmap-client` goes, with its Dependabot ignore and its entry among the chrono wrappers in `deny.toml`.
+- Step 4 (done): push and sign-in. `jmap-wire` gained a streaming transport trait, the event source, JMAP over WebSocket and streamed blob downloads; `zmail-jmap`'s two push transports and its sign-in moved onto it; and `jmap-client` left the workspace, with its Dependabot ignore and its entry among the chrono wrappers in `deny.toml`. See "Step 4: Push, Sign-in and the End of `jmap-client`" below.
+
+The move is finished: Zmail's JMAP is `jmap-wire` alone.
 
 ## Context
 
@@ -36,17 +38,19 @@ Zmail writes its own JMAP client and moves onto it in four steps, keeping `main`
 
 - **`using` is computed per request**: Core, then the capability of each call in the request (a typed call states its own; a call by name is looked up by its data type for the types of RFC 8620 and 8621), then anything the caller adds. `Request::set_capabilities` overrides the lot. Core is always listed: the envelope is Core's, and every example in the RFCs lists it. An `EmailSubmission/set` adds the mail capability only when it uses `onSuccessUpdateEmail` or `onSuccessDestroyEmail`, whose implicit `Email/set` is a mail method. *Rejected:* listing what the session advertises (it sends capabilities the request does not use, which is the bug in another form), and leaving `using` to the caller (every caller would have to get it right).
 - **The client follows redirects, not the transport.** The policy (`none`, `same_host`, `same_origin`, `hosts`, or a function) is then the same whatever the HTTP library, and is the one place that decides which hosts see the credentials. HTTPS to HTTP is always refused, as is a redirect that would turn an API POST into a GET. Zmail's own rule (only the session's host) is one policy among them. *Rejected:* a transport that follows redirects by its own policy (each implementation would have to reimplement the rule, and a caller could not tell whether it had).
-- **The transport trait is one method** (`execute`, with the timeout and size limit in the request). *Rejected:* making the client generic over `reqwest` middleware, or a `tower::Service` (a dependency and a concept more than the job needs). Streaming (event source) and WebSocket are not HTTP exchanges of this shape and will be traits of their own in step 4. Step 3 kept blobs on this one method (see "Blobs are whole bodies" below).
+- **The transport trait is one method** (`execute`, with the timeout and size limit in the request). *Rejected:* making the client generic over `reqwest` middleware, or a `tower::Service` (a dependency and a concept more than the job needs). Streaming (event source) and WebSocket are not HTTP exchanges of this shape and are traits of their own since step 4. Step 3 kept blobs on this one method (see "Blobs are whole bodies" below).
 - **Typed requests, lenient typed answers, raw JSON always available.** Records have every property optional and keep the ones the crate has no field for; lists and maps accept `null` (James writes it). Records to create are built property by property, so `null` can be told from "not set". *Rejected:* strict types that fail on a server's deviation, which is what failed with `jmap-client` on James.
 - **A patch removes with `null`** (`PatchObject::remove`), as RFC 8620 section 5.3 says. `jmap-client` writes `false` for a removed keyword, which Fastmail is reported to refuse; step 3 uses this for keywords and mailboxes (`EmailUpdate`).
 - **Dates are text.** `UtcDate` wraps the RFC 3339 string. *Rejected:* `jiff` in the public API (the workspace has it, but a library that picks a date crate for its users costs those who picked another) and `chrono` (banned in `deny.toml`). An optional `jiff` feature can come later without breaking anything.
 - **Errors are typed** (`thiserror`), never `anyhow`; error type enums keep unknown values.
 - **Nothing is retried** by the client, except once after a 401 when the credentials are a token source that can refresh. Which calls are safe to repeat is the caller's knowledge.
-- **No new dependencies**: `serde`, `serde_json`, `url`, `base64`, `thiserror` and optionally `reqwest` and (from step 2) `flate2`, all already in the lock. Without the `reqwest` feature there is no async runtime either.
+- **No new dependencies**: `serde`, `serde_json`, `url`, `base64`, `thiserror` and optionally `reqwest` and (from step 2) `flate2`, all already in the lock. Without the `reqwest` feature there is no async runtime either. Step 4 added `tokio` to the `reqwest` feature (for its timer; `reqwest` already brought it) and `tokio-tungstenite` with `futures-util` behind a feature that is off by default; all three were in the lock.
 
-### How Zmail uses both clients until step 4
+### How Zmail used both clients until step 4
 
-`zmail-jmap` signs in once. `jmap-client` fetches the session, and the `jmap-wire` client is given that same session (no second request), the same credentials, the same-host redirect rule and the same 10 second timeout. The calls that moved are built as typed `jmap-wire` requests; their answers are still read by the functions that read them before, so the errors users see are worded as they were. `wire_parity_tests.rs` in `zmail-jmap` builds each moved call both ways and holds the differences to `using`, the call id and the creation id.
+*History: this is how steps 1 to 3 ran. Since step 4 there is one client.*
+
+`zmail-jmap` signed in once. `jmap-client` fetched the session, and the `jmap-wire` client was given that same session (no second request), the same credentials, the same-host redirect rule and the same 10 second timeout. The calls that moved were built as typed `jmap-wire` requests; their answers were still read by the functions that read them before, so the errors users saw were worded as they had been. `wire_parity_tests.rs` in `zmail-jmap` built each moved call both ways and held the differences to `using`, the call id and the creation id.
 
 ## Step 2: The Reads
 
@@ -130,7 +134,9 @@ Zmail has no copy within an account. If it gains one, it is `EmailUpdate::add_to
 
 Everything else is held to what it was, with the differences listed in the pull request: blob URLs are percent-encoded (a blob id with a `/` or a space in it used to fail to download), blob requests say what they accept, four failures are worded by `jmap-wire`, an unknown SetError type is reported as itself instead of failing the whole answer, and blobs get 60 seconds instead of the 10 of an API call. Attachments keep their limit of 25 MiB, which is now also what a download reads at most: a larger answer is dropped without being held in memory first.
 
-### What step 4 needs
+### What step 4 needed
+
+*History: written at the end of step 3; step 4 did each of these.*
 
 - **One streaming piece, for the event source, that downloads can then use.** A second trait beside `HttpTransport` (an optional capability of a transport, so a transport that only does exchanges still works for everything but push): open a request and get the status, the headers and the body as chunks. The client's `exchange` function already separates what it needs from a response to decide on redirects, the 401 retry and the credentials (the status and the headers) from the body, so the same loop can drive both kinds of transport. Its timeout must be an idle one, and it has no size limit. A `download_to` that writes chunks to a caller's sink can then be added on that trait without changing `download`.
 - **The WebSocket binding** (RFC 8887) as a third trait: it carries the same `Request` and `Response` objects, which already serialise without the client.
@@ -143,6 +149,110 @@ Everything else is held to what it was, with the differences listed in the pull 
 - **A keyword change or a move of an email the server no longer has** is retried until it is dead-lettered, as before; only destroying treats `notFound` as done. With typed SetErrors this is now one `match` away, and belongs with the queue's retry rules.
 - **A send refused for an invalid address is retried** (#460). The refusal's type is now a `SetErrorType` in the library, but the code that classifies it moved in step 1 and reads JSON; changing it belongs to #460.
 - **The "unchanged" shortcut** (#513) is untouched.
+
+## Step 4: Push, Sign-in and the End of `jmap-client`
+
+### What the library gained
+
+- **A streaming transport.** `StreamingTransport` is a second trait a transport may offer beside `HttpTransport`: `open` returns the status and the headers as soon as they are in, and a `BodyStream` whose `chunk` hands the body over piece by piece. `ReqwestTransport` implements it.
+- **The event source** (RFC 8620 section 7.3), in `event_source`: a server-sent events parser, the request's variables (`types`, `closeafter`, `ping`) and `Last-Event-ID`, typed events, and a stream that knows when the server has gone quiet.
+- **`StateChange`** (section 7.1), with the `pushState` of RFC 8887.
+- **JMAP over WebSocket** (RFC 8887), in `websocket`: the messages as text, two traits for the socket, `Client::connect_websocket` and `WebSocketConnection`, and behind the `tungstenite` feature a transport on `tokio-tungstenite`.
+- **Streamed blob downloads**: `Client::download_stream`, on the streaming trait. `Client::download` is unchanged.
+- **`Credentials::check`**, `Session::websocket`, and the documentation of how an account is chosen.
+
+### Decisions within it
+
+- **One streaming trait, optional, with its own request type.** A transport that only does exchanges still works for everything but the event source and streamed downloads. `StreamRequest` has a `response_timeout` (connecting and waiting for the status and headers) and nothing else to bound it: no total timeout and no size limit, because a response that never ends would meet both. What bounds a stream is the idle time each `chunk` call is given, which the transport enforces (it has the timer; the protocol core has none), and the size of one line or one event of an event stream, which the parser enforces. *Rejected:* a second timeout field on `HttpRequest` and a flag for "no limit" (every transport would have to learn that a whole-body request may have neither, and `max_response_bytes` would stop meaning what it says); returning a `futures` `Stream` (a dependency in the public API of the protocol core, for one method); and an idle timeout fixed when the stream is opened (the event source learns the server's real ping interval from its first ping, after opening).
+- **The redirect, 401 and credential rules are one loop for both kinds of transport.** They are decided on the status and headers alone, so the client's loop is generic over "something with a status and headers" and is given the function that sends one hop. A streamed response that is a redirect or a 401 is dropped unread. *Rejected:* a second copy of the loop for streams (two places to keep the rule for who sees the credentials).
+- **A stream is never decompressed.** The event source and a streamed download ask for no compression, and an answer in a content encoding all the same is an error. Whole-body downloads still undo gzip. *Rejected:* streaming decompression (a decompressor's state machine and its own bound on expansion, for answers no server has been seen to send).
+- **The server-sent events parser follows the specification, and bounds what it leaves unbounded.** All three line endings wherever the bytes are cut (a carriage return and its line feed may arrive in different pieces), comments (which servers send as keep-alives), `data` over several lines, `id` (ignored when it contains a NUL, reset by an empty one, and made the stream's last event id when an event is dispatched, even one without data), `retry` (digits only), a byte order mark, and invalid UTF-8 read with replacement characters. A line, or the data of one event, over 1 MiB is an error. Zmail's earlier parser, which this replaces, split on line feeds only and ignored `id` and `retry`.
+- **Reconnecting is the caller's.** The stream reports its last event id and the server's `retry`, and `EventSource::last_event_id` sends the id back; nothing in the crate waits and tries again. A helper would need a timer, which the crate has only inside a transport, and a policy (how long, how often, when to give up, what a wake from sleep means) that belongs to the application: Zmail's lives in `zmail-sync` and did not change. The module documentation has a loop with backoff to copy. *Rejected:* a `reconnecting` wrapper with a backoff the caller configures (it would still not know about Zmail's wake signal, so Zmail would not use it, and it would be the only part of the crate that sleeps).
+- **Silence is measured by the pings.** With pings asked for, a stream on which nothing at all arrives for the ping interval plus a grace (15 seconds unless set) fails with a timeout; the interval is the one asked for until the server's first ping says which it really uses (never taken as less than 5 seconds). With `ping=0` there is no check unless the caller sets an idle time.
+- **`types` is written with its commas.** RFC 6570 level 1 would percent-encode the commas of `Email,Mailbox` and the `*`. Both are the syntax of the value RFC 8620 defines and are allowed in a query, and a server that splits the list before decoding it would see one unknown type; Zmail has always sent them literally, to James among others. The type names themselves are encoded.
+- **The WebSocket is two traits, and the library is a feature.** `WebSocketTransport::connect` takes a handshake (URL, headers, subprotocol, timeout, message and frame limits) and returns a `WebSocket` that sends and receives text. The binding itself (the messages, the client's part of the handshake, `WebSocketConnection`) needs no feature and is tested without a network. `TungsteniteTransport` is behind `tungstenite`, off by default. *Rejected:* depending on `tokio-tungstenite` outright (every user of the crate would build a WebSocket library for a push transport most servers do not need), and leaving the default implementation to each user (Zmail needs one, and the handshake rules below are easy to get wrong).
+- **What the WebSocket costs in crates.** `tokio-tungstenite` was in the lock only through `jmap-client`. Keeping WebSocket push keeps three crates that would otherwise have left with it: `tokio-tungstenite`, `tungstenite` and `sha1` 0.10 (everything else they need is shared with the rest of the tree). The alternative was to drop WebSocket push, which Zmail has, tests against James, and falls back to when a server's event source cannot be opened. Three small crates, behind a feature, is the cheaper side of that.
+- **The WebSocket handshake is held to the HTTP side's rules.** The credentials go to the URL the session advertises, as they go to its API, upload and download URLs. A `ws` URL is refused when the session came over HTTPS, as a redirect from HTTPS to HTTP is. A handshake answered with a redirect fails: nothing says the credentials may follow, and the WebSocket libraries do not follow one either. A 401 gets one more attempt when the credentials can refresh; any other status is `Error::Http` with that status. The server must confirm the `jmap` subprotocol (RFC 8887 section 4.2). Messages are limited to the client's response size limit and frames to 16 MiB. TLS is rustls against the system's roots, as `jmap-client` had it.
+- **A request-level error over the WebSocket is a message, not the end of the connection** (`WebSocketMessage::RequestError`, with the same `ProblemDetails` as an HTTP error status), since RFC 8887 answers one bad request with it and carries on. A message that is none of the three kinds the RFC allows is kept as `Unknown`. A message without `@type` is read by what it has.
+- **Streamed downloads return a reader, not a writer.** `download_stream` returns a `BlobStream` whose `chunk` the caller writes wherever it likes. *Rejected:* `download_to(impl AsyncWrite)`: there is no `AsyncWrite` without choosing `tokio`'s or `futures`' for every user of the protocol core. Its limits are a stream's: the response must begin, and never fall silent for longer than, the client's timeout; there is no size limit unless the download sets one.
+- **`PushSubscription` is not typed.** It is the third way to be pushed to (the server POSTs to a URL the client registers), needs a public endpoint a desktop client does not have, and is called by name like any other method.
+
+### The account
+
+`jmap-client`'s `default_account_id` was the first entry of `primaryAccounts` as its hash map happened to order it, and the order changed from one sign-in to the next. Tests written before the move (`sign_in_characterisation_tests.rs`) show what that gave, over forty sign-ins each:
+
+| Session | `jmap-client` | Now |
+| --- | --- | --- |
+| One account, primary for everything | that account | the same |
+| Several accounts, one primary for everything | that account | the same |
+| Different primary accounts for mail and for submission | either, at random | mail's |
+| Mail in one account; contacts, calendars and quota in another | either, at random | mail's |
+| A primary account for contacts only | the contacts account | the account that holds mail |
+| No primary accounts, one account with mail | the empty string | that account |
+| No accounts | the empty string | the sign-in fails, saying so |
+
+So on a server whose every primary account is the same one, which is every server Zmail is known to have been used with, nothing changes. On a server that names another account for any capability, Zmail used to sync whichever account the hash map put first, differently on different sign-ins; it now always uses the primary account for mail.
+
+**Sending happens in the mail account**, identities included. An `EmailSubmission` names the email to send and the identity to send it as by ids of its own account (RFC 8621 section 7), and the email is the Sent copy Zmail has just imported into the mail account, so the submission and its identities cannot be in another. A server whose primary account for submission is not its primary account for mail is therefore used through the mail account for both; if that account cannot submit, the server says so (`accountNotSupportedByMethod`) and the send fails with that. Importing the copy into the submission account instead would put it where Zmail does not sync. No server with that arrangement has been seen.
+
+### What Zmail does with it
+
+- **Sign-in** is `discovery::session_url` (the well-known URL's redirects, followed without credentials) and `ClientBuilder::connect_with`, with redirects kept to the session's host, as before. The same-host rule, the three shapes of endpoint and the refusal of a session that moves to another host are pinned by `session_tests.rs` and `sign_in_characterisation_tests.rs`.
+- **The event source** is `Client::event_source` with `types=Email,Mailbox`, `closeafter=no` and `ping=30`, on a client whose redirects stay on the event source's own host (as Zmail's own event source client had it). Which events mean mail changed did not change: a state change that touches Email, EmailDelivery, Mailbox or Thread of the account, or a `state` event that cannot be read.
+- **The WebSocket** is `Client::connect_websocket` over `TungsteniteTransport`, with the same steps as before: a `Mailbox/get` of no ids repeated until the server answers (Apache James loses frames sent right after the upgrade), `WebSocketPushEnable`, one more request whose answer shows push is on, and then the same request as a heartbeat every 30 seconds.
+- **Reconnecting, backoff, polling a server without push, and the wake signal** are in `zmail-sync` and were not touched: `watch_mail_changes` has the signature and the results it had.
+
+`push_characterisation_tests.rs` ran both transports against a scripted server on loopback while they were still on `jmap-client`, and the text it pinned changed in the move only as follows.
+
+On the wire:
+
+- the session request and the event source carry `User-Agent: jmap-wire/0.1.0` where `jmap-client/0.4.1` was (API requests already did), the session request asks for `application/json` and gzip, and the lookup of a well-known URL asks for `application/json` where it asked for anything;
+- the WebSocket handshake carries a `User-Agent`, which it did not;
+- WebSocket request ids are `r0`, `r1`... where they were `0`, `1`..., and the heartbeat's call id is `c0` where it was `s0`.
+
+In behaviour:
+
+- **A pushed state change that names a data type from a later specification** used to fail to decode in `jmap-client`, and Zmail took every such failure for a change to mail, whichever account it was for. It is now read, and counts only if it touches mail in Zmail's account. A WebSocket message that is not JSON, or not one of the three kinds, is still taken for a change.
+- **A server that accepts the event source connection and then sends nothing, not even headers,** used to be waited for without limit. It is now given 60 seconds (the connect timeout, a ping interval and the grace) and then treated as an event source that cannot be opened.
+- **The WebSocket handshake** has the 10 second timeout of an API request, where it had none.
+- **The bearer token rule** is `jmap-wire`'s: a token that is empty, or has a byte outside printable ASCII, is refused before anything is sent, with the same message as before. `jmap-client` built the header with an `unwrap`, so Zmail had a guard in front of it that refused what `reqwest` would not take as a header value; that guard let a tab and bytes above ASCII through, which no OAuth token has (RFC 6750). There is no `unwrap` on this path now: the token is checked where the header is built, and a transport is handed only header values that are ones.
+- **An event source on another host than the session's** is unchanged (redirects are followed on its own host), by a client built for it.
+
+In wording (the sentences a failed sign-in or a push failure is reported in):
+
+- an answer to the session request that is not JSON, or not a session, reads "the JMAP server's session could not be read: ..." where it read "Parse error: ..."; a session without `capabilities` is no longer refused for that, only one without `apiUrl`;
+- a session that redirects to another host reads "the JMAP server redirected to ..., which was refused: the redirect policy does not allow it" where it read "Transport error: error following redirect for url (...)";
+- a timeout or a failed connection names the URL and the cause, where it read "Transport error: error sending request for url (...)" with `jmap-client`'s URL trick showing (`...#/.well-known/jmap`);
+- a refused WebSocket handshake reads "Server failed: 401 Unauthorized" where it read "WebSockets error: HTTP error: 401 Unauthorized", and a refused redirect of the event source says where it led instead of "answered HTTP 307 Temporary Redirect".
+
+Wrong credentials (401), a wrong URL (404), a server error and problem details read exactly as they did, and the add-account flow takes the same answers for refused credentials.
+
+### What left the dependency tree
+
+Nine crates left `Cargo.lock`: `jmap-client` 0.4.1, `reqwest` 0.13.5 (the second `reqwest`), `async-stream`, `async-stream-impl`, `maybe-async`, `h2`, `tokio-util`, and `wasm-streams` 0.4.2 and 0.5.0. Three that only `jmap-client` brought stay for the WebSocket transport: `tokio-tungstenite`, `tungstenite` and `sha1` 0.10. `chrono` is still in the tree through `async-imap` and the pinned GPUI (`gpui`, `scheduler`, `zlog`), so its advisory ignore stays, with one wrapper fewer.
+
+### What was learnt
+
+- **Pinning behaviour as text before each move paid for itself four times.** Every difference in this record was found by a diff of a text file, not by reading code, and two real faults (step 3) and one silent one (the account, above) were only visible that way.
+- **A lenient decoder removes workarounds.** Zmail treated every WebSocket message `jmap-client` could not decode as "something changed", because a new data type made the whole message undecodable. With a decoder that keeps what it does not know, the workaround's reason went away.
+- **Timeouts are per kind of exchange.** An API call, a blob, a stream and a handshake each needed their own, and each was first written with someone else's: blobs under the API timeout (step 3), the event source with no limit on the wait for headers (here).
+- **A hash map is not a choice.** "The default account" was an iteration order.
+- **The cost of a dependency includes what it hides.** The URL trick, the panic guard, the `false` for `null`, the capabilities in `using` and the account were each a behaviour of Zmail that nobody had decided.
+
+### What making it a project of its own needs
+
+Not done, and not to be done without a decision; a checklist for when it is.
+
+1. **Licence.** Choose it (MIT OR Apache-2.0 is what is expected of a library). Add `LICENSE-MIT` and `LICENSE-APACHE`, set `license` in `Cargo.toml` instead of `license.workspace`, and have everyone who has contributed to `crates/jmap-wire` agree to the new licence (`git log -- crates/jmap-wire` is the list). Confirm once more, by review, that nothing in the crate comes from another JMAP crate.
+2. **Its own dependency versions.** Replace every `workspace = true` with a version and exactly the features the crate uses: `tokio` with `time` alone for the `reqwest` feature and `net` for `tungstenite`; `reqwest` with `rustls-tls` and no `json` or `blocking`; `futures-util` with `sink`; `flate2`; `tokio-tungstenite` with `rustls-tls-native-roots`. Today the workspace's wider feature sets hide a missing one.
+3. **Features.** Decide the default set (`reqwest` and `gzip` today), whether `tungstenite` should verify against the same roots as `reqwest` (it uses the system's, `reqwest` the bundled ones), and whether to take a rustls configuration directly so that users need not install a crypto provider (today `TungsteniteTransport::new` relies on rustls's process-wide one, and rustls panics at the first `wss` connection when it cannot pick one; Zmail installs one, and the type's documentation says so). Consider a `jiff` feature for dates.
+4. **MSRV policy.** It is the workspace's (1.98) because the code uses what that allows (`let` chains, `async` closures in a doctest). Decide a policy (the last N stable releases, say), set `rust-version`, and test it in CI.
+5. **CI of its own.** Format, Clippy and tests for the default features, none, each alone and all; `cargo doc` with warnings as errors; `cargo deny`; the three operating systems, since the loopback tests exercise sockets; and the MSRV. The live test against a real server (Apache James in Zmail's harness) has to move with it or be replaced: without it, nothing checks the crate against a server.
+6. **Fixtures from other servers.** Recorded answers from Fastmail, Stalwart and Cyrus, one directory each, and recorded push from any server (none exists yet, James included).
+7. **README and docs.rs.** A README that does not send the reader to Zmail; `package.metadata.docs.rs` with `all-features`; `doc(cfg)` on what is behind a feature; a `CONTRIBUTING` with the written-from-the-RFCs rule.
+8. **Version policy.** Semantic versioning from 0.1.0; a changelog per release (the crate's `CHANGELOG.md` is already its own); what `#[non_exhaustive]` promises; and a decision on the name before it is reserved.
+9. **The repository move, with history.** `git filter-repo --subdirectory-filter crates/jmap-wire` (or `git subtree split`) keeps the crate's commits; the squash commits of steps 1 to 4 also touch Zmail and will read oddly, so link this record from the new repository. Zmail then depends on it by version, and `zmail-jmap`'s characterisation tests, which read fixtures from the crate's directory by path, need the fixtures published in the package or copied.
+10. **What is still missing from the library** for a user who is not Zmail: `PushSubscription`, `Email/parse`, `SearchSnippet/get`, `VacationResponse` and `Blob/copy` as typed calls; streamed uploads; a reconnecting event source for those who want one; and capabilities beyond mail.
 
 ## Decisions (Rob's)
 
@@ -157,10 +267,16 @@ Made after step 1:
 - **The name `jmap-wire` stands for now.**
 - **The CI step that tests the crate on its own stays** (`cargo test -p jmap-wire --no-default-features`, and its documentation with warnings as errors).
 
-Still open, for the split: the licence itself, a version policy, and the crate's own dependency versions and features in place of the workspace's.
+Made after step 3:
+
+- **Blobs get 60 seconds** in Zmail (step 3's change from the 10 seconds of an API call) stands.
+- **The crate still stays in this repository**, to become a distinct project later, with the licence change then.
+
+Still open, for the split: the licence itself, a version policy, and the crate's own dependency versions and features in place of the workspace's. "What making it a project of its own needs" above is the list.
 
 ## Consequences
 
-- Until step 4, Zmail carries two JMAP clients and both `reqwest` versions. From step 3 on, `jmap-client` makes no JMAP API call but the WebSocket heartbeat.
+- Until step 4, Zmail carried two JMAP clients and both `reqwest` versions. Since step 4 it carries one of each, and three crates for the WebSocket transport.
 - Zmail owns the decoding of `Email/get` from step 2 on. CI tests only Apache James; the fixture tests in `crates/jmap-wire/tests/fixtures` take recorded answers from any server, one directory each, and Zmail's characterisation tests replay any directory that has a mailbox list and a sync answer. Recordings from Fastmail and Stalwart are still wanted: until then, what protects those users is that the decoding does not fail on a shape it has not seen.
 - A JMAP change in Zmail may now be a change in two crates, one of which must stay free of Zmail.
+- Zmail is now the only thing between its users and a JMAP server's quirks: there is no upstream to wait for, and none to blame. Apache James is the one server CI runs; other servers are untested until someone records their answers or runs Zmail against them.

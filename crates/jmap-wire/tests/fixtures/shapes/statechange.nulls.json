@@ -1,0 +1,10 @@
+{
+  "@type": "StateChange",
+  "changed": {
+    "a1": {"Email": "s2", "Mailbox": "m7", "FutureType": "f1"},
+    "a2": null,
+    "a3": {}
+  },
+  "pushState": null,
+  "vendor:serial": 12
+}

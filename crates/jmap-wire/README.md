@@ -1,10 +1,11 @@
 # jmap-wire
 
-A JMAP client library for Rust ([RFC 8620](https://www.rfc-editor.org/rfc/rfc8620) core, [RFC 8621](https://www.rfc-editor.org/rfc/rfc8621) mail), in layers that can each be used without the ones above:
+A JMAP client library for Rust ([RFC 8620](https://www.rfc-editor.org/rfc/rfc8620) core, [RFC 8621](https://www.rfc-editor.org/rfc/rfc8621) mail, [RFC 8887](https://www.rfc-editor.org/rfc/rfc8887) WebSocket), in layers that can each be used without the ones above:
 
 1. **A protocol core** with no HTTP library in it: request and response envelopes, method calls with call ids, result references, the Session object, and typed errors at all three levels (request, method and `/set`).
 2. **Typed calls**: `Get`, `Set`, `Changes`, `Query` and `QueryChanges` for any data type, and the mail data types implemented so far, read into records that tolerate what servers leave out, null or add. Anything else is called by name with JSON arguments, in the same request as typed calls.
 3. **A client** over a small transport trait, with Basic and Bearer authentication (and a hook for refreshing a token), a redirect policy the caller chooses, a timeout, a response size limit and gzip. The default transport uses `reqwest` with rustls.
+4. **Push**, both ways a client that stays connected can have it: the event source, over a transport that can stream a response, and JMAP over WebSocket, over a WebSocket trait with an optional implementation on `tokio-tungstenite`.
 
 It is developed in the [Zmail](https://github.com/unicornops/zmail) repository, which is its first user, but has nothing of Zmail in it. **It is not published on crates.io yet**, and its API will change while the rest of JMAP Mail is added. The plan is for it to become a project of its own later.
 
@@ -142,6 +143,45 @@ assert_eq!(request.using(), [capability::CORE, capability::MAIL]);
 # Ok::<(), jmap_wire::Error>(())
 ```
 
+## Push
+
+A server tells a connected client *that* data changed, with a `StateChange`; the client then asks what changed. The event source is one long response of server-sent events:
+
+```rust,no_run
+use std::time::Duration;
+use jmap_wire::event_source::{EventSource, EventSourceEvent};
+
+# async fn example(
+#     client: &jmap_wire::Client<jmap_wire::ReqwestTransport>,
+# ) -> Result<(), jmap_wire::Error> {
+let account = client.primary_account(jmap_wire::capability::MAIL)?;
+let source = EventSource::new()
+    .types(["Email", "Mailbox"])
+    .ping(Duration::from_secs(30));
+let mut events = client.event_source(&source).await?;
+// `next` fails when the server has been silent for longer than its
+// pings allow, and returns `None` when the server ends the response.
+while let Some(event) = events.next().await? {
+    if let EventSourceEvent::StateChange(change) = event {
+        if change.touches(account, ["Email", "Mailbox"]) {
+            // Call Email/changes and Mailbox/changes.
+        }
+    }
+}
+// To open the next stream where this one left off:
+let _resume = events.last_event_id().map(|id| source.clone().last_event_id(id));
+# Ok(())
+# }
+```
+
+Reconnecting is left to the caller, who knows when to try again and has a timer to wait with; the stream gives what a reconnect needs (the last event id, and the wait the server asked for). The module documentation of `event_source` has a loop with backoff.
+
+JMAP over WebSocket carries the same `Request` and `Response` objects over one connection, with state changes pushed down it once enabled (`Client::connect_websocket`, `websocket::WebSocketConnection`; the `tungstenite` feature has the transport). The module documentation of `websocket` has an example.
+
+## Choosing an account
+
+A session lists the accounts a user can reach and names a primary one per capability. Ask for the capability whose methods you are about to call: `client.primary_account(capability::MAIL)` for mailboxes and emails, `capability::SUBMISSION` for identities and submissions. They are usually the same account and need not be. Every call takes its account id outright, so a shared account from `session.accounts` is used by passing its id.
+
 ## What is implemented
 
 | Area | State |
@@ -162,11 +202,12 @@ assert_eq!(request.using(), [capability::CORE, capability::MAIL]);
 | `Email/set`: creating (every settable property, body parts by blob or inline value), keyword and mailbox changes with a typed patch, destroying, `ifInState` | done |
 | `Email/import`, `Email/copy` (`/copy` for any data type), `Mailbox/set` | done |
 | What a `/set`, `/copy` or import answer says of each record, with the `SetError`s and what they carry | done |
-| Blob upload and download, whole bodies with their own size limit and timeout | done |
-| `Email/parse`, `Blob/copy`, `SearchSnippet`, `VacationResponse` | by name only (`Request::call_raw`) |
-| Push: event source, WebSocket (RFC 8887), `PushSubscription` | URL template only |
+| Blob upload and download, whole bodies with their own size limit and timeout; download piece by piece over a transport that can stream | done |
+| `StateChange`, and the event source (RFC 8620 section 7.3): `types`, `closeafter`, `ping`, `Last-Event-ID`, a server-sent events parser, and a stream that fails when the pings stop | done |
+| JMAP over WebSocket (RFC 8887): requests and responses matched by id, enabling and disabling push, state changes, request-level errors as problem details | done |
+| `Email/parse`, `Blob/copy`, `SearchSnippet`, `VacationResponse`, `PushSubscription` | by name only (`Request::call_raw`) |
 
-It has been run against Apache James 3.9 (through Zmail's live tests, reading and writing), and its decoding is tested against answers recorded from James and the examples of the RFCs (`tests/fixtures`). It has not been run against Fastmail, Stalwart or Cyrus: recorded answers from those are wanted, one directory each.
+It has been run against Apache James 3.9 (through Zmail's live tests: reading, writing and both push transports), and its decoding is tested against answers recorded from James and the examples of the RFCs (`tests/fixtures`). It has not been run against Fastmail, Stalwart or Cyrus: recorded answers from those are wanted, one directory each, and no server's push has been recorded yet.
 
 ## Design notes
 
@@ -180,15 +221,19 @@ It has been run against Apache James 3.9 (through Zmail's live tests, reading an
 - **Dates** stay the RFC 3339 text the server sent (`mail::UtcDate`); the crate depends on no date library.
 - **Unknown data** is kept, not dropped: capability objects, extra properties on records and errors, and error types from later specifications.
 - **Removing with a patch** is `PatchObject::remove`, which writes `null` as RFC 8620 section 5.3 says (not `false`). `mail::EmailUpdate`, the typed patch for an email's keywords and mailboxes, has no way to write anything else.
-- **Blobs are whole bodies.** An upload is given as bytes and a download returns bytes, each under limits apart from the API's: a download size limit counted after decompression (128 MiB by default, or the download's own), the session's `maxSizeUpload` checked before an upload is sent, and a blob timeout (five minutes by default). There is no streaming yet; `Client::download_url` gives the URL to a caller who must stream a blob to disk with an HTTP client of their own.
+- **Blobs are whole bodies, or streams.** An upload is given as bytes and `Client::download` returns bytes, each under limits apart from the API's: a download size limit counted after decompression (128 MiB by default, or the download's own), the session's `maxSizeUpload` checked before an upload is sent, and a blob timeout (five minutes by default). `Client::download_stream` hands a blob over piece by piece instead, for one that goes to a file.
+- **Streams have limits of their own.** A response that is read as it arrives (the event source, a streamed download) is under no total timeout and no size limit, which are for exchanges that end. What bounds it is how long the server may take to begin answering, how long it may then be silent, and how large one line or one event of an event stream may be (1 MiB by default). A transport offers streaming through a second trait, `StreamingTransport`; one that does not is still a transport for everything else. The redirect, 401 and credential rules are decided on a response's status and headers, so they are the same for both.
+- **Silence on an event source** is measured by the pings asked for: nothing at all for the ping interval plus a grace (15 seconds by default) fails the stream with a timeout, and a server that announces another interval in its pings is held to that one.
+- **WebSocket.** The crate has the binding (the messages, `Client::connect_websocket`, `WebSocketConnection`) and two traits for the socket, not a WebSocket library; the `tungstenite` feature adds a transport on `tokio-tungstenite`. The credentials go to the URL the session advertises, as to its other endpoints; an unencrypted `ws` URL is refused when the session came over HTTPS; a handshake answered with a redirect fails; the server must confirm the `jmap` subprotocol; and messages and frames have size limits (the client's response size limit, and 16 MiB a frame). A request-level error arrives as a message with the same `ProblemDetails` as over HTTP.
 - **Credentials and blobs.** The upload and download URLs are the session's and get the credentials, whatever host they are on. A redirect from them is judged by the `RedirectPolicy` like any other; a download can opt into following a redirect the policy does not allow without credentials (`BlobDownload::follow_redirects_without_credentials`), for a server that answers with a signed link to a storage host.
 
 ## Features
 
-- `reqwest` (default): `ReqwestTransport` and `ClientBuilder::connect`. Without it the crate needs no async runtime: implement `HttpTransport` for your own HTTP client.
+- `reqwest` (default): `ReqwestTransport`, which also streams, and `ClientBuilder::connect`. It brings `tokio` for its timer (the idle time of a stream). Without it the crate needs no async runtime: implement `HttpTransport`, and `StreamingTransport` for push over the event source, for your own HTTP client.
 - `gzip` (default): gzip-compressed answers, decompressed with `flate2`.
+- `tungstenite` (off by default): `TungsteniteTransport`, a WebSocket transport on `tokio-tungstenite` with rustls and the system's root certificates. Without it, JMAP over WebSocket runs over any socket you implement `WebSocketTransport` and `WebSocket` for.
 
-Without either, the crate depends only on `serde`, `serde_json`, `url`, `base64` and `thiserror`.
+Without any of them, the crate depends only on `serde`, `serde_json`, `url`, `base64` and `thiserror`.
 
 ## Minimum Rust version
 

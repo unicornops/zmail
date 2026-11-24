@@ -1,0 +1,34 @@
+# pushes, then the server closes (WebSocket)
+  sent: GET /.well-known/jmap [accept: application/json]
+  sent: GET /.well-known/jmap [accept: application/json; accept-encoding: gzip; authorization: yes; user-agent: jmap-wire/0.1.0]
+  sent: GET /ws [authorization: yes; sec-websocket-protocol: jmap; user-agent: jmap-wire/0.1.0]
+  sent: ws: {"@type":"Request","id":"r0","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  sent: ws: {"@type":"WebSocketPushEnable","dataTypes":["Email","Mailbox"]}
+  sent: ws: {"@type":"Request","id":"r1","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  event: Connected(WebSocket)
+  event: MailChanged
+  event: MailChanged
+  event: MailChanged
+  event: MailChanged
+  end: Closed(WebSocket)
+# a server that loses the first two frames (WebSocket)
+  sent: GET /.well-known/jmap [accept: application/json]
+  sent: GET /.well-known/jmap [accept: application/json; accept-encoding: gzip; authorization: yes; user-agent: jmap-wire/0.1.0]
+  sent: GET /ws [authorization: yes; sec-websocket-protocol: jmap; user-agent: jmap-wire/0.1.0]
+  sent: ws: {"@type":"Request","id":"r0","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  sent: ws: {"@type":"Request","id":"r1","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  sent: ws: {"@type":"Request","id":"r2","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  sent: ws: {"@type":"WebSocketPushEnable","dataTypes":["Email","Mailbox"]}
+  sent: ws: {"@type":"Request","id":"r3","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  event: Connected(WebSocket)
+  event: MailChanged
+  end: Closed(WebSocket)
+# a request-level error after push is enabled (WebSocket)
+  sent: GET /.well-known/jmap [accept: application/json]
+  sent: GET /.well-known/jmap [accept: application/json; accept-encoding: gzip; authorization: yes; user-agent: jmap-wire/0.1.0]
+  sent: GET /ws [authorization: yes; sec-websocket-protocol: jmap; user-agent: jmap-wire/0.1.0]
+  sent: ws: {"@type":"Request","id":"r0","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  sent: ws: {"@type":"WebSocketPushEnable","dataTypes":["Email","Mailbox"]}
+  sent: ws: {"@type":"Request","id":"r1","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  event: Connected(WebSocket)
+  error: the JMAP WebSocket failed: Request failed: Limit (status 400). Details: Too many requests

@@ -1,0 +1,9 @@
+{
+  "@type": "StateChange",
+  "changed": {
+    "a456": {
+      "Mailbox": "d35ecb040aab"
+    }
+  },
+  "pushState": "bbb"
+}

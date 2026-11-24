@@ -383,7 +383,7 @@ fn serve(mut stream: TcpStream, base: &str, state: &Mutex<State>) {
 /// `serde_json` keeps it or sorts it depending on a feature that other
 /// crates of the workspace turn on, so the pinned text must not depend
 /// on it.
-fn canonical(value: &Value) -> String {
+pub(crate) fn canonical(value: &Value) -> String {
     match value {
         Value::Object(members) => {
             let mut members = members.iter().collect::<Vec<_>>();
@@ -404,8 +404,9 @@ fn canonical(value: &Value) -> String {
 
 /// A method call as it is pinned: without its call id, and with the
 /// creation ids of an import written `new0`, `new1`... Both are names
-/// the client makes up for the length of one request, which the two
-/// libraries choose differently (`wire_parity_tests.rs` states how).
+/// the client makes up for the length of one request, which
+/// `jmap-client` and `jmap-wire` chose differently
+/// (`request_shape_tests.rs` states how).
 fn without_ids(call: &Value) -> Value {
     let mut arguments = call[1].clone();
     if let Some(emails) = arguments.get_mut("emails").and_then(Value::as_object_mut) {

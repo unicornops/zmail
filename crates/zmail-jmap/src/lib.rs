@@ -9,7 +9,6 @@ mod wording;
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result, anyhow, bail};
-use jmap_client::client::Client;
 use jmap_wire::{
     BlobDownload, Comparator, Filter, Get, Query, SetErrorType, SetOutcome,
     mail::{
@@ -33,9 +32,10 @@ pub use push::{
     PUSH_PING_INTERVAL, PushEnd, PushEvent, PushPreference, PushTransport, watch_mail_changes,
 };
 
-/// The Phase 0 decision for the first JMAP implementation spike.
+/// How JMAP is implemented: ADR 0008, which superseded the Phase 0
+/// decision for a third-party client (ADR 0001).
 pub const IMPLEMENTATION_STRATEGY: &str =
-    "Start behind an internal adapter boundary with a third-party JMAP client candidate.";
+    "Zmail's own JMAP client library, jmap-wire, behind the zmail-jmap adapter boundary.";
 
 /// JMAP features that are explicitly in MVP scope.
 pub const MVP_SCOPE: &[&str] = &[
@@ -1053,41 +1053,9 @@ impl JmapCheckpoint {
     }
 }
 
-/// Builds the session credentials for the target's auth kind.
-///
-/// Password accounts authenticate with HTTP Basic; OAuth2 accounts
-/// authenticate with the bearer access token in the `Authorization` header
-/// (RFC 7628 bearer usage), which `jmap-client` sends for `Bearer`
-/// credentials.
-fn jmap_credentials(
-    auth: AuthKind,
-    username: &str,
-    secret: &str,
-) -> Result<jmap_client::client::Credentials> {
-    match auth {
-        AuthKind::Password => Ok(jmap_client::client::Credentials::basic(username, secret)),
-        AuthKind::OAuth2 => {
-            // `jmap-client` unwraps the header it builds from the token, so
-            // a token that is not a valid header value would panic there.
-            if reqwest::header::HeaderValue::from_str(&format!("Bearer {secret}")).is_err() {
-                bail!(
-                    "the OAuth access token contains characters that cannot be sent to the \
-                     server; sign in to the account again"
-                );
-            }
-            Ok(jmap_client::client::Credentials::bearer(secret.to_owned()))
-        }
-        AuthKind::ProtonSession => bail!("Proton accounts do not sign in over JMAP"),
-    }
-}
-
-/// Where RFC 8620 section 2.2 puts the session resource on a host.
-const WELL_KNOWN_JMAP: &str = "/.well-known/jmap";
-/// How many redirects from `/.well-known/jmap` are followed, as
-/// `jmap-client` allows for the session itself.
+/// How many redirects from `/.well-known/jmap` are followed.
 const MAX_SESSION_REDIRECTS: usize = 5;
-/// How long each request that follows those redirects may take, as
-/// `jmap-client`'s default.
+/// How long each request that follows those redirects may take.
 const SESSION_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The session URL for a stored endpoint.
@@ -1098,146 +1066,81 @@ const SESSION_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// provider preset such as Fastmail's). A bare origin means its
 /// `/.well-known/jmap`. That URL commonly redirects to the session on
 /// another host (`example.com` to `api.example.com`), so its redirects are
-/// followed here, without credentials and never from HTTPS to HTTP, as
-/// autodiscovery does. Where they end is used only when it answers as a
-/// JMAP server does without credentials (401, or the session as JSON), so
-/// a redirect to a sign-in page is not mistaken for the session; the
-/// credentials then go only to that host.
-async fn session_url(endpoint: &str) -> Result<Url> {
-    let mut url =
-        Url::parse(endpoint).with_context(|| format!("invalid JMAP endpoint {endpoint}"))?;
+/// followed (`jmap_wire::discovery::session_url`), without credentials and
+/// never from HTTPS to HTTP, as autodiscovery does. Where they end is used
+/// only when it answers as a JMAP server does without credentials (401, or
+/// the session as JSON), so a redirect to a sign-in page is not mistaken
+/// for the session; the credentials then go only to that host.
+async fn session_url(transport: &jmap_wire::ReqwestTransport, endpoint: &str) -> Result<Url> {
+    let url = Url::parse(endpoint).with_context(|| format!("invalid JMAP endpoint {endpoint}"))?;
     if !matches!(url.scheme(), "http" | "https") {
         bail!("JMAP endpoints should be absolute HTTP or HTTPS URLs");
     }
-    url.set_fragment(None);
-    if url.query().is_none() && matches!(url.path().trim_end_matches('/'), "" | WELL_KNOWN_JMAP) {
-        url.set_path(WELL_KNOWN_JMAP);
-    }
-    if url.path() != WELL_KNOWN_JMAP {
-        return Ok(url);
-    }
-
-    let well_known = url.clone();
-    let http = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(SESSION_LOOKUP_TIMEOUT)
-        .build()
-        .context("failed to build the JMAP session lookup client")?;
-    for _ in 0..=MAX_SESSION_REDIRECTS {
-        let response = http
-            .get(url.clone())
-            .send()
-            .await
-            .with_context(|| format!("failed to connect to the JMAP endpoint {url}"))?;
-        let location = response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|location| location.to_str().ok());
-        let Some(location) = location.filter(|_| response.status().is_redirection()) else {
-            return Ok(if url == well_known || answers_as_jmap(&response) {
-                url
-            } else {
-                well_known
-            });
-        };
-        url = next_session_hop(&url, location)?;
-    }
-    bail!("the JMAP endpoint {endpoint} redirects too many times")
+    let mut discovery = jmap_wire::discovery::Discovery::default();
+    discovery.timeout = SESSION_LOOKUP_TIMEOUT;
+    discovery.max_redirects = MAX_SESSION_REDIRECTS;
+    jmap_wire::discovery::session_url(transport, endpoint, &discovery)
+        .await
+        .map_err(wording::reported)
+        .with_context(|| format!("failed to connect to the JMAP endpoint {endpoint}"))
 }
 
-/// Whether a credential-less answer came from a JMAP session resource: it
-/// asks for credentials, or returns the session (JSON).
-fn answers_as_jmap(response: &reqwest::Response) -> bool {
-    response.status() == reqwest::StatusCode::UNAUTHORIZED
-        || (response.status().is_success()
-            && response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| value.trim_start().starts_with("application/json")))
-}
-
-/// Where a redirect from `current` to `location` leads, refused when it
-/// leaves HTTP(S) or goes from HTTPS to HTTP.
-fn next_session_hop(current: &Url, location: &str) -> Result<Url> {
-    let mut next = current
-        .join(location)
-        .with_context(|| format!("the JMAP endpoint {current} redirects to an invalid URL"))?;
-    next.set_fragment(None);
-    let allowed = match next.scheme() {
-        "https" => true,
-        "http" => current.scheme() == "http",
-        _ => false,
-    };
-    if !allowed {
-        bail!("the JMAP endpoint {current} redirects to {next}, which is not HTTPS");
-    }
-    Ok(next)
-}
-
-/// What `jmap-client` 0.4.1's `connect` is given to fetch `session`.
-///
-/// It always appends `/.well-known/jmap` to the URL it is given and offers
-/// no way to supply a session fetched elsewhere, so a well-known URL loses
-/// that suffix, and any other session URL gets an empty fragment: the
-/// appended path then lands in the fragment, which is never sent, and
-/// the request goes to `session` exactly.
-fn jmap_client_url(session: &Url) -> String {
-    let url = session.as_str();
-    match url.strip_suffix(WELL_KNOWN_JMAP) {
-        Some(base) if session.query().is_none() && session.fragment().is_none() => base.to_owned(),
-        _ => format!("{url}#"),
-    }
-}
-
-/// How long each API request may take, as `jmap-client`'s default was.
+/// How long each API request may take.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long one upload or download of a blob may take. A whole message
 /// or an attachment of up to [`MAX_ATTACHMENT_BYTES`] does not fit the
-/// ten seconds of an API request on a slow line, which is what
-/// `jmap-client` gave it: the part was then skipped, or the send failed.
+/// ten seconds of an API request on a slow line.
 const BLOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-/// The media type the Sent copy is uploaded as, as `jmap-client` sent
-/// it. `Email/import` reads the blob as a message whatever its label.
+/// The media type the Sent copy is uploaded as. `Email/import` reads the
+/// blob as a message whatever its label.
 const UPLOAD_CONTENT_TYPE: &str = "application/octet-stream";
 
-/// One sign-in to a JMAP account, while Zmail moves from `jmap-client`
-/// to its own JMAP library, `jmap-wire`, step by step (ADR 0008, #132).
+/// One sign-in to a JMAP account: a `jmap-wire` client (ADR 0008) and
+/// the account Zmail works in.
 ///
-/// It holds both clients over one session: `jmap-client` fetches it, and
-/// the `jmap-wire` client is given the same session, with the same
-/// credentials, the same-host redirect rule and the same timeout.
-/// Every API call and every blob goes through `jmap-wire`: identities,
-/// submission and destroying emails ([`Connection::send_first`]), the
-/// reads, keyword and mailbox changes and `Email/import`
-/// ([`Connection::call`]), the Sent copy's upload
-/// ([`Connection::upload`]) and attachment downloads
-/// ([`Connection::download`]). Only push still calls `jmap-client`,
-/// which a `Connection` dereferences to, and the session fetch at
-/// sign-in.
+/// Every API call and every blob goes through it: identities, submission
+/// and destroying emails ([`Connection::send_first`]), the reads, keyword
+/// and mailbox changes and `Email/import` ([`Connection::call`]), the Sent
+/// copy's upload ([`Connection::upload`]), attachment downloads
+/// ([`Connection::download`]) and both push transports (`push.rs`).
 pub(crate) struct Connection {
-    legacy: Client,
     wire: jmap_wire::Client<jmap_wire::ReqwestTransport>,
-}
-
-impl std::ops::Deref for Connection {
-    type Target = Client;
-
-    fn deref(&self) -> &Client {
-        &self.legacy
-    }
+    account_id: String,
+    credentials: jmap_wire::Credentials,
 }
 
 impl Connection {
-    /// The account every call is made in: the one `jmap-client` uses, so
-    /// that the calls on either client act on the same account.
+    /// The account every call is made in: see [`mail_account`].
     pub(crate) fn account_id(&self) -> &str {
-        self.legacy.default_account_id()
+        &self.account_id
     }
 
-    /// The session as `jmap-wire` holds it, for the limits it states.
+    /// The session, for the limits and the push transports it states.
     pub(crate) fn wire_session(&self) -> &jmap_wire::Session {
         self.wire.session()
+    }
+
+    /// The client itself, for the WebSocket.
+    pub(crate) fn wire(&self) -> &jmap_wire::Client<jmap_wire::ReqwestTransport> {
+        &self.wire
+    }
+
+    /// A client over the same session and connection pool for the event
+    /// source, whose redirects are followed on the event source's own
+    /// host only (the session may put it on another host than its own),
+    /// as they always were.
+    pub(crate) fn event_source_client(
+        &self,
+    ) -> jmap_wire::Result<jmap_wire::Client<jmap_wire::ReqwestTransport>> {
+        jmap_wire::Client::builder()
+            .credentials(self.credentials.clone())
+            .redirect_policy(jmap_wire::RedirectPolicy::same_host())
+            .timeout(REQUEST_TIMEOUT)
+            .with_session(
+                self.wire.transport().clone(),
+                self.wire.session_url().clone(),
+                self.wire.session().clone(),
+            )
     }
 
     /// Sends one typed call in a request of its own and returns its
@@ -1264,8 +1167,8 @@ impl Connection {
     /// Downloads an attachment's blob (RFC 8620 section 6.2), within
     /// [`BLOB_TIMEOUT`] and never reading more than
     /// [`MAX_ATTACHMENT_BYTES`]: a larger answer is an error, not held
-    /// in memory. The name and type in the URL are the placeholders
-    /// `jmap-client` sent; they only label the server's answer.
+    /// in memory. The name in the URL is a placeholder; it only labels
+    /// the server's answer.
     pub(crate) async fn download(&self, blob_id: &str) -> jmap_wire::Result<Vec<u8>> {
         let download = BlobDownload::new(self.account_id(), blob_id)
             .name("none")
@@ -1288,18 +1191,61 @@ impl Connection {
     }
 }
 
-/// The `jmap-wire` credentials for the target's auth kind: HTTP Basic
-/// for a password, the bearer access token for OAuth2.
-fn wire_credentials(
-    auth: AuthKind,
-    username: &str,
-    secret: &str,
-) -> Result<jmap_wire::Credentials> {
+/// The credentials for the target's auth kind: HTTP Basic for a
+/// password, the bearer access token for OAuth2 (RFC 6750).
+fn credentials(auth: AuthKind, username: &str, secret: &str) -> Result<jmap_wire::Credentials> {
     match auth {
         AuthKind::Password => Ok(jmap_wire::Credentials::basic(username, secret)),
-        AuthKind::OAuth2 => Ok(jmap_wire::Credentials::bearer(secret)),
+        AuthKind::OAuth2 => {
+            let credentials = jmap_wire::Credentials::bearer(secret);
+            // A token that is empty or has a line break or another
+            // control character in it cannot be a header value.
+            // `jmap-wire` refuses it before every request; said here, it
+            // is said before anything is sent, and in words that tell
+            // the user what to do.
+            if credentials.check().is_err() {
+                bail!(
+                    "the OAuth access token contains characters that cannot be sent to the \
+                     server; sign in to the account again"
+                );
+            }
+            Ok(credentials)
+        }
         AuthKind::ProtonSession => bail!("Proton accounts do not sign in over JMAP"),
     }
+}
+
+/// The account Zmail works in: the session's primary account for mail
+/// (`primaryAccounts["urn:ietf:params:jmap:mail"]`, RFC 8620 section 2).
+///
+/// Everything happens in that one account, sending included: an
+/// `EmailSubmission` names the email to send and the identity to send
+/// it as by ids of its own account (RFC 8621 section 7), and the email
+/// is the Sent copy Zmail has just imported into the mail account. So
+/// identities are read from the mail account too, not from the primary
+/// account for submission, should a server name another.
+///
+/// A session that names no primary account for mail (RFC 8620 lets a
+/// server leave it out when none of the accounts is the user's own)
+/// falls back to an account that can hold mail: a personal one before a
+/// shared one, then the lowest id. One with no such account cannot be
+/// used for mail at all.
+fn mail_account(session: &jmap_wire::Session) -> Result<String> {
+    if let Some(primary) = session.primary_account(jmap_wire::capability::MAIL) {
+        return Ok(primary.to_owned());
+    }
+    let holds_mail = |account: &jmap_wire::Account| {
+        account
+            .account_capabilities
+            .contains_key(jmap_wire::capability::MAIL)
+    };
+    session
+        .accounts
+        .iter()
+        .filter(|(_, account)| holds_mail(account))
+        .min_by_key(|(id, account)| (!account.is_personal, id.as_str()))
+        .map(|(id, _)| id.clone())
+        .ok_or_else(|| anyhow!("the JMAP server offers this user no account with mail"))
 }
 
 pub(crate) async fn connect_client(
@@ -1308,37 +1254,32 @@ pub(crate) async fn connect_client(
     secret: &str,
     auth: AuthKind,
 ) -> Result<Connection> {
-    let credentials = jmap_credentials(auth, username, secret)?;
-    let wire_credentials = wire_credentials(auth, username, secret)?;
-    let session = session_url(endpoint).await?;
-    let mut client_builder = Client::new().credentials(credentials);
+    let credentials = credentials(auth, username, secret)?;
+    let transport = jmap_wire::ReqwestTransport::new()
+        .map_err(|error| anyhow!("failed to set up the JMAP connection: {error}"))?;
+    let session = session_url(&transport, endpoint).await?;
     // Same-host redirects only: a session or API URL that moves to another
     // host would take the credentials with it.
-    let mut redirects = jmap_wire::RedirectPolicy::none();
-    if let Some(host) = session.host_str() {
-        client_builder = client_builder.follow_redirects([host.to_owned()]);
-        redirects = jmap_wire::RedirectPolicy::hosts([host]);
-    }
-
-    let legacy = client_builder
-        .connect(&jmap_client_url(&session))
+    let redirects = match session.host_str() {
+        Some(host) => jmap_wire::RedirectPolicy::hosts([host]),
+        None => jmap_wire::RedirectPolicy::none(),
+    };
+    let wire = jmap_wire::Client::builder()
+        .credentials(credentials.clone())
+        .redirect_policy(redirects)
+        .timeout(REQUEST_TIMEOUT)
+        .blob_timeout(BLOB_TIMEOUT)
+        .connect_with(transport, session)
         .await
+        .map_err(wording::reported)
         .with_context(|| format!("failed to connect to the JMAP endpoint {endpoint}"))?;
-    // One session fetch for both clients: `jmap-wire` is handed the one
-    // `jmap-client` just read.
-    let wire = serde_json::to_value(&*legacy.session())
-        .and_then(serde_json::from_value::<jmap_wire::Session>)
-        .map_err(anyhow::Error::from)
-        .and_then(|wire_session| {
-            Ok(jmap_wire::Client::builder()
-                .credentials(wire_credentials)
-                .redirect_policy(redirects)
-                .timeout(REQUEST_TIMEOUT)
-                .blob_timeout(BLOB_TIMEOUT)
-                .with_session(jmap_wire::ReqwestTransport::new()?, session, wire_session)?)
-        })
+    let account_id = mail_account(wire.session())
         .with_context(|| format!("failed to connect to the JMAP endpoint {endpoint}"))?;
-    Ok(Connection { legacy, wire })
+    Ok(Connection {
+        wire,
+        account_id,
+        credentials,
+    })
 }
 
 /// Fetches the JMAP session at `endpoint` with the credentials: the
@@ -2202,30 +2143,123 @@ fn timestamp_to_rfc3339(timestamp: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        JmapCheckpoint, JmapEmail, JmapMailbox, extract_renderable_bodies, format_jmap_addresses,
-        group_mailboxes, jmap_credentials, raw_html_body, sanitize_component, timestamp_to_rfc3339,
+        JmapCheckpoint, JmapEmail, JmapMailbox, credentials, extract_renderable_bodies,
+        format_jmap_addresses, group_mailboxes, mail_account, raw_html_body, sanitize_component,
+        timestamp_to_rfc3339,
     };
     use serde_json::json;
     use zmail_core::{AuthKind, threading::MessageHeaders};
 
     #[test]
-    fn jmap_credentials_follow_the_auth_kind() {
-        assert_eq!(
-            jmap_credentials(AuthKind::Password, "user@example.test", "app-password")
-                .expect("password credentials"),
-            jmap_client::client::Credentials::basic("user@example.test", "app-password"),
+    fn credentials_follow_the_auth_kind() {
+        assert!(
+            matches!(
+                credentials(AuthKind::Password, "user@example.test", "app-password"),
+                Ok(jmap_wire::Credentials::Basic { username, password })
+                    if username == "user@example.test" && password == "app-password"
+            ),
             "password accounts authenticate with HTTP Basic"
         );
-        assert_eq!(
-            jmap_credentials(AuthKind::OAuth2, "user@example.test", "access-token")
-                .expect("bearer credentials"),
-            jmap_client::client::Credentials::bearer("access-token"),
+        assert!(
+            matches!(
+                credentials(AuthKind::OAuth2, "user@example.test", "access-token"),
+                Ok(jmap_wire::Credentials::Bearer(token)) if token == "access-token"
+            ),
             "OAuth2 accounts authenticate with a bearer token"
         );
+        // A token that cannot be a header value is refused here, in
+        // words for the user, before anything is sent.
+        for token in ["token\r\nX-Evil: 1", "tok\u{7f}en", "tok\u{e9}n", ""] {
+            let error = credentials(AuthKind::OAuth2, "user@example.test", token)
+                .expect_err("not a header value");
+            assert!(error.to_string().contains("sign in to the account again"));
+        }
         assert!(
-            jmap_credentials(AuthKind::ProtonSession, "user@example.test", "").is_err(),
+            credentials(AuthKind::ProtonSession, "user@example.test", "").is_err(),
             "Proton sessions never reach JMAP"
         );
+    }
+
+    /// A session with these accounts (id, personal, holds mail) and
+    /// primary accounts.
+    fn session_with(
+        accounts: &[(&str, bool, bool)],
+        primary: serde_json::Value,
+    ) -> jmap_wire::Session {
+        let accounts = accounts
+            .iter()
+            .map(|(id, personal, mail)| {
+                let capabilities = if *mail {
+                    json!({"urn:ietf:params:jmap:mail": {}})
+                } else {
+                    json!({"urn:ietf:params:jmap:contacts": {}})
+                };
+                (
+                    (*id).to_owned(),
+                    json!({"isPersonal": personal, "accountCapabilities": capabilities}),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        serde_json::from_value(json!({
+            "apiUrl": "/api", "accounts": accounts, "primaryAccounts": primary
+        }))
+        .expect("a session")
+    }
+
+    #[test]
+    fn the_account_is_the_primary_one_for_mail() {
+        let mail = "urn:ietf:params:jmap:mail";
+        let submission = "urn:ietf:params:jmap:submission";
+        let contacts = "urn:ietf:params:jmap:contacts";
+        let both = [("a1", true, true), ("a2", true, true)];
+        let account = |session: &jmap_wire::Session| mail_account(session).ok();
+
+        assert_eq!(
+            account(&session_with(&both, json!({mail: "a2", submission: "a2"}))).as_deref(),
+            Some("a2")
+        );
+        // Mail's primary account, whatever submission's or another
+        // capability's is: everything, sending included, happens there.
+        assert_eq!(
+            account(&session_with(&both, json!({mail: "a1", submission: "a2"}))).as_deref(),
+            Some("a1")
+        );
+        assert_eq!(
+            account(&session_with(
+                &both,
+                json!({contacts: "a2", mail: "a1", "urn:ietf:params:jmap:quota": "a2"})
+            ))
+            .as_deref(),
+            Some("a1")
+        );
+        // No primary account for mail: an account that holds mail, a
+        // personal one first, never one that only holds something else.
+        assert_eq!(
+            account(&session_with(
+                &[("a1", true, false), ("a2", false, true), ("a3", true, true)],
+                json!({contacts: "a1"})
+            ))
+            .as_deref(),
+            Some("a3")
+        );
+        assert_eq!(
+            account(&session_with(
+                &[("b", false, true), ("a", false, true)],
+                json!({})
+            ))
+            .as_deref(),
+            Some("a")
+        );
+        let error = mail_account(&session_with(
+            &[("a1", true, false)],
+            json!({contacts: "a1"}),
+        ))
+        .expect_err("no account holds mail");
+        assert_eq!(
+            error.to_string(),
+            "the JMAP server offers this user no account with mail"
+        );
+        assert!(mail_account(&session_with(&[], json!({}))).is_err());
     }
 
     #[test]
@@ -2383,8 +2417,8 @@ mod tests {
 
     #[test]
     fn submission_identities_are_read_from_plain_json() {
-        // Shaped like Apache James's answer, whose extra and null members
-        // jmap-client's typed response refused.
+        // Shaped like Apache James's answer, with its extra and null
+        // members.
         let response = json!(["Identity/get", {
             "accountId": "a1",
             "state": null,
@@ -2735,10 +2769,16 @@ mod submission_tests;
 mod session_tests;
 
 #[cfg(test)]
-mod wire_parity_tests;
-
-#[cfg(test)]
 mod read_characterisation_tests;
 
 #[cfg(test)]
 mod write_characterisation_tests;
+
+#[cfg(test)]
+mod push_characterisation_tests;
+
+#[cfg(test)]
+mod sign_in_characterisation_tests;
+
+#[cfg(test)]
+mod request_shape_tests;

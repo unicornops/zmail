@@ -1,0 +1,19 @@
+# a redirect on the same host (EventSource)
+  sent: GET /.well-known/jmap [accept: application/json]
+  sent: GET /.well-known/jmap [accept: application/json; accept-encoding: gzip; authorization: yes; user-agent: jmap-wire/0.1.0]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-wire/0.1.0]
+  sent: GET /events-moved?types=Email [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-wire/0.1.0]
+  event: Connected(EventSource)
+  end: Closed(EventSource)
+# a redirect to another host (Auto)
+  sent: GET /.well-known/jmap [accept: application/json]
+  sent: GET /.well-known/jmap [accept: application/json; accept-encoding: gzip; authorization: yes; user-agent: jmap-wire/0.1.0]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-wire/0.1.0]
+  end: Unsupported
+  the other host received: []
+# a redirect to another host (EventSource)
+  sent: GET /.well-known/jmap [accept: application/json]
+  sent: GET /.well-known/jmap [accept: application/json; accept-encoding: gzip; authorization: yes; user-agent: jmap-wire/0.1.0]
+  sent: GET /events?types=Email,Mailbox&closeafter=no&ping=1 [accept: text/event-stream; authorization: yes; cache-control: no-cache; user-agent: jmap-wire/0.1.0]
+  error: failed to open the JMAP event source: the JMAP server redirected to http://other/events, which was refused: the redirect policy does not allow it
+  the other host received: []

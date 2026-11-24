@@ -1,6 +1,7 @@
 //! The client: a session, and requests sent to its API endpoint.
 
 use std::{
+    future::Future,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
@@ -16,8 +17,8 @@ use crate::{
     response::Response,
     session::Session,
     transport::{
-        HttpMethod, HttpRequest, HttpResponse, HttpTransport, RedirectAttempt, RedirectPolicy,
-        without_query,
+        BodyStream, HttpMethod, HttpRequest, HttpResponse, HttpTransport, RedirectAttempt,
+        RedirectPolicy, StreamRequest, StreamResponse, StreamingTransport, without_query,
     },
 };
 
@@ -61,13 +62,13 @@ pub const DEFAULT_USER_AGENT: &str = concat!("jmap-wire/", env!("CARGO_PKG_VERSI
 /// Everything a client is set up with but its transport and session.
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
-    credentials: Credentials,
+    pub(crate) credentials: Credentials,
     redirects: RedirectPolicy,
     pub(crate) timeout: Duration,
-    max_response_bytes: usize,
+    pub(crate) max_response_bytes: usize,
     pub(crate) blob_timeout: Duration,
     pub(crate) max_download_bytes: usize,
-    user_agent: Option<String>,
+    pub(crate) user_agent: Option<String>,
 }
 
 /// Sets a [`Client`] up: credentials, redirect policy, timeout and
@@ -275,7 +276,11 @@ impl<T: HttpTransport> Client<T> {
     }
 
     /// The id of the user's primary account for a capability, or
-    /// [`Error::Session`] when the session names none.
+    /// [`Error::Session`] when the session names none. This is how an
+    /// account is chosen (see [`Session::primary_account`]): ask for
+    /// the capability whose methods you are about to call, and pass the
+    /// id to them. Any other account of the session can be passed
+    /// instead.
     pub fn primary_account(&self, capability: &str) -> Result<&str, Error> {
         self.session
             .primary_account(capability)
@@ -463,6 +468,8 @@ pub(crate) struct Exchange<'a> {
     /// Refuse an answer in a content encoding the client cannot undo,
     /// instead of handing its bytes on as if they were the content.
     pub(crate) exact_content: bool,
+    /// Headers beside the ones every exchange has, names in lower case.
+    pub(crate) extra_headers: Vec<(String, String)>,
 }
 
 impl Exchange<'static> {
@@ -485,8 +492,43 @@ impl Exchange<'static> {
             max_response_bytes,
             redirects_without_credentials: false,
             exact_content: false,
+            extra_headers: Vec::new(),
         }
     }
+}
+
+/// What the redirect, 401 and credential rules are decided on: the
+/// status and the headers of a response, whether its body is at hand
+/// or still to read.
+trait Head {
+    fn status(&self) -> u16;
+    fn header(&self, name: &str) -> Option<&str>;
+}
+
+impl Head for HttpResponse {
+    fn status(&self) -> u16 {
+        self.status
+    }
+
+    fn header(&self, name: &str) -> Option<&str> {
+        HttpResponse::header(self, name)
+    }
+}
+
+impl<B> Head for StreamResponse<B> {
+    fn status(&self) -> u16 {
+        self.status
+    }
+
+    fn header(&self, name: &str) -> Option<&str> {
+        StreamResponse::header(self, name)
+    }
+}
+
+/// One hop of an exchange: where it goes and the headers it carries.
+struct Hop {
+    url: Url,
+    headers: Vec<(String, String)>,
 }
 
 /// One authenticated exchange with its redirects: the response that is
@@ -496,6 +538,104 @@ pub(crate) async fn exchange<T: HttpTransport>(
     config: &Config,
     exchange: Exchange<'_>,
 ) -> Result<(HttpResponse, Url), Error> {
+    let (response, url) = negotiate(config, &exchange, |hop| {
+        transport.execute(HttpRequest {
+            method: exchange.method,
+            url: hop.url,
+            headers: hop.headers,
+            body: exchange.body.clone(),
+            timeout: exchange.timeout,
+            max_response_bytes: exchange.max_response_bytes,
+        })
+    })
+    .await?;
+    #[cfg(feature = "gzip")]
+    let response = gzip::decoded(response, exchange.max_response_bytes)?;
+    if exchange.exact_content {
+        refuse_encoded(response.header("content-encoding"))?;
+    }
+    Ok((response, url))
+}
+
+/// As [`exchange`], for a response that is read as it arrives: the
+/// same redirects, the same 401 retry and the same rule for who sees
+/// the credentials decide which response it is, on its status and
+/// headers alone, and its body is handed over unread. The exchange's
+/// `timeout` is for the response to begin; its size limit and gzip do
+/// not apply, and a body in a content encoding is refused.
+pub(crate) async fn open<T: StreamingTransport>(
+    transport: &T,
+    config: &Config,
+    exchange: Exchange<'_>,
+) -> Result<(StreamResponse<T::Body>, Url), Error> {
+    let (response, url) = negotiate(config, &exchange, |hop| {
+        transport.open(StreamRequest {
+            method: exchange.method,
+            url: hop.url,
+            headers: hop.headers,
+            body: exchange.body.clone(),
+            response_timeout: exchange.timeout,
+        })
+    })
+    .await?;
+    let encoded = response
+        .header("content-encoding")
+        .map(str::trim)
+        .is_some_and(|encoding| !encoding.is_empty() && !encoding.eq_ignore_ascii_case("identity"));
+    if encoded && (200..300).contains(&response.status) {
+        return Err(TransportError::new(
+            crate::error::TransportErrorKind::Other,
+            "the response is in a content encoding, which a streamed response cannot be read in",
+        )
+        .into());
+    }
+    Ok((response, url))
+}
+
+/// The most of an error response's body that is read to find problem
+/// details in it.
+const MAX_REFUSAL_BYTES: usize = 64 * 1024;
+
+/// The streamed response when its status is a success; otherwise the
+/// error it stands for, as [`success`] gives it, read from the start of
+/// its body.
+pub(crate) async fn stream_success<B: BodyStream>(
+    mut response: StreamResponse<B>,
+    idle: Duration,
+) -> Result<StreamResponse<B>, Error> {
+    if (200..300).contains(&response.status) {
+        return Ok(response);
+    }
+    let mut body = Vec::new();
+    // What cannot be read of the body costs the detail, not the status.
+    while body.len() < MAX_REFUSAL_BYTES
+        && let Ok(Some(chunk)) = response.body.chunk(Some(idle)).await
+    {
+        body.extend_from_slice(&chunk);
+    }
+    body.truncate(MAX_REFUSAL_BYTES);
+    match success(HttpResponse::new(response.status, response.headers, body)) {
+        Err(error) => Err(error),
+        Ok(response) => Err(Error::Http {
+            status: response.status,
+        }),
+    }
+}
+
+/// The hops of one exchange: sends it with `send`, again with a fresh
+/// token after a 401 when the credentials can refresh, and again to
+/// wherever an allowed redirect leads, and returns the first response
+/// that is neither with the URL that gave it.
+async fn negotiate<R, F, Fut>(
+    config: &Config,
+    exchange: &Exchange<'_>,
+    send: F,
+) -> Result<(R, Url), Error>
+where
+    R: Head,
+    F: Fn(Hop) -> Fut,
+    Fut: Future<Output = Result<R, TransportError>>,
+{
     let origin = exchange.url.clone();
     let method = exchange.method;
     let mut url = origin.clone();
@@ -512,6 +652,7 @@ pub(crate) async fn exchange<T: HttpTransport>(
         if exchange.accept_gzip {
             headers.push(("accept-encoding".to_owned(), "gzip".to_owned()));
         }
+        headers.extend(exchange.extra_headers.iter().cloned());
         if let Some(user_agent) = &config.user_agent {
             headers.push(("user-agent".to_owned(), user_agent.clone()));
         }
@@ -519,20 +660,15 @@ pub(crate) async fn exchange<T: HttpTransport>(
         {
             headers.push(("authorization".to_owned(), authorization));
         }
-        let response = transport
-            .execute(HttpRequest {
-                method,
-                url: url.clone(),
-                headers,
-                body: exchange.body.clone(),
-                timeout: exchange.timeout,
-                max_response_bytes: exchange.max_response_bytes,
-            })
-            .await?;
+        let response = send(Hop {
+            url: url.clone(),
+            headers,
+        })
+        .await?;
 
         // A token the server no longer takes: one fresh one, one more
         // attempt.
-        if response.status == 401
+        if response.status() == 401
             && credentialed
             && token == TokenRequest::Current
             && config.credentials.can_refresh()
@@ -541,12 +677,7 @@ pub(crate) async fn exchange<T: HttpTransport>(
             continue;
         }
 
-        if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
-            #[cfg(feature = "gzip")]
-            let response = gzip::decoded(response, exchange.max_response_bytes)?;
-            if exchange.exact_content {
-                refuse_encoded(&response)?;
-            }
+        if !matches!(response.status(), 301 | 302 | 303 | 307 | 308) {
             return Ok((response, url));
         }
         let refuse = |to: &Url, reason| Error::Redirect {
@@ -557,7 +688,7 @@ pub(crate) async fn exchange<T: HttpTransport>(
             .header("location")
             .ok_or_else(|| refuse(&url, RedirectRefusal::BadLocation))?;
         let next = crate::discovery::next_hop(&url, location)?;
-        if method == HttpMethod::Post && !matches!(response.status, 307 | 308) {
+        if method == HttpMethod::Post && !matches!(response.status(), 307 | 308) {
             return Err(refuse(&next, RedirectRefusal::MethodChange));
         }
         redirects += 1;
@@ -585,9 +716,8 @@ pub(crate) async fn exchange<T: HttpTransport>(
 /// An error for a response whose body is still in a content encoding:
 /// one that is not gzip, or gzip without the `gzip` feature. Its bytes
 /// are not the content.
-fn refuse_encoded(response: &HttpResponse) -> Result<(), TransportError> {
-    let Some(encoding) = response
-        .header("content-encoding")
+fn refuse_encoded(content_encoding: Option<&str>) -> Result<(), TransportError> {
+    let Some(encoding) = content_encoding
         .map(str::trim)
         .filter(|encoding| !encoding.is_empty() && !encoding.eq_ignore_ascii_case("identity"))
     else {

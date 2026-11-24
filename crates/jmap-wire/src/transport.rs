@@ -1,6 +1,8 @@
 //! The HTTP layer, as small as the client needs it: one exchange at a
-//! time ([`HttpTransport`]), and the rule for following redirects
-//! ([`RedirectPolicy`]), which the client applies itself.
+//! time ([`HttpTransport`]), a response read as it arrives for
+//! transports that can ([`StreamingTransport`]), and the rule for
+//! following redirects ([`RedirectPolicy`]), which the client applies
+//! itself.
 
 use std::{collections::BTreeSet, fmt, future::Future, sync::Arc, time::Duration};
 
@@ -116,22 +118,12 @@ impl HttpResponse {
 
     /// The first header called `name`, whatever its case.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(header, _)| header.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        header(&self.headers, name)
     }
 
     /// Whether the content type is `media_type`, parameters aside.
     pub(crate) fn is(&self, media_type: &str) -> bool {
-        self.header("content-type").is_some_and(|value| {
-            value
-                .split(';')
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .eq_ignore_ascii_case(media_type)
-        })
+        is_media_type(self.header("content-type"), media_type)
     }
 }
 
@@ -170,6 +162,183 @@ impl<T: HttpTransport + ?Sized> HttpTransport for Arc<T> {
         request: HttpRequest,
     ) -> impl Future<Output = Result<HttpResponse, TransportError>> + Send {
         (**self).execute(request)
+    }
+}
+
+/// One HTTP request whose response is read as it arrives, for a
+/// [`StreamingTransport`]: the event source (RFC 8620 section 7.3), or
+/// a blob too large to hold.
+///
+/// It differs from [`HttpRequest`] in its limits. A response that never
+/// ends has no total timeout and no size limit; what bounds it is how
+/// long the server may take to begin answering (`response_timeout`) and
+/// how long it may then stay silent (the `idle` of
+/// [`BodyStream::chunk`]).
+///
+/// `Debug` prints header names without their values, and the URL
+/// without its query string, as either may carry secrets.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct StreamRequest {
+    /// The method.
+    pub method: HttpMethod,
+    /// The URL: always `http` or `https`.
+    pub url: Url,
+    /// The headers, names in lower case. `authorization` is among them
+    /// when the client has credentials.
+    pub headers: Vec<(String, String)>,
+    /// The body; empty for a GET.
+    pub body: Vec<u8>,
+    /// How long connecting and waiting for the status and the headers
+    /// may take. The body is not under it.
+    pub response_timeout: Duration,
+}
+
+impl StreamRequest {
+    /// A request to `url` with no headers and no body, and the default
+    /// timeout ([`DEFAULT_TIMEOUT`](crate::DEFAULT_TIMEOUT)) for the
+    /// response to begin.
+    pub fn new(method: HttpMethod, url: Url) -> Self {
+        Self {
+            method,
+            url,
+            headers: Vec::new(),
+            body: Vec::new(),
+            response_timeout: crate::DEFAULT_TIMEOUT,
+        }
+    }
+}
+
+impl fmt::Debug for StreamRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamRequest")
+            .field("method", &self.method)
+            .field("url", &without_query(&self.url))
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+            )
+            .field("body", &format_args!("{} bytes", self.body.len()))
+            .field("response_timeout", &self.response_timeout)
+            .finish()
+    }
+}
+
+/// The status and headers of a response, and its body still to read.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct StreamResponse<B> {
+    /// The status code.
+    pub status: u16,
+    /// The headers. Names are matched without regard to case.
+    pub headers: Vec<(String, String)>,
+    /// The body, read with [`BodyStream::chunk`]. Dropping it closes
+    /// the connection.
+    pub body: B,
+}
+
+impl<B> StreamResponse<B> {
+    /// A response.
+    pub fn new(status: u16, headers: Vec<(String, String)>, body: B) -> Self {
+        Self {
+            status,
+            headers,
+            body,
+        }
+    }
+
+    /// The first header called `name`, whatever its case.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        header(&self.headers, name)
+    }
+}
+
+/// The first header called `name`, whatever its case.
+pub(crate) fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+/// Whether a `Content-Type` value is `media_type`, parameters aside.
+pub(crate) fn is_media_type(content_type: Option<&str>, media_type: &str) -> bool {
+    content_type.is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .eq_ignore_ascii_case(media_type)
+    })
+}
+
+/// A response body read piece by piece.
+pub trait BodyStream: Send {
+    /// The next piece of the body, as the HTTP library hands it over
+    /// (never the whole of a long body at once), or `None` at its end.
+    ///
+    /// `idle` is how long to wait for it: when nothing arrives in that
+    /// time the stream fails with a
+    /// [`Timeout`](crate::TransportErrorKind::Timeout) error, and
+    /// `None` waits without limit. A body that ends before its length
+    /// or its last chunk is an error, not an end.
+    ///
+    /// The future may be dropped before it is done; the next call then
+    /// carries on with nothing lost.
+    fn chunk(
+        &mut self,
+        idle: Option<Duration>,
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, TransportError>> + Send;
+}
+
+/// An [`HttpTransport`] that can also hand a response over as it
+/// arrives: what the event source ([`Client::event_source`]) and
+/// streamed blob downloads ([`Client::download_stream`]) need. A
+/// transport that cannot is still a transport for everything else.
+///
+/// The rules of [`HttpTransport`] hold here too: no redirects followed,
+/// no headers that identify the user, nothing logged. The response is
+/// not decompressed.
+///
+/// [`Client::event_source`]: crate::Client::event_source
+/// [`Client::download_stream`]: crate::Client::download_stream
+pub trait StreamingTransport: HttpTransport {
+    /// The body of a response this transport opened.
+    type Body: BodyStream;
+
+    /// Sends `request` and returns as soon as the status and headers
+    /// are in, within the request's `response_timeout`. An HTTP error
+    /// status is a response, not an error.
+    fn open(
+        &self,
+        request: StreamRequest,
+    ) -> impl Future<Output = Result<StreamResponse<Self::Body>, TransportError>> + Send;
+}
+
+impl<T: StreamingTransport + ?Sized> StreamingTransport for &T {
+    type Body = T::Body;
+
+    fn open(
+        &self,
+        request: StreamRequest,
+    ) -> impl Future<Output = Result<StreamResponse<Self::Body>, TransportError>> + Send {
+        (**self).open(request)
+    }
+}
+
+impl<T: StreamingTransport + ?Sized> StreamingTransport for Arc<T> {
+    type Body = T::Body;
+
+    fn open(
+        &self,
+        request: StreamRequest,
+    ) -> impl Future<Output = Result<StreamResponse<Self::Body>, TransportError>> + Send {
+        (**self).open(request)
     }
 }
 

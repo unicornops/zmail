@@ -1,0 +1,26 @@
+# no WebSocket capability (WebSocket)
+  sent: GET /.well-known/jmap [accept: application/json]
+  sent: GET /.well-known/jmap [accept: application/json; accept-encoding: gzip; authorization: yes; user-agent: jmap-wire/0.1.0]
+  error: the JMAP server does not offer WebSocket push
+# a WebSocket without push (WebSocket)
+  sent: GET /.well-known/jmap [accept: application/json]
+  sent: GET /.well-known/jmap [accept: application/json; accept-encoding: gzip; authorization: yes; user-agent: jmap-wire/0.1.0]
+  error: the JMAP server does not offer WebSocket push
+# a handshake refused (401) (WebSocket)
+  sent: GET /.well-known/jmap [accept: application/json]
+  sent: GET /.well-known/jmap [accept: application/json; accept-encoding: gzip; authorization: yes; user-agent: jmap-wire/0.1.0]
+  sent: GET /ws [authorization: yes; sec-websocket-protocol: jmap; user-agent: jmap-wire/0.1.0]
+  error: failed to open the JMAP WebSocket: Server failed: 401 Unauthorized
+# a handshake refused (404) (WebSocket)
+  sent: GET /.well-known/jmap [accept: application/json]
+  sent: GET /.well-known/jmap [accept: application/json; accept-encoding: gzip; authorization: yes; user-agent: jmap-wire/0.1.0]
+  sent: GET /ws [authorization: yes; sec-websocket-protocol: jmap; user-agent: jmap-wire/0.1.0]
+  error: failed to open the JMAP WebSocket: Server failed: 404 Not Found
+# a server that never answers (WebSocket)
+  sent: GET /.well-known/jmap [accept: application/json]
+  sent: GET /.well-known/jmap [accept: application/json; accept-encoding: gzip; authorization: yes; user-agent: jmap-wire/0.1.0]
+  sent: GET /ws [authorization: yes; sec-websocket-protocol: jmap; user-agent: jmap-wire/0.1.0]
+  sent: ws: {"@type":"Request","id":"r0","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  sent: ws: {"@type":"Request","id":"r1","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  sent: ws: {"@type":"Request","id":"r2","methodCalls":[["Mailbox/get",{"accountId":"a1","ids":[]},"c0"]],"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}
+  error: the JMAP WebSocket never answered a request

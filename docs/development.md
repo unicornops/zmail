@@ -15,7 +15,7 @@ Building Zmail from source, testing it, and where the design documents are. Most
   - [ADR 0005](./adr/0005-store-encryption.md): encryption of the local store at rest
   - [ADR 0006](./adr/0006-html-email-renderer.md): rendering HTML mail safely
   - [ADR 0007](./adr/0007-terminal-ui.md): the terminal UI
-  - [ADR 0008](./adr/0008-own-jmap-client-library.md): Zmail's own JMAP client library, `crates/jmap-wire`
+  - [ADR 0008](./adr/0008-own-jmap-client-library.md): Zmail's own JMAP client library, `crates/jmap-wire`, which replaced `jmap-client`; it has its own [README](../crates/jmap-wire/README.md) and is tested alone with `cargo test -p jmap-wire` (also with `--no-default-features` and `--all-features`)
 - [`docs/phase5-hardening.md`](./phase5-hardening.md): accessibility, performance, crash policy, packaging, and release process
 - [`docs/performance.md`](./performance.md): performance budgets, how they are measured, and the latest numbers; [`benches/README.md`](../benches/README.md) has the store benchmarks
 - [`docs/oauth2-live-verification.md`](./oauth2-live-verification.md): checking OAuth2 sign-in against real providers by hand
