@@ -1,0 +1,21 @@
+{
+  "methodResponses": [
+    ["Mailbox/get", {
+      "accountId": "a1",
+      "state": "mb-12",
+      "list": [
+        {"id": "mb-inbox", "name": "Inbox", "parentId": null, "role": "inbox", "sortOrder": 1},
+        {"id": "mb-clients", "name": "Clients", "parentId": null, "role": null, "sortOrder": 10},
+        {"id": "mb-suppliers", "name": "Suppliers", "parentId": null, "role": null, "sortOrder": 10},
+        {"id": "mb-c-invoices", "name": "Invoices", "parentId": "mb-clients", "role": null, "sortOrder": 20},
+        {"id": "mb-s-invoices", "name": "Invoices", "parentId": "mb-suppliers", "role": null, "sortOrder": 20},
+        {"id": "mb-c-acme", "name": "Acme", "parentId": "mb-clients", "role": null, "sortOrder": 30},
+        {"id": "mb-s-acme", "name": "Acme", "parentId": "mb-suppliers", "role": null, "sortOrder": 30},
+        {"id": "mb-c-acme-invoices", "name": "Invoices", "parentId": "mb-c-acme", "role": null, "sortOrder": 40},
+        {"id": "mb-s-acme-invoices", "name": "Invoices", "parentId": "mb-s-acme", "role": null, "sortOrder": 40}
+      ],
+      "notFound": []
+    }, "c0"]
+  ],
+  "sessionState": "s1"
+}

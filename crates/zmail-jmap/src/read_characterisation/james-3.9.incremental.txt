@@ -9,7 +9,9 @@ JmapSync {
                 role: Some(
                     "inbox",
                 ),
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [
                     ThreadSnapshot {
@@ -133,7 +135,9 @@ JmapSync {
                 role: Some(
                     "archive",
                 ),
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [],
             },
@@ -142,7 +146,9 @@ JmapSync {
                 role: Some(
                     "drafts",
                 ),
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [],
             },
@@ -151,7 +157,9 @@ JmapSync {
                 role: Some(
                     "outbox",
                 ),
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [],
             },
@@ -160,7 +168,9 @@ JmapSync {
                 role: Some(
                     "sent",
                 ),
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [],
             },
@@ -169,7 +179,9 @@ JmapSync {
                 role: Some(
                     "trash",
                 ),
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [],
             },
@@ -178,11 +190,14 @@ JmapSync {
                 role: Some(
                     "junk",
                 ),
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [],
             },
         ],
     },
     identities: None,
+    renamed: [],
 }
