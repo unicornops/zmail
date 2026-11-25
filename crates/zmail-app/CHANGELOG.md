@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.1](https://github.com/unicornops/zmail/compare/v0.36.0...v0.36.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **jmap:** store mailboxes by path so same-named folders stay apart ([#524](https://github.com/unicornops/zmail/issues/524)) ([e9df053](https://github.com/unicornops/zmail/commit/e9df05370d2ad7017b9e2bba4590316e3bfe3f61))
+
 ## [0.36.0](https://github.com/unicornops/zmail/compare/v0.35.0...v0.36.0) (2026-11-24)
 
 
