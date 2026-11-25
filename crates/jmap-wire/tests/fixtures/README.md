@@ -61,7 +61,11 @@ incremental sync is replayed too.
   unknown data type and a vendor property, WebSocket messages without
   an `@type`, and an event stream (`eventsource.stream.txt`) with a
   comment, pings, ids, a `retry`, an event without a type, data on two
-  lines and both line endings.
+  lines and both line endings. `mailbox-get.same-names.json` has
+  mailboxes of one name under different parents, two and three levels
+  down (RFC 8621 section 2 asks only that siblings' names differ), and
+  `email-get.same-names.json` an email in each; Zmail's mailbox tests
+  (`crates/zmail-jmap/src/mailbox_identity_tests.rs`, #512) replay them.
 
 ## Adding a server
 

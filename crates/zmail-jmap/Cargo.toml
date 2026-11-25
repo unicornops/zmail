@@ -25,6 +25,8 @@ zmail-smtp = { path = "../zmail-smtp" }
 futures-util.workspace = true
 # The loopback WebSocket server of the push tests.
 tokio-tungstenite.workspace = true
+# The mailbox tests (#512) write a sync into a real local store.
+zmail-store = { path = "../zmail-store" }
 
 [lints]
 workspace = true

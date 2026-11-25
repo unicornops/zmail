@@ -47,6 +47,7 @@ fn mailbox(id: &str, name: &str, role: &str) -> crate::JmapMailbox {
     crate::JmapMailbox {
         id: id.to_owned(),
         name: name.to_owned(),
+        own_name: name.to_owned(),
         role: Some(role.to_owned()),
         sort_order: 0,
         parent: None,

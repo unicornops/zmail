@@ -10534,6 +10534,7 @@ dependencies = [
  "zmail-core",
  "zmail-security",
  "zmail-smtp",
+ "zmail-store",
 ]
 
 [[package]]

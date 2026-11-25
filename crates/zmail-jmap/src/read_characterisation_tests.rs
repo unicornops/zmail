@@ -73,8 +73,8 @@ enum Fault {
 }
 
 #[derive(Default)]
-struct State {
-    mailboxes: Value,
+pub(crate) struct State {
+    pub(crate) mailboxes: Value,
     /// The answer to the full `Email/get` of a sync.
     full: Value,
     /// The answer to the light `Email/get`, when recorded.
@@ -82,25 +82,32 @@ struct State {
     /// Emails the server does not have (yet).
     hidden: BTreeSet<String>,
     /// The answer to `Email/changes`; `cannotCalculateChanges` without.
-    changes: Option<Value>,
+    pub(crate) changes: Option<Value>,
     fault: Option<Fault>,
     /// Every method call, as `[name, arguments]`.
-    calls: Vec<Value>,
+    pub(crate) calls: Vec<Value>,
 }
 
-struct Replay {
+pub(crate) struct Replay {
     endpoint: String,
     state: Arc<Mutex<State>>,
 }
 
 impl Replay {
     fn start(server: &str) -> Self {
+        let light = fixtures().join(server).join("email-get.light.json");
+        let replay = Self::start_with(server, "all", "sync");
+        replay.with_state(|state| state.light = light.exists().then(|| recorded(&light)));
+        replay
+    }
+
+    /// Replays `mailbox-get.<mailboxes>.json` and `email-get.<emails>.json`
+    /// of `server`.
+    pub(crate) fn start_with(server: &str, mailboxes: &str, emails: &str) -> Self {
         let directory = fixtures().join(server);
-        let light = directory.join("email-get.light.json");
         let state = Arc::new(Mutex::new(State {
-            mailboxes: recorded(&directory.join("mailbox-get.all.json")),
-            full: recorded(&directory.join("email-get.sync.json")),
-            light: light.exists().then(|| recorded(&light)),
+            mailboxes: recorded(&directory.join(format!("mailbox-get.{mailboxes}.json"))),
+            full: recorded(&directory.join(format!("email-get.{emails}.json"))),
             ..State::default()
         }));
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
@@ -118,7 +125,7 @@ impl Replay {
         }
     }
 
-    fn with_state<T>(&self, change: impl FnOnce(&mut State) -> T) -> T {
+    pub(crate) fn with_state<T>(&self, change: impl FnOnce(&mut State) -> T) -> T {
         change(&mut self.state.lock().expect("the state"))
     }
 
@@ -145,7 +152,7 @@ impl Replay {
         })
     }
 
-    fn target(&self, checkpoint: Option<String>) -> SyncTarget {
+    pub(crate) fn target(&self, checkpoint: Option<String>) -> SyncTarget {
         SyncTarget {
             id: 1,
             display_name: "Recorded".to_owned(),
@@ -174,7 +181,7 @@ impl Replay {
         format!("{sync:#?}\n").replace(&self.endpoint, "http://server")
     }
 
-    async fn sync(
+    pub(crate) async fn sync(
         &self,
         checkpoint: Option<String>,
         existing: &[MailboxSnapshot],
