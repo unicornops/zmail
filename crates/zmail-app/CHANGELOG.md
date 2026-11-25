@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.0](https://github.com/unicornops/zmail/compare/v0.35.0...v0.36.0) (2026-11-24)
+
+
+### Features
+
+* **jmap:** push and sign-in through jmap-wire, and remove jmap-client (#132) ([#516](https://github.com/unicornops/zmail/issues/516)) ([469a84b](https://github.com/unicornops/zmail/commit/469a84b085ab388b5e086f9047ad8de234e80291))
+
 ## [0.35.0](https://github.com/unicornops/zmail/compare/v0.34.7...v0.35.0) (2026-11-23)
 
 
