@@ -1116,14 +1116,16 @@ pub struct MailboxSummary {
     pub id: i64,
     /// Account that owns the mailbox.
     pub account_id: i64,
-    /// Server name: the full path for IMAP (`Projects/Website`), the
-    /// mailbox's own name for JMAP.
+    /// Server name: the full path (`Projects/Website`). For IMAP it is
+    /// the server's; JMAP and Proton mailboxes are stored under a path of
+    /// their names joined by `/`, as JMAP names are unique only among
+    /// siblings (#512).
     pub name: String,
     /// What the mailbox is for, when the server said or the name made it
     /// clear.
     pub role: Option<MailboxRole>,
-    /// The IMAP hierarchy delimiter (`/` or `.`); `None` for JMAP and for
-    /// servers with a flat namespace.
+    /// The hierarchy delimiter (`/` or `.` for IMAP, `/` for JMAP and
+    /// Proton); `None` for servers with a flat namespace.
     pub delimiter: Option<String>,
     /// Server name of the parent mailbox, if the mailbox is nested. The
     /// parent may not be a stored mailbox itself: IMAP parents that cannot
@@ -1137,7 +1139,7 @@ pub struct MailboxSummary {
 
 impl MailboxSummary {
     /// The name shown for the mailbox in a folder tree: the last segment
-    /// of an IMAP path, or the JMAP name as is.
+    /// of its path.
     pub fn leaf_name(&self) -> &str {
         mailbox_leaf_name(
             &self.name,
@@ -1687,12 +1689,12 @@ pub struct MailboxRename {
 /// Mailbox snapshot written into the local store by a sync adapter.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MailboxSnapshot {
-    /// Server name (the full path for IMAP); the store matches mailboxes
-    /// by it.
+    /// Server name, the full path (JMAP and Proton paths are joined by
+    /// `/`); the store matches mailboxes by it.
     pub name: String,
     /// Server-reported role if known.
     pub role: Option<String>,
-    /// IMAP hierarchy delimiter, if the server has one.
+    /// Hierarchy delimiter of `name`, if it has one.
     pub delimiter: Option<String>,
     /// Server name of the parent mailbox, if nested.
     pub parent: Option<String>,
