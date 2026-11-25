@@ -143,8 +143,8 @@ thiserror = "2.0.21"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = "0.26.4"
 # The WebSocket binding of JMAP (RFC 8887), behind jmap-wire's
-# `tungstenite` feature; TLS by rustls with the system's roots. 0.29 has
-# no webpki-roots 0.26 (RUSTSEC-2026-0381).
+# `tungstenite` feature; TLS by rustls with the system's roots. Since 0.29
+# it has no webpki-roots 0.26 (RUSTSEC-2026-0381).
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 unicode-segmentation = "1.13"
 # Display widths for the terminal UI's truncation and wrapping (ADR 0007);
