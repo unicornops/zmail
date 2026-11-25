@@ -5,6 +5,7 @@
 
 ### Bug Fixes
 
+* **deps:** Bump tokio-tungstenite from 0.29.0 to 0.30.0 ([#522](https://github.com/unicornops/zmail/issues/522)) ([b640de8](https://github.com/unicornops/zmail/commit/b640de8103deb01502a73abee0264982bc1805d1))
 * **deps:** Bump flate2 ([#521](https://github.com/unicornops/zmail/issues/521)) ([c38a44f](https://github.com/unicornops/zmail/commit/c38a44f2b92fe9a3a6d6f76d3004c8097c9e36ad))
 * **jmap:** store mailboxes by path so same-named folders stay apart ([#524](https://github.com/unicornops/zmail/issues/524)) ([e9df053](https://github.com/unicornops/zmail/commit/e9df05370d2ad7017b9e2bba4590316e3bfe3f61))
 
