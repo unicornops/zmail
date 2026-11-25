@@ -1441,6 +1441,7 @@ impl SyncService {
 
         let (detail, checkpoint) = match &credentials {
             Credentials::Secret(secret) => {
+                let mut existing_mailboxes = existing_mailboxes;
                 let snapshot = match target.protocol {
                     ProtocolKind::Imap => {
                         zmail_imap::discover_and_sync(&target, secret, &existing_mailboxes).await?
@@ -1460,6 +1461,19 @@ impl SyncService {
                             if let Some(note) = identities::sync_note(&report) {
                                 snapshot.detail = format!("{} \u{2022} {note}", snapshot.detail);
                             }
+                        }
+                        // Mailboxes whose paths changed are renamed in
+                        // place first, so they keep their rows and queued
+                        // changes when the snapshot is written (#512).
+                        if !sync.renamed.is_empty() {
+                            self.inner.store.apply_mail_delta(
+                                account_id,
+                                &zmail_core::MailDelta {
+                                    renamed: sync.renamed.clone(),
+                                    ..zmail_core::MailDelta::default()
+                                },
+                            )?;
+                            rename_mirror(&mut existing_mailboxes, &sync.renamed);
                         }
                         snapshot
                     }
@@ -1949,6 +1963,21 @@ fn notify_with(notifier: &dyn Notifier, target: &SyncTarget, arrivals: Vec<NewMa
     });
 }
 
+/// Renames the mailboxes of a mirror read before the sync as the store
+/// renamed them, so new mail is still found by diffing against it.
+fn rename_mirror(mirror: &mut [MailboxSnapshot], renamed: &[zmail_core::MailboxRename]) {
+    let renames = renamed
+        .iter()
+        .map(|rename| (rename.from.as_str(), rename))
+        .collect::<HashMap<_, _>>();
+    for mailbox in mirror {
+        if let Some(rename) = renames.get(mailbox.name.as_str()) {
+            mailbox.name = rename.to.clone();
+            mailbox.parent = rename.parent.clone();
+        }
+    }
+}
+
 /// The threads of a [`zmail_core::MailDelta`] that gained new mail: the
 /// `arrived` messages, in mailboxes the mirror already had, newest first.
 /// As with [`collect_arrivals`], a mailbox new to the mirror is an import,
@@ -2097,7 +2126,9 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{BackgroundRuntime, SyncService, collect_arrivals, collect_delta_arrivals};
+    use super::{
+        BackgroundRuntime, SyncService, collect_arrivals, collect_delta_arrivals, rename_mirror,
+    };
     use anyhow::{Result, anyhow};
     use zmail_core::{
         AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxSnapshot, MessageSnapshot,
@@ -2831,6 +2862,48 @@ mod tests {
             ),
             ("Inbox", "thread-c"),
             "an arrival names its thread for the notification to open"
+        );
+    }
+
+    /// A JMAP mailbox the sync renames (#512) does not hide its new mail:
+    /// the mirror read before the sync is renamed with the store.
+    #[test]
+    fn a_renamed_mailbox_still_reports_its_new_mail() {
+        let mut existing = vec![
+            mailbox("Invoices", vec![thread("thread-a", 1, "Old invoice")]),
+            mailbox("Notes", Vec::new()),
+        ];
+        rename_mirror(
+            &mut existing,
+            &[zmail_core::MailboxRename {
+                from: "Invoices".to_owned(),
+                to: "Clients/Invoices".to_owned(),
+                parent: Some("Clients".to_owned()),
+            }],
+        );
+        assert_eq!(existing[0].name, "Clients/Invoices");
+        assert_eq!(existing[0].parent.as_deref(), Some("Clients"));
+        assert_eq!(existing[1].name, "Notes");
+
+        let snapshot = AccountSyncSnapshot {
+            checkpoint: "test".to_owned(),
+            detail: "test".to_owned(),
+            identities: None,
+            mailboxes: vec![mailbox(
+                "Clients/Invoices",
+                vec![
+                    thread("thread-a", 1, "Old invoice"),
+                    thread("thread-b", 1, "New invoice"),
+                ],
+            )],
+        };
+        let arrivals = collect_arrivals(&existing, &snapshot);
+        assert_eq!(
+            arrivals
+                .iter()
+                .map(|arrival| arrival.subject.as_str())
+                .collect::<Vec<_>>(),
+            ["New invoice"]
         );
     }
 

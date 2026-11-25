@@ -3,6 +3,7 @@
 mod batches;
 mod changes;
 mod identities;
+mod paths;
 mod push;
 mod wording;
 
@@ -20,9 +21,9 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use zmail_core::threading::bare_message_id;
 use zmail_core::{
-    AccountSyncSnapshot, AuthKind, BlobStore, MailboxSnapshot, MessageAttachment, MessageHeaders,
-    MessageSnapshot, NewIdentity, OpApplyReport, OutgoingMessage, PendingOp, PendingOpKind,
-    ProtocolKind, SyncTarget, ThreadSnapshot,
+    AccountSyncSnapshot, AuthKind, BlobStore, MailboxRename, MailboxSnapshot, MessageAttachment,
+    MessageHeaders, MessageSnapshot, NewIdentity, OpApplyReport, OutgoingMessage, PendingOp,
+    PendingOpKind, ProtocolKind, SyncTarget, ThreadSnapshot,
 };
 use zmail_security::sanitize_html_for_display;
 use zmail_smtp::render_rfc822_message;
@@ -64,6 +65,12 @@ pub struct JmapSync {
     /// `LocalStore::merge_server_identities`; `None` when the server would
     /// not list them, which leaves the local identities as they are.
     pub identities: Option<Vec<zmail_core::identity_sync::ServerIdentity>>,
+    /// Stored mailboxes whose names change with this sync: renamed or
+    /// moved on the server, or stored under their own names before
+    /// mailboxes were stored by path (#512). Applied to the store
+    /// (`LocalStore::apply_mail_delta`) before the snapshot is written,
+    /// so each keeps its conversations and queued changes.
+    pub renamed: Vec<MailboxRename>,
 }
 
 /// Connects to a live JMAP account and returns the mailbox snapshot written
@@ -98,12 +105,18 @@ pub async fn discover_and_sync(
             is_primary: identity.is_primary || index == 0,
         })
         .collect::<Vec<_>>();
+    let (mailbox_details, mailbox_state) = fetch_mailboxes(&client).await?;
+    let mailbox_ids = changes::mailbox_id_map(&mailbox_details);
+    let renamed = paths::renames(
+        checkpoint.mailbox_ids.as_ref(),
+        &mailbox_details,
+        existing_mailboxes,
+    );
     let finish = |snapshot| JmapSync {
         snapshot,
         identities: server_identities.clone(),
+        renamed: renamed.clone(),
     };
-    let (mailbox_details, mailbox_state) = fetch_mailboxes(&client).await?;
-    let mailbox_ids = changes::mailbox_id_map(&mailbox_details);
 
     // Incremental path: once a sync has recorded the Email state, only the
     // emails changed since then are fetched (`Email/changes`). It falls
@@ -157,6 +170,7 @@ pub async fn discover_and_sync(
     if checkpoint.mailbox_query_state.as_deref() == Some(mailbox_state.as_str())
         && checkpoint.email_query_state.as_deref() == Some(email_query.query_state.as_str())
         && !existing_mailboxes.is_empty()
+        && paths::mirror_matches(existing_mailboxes, &mailbox_details)
     {
         return Ok(finish(AccountSyncSnapshot {
             checkpoint: JmapCheckpoint {
@@ -211,19 +225,13 @@ pub async fn apply_pending_ops(
     let client = connect_client(&target.endpoint, &target.username, secret, target.auth).await?;
     let mut report = OpApplyReport::default();
 
-    // The queue names mailboxes as the mirror does, by name; the server
-    // is told their ids. Two mailboxes with one name (#512) resolve to
-    // one of them, as they do in the mirror.
+    // The queue names mailboxes as the mirror does, by path; the server
+    // is told their ids.
     let needs_mailbox_map = ops.iter().any(|op| matches!(op.kind, PendingOpKind::Move));
-    let mailboxes: HashMap<String, JmapMailbox> = if needs_mailbox_map {
-        fetch_mailboxes(&client)
-            .await?
-            .0
-            .into_iter()
-            .map(|mailbox| (mailbox.name.clone(), mailbox))
-            .collect()
+    let mailboxes = if needs_mailbox_map {
+        fetch_mailboxes(&client).await?.0
     } else {
-        HashMap::new()
+        Vec::new()
     };
 
     for op in ops {
@@ -240,7 +248,7 @@ pub async fn apply_pending_ops(
 async fn apply_single_jmap_op(
     client: &Connection,
     op: &PendingOp,
-    mailboxes: &HashMap<String, JmapMailbox>,
+    mailboxes: &[JmapMailbox],
 ) -> Result<()> {
     let email_id = op.remote_id.as_str();
     match op.kind {
@@ -276,10 +284,10 @@ async fn apply_single_jmap_op(
             let Some(target_mailbox) = op.target_mailbox.as_deref() else {
                 bail!("move operation without a target mailbox");
             };
-            let Some(target) = mailboxes.get(target_mailbox) else {
+            let Some(target) = queued_mailbox(mailboxes, target_mailbox) else {
                 bail!("the JMAP account has no mailbox named {target_mailbox}");
             };
-            let source = mailboxes.get(&op.source_mailbox);
+            let source = queued_mailbox(mailboxes, &op.source_mailbox);
             move_email(client, email_id, source, target)
                 .await
                 .with_context(|| {
@@ -287,6 +295,25 @@ async fn apply_single_jmap_op(
                 })
         }
     }
+}
+
+/// The mailbox a queued operation names: the one stored under that
+/// path.
+///
+/// An operation queued before mailboxes were stored by path (#512) names
+/// a nested mailbox by its own name. It is found by that name when only
+/// one mailbox has it; when several do, the user's choice cannot be
+/// told apart, and the operation fails rather than move mail to the
+/// wrong one.
+fn queued_mailbox<'a>(mailboxes: &'a [JmapMailbox], name: &str) -> Option<&'a JmapMailbox> {
+    if let Some(mailbox) = mailboxes.iter().find(|mailbox| mailbox.name == name) {
+        return Some(mailbox);
+    }
+    let mut named = mailboxes
+        .iter()
+        .filter(|mailbox| mailbox.parent.is_some() && mailbox.own_name == name);
+    let only = named.next()?;
+    named.next().is_none().then_some(only)
 }
 
 /// The change to an email's mailboxes that moves it from `source` to
@@ -988,7 +1015,8 @@ struct JmapCheckpoint {
     /// `Email/changes`.
     #[serde(default)]
     email_state: Option<String>,
-    /// Server mailbox ids and the names the mirror stores them under.
+    /// Server mailbox ids and the names (paths, since #512) the mirror
+    /// stores them under.
     #[serde(default)]
     mailbox_ids: Option<BTreeMap<String, String>>,
 }
@@ -1002,10 +1030,14 @@ struct JmapQueryResult {
 #[derive(Debug)]
 pub(crate) struct JmapMailbox {
     id: String,
+    /// The path the mirror stores the mailbox under (`Clients/Invoices`,
+    /// [`paths`]).
     name: String,
+    /// The mailbox's own name on the server (`Invoices`).
+    own_name: String,
     role: Option<String>,
     sort_order: u32,
-    /// The parent mailbox's name (`parentId` resolved), if nested.
+    /// The parent mailbox's path (`parentId` resolved), if nested.
     parent: Option<String>,
 }
 
@@ -1329,23 +1361,30 @@ async fn fetch_mailboxes(client: &Connection) -> Result<(Vec<JmapMailbox>, Strin
     let state = response.state.unwrap_or_default();
 
     let list = response.list;
-    let names = list
+    let listed = list
         .iter()
-        .filter_map(|mailbox| Some((mailbox.id.as_deref()?, mailbox.name.as_deref()?)))
-        .collect::<HashMap<_, _>>();
+        .filter_map(|mailbox| {
+            Some(paths::Listed {
+                id: mailbox.id.as_deref()?,
+                name: mailbox.name.as_deref()?,
+                parent_id: mailbox.parent_id.as_deref(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut placed = paths::mailbox_paths(&listed);
     let mut mailboxes = list
         .iter()
         .filter_map(|mailbox| {
+            let id = mailbox.id.clone()?;
+            let own_name = mailbox.name.clone()?;
+            let paths::Placed { path, parent } = placed.remove(&id)?;
             Some(JmapMailbox {
-                id: mailbox.id.clone()?,
-                name: mailbox.name.clone()?,
+                id,
+                name: path,
+                own_name,
                 role: mailbox_role(mailbox.role.as_ref()),
                 sort_order: mailbox.sort_order.unwrap_or(0),
-                parent: mailbox
-                    .parent_id
-                    .as_deref()
-                    .and_then(|parent_id| names.get(parent_id))
-                    .map(|name| (*name).to_owned()),
+                parent,
             })
         })
         .collect::<Vec<_>>();
@@ -1933,7 +1972,7 @@ fn group_mailboxes(
                 MailboxSnapshot {
                     name: mailbox.name,
                     role: mailbox.role,
-                    delimiter: None,
+                    delimiter: Some(paths::DELIMITER.to_owned()),
                     parent: mailbox.parent,
                     threads,
                 },
@@ -2275,6 +2314,7 @@ mod tests {
             super::JmapMailbox {
                 id: "mb-inbox".to_owned(),
                 name: "Inbox".to_owned(),
+                own_name: "Inbox".to_owned(),
                 role: Some("inbox".to_owned()),
                 sort_order: 0,
                 parent: None,
@@ -2282,6 +2322,7 @@ mod tests {
             super::JmapMailbox {
                 id: "mb-junk".to_owned(),
                 name: "Bulk".to_owned(),
+                own_name: "Bulk".to_owned(),
                 role: Some("junk".to_owned()),
                 sort_order: 1,
                 parent: None,
@@ -2736,6 +2777,7 @@ mod tests {
                 vec![JmapMailbox {
                     id: "inbox".to_owned(),
                     name: "Inbox".to_owned(),
+                    own_name: "Inbox".to_owned(),
                     role: Some("inbox".to_owned()),
                     sort_order: 0,
                     parent: None,

@@ -11,11 +11,16 @@
 //! The server replays `mailbox-get.same-names.json` and
 //! `email-get.same-names.json` from the `shapes` fixtures: one email in
 //! each of the four `Invoices` mailboxes, and one in the inbox.
+//!
+//! Each mailbox is stored under its path (`Clients/Acme/Invoices`). The
+//! last tests cover what changes that path afterwards: a mirror stored
+//! under the mailboxes' own names before, and a parent renamed on the
+//! server.
 
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
-use zmail_core::{MailboxSnapshot, PendingOp, PendingOpKind, ProtocolKind};
+use zmail_core::{MailDelta, MailboxSnapshot, PendingOp, PendingOpKind, ProtocolKind};
 use zmail_store::LocalStore;
 
 use crate::{JmapSync, apply_pending_ops, read_characterisation_tests::Replay};
@@ -33,8 +38,20 @@ fn store() -> (LocalStore, i64) {
     (store, account_id)
 }
 
-/// Writes a sync into the store as the sync service does.
+/// Writes a sync into the store as the sync service does: the renamed
+/// mailboxes first, then the snapshot.
 fn write(store: &LocalStore, account_id: i64, sync: &JmapSync) {
+    if !sync.renamed.is_empty() {
+        store
+            .apply_mail_delta(
+                account_id,
+                &MailDelta {
+                    renamed: sync.renamed.clone(),
+                    ..MailDelta::default()
+                },
+            )
+            .expect("the renames are applied");
+    }
     store
         .replace_account_snapshot(account_id, &sync.snapshot)
         .expect("the snapshot is written");
@@ -246,4 +263,227 @@ async fn a_move_names_the_mailboxes_the_user_chose() {
             }}),
         ]
     );
+}
+
+/// Each stored mailbox's row id, by name.
+fn row_ids(store: &LocalStore, account_id: i64) -> BTreeMap<String, i64> {
+    store
+        .list_mailboxes(account_id)
+        .expect("the mailboxes list")
+        .into_iter()
+        .map(|mailbox| (mailbox.name, mailbox.id))
+        .collect()
+}
+
+/// An `Email/changes` answer with nothing changed since `state`, so the
+/// next sync takes the incremental path.
+fn nothing_changed(replay: &Replay, state: &str) {
+    replay.with_state(|server| {
+        server.changes = Some(json!({
+            "accountId": "a1", "oldState": state, "newState": state,
+            "hasMoreChanges": false, "created": [], "updated": [], "destroyed": []
+        }));
+    });
+}
+
+/// The own name of a mailbox stored under `path`: what the mirror stored
+/// it under before #512.
+fn own_name(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_owned()
+}
+
+/// A mirror stored the way it was before #512: nested mailboxes under
+/// their own names, with no delimiter, and a checkpoint that recorded
+/// those names.
+fn stored_before_paths(sync: &JmapSync) -> (Vec<MailboxSnapshot>, String) {
+    let mailboxes = sync
+        .snapshot
+        .mailboxes
+        .iter()
+        .cloned()
+        .map(|mut mailbox| {
+            mailbox.name = own_name(&mailbox.name);
+            mailbox.parent = mailbox.parent.as_deref().map(own_name);
+            mailbox.delimiter = None;
+            mailbox
+        })
+        .collect();
+    let mut checkpoint: Value =
+        serde_json::from_str(&sync.snapshot.checkpoint).expect("the checkpoint is JSON");
+    for name in checkpoint["mailbox_ids"]
+        .as_object_mut()
+        .expect("the checkpoint has mailbox ids")
+        .values_mut()
+    {
+        *name = Value::String(own_name(name.as_str().expect("a name")));
+    }
+    (mailboxes, checkpoint.to_string())
+}
+
+/// A mirror from before #512 is moved to paths by the next sync: the
+/// nested mailbox keeps its row, its mail and the move queued into it
+/// under its old name.
+#[tokio::test]
+async fn a_mirror_stored_by_own_names_moves_to_paths_in_place() {
+    // `shapes` has `Zmail` under `Projects`, and no two names alike.
+    let replay = Replay::start_with("shapes", "all", "sync");
+    let current = replay.sync(None, &[]).await.expect("the first sync runs");
+    let (before, checkpoint) = stored_before_paths(&current);
+    let (store, account_id) = store();
+    store
+        .replace_account_snapshot(
+            account_id,
+            &zmail_core::AccountSyncSnapshot {
+                mailboxes: before,
+                ..current.snapshot.clone()
+            },
+        )
+        .expect("the old mirror is written");
+    let rows = row_ids(&store, account_id);
+    let zmail = rows["Zmail"];
+    let kept = store
+        .account_mailbox_snapshots(account_id)
+        .expect("mirror")
+        .iter()
+        .find(|mailbox| mailbox.name == "Zmail")
+        .map(emails_in)
+        .expect("Zmail is stored");
+    // A conversation moved into it, queued under the old name.
+    let inbox_thread = store
+        .list_threads(rows["Inbox"], 0..1)
+        .expect("the inbox lists")[0]
+        .id;
+    store
+        .move_thread(inbox_thread, zmail)
+        .expect("the conversation moves");
+    let queued = store.list_pending_ops(account_id).expect("the queue lists");
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].target_mailbox.as_deref(), Some("Zmail"));
+
+    nothing_changed(&replay, "em-41");
+    let existing = store.account_mailbox_snapshots(account_id).expect("mirror");
+    let sync = replay
+        .sync(Some(checkpoint), &existing)
+        .await
+        .expect("the next sync runs");
+    assert_eq!(
+        sync.renamed,
+        [zmail_core::MailboxRename {
+            from: "Zmail".to_owned(),
+            to: "Projects/Zmail".to_owned(),
+            parent: Some("Projects".to_owned()),
+        }]
+    );
+    write(&store, account_id, &sync);
+
+    let rows_after = row_ids(&store, account_id);
+    assert_eq!(
+        rows_after.get("Projects/Zmail"),
+        Some(&zmail),
+        "{rows_after:?}"
+    );
+    assert!(!rows_after.contains_key("Zmail"), "{rows_after:?}");
+    let mirror = store.account_mailbox_snapshots(account_id).expect("mirror");
+    let moved = mirror
+        .iter()
+        .find(|mailbox| mailbox.name == "Projects/Zmail")
+        .expect("Projects/Zmail is stored");
+    assert_eq!(moved.parent.as_deref(), Some("Projects"));
+    assert_eq!(moved.delimiter.as_deref(), Some("/"));
+    let emails = emails_in(moved);
+    assert!(
+        kept.iter().all(|id| emails.contains(id)) && emails.len() > kept.len(),
+        "its mail and the moved conversation stay: {kept:?} then {emails:?}"
+    );
+    let queued = store.list_pending_ops(account_id).expect("the queue lists");
+    assert_eq!(queued[0].target_mailbox.as_deref(), Some("Projects/Zmail"));
+    // Every top-level mailbox kept its row as well.
+    for (name, id) in rows.iter().filter(|(name, _)| name.as_str() != "Zmail") {
+        assert_eq!(rows_after.get(name), Some(id), "{name}");
+    }
+}
+
+/// A move queued before #512 names a nested mailbox by its own name: it
+/// still reaches that mailbox when the name is the only one of its kind,
+/// and fails, rather than pick one, when several mailboxes share it.
+#[tokio::test]
+async fn a_move_queued_under_an_own_name_reaches_its_mailbox_when_unambiguous() {
+    let replay = Replay::start_with("shapes", "all", "sync");
+    let ops = [move_op(1, "e1", "Inbox", "Zmail")];
+    let report = apply_pending_ops(&replay.target(None), "pw", &ops)
+        .await
+        .expect("the move runs");
+    assert_eq!(report.applied, [1], "{report:?}");
+    assert_eq!(
+        updates_sent(&replay),
+        [json!({"e1": {"mailboxIds/mb-inbox": null, "mailboxIds/mb-zmail": true}})]
+    );
+
+    let replay = same_names();
+    let ops = [move_op(2, "e1", "Inbox", "Invoices")];
+    let report = apply_pending_ops(&replay.target(None), "pw", &ops)
+        .await
+        .expect("the move runs");
+    assert_eq!(
+        report.failed,
+        [(
+            2,
+            "the JMAP account has no mailbox named Invoices".to_owned()
+        )]
+    );
+    assert!(updates_sent(&replay).is_empty());
+}
+
+/// A parent renamed on the server renames every mailbox under it, each
+/// in place: same rows, same mail.
+#[tokio::test]
+async fn a_parent_renamed_on_the_server_renames_its_children_in_place() {
+    let replay = same_names();
+    let (store, account_id) = store();
+    let first = replay.sync(None, &[]).await.expect("the first sync runs");
+    write(&store, account_id, &first);
+    let rows = row_ids(&store, account_id);
+    let before = stored(&store, account_id);
+
+    replay.with_state(|server| {
+        server.mailboxes["state"] = json!("mb-13");
+        for mailbox in server.mailboxes["list"].as_array_mut().expect("a list") {
+            if mailbox["id"] == "mb-clients" {
+                mailbox["name"] = json!("Customers");
+            }
+        }
+    });
+    nothing_changed(&replay, "em-7");
+    let existing = store.account_mailbox_snapshots(account_id).expect("mirror");
+    let second = replay
+        .sync(Some(first.snapshot.checkpoint.clone()), &existing)
+        .await
+        .expect("the second sync runs");
+    assert_eq!(
+        second
+            .renamed
+            .iter()
+            .map(|rename| (rename.from.as_str(), rename.to.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("Clients", "Customers"),
+            ("Clients/Invoices", "Customers/Invoices"),
+            ("Clients/Acme", "Customers/Acme"),
+            ("Clients/Acme/Invoices", "Customers/Acme/Invoices"),
+        ]
+    );
+    write(&store, account_id, &second);
+
+    let renamed = |name: &str| name.replacen("Clients", "Customers", 1);
+    let rows_after = row_ids(&store, account_id);
+    let expected_rows = rows
+        .iter()
+        .map(|(name, id)| (renamed(name), *id))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(rows_after, expected_rows);
+    let expected = before
+        .into_iter()
+        .map(|(name, parent, emails)| (renamed(&name), parent.as_deref().map(renamed), emails))
+        .collect::<Vec<_>>();
+    assert_eq!(stored(&store, account_id), expected);
 }

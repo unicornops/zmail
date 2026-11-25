@@ -308,6 +308,7 @@ pub(crate) fn apply_email_changes(
         let mut mailbox = by_id.remove(&detail.id).unwrap_or_default();
         mailbox.name = detail.name.clone();
         mailbox.role = detail.role.clone();
+        mailbox.delimiter = Some(crate::paths::DELIMITER.to_owned());
         mailbox.parent = detail.parent.clone();
         positions.insert(detail.id.as_str(), mailboxes.len());
         mailboxes.push(mailbox);
@@ -431,6 +432,7 @@ mod tests {
         JmapMailbox {
             id: id.to_owned(),
             name: name.to_owned(),
+            own_name: name.to_owned(),
             role: role.map(str::to_owned),
             sort_order: 0,
             parent: None,
@@ -685,15 +687,17 @@ mod tests {
     }
 
     #[test]
-    fn mailboxes_carry_their_parent() {
-        let mut child = detail("m2", "Website", None);
+    fn mailboxes_carry_their_path_and_parent() {
+        let mut child = detail("m2", "Projects/Website", None);
         child.parent = Some("Projects".to_owned());
         let details = [detail("m1", "Projects", None), child];
+        // Stored under its own name before #512: it takes its path.
         let existing = by_id(vec![("m2", mailbox("Website", Vec::new()))]);
         let mailboxes = apply_email_changes(&details, existing, &HashSet::new(), Vec::new());
         assert_eq!(mailboxes[0].parent, None);
+        assert_eq!(mailboxes[1].name, "Projects/Website");
         assert_eq!(mailboxes[1].parent.as_deref(), Some("Projects"));
-        assert_eq!(mailboxes[1].delimiter, None, "JMAP names are not paths");
+        assert_eq!(mailboxes[1].delimiter.as_deref(), Some("/"));
     }
 
     #[test]

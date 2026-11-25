@@ -1,6 +1,6 @@
 JmapSync {
     snapshot: AccountSyncSnapshot {
-        checkpoint: "{\"mailbox_query_state\":\"mb-7\",\"email_query_state\":null,\"email_state\":\"em-next\",\"mailbox_ids\":{\"mb-archive\":\"Archive\",\"mb-bulk\":\"Bulk\",\"mb-custom\":\"Receipts\",\"mb-inbox\":\"Inbox\",\"mb-orphan\":\"Orphan\",\"mb-projects\":\"Projects\",\"mb-sent\":\"Sent\",\"mb-zmail\":\"Zmail\"}}",
+        checkpoint: "{\"mailbox_query_state\":\"mb-7\",\"email_query_state\":null,\"email_state\":\"em-next\",\"mailbox_ids\":{\"mb-archive\":\"Archive\",\"mb-bulk\":\"Bulk\",\"mb-custom\":\"Receipts\",\"mb-inbox\":\"Inbox\",\"mb-orphan\":\"Orphan\",\"mb-projects\":\"Projects\",\"mb-sent\":\"Sent\",\"mb-zmail\":\"Projects/Zmail\"}}",
         detail: "JMAP incremental sync applied 4 email changes for Recorded",
         identities: None,
         mailboxes: [
@@ -9,7 +9,9 @@ JmapSync {
                 role: Some(
                     "archive",
                 ),
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [
                     ThreadSnapshot {
@@ -61,9 +63,11 @@ JmapSync {
                 ],
             },
             MailboxSnapshot {
-                name: "Zmail",
+                name: "Projects/Zmail",
                 role: None,
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: Some(
                     "Projects",
                 ),
@@ -164,7 +168,9 @@ JmapSync {
                 role: Some(
                     "inbox",
                 ),
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [
                     ThreadSnapshot {
@@ -307,7 +313,9 @@ JmapSync {
                 role: Some(
                     "sent",
                 ),
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [
                     ThreadSnapshot {
@@ -356,7 +364,9 @@ JmapSync {
                 role: Some(
                     "junk",
                 ),
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [],
             },
@@ -365,7 +375,9 @@ JmapSync {
                 role: Some(
                     "x-receipts",
                 ),
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [
                     ThreadSnapshot {
@@ -416,18 +428,23 @@ JmapSync {
             MailboxSnapshot {
                 name: "Projects",
                 role: None,
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [],
             },
             MailboxSnapshot {
                 name: "Orphan",
                 role: None,
-                delimiter: None,
+                delimiter: Some(
+                    "/",
+                ),
                 parent: None,
                 threads: [],
             },
         ],
     },
     identities: None,
+    renamed: [],
 }
