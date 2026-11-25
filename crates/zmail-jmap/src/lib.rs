@@ -2782,3 +2782,6 @@ mod sign_in_characterisation_tests;
 
 #[cfg(test)]
 mod request_shape_tests;
+
+#[cfg(test)]
+mod mailbox_identity_tests;

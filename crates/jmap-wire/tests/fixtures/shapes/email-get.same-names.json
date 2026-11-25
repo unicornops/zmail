@@ -1,0 +1,321 @@
+{
+  "methodResponses": [
+    [
+      "Email/get",
+      {
+        "accountId": "a1",
+        "state": "em-7",
+        "list": [
+          {
+            "id": "e1",
+            "threadId": "t1",
+            "mailboxIds": {
+              "mb-inbox": true
+            },
+            "keywords": {
+              "$seen": true
+            },
+            "from": [
+              {
+                "name": "Ada Example",
+                "email": "ada@example.test"
+              }
+            ],
+            "replyTo": null,
+            "to": [
+              {
+                "name": null,
+                "email": "me@example.test"
+              }
+            ],
+            "cc": null,
+            "subject": "Welcome",
+            "preview": "Welcome",
+            "hasAttachment": false,
+            "attachments": [],
+            "bodyValues": {
+              "1": {
+                "value": "Welcome.\n",
+                "isEncodingProblem": false,
+                "isTruncated": false
+              }
+            },
+            "textBody": [
+              {
+                "partId": "1",
+                "blobId": "b-e1-1",
+                "size": 9,
+                "type": "text/plain",
+                "charset": "utf-8"
+              }
+            ],
+            "htmlBody": [
+              {
+                "partId": "1",
+                "blobId": "b-e1-1",
+                "size": 9,
+                "type": "text/plain",
+                "charset": "utf-8"
+              }
+            ],
+            "receivedAt": "2026-11-01T09:00:00Z",
+            "messageId": [
+              "e1@example.test"
+            ],
+            "inReplyTo": null,
+            "references": null,
+            "header:Delivered-To:all": [],
+            "header:X-Original-To:all": []
+          },
+          {
+            "id": "e2",
+            "threadId": "t2",
+            "mailboxIds": {
+              "mb-c-invoices": true
+            },
+            "keywords": {
+              "$seen": true
+            },
+            "from": [
+              {
+                "name": "Ada Example",
+                "email": "ada@example.test"
+              }
+            ],
+            "replyTo": null,
+            "to": [
+              {
+                "name": null,
+                "email": "me@example.test"
+              }
+            ],
+            "cc": null,
+            "subject": "Invoice sent to a client",
+            "preview": "Invoice sent to a client",
+            "hasAttachment": false,
+            "attachments": [],
+            "bodyValues": {
+              "1": {
+                "value": "Invoice sent to a client.\n",
+                "isEncodingProblem": false,
+                "isTruncated": false
+              }
+            },
+            "textBody": [
+              {
+                "partId": "1",
+                "blobId": "b-e2-1",
+                "size": 26,
+                "type": "text/plain",
+                "charset": "utf-8"
+              }
+            ],
+            "htmlBody": [
+              {
+                "partId": "1",
+                "blobId": "b-e2-1",
+                "size": 26,
+                "type": "text/plain",
+                "charset": "utf-8"
+              }
+            ],
+            "receivedAt": "2026-11-02T09:00:00Z",
+            "messageId": [
+              "e2@example.test"
+            ],
+            "inReplyTo": null,
+            "references": null,
+            "header:Delivered-To:all": [],
+            "header:X-Original-To:all": []
+          },
+          {
+            "id": "e3",
+            "threadId": "t3",
+            "mailboxIds": {
+              "mb-s-invoices": true
+            },
+            "keywords": {
+              "$seen": true
+            },
+            "from": [
+              {
+                "name": "Ada Example",
+                "email": "ada@example.test"
+              }
+            ],
+            "replyTo": null,
+            "to": [
+              {
+                "name": null,
+                "email": "me@example.test"
+              }
+            ],
+            "cc": null,
+            "subject": "Invoice from a supplier",
+            "preview": "Invoice from a supplier",
+            "hasAttachment": false,
+            "attachments": [],
+            "bodyValues": {
+              "1": {
+                "value": "Invoice from a supplier.\n",
+                "isEncodingProblem": false,
+                "isTruncated": false
+              }
+            },
+            "textBody": [
+              {
+                "partId": "1",
+                "blobId": "b-e3-1",
+                "size": 25,
+                "type": "text/plain",
+                "charset": "utf-8"
+              }
+            ],
+            "htmlBody": [
+              {
+                "partId": "1",
+                "blobId": "b-e3-1",
+                "size": 25,
+                "type": "text/plain",
+                "charset": "utf-8"
+              }
+            ],
+            "receivedAt": "2026-11-03T09:00:00Z",
+            "messageId": [
+              "e3@example.test"
+            ],
+            "inReplyTo": null,
+            "references": null,
+            "header:Delivered-To:all": [],
+            "header:X-Original-To:all": []
+          },
+          {
+            "id": "e4",
+            "threadId": "t4",
+            "mailboxIds": {
+              "mb-c-acme-invoices": true
+            },
+            "keywords": {
+              "$seen": true
+            },
+            "from": [
+              {
+                "name": "Ada Example",
+                "email": "ada@example.test"
+              }
+            ],
+            "replyTo": null,
+            "to": [
+              {
+                "name": null,
+                "email": "me@example.test"
+              }
+            ],
+            "cc": null,
+            "subject": "Invoice sent to Acme the client",
+            "preview": "Invoice sent to Acme the client",
+            "hasAttachment": false,
+            "attachments": [],
+            "bodyValues": {
+              "1": {
+                "value": "Invoice sent to Acme the client.\n",
+                "isEncodingProblem": false,
+                "isTruncated": false
+              }
+            },
+            "textBody": [
+              {
+                "partId": "1",
+                "blobId": "b-e4-1",
+                "size": 33,
+                "type": "text/plain",
+                "charset": "utf-8"
+              }
+            ],
+            "htmlBody": [
+              {
+                "partId": "1",
+                "blobId": "b-e4-1",
+                "size": 33,
+                "type": "text/plain",
+                "charset": "utf-8"
+              }
+            ],
+            "receivedAt": "2026-11-04T09:00:00Z",
+            "messageId": [
+              "e4@example.test"
+            ],
+            "inReplyTo": null,
+            "references": null,
+            "header:Delivered-To:all": [],
+            "header:X-Original-To:all": []
+          },
+          {
+            "id": "e5",
+            "threadId": "t5",
+            "mailboxIds": {
+              "mb-s-acme-invoices": true
+            },
+            "keywords": {
+              "$seen": true
+            },
+            "from": [
+              {
+                "name": "Ada Example",
+                "email": "ada@example.test"
+              }
+            ],
+            "replyTo": null,
+            "to": [
+              {
+                "name": null,
+                "email": "me@example.test"
+              }
+            ],
+            "cc": null,
+            "subject": "Invoice from Acme the supplier",
+            "preview": "Invoice from Acme the supplier",
+            "hasAttachment": false,
+            "attachments": [],
+            "bodyValues": {
+              "1": {
+                "value": "Invoice from Acme the supplier.\n",
+                "isEncodingProblem": false,
+                "isTruncated": false
+              }
+            },
+            "textBody": [
+              {
+                "partId": "1",
+                "blobId": "b-e5-1",
+                "size": 32,
+                "type": "text/plain",
+                "charset": "utf-8"
+              }
+            ],
+            "htmlBody": [
+              {
+                "partId": "1",
+                "blobId": "b-e5-1",
+                "size": 32,
+                "type": "text/plain",
+                "charset": "utf-8"
+              }
+            ],
+            "receivedAt": "2026-11-05T09:00:00Z",
+            "messageId": [
+              "e5@example.test"
+            ],
+            "inReplyTo": null,
+            "references": null,
+            "header:Delivered-To:all": [],
+            "header:X-Original-To:all": []
+          }
+        ],
+        "notFound": []
+      },
+      "c0"
+    ]
+  ],
+  "sessionState": "s1"
+}
