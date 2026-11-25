@@ -15,6 +15,17 @@ leading `-` negates any of them:
 zmail-app search 1 'from:alice "budget review" -in:junk after:30d'
 ```
 
+`in:` takes a mailbox's role (`in:inbox`, `in:sent`, `in:spam` or
+`in:junk`, `in:bin` or `in:trash`), its full name, or the name the folder
+list shows for it. A folder inside another one can be named either way:
+`in:Invoices` searches every folder called Invoices, such as both
+`Clients/Invoices` and `Suppliers/Invoices`, while `in:Clients/Invoices`
+searches just that one. The full name uses the account's own separator,
+so an IMAP server that nests with dots wants `in:INBOX.Invoices`. A
+Proton folder is found by its name too (`in:Work` for Bridge's
+`Folders/Work`). Names ignore case, and `-in:Invoices` leaves out every
+folder called Invoices.
+
 ## Where a search looks
 
 In the app, a search starts in the folder the list shows (the Unified

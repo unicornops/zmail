@@ -3154,14 +3154,23 @@ impl LocalStore {
     ) -> Result<Vec<SearchHit>> {
         let parsed = zmail_core::search::SearchQuery::parse(query);
         let conn = self.connection()?;
-        let mut hits =
-            match search::compile_search(&parsed, scope, limit, now, search::HitSource::Local) {
-                Some(compiled) => run_search(&conn, compiled, false)?,
-                None => return Ok(Vec::new()),
-            };
+        let mailboxes = search::mailboxes_for(&conn, &parsed)
+            .context("failed to read the mailboxes to search")?;
+        let mut hits = match search::compile_search(
+            &parsed,
+            &mailboxes,
+            scope,
+            limit,
+            now,
+            search::HitSource::Local,
+        ) {
+            Some(compiled) => run_search(&conn, compiled, false)?,
+            None => return Ok(Vec::new()),
+        };
         if hits.len() < limit
             && let Some(compiled) = search::compile_search(
                 &parsed,
+                &mailboxes,
                 scope,
                 limit,
                 now,

@@ -36,7 +36,7 @@ use anyhow::{Context, Result, bail};
 use tokio::time::sleep;
 use zmail_core::{
     MailboxSelection, MailboxSummary, ProtocolKind, VirtualMailbox,
-    search::{SearchQuery, SearchTerm, mailbox_matches},
+    search::{SearchMailbox, SearchQuery, SearchTerm, mailbox_matches},
 };
 
 use crate::SyncService;
@@ -138,12 +138,7 @@ impl SyncService {
                     .list_mailboxes(account_id)?
                     .into_iter()
                     .filter(|mailbox| {
-                        mailbox_in_folder(folder, mailbox)
-                            && mailbox_in_scope(
-                                &parsed,
-                                &mailbox.name,
-                                mailbox.role.map(|role| role.as_str()),
-                            )
+                        mailbox_in_folder(folder, mailbox) && mailbox_in_scope(&parsed, mailbox)
                     })
                     .map(|mailbox| mailbox.name)
                     .collect::<Vec<_>>();
@@ -237,10 +232,17 @@ fn mailbox_in_folder(folder: Option<&MailboxSelection>, mailbox: &MailboxSummary
 }
 
 /// Whether a mailbox is covered by the query's `in:` clauses: it must match
-/// every positive one and no negated one.
-fn mailbox_in_scope(query: &SearchQuery, name: &str, role: Option<&str>) -> bool {
+/// every positive one and no negated one ([`mailbox_matches`]: by full
+/// name, last path segment or role).
+fn mailbox_in_scope(query: &SearchQuery, mailbox: &MailboxSummary) -> bool {
+    let mailbox = SearchMailbox {
+        name: &mailbox.name,
+        parent: mailbox.parent.as_deref(),
+        delimiter: mailbox.delimiter.as_deref(),
+        role: mailbox.role.map(|role| role.as_str()),
+    };
     query.clauses.iter().all(|clause| match &clause.term {
-        SearchTerm::Mailbox(value) => mailbox_matches(value, name, role) != clause.negated,
+        SearchTerm::Mailbox(value) => mailbox_matches(value, &mailbox) != clause.negated,
         _ => true,
     })
 }
@@ -297,14 +299,69 @@ mod tests {
 
     #[test]
     fn in_clauses_choose_the_mailboxes() {
-        let scope = |query: &str, name: &str, role: Option<&str>| {
-            mailbox_in_scope(&SearchQuery::parse(query), name, role)
+        use zmail_core::MailboxRole;
+
+        let top = |name: &str, role: Option<MailboxRole>| MailboxSummary {
+            id: 1,
+            account_id: 1,
+            name: name.to_owned(),
+            role,
+            delimiter: None,
+            parent: None,
+            total_threads: 0,
+            unread_threads: 0,
         };
-        assert!(scope("report", "Archive", Some("archive")));
-        assert!(scope("report in:inbox", "INBOX", Some("inbox")));
-        assert!(!scope("report in:inbox", "Archive", Some("archive")));
-        assert!(!scope("report -in:spam", "Bulk", Some("junk")));
-        assert!(scope("report -in:spam", "INBOX", None));
+        let scope = |query: &str, mailbox: &MailboxSummary| {
+            mailbox_in_scope(&SearchQuery::parse(query), mailbox)
+        };
+        let inbox = top("INBOX", Some(MailboxRole::Inbox));
+        let archive = top("Archive", Some(MailboxRole::Archive));
+        assert!(scope("report", &archive));
+        assert!(scope("report in:inbox", &inbox));
+        assert!(!scope("report in:inbox", &archive));
+        assert!(!scope(
+            "report -in:spam",
+            &top("Bulk", Some(MailboxRole::Junk))
+        ));
+        assert!(scope("report -in:spam", &top("INBOX", None)));
+    }
+
+    #[test]
+    fn in_clauses_find_nested_mailboxes_by_their_last_segment() {
+        let nested = |name: &str, delimiter: &str| MailboxSummary {
+            id: 1,
+            account_id: 1,
+            name: name.to_owned(),
+            role: None,
+            delimiter: Some(delimiter.to_owned()),
+            parent: name
+                .rsplit_once(delimiter)
+                .map(|(parent, _)| parent.to_owned()),
+            total_threads: 0,
+            unread_threads: 0,
+        };
+        let scope = |query: &str, mailbox: &MailboxSummary| {
+            mailbox_in_scope(&SearchQuery::parse(query), mailbox)
+        };
+        let clients = nested("Clients/Invoices", "/");
+        let suppliers = nested("Suppliers/Invoices", "/");
+        let dotted = nested("INBOX.Clients.Invoices", ".");
+
+        // The bare name covers every mailbox of that name.
+        for mailbox in [&clients, &suppliers, &dotted] {
+            assert!(scope("report in:Invoices", mailbox), "{}", mailbox.name);
+            assert!(!scope("report -in:invoices", mailbox), "{}", mailbox.name);
+        }
+        // The full path covers just that mailbox.
+        assert!(scope("report in:Clients/Invoices", &clients));
+        assert!(!scope("report in:Clients/Invoices", &suppliers));
+        assert!(!scope("report in:Clients/Invoices", &dotted));
+        assert!(scope("report in:inbox.clients.invoices", &dotted));
+        assert!(!scope("report -in:Clients/Invoices", &clients));
+        assert!(scope("report -in:Clients/Invoices", &suppliers));
+        // Proton's Bridge paths.
+        assert!(scope("report in:Work", &nested("Folders/Work", "/")));
+        assert!(!scope("report in:Folders", &nested("Folders/Work", "/")));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

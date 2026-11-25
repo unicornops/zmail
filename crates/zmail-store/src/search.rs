@@ -10,14 +10,19 @@
 //! SQL conditions with bound parameters. Nothing typed by the user is ever
 //! spliced into SQL text.
 //!
+//! `in:` clauses are matched against the stored mailboxes in Rust, with
+//! [`mailbox_matches`] (by full name, last path segment or role), exactly
+//! as the server searches choose their mailboxes, and become a condition
+//! on the matching mailbox ids.
+//!
 //! Matching is per thread: `from:alice after:2026-01-01` finds threads that
 //! have a message from Alice and a message on or after that day, not
 //! necessarily the same message.
 
-use rusqlite::types::Value;
+use rusqlite::{Connection, types::Value};
 use zmail_core::{
     MailboxSelection, SearchScope,
-    search::{SearchQuery, SearchTerm, SearchText, day_start_unix, mailbox_role_alias},
+    search::{SearchMailbox, SearchQuery, SearchTerm, SearchText, day_start_unix, mailbox_matches},
     time::{Date, ZonedDateTime},
 };
 
@@ -40,6 +45,54 @@ pub(crate) enum HitSource<'a> {
     ServerHits(&'a str),
 }
 
+/// A stored mailbox, as an `in:` clause matches it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMailbox {
+    pub(crate) id: i64,
+    pub(crate) name: String,
+    pub(crate) role: Option<String>,
+    pub(crate) delimiter: Option<String>,
+    pub(crate) parent: Option<String>,
+}
+
+impl StoredMailbox {
+    fn search_mailbox(&self) -> SearchMailbox<'_> {
+        SearchMailbox {
+            name: &self.name,
+            parent: self.parent.as_deref(),
+            delimiter: self.delimiter.as_deref(),
+            role: self.role.as_deref(),
+        }
+    }
+}
+
+/// The stored mailboxes `query`'s `in:` clauses are matched against: every
+/// account's, or none when the query has no `in:` clause.
+pub(crate) fn mailboxes_for(
+    conn: &Connection,
+    query: &SearchQuery,
+) -> rusqlite::Result<Vec<StoredMailbox>> {
+    if !query
+        .clauses
+        .iter()
+        .any(|clause| matches!(clause.term, SearchTerm::Mailbox(_)))
+    {
+        return Ok(Vec::new());
+    }
+    let mut statement =
+        conn.prepare_cached("SELECT id, name, role, delimiter, parent_name FROM mailboxes")?;
+    let rows = statement.query_map([], |row| {
+        Ok(StoredMailbox {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            role: row.get(2)?,
+            delimiter: row.get(3)?,
+            parent: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
 /// Compiles `query` for the threads `scope` covers: a folder, one account
 /// or every account. `now` supplies today's date and the time zone that
 /// `before:`/`after:` day boundaries are taken in.
@@ -47,10 +100,14 @@ pub(crate) enum HitSource<'a> {
 /// An `in:` clause in the query chooses the folder itself, so a folder
 /// scope then only keeps the folder's accounts (see [`scope_condition`]).
 ///
+/// `mailboxes` are the stored mailboxes `in:` clauses choose from
+/// ([`mailboxes_for`]).
+///
 /// Returns `None` when no clause is searchable (for example a query of
 /// only punctuation), which callers treat as no results.
 pub(crate) fn compile_search(
     query: &SearchQuery,
+    mailboxes: &[StoredMailbox],
     scope: &SearchScope,
     limit: usize,
     now: &ZonedDateTime,
@@ -96,15 +153,20 @@ pub(crate) fn compile_search(
                 push_condition(&mut conditions, clause.negated, "t.is_flagged = 1");
                 None
             }
-            SearchTerm::Mailbox(name) => {
-                push_condition(
-                    &mut conditions,
-                    clause.negated,
-                    "t.mailbox_id IN (SELECT id FROM mailboxes WHERE lower(name) = lower(?) \
-                     OR lower(COALESCE(role, '')) = lower(?))",
-                );
-                condition_params.push(Value::Text(name.clone()));
-                condition_params.push(Value::Text(mailbox_role_alias(name).to_owned()));
+            SearchTerm::Mailbox(value) => {
+                let ids = mailboxes
+                    .iter()
+                    .filter(|mailbox| mailbox_matches(value, &mailbox.search_mailbox()))
+                    .map(|mailbox| Value::Integer(mailbox.id))
+                    .collect::<Vec<_>>();
+                let condition = if ids.is_empty() {
+                    // No such mailbox: nothing is in it.
+                    "0 = 1".to_owned()
+                } else {
+                    format!("t.mailbox_id IN ({})", vec!["?"; ids.len()].join(", "))
+                };
+                push_condition(&mut conditions, clause.negated, &condition);
+                condition_params.extend(ids);
                 None
             }
             SearchTerm::Before(spec) | SearchTerm::After(spec) => {
@@ -252,10 +314,35 @@ mod tests {
 
     use super::*;
 
+    fn stored(id: i64, name: &str, role: Option<&str>, delimiter: Option<&str>) -> StoredMailbox {
+        StoredMailbox {
+            id,
+            name: name.to_owned(),
+            role: role.map(str::to_owned),
+            delimiter: delimiter.map(str::to_owned),
+            parent: delimiter
+                .and_then(|delimiter| name.rsplit_once(delimiter))
+                .map(|(parent, _)| parent.to_owned()),
+        }
+    }
+
+    /// The fixture's mailboxes, by id.
+    fn mailboxes() -> Vec<StoredMailbox> {
+        vec![
+            stored(1, "INBOX", Some("inbox"), None),
+            stored(2, "Bulk", Some("junk"), None),
+            stored(3, "Clients/Invoices", None, Some("/")),
+            stored(4, "Suppliers/Invoices", None, Some("/")),
+            stored(5, "Folders/Work", None, Some("/")),
+            stored(6, "INBOX.Archive", None, Some(".")),
+        ]
+    }
+
     fn compile(query: &str) -> Option<CompiledSearch> {
         let now = clock_at("2026-03-31T12:00:00Z").expect("valid time");
         compile_search(
             &SearchQuery::parse(query),
+            &mailboxes(),
             &SearchScope::Account(7),
             50,
             &now,
@@ -355,19 +442,46 @@ mod tests {
         assert_eq!(compiled.params.len(), 2);
     }
 
+    fn integer_params(compiled: &CompiledSearch) -> Vec<i64> {
+        compiled
+            .params
+            .iter()
+            .filter_map(|value| match value {
+                Value::Integer(value) => Some(*value),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn mailbox_values_are_bound_never_spliced() {
+    fn mailbox_values_never_reach_sql() {
         let compiled = compile("in:\"x') OR 1=1 --\" in:spam").expect("compiles");
         assert!(!compiled.sql.contains("1=1"));
-        assert_eq!(
-            text_params(&compiled),
-            vec![
-                "x') OR 1=1 --".to_owned(),
-                "x') OR 1=1 --".to_owned(),
-                "spam".to_owned(),
-                "junk".to_owned(),
-            ]
-        );
+        assert!(text_params(&compiled).is_empty());
+        // No mailbox is named that, so nothing is in it; `in:spam` is the
+        // junk mailbox's id. Then the account and the limit.
+        assert!(compiled.sql.contains("AND 0 = 1"));
+        assert_eq!(integer_params(&compiled), vec![7, 2, 50]);
+    }
+
+    #[test]
+    fn mailboxes_are_chosen_by_full_name_last_segment_or_role() {
+        let ids = |query: &str| {
+            let compiled = compile(query).expect("compiles");
+            let ids = integer_params(&compiled);
+            // The account first and the limit last.
+            ids[1..ids.len() - 1].to_vec()
+        };
+        assert_eq!(ids("in:invoices"), vec![3, 4]);
+        assert_eq!(ids("in:Clients/Invoices"), vec![3]);
+        assert_eq!(ids("in:work"), vec![5]);
+        assert_eq!(ids("in:Archive"), vec![6]);
+        assert_eq!(ids("in:inbox.archive"), vec![6]);
+        assert_eq!(ids("in:inbox"), vec![1]);
+        assert_eq!(ids("in:spam"), vec![2]);
+        let negated = compile("-in:Invoices").expect("compiles");
+        assert!(negated.sql.contains("AND NOT (t.mailbox_id IN (?, ?))"));
+        assert_eq!(integer_params(&negated), vec![7, 3, 4, 50]);
     }
 
     #[test]
@@ -376,6 +490,7 @@ mod tests {
         let now = clock_at("2026-06-15T09:00:00+01:00").expect("valid time");
         let compiled = compile_search(
             &SearchQuery::parse("after:2026-06-01 before:7d"),
+            &[],
             &SearchScope::Account(1),
             10,
             &now,
@@ -931,6 +1046,126 @@ mod store_tests {
             search_in(&store, &inbox, "budget -in:junk"),
             ["Quarterly budget review"]
         );
+    }
+
+    /// An account whose mailboxes nest under `delimiter`: each mail's
+    /// mailbox is stored under its full path, with its parent, as the
+    /// adapters store them.
+    fn nested_account(store: &LocalStore, delimiter: &str, mail: &[Mail]) -> i64 {
+        let account = store
+            .create_demo_account(ProtocolKind::Imap)
+            .expect("account should be created");
+        let mut snapshot = snapshot(mail);
+        for mailbox in &mut snapshot.mailboxes {
+            mailbox.delimiter = Some(delimiter.to_owned());
+            mailbox.parent = mailbox
+                .name
+                .rsplit_once(delimiter)
+                .map(|(parent, _)| parent.to_owned());
+        }
+        store
+            .replace_account_snapshot(account, &snapshot)
+            .expect("snapshot should apply");
+        account
+    }
+
+    fn mail_in(mailbox: &'static str, id: &'static str, subject: &'static str) -> Mail {
+        Mail {
+            mailbox,
+            id,
+            from: "Billing <billing@example.com>",
+            to: "ops@zmail.dev",
+            subject,
+            body: Some("Invoice attached."),
+            at: "2026-03-20T09:00:00Z",
+            unread: false,
+            flagged: false,
+            attachment: false,
+        }
+    }
+
+    #[test]
+    fn in_clauses_find_nested_mailboxes_by_their_last_segment() {
+        use zmail_core::SearchScope;
+
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        // JMAP and Proton paths, joined by `/`.
+        let jmap = nested_account(
+            &store,
+            "/",
+            &[
+                mail_in("Inbox", "inbox", "Inbox invoice"),
+                mail_in("Clients", "clients", "Clients invoice"),
+                mail_in("Clients/Invoices", "client", "Client invoice"),
+                mail_in("Suppliers/Invoices", "supplier", "Supplier invoice"),
+                mail_in("Folders/Work", "work", "Work invoice"),
+            ],
+        );
+        // An IMAP server whose delimiter is `.`.
+        let imap = nested_account(
+            &store,
+            ".",
+            &[
+                mail_in("INBOX", "dotted-inbox", "Dotted inbox invoice"),
+                mail_in("INBOX.Invoices", "dotted", "Dotted invoice"),
+            ],
+        );
+        let account = |account_id: i64, query: &str| {
+            search_in(&store, &SearchScope::Account(account_id), query)
+        };
+
+        // The bare name searches every mailbox of that name.
+        assert_eq!(
+            account(jmap, "in:Invoices"),
+            ["Client invoice", "Supplier invoice"]
+        );
+        assert_eq!(account(imap, "in:invoices"), ["Dotted invoice"]);
+        assert_eq!(
+            search_in(&store, &SearchScope::AllAccounts, "invoice in:Invoices"),
+            ["Client invoice", "Dotted invoice", "Supplier invoice"]
+        );
+        // The full path searches only that mailbox.
+        assert_eq!(account(jmap, "in:clients/invoices"), ["Client invoice"]);
+        assert_eq!(account(imap, "in:INBOX.Invoices"), ["Dotted invoice"]);
+        // A parent's name is the parent only.
+        assert_eq!(account(jmap, "in:Clients"), ["Clients invoice"]);
+        // Proton's `Folders/Work` by its folder name.
+        assert_eq!(account(jmap, "in:work"), ["Work invoice"]);
+        // Negated, every mailbox of the name is left out.
+        assert_eq!(
+            account(jmap, "invoice -in:Invoices"),
+            ["Clients invoice", "Inbox invoice", "Work invoice"]
+        );
+        assert_eq!(
+            account(jmap, "invoice -in:Clients/Invoices"),
+            [
+                "Clients invoice",
+                "Inbox invoice",
+                "Supplier invoice",
+                "Work invoice"
+            ]
+        );
+        // Roles are unchanged.
+        assert_eq!(
+            search_in(&store, &SearchScope::AllAccounts, "in:inbox"),
+            ["Dotted inbox invoice", "Inbox invoice"]
+        );
+        // No such mailbox: nothing, and negated, no narrowing.
+        assert!(account(jmap, "in:Nowhere").is_empty());
+        assert_eq!(account(imap, "invoice -in:Nowhere").len(), 2);
+
+        // The server hits' local re-check matches `in:` the same way.
+        store
+            .record_server_search_hits(
+                jmap,
+                "rocket in:Invoices",
+                &[
+                    server_hit(Some("Suppliers/Invoices"), "supplier"),
+                    server_hit(Some("Folders/Work"), "work"),
+                ],
+            )
+            .expect("hits should record");
+        assert_eq!(account(jmap, "rocket in:Invoices"), ["Supplier invoice"]);
     }
 
     #[test]
