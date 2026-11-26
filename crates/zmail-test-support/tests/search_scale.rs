@@ -20,8 +20,8 @@ use std::{
 
 use anyhow::Result;
 use zmail_core::{
-    AccountSyncSnapshot, HydratedBody, ProtocolKind, ThreadSnapshot,
-    search::{SearchQuery, SearchTerm, SearchText, day_start_unix, mailbox_matches},
+    AccountSyncSnapshot, HydratedBody, MailboxSnapshot, ProtocolKind, ThreadSnapshot,
+    search::{SearchMailbox, SearchQuery, SearchTerm, SearchText, day_start_unix, mailbox_matches},
     time::{Date, TimeZone, ZonedDateTime, clock_at, parse_timestamp},
 };
 use zmail_store::LocalStore;
@@ -49,6 +49,8 @@ struct OracleThread {
     subject: String,
     mailbox: String,
     role: Option<String>,
+    delimiter: Option<String>,
+    parent: Option<String>,
     subject_tokens: Vec<String>,
     participants: Vec<String>,
     preview: Vec<String>,
@@ -78,18 +80,20 @@ fn oracle_threads(snapshot: &AccountSyncSnapshot) -> Vec<OracleThread> {
     let mut threads = Vec::new();
     for mailbox in &snapshot.mailboxes {
         for thread in &mailbox.threads {
-            threads.push(oracle_thread(&mailbox.name, mailbox.role.clone(), thread));
+            threads.push(oracle_thread(mailbox, thread));
         }
     }
     threads
 }
 
-fn oracle_thread(mailbox: &str, role: Option<String>, thread: &ThreadSnapshot) -> OracleThread {
+fn oracle_thread(mailbox: &MailboxSnapshot, thread: &ThreadSnapshot) -> OracleThread {
     let messages = &thread.messages;
     OracleThread {
         subject: thread.subject.clone(),
-        mailbox: mailbox.to_owned(),
-        role,
+        mailbox: mailbox.name.clone(),
+        role: mailbox.role.clone(),
+        delimiter: mailbox.delimiter.clone(),
+        parent: mailbox.parent.clone(),
         subject_tokens: tokens(&thread.subject),
         participants: tokens(&thread.participants),
         preview: tokens(&thread.preview),
@@ -169,9 +173,15 @@ fn oracle(threads: &[OracleThread], query: &str) -> BTreeSet<String> {
                     SearchTerm::Unread => thread.unread,
                     SearchTerm::Read => !thread.unread,
                     SearchTerm::Flagged => thread.flagged,
-                    SearchTerm::Mailbox(value) => {
-                        mailbox_matches(value, &thread.mailbox, thread.role.as_deref())
-                    }
+                    SearchTerm::Mailbox(value) => mailbox_matches(
+                        value,
+                        &SearchMailbox {
+                            name: &thread.mailbox,
+                            parent: thread.parent.as_deref(),
+                            delimiter: thread.delimiter.as_deref(),
+                            role: thread.role.as_deref(),
+                        },
+                    ),
                     SearchTerm::Before(spec) | SearchTerm::After(spec) => {
                         let Some(boundary) = spec
                             .resolve(today)

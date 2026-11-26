@@ -11,9 +11,14 @@
 //! | `subject:report` | the subject line |
 //! | `has:attachment` | threads with an attachment |
 //! | `is:unread`, `is:read`, `is:flagged` (`is:starred`) | thread state |
-//! | `in:inbox`, `in:"Project X"` | a mailbox, by name or role |
+//! | `in:inbox`, `in:"Project X"`, `in:Clients/Invoices` | a mailbox, by full name, last path segment or role |
 //! | `after:2026-01-31`, `before:2026-02-01` | message dates (`YYYY-MM-DD`) |
 //! | `after:7d`, `before:2w` | relative dates: days, weeks, months, years ago |
+//!
+//! `in:` matches a nested mailbox by its full path (`in:Clients/Invoices`)
+//! or by the name the folder tree shows for it, the last segment of its
+//! path (`in:Invoices`, which also finds `Suppliers/Invoices`); see
+//! [`mailbox_matches`].
 //!
 //! A leading `-` negates any clause (`-word`, `-from:alice`, `-is:unread`).
 //! Operator names are case-insensitive. A clause that does not parse as an
@@ -65,7 +70,8 @@ pub enum SearchTerm {
     Read,
     /// The thread is flagged.
     Flagged,
-    /// The thread is in the mailbox with this name or role.
+    /// The thread is in a mailbox with this full name, last path segment
+    /// or role (see [`mailbox_matches`]).
     Mailbox(String),
     /// A message in the thread arrived before the start of this day.
     Before(DateSpec),
@@ -288,11 +294,42 @@ pub fn mailbox_role_alias(value: &str) -> &str {
     }
 }
 
-/// Whether an `in:` value names a mailbox, by name or role, ignoring
-/// ASCII case.
-pub fn mailbox_matches(value: &str, name: &str, role: Option<&str>) -> bool {
-    name.eq_ignore_ascii_case(value)
-        || role.is_some_and(|role| role.eq_ignore_ascii_case(mailbox_role_alias(value)))
+/// A mailbox as an `in:` clause sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchMailbox<'a> {
+    /// Server name: the full path (`Clients/Invoices`, `Folders/Work`,
+    /// `INBOX.Archive`).
+    pub name: &'a str,
+    /// Server name of the parent mailbox, if nested.
+    pub parent: Option<&'a str>,
+    /// The hierarchy delimiter of `name`, if it has one.
+    pub delimiter: Option<&'a str>,
+    /// The stored role (`inbox`, `junk`), if known.
+    pub role: Option<&'a str>,
+}
+
+impl SearchMailbox<'_> {
+    /// The last segment of the mailbox's path: the name the folder tree
+    /// shows for it ([`crate::mailbox_leaf_name`]).
+    pub fn leaf_name(&self) -> &str {
+        crate::mailbox_leaf_name(self.name, self.parent, self.delimiter)
+    }
+}
+
+/// Whether an `in:` value names a mailbox, ignoring ASCII case: by its
+/// full name (`in:Clients/Invoices`), by the last segment of its path
+/// (`in:Invoices`, the name the folder tree shows, so every mailbox of
+/// that name is searched, whatever folder it is in) or by role
+/// (`in:inbox`, `in:spam`, see [`mailbox_role_alias`]).
+///
+/// The local search and every server search match `in:` through this
+/// one function, so they agree on which mailboxes a query covers.
+pub fn mailbox_matches(value: &str, mailbox: &SearchMailbox<'_>) -> bool {
+    mailbox.name.eq_ignore_ascii_case(value)
+        || mailbox.leaf_name().eq_ignore_ascii_case(value)
+        || mailbox
+            .role
+            .is_some_and(|role| role.eq_ignore_ascii_case(mailbox_role_alias(value)))
 }
 
 /// The Unix time at which `day` starts in `zone`. Days that skip midnight
@@ -606,12 +643,70 @@ mod tests {
         assert!(!SearchQuery::parse("-report !!").needs_message_bodies());
     }
 
+    fn top<'a>(name: &'a str, role: Option<&'a str>) -> SearchMailbox<'a> {
+        SearchMailbox {
+            name,
+            parent: None,
+            delimiter: None,
+            role,
+        }
+    }
+
+    fn nested<'a>(name: &'a str, delimiter: &'a str) -> SearchMailbox<'a> {
+        SearchMailbox {
+            name,
+            parent: name.rsplit_once(delimiter).map(|(parent, _)| parent),
+            delimiter: Some(delimiter),
+            role: None,
+        }
+    }
+
     #[test]
     fn mailboxes_match_by_name_or_role() {
-        assert!(mailbox_matches("inbox", "INBOX", None));
-        assert!(mailbox_matches("Spam", "Bulk", Some("junk")));
-        assert!(mailbox_matches("archive", "All Mail", Some("archive")));
-        assert!(!mailbox_matches("project", "Projects", None));
+        assert!(mailbox_matches("inbox", &top("INBOX", None)));
+        assert!(mailbox_matches("Spam", &top("Bulk", Some("junk"))));
+        assert!(mailbox_matches(
+            "archive",
+            &top("All Mail", Some("archive"))
+        ));
+        assert!(!mailbox_matches("project", &top("Projects", None)));
+    }
+
+    #[test]
+    fn nested_mailboxes_match_by_full_path_or_last_segment() {
+        let clients = nested("Clients/Invoices", "/");
+        let suppliers = nested("Suppliers/Invoices", "/");
+        // The bare name finds every mailbox of that name.
+        assert!(mailbox_matches("invoices", &clients));
+        assert!(mailbox_matches("Invoices", &suppliers));
+        // The full path finds only that one.
+        assert!(mailbox_matches("clients/invoices", &clients));
+        assert!(!mailbox_matches("Clients/Invoices", &suppliers));
+        // A parent's name, or part of the path, is not the mailbox.
+        assert!(!mailbox_matches("Clients", &clients));
+        assert!(!mailbox_matches("Invoice", &clients));
+        // Proton (Bridge) paths and IMAP's `.` delimiter alike.
+        assert!(mailbox_matches("work", &nested("Folders/Work", "/")));
+        assert!(mailbox_matches("Archive", &nested("INBOX.Archive", ".")));
+        assert!(mailbox_matches(
+            "INBOX.Archive",
+            &nested("INBOX.Archive", ".")
+        ));
+        // The segment splits on the mailbox's own delimiter only.
+        assert!(!mailbox_matches("Archive", &nested("INBOX/Archive", ".")));
+        // A deeper path's tail is not its full path.
+        assert!(!mailbox_matches(
+            "Clients/Invoices",
+            &nested("Acme/Clients/Invoices", "/")
+        ));
+        // No delimiter: the name is matched whole, as before.
+        assert!(!mailbox_matches("Work", &top("Folders/Work", None)));
+        // Roles still match, nested or not.
+        let nested_junk = SearchMailbox {
+            role: Some("junk"),
+            ..nested("Folders/Bulk", "/")
+        };
+        assert!(mailbox_matches("spam", &nested_junk));
     }
 
     #[test]

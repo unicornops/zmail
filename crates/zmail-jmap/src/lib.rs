@@ -1462,9 +1462,10 @@ fn sync_query(account_id: &str, position: i64) -> Query<Email> {
 /// This is the fallback for mail whose body the local index does not hold.
 /// Every operator has a JMAP filter: free text (`text`), `from`, `to`,
 /// `subject`, `hasAttachment`, the `$seen` and `$flagged` keywords,
-/// `inMailbox` (resolved by mailbox name or role), and `before`/`after`
-/// at the start of the day in `now`'s zone; negation wraps a condition in
-/// a `NOT` operator. The store re-checks the non-text clauses locally.
+/// `inMailbox` (each mailbox an `in:` names by full path, last path
+/// segment or role, [`zmail_core::search::mailbox_matches`]), and
+/// `before`/`after` at the start of the day in `now`'s zone; negation
+/// wraps a condition in a `NOT` operator. The store re-checks the non-text clauses locally.
 pub async fn search_emails(
     target: &SyncTarget,
     secret: &str,
@@ -1515,7 +1516,7 @@ fn search_filter(
     mailboxes: &[JmapMailbox],
     now: &zmail_core::time::ZonedDateTime,
 ) -> Option<Filter<EmailFilterCondition>> {
-    use zmail_core::search::{SearchTerm, day_start_unix, mailbox_matches};
+    use zmail_core::search::{SearchMailbox, SearchTerm, day_start_unix, mailbox_matches};
 
     let condition = EmailFilterCondition::new;
     let today = zmail_core::time::Date::of(now);
@@ -1547,7 +1548,17 @@ fn search_filter(
                 let ids = mailboxes
                     .iter()
                     .filter(|mailbox| {
-                        mailbox_matches(value, &mailbox.name, mailbox.role.as_deref())
+                        // As the mirror stores it, so the local re-check
+                        // of the server's hits covers the same mailboxes.
+                        mailbox_matches(
+                            value,
+                            &SearchMailbox {
+                                name: &mailbox.name,
+                                parent: mailbox.parent.as_deref(),
+                                delimiter: Some(paths::DELIMITER),
+                                role: mailbox.role.as_deref(),
+                            },
+                        )
                     })
                     .map(|mailbox| condition().in_mailbox(mailbox.id.clone()).into())
                     .collect::<Vec<_>>();
@@ -2366,6 +2377,85 @@ mod tests {
                 "conditions": [{"text": "budget"}],
             }))
         );
+    }
+
+    #[test]
+    fn search_filters_find_nested_mailboxes_by_full_path_or_own_name() {
+        let mailbox = |id: &str, path: &str, role: Option<&str>| super::JmapMailbox {
+            id: id.to_owned(),
+            name: path.to_owned(),
+            own_name: path.rsplit('/').next().unwrap_or(path).to_owned(),
+            role: role.map(str::to_owned),
+            sort_order: 0,
+            parent: path.rsplit_once('/').map(|(parent, _)| parent.to_owned()),
+        };
+        let mailboxes = vec![
+            mailbox("mb-inbox", "Inbox", Some("inbox")),
+            mailbox("mb-clients", "Clients", None),
+            mailbox("mb-client-invoices", "Clients/Invoices", None),
+            mailbox("mb-supplier-invoices", "Suppliers/Invoices", None),
+            mailbox("mb-junk", "Folders/Bulk", Some("junk")),
+        ];
+        let now = zmail_core::time::clock_at("2026-06-15T12:00:00Z").expect("valid time");
+        let filter = |query: &str| {
+            super::search_filter(
+                &zmail_core::search::SearchQuery::parse(query),
+                &mailboxes,
+                &now,
+            )
+            .map(|filter| serde_json::to_value(filter).expect("filters serialise"))
+        };
+        let in_mailboxes = |ids: &[&str]| {
+            serde_json::json!({
+                "operator": "OR",
+                "conditions": ids
+                    .iter()
+                    .map(|id| serde_json::json!({"inMailbox": id}))
+                    .collect::<Vec<_>>(),
+            })
+        };
+        let and = |conditions: serde_json::Value| {
+            Some(serde_json::json!({"operator": "AND", "conditions": conditions}))
+        };
+
+        // The bare name asks for every mailbox of that name.
+        assert_eq!(
+            filter("in:invoices"),
+            and(serde_json::json!([in_mailboxes(&[
+                "mb-client-invoices",
+                "mb-supplier-invoices"
+            ])]))
+        );
+        // The full path asks for that one.
+        assert_eq!(
+            filter("in:Clients/Invoices"),
+            and(serde_json::json!([in_mailboxes(&["mb-client-invoices"])]))
+        );
+        // A parent's name is that mailbox, not its children.
+        assert_eq!(
+            filter("in:Clients"),
+            and(serde_json::json!([in_mailboxes(&["mb-clients"])]))
+        );
+        // Negated, every mailbox of the name is left out.
+        assert_eq!(
+            filter("budget -in:Invoices"),
+            and(serde_json::json!([
+                {"text": "budget"},
+                {"operator": "NOT", "conditions": [
+                    in_mailboxes(&["mb-client-invoices", "mb-supplier-invoices"])
+                ]},
+            ]))
+        );
+        // Roles are unchanged, nested or not.
+        assert_eq!(
+            filter("in:spam in:inbox"),
+            and(serde_json::json!([
+                in_mailboxes(&["mb-junk"]),
+                in_mailboxes(&["mb-inbox"]),
+            ]))
+        );
+        // A path tail that is not a full path names no mailbox.
+        assert_eq!(filter("in:Acme/Clients/Invoices"), None);
     }
 
     #[test]
