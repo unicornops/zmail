@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.0](https://github.com/unicornops/zmail/compare/v0.36.1...v0.37.0) (2026-11-26)
+
+
+### Features
+
+* **search:** match in: against a nested mailbox's own name as well as its path ([#527](https://github.com/unicornops/zmail/issues/527)) ([c96fba2](https://github.com/unicornops/zmail/commit/c96fba2604d99aee18ace9edd25179a73e2d7a6d))
+
 ## [0.36.1](https://github.com/unicornops/zmail/compare/v0.36.0...v0.36.1) (2026-11-25)
 
 
