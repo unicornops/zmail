@@ -372,7 +372,46 @@ fn message_delta(
 
 #[cfg(test)]
 mod tests {
+    use zmail_proton_api::{
+        Manager,
+        mock::{MockServer, Reply},
+    };
+
     use super::*;
+
+    // Issue #462: a server that always has more events is read in runs:
+    // each applies what it collected and saves its place.
+    #[tokio::test]
+    async fn an_endless_event_stream_is_read_in_runs() {
+        let server = MockServer::start(|request, index| {
+            assert!(request.path.starts_with("/core/v4/events/"));
+            Reply::json(
+                200,
+                serde_json::json!({"Code": 1000, "EventID": format!("e{}", index + 1), "More": 1}),
+            )
+        })
+        .await;
+        let manager =
+            Manager::new(zmail_proton_api::mock::config(&server.url, None)).expect("manager");
+        let client = manager.new_client("uid", "access", "refresh");
+        let checkpoint = ProtonCheckpoint {
+            event_id: "e0".to_owned(),
+            ..ProtonCheckpoint::default()
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(120),
+            apply_events(&client, &checkpoint, &HashSet::new(), 128),
+        )
+        .await
+        .expect("bounded: finished in time")
+        .expect("events");
+        let EventsOutcome::Applied(applied) = outcome else {
+            panic!("no refresh was asked for");
+        };
+        let read = server.requests().len();
+        assert_eq!(applied.event_id, format!("e{read}"), "the last event read");
+        assert!(applied.delta.is_none(), "no event changed anything");
+    }
 
     fn event(json: serde_json::Value) -> Event {
         serde_json::from_value(json).expect("event")

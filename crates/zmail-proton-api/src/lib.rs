@@ -47,6 +47,9 @@ mod mail_settings;
 mod manager;
 mod manager_auth;
 mod message;
+#[cfg(any(test, feature = "test-harness"))]
+#[doc(hidden)]
+pub mod mock;
 mod package;
 mod paging;
 mod pinning;

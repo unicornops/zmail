@@ -1,9 +1,4 @@
-//! Client tests against a local mock HTTPS server.
-//!
-//! The server speaks just enough HTTP/1.1 over rustls for these tests: one
-//! request per connection, `Content-Length` bodies, `Connection: close`
-//! replies. Its certificate comes from `testdata/` (a throwaway CA and a
-//! leaf for `127.0.0.1`), so the client runs its real TLS path.
+//! Client tests against the local mock HTTPS server ([`crate::mock`]).
 
 use std::{
     sync::{
@@ -14,229 +9,17 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::TcpListener,
-    task::JoinHandle,
-};
-use tokio_rustls::{
-    TlsAcceptor,
-    rustls::{
-        ServerConfig,
-        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
-    },
-};
+use tokio::{io::AsyncReadExt, net::TcpListener};
 
 use crate::{
-    AppVersion, ClientConfig, Code, Error, Manager, PinSet, Status, manager::Request,
-    response::RetryPolicy,
+    AppVersion, ClientConfig, Code, Error, Manager, PinSet, Status,
+    manager::Request,
+    mock::{LEAF_PIN, MockServer, Recorded, Reply},
 };
-
-const CA_PEM: &[u8] = include_bytes!("testdata/ca.pem");
-const LEAF_PEM: &[u8] = include_bytes!("testdata/leaf.pem");
-const LEAF_KEY_PEM: &[u8] = include_bytes!("testdata/leaf-key.pem");
-/// SPKI pin of `testdata/leaf.pem`.
-const LEAF_PIN: &str = "w8Iej+c8CZbEzpfZigKNhMQF1/ZM9EOLj7sR10YYCMM=";
-
-/// A request as the mock server saw it.
-#[derive(Debug, Clone)]
-struct Recorded {
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-}
-
-impl Recorded {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
-
-    fn json(&self) -> serde_json::Value {
-        serde_json::from_slice(&self.body).expect("JSON request body")
-    }
-}
-
-/// A reply from the mock server.
-struct Reply {
-    status: u16,
-    headers: Vec<(&'static str, String)>,
-    body: String,
-}
-
-impl Reply {
-    fn json(status: u16, body: serde_json::Value) -> Self {
-        Self {
-            status,
-            headers: Vec::new(),
-            body: body.to_string(),
-        }
-    }
-
-    /// Closes the connection after reading the request, without
-    /// answering (a connection dropped mid-request).
-    fn drop_connection() -> Self {
-        Self {
-            status: 0,
-            headers: Vec::new(),
-            body: String::new(),
-        }
-    }
-
-    fn with_header(mut self, name: &'static str, value: &str) -> Self {
-        self.headers.push((name, value.to_owned()));
-        self
-    }
-}
-
-type Handler = dyn Fn(&Recorded, usize) -> Reply + Send + Sync;
-
-struct MockServer {
-    url: String,
-    requests: Arc<Mutex<Vec<Recorded>>>,
-    task: JoinHandle<()>,
-}
-
-impl MockServer {
-    async fn start(handler: impl Fn(&Recorded, usize) -> Reply + Send + Sync + 'static) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        Self::start_on(listener, Arc::new(handler))
-    }
-
-    fn start_on(listener: TcpListener, handler: Arc<Handler>) -> Self {
-        let port = listener.local_addr().expect("addr").port();
-        let acceptor = TlsAcceptor::from(Arc::new(server_tls()));
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let recorded = requests.clone();
-        let task = tokio::spawn(async move {
-            loop {
-                let Ok((tcp, _)) = listener.accept().await else {
-                    return;
-                };
-                let acceptor = acceptor.clone();
-                let handler = handler.clone();
-                let recorded = recorded.clone();
-                tokio::spawn(async move {
-                    let Ok(tls) = acceptor.accept(tcp).await else {
-                        return;
-                    };
-                    serve_one(tls, handler, recorded).await;
-                });
-            }
-        });
-        Self {
-            url: format!("https://127.0.0.1:{port}"),
-            requests,
-            task,
-        }
-    }
-
-    fn requests(&self) -> Vec<Recorded> {
-        self.requests.lock().expect("requests").clone()
-    }
-}
-
-impl Drop for MockServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-fn server_tls() -> ServerConfig {
-    let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
-    let chain = vec![CertificateDer::from_pem_slice(LEAF_PEM).expect("leaf")];
-    let key = PrivateKeyDer::from_pem_slice(LEAF_KEY_PEM).expect("key");
-    let mut config = ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .expect("versions")
-        .with_no_client_auth()
-        .with_single_cert(chain, key)
-        .expect("server cert");
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    config
-}
-
-async fn serve_one<S>(stream: S, handler: Arc<Handler>, recorded: Arc<Mutex<Vec<Recorded>>>)
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let mut reader = BufReader::new(stream);
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
-        return;
-    }
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_owned();
-    let path = parts.next().unwrap_or_default().to_owned();
-    let mut headers = Vec::new();
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
-            return;
-        }
-        let line = line.trim_end();
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            headers.push((name.trim().to_owned(), value.trim().to_owned()));
-        }
-    }
-    let length = headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let mut body = vec![0; length];
-    if reader.read_exact(&mut body).await.is_err() {
-        return;
-    }
-    let request = Recorded {
-        method,
-        path,
-        headers,
-        body,
-    };
-    let index = {
-        let mut all = recorded.lock().expect("requests");
-        all.push(request.clone());
-        all.len() - 1
-    };
-    let reply = handler(&request, index);
-    if reply.status == 0 {
-        return;
-    }
-    let mut response = format!(
-        "HTTP/1.1 {} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nDate: Tue, 20 Oct 2026 10:00:00 GMT\r\n",
-        reply.status,
-        reply.body.len()
-    );
-    for (name, value) in &reply.headers {
-        response.push_str(&format!("{name}: {value}\r\n"));
-    }
-    response.push_str("\r\n");
-    response.push_str(&reply.body);
-    let stream = reader.get_mut();
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
-}
 
 /// A config for the mock server with fast, jitter-free retries.
 fn test_config(url: &str, pins: Option<PinSet>) -> ClientConfig {
-    let mut config = ClientConfig::with_custom_ca(url, CA_PEM, pins)
-        .expect("config")
-        .with_app_version(AppVersion::zmail("0.14.0").expect("version"));
-    config.retry = RetryPolicy {
-        max_retries: 3,
-        max_wait: Duration::from_secs(2),
-        fallback_after: Duration::from_millis(20),
-        jitter: Duration::ZERO,
-        backoff_base: Duration::from_millis(100),
-    };
-    config
+    crate::mock::config(url, pins)
 }
 
 fn user_reply() -> Reply {
@@ -287,11 +70,7 @@ async fn error_codes_become_typed_errors_and_run_handlers() {
             422,
             serde_json::json!({"Code": 9001, "Error": "Human verification required", "Details": {"HumanVerificationToken": "token", "HumanVerificationMethods": ["captcha"]}}),
         ),
-        _ => Reply {
-            status: 500,
-            headers: Vec::new(),
-            body: "not json".to_owned(),
-        },
+        _ => Reply::bytes(500, "not json"),
     })
     .await;
     let manager = Manager::new(test_config(&server.url, None)).expect("manager");
@@ -957,12 +736,7 @@ async fn salts_the_key_password_and_lists_addresses() {
 async fn label_actions_accept_an_empty_body() {
     // go-proton-api's fake server answers label actions with no body;
     // upstream (resty) reads that as an empty result.
-    let server = MockServer::start(|_, _| Reply {
-        status: 200,
-        headers: Vec::new(),
-        body: String::new(),
-    })
-    .await;
+    let server = MockServer::start(|_, _| Reply::bytes(200, "")).await;
     let manager = Manager::new(test_config(&server.url, None)).expect("manager");
     let client = manager.new_client("uid", "access", "refresh");
 
@@ -1205,4 +979,110 @@ fn idempotent_requests_are_the_ones_safe_to_repeat() {
             .header(crate::manager::METHOD_OVERRIDE_HEADER, "DELETE")
             .is_idempotent()
     );
+}
+
+// Issue #462: what the server says never keeps a request going, or fills
+// memory, without bound. Each test fails rather than hangs on a regression.
+
+/// Runs `future`, failing the test if it takes longer than `seconds`.
+async fn within<T>(seconds: u64, future: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(seconds), future)
+        .await
+        .expect("bounded: finished in time")
+}
+
+const GIB: u64 = 1 << 30;
+const MIB: usize = 1 << 20;
+
+#[tokio::test]
+async fn refuses_a_json_body_declared_over_the_limit() {
+    // A gigabyte declared, nothing sent: the client must not wait for it.
+    let server = MockServer::start(|_, _| Reply::streamed(200, Some(GIB), 0)).await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+    let error = within(10, client.get_user()).await.expect_err("too large");
+    assert!(error.to_string().contains("too large"), "{error:?}");
+    assert_eq!(server.requests().len(), 1, "not retried");
+}
+
+#[tokio::test]
+async fn cuts_off_a_chunked_json_body_past_the_limit() {
+    // No length given: the client counts as it reads.
+    let server = MockServer::start(|_, _| Reply::streamed(200, None, 80 * MIB)).await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+    let error = within(30, client.get_user()).await.expect_err("too large");
+    assert!(error.to_string().contains("too large"), "{error:?}");
+}
+
+#[tokio::test]
+async fn refuses_an_attachment_declared_over_the_limit() {
+    let server = MockServer::start(|_, _| Reply::streamed(200, Some(4 * GIB), 0)).await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+    let error = within(10, client.get_attachment("att-1"))
+        .await
+        .expect_err("too large");
+    assert!(error.to_string().contains("too large"), "{error:?}");
+}
+
+#[tokio::test]
+async fn gives_up_on_a_listing_that_stays_stale() {
+    let server = MockServer::start(|_, _| {
+        Reply::json(
+            200,
+            serde_json::json!({"Code": 1000, "Messages": [], "Stale": 1}),
+        )
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+    let error = within(
+        20,
+        client.get_message_metadata_page(0, 128, &crate::MessageFilter::default()),
+    )
+    .await
+    .expect_err("still stale");
+    assert!(error.to_string().contains("stale"), "{error:?}");
+    let asked = server.requests().len();
+    assert!((2..=10).contains(&asked), "asked {asked} times");
+}
+
+#[tokio::test]
+async fn refuses_an_inflated_contact_total() {
+    let server = MockServer::start(|_, _| {
+        Reply::json(
+            200,
+            serde_json::json!({"Code": 1000, "ContactEmails": [], "Total": 1_000_000_000_000u64}),
+        )
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+    let error = within(10, client.get_all_contact_emails("bob@example.com"))
+        .await
+        .expect_err("inflated total");
+    assert!(error.to_string().contains("more than"), "{error:?}");
+    assert_eq!(server.requests().len(), 1, "no page past the first");
+}
+
+#[tokio::test]
+async fn refuses_an_inflated_message_count() {
+    let server = MockServer::start(|_, _| {
+        Reply::json(
+            200,
+            serde_json::json!({"Code": 1000, "Messages": [], "Total": 1_000_000_000_000u64}),
+        )
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+    let error = within(
+        10,
+        client.get_message_metadata(&crate::MessageFilter::default()),
+    )
+    .await
+    .expect_err("inflated total");
+    assert!(error.to_string().contains("more than"), "{error:?}");
+    assert_eq!(server.requests().len(), 1, "only the count");
 }
