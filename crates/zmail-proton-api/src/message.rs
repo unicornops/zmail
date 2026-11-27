@@ -13,7 +13,9 @@
 // `ConversationID` field Proton returns (go-proton-api does not read it),
 // which Zmail uses to group threads. Chunks run one after another rather
 // than in parallel. Sending is in `draft.rs`, `package.rs` and
-// `attachment.rs`.
+// `attachment.rs`. Modified on 2026-11-27 (#462): a page the server keeps
+// answering as stale is asked for a few times with a short back-off, not
+// forever, and a full message is read up to the data response limit.
 
 //! Message metadata: what a message list needs, without the encrypted body.
 
@@ -29,6 +31,11 @@ use crate::{
     paging::{MAX_PAGE_SIZE, fetch_paged},
     response::Error,
 };
+
+/// How many times [`Client::get_message_metadata_page`] asks for a page
+/// the server answers as stale before giving up: the waits between them
+/// (100 ms doubling, with jitter) come to at most 1.5 s.
+pub const MAX_STALE_ATTEMPTS: u32 = 5;
 
 /// An email address as the API sends it (Go's `mail.Address`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,7 +367,7 @@ impl Client {
             message: Message,
         }
         let res: Res = self
-            .json(&Request::get(format!("/mail/v4/messages/{message_id}")))
+            .json(&Request::get(format!("/mail/v4/messages/{message_id}")).data())
             .await?;
         Ok(res.message)
     }
@@ -379,7 +386,9 @@ impl Client {
     }
 
     /// Returns one page of message metadata (`GetMessageMetadataPage`),
-    /// asking again while the server reports the result as stale.
+    /// asking again while the server reports the result as stale, up to
+    /// [`MAX_STALE_ATTEMPTS`] times in all with a short back-off between
+    /// them (go-proton-api asks again for as long as it is stale).
     pub async fn get_message_metadata_page(
         &self,
         page: usize,
@@ -412,12 +421,19 @@ impl Client {
                 page_size,
                 sort: "ID",
             })?;
-        loop {
+        let backoff = self.manager().config().retry;
+        for attempt in 0..MAX_STALE_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(backoff.backoff_delay(attempt - 1)).await;
+            }
             let res: Res = self.json(&request).await?;
             if !res.stale {
                 return Ok(res.messages);
             }
         }
+        Err(Error::StillStale {
+            attempts: MAX_STALE_ATTEMPTS,
+        })
     }
 
     /// Counts the messages matching `filter` (`countMessages`).

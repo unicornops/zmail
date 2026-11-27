@@ -169,6 +169,29 @@ pub enum Error {
     /// A response body could not be decoded.
     #[error("unexpected Proton response: {0}")]
     Decode(#[from] serde_json::Error),
+    /// A response was larger than Zmail reads for its kind of route
+    /// (ADR 0004, "Bounded requests"); the rest of it was not read.
+    #[error("Proton's response was too large: over the {limit}-byte limit")]
+    ResponseTooLarge {
+        /// The limit for the route, in bytes.
+        limit: usize,
+    },
+    /// The message listing was still out of date after the retries.
+    #[error("Proton's message list was still stale after {attempts} attempts")]
+    StillStale {
+        /// How many times the page was asked for.
+        attempts: u32,
+    },
+    /// The server reported more items than Zmail lists in one go.
+    #[error("Proton reported {total} {what}, more than the {limit} Zmail lists")]
+    TooManyItems {
+        /// What was listed.
+        what: &'static str,
+        /// The count the server reported.
+        total: usize,
+        /// The most Zmail lists.
+        limit: usize,
+    },
     /// The SRP challenge could not be answered: a bad or unsigned modulus,
     /// an invalid salt or server ephemeral, or an unsupported version.
     #[error("Proton sign-in failed: {0}")]
@@ -291,15 +314,16 @@ impl Error {
     ///
     /// - Yes: no answer after the connection was made (a timeout, a reset
     ///   or dropped connection, a body cut short), a server error (5xx) or
-    ///   rate limiting (429) still there after the retries, and a success
-    ///   answer that could not be read.
+    ///   rate limiting (429) still there after the retries, and an answer
+    ///   that could not be read (a success that does not decode, or one too
+    ///   large to read).
     /// - No: the connection or the TLS handshake never completed (nothing
     ///   was sent), any other error answer (4xx), a session Proton signed
     ///   out, and errors raised before any request.
     pub fn may_have_been_carried_out(&self) -> bool {
         match self {
             Self::Network(error) => !error.is_connect(),
-            Self::Decode(_) => true,
+            Self::Decode(_) | Self::ResponseTooLarge { .. } => true,
             Self::Deauthenticated(_) => false,
             _ => self
                 .status()

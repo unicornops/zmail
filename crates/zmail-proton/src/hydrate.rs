@@ -6,7 +6,10 @@
 //! 1. Decryption is decoupled from network scheduling. Every body and
 //!    attachment of the batch is downloaded first; only then are they
 //!    decrypted, on a blocking worker, so the timing and order of requests
-//!    never depend on how long, or whether, a decryption took.
+//!    never depend on how long, or whether, a decryption took. A batch
+//!    holds at most [`HYDRATION_BATCH_BYTES`] of encrypted mail; messages
+//!    past that wait for the next hydration, not for this one's
+//!    decryption.
 //! 2. Failures are never reported back: nothing is sent to Proton (or
 //!    anyone) because a message did not decrypt.
 //! 3. Nothing is re-fetched because decryption failed. An undecryptable
@@ -15,7 +18,7 @@
 
 use anyhow::{Context, Result, bail};
 use zmail_core::{HydratedBody, MessageHeaders, ProtocolKind, SyncTarget};
-use zmail_proton_api::Message;
+use zmail_proton_api::{Client, Message};
 
 use crate::{
     ProtonSession,
@@ -24,7 +27,9 @@ use crate::{
 
 /// Fetches, decrypts and parses the bodies of the given messages, in the
 /// shape the store takes. Messages that no longer exist on the server are
-/// left out; the next sync removes them.
+/// left out; the next sync removes them. So are the messages past the
+/// batch's [`HYDRATION_BATCH_BYTES`], which the next hydration fetches; a
+/// first message larger than that on its own is an error.
 pub async fn fetch_message_bodies(
     target: &SyncTarget,
     session: &ProtonSession,
@@ -41,19 +46,7 @@ pub async fn fetch_message_bodies(
     let keys = session.unlocked_keys().await?;
 
     // Rule 1: the network phase finishes before any decryption starts.
-    let mut downloaded: Vec<(Message, Vec<Vec<u8>>)> = Vec::with_capacity(message_ids.len());
-    for message_id in message_ids {
-        let message = match client.get_message(message_id).await {
-            Ok(message) => message,
-            Err(error) if error.status() == Some(404) => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let mut attachments = Vec::with_capacity(message.attachments.len());
-        for attachment in &message.attachments {
-            attachments.push(client.get_attachment(&attachment.id).await?);
-        }
-        downloaded.push((message, attachments));
-    }
+    let downloaded = download(client, message_ids).await?;
 
     let mailbox_name = mailbox_name.to_owned();
     // Attachments are written through the store's blob store, which
@@ -82,6 +75,81 @@ pub async fn fetch_message_bodies(
     })
     .await
     .context("the decryption task stopped")
+}
+
+/// The most encrypted mail one hydration batch holds (256 MiB: message
+/// bodies and attachment data, before decryption). Twice the largest
+/// response Zmail reads for one message or attachment
+/// ([`zmail_proton_api::MAX_DATA_RESPONSE_BYTES`]), and ten times Proton's
+/// 25 MB limit for a message with its attachments.
+pub(crate) const HYDRATION_BATCH_BYTES: usize = 256 << 20;
+
+/// A message and its attachments' encrypted data, as downloaded.
+type Downloaded = (Message, Vec<Vec<u8>>);
+
+/// The network phase: each message with its attachments' encrypted data,
+/// within [`HYDRATION_BATCH_BYTES`].
+async fn download(client: &Client, message_ids: &[String]) -> Result<Vec<Downloaded>> {
+    download_within(client, message_ids, HYDRATION_BATCH_BYTES).await
+}
+
+/// Downloads the messages in order until the next would take the batch
+/// over `budget` bytes, by the sizes Proton gives for its body and
+/// attachments or by the bytes that arrive. The messages after that are
+/// left out, still to be hydrated: the next hydration of the thread fetches
+/// them. Nothing is decrypted until the batch is complete (rule 1), so the
+/// batch is cut short before decryption, never between decryptions. A
+/// first message that does not fit on its own is an error.
+async fn download_within(
+    client: &Client,
+    message_ids: &[String],
+    budget: usize,
+) -> Result<Vec<Downloaded>> {
+    let too_large = |message_id: &str| {
+        anyhow::anyhow!(
+            "Proton message {message_id} is too large to download: over the \
+             {budget}-byte limit for one download"
+        )
+    };
+    let mut downloaded: Vec<Downloaded> = Vec::with_capacity(message_ids.len());
+    let mut used = 0usize;
+    'messages: for message_id in message_ids {
+        let message = match client.get_message(message_id).await {
+            Ok(message) => message,
+            Err(error) if error.status() == Some(404) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let declared = message
+            .attachments
+            .iter()
+            .map(|attachment| usize::try_from(attachment.size).unwrap_or(0))
+            .fold(message.body.len(), usize::saturating_add);
+        if declared > budget - used {
+            if downloaded.is_empty() {
+                return Err(too_large(message_id));
+            }
+            break;
+        }
+        let mut size = message.body.len();
+        let mut attachments = Vec::with_capacity(message.attachments.len());
+        for attachment in &message.attachments {
+            let data = client.get_attachment(&attachment.id).await?;
+            size = size.saturating_add(data.len());
+            if size > budget - used {
+                // More arrived than Proton said there was.
+                if downloaded.is_empty() {
+                    return Err(too_large(message_id));
+                }
+                break 'messages;
+            }
+            attachments.push(data);
+        }
+        // Counted at its declared size when that is larger, so the batch
+        // plans by what Proton says as well as by what arrived.
+        used += size.max(declared);
+        downloaded.push((message, attachments));
+    }
+    Ok(downloaded)
 }
 
 /// Bridge adds the message's own internal ID to the References it builds
@@ -127,7 +195,123 @@ fn undecryptable_body() -> HydratedBody {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use zmail_proton_api::{
+        Manager,
+        mock::{MockServer, Reply},
+    };
+
     use super::*;
+
+    const MIB: i64 = 1 << 20;
+
+    /// A message whose attachments declare these encrypted sizes.
+    fn message_reply(id: &str, sizes: &[i64]) -> Reply {
+        let attachments: Vec<serde_json::Value> = sizes
+            .iter()
+            .enumerate()
+            .map(|(index, size)| serde_json::json!({"ID": format!("{id}-a{index}"), "Size": size}))
+            .collect();
+        Reply::json(
+            200,
+            serde_json::json!({"Code": 1000, "Message": {
+                "ID": id, "AddressID": "addr-1", "Body": "-----BEGIN PGP MESSAGE-----",
+                "MIMEType": "text/plain", "Attachments": attachments,
+            }}),
+        )
+    }
+
+    /// A mock server with the messages of `sizes`, each attachment's data
+    /// a few bytes.
+    async fn server(messages: &'static [(&'static str, &'static [i64])]) -> MockServer {
+        MockServer::start(move |request, _| {
+            if let Some(id) = request.path.strip_prefix("/mail/v4/messages/")
+                && let Some((_, sizes)) = messages.iter().find(|(known, _)| *known == id)
+            {
+                return message_reply(id, sizes);
+            }
+            if request.path.starts_with("/mail/v4/attachments/") {
+                return Reply::bytes(200, "encrypted");
+            }
+            Reply::json(404, serde_json::json!({"Code": 2501, "Error": "not found"}))
+        })
+        .await
+    }
+
+    async fn downloaded(server: &MockServer, ids: &[&str]) -> Result<Vec<(Message, Vec<Vec<u8>>)>> {
+        let manager =
+            Manager::new(zmail_proton_api::mock::config(&server.url, None)).expect("manager");
+        let client = manager.new_client("uid", "access", "refresh");
+        let ids: Vec<String> = ids.iter().map(|id| (*id).to_owned()).collect();
+        tokio::time::timeout(Duration::from_secs(20), download(&client, &ids))
+            .await
+            .expect("bounded: finished in time")
+    }
+
+    fn attachment_requests(server: &MockServer, message_id: &str) -> usize {
+        let prefix = format!("/mail/v4/attachments/{message_id}-");
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.path.starts_with(&prefix))
+            .count()
+    }
+
+    // Issue #462: a batch stops at its byte budget; the messages after it
+    // are left for the next hydration.
+    #[tokio::test]
+    async fn a_batch_stops_at_its_byte_budget() {
+        static MESSAGES: [(&str, &[i64]); 2] = [
+            ("m1", &[100 * MIB, 50 * MIB]),
+            ("m2", &[100 * MIB, 50 * MIB]),
+        ];
+        let server = server(&MESSAGES).await;
+        let batch = downloaded(&server, &["m1", "m2"]).await.expect("m1 fits");
+        let ids: Vec<&str> = batch
+            .iter()
+            .map(|(message, _)| message.metadata.id.as_str())
+            .collect();
+        assert_eq!(ids, ["m1"], "m2 would take the batch over its budget");
+        assert_eq!(batch[0].1.len(), 2);
+        assert_eq!(attachment_requests(&server, "m2"), 0);
+    }
+
+    #[tokio::test]
+    async fn counts_the_bytes_that_arrive_as_well_as_the_sizes_declared() {
+        // Each message declares 28 bytes (its 27-byte body and a 1-byte
+        // attachment) but its attachment brings 9: 36 bytes each.
+        static MESSAGES: [(&str, &[i64]); 3] = [("m1", &[1]), ("m2", &[1]), ("m3", &[1])];
+        let server = server(&MESSAGES).await;
+        let manager =
+            Manager::new(zmail_proton_api::mock::config(&server.url, None)).expect("manager");
+        let client = manager.new_client("uid", "access", "refresh");
+        let ids = ["m1".to_owned(), "m2".to_owned(), "m3".to_owned()];
+
+        // m3 fits by what it declares (72 + 28) but not by what arrives.
+        let batch = download_within(&client, &ids, 100)
+            .await
+            .expect("m1 and m2");
+        let listed: Vec<&str> = batch
+            .iter()
+            .map(|(message, _)| message.metadata.id.as_str())
+            .collect();
+        assert_eq!(listed, ["m1", "m2"]);
+
+        let error = download_within(&client, &ids, 30)
+            .await
+            .expect_err("m1 alone is over");
+        assert!(format!("{error:#}").contains("too large"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn a_message_larger_than_the_budget_is_refused() {
+        static MESSAGES: [(&str, &[i64]); 1] = [("big", &[200 * MIB, 200 * MIB])];
+        let server = server(&MESSAGES).await;
+        let error = downloaded(&server, &["big"]).await.expect_err("too large");
+        assert!(format!("{error:#}").contains("too large"), "{error:#}");
+        assert_eq!(attachment_requests(&server, "big"), 0, "nothing downloaded");
+    }
 
     #[test]
     fn a_messages_own_internal_id_is_not_one_of_its_references() {

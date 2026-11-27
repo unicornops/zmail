@@ -23,6 +23,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 mail-parser.workspace = true
+# The mock HTTPS server (`zmail_proton_api::mock`) for tests against the API.
+zmail-proton-api = { path = "../zmail-proton-api", features = ["test-harness"] }
 
 [lints]
 workspace = true

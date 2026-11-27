@@ -47,6 +47,9 @@ mod mail_settings;
 mod manager;
 mod manager_auth;
 mod message;
+#[cfg(any(test, feature = "test-harness"))]
+#[doc(hidden)]
+pub mod mock;
 mod package;
 mod paging;
 mod pinning;
@@ -65,8 +68,12 @@ mod tests;
 pub use address::{Address, AddressStatus, AddressType};
 pub use attachment::{ATTACHMENT_DISPOSITION, Attachment, CreateAttachmentReq, INLINE_DISPOSITION};
 pub use client::Client;
-pub use config::{API_HOST_URL, AppVersion, ClientConfig};
-pub use contact::{Card, CardType, Contact, ContactEmail, ContactSettings, same_address};
+pub use config::{
+    API_HOST_URL, AppVersion, ClientConfig, MAX_DATA_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES,
+};
+pub use contact::{
+    Card, CardType, Contact, ContactEmail, ContactSettings, MAX_CONTACT_EMAILS, same_address,
+};
 pub use cookies::{CookieJar, StoredCookie};
 pub use crypto::{RecipientKey, SessionKey, Split};
 pub use draft::{CreateDraftAction, CreateDraftReq, DraftTemplate, UpdateDraftReq};
@@ -79,12 +86,14 @@ pub use label::*;
 pub use mail_settings::MailSettings;
 pub use manager::{Manager, Status};
 pub use manager_auth::{Auth, AuthInfo, PasswordMode, TwoFaInfo, TwoFaStatus};
-pub use message::{EmailAddress, Message, MessageFilter, MessageFlags, MessageMetadata};
+pub use message::{
+    EmailAddress, MAX_STALE_ATTEMPTS, Message, MessageFilter, MessageFlags, MessageMetadata,
+};
 pub use package::{
     EncryptionScheme, MULTIPART_MIXED, MessagePackage, MessageRecipient, PackageKey, SendDraftReq,
     SendPreferences, SignatureType, TEXT_HTML, TEXT_PLAIN,
 };
-pub use paging::{MAX_PAGE_SIZE, fetch_paged};
+pub use paging::{MAX_PAGE_SIZE, MAX_PAGED_ITEMS, fetch_paged};
 pub use pinning::{PinMismatch, PinParseError, PinSet};
 pub use response::{ApiError, Code, Error};
 pub use salt::{Salt, SaltedKeyPass, Salts};
