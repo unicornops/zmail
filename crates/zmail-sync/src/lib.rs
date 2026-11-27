@@ -1669,6 +1669,22 @@ impl SyncService {
                     .record_outbox_failure(job.job_id, refused.to_string());
             }
         }
+        // So does an envelope Zmail will not send, which the transports
+        // check before anything reaches a server: one that names each
+        // address it refuses, or no recipient at all. Neither changes
+        // between attempts.
+        if let Some(invalid) = invalid_addresses(&error) {
+            return self
+                .inner
+                .store
+                .record_outbox_failure(job.job_id, invalid.to_string());
+        }
+        if let Some(none) = no_recipients(&error) {
+            return self
+                .inner
+                .store
+                .record_outbox_failure(job.job_id, none.to_string());
+        }
         // A refused sign-in fails at once: retrying the same credentials
         // cannot work, and the stored message tells the shell to offer
         // Re-authenticate. So does a recipient key that no longer matches
@@ -2057,6 +2073,19 @@ fn reauth_required(error: &anyhow::Error) -> Option<&ReauthRequired> {
 /// The [`zmail_jmap::SubmissionRefused`] failure somewhere in `error`'s
 /// chain, if any: the JMAP server said it did not send the message.
 fn submission_refused(error: &anyhow::Error) -> Option<&zmail_jmap::SubmissionRefused> {
+    error.chain().find_map(|cause| cause.downcast_ref())
+}
+
+/// The [`InvalidAddresses`](zmail_core::participants::InvalidAddresses)
+/// failure somewhere in `error`'s chain, if any: a transport would not
+/// put these addresses in the envelope.
+fn invalid_addresses(error: &anyhow::Error) -> Option<&zmail_core::participants::InvalidAddresses> {
+    error.chain().find_map(|cause| cause.downcast_ref())
+}
+
+/// The [`NoRecipients`](zmail_core::participants::NoRecipients) failure
+/// somewhere in `error`'s chain, if any: the message has no one to go to.
+fn no_recipients(error: &anyhow::Error) -> Option<&zmail_core::participants::NoRecipients> {
     error.chain().find_map(|cause| cause.downcast_ref())
 }
 

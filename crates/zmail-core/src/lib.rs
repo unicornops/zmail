@@ -1051,6 +1051,15 @@ pub struct OutgoingMessage {
 }
 
 impl OutgoingMessage {
+    /// Checks that the message has a recipient at all, in To, Cc or Bcc.
+    pub fn check_recipients(&self) -> Result<(), participants::NoRecipients> {
+        if self.to.is_empty() && self.cc.is_empty() && self.bcc.is_empty() {
+            Err(participants::NoRecipients)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Checks the envelope this message goes out with, before anything
     /// reaches a server: the sender's address and every To, Cc and Bcc
     /// recipient's, by [`participants::is_valid_address`].

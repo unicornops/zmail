@@ -119,9 +119,7 @@ pub fn envelope_address(recipient: &str) -> String {
 /// or commas, so it stands in an SMTP envelope (`MAIL FROM:<...>`,
 /// `RCPT TO:<...>`) as it is; and a domain that neither starts nor ends
 /// with a dot nor has two in a row. The GUI's Send and the CLI's identity
-/// addresses check with this too; the TUI's address check applies the
-/// same rule, except that it lets control characters other than
-/// whitespace through.
+/// addresses and the TUI's compose check with this too.
 pub fn is_valid_address(address: &str) -> bool {
     let Some((local, domain)) = address.split_once('@') else {
         return false;
@@ -172,6 +170,20 @@ impl fmt::Display for InvalidAddresses {
 }
 
 impl std::error::Error for InvalidAddresses {}
+
+/// A message with no To, Cc or Bcc recipient, which no transport can
+/// send ([`crate::OutgoingMessage::check_recipients`]). Like
+/// [`InvalidAddresses`], sending it again cannot change that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoRecipients;
+
+impl fmt::Display for NoRecipients {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("There is no recipient to send this message to")
+    }
+}
+
+impl std::error::Error for NoRecipients {}
 
 /// Checks the addresses a message goes out with, before any reaches a
 /// server: the sender's bare address and each recipient entry's

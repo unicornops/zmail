@@ -29,7 +29,7 @@ use zmail_actions::{AUTOSAVE_DELAY, MailEvent, StartedDraft, reply};
 use zmail_core::{
     DraftAttachment, DraftDetail, DraftState, DraftUpdate, IdentitySummary, MessageHeaders,
     NewDraft, ThreadMessage,
-    participants::{Participant, parse_address_list},
+    participants::{InvalidAddresses, Participant, is_valid_address, parse_address_list},
     text::count_noun,
     time::format_full_date,
 };
@@ -331,27 +331,18 @@ pub fn recipients(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The entries of an address field that are not deliverable addresses:
-/// the GUI's rule, one `@` with text on both sides, no spaces, and a
-/// domain that neither starts nor ends with a dot nor has two in a row.
+/// The entries of an address field that are not deliverable addresses,
+/// by [`is_valid_address`]: the rule the GUI, the CLI and the store (when
+/// a draft is queued) apply too.
 pub fn invalid_addresses(text: &str) -> Vec<String> {
     parse_address_list(text)
         .into_iter()
         .filter(|participant| participant.email.is_some() || participant.name.is_some())
         .filter(|participant| {
-            let Some(email) = participant.email.as_deref() else {
-                return true;
-            };
-            let Some((local, domain)) = email.split_once('@') else {
-                return true;
-            };
-            local.is_empty()
-                || domain.is_empty()
-                || domain.contains('@')
-                || email.contains(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '>' | ','))
-                || domain.starts_with('.')
-                || domain.ends_with('.')
-                || domain.contains("..")
+            participant
+                .email
+                .as_deref()
+                .is_none_or(|email| !is_valid_address(email))
         })
         .map(|participant| participant.to_header_value())
         .collect()
@@ -1876,10 +1867,14 @@ impl App {
             .flat_map(|field| invalid_addresses(&compose.text(field)))
             .collect();
         if !invalid.is_empty() {
-            self.status = Some(format!(
-                "Not an address Zmail can send to: {}",
-                invalid.join(", ")
-            ));
+            // As the store would word it, control characters escaped.
+            self.status = Some(
+                InvalidAddresses {
+                    sender: None,
+                    recipients: invalid,
+                }
+                .to_string(),
+            );
             return;
         }
         let draft_id = compose.draft_id;
