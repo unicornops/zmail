@@ -189,10 +189,10 @@ mod tests {
             answer.starts_with("HTTP/1.1 400"),
             "read: {read:?}, answer: {answer}"
         );
-        assert!(
-            !waiting.is_finished(),
-            "a forged state must not end the wait"
-        );
+        if waiting.is_finished() {
+            let ended = waiting.join().expect("the wait ends");
+            panic!("a forged state must not end the wait: {ended:?}");
+        }
         cancel.cancel();
         let error = waiting
             .join()

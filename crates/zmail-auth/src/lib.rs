@@ -991,10 +991,10 @@ mod tests {
             "GET /callback?code=auth-code-1&state=attacker HTTP/1.1\r\nHost: x\r\n\r\n",
         );
         assert!(forged.starts_with("HTTP/1.1 400"), "{forged}");
-        assert!(
-            !listener.is_finished(),
-            "a forged state must not end the wait"
-        );
+        if listener.is_finished() {
+            let ended = listener.join().expect("the listener thread should finish");
+            panic!("a forged state must not end the wait: {ended:?}");
+        }
 
         let real = send_to_listener(
             port,
