@@ -8,6 +8,10 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+# Carries the links the system and a second launch hand the running app
+# (`src/open_urls.rs`) to the main thread.
+futures-channel = "0.3.34"
+futures-util.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 serde_json.workspace = true

@@ -43,6 +43,7 @@ mod list;
 mod motion;
 mod notifications;
 mod onboarding;
+mod open_urls;
 mod outbox;
 mod palette;
 mod perf;

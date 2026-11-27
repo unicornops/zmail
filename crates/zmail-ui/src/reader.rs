@@ -134,6 +134,17 @@ pub(crate) struct ReaderState {
     pub(crate) download_failed: bool,
 }
 
+/// What the reader asks of the shell that its actions don't carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReaderEvent {
+    /// The user confirmed a `mailto:` link: write a new message from it,
+    /// or say it can't be used (`None`: an address in it holds a control
+    /// character).
+    Mailto(Option<zmail_security::mailto::MailtoDraft>),
+}
+
+impl gpui::EventEmitter<ReaderEvent> for ReaderView {}
+
 pub(crate) struct ReaderView {
     focus_handle: FocusHandle,
     hour_cycle: HourCycle,

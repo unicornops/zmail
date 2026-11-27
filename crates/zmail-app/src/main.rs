@@ -27,9 +27,9 @@ use prompts::{prompt_with_default, prompt_yes_no};
 mod account_setup;
 mod cli;
 mod hardening;
-mod mailto;
 mod output;
 mod prompts;
+mod single_instance;
 mod ui_fixture;
 
 const PHASE0_DARK_THEME: &str = zmail_theme::bundled::DARK;
@@ -95,7 +95,7 @@ impl Command {
 
 fn run(command: Command, force: bool) -> Result<()> {
     match command {
-        Command::Gui => launch_gui(),
+        Command::Gui => launch_gui(None),
         Command::Help(spec) => {
             match spec {
                 Some(spec) => print!("{}", cli::command_help(spec)),
@@ -109,7 +109,7 @@ fn run(command: Command, force: bool) -> Result<()> {
         }
         Command::Tui => launch_tui(),
         Command::LaunchTuiFixture(view) => launch_tui_fixture(view),
-        Command::Mailto(url) => launch_gui_with_mailto(&url),
+        Command::Mailto(url) => launch_gui_with_mailto(url),
         Command::LaunchImapFixture {
             endpoint,
             username,
@@ -169,53 +169,47 @@ fn run(command: Command, force: bool) -> Result<()> {
     }
 }
 
-/// Launches the GUI with a compose draft pre-filled from a mailto URL.
+/// Opens a compose window filled from a `mailto:` link: in the Zmail
+/// already running on this store, when there is one (#457), else in a new
+/// window.
 ///
-/// Malformed URLs fall back to a plain GUI launch with a warning, and a
-/// missing account configuration surfaces the setup flow instead.
-fn launch_gui_with_mailto(url: &str) -> Result<()> {
-    match mailto::parse_mailto(url) {
-        Some(mailto) => {
-            let store = open_store().context("failed to open the local store")?;
-            let Some(target) = store.list_sync_targets()?.first().cloned() else {
-                eprintln!("no configured account exists; opening the app without a draft");
-                return launch_gui();
-            };
-            let identity = target
-                .identities
-                .iter()
-                .find(|identity| identity.is_primary)
-                .or_else(|| target.identities.first())
-                .context("the configured account has no identities")?;
-            let draft_id = store.create_draft(&NewDraft {
-                account_id: target.id,
-                identity_id: identity.id,
-                to: mailto.to,
-                cc: mailto.cc,
-                bcc: mailto.bcc,
-                subject: mailto.subject,
-                body: mailto.body,
-                threading: Default::default(),
-            })?;
-            launch_gui_with_initial_draft(Some(draft_id))
-        }
-        None => {
-            eprintln!("warning: ignoring malformed mailto URL {}", line(url));
-            launch_gui()
-        }
+/// A malformed link falls back to a plain launch with a warning; with no
+/// account yet, the window opens on the first-run setup.
+fn launch_gui_with_mailto(url: String) -> Result<()> {
+    if zmail_security::mailto::parse_mailto(&url).is_none() {
+        eprintln!("warning: ignoring malformed mailto URL {}", line(&url));
+        return launch_gui(None);
     }
+    if let Some(endpoint) = single_instance::Endpoint::for_data_dir(&data_dir()?)
+        && single_instance::hand_off(&endpoint, &url) == single_instance::HandOff::Delivered
+    {
+        return Ok(());
+    }
+    launch_gui(Some(url))
 }
 
-fn launch_gui() -> Result<()> {
-    launch_gui_with_initial_draft(None)
-}
-
-fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
+/// Starts the window, opening a compose window on `mailto` once the store
+/// is unlocked, and receives the links later launches hand over.
+fn launch_gui(mailto: Option<String>) -> Result<()> {
     install_panic_log();
     let runtime = BackgroundRuntime::start(4)?;
     let handle = runtime.handle().clone();
     let bootstrap = build_bootstrap(runtime.summary())?;
-    let initial_view = initial_draft_id.map_or(InitialView::Inbox, InitialView::Draft);
+    let (links, urls) = zmail_ui::url_channel();
+    if let Some(mailto) = mailto {
+        links.send(mailto);
+    }
+    // Only one window per store takes the links (`single_instance`); a
+    // second one, or one that can't listen, still works without.
+    let listener = single_instance::Endpoint::for_data_dir(&data_dir()?).and_then(|endpoint| {
+        single_instance::listen(&endpoint, &handle, move |link| links.send(link))
+            .inspect_err(|error| {
+                eprintln!("note: links clicked while Zmail runs will open another window: {error}")
+            })
+            .ok()
+            .flatten()
+    });
+    let initial_view = InitialView::Inbox;
     // The window unlocks the encrypted store first (ADR 0005), showing the
     // migration's progress or what went wrong; sync starts once it is open.
     zmail_ui::run_unlocking(
@@ -223,6 +217,7 @@ fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
         bootstrap,
         store_path()?,
         Arc::new(OsKeychain),
+        urls,
         move |store| {
             let secrets = keychain_secrets(&store)?;
             // Only one process syncs a store (ADR 0007): when a terminal UI
@@ -245,6 +240,7 @@ fn launch_gui_with_initial_draft(initial_draft_id: Option<i64>) -> Result<()> {
             })
         },
     );
+    drop(listener);
     drop(runtime);
     Ok(())
 }
@@ -2157,7 +2153,7 @@ mod tests {
             .expect("list-accounts prints");
 
         // A draft from a hostile mailto: link.
-        let mailto = mailto::parse_mailto(
+        let mailto = zmail_security::mailto::parse_mailto(
             "mailto:ada@example.com?subject=Hi%1B%5D52%3Bc%3BcHduZWQ%3D%07&body=Body%1B%5B2J",
         )
         .expect("the link parses");

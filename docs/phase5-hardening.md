@@ -151,7 +151,7 @@ Run this on each platform before claiming screen-reader support works, and note 
   - `APPLE_CERTIFICATE_PASSWORD`: the P12 passphrase for the certificate above.
   - `APPLE_TEAM_ID`: the Apple Developer team identifier.
   - `APPLE_DEVELOPER_ID` and `APPLE_APP_PASSWORD`: the Apple ID and its app-specific password used by `notarytool`.
-- Windows releases carry the zip archive and a WiX-built MSI installer (Program Files, Start-menu shortcut, `mailto:` scheme registration) produced by `cargo wix`; the executable embeds a VERSIONINFO resource (`crates/zmail-app/build.rs`) the MSI binds its product version against.
+- Windows releases carry the zip archive and a WiX-built MSI installer (Program Files, Start-menu shortcut, `mailto:` scheme registration and the Default Programs registration that lists Zmail in Settings > Apps > Default apps, removed on uninstall) produced by `cargo wix`, which CI's Windows build also builds, installs and uninstalls on pull requests (`scripts/check-windows-msi.ps1`); the executable embeds a VERSIONINFO resource (`crates/zmail-app/build.rs`) the MSI binds its product version against.
 - Signing and notarisation are opt-in, repository-controlled, and no-op until the secrets exist. The concrete secret inventory a maintainer adds to activate them:
   - `WINDOWS_SIGNING_CERT`: an Authenticode certificate as base64-encoded PFX. When present, the Windows release job signs the binary and the zip with `signtool` (RFC 3161 timestamping) before uploading.
   - `WINDOWS_SIGNING_PASSWORD`: the PFX passphrase for the certificate above.

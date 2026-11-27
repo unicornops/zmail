@@ -36,6 +36,7 @@
 //! | `settings` | `SettingsWindow`: Accounts, Appearance, Keyboard, Privacy, Sending, About & Diagnostics |
 //! | `notifications` | new-mail notifications through GPUI; a click opens the conversation |
 //! | `store_unlock` | unlocking the encrypted store before the workspace: the "Encrypting your mail" progress window and the keychain and lost-key screens |
+//! | `open_urls` | `mailto:` links from the system's open-URL event and from a second launch: a compose window each, held until the store is unlocked |
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -83,6 +84,8 @@ mod message_list;
 mod motion;
 mod move_picker;
 mod notifications;
+mod open_urls;
+pub use open_urls::{UrlReceiver, UrlSender, url_channel};
 mod outbox_detail;
 mod pane;
 mod preferences;
@@ -126,8 +129,9 @@ pub const APP_ID: &str = "ie.unicornops.zmail";
 
 /// What the window shows when it first opens.
 ///
-/// Normal launches use [`InitialView::Inbox`]; a `mailto:` launch opens its
-/// draft. The other variants exist for `zmail-app launch-ui-fixture`, which
+/// Normal launches use [`InitialView::Inbox`] (a `mailto:` launch too: its
+/// link comes through [`run_unlocking`]'s `urls`). The other variants
+/// exist for `zmail-app launch-ui-fixture`, which
 /// `scripts/capture-release-screenshot.sh --matrix` uses to put the window
 /// into each state of the UI screenshot matrix without clicking through it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -253,50 +257,61 @@ pub struct Started {
 /// first, with a progress window), then calls `start` and opens the
 /// workspace. A store that can't be unlocked gets a window that says why;
 /// it is never opened unencrypted.
+///
+/// Each `mailto:` link that `urls` brings, or the system sends (its
+/// open-URL event), opens a compose window on a new draft filled from it;
+/// one that arrives before the store is unlocked opens once the workspace
+/// does (#457).
 pub fn run_unlocking(
     asset_source: impl AssetSource,
     bootstrap: AppBootstrap,
     store_path: std::path::PathBuf,
     keychain: Arc<dyn zmail_store::StoreKeychain>,
+    urls: UrlReceiver,
     start: impl Fn(Arc<LocalStore>) -> anyhow::Result<Started> + 'static,
 ) {
-    gpui_platform::application()
-        .with_assets(asset_source)
-        .run(move |cx: &mut App| {
-            init_app(
-                zmail_core::preferences::KeymapName::default(),
-                &bootstrap,
-                cx,
-            );
-            let bootstrap = bootstrap.clone();
-            let start = Rc::new(start);
-            let unlocker = store_unlock::Unlocker::new(
-                store_path.clone(),
-                keychain.clone(),
-                move |store, notice, cx| {
-                    let started = start(store.clone())?;
-                    // The keymap the store's preferences pick, now they can
-                    // be read; the menu bar shows its shortcuts.
-                    keymap::bind_keymap(saved_keymap(&store), cx);
-                    menus::refresh_menu_bar(cx);
-                    let handle = open_main_window(
-                        MainWindow {
-                            bootstrap: bootstrap.clone(),
-                            store,
-                            sync_service: started.sync_service,
-                            secrets: started.secrets,
-                            initial_view: started.initial_view,
-                        },
-                        cx,
-                    )?;
-                    if let Some(notice) = notice {
-                        let _ = handle.update(cx, |view, _, cx| view.show_status(notice, cx));
-                    }
-                    Ok(())
-                },
-            );
-            store_unlock::start(unlocker, cx);
-        });
+    let app = gpui_platform::application().with_assets(asset_source);
+    // Before the app runs: macOS sends the link that launched it as soon
+    // as it finishes launching.
+    open_urls::register(&app, &urls);
+    app.run(move |cx: &mut App| {
+        init_app(
+            zmail_core::preferences::KeymapName::default(),
+            &bootstrap,
+            cx,
+        );
+        open_urls::listen(urls, cx);
+        let bootstrap = bootstrap.clone();
+        let start = Rc::new(start);
+        let unlocker = store_unlock::Unlocker::new(
+            store_path.clone(),
+            keychain.clone(),
+            move |store, notice, cx| {
+                let started = start(store.clone())?;
+                // The keymap the store's preferences pick, now they can
+                // be read; the menu bar shows its shortcuts.
+                keymap::bind_keymap(saved_keymap(&store), cx);
+                menus::refresh_menu_bar(cx);
+                let handle = open_main_window(
+                    MainWindow {
+                        bootstrap: bootstrap.clone(),
+                        store,
+                        sync_service: started.sync_service,
+                        secrets: started.secrets,
+                        initial_view: started.initial_view,
+                    },
+                    cx,
+                )?;
+                if let Some(notice) = notice {
+                    let _ = handle.update(cx, |view, _, cx| view.show_status(notice, cx));
+                }
+                // Links that came while the store was locked open now.
+                open_urls::attach(handle, cx);
+                Ok(())
+            },
+        );
+        store_unlock::start(unlocker, cx);
+    });
 }
 
 /// Opens only the unlock window, on `phase`, for the screenshot fixture.

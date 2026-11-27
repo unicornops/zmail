@@ -2,9 +2,11 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
     <!--
       Zmail MSI definition (WiX v3, built by cargo-wix on the Windows
-      release job). Installs to Program Files, adds a Start-menu shortcut,
-      and registers the mailto: URL scheme so browsers and file managers
-      can offer Zmail as the mail handler.
+      release job, and on pull requests by CI's Windows build, which
+      installs and uninstalls it with scripts/check-windows-msi.ps1).
+      Installs to Program Files, adds a Start-menu shortcut, and registers
+      Zmail for mailto: links: the scheme's handler and a mail app in
+      Settings > Apps > Default apps.
     -->
     <Product Id="*"
              Name="Zmail"
@@ -41,8 +43,12 @@
                               Source="$(var.CargoTargetDir)\release\zmail-app.exe"
                               KeyPath="yes" />
                     </Component>
-                    <Component Id="mailto_registration"
-                               Guid="F935E04A-DD05-4FCB-94A2-060B7F6D7840"
+                    <!-- The scheme itself, as Windows defines it: kept on
+                         uninstall (Permanent), since other mail apps rely
+                         on it. -->
+                    <Component Id="mailto_scheme"
+                               Guid="A43484A1-B31C-49CE-B1FB-FBE27FB88A15"
+                               Permanent="yes"
                                Win64="yes">
                         <RegistryValue Root="HKLM"
                                        Key="SOFTWARE\Classes\mailto"
@@ -52,7 +58,18 @@
                                        Key="SOFTWARE\Classes\mailto"
                                        Name="URL Protocol"
                                        Type="string"
-                                       Value="" />
+                                       Value=""
+                                       KeyPath="yes" />
+                    </Component>
+                    <!-- Zmail as a mail app (#457): the machine-wide mailto:
+                         handler unless the user picks another, and listed
+                         in Settings > Apps > Default apps (Default Programs:
+                         Capabilities, URLAssociations and
+                         RegisteredApplications), where the user's choice
+                         wins. All of it goes on uninstall. -->
+                    <Component Id="mailto_registration"
+                               Guid="0530787E-0085-4F9B-9531-903310C64F1D"
+                               Win64="yes">
                         <RegistryValue Root="HKLM"
                                        Key="SOFTWARE\Classes\mailto\DefaultIcon"
                                        Type="string"
@@ -61,6 +78,55 @@
                                        Key="SOFTWARE\Classes\mailto\shell\open\command"
                                        Type="string"
                                        Value="&quot;[APPLICATIONFOLDER]zmail-app.exe&quot; &quot;%1&quot;" />
+                        <!-- The ProgID Default apps sets for mailto: when the
+                             user picks Zmail. -->
+                        <RegistryKey Root="HKLM"
+                                     Key="SOFTWARE\Classes\Zmail.Url.mailto"
+                                     ForceDeleteOnUninstall="yes">
+                            <RegistryValue Type="string" Value="Zmail email link" />
+                            <RegistryValue Name="FriendlyTypeName"
+                                           Type="string"
+                                           Value="Zmail email link" />
+                            <RegistryValue Key="DefaultIcon"
+                                           Type="string"
+                                           Value="[APPLICATIONFOLDER]zmail-app.exe,0" />
+                            <RegistryValue Key="shell\open\command"
+                                           Type="string"
+                                           Value="&quot;[APPLICATIONFOLDER]zmail-app.exe&quot; &quot;%1&quot;" />
+                        </RegistryKey>
+                        <RegistryKey Root="HKLM"
+                                     Key="SOFTWARE\Clients\Mail\Zmail"
+                                     ForceDeleteOnUninstall="yes">
+                            <RegistryValue Type="string" Value="Zmail" />
+                            <RegistryValue Key="DefaultIcon"
+                                           Type="string"
+                                           Value="[APPLICATIONFOLDER]zmail-app.exe,0" />
+                            <RegistryValue Key="shell\open\command"
+                                           Type="string"
+                                           Value="&quot;[APPLICATIONFOLDER]zmail-app.exe&quot;" />
+                            <RegistryValue Key="Capabilities"
+                                           Name="ApplicationName"
+                                           Type="string"
+                                           Value="Zmail" />
+                            <RegistryValue Key="Capabilities"
+                                           Name="ApplicationDescription"
+                                           Type="string"
+                                           Value="Fast, standards-compliant desktop email client" />
+                            <RegistryValue Key="Capabilities"
+                                           Name="ApplicationIcon"
+                                           Type="string"
+                                           Value="[APPLICATIONFOLDER]zmail-app.exe,0" />
+                            <RegistryValue Key="Capabilities\URLAssociations"
+                                           Name="mailto"
+                                           Type="string"
+                                           Value="Zmail.Url.mailto" />
+                        </RegistryKey>
+                        <RegistryValue Root="HKLM"
+                                       Key="SOFTWARE\RegisteredApplications"
+                                       Name="Zmail"
+                                       Type="string"
+                                       Value="SOFTWARE\Clients\Mail\Zmail\Capabilities"
+                                       KeyPath="yes" />
                     </Component>
                 </Directory>
             </Directory>
@@ -73,6 +139,7 @@
     <Fragment>
         <ComponentGroup Id="ProductComponents" Directory="APPLICATIONFOLDER">
             <ComponentRef Id="zmail_app.exe" />
+            <ComponentRef Id="mailto_scheme" />
             <ComponentRef Id="mailto_registration" />
         </ComponentGroup>
         <ComponentGroup Id="StartMenuComponents" Directory="ApplicationProgramsFolder">

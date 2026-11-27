@@ -101,8 +101,8 @@ jobs:
                       scripts/capture-linux-web-screenshots.sh|scripts/x11-capture-session.sh)
                         app_code=true
                         ;;
-                      # The Build job's glibc check.
-                      scripts/check-linux-glibc.sh|scripts/test-check-linux-glibc.sh)
+                      # The Build job's glibc and Windows installer checks.
+                      scripts/check-linux-glibc.sh|scripts/test-check-linux-glibc.sh|scripts/check-windows-msi.ps1)
                         app_code=true
                         ;;
                     esac
@@ -340,6 +340,26 @@ jobs:
             - name: Store tests (this platform's SQLCipher)
               if: runner.os != 'Linux'
               run: cargo test --release --locked -p zmail-store -p zmail-actions -p zmail-setup -p zmail-tui -- --nocapture
+
+            # The hand-off of a mailto: link from a second launch to the
+            # running app (#457) goes through a Unix domain socket on macOS
+            # and a named pipe on Windows: their tests run on each.
+            - name: Single-instance tests (this platform's socket or pipe)
+              if: runner.os != 'Linux'
+              run: cargo test --release --locked -p zmail-app -- single_instance --nocapture
+
+            # The MSI the release builds, from crates/zmail-app/wix/main.wxs,
+            # installed and uninstalled: its mailto: and Default apps
+            # registration, and nothing of Zmail's left after (#457).
+            # cargo-wix is pinned as in release-please.yml.
+            - name: Check the Windows installer
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  cargo install cargo-wix --version 0.3.9 --locked
+                  cargo wix -p zmail-app --no-build --nocapture
+                  $msi = Get-ChildItem target/wix/*.msi | Select-Object -First 1
+                  ./scripts/check-windows-msi.ps1 $msi.FullName
 
             - name: Upload release binary
               uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

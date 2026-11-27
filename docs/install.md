@@ -1,6 +1,6 @@
 # Installing Zmail
 
-How to download and check Zmail, run it for the first time, upgrade it, use it over SSH, and where it keeps its data. To build it yourself, see [Development](./development.md).
+How to download and check Zmail, run it for the first time, make it your mail app, upgrade it, use it over SSH, and where it keeps its data. To build it yourself, see [Development](./development.md).
 
 ## Install
 
@@ -68,6 +68,23 @@ Zmail does not update itself yet. Your accounts and mail stay in the data direct
 - **Linux tarball:** unpack the new one over the old `zmail-app`. If you added the AppArmor profile by hand, copy the repository's current one when it changes.
 - **Windows:** run the new MSI, or replace `zmail-app.exe` from the zip.
 - **From source:** `git pull`, then build again (see [Development](./development.md)).
+
+## Make Zmail your mail app
+
+Then a `mailto:` link in a browser or another app opens a new message in Zmail, filled with the link's recipients, subject and body, from the account the window shows (or your first account) and its primary identity. If Zmail is closed, it starts, unlocks the store and then opens the message; if it is open, the running Zmail opens it, rather than a second window. A `mailto:` link in a message opens in Zmail too, after the dialog that shows where it goes. Zmail only reads a link's `to`, `cc`, `bcc`, `subject` and `body`, never `attach` or `from`, and refuses a link whose addresses hide line breaks or other control characters.
+
+- **macOS:** install Zmail in Applications from the DMG or the zip (the `zmail-macos.tar.gz` binary alone cannot be chosen). Open the Mail app, choose **Mail > Settings > General**, and pick Zmail under **Default email reader** (choose **Select…** if it is not listed). Older macOS versions ask you to add an account to Mail before that setting shows.
+- **Windows:** the MSI registers Zmail as a mail app. Open **Settings > Apps > Default apps**, search for Zmail, and set it as the default for **MAILTO** (or, under **Choose defaults by link type**, pick Zmail for **MAILTO**). The zip registers nothing. Uninstalling Zmail removes its registration; Windows then asks which app to use.
+- **Linux:** the `.deb`'s desktop entry (`ie.unicornops.zmail.desktop`) says Zmail handles `mailto:` links. Choose it in your desktop's settings (GNOME: **Settings > Apps > Default Apps > Mail**; KDE: **System Settings > Default Applications > Email client**), or from a terminal:
+
+  ```bash
+  xdg-mime default ie.unicornops.zmail.desktop x-scheme-handler/mailto
+  xdg-mime query default x-scheme-handler/mailto    # should print ie.unicornops.zmail.desktop
+  ```
+
+  With the tarball, first copy [`crates/zmail-app/ie.unicornops.zmail.desktop`](../crates/zmail-app/ie.unicornops.zmail.desktop) to `~/.local/share/applications/` and make sure `zmail-app` is on your `PATH`.
+
+On Linux and Windows a link starts `zmail-app mailto:...`, which hands it to the Zmail already open on the same store (the same `ZMAIL_DATA_DIR`) through a channel only your user can use (a socket in your runtime directory, or a named pipe), or starts the window when none is. On macOS the system sends the link to Zmail itself.
 
 ## Using Zmail over SSH or on a headless machine
 

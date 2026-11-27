@@ -4,6 +4,7 @@ pub mod attachment_safety;
 pub mod html;
 pub mod keychain;
 pub mod links;
+pub mod mailto;
 pub mod sender_safety;
 pub mod sender_warning;
 pub mod terminal;

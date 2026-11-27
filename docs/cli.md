@@ -165,7 +165,7 @@ zmail-app index 1                        # one indexing pass, in the foreground
 
 ## Writing and sending
 
-`compose ACCOUNT [IDENTITY]` writes a draft at prompts and then sends it or keeps it. `drafts`, `draft`, `attach`, `detach` and `send` work on drafts by id, and `outbox`, `retry-outbox` and `process-outbox` on the outbox. `mailto URL` opens the desktop app on a new draft from a `mailto:` link; the system's mail link handler runs `zmail-app mailto:...` with the whole link.
+`compose ACCOUNT [IDENTITY]` writes a draft at prompts and then sends it or keeps it. `drafts`, `draft`, `attach`, `detach` and `send` work on drafts by id, and `outbox`, `retry-outbox` and `process-outbox` on the outbox. `mailto URL` opens the desktop app on a new draft from a `mailto:` link; the system's mail link handler runs `zmail-app mailto:...` with the whole link. When a Zmail window is already open on the same store, the link goes to it (a compose window opens there) and the command exits; otherwise the window starts, and the compose window opens once the store is unlocked. See [Make Zmail your mail app](./install.md#make-zmail-your-mail-app).
 
 ## The mail store
 
