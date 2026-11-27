@@ -30,7 +30,7 @@ fn same_names() -> Replay {
 }
 
 /// A store with one JMAP account and nothing synced.
-fn store() -> (LocalStore, i64) {
+pub(crate) fn store() -> (LocalStore, i64) {
     let store = LocalStore::open_ephemeral().expect("the store opens");
     let account_id = store
         .create_demo_account(ProtocolKind::Jmap)
@@ -40,7 +40,7 @@ fn store() -> (LocalStore, i64) {
 
 /// Writes a sync into the store as the sync service does: the renamed
 /// mailboxes first, then the snapshot.
-fn write(store: &LocalStore, account_id: i64, sync: &JmapSync) {
+pub(crate) fn write(store: &LocalStore, account_id: i64, sync: &JmapSync) {
     if !sync.renamed.is_empty() {
         store
             .apply_mail_delta(

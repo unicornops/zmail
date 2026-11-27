@@ -76,7 +76,7 @@ enum Fault {
 pub(crate) struct State {
     pub(crate) mailboxes: Value,
     /// The answer to the full `Email/get` of a sync.
-    full: Value,
+    pub(crate) full: Value,
     /// The answer to the light `Email/get`, when recorded.
     light: Option<Value>,
     /// Emails the server does not have (yet).
