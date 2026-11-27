@@ -289,6 +289,9 @@ mod platform {
         let task = runtime.spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
+                    // Out of file descriptors, say: try again shortly
+                    // rather than spin.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     continue;
                 };
                 // Only this user's processes may hand over a link.
