@@ -14,6 +14,9 @@ jmap-wire = { path = "../jmap-wire", features = ["tungstenite"] }
 reqwest.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
+# `Connector::Rustls`, to give the WebSocket transport the shared TLS
+# configuration.
+tokio-tungstenite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
@@ -23,8 +26,6 @@ zmail-smtp = { path = "../zmail-smtp" }
 
 [dev-dependencies]
 futures-util.workspace = true
-# The loopback WebSocket server of the push tests.
-tokio-tungstenite.workspace = true
 # The TLS tests' throwaway CA (`zmail_security::tls::test_ca`).
 zmail-security = { path = "../zmail-security", features = ["test-ca"] }
 # The mailbox tests (#512) write a sync into a real local store.

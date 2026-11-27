@@ -12,6 +12,7 @@ rand.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+zmail-security = { path = "../zmail-security" }
 
 [dev-dependencies]
 # The TLS tests' throwaway CA (`zmail_security::tls::test_ca`).

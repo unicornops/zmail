@@ -607,8 +607,11 @@ fn token_request(endpoint: &str, form: Vec<(&str, String)>) -> Result<TokenSet> 
     let endpoint = endpoint.trim();
     // The request carries the client secret, the code or the refresh
     // token: it never follows a redirect (a 307 would post them on to
-    // another host), and an https endpoint never falls back to http.
+    // another host), and an https endpoint never falls back to http. TLS
+    // is the shared configuration of every mail connection (ADR 0009).
+    let tls = zmail_security::tls::client_config().context("failed to prepare the token client")?;
     let client = reqwest::blocking::Client::builder()
+        .use_preconfigured_tls((*tls).clone())
         .redirect(reqwest::redirect::Policy::none())
         .https_only(endpoint.starts_with("https://"));
     // Unit tests talk to loopback mock endpoints; the host proxy

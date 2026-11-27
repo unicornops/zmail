@@ -4,7 +4,8 @@
 //! A test starts a loopback server with [`server_config`] (or [`accept`],
 //! or [`serve_https_once`]), whose certificate names `localhost`,
 //! `127.0.0.1` and `::1` and is signed by this CA, and calls [`trust`]
-//! before it connects. From then on the shared configuration trusts this
+//! before it connects. From then on the shared configuration
+//! ([`client_config`](super::client_config)) trusts this
 //! CA on top of the system's, in that process. Nothing else trusts it: a
 //! client with TLS settings of its own (bundled roots, or its own load of
 //! the system's) fails the handshake, which is what the tests look for.
@@ -51,6 +52,16 @@ static TRUSTED: AtomicBool = AtomicBool::new(false);
 /// from the next time a client asks for it.
 pub fn trust() {
     TRUSTED.store(true, Ordering::SeqCst);
+}
+
+/// Whether a test has called [`trust`] in this process.
+pub(super) fn trusted() -> bool {
+    TRUSTED.load(Ordering::SeqCst)
+}
+
+/// The CA certificate, DER.
+pub(super) fn ca() -> CertificateDer<'static> {
+    CertificateDer::from_pem_slice(CA_PEM).expect("the test CA parses")
 }
 
 /// The TLS settings of a test server: the certificate for the loopback

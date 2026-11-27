@@ -1,6 +1,6 @@
 //! Minimal SMTP submission client used by the Phase 2b harness.
 
-use std::{sync::Once, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mail_send::{
@@ -8,6 +8,7 @@ use mail_send::{
     mail_builder::{MessageBuilder, headers::address::Address},
     smtp::message::Message,
 };
+use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 use zmail_core::{
     AuthKind, OutgoingMessage,
@@ -188,8 +189,6 @@ async fn submit_within(
     message: &OutgoingMessage,
     timeouts: Timeouts,
 ) -> Result<()> {
-    ensure_rustls_provider();
-
     message.check_recipients()?;
     // mail-send writes `MAIL FROM` and `RCPT TO` as they are, so an
     // address that could break out of them never reaches the server.
@@ -248,15 +247,21 @@ async fn submit_within(
     Ok(())
 }
 
-/// The client for `config`, with its sign-in and connect timeout.
+/// The client for `config`, with its sign-in and connect timeout, and
+/// for implicit TLS and STARTTLS the shared configuration of every mail
+/// connection (ADR 0009) rather than one mail-send builds per client.
 fn client_builder(
     config: &SubmissionConfig,
     timeouts: Timeouts,
 ) -> Result<SmtpClientBuilder<&str>> {
-    let mut builder = SmtpClientBuilder::new(config.host.as_str(), config.port)
-        .map_err(anyhow::Error::msg)?
-        .helo_host(config.hello_name.clone())
-        .timeout(timeouts.connect);
+    let tls = TlsConnector::from(
+        zmail_security::tls::client_config()
+            .context("failed to set up TLS for the SMTP connection")?,
+    );
+    let mut builder =
+        SmtpClientBuilder::new_with_tls_connector(config.host.as_str(), config.port, tls)
+            .helo_host(config.hello_name.clone())
+            .timeout(timeouts.connect);
     if let Some(credentials) = config.sasl_credentials()? {
         builder = builder.credentials(credentials);
     }
@@ -271,7 +276,6 @@ pub async fn check_sign_in(config: &SubmissionConfig) -> Result<()> {
 }
 
 async fn check_sign_in_within(config: &SubmissionConfig, timeouts: Timeouts) -> Result<()> {
-    ensure_rustls_provider();
     let builder = client_builder(config, timeouts)?;
     // QUIT is a courtesy: the sign-in has already succeeded.
     match config.security {
@@ -430,14 +434,6 @@ fn all_recipients(message: &OutgoingMessage) -> Vec<String> {
         .chain(message.bcc.iter())
         .map(|recipient| envelope_address(recipient))
         .collect()
-}
-
-fn ensure_rustls_provider() {
-    static RUSTLS_PROVIDER: Once = Once::new();
-
-    RUSTLS_PROVIDER.call_once(|| {
-        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
-    });
 }
 
 #[cfg(test)]

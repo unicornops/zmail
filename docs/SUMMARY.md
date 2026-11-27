@@ -37,6 +37,7 @@
   - [ADR 0006: HTML mail renderer](./adr/0006-html-email-renderer.md)
   - [ADR 0007: Terminal UI](./adr/0007-terminal-ui.md)
   - [ADR 0008: Zmail's own JMAP client library](./adr/0008-own-jmap-client-library.md)
+  - [ADR 0009: One TLS trust policy](./adr/0009-one-tls-trust-policy.md)
 
 # Project
 

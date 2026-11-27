@@ -6,10 +6,7 @@
 //! turns each [`PushEvent`] into an incremental sync (`Email/changes`), so
 //! the local store stays the only thing the UI reads.
 
-use std::{
-    sync::Once,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use jmap_wire::{
@@ -18,6 +15,7 @@ use jmap_wire::{
     mail::Mailbox,
     websocket::{PushEnable, WebSocketConnection, WebSocketMessage},
 };
+use tokio_tungstenite::Connector;
 use zmail_core::{ProtocolKind, SyncTarget};
 
 use crate::{Connection, connect_client, wording};
@@ -280,11 +278,10 @@ async fn run_websocket<F>(
 where
     F: FnMut(PushEvent) + Send,
 {
-    ensure_rustls_provider();
     let account_id = client.account_id();
     let mut socket = client
         .wire()
-        .connect_websocket(&TungsteniteTransport::new())
+        .connect_websocket(&websocket_transport()?)
         .await
         .map_err(|error| push_error(error).context("failed to open the JMAP WebSocket"))?;
     // Apache James 3.9 silently drops frames that arrive before its socket
@@ -401,12 +398,12 @@ async fn send_heartbeat(socket: &mut Socket, account_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn ensure_rustls_provider() {
-    static RUSTLS_PROVIDER: Once = Once::new();
-
-    RUSTLS_PROVIDER.call_once(|| {
-        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
-    });
+/// The WebSocket transport, on the shared configuration of every mail
+/// connection (ADR 0009) rather than tokio-tungstenite's own roots.
+fn websocket_transport() -> Result<TungsteniteTransport> {
+    let tls = zmail_security::tls::client_config()
+        .map_err(|error| anyhow!("failed to set up the JMAP WebSocket: {error}"))?;
+    Ok(TungsteniteTransport::with_connector(Connector::Rustls(tls)))
 }
 
 /// Whether a pushed change touches mail data of `account_id`.

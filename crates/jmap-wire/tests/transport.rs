@@ -559,6 +559,15 @@ async fn nothing_listening_is_a_connect_error() {
     }
 }
 
+/// A TLS configuration reqwest cannot use fails the transport's set-up:
+/// it never falls back to the bundled roots.
+#[test]
+fn a_tls_configuration_reqwest_cannot_use_is_an_error() {
+    let error = ReqwestTransport::with_preconfigured_tls("not a rustls configuration")
+        .expect_err("only a rustls ClientConfig is accepted");
+    assert_eq!(error.kind(), TransportErrorKind::Other);
+}
+
 /// Two hosts: `127.0.0.1` redirects its well-known URL and its API to
 /// `localhost`, which is the JMAP server.
 fn two_hosts() -> (Server, Server) {

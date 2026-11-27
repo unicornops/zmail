@@ -15,6 +15,11 @@ use crate::{
 /// An [`HttpTransport`] on a `reqwest` client: TLS by rustls, no
 /// redirects (the [`Client`](crate::Client) follows them by its policy),
 /// no cookies and no `Referer`.
+///
+/// Servers are checked against the Mozilla roots bundled with reqwest
+/// (webpki-roots) unless you bring a TLS configuration
+/// ([`with_preconfigured_tls`](Self::with_preconfigured_tls)) or a whole
+/// client ([`from_client`](Self::from_client)).
 #[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
@@ -23,7 +28,24 @@ pub struct ReqwestTransport {
 impl ReqwestTransport {
     /// A transport with a `reqwest` client of its own.
     pub fn new() -> Result<Self, TransportError> {
-        reqwest::Client::builder()
+        Self::build(reqwest::Client::builder())
+    }
+
+    /// A transport with a `reqwest` client of its own that uses your TLS
+    /// configuration: a `rustls::ClientConfig` of the rustls version
+    /// `reqwest` uses, with the roots or the certificate verifier you
+    /// want (the operating system's, say), handed to `reqwest`'s
+    /// `use_preconfigured_tls`. Anything else is an error here, not a
+    /// fall back to the bundled roots.
+    ///
+    /// Do not build a configuration that skips certificate verification;
+    /// the requests carry the credentials.
+    pub fn with_preconfigured_tls(tls: impl std::any::Any) -> Result<Self, TransportError> {
+        Self::build(reqwest::Client::builder().use_preconfigured_tls(tls))
+    }
+
+    fn build(builder: reqwest::ClientBuilder) -> Result<Self, TransportError> {
+        builder
             .redirect(reqwest::redirect::Policy::none())
             .referer(false)
             .build()

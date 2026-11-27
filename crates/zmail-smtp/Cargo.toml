@@ -12,6 +12,7 @@ mail-send.workspace = true
 tokio-rustls.workspace = true
 zeroize.workspace = true
 zmail-core = { path = "../zmail-core" }
+zmail-security = { path = "../zmail-security" }
 
 [dev-dependencies]
 tokio.workspace = true

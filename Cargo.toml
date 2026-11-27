@@ -117,12 +117,20 @@ ratatui-textarea = { version = "0.9.4", default-features = false, features = ["c
 # Autoconfig XML. Already in the tree through GPUI (usvg); it never fetches
 # external entities, and zmail-autodiscover also turns DTDs off.
 roxmltree = "0.21.1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# No root store of its own (`rustls-tls-manual-roots`): Zmail's clients get
+# the shared TLS configuration (`zmail_security::tls`, ADR 0009) through
+# `use_preconfigured_tls`, and Proton's its pinned one. A crate that wants
+# reqwest's bundled roots says so in its own manifest (ADR 0009 lists them).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-manual-roots"] }
 sha2 = "0.11"
 rpassword = "7.4.0"
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 rusqlite = { version = "0.43", features = ["bundled", "fallible_uint"] }
 rustls-native-certs = "0.8.2"
+# The operating system's certificate verifier, behind the shared TLS
+# configuration of every mail connection (zmail-security, ADR 0009); already
+# in the tree through mail-send.
+rustls-platform-verifier = "0.7.1"
 # Safe wrappers for turning core dumps off (`setrlimit`, Linux's
 # `PR_SET_DUMPABLE`) in zmail-app; already in the tree through crossterm,
 # GPUI and tempfile.
