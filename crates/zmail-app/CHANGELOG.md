@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.4](https://github.com/unicornops/zmail/compare/v0.37.3...v0.37.4) (2026-11-27)
+
+
+### Bug Fixes
+
+* **store:** wait for SQLCipher's set-up before keying a connection, refuse unusable keys ([#535](https://github.com/unicornops/zmail/issues/535)) ([13d3a50](https://github.com/unicornops/zmail/commit/13d3a50bc7f62ec783e7cd2a4aee6279bafb4a5e))
+
 ## [0.37.3](https://github.com/unicornops/zmail/compare/v0.37.2...v0.37.3) (2026-11-27)
 
 
