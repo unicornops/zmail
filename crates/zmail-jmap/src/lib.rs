@@ -167,7 +167,14 @@ pub async fn discover_and_sync(
     let email_state = changes::fetch_email_state(&client).await?;
     let email_query = fetch_email_query(&client).await?;
 
+    // Nothing changed only when all three states are as the checkpoint
+    // recorded them. The `queryState` follows the query's results, the
+    // ids in order, so a server may keep it when only an email's
+    // keywords change (RFC 8620 section 5.5): the `Email` state is what
+    // changes with any email (section 5.1). The `Mailbox` state covers
+    // every mailbox property, names, parents and roles included.
     if checkpoint.mailbox_query_state.as_deref() == Some(mailbox_state.as_str())
+        && checkpoint.email_state.as_deref() == Some(email_state.as_str())
         && checkpoint.email_query_state.as_deref() == Some(email_query.query_state.as_str())
         && !existing_mailboxes.is_empty()
         && paths::mirror_matches(existing_mailboxes, &mailbox_details)
