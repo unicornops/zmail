@@ -125,7 +125,9 @@ async fn refreshes_once_on_401_and_retries() {
     let refreshed = Arc::new(Mutex::new(Vec::new()));
     let sink = refreshed.clone();
     client.add_auth_handler(move |auth| {
-        sink.lock().expect("auth").push(auth.refresh_token.clone());
+        sink.lock()
+            .expect("auth")
+            .push(auth.refresh_token.as_str().to_owned());
     });
 
     client.get_user().await.expect("user after refresh");
@@ -239,12 +241,70 @@ async fn new_client_with_refresh_resumes_a_session() {
         .new_client_with_refresh("uid", "refresh-1")
         .await
         .expect("resume");
-    assert_eq!(auth.refresh_token, "refresh-2");
+    assert_eq!(auth.refresh_token.as_str(), "refresh-2");
     assert_eq!(client.uid(), "uid");
     client.get_user().await.expect("user");
     let requests = server.requests();
     assert!(requests[0].json().get("AccessToken").is_none());
     assert_eq!(requests[1].header("authorization"), Some("Bearer access-2"));
+}
+
+/// Compiles only for a type that wipes itself when dropped.
+fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+#[tokio::test]
+async fn refresh_and_close_wipe_the_replaced_tokens() {
+    let server = MockServer::start(|request, _| match request.path.as_str() {
+        "/auth/v4/refresh" => Reply::json(
+            200,
+            serde_json::json!({"Code": 1000, "UID": "uid", "AccessToken": "access-2", "RefreshToken": "refresh-2"}),
+        ),
+        _ if request.header("authorization") == Some("Bearer access-1") => {
+            api_error(401, 401, "Invalid access token")
+        }
+        _ => user_reply(),
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access-1", "refresh-1");
+    client.add_auth_handler(|auth| {
+        // The new tokens reach the handlers in wiping buffers too.
+        wiped_on_drop(&auth.access_token);
+        wiped_on_drop(&auth.refresh_token);
+    });
+
+    let (access_1, refresh_1) = client.token_handles();
+    {
+        let access = access_1.upgrade().expect("access token held");
+        let refresh = refresh_1.upgrade().expect("refresh token held");
+        assert_eq!(access.as_str(), "access-1");
+        assert_eq!(refresh.as_str(), "refresh-1");
+        wiped_on_drop(&*access);
+        wiped_on_drop(&*refresh);
+    }
+
+    // A 401 refreshes the session: the replaced tokens are dropped, and
+    // so wiped, with no copy of them left anywhere.
+    client.get_user().await.expect("user after refresh");
+    assert!(access_1.upgrade().is_none(), "the old access token is kept");
+    assert!(refresh_1.upgrade().is_none(), "the old refresh token is kept");
+    let (access_2, refresh_2) = client.token_handles();
+    assert_eq!(
+        access_2.upgrade().expect("new access token").as_str(),
+        "access-2"
+    );
+    assert_eq!(
+        refresh_2.upgrade().expect("new refresh token").as_str(),
+        "refresh-2"
+    );
+
+    // Closing the client wipes the tokens it held.
+    client.close();
+    assert!(access_2.upgrade().is_none(), "close keeps the access token");
+    assert!(refresh_2.upgrade().is_none(), "close keeps the refresh token");
+    let (access, refresh) = client.token_handles();
+    assert!(access.upgrade().is_some_and(|token| token.is_empty()));
+    assert!(refresh.upgrade().is_some_and(|token| token.is_empty()));
 }
 
 #[tokio::test]

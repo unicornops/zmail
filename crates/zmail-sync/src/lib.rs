@@ -3224,14 +3224,17 @@ mod oauth2_refresh_tests {
             .sync_target(account_id)
             .expect("the target should load")
             .expect("the target should exist");
-        assert_eq!(
-            service
-                .connect_secret(&target)
-                .await
-                .expect("the password should resolve"),
-            "app-password"
-        );
+        let secret = service
+            .connect_secret(&target)
+            .await
+            .expect("the password should resolve");
+        // Handed to the adapter in a buffer that wipes it when dropped.
+        wiped_on_drop(&secret);
+        assert_eq!(secret.as_str(), "app-password");
     }
+
+    /// Compiles only for a type that wipes itself when dropped.
+    fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
 
     #[tokio::test]
     async fn connect_secret_returns_a_live_access_token_without_refreshing() {
