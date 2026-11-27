@@ -353,7 +353,9 @@ impl OAuth2Client {
     /// the code, or with the provider's error). Anything else that reaches
     /// the port (another page, a stale or forged state, a connection that
     /// sends nothing within `read_timeout`) gets a 400 and the wait goes
-    /// on, until the real redirect or the deadline.
+    /// on, until the real redirect or the deadline. A connection already
+    /// waiting when the deadline passes is still taken and answered, so a
+    /// redirect that arrived in time is never dropped unanswered.
     fn listen(
         &self,
         expected_state: &str,
@@ -372,9 +374,8 @@ impl OAuth2Client {
             if cancelled() {
                 bail!("the sign-in was cancelled");
             }
-            if std::time::Instant::now() > deadline {
-                bail!("timed out waiting for the OAuth2 redirect");
-            }
+            // The deadline is only looked at when nothing is waiting: a
+            // connection in the backlog arrived before it.
             match listener.accept() {
                 Ok((stream, _)) => match capture_redirect(stream, expected_state, read_timeout) {
                     Callback::Code(code) => return Ok(code),
@@ -382,7 +383,11 @@ impl OAuth2Client {
                     Callback::Ignored => {}
                 },
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(100));
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        bail!("timed out waiting for the OAuth2 redirect");
+                    }
+                    thread::sleep((deadline - now).min(Duration::from_millis(100)));
                 }
                 Err(error) => return Err(error).context("failed to accept the redirect"),
             }
@@ -921,25 +926,25 @@ mod tests {
         }
     }
 
+    /// Long enough that no listener test depends on how fast the machine
+    /// is: the tests end their waits with a real redirect, not the clock.
+    const WAIT: Duration = Duration::from_secs(30);
+
     #[test]
     fn redirect_capture_returns_the_code_and_validates_state() {
         let port = free_port();
         let client = client(port);
         let state = "known-state".to_owned();
         let expected_state = state.clone();
-        let listener = thread::spawn(move || {
-            client.listen_for_redirect(&expected_state, Duration::from_secs(10))
-        });
+        let listener = thread::spawn(move || client.listen_for_redirect(&expected_state, WAIT));
 
-        let mut stream = connect_with_retry(port);
-        stream
-            .write_all(
-                format!("GET /callback?code=auth-code-1&state={state} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
-                    .as_bytes(),
-            )
-            .expect("the redirect should send");
-        let mut response = Vec::new();
-        let _ = stream.read_to_end(&mut response);
+        let answer = send_to_listener(
+            port,
+            &format!(
+                "GET /callback?code=auth-code-1&state={state} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            ),
+        );
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
 
         let code = listener
             .join()
@@ -948,33 +953,48 @@ mod tests {
         assert_eq!(code, "auth-code-1");
     }
 
-    /// Sends `request` to the redirect listener and returns its answer.
-    fn send_to_listener(port: u16, request: &str) -> String {
+    /// Reads the listener's answer to the end. A failed read is added to
+    /// the answer, so an assertion on it says what went wrong.
+    fn read_answer(mut stream: std::net::TcpStream) -> String {
+        let mut answer = String::new();
+        if let Err(error) = stream.read_to_string(&mut answer) {
+            answer.push_str(&format!("\n[the read failed: {error}]"));
+        }
+        answer
+    }
+
+    /// Connects (waiting for the listener to bind) and sends `request`.
+    fn connect_and_send(port: u16, request: &str) -> std::net::TcpStream {
         let mut stream = connect_with_retry(port);
+        stream
+            .set_read_timeout(Some(WAIT))
+            .expect("the read timeout should set");
         stream
             .write_all(request.as_bytes())
             .expect("the request should send");
-        let mut response = String::new();
-        let _ = stream.read_to_string(&mut response);
-        response
+        stream
+    }
+
+    /// Sends `request` to the redirect listener and returns its answer.
+    fn send_to_listener(port: u16, request: &str) -> String {
+        read_answer(connect_and_send(port, request))
     }
 
     #[test]
     fn a_mismatched_state_is_refused_and_the_wait_goes_on() {
         let port = free_port();
         let client = client(port);
-        let listener =
-            thread::spawn(move || client.listen_for_redirect("expected", Duration::from_secs(10)));
+        let listener = thread::spawn(move || client.listen_for_redirect("expected", WAIT));
 
         let forged = send_to_listener(
             port,
             "GET /callback?code=auth-code-1&state=attacker HTTP/1.1\r\nHost: x\r\n\r\n",
         );
         assert!(forged.starts_with("HTTP/1.1 400"), "{forged}");
-        assert!(
-            !listener.is_finished(),
-            "a forged state must not end the wait"
-        );
+        if listener.is_finished() {
+            let ended = listener.join().expect("the listener thread should finish");
+            panic!("a forged state must not end the wait: {ended:?}");
+        }
 
         let real = send_to_listener(
             port,
@@ -992,13 +1012,10 @@ mod tests {
     fn stray_requests_do_not_end_the_sign_in() {
         let port = free_port();
         let client = client(port);
+        // Each request is written as soon as its connection opens, long
+        // before this read timeout; only the silent connection meets it.
         let listener = thread::spawn(move || {
-            client.listen(
-                "expected",
-                Duration::from_secs(10),
-                Duration::from_millis(300),
-                || false,
-            )
+            client.listen("expected", WAIT, Duration::from_secs(2), || false)
         });
 
         // Another page, as a web page's <img src> or a favicon would ask.
@@ -1014,19 +1031,18 @@ mod tests {
             let answer = send_to_listener(port, request);
             assert!(answer.starts_with("HTTP/1.1 400"), "{request}: {answer}");
         }
-        // A connection that sends nothing until the read times out.
-        let silent = connect_with_retry(port);
-        thread::sleep(Duration::from_millis(500));
-        drop(silent);
-        assert!(
-            !listener.is_finished(),
-            "stray requests must not end the wait"
-        );
-
-        send_to_listener(
+        // A connection that sends nothing, with the real redirect queued
+        // behind it: the listener gives up on the silent one when its read
+        // times out, answers it, and goes on to the redirect.
+        let silent = connect_and_send(port, "");
+        let real = connect_and_send(
             port,
             "GET /callback?code=auth-code-3&state=expected HTTP/1.1\r\n\r\n",
         );
+        let silent = read_answer(silent);
+        assert!(silent.starts_with("HTTP/1.1 400"), "{silent}");
+        let real = read_answer(real);
+        assert!(real.starts_with("HTTP/1.1 200"), "{real}");
         let code = listener
             .join()
             .expect("the listener thread should finish")
@@ -1034,26 +1050,85 @@ mod tests {
         assert_eq!(code, "auth-code-3");
     }
 
+    /// Connects to a listener that is already bound and sends `request`,
+    /// leaving the connection in its backlog until the listener accepts it.
+    fn queue_request(port: u16, request: &str) -> std::net::TcpStream {
+        let mut stream =
+            std::net::TcpStream::connect(("127.0.0.1", port)).expect("the listener is bound");
+        stream
+            .set_read_timeout(Some(WAIT))
+            .expect("the read timeout should set");
+        stream
+            .write_all(request.as_bytes())
+            .expect("the request should send");
+        stream
+    }
+
     #[test]
     fn only_stray_requests_end_at_the_deadline() {
         let port = free_port();
         let client = client(port);
-        let listener =
-            thread::spawn(move || client.listen_for_redirect("expected", Duration::from_secs(1)));
-        send_to_listener(port, "GET /callback?state=attacker HTTP/1.1\r\n\r\n");
-        let error = listener
-            .join()
-            .expect("the listener thread should finish")
-            .expect_err("no real redirect came");
+        let timeout = Duration::from_millis(500);
+        let queued = std::cell::RefCell::new(None);
+        let started = std::time::Instant::now();
+        // The cancel check runs on the listener's thread once it is bound,
+        // so the forged redirect is queued however slow the machine is.
+        let result = client.listen("expected", timeout, WAIT, || {
+            if queued.borrow().is_none() {
+                queued.replace(Some(queue_request(
+                    port,
+                    "GET /callback?state=attacker HTTP/1.1\r\n\r\n",
+                )));
+            }
+            false
+        });
+        let elapsed = started.elapsed();
+        let answer = read_answer(queued.into_inner().expect("the request was queued"));
+        assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+        let error = result.expect_err("no real redirect came");
         assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+        assert!(
+            elapsed >= timeout,
+            "the wait lasts until the deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_redirect_waiting_at_the_deadline_is_still_answered() {
+        let port = free_port();
+        let client = client(port);
+        let timeout = Duration::from_millis(100);
+        let queued = std::cell::RefCell::new(None);
+        // The cancel check runs on the listener's thread before each poll:
+        // the first one queues the real redirect and then sleeps past the
+        // deadline, so the listener next looks at the clock with the
+        // redirect already waiting in its backlog.
+        let result = client.listen("expected", timeout, WAIT, || {
+            if queued.borrow().is_none() {
+                queued.replace(Some(queue_request(
+                    port,
+                    "GET /callback?code=auth-code-4&state=expected HTTP/1.1\r\n\r\n",
+                )));
+                thread::sleep(timeout * 2);
+            }
+            false
+        });
+        let answer = read_answer(queued.into_inner().expect("the redirect was queued"));
+        assert!(
+            answer.starts_with("HTTP/1.1 200"),
+            "a redirect that arrived in time is answered: {answer}"
+        );
+        assert_eq!(
+            result.expect("a redirect that arrived in time signs in"),
+            "auth-code-4"
+        );
     }
 
     #[test]
     fn a_provider_refusal_is_reported_as_what_it_is() {
         let port = free_port();
         let client = client(port);
-        let listener =
-            thread::spawn(move || client.listen_for_redirect("expected", Duration::from_secs(10)));
+        let listener = thread::spawn(move || client.listen_for_redirect("expected", WAIT));
         let page = send_to_listener(
             port,
             "GET /callback?error=access_denied&error_description=The+user+said+no&state=expected HTTP/1.1\r\n\r\n",
