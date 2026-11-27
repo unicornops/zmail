@@ -576,3 +576,64 @@ fn a_link_shows_its_real_target_before_opening(cx: &mut TestAppContext) {
     );
     assert_eq!(prompt(cx), None);
 }
+
+#[gpui::test]
+fn a_mailto_link_opens_a_filled_compose_window_after_confirming(cx: &mut TestAppContext) {
+    let (view, cx, reader, harness) = {
+        let (view, cx, harness) = open_workspace_with(
+            cx,
+            Setup::Account,
+            |_| InitialView::Inbox,
+            |store| {
+                store_conversation(
+                    store,
+                    vec![message(
+                        "Priya Raman <priya@example.test>",
+                        "2026-03-24T11:00:00Z",
+                        false,
+                        "Write to mailto:help@example.test?subject=Order%2042&body=Hello%20there",
+                    )],
+                )
+            },
+        );
+        let reader = cx.read_entity(&view, |view, _| view.reader.clone());
+        (view, cx, reader, harness)
+    };
+    click_row(0, Modifiers::none(), cx);
+    // "Write to " is 9 characters at the test platform's 8.4 px each: the
+    // address starts at about 76 px.
+    let body = paragraph("reader-paragraph-0-0", cx);
+    cx.simulate_click(
+        point(body.left() + px(120.), body.top() + body.size.height / 2.),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let prompt = cx.read_entity(&reader, |reader, _| {
+        reader.link_prompt().map(|prompt| prompt.target.clone())
+    });
+    assert_eq!(
+        prompt.as_deref(),
+        Some("mailto:help@example.test?subject=Order%2042&body=Hello%20there"),
+        "the dialog shows the link before anything opens"
+    );
+    assert!(
+        cx.read_entity(&view, |view, _| view.compose_windows.is_empty()),
+        "nothing opens without confirming"
+    );
+
+    click("reader-link-open", cx);
+    assert_eq!(cx.opened_url(), None, "the link is not handed to the OS");
+    let (compose, _) = super::compose_window(&view, cx);
+    let draft_id = cx
+        .read_entity(&compose, |compose, _| compose.draft_id())
+        .expect("the compose window has a draft");
+    let draft = harness
+        .store
+        .draft_detail(draft_id)
+        .expect("the draft loads")
+        .expect("the draft exists");
+    assert_eq!(draft.to, ["help@example.test"]);
+    assert_eq!(draft.subject, "Order 42");
+    assert_eq!(draft.body, "Hello there");
+    assert_eq!(draft.identity_email, "me@example.test");
+}
