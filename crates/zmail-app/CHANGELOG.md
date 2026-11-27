@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.6](https://github.com/unicornops/zmail/compare/v0.37.5...v0.37.6) (2026-11-27)
+
+
+### Bug Fixes
+
+* **proton:** bound server-driven loops and response sizes ([#539](https://github.com/unicornops/zmail/issues/539)) ([8d5a4b2](https://github.com/unicornops/zmail/commit/8d5a4b2afce4052417ee996c7f115dfd09095950)), closes [#462](https://github.com/unicornops/zmail/issues/462)
+
 ## [0.37.5](https://github.com/unicornops/zmail/compare/v0.37.4...v0.37.5) (2026-11-27)
 
 
