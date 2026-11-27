@@ -464,7 +464,9 @@ pub fn remove_account(
             let read = |slot| secrets.get_account_secret_from_slot(account_id, slot).ok();
             (
                 sync_service,
-                read(SecretSlot::ProtonUid),
+                // The UID names the session and is not secret; the
+                // refresh token stays in its wiping buffer.
+                read(SecretSlot::ProtonUid).map(|uid| uid.as_str().to_owned()),
                 read(SecretSlot::ProtonRefreshToken),
             )
         });
@@ -501,9 +503,12 @@ pub fn reauthorization_client(
             "This account signs in through a custom OAuth service, so Zmail cannot start its sign-in again. Remove the account and add it again.",
         );
     };
+    // `zmail-auth` holds the client secret as a plain `String` for the
+    // sign-in (a copy that is not wiped).
     let client_secret = secrets
         .get_account_secret_from_slot(account_id, SecretSlot::ClientSecret)
-        .ok();
+        .ok()
+        .map(|secret| secret.as_str().to_owned());
     let client = preset.client(
         config.client_id,
         client_secret,
@@ -800,7 +805,10 @@ mod tests {
             super::store_account(&store, &secrets, None, &form).expect("stored");
         assert_eq!(message, "jane@example.test added.");
         assert_eq!(
-            secrets.get_account_secret(account_id).expect("kept"),
+            secrets
+                .get_account_secret(account_id)
+                .expect("kept")
+                .as_str(),
             "app-password"
         );
         let account = &store.list_accounts().expect("accounts")[0];
@@ -830,7 +838,10 @@ mod tests {
         let (account_id, _) = super::store_account(&store, &secrets, None, &form).expect("stored");
         assert_eq!(account_id, 1, "the id is the one with secrets left over");
         assert_eq!(
-            secrets.get_account_secret(account_id).expect("kept"),
+            secrets
+                .get_account_secret(account_id)
+                .expect("kept")
+                .as_str(),
             "app-password"
         );
         for slot in SecretSlot::ALL {
@@ -870,7 +881,8 @@ mod tests {
         assert_eq!(
             secrets
                 .get_account_secret_from_slot(account_id, SecretSlot::RefreshToken)
-                .expect("kept"),
+                .expect("kept")
+                .as_str(),
             "refresh"
         );
         // A password form can't be stored this way.

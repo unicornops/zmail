@@ -289,10 +289,7 @@ impl<K: crate::Keychain + ?Sized> StoreKeychain for K {
             .read_entry(&store_entry_name(id))
             .with_context(|| format!("failed to load the mail store key {id}"))?
         {
-            Some(secret) => {
-                let secret = Zeroizing::new(secret);
-                StoreKey::from_secret_hex(id, &secret).map(Some)
-            }
+            Some(secret) => StoreKey::from_secret_hex(id, &secret).map(Some),
             None => Ok(None),
         }
     }

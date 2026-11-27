@@ -192,7 +192,7 @@ fn submission_config(
     Ok(zmail_smtp::SubmissionConfig {
         host,
         port,
-        secret: username.as_ref().map(|_| secret.to_owned()),
+        secret: username.as_ref().map(|_| secret.to_owned().into()),
         username,
         auth: account.auth,
         security,

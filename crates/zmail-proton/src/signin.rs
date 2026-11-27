@@ -307,7 +307,7 @@ mod tests {
             self.0.set_account_secret(account_id, secret)
         }
 
-        fn get_account_secret(&self, account_id: i64) -> Result<String> {
+        fn get_account_secret(&self, account_id: i64) -> Result<Zeroizing<String>> {
             self.0.get_account_secret(account_id)
         }
 
@@ -332,7 +332,7 @@ mod tests {
             &self,
             account_id: i64,
             slot: SecretSlot,
-        ) -> Result<String> {
+        ) -> Result<Zeroizing<String>> {
             self.0.get_account_secret_from_slot(account_id, slot)
         }
 
@@ -356,8 +356,8 @@ mod tests {
             state.key_pass = Some(SaltedKeyPass::from_secret("salted"));
             *state.auth.lock().expect("auth") = Some(Auth {
                 uid: "uid-1".to_owned(),
-                access_token: "access".to_owned(),
-                refresh_token: "refresh".to_owned(),
+                access_token: "access".to_owned().into(),
+                refresh_token: "refresh".to_owned().into(),
                 ..Auth::default()
             });
         }

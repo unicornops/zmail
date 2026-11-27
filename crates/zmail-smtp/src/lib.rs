@@ -8,6 +8,7 @@ use mail_send::{
     mail_builder::{MessageBuilder, headers::address::Address},
     smtp::message::Message,
 };
+use zeroize::Zeroizing;
 use zmail_core::{
     AuthKind, OutgoingMessage,
     participants::{Participant, envelope_address},
@@ -68,8 +69,8 @@ pub struct SubmissionConfig {
     /// Optional username for SMTP AUTH.
     pub username: Option<String>,
     /// Optional password or app password for SMTP AUTH; for OAuth2 accounts
-    /// this is the current access token.
-    pub secret: Option<String>,
+    /// this is the current access token. Wiped when dropped (#474).
+    pub secret: Option<Zeroizing<String>>,
     /// Authentication method used for SMTP AUTH.
     pub auth: AuthKind,
     /// Transport security mode.
@@ -126,16 +127,20 @@ impl SubmissionConfig {
     /// Password accounts authenticate with `AUTH PLAIN`; OAuth2 accounts
     /// authenticate with `AUTH XOAUTH2` using the current access token as
     /// the bearer secret.
-    fn sasl_credentials(&self) -> Result<Option<Credentials<String>>> {
+    ///
+    /// The credentials borrow the secret rather than copy it. `mail-send`
+    /// still copies it when it encodes the `AUTH` exchange (the SASL
+    /// string and its base64), into buffers it frees without wiping.
+    fn sasl_credentials(&self) -> Result<Option<Credentials<&str>>> {
         match (&self.username, &self.secret) {
             (Some(username), Some(secret)) => Ok(Some(match self.auth {
                 AuthKind::Password => Credentials::Plain {
-                    username: username.clone(),
-                    secret: secret.clone(),
+                    username: username.as_str(),
+                    secret: secret.as_str(),
                 },
                 AuthKind::OAuth2 => Credentials::XOauth2 {
-                    username: username.clone(),
-                    secret: secret.clone(),
+                    username: username.as_str(),
+                    secret: secret.as_str(),
                 },
                 AuthKind::ProtonSession => bail!("Proton accounts do not send over SMTP"),
             })),
@@ -245,8 +250,8 @@ async fn submit_within(
 fn client_builder(
     config: &SubmissionConfig,
     timeouts: Timeouts,
-) -> Result<SmtpClientBuilder<String>> {
-    let mut builder = SmtpClientBuilder::new(config.host.clone(), config.port)
+) -> Result<SmtpClientBuilder<&str>> {
+    let mut builder = SmtpClientBuilder::new(config.host.as_str(), config.port)
         .map_err(anyhow::Error::msg)?
         .helo_host(config.hello_name.clone())
         .timeout(timeouts.connect);
@@ -446,7 +451,7 @@ mod tests {
             host: "smtp.example.test".to_owned(),
             port: 587,
             username: Some("user@example.test".to_owned()),
-            secret: Some("the-secret".to_owned()),
+            secret: Some("the-secret".to_owned().into()),
             auth,
             security: SubmissionSecurity::StartTls,
             hello_name: "localhost".to_owned(),
@@ -456,7 +461,8 @@ mod tests {
     #[test]
     fn sasl_credentials_pick_the_mechanism_from_the_auth_kind() {
         // Password accounts authenticate with AUTH PLAIN.
-        let credentials = config(AuthKind::Password)
+        let password = config(AuthKind::Password);
+        let credentials = password
             .sasl_credentials()
             .expect("password credentials should build")
             .expect("credentials should be present");
@@ -468,7 +474,8 @@ mod tests {
 
         // OAuth2 accounts authenticate with AUTH XOAUTH2, using the current
         // access token as the bearer secret.
-        let credentials = config(AuthKind::OAuth2)
+        let oauth2 = config(AuthKind::OAuth2);
+        let credentials = oauth2
             .sasl_credentials()
             .expect("OAuth2 credentials should build")
             .expect("credentials should be present");

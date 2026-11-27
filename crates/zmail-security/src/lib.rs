@@ -19,6 +19,8 @@ use anyhow::{Context, Result};
 use keyring::Entry;
 
 pub use keychain::{InMemoryKeychain, Keychain, StoreId, StoreSecrets};
+/// The buffer secrets are handed over in: it wipes them when dropped.
+pub use zeroize::Zeroizing;
 
 /// Default remote content stance.
 pub const REMOTE_CONTENT_POLICY: &str = "Blocked by default.";
@@ -104,8 +106,10 @@ secret_slots! {
 pub trait SecretStore: Send + Sync {
     /// Persists the secret for an account.
     fn set_account_secret(&self, account_id: i64, secret: &str) -> Result<()>;
-    /// Loads the secret for an account.
-    fn get_account_secret(&self, account_id: i64) -> Result<String>;
+    /// Loads the secret for an account, in a buffer that wipes it when
+    /// dropped (#474). Pass it on borrowed (`&str`); a copy made from it
+    /// is not wiped.
+    fn get_account_secret(&self, account_id: i64) -> Result<Zeroizing<String>>;
     /// Removes the secret for an account.
     fn delete_account_secret(&self, account_id: i64) -> Result<()>;
     /// Persists the secret for an account in a named slot.
@@ -115,8 +119,13 @@ pub trait SecretStore: Send + Sync {
         slot: SecretSlot,
         secret: &str,
     ) -> Result<()>;
-    /// Loads the secret for an account from a named slot.
-    fn get_account_secret_from_slot(&self, account_id: i64, slot: SecretSlot) -> Result<String>;
+    /// Loads the secret for an account from a named slot, in a buffer that
+    /// wipes it when dropped (#474), as [`SecretStore::get_account_secret`].
+    fn get_account_secret_from_slot(
+        &self,
+        account_id: i64,
+        slot: SecretSlot,
+    ) -> Result<Zeroizing<String>>;
     /// Removes the secret for an account in a named slot.
     fn delete_account_secret_in_slot(&self, account_id: i64, slot: SecretSlot) -> Result<()>;
     /// Removes every secret kept for `account_id`, in every slot
@@ -152,9 +161,15 @@ pub trait SecretStore: Send + Sync {
 pub struct OsKeychain;
 
 impl Keychain for OsKeychain {
-    fn read_entry(&self, name: &str) -> Result<Option<String>> {
+    fn read_entry(&self, name: &str) -> Result<Option<Zeroizing<String>>> {
+        // `keyring` returns a plain `String`, moved (not copied) into the
+        // wiping buffer here. Copies below it that Zmail can't wipe (ADR
+        // 0005 §3): on Linux the D-Bus messages that carry the secret to
+        // and from the Secret Service (`dbus-secret-service`, libdbus); on
+        // macOS the `CFData` the Security framework returns. On Windows
+        // `keyring` wipes its own credential blobs.
         match entry(name)?.get_password() {
-            Ok(secret) => Ok(Some(secret)),
+            Ok(secret) => Ok(Some(Zeroizing::new(secret))),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => {
                 Err(error).with_context(|| format!("failed to read {name} from the keychain"))
@@ -190,9 +205,9 @@ fn entry(name: &str) -> Result<Entry> {
 /// keychain use [`InMemoryKeychain`] and [`StoreSecrets`], as the app does.
 #[derive(Debug, Default)]
 pub struct InMemorySecretStore {
-    secrets: Mutex<HashMap<(i64, SecretSlot), String>>,
+    secrets: Mutex<HashMap<(i64, SecretSlot), Zeroizing<String>>>,
     /// Store keys ([`vault::StoreKeychain`]), as the keychain holds them.
-    store_keys: Mutex<HashMap<vault::KeyId, zeroize::Zeroizing<String>>>,
+    store_keys: Mutex<HashMap<vault::KeyId, Zeroizing<String>>>,
     /// Store markers ([`vault::StoreLocation`]), as the keychain holds them.
     store_markers: Mutex<HashMap<vault::StoreLocation, String>>,
 }
@@ -203,7 +218,7 @@ impl InMemorySecretStore {
         Arc::new(Self::default())
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(i64, SecretSlot), String>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(i64, SecretSlot), Zeroizing<String>>> {
         self.secrets
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -211,7 +226,7 @@ impl InMemorySecretStore {
 
     fn lock_store_keys(
         &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<vault::KeyId, zeroize::Zeroizing<String>>> {
+    ) -> std::sync::MutexGuard<'_, HashMap<vault::KeyId, Zeroizing<String>>> {
         self.store_keys
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -231,7 +246,7 @@ impl SecretStore for InMemorySecretStore {
         self.set_account_secret_in_slot(account_id, SecretSlot::Password, secret)
     }
 
-    fn get_account_secret(&self, account_id: i64) -> Result<String> {
+    fn get_account_secret(&self, account_id: i64) -> Result<Zeroizing<String>> {
         self.get_account_secret_from_slot(account_id, SecretSlot::Password)
     }
 
@@ -245,11 +260,16 @@ impl SecretStore for InMemorySecretStore {
         slot: SecretSlot,
         secret: &str,
     ) -> Result<()> {
-        self.lock().insert((account_id, slot), secret.to_owned());
+        self.lock()
+            .insert((account_id, slot), Zeroizing::new(secret.to_owned()));
         Ok(())
     }
 
-    fn get_account_secret_from_slot(&self, account_id: i64, slot: SecretSlot) -> Result<String> {
+    fn get_account_secret_from_slot(
+        &self,
+        account_id: i64,
+        slot: SecretSlot,
+    ) -> Result<Zeroizing<String>> {
         self.lock()
             .get(&(account_id, slot))
             .cloned()
@@ -279,7 +299,46 @@ pub fn sanitize_html_for_display(html: &str) -> SanitizedHtml {
 
 #[cfg(test)]
 mod tests {
-    use super::{InMemorySecretStore, SecretSlot, SecretStore};
+    use super::{InMemoryKeychain, InMemorySecretStore, Keychain, SecretSlot, SecretStore};
+    use crate::{StoreId, StoreSecrets};
+
+    /// Compiles only for a type that wipes itself when dropped.
+    fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+    /// Every way a secret is read hands it over in a buffer that wipes it
+    /// when dropped (#474): the secret stores' getters and the keychain's
+    /// entries, which hold the store keys as well.
+    #[test]
+    fn secrets_are_read_into_buffers_that_wipe_them() {
+        let store = InMemorySecretStore::default();
+        store.set_account_secret(4, "password").expect("stored");
+        store
+            .set_account_secret_in_slot(4, SecretSlot::ProtonKeyPass, "key-pass")
+            .expect("stored");
+        let password = store.get_account_secret(4).expect("password");
+        wiped_on_drop(&password);
+        assert_eq!(password.as_str(), "password");
+        let key_pass = store
+            .get_account_secret_from_slot(4, SecretSlot::ProtonKeyPass)
+            .expect("key password");
+        wiped_on_drop(&key_pass);
+        assert_eq!(key_pass.as_str(), "key-pass");
+
+        let keychain = InMemoryKeychain::shared();
+        let secrets = StoreSecrets::new(keychain.clone(), StoreId::generate(), []);
+        secrets
+            .set_account_secret_in_slot(1, SecretSlot::RefreshToken, "refresh")
+            .expect("stored");
+        let refresh = secrets
+            .get_account_secret_from_slot(1, SecretSlot::RefreshToken)
+            .expect("refresh token");
+        wiped_on_drop(&refresh);
+        assert_eq!(refresh.as_str(), "refresh");
+        keychain.write_entry("entry", "secret").expect("written");
+        let entry = keychain.read_entry("entry").expect("read").expect("entry");
+        wiped_on_drop(&entry);
+        assert_eq!(entry.as_str(), "secret");
+    }
 
     #[test]
     fn in_memory_store_round_trips_secrets() {
@@ -288,7 +347,10 @@ mod tests {
             .set_account_secret(4, "top-secret")
             .expect("secret should store");
         assert_eq!(
-            store.get_account_secret(4).expect("secret should load"),
+            store
+                .get_account_secret(4)
+                .expect("secret should load")
+                .as_str(),
             "top-secret"
         );
         store
@@ -315,25 +377,31 @@ mod tests {
 
         // The legacy single-secret API addresses the password slot only.
         assert_eq!(
-            store.get_account_secret(4).expect("password loads"),
+            store
+                .get_account_secret(4)
+                .expect("password loads")
+                .as_str(),
             "app-password"
         );
         assert_eq!(
             store
                 .get_account_secret_from_slot(4, SecretSlot::AccessToken)
-                .expect("access token loads"),
+                .expect("access token loads")
+                .as_str(),
             "access-1"
         );
         assert_eq!(
             store
                 .get_account_secret_from_slot(4, SecretSlot::RefreshToken)
-                .expect("refresh token loads"),
+                .expect("refresh token loads")
+                .as_str(),
             "refresh-1"
         );
         assert_eq!(
             store
                 .get_account_secret_from_slot(4, SecretSlot::ClientSecret)
-                .expect("client secret loads"),
+                .expect("client secret loads")
+                .as_str(),
             "client-1"
         );
 
@@ -416,13 +484,15 @@ mod tests {
         assert_eq!(
             store
                 .get_account_secret_from_slot(9, SecretSlot::RefreshToken)
-                .expect("oauth"),
+                .expect("oauth")
+                .as_str(),
             "oauth-refresh"
         );
         assert_eq!(
             store
                 .get_account_secret_from_slot(9, SecretSlot::ProtonRefreshToken)
-                .expect("proton"),
+                .expect("proton")
+                .as_str(),
             "proton-refresh"
         );
         assert!(

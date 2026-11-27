@@ -9,7 +9,9 @@
 // checked (no `WithSkipVerifyProofs`). The refresh `State` is base64 rather
 // than raw random bytes, and tokens are redacted from `Debug` output.
 // FIDO2 is not supported (ADR 0004) but the empty `FIDO2` object is sent
-// as upstream does. `AuthModulus` is not ported.
+// as upstream does. `AuthModulus` is not ported. The tokens of an `Auth`
+// are held in buffers that wipe them when dropped, and the request and
+// response bodies that carried them are wiped after use (#474).
 
 //! Sessions: SRP login, the `Auth` response, new clients and token refresh.
 
@@ -21,7 +23,8 @@ use base64::{
 };
 use proton_srp::{SRPAuth, SRPProof, SrpHashVersion};
 use rand::Rng;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     client::Client,
@@ -85,12 +88,12 @@ pub struct Auth {
     /// The session UID (`x-pm-uid`).
     #[serde(rename = "UID")]
     pub uid: String,
-    /// The bearer access token.
-    #[serde(rename = "AccessToken")]
-    pub access_token: String,
-    /// The refresh token.
-    #[serde(rename = "RefreshToken")]
-    pub refresh_token: String,
+    /// The bearer access token, wiped when dropped.
+    #[serde(rename = "AccessToken", deserialize_with = "wiping_string")]
+    pub access_token: Zeroizing<String>,
+    /// The refresh token, wiped when dropped.
+    #[serde(rename = "RefreshToken", deserialize_with = "wiping_string")]
+    pub refresh_token: Zeroizing<String>,
     /// The SRP server proof (login only).
     #[serde(rename = "ServerProof", default)]
     pub server_proof: String,
@@ -117,6 +120,15 @@ impl fmt::Debug for Auth {
             .field("password_mode", &self.password_mode)
             .finish_non_exhaustive()
     }
+}
+
+/// Reads a string straight into a wiping buffer. The decoder hands over
+/// the string it built (from a [`serde_json::Value`], the string itself),
+/// so it is moved rather than copied.
+fn wiping_string<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Zeroizing<String>, D::Error> {
+    String::deserialize(deserializer).map(Zeroizing::new)
 }
 
 /// The SRP challenge from `/auth/v4/info` (go-proton-api's `AuthInfo`).
@@ -240,7 +252,7 @@ impl Manager {
                 client_proof: BASE64.encode(proofs.client_proof),
                 srp_session: &info.srp_session,
             })?;
-        let auth: Auth = self.send(&request, None).await?.json()?;
+        let auth = self.send_for_auth(request).await?;
         check_server_proof(&proofs, &auth.server_proof)?;
         let client = Client::new(
             self.clone(),
@@ -297,7 +309,21 @@ impl Manager {
             state: URL_SAFE_NO_PAD.encode(state),
             access_token,
         })?;
-        self.send(&request, None).await?.json()
+        self.send_for_auth(request).await
+    }
+
+    /// Sends a request whose answer is a session, then wipes the request
+    /// body (a refresh token, or SRP proofs) and the response body (the new
+    /// tokens). `reqwest`'s own copies of both are freed without wiping.
+    async fn send_for_auth(&self, mut request: Request) -> Result<Auth, Error> {
+        let sent = self.send(&request, None).await;
+        if let Some(body) = request.body.as_mut() {
+            body.zeroize();
+        }
+        let mut response = sent?;
+        let auth = response.json();
+        response.body.zeroize();
+        auth
     }
 }
 
@@ -341,6 +367,8 @@ mod tests {
         )
         .expect("auth");
         assert_eq!(auth.uid, "uid");
+        assert_eq!(auth.access_token.as_str(), "secret-access");
+        assert_eq!(auth.refresh_token.as_str(), "secret-refresh");
         assert!(auth.two_fa.enabled.has_totp());
         assert!(auth.two_fa.enabled.has_fido2());
         assert_eq!(auth.password_mode, PasswordMode::Two);

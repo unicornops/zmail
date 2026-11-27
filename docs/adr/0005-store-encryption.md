@@ -288,6 +288,62 @@ explicit export, as is `export-account` (mbox).
   a `PRAGMA key` needs is zeroised after each use. Ephemeral stores (tests,
   UI fixtures, the performance run) get a random in-memory key and are
   encrypted too, so every test exercises the encrypted path.
+- **Account secrets in memory** (#474). Passwords, OAuth2 tokens and
+  Proton session tokens are wiped from Zmail's memory once used, as the
+  store key is, so they do not linger in freed memory (and from there
+  in swap or a crash dump, though #431 turns core dumps off on Unix).
+  `Debug` still prints none of them. Where they are wiped:
+  - `Keychain::read_entry` and the `SecretStore` getters
+    (`get_account_secret`, `get_account_secret_from_slot`) return
+    `Zeroizing<String>`, and the in-memory stores used in tests hold
+    their entries that way too. `keyring` returns a plain `String`,
+    moved (not copied) into the buffer.
+  - `SyncService::connect_secret` returns the password or access token
+    in that buffer; the IMAP, JMAP and SMTP adapters borrow it as `&str`,
+    and `zmail_smtp::SubmissionConfig::secret` holds it as
+    `Zeroizing<String>`. An OAuth2 refresh moves the new grant from
+    `zmail-auth`'s `TokenSet` into wiping buffers before it is stored,
+    and sends the refresh token from one.
+  - IMAP's XOAUTH2 response is built in a wiping buffer.
+  - Proton (ADR 0004): `zmail_proton_api::Client` holds the access and
+    refresh tokens as `Arc<Zeroizing<String>>`, shared with the requests
+    using them rather than copied, so a refresh or `close` drops the old
+    tokens and they are wiped as soon as the last request holding them
+    finishes. `Auth` (a sign-in's or refresh's tokens) holds them as
+    `Zeroizing<String>`, decoded straight into the buffer; the request
+    body of a refresh (the refresh token) and the response body that
+    carried new tokens are wiped after use, as is the `Bearer` value
+    before `reqwest` takes it. Resuming a session reads the refresh token
+    and the salted key password into wiping buffers;
+    `zmail_proton::StoredSession` takes its refresh token as one, and
+    `SaltedKeyPass` and the sign-in's password already were.
+  - The Proton session UID is not treated as secret (it is in `Debug`
+    output); it stays a `String`.
+
+  Copies Zmail can't wipe, because a library takes its own and frees it
+  without wiping (each is noted in a comment where the secret is handed
+  over):
+  - The keychain's platform layer: on Linux the D-Bus messages to and
+    from the Secret Service (`dbus-secret-service` over libdbus); on
+    macOS the `CFData` the Security framework returns. On Windows
+    `keyring` wipes its own credential blobs.
+  - HTTP: `reqwest`, `hyper`, `http` and `rustls` buffers holding
+    `Authorization` headers (`HeaderValue`), request bodies (`Bytes`)
+    and the response bodies that carry tokens (Proton's `/auth/v4` and
+    `/auth/v4/refresh`, an OAuth2 token endpoint), and `serde_json`'s
+    intermediate values decoding them.
+  - JMAP: `jmap_wire::Credentials` keeps a plain `String` copy of the
+    password or token for the connection's lifetime, and builds the
+    `Authorization` value for each request. `jmap-wire` is meant to
+    become a project of its own (ADR 0008), so it was left as it is.
+  - IMAP: `async-imap` formats the password into its `LOGIN` command
+    and base64-encodes the XOAUTH2 response.
+  - SMTP: `mail-send` copies the secret when it encodes the `AUTH`
+    exchange (the SASL string and its base64); Zmail's credentials only
+    borrow it.
+  - OAuth2: `zmail-auth`'s `TokenSet` and `OAuth2Client` (the client
+    secret, during a sign-in) are plain `String`s until handed over.
+  - TLS: `rustls` encrypts every one of these in its own record buffers.
 - **No passphrase by default.** An optional passphrase (Argon2id-wrapped
   data key in the sidecar, asked for at start) is a later feature and
   needs a new dependency; it is also the answer for Linux systems with no
@@ -561,7 +617,8 @@ It does not protect against:
   Credential Manager gives it to any process of that user), read Zmail's
   memory, or simply read the opened-attachment copies.
 - **Memory.** Decrypted pages, bodies and the key sit in Zmail's process
-  memory while it runs. SQLCipher's `cipher_memory_security` (wiping
+  memory while it runs (account secrets are wiped after use, §3, but not
+  the copies libraries make). SQLCipher's `cipher_memory_security` (wiping
   and locking its buffers) is off: it costs a lot and protects little
   once an attacker can read the process.
 - **Swap and hibernation.** Pages of Zmail's memory, and on Linux the

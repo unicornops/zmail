@@ -240,12 +240,10 @@ pub struct StoredSession {
 }
 
 impl StoredSession {
-    /// A session from its UID and refresh token.
-    pub fn new(uid: String, refresh_token: String) -> Self {
-        Self {
-            uid,
-            refresh_token: Zeroizing::new(refresh_token),
-        }
+    /// A session from its UID and refresh token. The UID names the
+    /// session (it is in `Debug` output) and is not secret.
+    pub fn new(uid: String, refresh_token: Zeroizing<String>) -> Self {
+        Self { uid, refresh_token }
     }
 }
 
@@ -378,6 +376,10 @@ impl ProtonSessions {
                 .get_account_secret_from_slot(account_id, slot)
                 .with_context(|| format!("no stored Proton session for account {account_id}"))
         };
+        // Each is read into a buffer that wipes it when dropped (#474): the
+        // spent refresh token at the end of this function, the key
+        // password once copied into the `SaltedKeyPass`, which wipes its
+        // own copy when the session ends.
         let uid = read(SecretSlot::ProtonUid)?;
         let refresh_token = read(SecretSlot::ProtonRefreshToken)?;
         let key_pass = SaltedKeyPass::from_secret(&read(SecretSlot::ProtonKeyPass)?);
@@ -458,7 +460,7 @@ pub fn stored_session(secrets: &dyn SecretStore, account_id: i64) -> Option<Stor
             .filter(|value| !value.is_empty())
     };
     Some(StoredSession::new(
-        read(SecretSlot::ProtonUid)?,
+        read(SecretSlot::ProtonUid)?.as_str().to_owned(),
         read(SecretSlot::ProtonRefreshToken)?,
     ))
 }
@@ -502,8 +504,8 @@ mod tests {
     fn auth(refresh_token: &str) -> Auth {
         Auth {
             uid: "uid-1".to_owned(),
-            access_token: "access".to_owned(),
-            refresh_token: refresh_token.to_owned(),
+            access_token: "access".to_owned().into(),
+            refresh_token: refresh_token.to_owned().into(),
             ..Auth::default()
         }
     }
@@ -520,7 +522,13 @@ mod tests {
         )
         .expect("stored");
         assert!(has_session(&secrets, 7));
-        let read = |slot| secrets.get_account_secret_from_slot(7, slot).expect("slot");
+        let read = |slot| {
+            secrets
+                .get_account_secret_from_slot(7, slot)
+                .expect("slot")
+                .as_str()
+                .to_owned()
+        };
         assert_eq!(read(SecretSlot::ProtonUid), "uid-1");
         assert_eq!(read(SecretSlot::ProtonRefreshToken), "refresh-1");
         assert_eq!(read(SecretSlot::ProtonKeyPass), "salted-key-pass");
@@ -557,7 +565,7 @@ mod tests {
             self.inner.set_account_secret(account_id, secret)
         }
 
-        fn get_account_secret(&self, account_id: i64) -> Result<String> {
+        fn get_account_secret(&self, account_id: i64) -> Result<Zeroizing<String>> {
             self.inner.get_account_secret(account_id)
         }
 
@@ -582,7 +590,7 @@ mod tests {
             &self,
             account_id: i64,
             slot: SecretSlot,
-        ) -> Result<String> {
+        ) -> Result<Zeroizing<String>> {
             self.inner.get_account_secret_from_slot(account_id, slot)
         }
 
@@ -600,6 +608,7 @@ mod tests {
             secrets
                 .get_account_secret_from_slot(7, SecretSlot::ProtonRefreshToken)
                 .ok()
+                .map(|token| token.as_str().to_owned())
         };
         let slot = RefreshTokenSlot::new(secrets.clone(), 7);
         slot.save("refresh-1");

@@ -40,7 +40,7 @@ use zmail_core::{
     MessageHeaders, MessageSnapshot, OpApplyReport, PendingOp, PendingOpKind, ProtocolKind,
     SyncTarget, ThreadSnapshot,
 };
-use zmail_security::sanitize_html_for_display;
+use zmail_security::{Zeroizing, sanitize_html_for_display};
 
 pub use watch::{
     IDLE_RENEW_INTERVAL, MAX_WATCH_CONNECTIONS, STATUS_POLL_INTERVAL, WatchEnd, WatchEvent,
@@ -1011,9 +1011,11 @@ fn parse_endpoint(endpoint: &str) -> Result<ImapEndpoint> {
 /// SASL XOAUTH2 string for IMAP bearer-token authentication.
 ///
 /// The value is the clear-text mechanism response; the IMAP client base64-encodes
-/// it before sending it to the server.
-fn xoauth2_response(username: &str, token: &str) -> Vec<u8> {
-    format!("user={username}\x01auth=Bearer {token}\x01\x01").into_bytes()
+/// it before sending it to the server. It carries the token, so it is wiped
+/// when dropped; `async-imap`'s base64 copy and the command it writes are
+/// freed without wiping (#474).
+fn xoauth2_response(username: &str, token: &str) -> Zeroizing<Vec<u8>> {
+    Zeroizing::new(format!("user={username}\x01auth=Bearer {token}\x01\x01").into_bytes())
 }
 
 /// [`Authenticator`] that answers the XOAUTH2 challenge with a bearer token.
@@ -1023,7 +1025,7 @@ struct Xoauth2Authenticator<'a> {
 }
 
 impl Authenticator for Xoauth2Authenticator<'_> {
-    type Response = Vec<u8>;
+    type Response = Zeroizing<Vec<u8>>;
 
     fn process(&mut self, _challenge: &[u8]) -> Self::Response {
         xoauth2_response(self.username, self.token)
@@ -1110,6 +1112,9 @@ async fn connect_session_with(
         .context("failed to read the IMAP greeting")?
         .context("the IMAP server closed the connection before greeting")?;
 
+    // The secret is borrowed from the caller's wiping buffer (#474).
+    // `async-imap` copies it into the `LOGIN` command it formats, or the
+    // base64 of the XOAUTH2 response, and frees those without wiping.
     match auth {
         AuthKind::Password => client
             .login(username, secret)
@@ -2128,7 +2133,7 @@ mod tests {
     fn xoauth2_response_matches_the_sasl_mechanism_format() {
         let response = xoauth2_response("user@example.test", "token-1234");
         assert_eq!(
-            String::from_utf8(response).expect("the XOAUTH2 response is UTF-8"),
+            String::from_utf8(response.to_vec()).expect("the XOAUTH2 response is UTF-8"),
             "user=user@example.test\x01auth=Bearer token-1234\x01\x01"
         );
     }

@@ -13,7 +13,7 @@ use zmail_core::{
 };
 use zmail_proton::{ClientConfig, SignInStep, store_new_session};
 use zmail_proton_api::{AppVersion, CardType, EncryptionScheme, Manager, MessageFilter};
-use zmail_security::{InMemorySecretStore, SecretSlot, SecretStore};
+use zmail_security::{InMemorySecretStore, SecretSlot, SecretStore, Zeroizing};
 use zmail_store::LocalStore;
 use zmail_sync::{BackgroundRuntime, SyncService};
 use zmail_test_support::{
@@ -155,7 +155,7 @@ fn signing_out_a_removed_account_ends_its_session_on_the_server() -> Result<()> 
     let manager = Manager::new(harness_config(&harness)?)?;
     let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
     let sessions = zmail_proton::ProtonSessions::new(harness_config(&harness)?, secrets.clone())?;
-    let stored = |account_id: i64| -> Result<(String, String)> {
+    let stored = |account_id: i64| -> Result<(Zeroizing<String>, Zeroizing<String>)> {
         Ok((
             secrets.get_account_secret_from_slot(account_id, SecretSlot::ProtonUid)?,
             secrets.get_account_secret_from_slot(account_id, SecretSlot::ProtonRefreshToken)?,
@@ -1893,7 +1893,7 @@ fn onboarding_signs_in_step_by_step_and_the_session_syncs() -> Result<()> {
             .is_empty()
     );
     let key_pass = secrets.get_account_secret_from_slot(account_id, SecretSlot::ProtonKeyPass)?;
-    ensure!(!key_pass.is_empty() && key_pass != harness.password());
+    ensure!(!key_pass.is_empty() && key_pass.as_str() != harness.password());
     sync_service
         .sync_account_and_wait(account_id)
         .with_context(|| format!("sync failed; server log:\n{}", harness.logs()))?;

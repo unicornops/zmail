@@ -569,6 +569,7 @@ fn reauthenticate_saves_a_new_password_in_the_keychain(cx: &mut TestAppContext) 
             .secrets
             .get_account_secret(account_id)
             .ok()
+            .map(|secret| secret.as_str().to_owned())
     });
     assert_eq!(saved.as_deref(), Some("new-app-password"));
     assert!(
@@ -592,6 +593,7 @@ fn a_new_password_the_server_refuses_is_kept_out_of_the_keychain(cx: &mut TestAp
                 .secrets
                 .get_account_secret(account_id)
                 .ok()
+                .map(|secret| secret.as_str().to_owned())
         })
     };
     let before = secret(cx);
