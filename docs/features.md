@@ -16,6 +16,7 @@ What is built so far (Zmail is beta, so expect gaps and rough edges):
 - received attachment download and save-as for IMAP and JMAP accounts
 - full-text search with query operators ([Searching mail](./search.md)); IMAP message bodies are fetched and indexed in the background, newest first, within the account's disk budget, pausing on battery power (Linux) unless Settings → Mail says to keep going
 - compose, autosave, attachment handling, outbox retry, SMTP submission, and JMAP submission support
+- Zmail as your mail app: a `mailto:` link from a browser or another app, or one in a message (after the link dialog), opens a new message in Zmail, filled from the link; while Zmail is open, the running app takes the link ([Make Zmail your mail app](./install.md#make-zmail-your-mail-app))
 - multiple identities from day one, with JMAP identity discovery and manual identity setup for generic accounts
 - OS keychain-backed credential storage
 - per-account cache policy persisted with each configured account
