@@ -1048,6 +1048,53 @@ mod tests {
         assert!(format!("{error:#}").contains("timed out"), "{error:#}");
     }
 
+    /// Connects to a listener that is already bound and sends `request`,
+    /// leaving the connection in its backlog until the listener accepts it.
+    fn queue_request(port: u16, request: &str) -> std::net::TcpStream {
+        let mut stream =
+            std::net::TcpStream::connect(("127.0.0.1", port)).expect("the listener is bound");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("the read timeout should set");
+        stream
+            .write_all(request.as_bytes())
+            .expect("the request should send");
+        stream
+    }
+
+    #[test]
+    fn a_redirect_waiting_at_the_deadline_is_still_answered() {
+        let port = free_port();
+        let client = client(port);
+        let timeout = Duration::from_millis(100);
+        let queued = std::cell::RefCell::new(None);
+        // The cancel check runs on the listener's thread before each poll:
+        // the first one queues the real redirect and then sleeps past the
+        // deadline, so the listener next looks at the clock with the
+        // redirect already waiting in its backlog.
+        let result = client.listen("expected", timeout, Duration::from_secs(30), || {
+            if queued.borrow().is_none() {
+                queued.replace(Some(queue_request(
+                    port,
+                    "GET /callback?code=auth-code-4&state=expected HTTP/1.1\r\n\r\n",
+                )));
+                thread::sleep(timeout * 2);
+            }
+            false
+        });
+        let mut stream = queued.into_inner().expect("the redirect was queued");
+        let mut answer = String::new();
+        let read = stream.read_to_string(&mut answer);
+        assert!(
+            answer.starts_with("HTTP/1.1 200"),
+            "a redirect that arrived in time is answered (read: {read:?}): {answer}"
+        );
+        assert_eq!(
+            result.expect("a redirect that arrived in time signs in"),
+            "auth-code-4"
+        );
+    }
+
     #[test]
     fn a_provider_refusal_is_reported_as_what_it_is() {
         let port = free_port();
