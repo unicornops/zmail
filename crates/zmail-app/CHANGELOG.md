@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.2](https://github.com/unicornops/zmail/compare/v0.37.1...v0.37.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* **outbox:** fail a send refused for its envelope at once ([#531](https://github.com/unicornops/zmail/issues/531)) ([9b71ac7](https://github.com/unicornops/zmail/commit/9b71ac7156108bde86d62e97f7e7293a7b5333ac)), closes [#460](https://github.com/unicornops/zmail/issues/460)
+
 ## [0.37.1](https://github.com/unicornops/zmail/compare/v0.37.0...v0.37.1) (2026-11-27)
 
 
