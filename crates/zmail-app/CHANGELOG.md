@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.1](https://github.com/unicornops/zmail/compare/v0.37.0...v0.37.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **jmap:** compare the Email state before returning the mirror unchanged ([#529](https://github.com/unicornops/zmail/issues/529)) ([9da0d1a](https://github.com/unicornops/zmail/commit/9da0d1a50c7ce296b2adb76de260c72dbf6ad47e)), closes [#513](https://github.com/unicornops/zmail/issues/513)
+
 ## [0.37.0](https://github.com/unicornops/zmail/compare/v0.36.1...v0.37.0) (2026-11-26)
 
 
