@@ -392,6 +392,8 @@ pub(crate) fn encrypt_plaintext_store_until(
     private::ensure_private_file(&encrypting)
         .with_context(|| format!("failed to create {}", encrypting.display()))?;
 
+    // `ATTACH … KEY` below needs SQLCipher set up.
+    connection::sqlcipher_ready()?;
     // `ATTACH` inherits these flags, and it has to create the copy.
     let source = Connection::open_with_flags(
         path,
@@ -419,9 +421,11 @@ pub(crate) fn encrypt_plaintext_store_until(
         .to_str()
         .context("the store path must be valid UTF-8")?
         .replace('\'', "''");
+    // An empty key here would attach a plaintext copy: refused first.
+    let literal = connection::key_literal(key).context("failed to create the encrypted copy")?;
     let attach = zeroize::Zeroizing::new(format!(
         "ATTACH DATABASE '{target}' AS encrypted KEY {};",
-        *key.sqlcipher_key()
+        *literal
     ));
     source
         .execute_batch(&attach)

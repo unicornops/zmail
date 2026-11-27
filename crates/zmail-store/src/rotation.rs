@@ -170,9 +170,12 @@ fn rekey_files(
         .to_str()
         .context("the store path must be valid UTF-8")?
         .replace('\'', "''");
+    // An empty key here would attach a plaintext copy: refused first.
+    let literal =
+        connection::key_literal(new_key).context("failed to create the re-encrypted copy")?;
     let attach = zeroize::Zeroizing::new(format!(
         "ATTACH DATABASE '{target}' AS rekeyed KEY {};",
-        *new_key.sqlcipher_key()
+        *literal
     ));
     source
         .execute_batch(&attach)
