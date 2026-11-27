@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.5](https://github.com/unicornops/zmail/compare/v0.37.4...v0.37.5) (2026-11-27)
+
+
+### Bug Fixes
+
+* **auth:** answer a redirect waiting at the OAuth listener's deadline ([#537](https://github.com/unicornops/zmail/issues/537)) ([1340450](https://github.com/unicornops/zmail/commit/13404504ea60c13d01366112f11e712fa2cb7c92)), closes [#459](https://github.com/unicornops/zmail/issues/459)
+
 ## [0.37.4](https://github.com/unicornops/zmail/compare/v0.37.3...v0.37.4) (2026-11-27)
 
 
