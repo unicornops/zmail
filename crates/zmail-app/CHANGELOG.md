@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.7](https://github.com/unicornops/zmail/compare/v0.37.6...v0.37.7) (2026-11-27)
+
+
+### Bug Fixes
+
+* **security:** wipe account secrets and Proton session tokens after use ([#541](https://github.com/unicornops/zmail/issues/541)) ([1ee0982](https://github.com/unicornops/zmail/commit/1ee09823eb076aac623841e7fb4664099f18b12a)), closes [#474](https://github.com/unicornops/zmail/issues/474)
+
 ## [0.37.6](https://github.com/unicornops/zmail/compare/v0.37.5...v0.37.6) (2026-11-27)
 
 
