@@ -2153,6 +2153,16 @@ mod tests {
     }
 
     #[test]
+    fn compose_flags_an_address_with_a_control_character_as_the_store_would() {
+        // The store refuses to queue these (`participants::check_envelope`),
+        // so compose says so before Send rather than after.
+        assert_eq!(
+            invalid_addresses("ada@example.com, bob\u{7}@example.com, Eve <eve@exa\u{1b}mple.com>"),
+            ["bob\u{7}@example.com", "Eve <eve@exa\u{1b}mple.com>"]
+        );
+    }
+
+    #[test]
     fn the_address_being_typed_starts_after_the_last_separator() {
         assert_eq!(last_address_start("ad"), 0);
         assert_eq!(last_address_start("ada@example.com,  gr"), 18);

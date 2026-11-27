@@ -3717,3 +3717,180 @@ mod outbox_refusal_tests {
         assert_eq!(store.list_pending_ops(account_id).expect("ops").len(), 1);
     }
 }
+
+#[cfg(test)]
+mod outbox_envelope_tests {
+    use std::sync::Arc;
+
+    use zmail_core::{
+        AuthKind, CachePolicySummary, NewAccount, NewIdentity, OutboxJobState, OutboxJobSummary,
+        OutgoingConfig, OutgoingMessage, ProtocolKind, SubmissionKind, SubmissionSecurity,
+    };
+    use zmail_security::{InMemorySecretStore, SecretStore};
+    use zmail_store::LocalStore;
+
+    use super::SyncService;
+
+    /// An outbox job after its first attempt, with what it ran on.
+    struct Attempted {
+        job: OutboxJobSummary,
+        store: Arc<LocalStore>,
+        service: SyncService,
+        account_id: i64,
+        // Last, so the service goes before its runtime.
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    /// Sends a message, as a job of an account of `protocol`, after
+    /// `spoil` has changed its envelope the way an identity edited after
+    /// queueing, or a job an older Zmail queued, could: the store checks
+    /// the envelope when a draft is queued, so only the transports' own
+    /// checks catch it.
+    fn attempt(protocol: ProtocolKind, spoil: impl FnOnce(&mut OutgoingMessage)) -> Attempted {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the runtime starts");
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let (endpoint, outgoing) = match protocol {
+            // Nothing listens there: the checks come before any connection.
+            ProtocolKind::Imap => (
+                "imaps://mail.example.test:993",
+                Some(OutgoingConfig {
+                    kind: SubmissionKind::Smtp,
+                    host: Some("127.0.0.1".to_owned()),
+                    port: Some(9),
+                    username: Some("user@example.test".to_owned()),
+                    security: Some(SubmissionSecurity::Plain),
+                    hello_name: "localhost".to_owned(),
+                }),
+            ),
+            _ => ("https://jmap.example.test/.well-known/jmap", None),
+        };
+        let account_id = store
+            .insert_account(&NewAccount {
+                display_name: "Test Account".to_owned(),
+                protocol,
+                auth: AuthKind::Password,
+                endpoint: endpoint.to_owned(),
+                username: "user@example.test".to_owned(),
+                cache_policy: CachePolicySummary::performance_first(),
+                outgoing,
+                identities: vec![NewIdentity {
+                    display_name: "Test Account".to_owned(),
+                    email_address: "user@example.test".to_owned(),
+                    signature: String::new(),
+                    is_primary: true,
+                }],
+            })
+            .expect("the account should be inserted");
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        secrets
+            .set_account_secret(account_id, "password")
+            .expect("the password stores");
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let draft_id = store
+            .create_draft(&zmail_core::NewDraft {
+                account_id,
+                identity_id,
+                to: vec!["bob@example.org".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Spoiled".to_owned(),
+                body: "Never sent".to_owned(),
+                threading: Default::default(),
+            })
+            .expect("draft");
+        store.queue_draft(draft_id).expect("queued");
+        // Claimed before the service starts, so its own outbox poll
+        // cannot take the job first.
+        let mut job = store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("claimed")
+            .expect("due");
+        spoil(&mut job.message);
+        let service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+        let delivered = runtime.block_on(service.deliver_outbox_job(&job));
+        service.record_attempt(&job, delivered).expect("recorded");
+        let job = store
+            .list_outbox_jobs(Some(account_id))
+            .expect("jobs")
+            .into_iter()
+            .find(|summary| summary.id == job.job_id)
+            .expect("job");
+        Attempted {
+            job,
+            store,
+            service,
+            account_id,
+            _runtime: runtime,
+        }
+    }
+
+    /// `job` failed on its first attempt with `message`, and no later
+    /// outbox pass tries it again.
+    fn failed_for_good(attempted: Attempted, message: &str) {
+        let Attempted {
+            job,
+            store,
+            service,
+            account_id,
+            ..
+        } = &attempted;
+        let account_id = *account_id;
+        assert_eq!(job.state, OutboxJobState::Failed, "{job:?}");
+        assert_eq!(job.attempt_count, 1, "{job:?}");
+        assert_eq!(job.next_attempt_at, None, "{job:?}");
+        assert_eq!(job.last_error_message.as_deref(), Some(message));
+        assert_eq!(
+            service
+                .process_outbox_and_wait(Some(account_id))
+                .expect("the pass runs"),
+            0,
+            "nothing is retried"
+        );
+        let after = store
+            .list_outbox_jobs(Some(account_id))
+            .expect("jobs")
+            .into_iter()
+            .find(|summary| summary.id == job.id)
+            .expect("job");
+        assert_eq!(after.state, OutboxJobState::Failed);
+        assert_eq!(after.attempt_count, 1);
+    }
+
+    #[test]
+    fn an_smtp_send_to_an_invalid_address_fails_at_once_naming_it() {
+        failed_for_good(
+            attempt(ProtocolKind::Imap, |message| {
+                message.to = vec!["Bob <bob@example.org\r\nRCPT TO:<eve@example.org>>".to_owned()];
+            }),
+            "Not an address Zmail can send to: Bob <bob@example.org\\r\\nRCPT TO:<eve@example.org>>",
+        );
+    }
+
+    #[test]
+    fn a_jmap_send_from_an_invalid_address_fails_at_once_naming_it() {
+        failed_for_good(
+            attempt(ProtocolKind::Jmap, |message| {
+                message.from_email = "user@@example.test".to_owned();
+            }),
+            "Not an address Zmail can send from: user@@example.test",
+        );
+    }
+
+    #[test]
+    fn a_send_with_no_recipient_fails_at_once() {
+        for protocol in [ProtocolKind::Imap, ProtocolKind::Jmap] {
+            failed_for_good(
+                attempt(protocol, |message| {
+                    message.to.clear();
+                    message.cc.clear();
+                    message.bcc.clear();
+                }),
+                "There is no recipient to send this message to",
+            );
+        }
+    }
+}
