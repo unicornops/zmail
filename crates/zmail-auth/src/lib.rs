@@ -721,6 +721,9 @@ fn urldecode(value: &str) -> String {
 }
 
 #[cfg(test)]
+mod tls_tests;
+
+#[cfg(test)]
 mod tests {
     use std::{
         io::{Read, Write},

@@ -4,6 +4,8 @@
 mod connection_tests;
 mod qresync;
 mod stall;
+#[cfg(test)]
+mod tls_tests;
 mod watch;
 
 use std::{

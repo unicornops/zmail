@@ -8,6 +8,7 @@ pub mod mailto;
 pub mod sender_safety;
 pub mod sender_warning;
 pub mod terminal;
+pub mod tls;
 pub mod vault;
 
 use std::{

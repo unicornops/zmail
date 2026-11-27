@@ -10464,6 +10464,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "sha2 0.11.1",
+ "zmail-security",
 ]
 
 [[package]]
@@ -10475,6 +10476,7 @@ dependencies = [
  "roxmltree 0.21.2",
  "tokio",
  "url",
+ "zmail-security",
 ]
 
 [[package]]
@@ -10623,6 +10625,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "thiserror 2.0.21",
+ "tokio-rustls",
  "url",
  "zeroize",
  "zmail-core",
@@ -10657,6 +10660,7 @@ dependencies = [
  "tokio-rustls",
  "zeroize",
  "zmail-core",
+ "zmail-security",
 ]
 
 [[package]]

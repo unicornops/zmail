@@ -20,6 +20,8 @@ pub use zmail_core::SubmissionSecurity;
 
 #[cfg(test)]
 mod timeout_tests;
+#[cfg(test)]
+mod tls_tests;
 
 /// Delivery model for SMTP-native accounts.
 pub const DELIVERY_MODEL: &str =

@@ -20,5 +20,9 @@ url.workspace = true
 zmail-core = { path = "../zmail-core" }
 zmail-security = { path = "../zmail-security" }
 
+[dev-dependencies]
+# The TLS tests' throwaway CA (`zmail_security::tls::test_ca`).
+zmail-security = { path = "../zmail-security", features = ["test-ca"] }
+
 [lints]
 workspace = true
