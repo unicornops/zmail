@@ -10655,6 +10655,7 @@ dependencies = [
  "mail-send",
  "tokio",
  "tokio-rustls",
+ "zeroize",
  "zmail-core",
 ]
 
@@ -10680,6 +10681,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "tokio",
+ "zeroize",
  "zmail-auth",
  "zmail-core",
  "zmail-imap",

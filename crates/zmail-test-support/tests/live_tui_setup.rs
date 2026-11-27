@@ -208,7 +208,7 @@ fn the_terminal_ui_adds_an_imap_account_and_syncs_it() -> Result<()> {
     assert_eq!(target.endpoint, MAIL_HARNESS_IMAP_ENDPOINT);
     assert_eq!(target.username, MAIL_HARNESS_RECIPIENT_LOGIN);
     assert_eq!(
-        secrets.get_account_secret(account.id)?,
+        secrets.get_account_secret(account.id)?.as_str(),
         MAIL_HARNESS_RECIPIENT_PASSWORD,
         "the password is in the keychain"
     );

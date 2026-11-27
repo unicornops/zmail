@@ -34,8 +34,9 @@ const BACKFILL_PAUSE: Duration = Duration::from_millis(1500);
 
 /// What a protocol adapter connects with.
 pub(crate) enum Credentials {
-    /// A password or OAuth2 access token (IMAP and JMAP).
-    Secret(String),
+    /// A password or OAuth2 access token (IMAP and JMAP), wiped when
+    /// dropped.
+    Secret(zeroize::Zeroizing<String>),
     /// A resumed Proton session.
     #[cfg(feature = "proton")]
     Proton(std::sync::Arc<zmail_proton::ProtonSession>),
@@ -403,7 +404,7 @@ impl SyncService {
         &self,
         account_id: i64,
         uid: Option<String>,
-        refresh_token: Option<String>,
+        refresh_token: Option<zeroize::Zeroizing<String>>,
     ) {
         #[cfg(feature = "proton")]
         if let Some(sessions) = self.proton_sessions() {

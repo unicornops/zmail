@@ -1229,6 +1229,12 @@ impl Connection {
 
 /// The credentials for the target's auth kind: HTTP Basic for a
 /// password, the bearer access token for OAuth2 (RFC 6750).
+///
+/// The secret is borrowed from the caller's wiping buffer (#474), but
+/// `jmap_wire::Credentials` keeps its own plain `String` copy for the
+/// connection's lifetime, and builds the `Authorization` value for each
+/// request, which `reqwest` copies into a `HeaderValue`; none of these
+/// are wiped.
 fn credentials(auth: AuthKind, username: &str, secret: &str) -> Result<jmap_wire::Credentials> {
     match auth {
         AuthKind::Password => Ok(jmap_wire::Credentials::basic(username, secret)),

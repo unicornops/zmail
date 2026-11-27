@@ -7,7 +7,8 @@
 // gets 401 refreshes the session once and is retried once, as upstream.
 // Concurrent 401s share one refresh: a task skips the refresh when another
 // has already replaced the token it used. Per-client resty hooks and client
-// IDs are not ported.
+// IDs are not ported. The tokens are held in buffers that wipe them when
+// dropped, so the ones a refresh or Close replaces are wiped (#474).
 
 //! An authenticated API client for one session.
 
@@ -17,6 +18,7 @@ use std::{
 };
 
 use serde::de::DeserializeOwned;
+use zeroize::Zeroizing;
 
 use crate::{
     manager::{AuthHeaders, Manager, Request, Response},
@@ -27,12 +29,25 @@ use crate::{
 type AuthHandler = Arc<dyn Fn(&Auth) + Send + Sync>;
 type DeauthHandler = Arc<dyn Fn() + Send + Sync>;
 
+/// A session token, wiped when the last holder drops it. Shared rather
+/// than copied: each request holds the session's tokens while it runs, so
+/// a token replaced by a refresh is wiped once the requests that used it
+/// are done, and no copy of it is left in Zmail's own memory.
+type Token = Arc<Zeroizing<String>>;
+
 /// A Proton session: the UID, the access token and the refresh token.
+///
+/// Replacing a token, on refresh or [`Client::close`], drops the old one,
+/// which wipes it. Copies made while sending it are not Zmail's to wipe:
+/// the `Authorization` header and the refresh request's JSON body are
+/// handed to `reqwest` (`http::HeaderValue`, `bytes::Bytes`, hyper's and
+/// rustls's buffers), and the tokens in a response are read from its
+/// body, which `reqwest` frees without wiping.
 #[derive(Clone, Default)]
 struct Session {
     uid: String,
-    access_token: String,
-    refresh_token: String,
+    access_token: Token,
+    refresh_token: Token,
 }
 
 #[derive(Default)]
@@ -70,8 +85,8 @@ impl Client {
             manager,
             session: Mutex::new(Session {
                 uid: uid.to_owned(),
-                access_token: access_token.to_owned(),
-                refresh_token: refresh_token.to_owned(),
+                access_token: token(access_token),
+                refresh_token: token(refresh_token),
             }),
             handlers: Mutex::new(Handlers::default()),
             refresh: tokio::sync::Mutex::new(()),
@@ -100,7 +115,8 @@ impl Client {
         lock(&self.handlers).deauth.push(Arc::new(handler));
     }
 
-    /// Forgets the tokens and handlers (`Close`).
+    /// Forgets the tokens and handlers (`Close`). The tokens are wiped
+    /// once no request still holds them.
     pub fn close(&self) {
         *lock(&self.session) = Session::default();
         let mut handlers = lock(&self.handlers);
@@ -140,7 +156,7 @@ impl Client {
     async fn refresh_after_401(&self, stale_access_token: &str) -> Result<(), Error> {
         let _guard = self.refresh.lock().await;
         let session = lock(&self.session).clone();
-        if session.access_token != stale_access_token {
+        if session.access_token.as_str() != stale_access_token {
             return Ok(());
         }
         let auth = match self
@@ -162,8 +178,10 @@ impl Client {
         };
         {
             let mut current = lock(&self.session);
-            current.access_token = auth.access_token.clone();
-            current.refresh_token = auth.refresh_token.clone();
+            // The replaced tokens are wiped once the requests holding
+            // them are done.
+            current.access_token = token(&auth.access_token);
+            current.refresh_token = token(&auth.refresh_token);
         }
         let handlers = lock(&self.handlers).auth.clone();
         for handler in handlers {
@@ -186,6 +204,29 @@ impl Client {
             handler();
         }
     }
+}
+
+#[cfg(test)]
+impl Client {
+    /// Weak handles on the session's access and refresh tokens, so a test
+    /// can tell that a replaced token was dropped, and so wiped.
+    pub(crate) fn token_handles(
+        &self,
+    ) -> (
+        std::sync::Weak<Zeroizing<String>>,
+        std::sync::Weak<Zeroizing<String>>,
+    ) {
+        let session = lock(&self.session);
+        (
+            Arc::downgrade(&session.access_token),
+            Arc::downgrade(&session.refresh_token),
+        )
+    }
+}
+
+/// A token in a buffer that wipes it when dropped.
+fn token(value: &str) -> Token {
+    Arc::new(Zeroizing::new(value.to_owned()))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

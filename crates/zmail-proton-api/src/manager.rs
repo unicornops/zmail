@@ -237,7 +237,10 @@ impl Manager {
                 builder = builder.header(UID_HEADER, auth.uid);
             }
             if !auth.access_token.is_empty() {
-                builder = builder.header(AUTHORIZATION, format!("Bearer {}", auth.access_token));
+                // Built in a wiping buffer; `reqwest` copies it into its
+                // own `HeaderValue`, which it frees without wiping.
+                let bearer = zeroize::Zeroizing::new(format!("Bearer {}", auth.access_token));
+                builder = builder.header(AUTHORIZATION, bearer.as_str());
             }
         }
         for (name, value) in &request.headers {

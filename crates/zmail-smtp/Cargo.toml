@@ -10,6 +10,7 @@ publish = false
 anyhow.workspace = true
 mail-send.workspace = true
 tokio-rustls.workspace = true
+zeroize.workspace = true
 zmail-core = { path = "../zmail-core" }
 
 [dev-dependencies]

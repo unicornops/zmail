@@ -279,7 +279,10 @@ fn change_saves_a_new_password_hidden_and_cycles_the_cache_budget() {
     assert!(text.contains("New password : [hidden]"), "{text}");
     assert_snapshot("account-change-80x24", &draw(&mut app, 80, 24));
     key(&mut app, KeyCode::Enter);
-    assert_eq!(secrets.get_account_secret(work).expect("kept"), PASSWORD);
+    assert_eq!(
+        secrets.get_account_secret(work).expect("kept").as_str(),
+        PASSWORD
+    );
     assert!(
         app.edit
             .as_ref()
@@ -795,7 +798,10 @@ fn a_preset_address_skips_discovery_and_the_password_never_shows() {
     assert_eq!(add(&app).step, Step::Done, "{:?}", add(&app).error);
     let account_id = add(&app).account_id.expect("saved");
     assert_eq!(
-        secrets.get_account_secret(account_id).expect("kept"),
+        secrets
+            .get_account_secret(account_id)
+            .expect("kept")
+            .as_str(),
         PASSWORD
     );
     assert!(add(&app).form.password.is_empty(), "forgotten once saved");

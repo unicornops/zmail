@@ -30,6 +30,7 @@ use tokio::{
     time::sleep,
 };
 use wake::{WakeSignal, unless_woken};
+use zeroize::Zeroizing;
 use zmail_core::{
     AuthKind, INTERRUPTED_SEND_MESSAGE, MailboxSnapshot, OutboxJobState, PendingOutboxJob,
     ProtocolKind, RuntimeSummary, SubmissionKind, SyncPhase, SyncTarget, UnconfirmedSend,
@@ -611,7 +612,11 @@ impl SyncService {
     /// expiry has passed, so sessions survive access-token expiry without
     /// user interaction. Access tokens stored in the legacy single-secret
     /// slot by the token-paste flow are honored as a fallback.
-    pub async fn connect_secret(&self, target: &SyncTarget) -> Result<String> {
+    ///
+    /// The secret comes in a buffer that wipes it when dropped (#474);
+    /// adapters borrow it as `&str`. Copies the protocol libraries make
+    /// are noted where each adapter hands it over (ADR 0005 §3).
+    pub async fn connect_secret(&self, target: &SyncTarget) -> Result<Zeroizing<String>> {
         if target.auth == AuthKind::ProtonSession {
             bail!("Proton accounts connect with a session, not a stored secret");
         }
@@ -683,7 +688,7 @@ impl SyncService {
         // the sync runtime's async workers.
         let endpoint = config.token_endpoint.clone();
         let client_id = config.client_id.clone();
-        let token = refresh_token.to_owned();
+        let token = Zeroizing::new(refresh_token.to_owned());
         let (tx, rx) = oneshot::channel();
         thread::Builder::new()
             .name("zmail-oauth2-refresh".to_owned())
@@ -691,7 +696,7 @@ impl SyncService {
                 let _ = tx.send(zmail_auth::refresh_access_token(
                     &endpoint,
                     &client_id,
-                    client_secret.as_deref(),
+                    client_secret.as_ref().map(|secret| secret.as_str()),
                     &token,
                 ));
             })
@@ -701,12 +706,18 @@ impl SyncService {
             .context("the OAuth2 refresh thread exited before returning")?
             .map_err(refused_grant)?;
 
+        // `zmail-auth` hands the new grant over as plain `String`s; they
+        // are moved (not copied) into wiping buffers here. The token
+        // endpoint's response body, read by `reqwest` and decoded by
+        // `serde_json`, is freed without wiping.
+        let access_token = Zeroizing::new(tokens.access_token);
+        let refresh_token = tokens.refresh_token.map(Zeroizing::new);
         self.inner.secrets.set_account_secret_in_slot(
             target.id,
             SecretSlot::AccessToken,
-            &tokens.access_token,
+            &access_token,
         )?;
-        if let Some(refresh_token) = tokens.refresh_token.filter(|token| !token.is_empty()) {
+        if let Some(refresh_token) = refresh_token.filter(|token| !token.is_empty()) {
             self.inner.secrets.set_account_secret_in_slot(
                 target.id,
                 SecretSlot::RefreshToken,
@@ -1880,7 +1891,11 @@ impl SyncService {
     }
 
     /// The password or access token outbox job `job` sends with.
-    async fn outbox_secret(&self, job: &PendingOutboxJob, target: &SyncTarget) -> Result<String> {
+    async fn outbox_secret(
+        &self,
+        job: &PendingOutboxJob,
+        target: &SyncTarget,
+    ) -> Result<Zeroizing<String>> {
         self.connect_secret(target).await.with_context(|| {
             format!(
                 "missing or inaccessible credentials for account {}",
@@ -2197,7 +2212,7 @@ mod tests {
             Ok(())
         }
 
-        fn get_account_secret(&self, _account_id: i64) -> Result<String> {
+        fn get_account_secret(&self, _account_id: i64) -> Result<zeroize::Zeroizing<String>> {
             thread::sleep(self.delay);
             Err(anyhow!("synthetic slow secret lookup"))
         }
@@ -2219,7 +2234,7 @@ mod tests {
             &self,
             _account_id: i64,
             _slot: SecretSlot,
-        ) -> Result<String> {
+        ) -> Result<zeroize::Zeroizing<String>> {
             Err(anyhow!("synthetic slot lookup"))
         }
 
@@ -2536,7 +2551,7 @@ mod tests {
             Ok(())
         }
 
-        fn get_account_secret(&self, _account_id: i64) -> Result<String> {
+        fn get_account_secret(&self, _account_id: i64) -> Result<zeroize::Zeroizing<String>> {
             self.lookups
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(anyhow!("synthetic missing secret"))
@@ -2559,7 +2574,7 @@ mod tests {
             &self,
             _account_id: i64,
             _slot: SecretSlot,
-        ) -> Result<String> {
+        ) -> Result<zeroize::Zeroizing<String>> {
             Err(anyhow!("synthetic slot lookup"))
         }
 
@@ -3162,19 +3177,22 @@ mod oauth2_refresh_tests {
         assert_eq!(
             secrets
                 .get_account_secret_from_slot(account_id, SecretSlot::AccessToken)
-                .expect("the access token should load"),
+                .expect("the access token should load")
+                .as_str(),
             "access-1"
         );
         assert_eq!(
             secrets
                 .get_account_secret_from_slot(account_id, SecretSlot::RefreshToken)
-                .expect("the refresh token should load"),
+                .expect("the refresh token should load")
+                .as_str(),
             "refresh-1"
         );
         assert_eq!(
             secrets
                 .get_account_secret_from_slot(account_id, SecretSlot::ClientSecret)
-                .expect("the client secret should load"),
+                .expect("the client secret should load")
+                .as_str(),
             "client-secret-1"
         );
         let target = store
@@ -3260,7 +3278,8 @@ mod oauth2_refresh_tests {
             service
                 .connect_secret(&target)
                 .await
-                .expect("the token should resolve"),
+                .expect("the token should resolve")
+                .as_str(),
             "live-token"
         );
     }
@@ -3283,7 +3302,8 @@ mod oauth2_refresh_tests {
             service
                 .connect_secret(&target)
                 .await
-                .expect("the pasted token should resolve"),
+                .expect("the pasted token should resolve")
+                .as_str(),
             "pasted-token"
         );
     }
@@ -3321,7 +3341,8 @@ mod oauth2_refresh_tests {
         assert_eq!(
             secrets
                 .get_account_secret_from_slot(account_id, SecretSlot::AccessToken)
-                .expect("the stale token should still be stored"),
+                .expect("the stale token should still be stored")
+                .as_str(),
             "stale-token"
         );
     }

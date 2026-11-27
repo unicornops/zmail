@@ -287,7 +287,10 @@ async fn refresh_and_close_wipe_the_replaced_tokens() {
     // so wiped, with no copy of them left anywhere.
     client.get_user().await.expect("user after refresh");
     assert!(access_1.upgrade().is_none(), "the old access token is kept");
-    assert!(refresh_1.upgrade().is_none(), "the old refresh token is kept");
+    assert!(
+        refresh_1.upgrade().is_none(),
+        "the old refresh token is kept"
+    );
     let (access_2, refresh_2) = client.token_handles();
     assert_eq!(
         access_2.upgrade().expect("new access token").as_str(),
@@ -301,7 +304,10 @@ async fn refresh_and_close_wipe_the_replaced_tokens() {
     // Closing the client wipes the tokens it held.
     client.close();
     assert!(access_2.upgrade().is_none(), "close keeps the access token");
-    assert!(refresh_2.upgrade().is_none(), "close keeps the refresh token");
+    assert!(
+        refresh_2.upgrade().is_none(),
+        "close keeps the refresh token"
+    );
     let (access, refresh) = client.token_handles();
     assert!(access.upgrade().is_some_and(|token| token.is_empty()));
     assert!(refresh.upgrade().is_some_and(|token| token.is_empty()));

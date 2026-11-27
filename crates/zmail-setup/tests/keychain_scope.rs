@@ -125,7 +125,7 @@ fn assert_every_slot(secrets: &dyn SecretStore, account_id: i64, owner: &str) {
         let found = secrets
             .get_account_secret_from_slot(account_id, slot)
             .unwrap_or_else(|error| panic!("{owner}'s {slot:?} is gone: {error:#}"));
-        assert_eq!(found, secret(owner, slot), "{slot:?}");
+        assert_eq!(found.as_str(), secret(owner, slot), "{slot:?}");
     }
 }
 
@@ -306,7 +306,8 @@ fn adding_an_account_to_a_second_store_leaves_the_first_stores_secrets() {
         assert_eq!(
             second_secrets
                 .get_account_secret_from_slot(second_id, slot)
-                .expect("its own"),
+                .expect("its own")
+                .as_str(),
             expected,
             "{adding:?}"
         );
@@ -574,7 +575,7 @@ impl FlakyKeychain {
 }
 
 impl Keychain for FlakyKeychain {
-    fn read_entry(&self, name: &str) -> Result<Option<String>> {
+    fn read_entry(&self, name: &str) -> Result<Option<zmail_security::Zeroizing<String>>> {
         self.check(name)?;
         self.inner.read_entry(name)
     }
@@ -641,8 +642,10 @@ fn an_interrupted_move_finishes_later_without_losing_a_secret() {
         let found = secrets.get_account_secret_from_slot(account_id, slot);
         match slot {
             SecretSlot::ProtonKeyPass => assert!(found.is_err()),
-            SecretSlot::RefreshToken => assert_eq!(found.expect("moved"), "newer refresh token"),
-            slot => assert_eq!(found.expect("moved"), secret("old build", slot)),
+            SecretSlot::RefreshToken => {
+                assert_eq!(found.expect("moved").as_str(), "newer refresh token")
+            }
+            slot => assert_eq!(found.expect("moved").as_str(), secret("old build", slot)),
         }
     }
     assert!(
@@ -657,7 +660,8 @@ fn an_interrupted_move_finishes_later_without_losing_a_secret() {
     assert_eq!(
         secrets
             .get_account_secret_from_slot(account_id, SecretSlot::ProtonKeyPass)
-            .expect("moved now"),
+            .expect("moved now")
+            .as_str(),
         secret("old build", SecretSlot::ProtonKeyPass)
     );
     // The next start finishes and nothing is left under an old name.
@@ -669,9 +673,9 @@ fn an_interrupted_move_finishes_later_without_losing_a_secret() {
             .get_account_secret_from_slot(account_id, slot)
             .expect("there");
         if slot == SecretSlot::RefreshToken {
-            assert_eq!(found, "newer refresh token");
+            assert_eq!(found.as_str(), "newer refresh token");
         } else {
-            assert_eq!(found, secret("old build", slot));
+            assert_eq!(found.as_str(), secret("old build", slot));
         }
     }
     assert_entries_named_by_store(&keychain, &[store_id], true);

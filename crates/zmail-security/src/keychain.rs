@@ -25,6 +25,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
+use zeroize::Zeroizing;
 
 use crate::{SecretSlot, SecretStore};
 
@@ -33,9 +34,9 @@ use crate::{SecretSlot, SecretStore};
 /// ([`InMemoryKeychain`]). Account secrets go through [`StoreSecrets`],
 /// which names them.
 pub trait Keychain: Send + Sync {
-    /// The secret in the entry `name`; `Ok(None)` when there is no such
-    /// entry.
-    fn read_entry(&self, name: &str) -> Result<Option<String>>;
+    /// The secret in the entry `name`, in a buffer that wipes it when
+    /// dropped; `Ok(None)` when there is no such entry.
+    fn read_entry(&self, name: &str) -> Result<Option<Zeroizing<String>>>;
     /// Writes `secret` to the entry `name`, replacing what it held.
     fn write_entry(&self, name: &str, secret: &str) -> Result<()>;
     /// Deletes the entry `name`; deleting a missing entry is not an error.
@@ -183,7 +184,11 @@ impl StoreSecrets {
     /// Moves `account_id`'s `slot` secret from its old name, as
     /// [`StoreSecrets::claim_legacy_secrets`] does for every slot, and
     /// returns the secret now under this store's name.
-    fn claim_legacy_slot(&self, account_id: i64, slot: SecretSlot) -> Result<Option<String>> {
+    fn claim_legacy_slot(
+        &self,
+        account_id: i64,
+        slot: SecretSlot,
+    ) -> Result<Option<Zeroizing<String>>> {
         let name = self.name(account_id, slot);
         let legacy_name = legacy_entry_name(account_id, slot);
         let current = self.keychain.read_entry(&name)?;
@@ -195,7 +200,7 @@ impl StoreSecrets {
             None => {
                 self.keychain.write_entry(&name, &legacy)?;
                 // The old entry goes only once the new one reads back.
-                if self.keychain.read_entry(&name)?.as_deref() != Some(legacy.as_str()) {
+                if self.keychain.read_entry(&name)?.as_ref() != Some(&legacy) {
                     bail!(
                         "the keychain did not return the {slot:?} secret of account {account_id} \
                          it was moved to"
@@ -228,7 +233,7 @@ impl SecretStore for StoreSecrets {
         self.set_account_secret_in_slot(account_id, SecretSlot::Password, secret)
     }
 
-    fn get_account_secret(&self, account_id: i64) -> Result<String> {
+    fn get_account_secret(&self, account_id: i64) -> Result<Zeroizing<String>> {
         self.get_account_secret_from_slot(account_id, SecretSlot::Password)
     }
 
@@ -249,7 +254,11 @@ impl SecretStore for StoreSecrets {
             })
     }
 
-    fn get_account_secret_from_slot(&self, account_id: i64, slot: SecretSlot) -> Result<String> {
+    fn get_account_secret_from_slot(
+        &self,
+        account_id: i64,
+        slot: SecretSlot,
+    ) -> Result<Zeroizing<String>> {
         let found = match self.keychain.read_entry(&self.name(account_id, slot)) {
             // An account whose secrets could not all be moved when the
             // store was opened moves this one now.
@@ -295,7 +304,7 @@ pub enum KeychainAccess {
 /// asked about, so tests can check how entries are named.
 #[derive(Debug, Default)]
 pub struct InMemoryKeychain {
-    entries: Mutex<BTreeMap<String, String>>,
+    entries: Mutex<BTreeMap<String, Zeroizing<String>>>,
     accesses: Mutex<Vec<(KeychainAccess, String)>>,
 }
 
@@ -325,7 +334,7 @@ impl InMemoryKeychain {
         self.lock_accesses().push((access, name.to_owned()));
     }
 
-    fn lock_entries(&self) -> MutexGuard<'_, BTreeMap<String, String>> {
+    fn lock_entries(&self) -> MutexGuard<'_, BTreeMap<String, Zeroizing<String>>> {
         self.entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -339,7 +348,7 @@ impl InMemoryKeychain {
 }
 
 impl Keychain for InMemoryKeychain {
-    fn read_entry(&self, name: &str) -> Result<Option<String>> {
+    fn read_entry(&self, name: &str) -> Result<Option<Zeroizing<String>>> {
         self.record(KeychainAccess::Read, name);
         Ok(self.lock_entries().get(name).cloned())
     }
@@ -347,7 +356,7 @@ impl Keychain for InMemoryKeychain {
     fn write_entry(&self, name: &str, secret: &str) -> Result<()> {
         self.record(KeychainAccess::Write, name);
         self.lock_entries()
-            .insert(name.to_owned(), secret.to_owned());
+            .insert(name.to_owned(), Zeroizing::new(secret.to_owned()));
         Ok(())
     }
 
@@ -415,7 +424,10 @@ mod tests {
         secrets.claim_legacy_secrets(1).expect("nothing to move");
         secrets.clear_account_secrets(1).expect("cleared");
         secrets.set_account_secret(1, "mine").expect("kept");
-        assert_eq!(secrets.get_account_secret(1).expect("its own"), "mine");
+        assert_eq!(
+            secrets.get_account_secret(1).expect("its own").as_str(),
+            "mine"
+        );
 
         assert!(
             keychain
@@ -426,7 +438,11 @@ mod tests {
             keychain.accesses()
         );
         assert_eq!(
-            keychain.read_entry("account-1").expect("read").as_deref(),
+            keychain
+                .read_entry("account-1")
+                .expect("read")
+                .as_ref()
+                .map(|s| s.as_str()),
             Some("another store's")
         );
     }
@@ -446,12 +462,16 @@ mod tests {
         let store = StoreId::generate();
         let secrets = StoreSecrets::new(keychain.clone(), store, [2]);
 
-        assert_eq!(secrets.get_account_secret(2).expect("moved"), "password");
+        assert_eq!(
+            secrets.get_account_secret(2).expect("moved").as_str(),
+            "password"
+        );
         assert_eq!(
             keychain
                 .read_entry(&account_entry_name(store, 2, SecretSlot::Password))
                 .expect("read")
-                .as_deref(),
+                .as_ref()
+                .map(|s| s.as_str()),
             Some("password")
         );
         assert_eq!(keychain.read_entry("account-2").expect("read"), None);
@@ -474,7 +494,7 @@ mod tests {
         /// Accepts writes and forgets them.
         struct Forgetful(Arc<InMemoryKeychain>);
         impl Keychain for Forgetful {
-            fn read_entry(&self, name: &str) -> anyhow::Result<Option<String>> {
+            fn read_entry(&self, name: &str) -> anyhow::Result<Option<zeroize::Zeroizing<String>>> {
                 self.0.read_entry(name)
             }
             fn write_entry(&self, _name: &str, _secret: &str) -> anyhow::Result<()> {
@@ -495,7 +515,11 @@ mod tests {
         );
         assert!(secrets.claim_legacy_secrets(3).is_err());
         assert_eq!(
-            keychain.read_entry("account-3").expect("read").as_deref(),
+            keychain
+                .read_entry("account-3")
+                .expect("read")
+                .as_ref()
+                .map(|s| s.as_str()),
             Some("password")
         );
     }

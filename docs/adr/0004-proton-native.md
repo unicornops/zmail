@@ -574,7 +574,10 @@ network peer.**
   `zmail-proton` (the Bridge services port: login, sync, message
   building, events and sending). New `zmail-security` secret slots hold
   the Proton session UID, the refresh token and the salted key password;
-  the account password itself is never stored. Removing an account signs
+  the account password itself is never stored. In memory the tokens and
+  the salted key password are held in buffers that wipe them when
+  dropped, a refresh or close wiping the tokens it replaces (ADR 0005
+  §3, "Account secrets in memory"). Removing an account signs
   its session out on Proton's side as well (best effort, in the
   background), and so does an add whose session the keychain refuses.
 - The phases are tracked in #237: ADR and pins, the fake-server harness,
