@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.3](https://github.com/unicornops/zmail/compare/v0.37.2...v0.37.3) (2026-11-27)
+
+
+### Bug Fixes
+
+* **mailto:** open mailto: links in Zmail's composer on every platform ([#533](https://github.com/unicornops/zmail/issues/533)) ([651c499](https://github.com/unicornops/zmail/commit/651c499e7181f0dd762a275ff68c2361d3477867))
+
 ## [0.37.2](https://github.com/unicornops/zmail/compare/v0.37.1...v0.37.2) (2026-11-27)
 
 
