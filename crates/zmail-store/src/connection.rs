@@ -9,16 +9,26 @@
 //! transaction outlives the call that began it. Each connection's page
 //! cache is 16 MiB rather than SQLite's 2 MiB, so walking a 100k-thread
 //! mailbox's indexes stays in decrypted pages.
+//!
+//! No connection is opened before SQLCipher has finished setting itself up
+//! ([`sqlcipher_ready`]), and no key reaches SQLCipher unless it is a full
+//! raw key ([`key_literal`]).
 
 use std::{
     cell::RefCell,
     ops::{Deref, DerefMut},
     path::Path,
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Mutex, PoisonError, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, ErrorCode};
+use zeroize::Zeroizing;
 use zmail_security::vault::StoreKey;
 
 /// Connections a thread keeps per store: the UI thread nests at most one
@@ -121,10 +131,120 @@ pub(crate) fn close_dropped_store_connections() {
     });
 }
 
+/// Set once a probe has shown SQLCipher fully set up in this process.
+static SQLCIPHER_READY: AtomicBool = AtomicBool::new(false);
+
+/// Held while probing, so a process's first opens wait for one probe.
+static SQLCIPHER_SETUP: Mutex<()> = Mutex::new(());
+
+/// How long to wait for another thread's SQLCipher set-up to finish.
+const SQLCIPHER_SETUP_WAIT: Duration = Duration::from_secs(5);
+
+/// Waits until SQLCipher has finished setting itself up in this process.
+///
+/// SQLite marks itself initialised, and lets other threads through, before
+/// it runs SQLCipher's set-up (`SQLITE_EXTRA_INIT`). A connection keyed in
+/// between is refused with SQLCipher's catch-all message, "PRAGMA key
+/// requires a key of one or more characters", whatever the key (#514). So
+/// the first open in a process goes through here alone: when it is the
+/// process's first SQLite use, the probe's own open runs the whole set-up
+/// before it returns; when another thread is part-way through it, the probe
+/// is retried until the set-up is done.
+pub(crate) fn sqlcipher_ready() -> Result<()> {
+    if SQLCIPHER_READY.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let _setup = SQLCIPHER_SETUP
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if SQLCIPHER_READY.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let deadline = Instant::now() + SQLCIPHER_SETUP_WAIT;
+    let mut pause = Duration::from_millis(1);
+    loop {
+        match probe_sqlcipher() {
+            Ok(()) => {
+                SQLCIPHER_READY.store(true, Ordering::Release);
+                return Ok(());
+            }
+            Err(error) if Instant::now() >= deadline => {
+                return Err(error.context("SQLCipher did not finish setting itself up"));
+            }
+            Err(_) => {
+                thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/// Whether SQLCipher is set up: it keys a throwaway in-memory database,
+/// which fails until the set-up has begun, and has `sqlcipher_export`, the
+/// last thing the set-up adds (new connections get it from then on).
+fn probe_sqlcipher() -> Result<()> {
+    let conn = Connection::open_in_memory().context("failed to open SQLite")?;
+    conn.execute_batch("PRAGMA key = 'zmail-sqlcipher-probe';")
+        .context("SQLCipher refused a key")?;
+    let exports: bool = conn
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_function_list WHERE name = 'sqlcipher_export')",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to list SQLite's functions")?;
+    if !exports {
+        bail!("SQLCipher has not added sqlcipher_export yet");
+    }
+    Ok(())
+}
+
+/// Why a store key was refused before it reached SQLCipher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum UnusableStoreKey {
+    /// No key material at all. SQLCipher would refuse it for `PRAGMA key`,
+    /// and `ATTACH … KEY` with an empty key attaches a plaintext database.
+    #[error("the store key for SQLCipher is empty")]
+    Empty,
+    /// Not SQLCipher's raw-key form, `"x'…'"` around 64 hexadecimal digits:
+    /// SQLCipher would take it as a passphrase instead.
+    #[error("the store key for SQLCipher is not a 32-byte raw key")]
+    NotARawKey,
+}
+
+/// Length of a raw key in hexadecimal digits: 32 bytes.
+const RAW_KEY_HEX_DIGITS: usize = 64;
+
+/// `key` as the value of `PRAGMA key` or `ATTACH … KEY`, refused unless it
+/// is a full raw key.
+pub(crate) fn key_literal(key: &StoreKey) -> Result<Zeroizing<String>, UnusableStoreKey> {
+    checked_key_literal(key.sqlcipher_key())
+}
+
+/// `literal` when it is SQLCipher's raw-key form, `"x'…'"` around exactly
+/// [`RAW_KEY_HEX_DIGITS`] hexadecimal digits.
+fn checked_key_literal(literal: Zeroizing<String>) -> Result<Zeroizing<String>, UnusableStoreKey> {
+    let digits = literal
+        .strip_prefix("\"x'")
+        .and_then(|rest| rest.strip_suffix("'\""));
+    match digits {
+        _ if literal.is_empty() => Err(UnusableStoreKey::Empty),
+        Some("") => Err(UnusableStoreKey::Empty),
+        Some(digits)
+            if digits.len() == RAW_KEY_HEX_DIGITS
+                && digits.bytes().all(|digit| digit.is_ascii_hexdigit()) =>
+        {
+            Ok(literal)
+        }
+        _ => Err(UnusableStoreKey::NotARawKey),
+    }
+}
+
 /// Opens a connection to the encrypted database at `path` with `key`, and
 /// configures it. A wrong key, or a database that isn't encrypted, fails
 /// here rather than at the first query.
 pub(crate) fn open_keyed(path: &Path, key: &StoreKey) -> Result<Connection> {
+    sqlcipher_ready()?;
     let conn =
         Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     apply_key(&conn, key)?;
@@ -142,8 +262,10 @@ pub(crate) fn open_keyed(path: &Path, key: &StoreKey) -> Result<Connection> {
 }
 
 /// Keys a connection: SQLCipher needs this before anything reads the file.
+/// An empty or malformed key is refused here and never reaches SQLCipher.
 pub(crate) fn apply_key(conn: &Connection, key: &StoreKey) -> Result<()> {
-    let statement = zeroize::Zeroizing::new(format!("PRAGMA key = {};", *key.sqlcipher_key()));
+    let literal = key_literal(key).context("failed to key the store connection")?;
+    let statement = Zeroizing::new(format!("PRAGMA key = {};", *literal));
     conn.execute_batch(&statement)
         .context("failed to key the store connection")
 }
@@ -176,7 +298,79 @@ pub(crate) fn is_not_a_database(error: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
+    use zeroize::Zeroizing;
+    use zmail_security::vault::StoreKey;
+
+    use super::{UnusableStoreKey, apply_key, checked_key_literal, key_literal, sqlcipher_ready};
     use crate::LocalStore;
+
+    fn literal(value: &str) -> Result<Zeroizing<String>, UnusableStoreKey> {
+        checked_key_literal(Zeroizing::new(value.to_owned()))
+    }
+
+    #[test]
+    fn an_empty_key_never_reaches_sqlcipher() {
+        assert_eq!(literal("").err(), Some(UnusableStoreKey::Empty));
+        assert_eq!(literal("\"x''\"").err(), Some(UnusableStoreKey::Empty));
+    }
+
+    #[test]
+    fn only_a_full_raw_key_reaches_sqlcipher() {
+        let hex = "0123456789abcdefABCDEF0123456789".repeat(2);
+        assert!(literal(&format!("\"x'{hex}'\"")).is_ok());
+        for refused in [
+            // A passphrase, short raw keys, a raw key with a salt, other quoting.
+            "passphrase".to_owned(),
+            "\"x'00'\"".to_owned(),
+            format!("\"x'{}'\"", &hex[..62]),
+            format!("\"x'{hex}{}'\"", &hex[..32]),
+            format!("\"x'{}zz'\"", &hex[..62]),
+            format!("x'{hex}'"),
+            format!("'x'{hex}''"),
+        ] {
+            assert_eq!(
+                literal(&refused).err(),
+                Some(UnusableStoreKey::NotARawKey),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_store_key_is_a_full_raw_key() {
+        for _ in 0..64 {
+            key_literal(&StoreKey::generate()).expect("a generated key is a raw key");
+        }
+    }
+
+    #[test]
+    fn a_refused_key_is_a_typed_error_naming_the_cause() {
+        // As `apply_key` reports it.
+        let error = anyhow::Error::from(literal("").expect_err("refused"))
+            .context("failed to key the store connection");
+        assert_eq!(
+            error.downcast_ref::<UnusableStoreKey>(),
+            Some(&UnusableStoreKey::Empty)
+        );
+        assert!(format!("{error:#}").contains("the store key for SQLCipher is empty"));
+    }
+
+    #[test]
+    fn sqlcipher_is_set_up_before_a_connection_is_keyed() {
+        sqlcipher_ready().expect("SQLCipher is set up");
+        sqlcipher_ready().expect("and stays so");
+        let conn = Connection::open_in_memory().expect("opens");
+        apply_key(&conn, &StoreKey::generate()).expect("keys");
+        let exports: bool = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM pragma_function_list WHERE name = 'sqlcipher_export')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("lists functions");
+        assert!(exports);
+    }
 
     /// Whether this connection has the marker temp table: temp tables live
     /// in one connection only, so they show which connection a call got.
