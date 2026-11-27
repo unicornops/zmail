@@ -171,6 +171,7 @@ async fn send(
     trusted: &[KeyTrust],
     draft_id: Option<&str>,
 ) -> Result<()> {
+    message.check_recipients()?;
     let client = session.client();
     let mut addresses = client.get_addresses().await?;
     addresses.sort_by_key(|address| address.order);
@@ -185,9 +186,6 @@ async fn send(
         .chain(&message.bcc)
         .map(|recipient| envelope_address(recipient))
         .collect();
-    if to.is_empty() {
-        bail!("sending through Proton needs at least one recipient");
-    }
 
     let from = message.from_email.as_str();
     let from_addr = get_addr(&addresses, from)

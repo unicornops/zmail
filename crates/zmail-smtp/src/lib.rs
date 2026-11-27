@@ -183,9 +183,7 @@ async fn submit_within(
 ) -> Result<()> {
     ensure_rustls_provider();
 
-    if message.to.is_empty() && message.cc.is_empty() && message.bcc.is_empty() {
-        bail!("SMTP submission requires at least one recipient");
-    }
+    message.check_recipients()?;
     // mail-send writes `MAIL FROM` and `RCPT TO` as they are, so an
     // address that could break out of them never reaches the server.
     message.check_addresses()?;
@@ -321,9 +319,7 @@ fn connect_error(error: mail_send::Error, context: &'static str) -> anyhow::Erro
 
 /// Renders a composed outgoing message into RFC-822 bytes.
 pub fn render_rfc822_message(message: &OutgoingMessage) -> Result<Vec<u8>> {
-    if all_recipients(message).is_empty() {
-        bail!("message rendering requires at least one recipient");
-    }
+    message.check_recipients()?;
 
     let from_display = message
         .from_name
