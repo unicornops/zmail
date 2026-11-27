@@ -121,7 +121,7 @@ pub fn over_ssh() -> bool {
 mod tests {
     use std::io::{Read as _, Write as _};
     use std::net::{TcpListener, TcpStream};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use zmail_auth::OAuth2Client;
 
@@ -162,30 +162,43 @@ mod tests {
     fn a_redirect_with_the_wrong_state_is_refused() {
         let port = free_port();
         let sign_in = BrowserSignIn::new(client(port));
-        // A forged state is answered with a 400 and the wait goes on, so
-        // only the deadline ends it here.
-        let waiting = std::thread::spawn(move || sign_in.wait(Duration::from_secs(1)));
+        let cancel = sign_in.canceller();
+        // A forged state is answered with a 400 and the wait goes on; the
+        // test ends it by cancelling, so the deadline never matters.
+        let waiting = std::thread::spawn(move || sign_in.wait(Duration::from_secs(30)));
         // The listener binds when waiting starts; retry until it does.
-        let mut stream = None;
-        for _ in 0..100 {
-            if let Ok(connected) = TcpStream::connect(("127.0.0.1", port)) {
-                stream = Some(connected);
-                break;
+        let started = Instant::now();
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(connected) => break connected,
+                Err(_) if started.elapsed() < Duration::from_secs(10) => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("the listener never came up: {error}"),
             }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let mut stream = stream.expect("the listener is up");
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("the read timeout is set");
         stream
             .write_all(b"GET /callback?code=abc&state=forged HTTP/1.1\r\n\r\n")
             .expect("the redirect is sent");
         let mut answer = String::new();
-        let _ = stream.read_to_string(&mut answer);
-        assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+        let read = stream.read_to_string(&mut answer);
+        assert!(
+            answer.starts_with("HTTP/1.1 400"),
+            "read: {read:?}, answer: {answer}"
+        );
+        assert!(
+            !waiting.is_finished(),
+            "a forged state must not end the wait"
+        );
+        cancel.cancel();
         let error = waiting
             .join()
             .expect("the wait ends")
             .expect_err("a forged state never signs in");
-        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
     }
 
     #[test]
