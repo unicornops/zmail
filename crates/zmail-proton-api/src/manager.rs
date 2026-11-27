@@ -10,7 +10,8 @@
 // The cookie jar is Zmail's own. Connection errors other than a failed
 // connect are only retried for GET requests. TLS pin mismatches are never
 // retried. Pre/post request hooks, the logger and the panic handler are
-// not ported.
+// not ported. Modified on 2026-11-27 (#462): response bodies are read in
+// chunks up to a limit for the kind of route, instead of whole.
 
 //! The API manager: one HTTP client, cookie jar and status per API host.
 
@@ -34,7 +35,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use zmail_core::time::{Stamp, parse_rfc2822};
 
 use crate::{
-    config::{CONNECT_TIMEOUT, ClientConfig, POOL_IDLE_TIMEOUT, READ_TIMEOUT},
+    config::{CONNECT_TIMEOUT, ClientConfig, POOL_IDLE_TIMEOUT, READ_TIMEOUT, ResponseLimits},
     cookies::CookieJar,
     response::{ApiError, Code, Error, is_retryable_status},
 };
@@ -254,7 +255,7 @@ impl Manager {
                 .body(body.clone());
         }
 
-        let response = match builder.send().await {
+        let mut response = match builder.send().await {
             Ok(response) => response,
             Err(error) => {
                 self.set_status(Status::Down);
@@ -281,14 +282,13 @@ impl Manager {
                 .server_time
                 .store(date.seconds(), Ordering::Relaxed);
         }
-        let body = match response.bytes().await {
-            Ok(body) => body.to_vec(),
-            Err(error) => {
-                self.set_status(Status::Down);
-                return Err(Error::from_transport(error));
-            }
-        };
-        self.set_status(Status::Up);
+        let limit = request.kind.limit(&self.inner.config.limits);
+        let body = read_body(&mut response, limit).await;
+        self.set_status(match &body {
+            Err(Error::Network(_) | Error::Certificate(_) | Error::PinMismatch(_)) => Status::Down,
+            _ => Status::Up,
+        });
+        let body = body?;
         Ok(Response {
             status,
             headers,
@@ -330,6 +330,47 @@ impl Manager {
     }
 }
 
+/// Reads a response body, refusing one over `limit` bytes: at once when
+/// its `Content-Length` says so, otherwise as soon as the bytes read pass
+/// it, without reading the rest.
+async fn read_body(response: &mut reqwest::Response, limit: usize) -> Result<Vec<u8>, Error> {
+    let too_large = || Error::ResponseTooLarge { limit };
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(Error::from_transport)? {
+        if chunk.len() > limit - body.len() {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// What a route answers with, which sets how much of its response is read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ResponseKind {
+    /// A JSON answer.
+    #[default]
+    Json,
+    /// Message or attachment data: a full message with its body, or an
+    /// attachment's data packets.
+    Data,
+}
+
+impl ResponseKind {
+    fn limit(self, limits: &ResponseLimits) -> usize {
+        match self {
+            Self::Json => limits.json,
+            Self::Data => limits.data,
+        }
+    }
+}
+
 /// The session headers sent with an authenticated request.
 pub(crate) struct AuthHeaders<'a> {
     pub(crate) uid: &'a str,
@@ -346,6 +387,8 @@ pub(crate) struct Request {
     pub(crate) body: Option<Vec<u8>>,
     /// The body's media type.
     pub(crate) content_type: String,
+    /// What the route answers with.
+    pub(crate) kind: ResponseKind,
 }
 
 impl Request {
@@ -357,7 +400,14 @@ impl Request {
             headers: Vec::new(),
             body: None,
             content_type: String::new(),
+            kind: ResponseKind::Json,
         }
+    }
+
+    /// Marks the route as answering with message or attachment data.
+    pub(crate) fn data(mut self) -> Self {
+        self.kind = ResponseKind::Data;
+        self
     }
 
     pub(crate) fn get(path: impl Into<String>) -> Self {

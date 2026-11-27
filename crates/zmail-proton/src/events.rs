@@ -18,7 +18,10 @@
 // reading or rewriting the rest of the mirror. Modified on 2026-11-09
 // (#418): label, address and user changes are applied in place as Bridge
 // applies them, from the labels and addresses read again and the stored
-// label map, so they no longer resync; only a refresh does.
+// label map, so they no longer resync; only a refresh does. Modified on
+// 2026-11-27 (#462): one sync reads at most `MAX_EVENTS_PER_RUN` events and
+// the next carries on from there, where Bridge follows `More` for as long
+// as the server sets it.
 
 //! Incremental sync from the account's event stream.
 
@@ -42,6 +45,12 @@ use crate::{
 pub const EVENT_PERIOD: Duration = Duration::from_secs(20);
 /// The random extra wait on each poll (`EventJitter`).
 pub const EVENT_JITTER: Duration = Duration::from_secs(20);
+
+/// The most events one sync reads before it applies them and saves its
+/// place: 20 calls of up to `MAX_COLLECTED_EVENTS` (50). While the server
+/// still has more, the next event poll (20 to 40 s later) finds them and
+/// syncs again, so a long backlog arrives in stretches of 1,000.
+pub(crate) const MAX_EVENTS_PER_RUN: usize = 1_000;
 
 /// The wait before the next event poll: the period plus a random jitter,
 /// like Bridge's ticker.
@@ -151,6 +160,9 @@ impl ChangeSummary {
 /// Only a refresh request asks for a full resync. `stored` holds the
 /// mirror's mailbox names.
 ///
+/// At most [`MAX_EVENTS_PER_RUN`] events are read; the returned event ID
+/// is the last one read, so the next sync carries on after it.
+///
 /// While older mail is still being fetched the mirror holds only part of
 /// the history; an event for a message not listed yet places it now, and
 /// the backfill listing it later finds it already there.
@@ -168,7 +180,7 @@ pub(crate) async fn apply_events(
             from = last.event_id.clone();
         }
         events.extend(batch);
-        if !more {
+        if !more || events.len() >= MAX_EVENTS_PER_RUN {
             break;
         }
     }
@@ -409,6 +421,7 @@ mod tests {
             panic!("no refresh was asked for");
         };
         let read = server.requests().len();
+        assert_eq!(read, MAX_EVENTS_PER_RUN);
         assert_eq!(applied.event_id, format!("e{read}"), "the last event read");
         assert!(applied.delta.is_none(), "no event changed anything");
     }

@@ -230,6 +230,34 @@ against counting and rebuilding after every write, and fail if writing a
 stretch into a mirror sixteen times larger takes more than a quarter
 more work (`crates/zmail-store/src/merge/incremental_tests.rs`).
 
+### Bounded requests
+
+What the server sends never keeps a request or a sync going, or fills
+memory, without bound (November 27, 2026, #462). go-proton-api and
+Bridge follow the server for as long as it says there is more; Zmail
+stops at these limits, chosen well past what a large real account needs
+(the 1.3-million-message account above among them):
+
+| What | Limit | Past it |
+| --- | --- | --- |
+| A JSON response (listings, events, keys, contacts) | 64 MiB (`MAX_JSON_RESPONSE_BYTES`) | the request fails ("response was too large") |
+| A full message with its body, or one attachment's data | 128 MiB (`MAX_DATA_RESPONSE_BYTES`), five times Proton's 25 MB limit for a message with its attachments | the request fails |
+| Events read by one sync | 1,000 (`MAX_EVENTS_PER_RUN`: 20 calls of up to 50) | the sync applies what it read and saves the last event as its checkpoint; the next event poll, 20 to 40 s later, finds the rest and syncs again |
+| Asking again for a message page answered as stale | 5 attempts (`MAX_STALE_ATTEMPTS`), waiting 100 ms doubling with jitter between them, 1.5 s at most in all | the listing fails, and the sync with it, to be tried again later |
+| A message count from the server, paged through (`get_message_metadata`) | 5 million (`MAX_PAGED_ITEMS`) | refused before any page is fetched |
+| Messages listed for a label a label event adds | 5 million (`MAX_LABEL_MESSAGES`) | the sync fails |
+| Contact addresses equal to one address (`Total` from the server) | 15,000, 100 pages (`MAX_CONTACT_EMAILS`) | refused before the second page; leaving some out could drop a pinned key, so it is never cut short |
+| Encrypted mail one hydration batch holds | 256 MiB (`HYDRATION_BATCH_BYTES`) | the batch stops before the message that would pass it, by the sizes Proton declares or by the bytes that arrive, whichever is larger; those messages are hydrated the next time the thread is opened. A first message larger than that on its own fails. |
+
+A response's size is checked against its `Content-Length` before any of
+it is read, and counted as it arrives otherwise, so the rest of an
+oversized body is never read. A response too large to read counts as one
+that may have been carried out, like one that does not decode, so a send
+that gets one is looked up before any retry. The hydration batch is cut
+short before decryption starts, never between decryptions, so the timing
+of requests still does not depend on decryption (rule 1 under
+`RUSTSEC-2023-0071` below).
+
 ### Crypto: `proton-srp` for SRP, a port onto `pgp` for keys
 
 Two paths were assessed for SRP login and key unlocking.

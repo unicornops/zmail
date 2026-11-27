@@ -22,6 +22,8 @@
 // `get_settings` fails with `Error::ContactCardUnverified`, and otherwise
 // the settings say the card was ignored (`card_unverified`), so the user
 // can be told (ADR 0004).
+// Modified by UnicornOps on 2026-11-27 (#462): `GetAllContactEmails`
+// refuses a `Total` over `MAX_CONTACT_EMAILS` instead of paging through it.
 
 //! Contacts, and what a contact card says about sending to an address.
 
@@ -301,6 +303,12 @@ impl Contact {
     }
 }
 
+/// The most contact addresses equal to one address that
+/// [`Client::get_all_contact_emails`] lists (100 pages, 15,000). Each is
+/// a contact that lists the address, so that is far past any real address
+/// book.
+pub const MAX_CONTACT_EMAILS: usize = 100 * MAX_PAGE_SIZE;
+
 /// Go's `strconv.ParseBool`.
 fn parse_bool(value: &str) -> Result<bool, Error> {
     match value {
@@ -327,12 +335,21 @@ impl Client {
         Ok(res.contact)
     }
 
-    /// Every contact address equal to `email` (`GetAllContactEmails`).
+    /// Every contact address equal to `email` (`GetAllContactEmails`). A
+    /// `Total` over [`MAX_CONTACT_EMAILS`] is refused rather than paged
+    /// through; leaving some out could drop a contact's pinned keys.
     pub async fn get_all_contact_emails(&self, email: &str) -> Result<Vec<ContactEmail>, Error> {
         let page_size = MAX_PAGE_SIZE;
         let (total, mut emails) = self.contact_emails_page(email, 0, page_size).await?;
         if total <= page_size {
             return Ok(emails);
+        }
+        if total > MAX_CONTACT_EMAILS {
+            return Err(Error::TooManyItems {
+                what: "contact addresses",
+                total,
+                limit: MAX_CONTACT_EMAILS,
+            });
         }
         for page in 1..total / page_size + 1 {
             let (_, batch) = self.contact_emails_page(email, page, page_size).await?;

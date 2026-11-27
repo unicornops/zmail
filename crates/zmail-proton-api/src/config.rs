@@ -46,6 +46,36 @@ pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Idle pooled connections are closed after this (Bridge: 5 minutes).
 pub(crate) const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+/// The most Zmail reads of a JSON response: listings, events, keys,
+/// contacts (64 MiB). The largest are event pages that carry the metadata
+/// of every message a bulk change touched; anything past this is not a
+/// Proton answer Zmail can use (ADR 0004, "Bounded requests").
+pub const MAX_JSON_RESPONSE_BYTES: usize = 64 << 20;
+
+/// The most Zmail reads of message or attachment data: a full message with
+/// its encrypted body, or one attachment's data packets (128 MiB, five
+/// times Proton's 25 MB limit for a message with its attachments, as for
+/// decrypted data).
+pub const MAX_DATA_RESPONSE_BYTES: usize = 128 << 20;
+
+/// The response size limits by kind of route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResponseLimits {
+    /// JSON answers ([`MAX_JSON_RESPONSE_BYTES`]).
+    pub(crate) json: usize,
+    /// Message and attachment data ([`MAX_DATA_RESPONSE_BYTES`]).
+    pub(crate) data: usize,
+}
+
+impl Default for ResponseLimits {
+    fn default() -> Self {
+        Self {
+            json: MAX_JSON_RESPONSE_BYTES,
+            data: MAX_DATA_RESPONSE_BYTES,
+        }
+    }
+}
+
 /// The Proton Mail Bridge release Zmail ports, and whose app version it
 /// sends: the `v3.27.1` pin in `docs/upstream/proton.md`.
 pub const BRIDGE_VERSION: &str = "3.27.1";
@@ -134,6 +164,7 @@ pub struct ClientConfig {
     pub(crate) app_version: AppVersion,
     trust: Trust,
     pub(crate) retry: RetryPolicy,
+    pub(crate) limits: ResponseLimits,
 }
 
 impl ClientConfig {
@@ -145,6 +176,7 @@ impl ClientConfig {
             app_version,
             trust: Trust::PinnedPlatformRoots(PinSet::trusted_api_pins()),
             retry: RetryPolicy::default(),
+            limits: ResponseLimits::default(),
         })
     }
 
@@ -187,6 +219,7 @@ impl ClientConfig {
                 pins,
             },
             retry: RetryPolicy::default(),
+            limits: ResponseLimits::default(),
         })
     }
 

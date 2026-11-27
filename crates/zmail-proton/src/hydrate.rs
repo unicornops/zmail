@@ -6,7 +6,10 @@
 //! 1. Decryption is decoupled from network scheduling. Every body and
 //!    attachment of the batch is downloaded first; only then are they
 //!    decrypted, on a blocking worker, so the timing and order of requests
-//!    never depend on how long, or whether, a decryption took.
+//!    never depend on how long, or whether, a decryption took. A batch
+//!    holds at most [`HYDRATION_BATCH_BYTES`] of encrypted mail; messages
+//!    past that wait for the next hydration, not for this one's
+//!    decryption.
 //! 2. Failures are never reported back: nothing is sent to Proton (or
 //!    anyone) because a message did not decrypt.
 //! 3. Nothing is re-fetched because decryption failed. An undecryptable
@@ -24,7 +27,9 @@ use crate::{
 
 /// Fetches, decrypts and parses the bodies of the given messages, in the
 /// shape the store takes. Messages that no longer exist on the server are
-/// left out; the next sync removes them.
+/// left out; the next sync removes them. So are the messages past the
+/// batch's [`HYDRATION_BATCH_BYTES`], which the next hydration fetches; a
+/// first message larger than that on its own is an error.
 pub async fn fetch_message_bodies(
     target: &SyncTarget,
     session: &ProtonSession,
@@ -72,19 +77,76 @@ pub async fn fetch_message_bodies(
     .context("the decryption task stopped")
 }
 
-/// The network phase: each message with its attachments' encrypted data.
-async fn download(client: &Client, message_ids: &[String]) -> Result<Vec<(Message, Vec<Vec<u8>>)>> {
-    let mut downloaded: Vec<(Message, Vec<Vec<u8>>)> = Vec::with_capacity(message_ids.len());
-    for message_id in message_ids {
+/// The most encrypted mail one hydration batch holds (256 MiB: message
+/// bodies and attachment data, before decryption). Twice the largest
+/// response Zmail reads for one message or attachment
+/// ([`zmail_proton_api::MAX_DATA_RESPONSE_BYTES`]), and ten times Proton's
+/// 25 MB limit for a message with its attachments.
+pub(crate) const HYDRATION_BATCH_BYTES: usize = 256 << 20;
+
+/// A message and its attachments' encrypted data, as downloaded.
+type Downloaded = (Message, Vec<Vec<u8>>);
+
+/// The network phase: each message with its attachments' encrypted data,
+/// within [`HYDRATION_BATCH_BYTES`].
+async fn download(client: &Client, message_ids: &[String]) -> Result<Vec<Downloaded>> {
+    download_within(client, message_ids, HYDRATION_BATCH_BYTES).await
+}
+
+/// Downloads the messages in order until the next would take the batch
+/// over `budget` bytes, by the sizes Proton gives for its body and
+/// attachments or by the bytes that arrive. The messages after that are
+/// left out, still to be hydrated: the next hydration of the thread fetches
+/// them. Nothing is decrypted until the batch is complete (rule 1), so the
+/// batch is cut short before decryption, never between decryptions. A
+/// first message that does not fit on its own is an error.
+async fn download_within(
+    client: &Client,
+    message_ids: &[String],
+    budget: usize,
+) -> Result<Vec<Downloaded>> {
+    let too_large = |message_id: &str| {
+        anyhow::anyhow!(
+            "Proton message {message_id} is too large to download: over the \
+             {budget}-byte limit for one download"
+        )
+    };
+    let mut downloaded: Vec<Downloaded> = Vec::with_capacity(message_ids.len());
+    let mut used = 0usize;
+    'messages: for message_id in message_ids {
         let message = match client.get_message(message_id).await {
             Ok(message) => message,
             Err(error) if error.status() == Some(404) => continue,
             Err(error) => return Err(error.into()),
         };
+        let declared = message
+            .attachments
+            .iter()
+            .map(|attachment| usize::try_from(attachment.size).unwrap_or(0))
+            .fold(message.body.len(), usize::saturating_add);
+        if declared > budget - used {
+            if downloaded.is_empty() {
+                return Err(too_large(message_id));
+            }
+            break;
+        }
+        let mut size = message.body.len();
         let mut attachments = Vec::with_capacity(message.attachments.len());
         for attachment in &message.attachments {
-            attachments.push(client.get_attachment(&attachment.id).await?);
+            let data = client.get_attachment(&attachment.id).await?;
+            size = size.saturating_add(data.len());
+            if size > budget - used {
+                // More arrived than Proton said there was.
+                if downloaded.is_empty() {
+                    return Err(too_large(message_id));
+                }
+                break 'messages;
+            }
+            attachments.push(data);
         }
+        // Counted at its declared size when that is larger, so the batch
+        // plans by what Proton says as well as by what arrived.
+        used += size.max(declared);
         downloaded.push((message, attachments));
     }
     Ok(downloaded)
@@ -213,6 +275,33 @@ mod tests {
         assert_eq!(ids, ["m1"], "m2 would take the batch over its budget");
         assert_eq!(batch[0].1.len(), 2);
         assert_eq!(attachment_requests(&server, "m2"), 0);
+    }
+
+    #[tokio::test]
+    async fn counts_the_bytes_that_arrive_as_well_as_the_sizes_declared() {
+        // Each message declares 28 bytes (its 27-byte body and a 1-byte
+        // attachment) but its attachment brings 9: 36 bytes each.
+        static MESSAGES: [(&str, &[i64]); 3] = [("m1", &[1]), ("m2", &[1]), ("m3", &[1])];
+        let server = server(&MESSAGES).await;
+        let manager =
+            Manager::new(zmail_proton_api::mock::config(&server.url, None)).expect("manager");
+        let client = manager.new_client("uid", "access", "refresh");
+        let ids = ["m1".to_owned(), "m2".to_owned(), "m3".to_owned()];
+
+        // m3 fits by what it declares (72 + 28) but not by what arrives.
+        let batch = download_within(&client, &ids, 100)
+            .await
+            .expect("m1 and m2");
+        let listed: Vec<&str> = batch
+            .iter()
+            .map(|(message, _)| message.metadata.id.as_str())
+            .collect();
+        assert_eq!(listed, ["m1", "m2"]);
+
+        let error = download_within(&client, &ids, 30)
+            .await
+            .expect_err("m1 alone is over");
+        assert!(format!("{error:#}").contains("too large"), "{error:#}");
     }
 
     #[tokio::test]

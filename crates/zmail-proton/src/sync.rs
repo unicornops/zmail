@@ -10,6 +10,8 @@
 // pipeline; the snapshot building is Zmail's own. Modified on 2026-10-23:
 // the pass stops after a number of pages and resumes later from its cursor,
 // so a first sync shows the newest mail and the rest arrives in chunks.
+// Modified on 2026-11-27 (#462): listing a label's mail stops at
+// `MAX_LABEL_MESSAGES` instead of following the server without end.
 
 //! Read sync: labels to mailboxes and message metadata into the store.
 //!
@@ -30,7 +32,7 @@ use std::{
     future::Future,
 };
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use zmail_core::{MailboxSnapshot, MessageHeaders, MessageSnapshot, ThreadSnapshot};
 use zmail_proton_api::{Client, EmailAddress, Label, LabelType, MessageFilter, MessageMetadata};
 
@@ -47,6 +49,12 @@ pub(crate) const FIRST_SYNC_PAGES: usize = 4;
 /// 1,024 messages a run, with event polling, write-back and sending in
 /// between runs.
 pub(crate) const BACKFILL_PAGES_PER_RUN: usize = 8;
+
+/// The most messages listing a label's mail reads (5 million, as
+/// [`zmail_proton_api::MAX_PAGED_ITEMS`]): a label with more fails the
+/// sync rather than keep the listing going for as long as the server
+/// answers.
+pub(crate) const MAX_LABEL_MESSAGES: usize = zmail_proton_api::MAX_PAGED_ITEMS;
 
 /// Every label type Bridge mirrors.
 pub(crate) const LABEL_TYPES: [LabelType; 3] =
@@ -112,13 +120,14 @@ pub(crate) async fn fetch_metadata_pages(
 }
 
 /// Lists the metadata of every message with the label, newest first: the
-/// mail of a mailbox a label change adds.
+/// mail of a mailbox a label change adds. A label of more than
+/// [`MAX_LABEL_MESSAGES`] messages is an error.
 pub(crate) async fn fetch_label_messages(
     client: &Client,
     label_id: &str,
     page_size: usize,
 ) -> Result<Vec<MessageMetadata>> {
-    let pages = list_pages(
+    list_label(
         |mut filter| async move {
             filter.label_id = label_id.to_owned();
             client
@@ -126,12 +135,31 @@ pub(crate) async fn fetch_label_messages(
                 .await
                 .map_err(anyhow::Error::from)
         },
-        "",
-        usize::MAX,
-        &|_| {},
+        page_size,
+        MAX_LABEL_MESSAGES,
     )
-    .await?;
-    Ok(pages.messages)
+    .await
+}
+
+/// The listing of [`fetch_label_messages`], over any page source, stopped
+/// after enough pages for `max_messages`.
+async fn list_label<F, Fut>(
+    fetch: F,
+    page_size: usize,
+    max_messages: usize,
+) -> Result<Vec<MessageMetadata>>
+where
+    F: FnMut(MessageFilter) -> Fut,
+    Fut: Future<Output = Result<Vec<MessageMetadata>>>,
+{
+    // Each page after the first repeats the cursor message, and only an
+    // empty page ends the listing: enough pages for `max_messages`, and one.
+    let pages = max_messages.div_ceil(page_size.saturating_sub(1).max(1)) + 1;
+    let listed = list_pages(fetch, "", pages, &|_| {}).await?;
+    if listed.next_end_id.is_some() || listed.messages.len() > max_messages {
+        bail!("the Proton label holds more than {max_messages} messages, more than Zmail lists");
+    }
+    Ok(listed.messages)
 }
 
 /// The cursor walk of [`fetch_metadata_pages`], over any page source.
@@ -551,6 +579,38 @@ mod tests {
         let end_id = first.next_end_id.expect("cursor");
         let rest = list_pages(fetch, &end_id, 8, &|_| {}).await.expect("rest");
         assert!(rest.messages.is_empty() && rest.next_end_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_label_listing_stops_at_its_limit() {
+        let messages = newest_first(12);
+        let requests = std::sync::Mutex::new(0);
+        let fetch = |filter| std::future::ready(listing(&messages, 4, &requests, filter));
+        let all = list_label(fetch, 4, 12).await.expect("12 fit");
+        assert_eq!(ids(&all), ids(&messages));
+
+        let error = list_label(fetch, 4, 11)
+            .await
+            .expect_err("12 do not fit 11");
+        assert!(error.to_string().contains("more than 11"), "{error:#}");
+
+        // A server whose pages never run out: new IDs on every page.
+        let pages = std::sync::Mutex::new(0usize);
+        let endless = |_filter: MessageFilter| {
+            let mut page = pages.lock().expect("pages");
+            *page += 1;
+            let start = *page * 4;
+            std::future::ready(Ok((start..start + 4)
+                .map(|index| meta(&format!("x{index}"), "", &["l"], 0, false))
+                .collect()))
+        };
+        let error = list_label(endless, 4, 100).await.expect_err("endless");
+        assert!(error.to_string().contains("more than 100"), "{error:#}");
+        assert_eq!(
+            *pages.lock().expect("pages"),
+            35,
+            "enough pages for 100 at 3 new a page, and one"
+        );
     }
 
     #[test]

@@ -18,8 +18,15 @@ use crate::response::Error;
 /// The largest page the API serves (`maxPageSize`).
 pub const MAX_PAGE_SIZE: usize = 150;
 
+/// The most items [`fetch_paged`] fetches (5 million): the count comes
+/// from the server, so it bounds the pages asked for. Proton accounts of
+/// over a million messages exist (ADR 0004); this leaves room for several
+/// times that.
+pub const MAX_PAGED_ITEMS: usize = 5_000_000;
+
 /// Fetches `total` items in pages of `page_size`, with up to one request
-/// per CPU in flight, and returns them in page order (`fetchPaged`).
+/// per CPU in flight, and returns them in page order (`fetchPaged`). A
+/// `total` over [`MAX_PAGED_ITEMS`] is refused.
 ///
 /// Like upstream it asks for `total / page_size + 1` pages, so the last page
 /// may be empty.
@@ -32,6 +39,13 @@ where
     F: Fn(usize, usize) -> Fut,
     Fut: Future<Output = Result<Vec<T>, Error>>,
 {
+    if total > MAX_PAGED_ITEMS {
+        return Err(Error::TooManyItems {
+            what: "items",
+            total,
+            limit: MAX_PAGED_ITEMS,
+        });
+    }
     let page_size = page_size.clamp(1, MAX_PAGE_SIZE);
     let pages = total / page_size + 1;
     let concurrency = thread::available_parallelism().map_or(1, usize::from);

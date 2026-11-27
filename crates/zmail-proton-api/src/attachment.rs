@@ -8,7 +8,8 @@
 // Modified by UnicornOps on 2026-10-21: rewritten in Rust. The upload's
 // multipart form is written by hand (the fields in a fixed order) instead
 // of with resty, and returns the session key with the attachment so the
-// caller need not decrypt the key packets it just made.
+// caller need not decrypt the key packets it just made. Modified on
+// 2026-11-27 (#462): a download is read up to the data response limit.
 
 //! Message attachments.
 
@@ -130,9 +131,7 @@ impl Client {
     /// Prefix them with the attachment's key packets to decrypt them.
     pub async fn get_attachment(&self, attachment_id: &str) -> Result<Vec<u8>, Error> {
         let response = self
-            .send(&Request::get(format!(
-                "/mail/v4/attachments/{attachment_id}"
-            )))
+            .send(&Request::get(format!("/mail/v4/attachments/{attachment_id}")).data())
             .await?;
         Ok(response.body)
     }

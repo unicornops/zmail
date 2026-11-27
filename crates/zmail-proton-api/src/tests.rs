@@ -1002,6 +1002,10 @@ async fn refuses_a_json_body_declared_over_the_limit() {
     let client = manager.new_client("uid", "access", "refresh");
     let error = within(10, client.get_user()).await.expect_err("too large");
     assert!(error.to_string().contains("too large"), "{error:?}");
+    assert!(
+        matches!(error, Error::ResponseTooLarge { limit } if limit == crate::MAX_JSON_RESPONSE_BYTES),
+        "{error:?}"
+    );
     assert_eq!(server.requests().len(), 1, "not retried");
 }
 
@@ -1024,6 +1028,10 @@ async fn refuses_an_attachment_declared_over_the_limit() {
         .await
         .expect_err("too large");
     assert!(error.to_string().contains("too large"), "{error:?}");
+    assert!(
+        matches!(error, Error::ResponseTooLarge { limit } if limit == crate::MAX_DATA_RESPONSE_BYTES),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]
@@ -1046,6 +1054,7 @@ async fn gives_up_on_a_listing_that_stays_stale() {
     assert!(error.to_string().contains("stale"), "{error:?}");
     let asked = server.requests().len();
     assert!((2..=10).contains(&asked), "asked {asked} times");
+    assert_eq!(asked, crate::MAX_STALE_ATTEMPTS as usize);
 }
 
 #[tokio::test]
@@ -1085,4 +1094,80 @@ async fn refuses_an_inflated_message_count() {
     .expect_err("inflated total");
     assert!(error.to_string().contains("more than"), "{error:?}");
     assert_eq!(server.requests().len(), 1, "only the count");
+}
+
+#[tokio::test]
+async fn reads_each_body_up_to_its_routes_limit() {
+    let server = MockServer::start(|request, _| {
+        let (size, chunked) = match request.path.as_str() {
+            "/json-at-limit" | "/data-over-json-limit" => (1024, false),
+            "/json-over-limit" => (1025, false),
+            "/json-chunked-over-limit" => (1025, true),
+            "/data-at-limit" => (4096, true),
+            _ => (4097, false),
+        };
+        Reply::streamed(200, (!chunked).then_some(size as u64), size)
+    })
+    .await;
+    let mut config = test_config(&server.url, None);
+    config.limits = crate::config::ResponseLimits {
+        json: 1024,
+        data: 4096,
+    };
+    let manager = Manager::new(config).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+    let send = |request: Request| {
+        let client = &client;
+        async move { within(10, client.send(&request)).await }
+    };
+
+    let body = send(Request::get("/json-at-limit"))
+        .await
+        .expect("at the limit");
+    assert_eq!(body.body.len(), 1024);
+    for path in ["/json-over-limit", "/json-chunked-over-limit"] {
+        let error = send(Request::get(path)).await.expect_err(path);
+        assert!(
+            matches!(error, Error::ResponseTooLarge { limit: 1024 }),
+            "{path}: {error:?}"
+        );
+        assert!(error.may_have_been_carried_out(), "an answer was not read");
+    }
+    assert_eq!(manager.status(), Status::Up, "the server did answer");
+
+    let data = send(Request::get("/data-at-limit").data())
+        .await
+        .expect("data limit");
+    assert_eq!(data.body.len(), 4096);
+    send(Request::get("/data-over-json-limit").data())
+        .await
+        .expect("data routes take the data limit");
+    let error = send(Request::get("/data-over-limit").data())
+        .await
+        .expect_err("over the data limit");
+    assert!(
+        matches!(error, Error::ResponseTooLarge { limit: 4096 }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn asks_again_while_a_listing_is_stale() {
+    let server = MockServer::start(|_, index| {
+        Reply::json(
+            200,
+            serde_json::json!({"Code": 1000, "Messages": [{"ID": "m1"}], "Stale": i64::from(index < 2)}),
+        )
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+    let page = within(
+        10,
+        client.get_message_metadata_page(0, 128, &crate::MessageFilter::default()),
+    )
+    .await
+    .expect("fresh on the third answer");
+    assert_eq!(page.len(), 1);
+    assert_eq!(server.requests().len(), 3);
 }
