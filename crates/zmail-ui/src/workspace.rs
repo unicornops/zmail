@@ -30,6 +30,7 @@ use zmail_core::{
 };
 use zmail_notify::ThreadRef;
 use zmail_security::SecretStore;
+use zmail_security::mailto::MailtoDraft;
 use zmail_store::LocalStore;
 use zmail_sync::SyncService;
 
@@ -60,7 +61,7 @@ use crate::message_list::{
 };
 use crate::outbox_detail::{OutboxDetailEvent, OutboxDetailState, OutboxDetailView};
 use crate::pane::{Pane, dispatch_from};
-use crate::reader::{ReaderState, ReaderView};
+use crate::reader::{ReaderEvent, ReaderState, ReaderView};
 use crate::sidebar::{
     OutboxStatus, SidebarEvent, SidebarHighlight, SidebarState, SidebarView, TreeNode,
 };
@@ -164,6 +165,7 @@ impl WorkspaceView {
             cx.subscribe_in(&mail_actions, window, Self::on_mail_event),
             cx.subscribe_in(&sidebar, window, Self::on_sidebar_event),
             cx.subscribe_in(&message_list, window, Self::on_message_list_event),
+            cx.subscribe_in(&reader, window, Self::on_reader_event),
             cx.subscribe_in(&compose, window, Self::on_compose_event),
             cx.subscribe_in(&outbox_detail, window, Self::on_outbox_detail_event),
             // Whatever changed in the shell, the panes get the new state.
@@ -1608,6 +1610,48 @@ impl WorkspaceView {
 
     /// Open the compose pane for a new draft, creating the draft in the store.
     pub(crate) fn open_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.compose_new(MailtoDraft::default(), window, cx);
+    }
+
+    /// Opens a compose window on a new draft filled from a `mailto:` link
+    /// (#457), from the account the window shows, else the first one, and
+    /// that account's primary identity. The link came from the system, a
+    /// second launch or a message, and was parsed by
+    /// [`zmail_security::mailto::parse_mailto`].
+    pub(crate) fn compose_mailto(
+        &mut self,
+        mailto: MailtoDraft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_account_id.is_none()
+            && let Some(first) = self.accounts.first().map(|account| account.id)
+        {
+            self.select_account(first, cx);
+        }
+        self.compose_new(mailto, window, cx);
+    }
+
+    /// Events from the reader pane.
+    fn on_reader_event(
+        &mut self,
+        _: &Entity<ReaderView>,
+        event: &ReaderEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ReaderEvent::Mailto(Some(mailto)) => self.compose_mailto(mailto.clone(), window, cx),
+            ReaderEvent::Mailto(None) => self.show_error(
+                "This email link can't be used: an address in it holds a control character.",
+                cx,
+            ),
+        }
+    }
+
+    /// Creates a draft with `fields` on the selected account and opens it
+    /// in a compose window.
+    fn compose_new(&mut self, fields: MailtoDraft, window: &mut Window, cx: &mut Context<Self>) {
         let Some(account_id) = self.selected_account_id else {
             // With no account the onboarding is already showing.
             if self.onboarding.is_none() {
@@ -1635,14 +1679,21 @@ impl WorkspaceView {
             return;
         };
 
+        let MailtoDraft {
+            to,
+            cc,
+            bcc,
+            subject,
+            body,
+        } = fields;
         let draft = NewDraft {
             account_id,
             identity_id: identity.id,
-            to: Vec::new(),
-            cc: Vec::new(),
-            bcc: Vec::new(),
-            subject: String::new(),
-            body: String::new(),
+            to,
+            cc,
+            bcc,
+            subject,
+            body,
             threading: Default::default(),
         };
         match self

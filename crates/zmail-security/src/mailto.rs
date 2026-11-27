@@ -1,21 +1,37 @@
-//! `mailto:` links (RFC 6068), which come from web pages and other apps:
-//! untrusted. A link whose addresses hold control characters once decoded
-//! is refused whole.
+//! `mailto:` links (RFC 6068) as the fields of a new draft. They come from
+//! web pages, other apps and mail: untrusted. A link whose addresses hold
+//! control characters once decoded is refused whole, and only `to`, `cc`,
+//! `bcc`, `subject` and `body` are read (never `attach`, `from` or the
+//! like; [`crate::links`] drops those before a link dialog shows one).
+//!
+//! Every way a link reaches Zmail's composer goes through
+//! [`parse_mailto`]: `zmail-app mailto:...` on the command line, the
+//! system's open-URL event and a link handed to the running app by a
+//! second launch (`zmail-ui`), and a `mailto:` link in a message.
 
 /// A mailto URL decomposed into draft fields.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct MailtoDraft {
-    pub(crate) to: Vec<String>,
-    pub(crate) cc: Vec<String>,
-    pub(crate) bcc: Vec<String>,
-    pub(crate) subject: String,
-    pub(crate) body: String,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MailtoDraft {
+    /// The `To` addresses: the link's path, then its `to` fields.
+    pub to: Vec<String>,
+    /// The `cc` field's addresses.
+    pub cc: Vec<String>,
+    /// The `bcc` field's addresses.
+    pub bcc: Vec<String>,
+    /// The subject, on one line.
+    pub subject: String,
+    /// The body.
+    pub body: String,
 }
 
 /// Parses an RFC 6068 mailto URL into draft fields, or `None` when it is
-/// not one or an address in it holds a control character.
-pub(crate) fn parse_mailto(raw: &str) -> Option<MailtoDraft> {
-    let rest = raw.strip_prefix("mailto:")?;
+/// not one or an address in it holds a control character. The scheme is
+/// matched in any case, as URL schemes are.
+pub fn parse_mailto(raw: &str) -> Option<MailtoDraft> {
+    let rest = raw
+        .get(..7)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("mailto:"))
+        .map(|_| &raw[7..])?;
     let (recipients, query) = match rest.split_once('?') {
         Some((recipients, query)) => (recipients, Some(query)),
         None => (rest, None),
@@ -189,5 +205,43 @@ mod tests {
             .expect("parses");
         assert_eq!(draft.subject, "Hi  There");
         assert_eq!(draft.body, "One\r\nTwo");
+    }
+
+    #[test]
+    fn the_scheme_matches_in_any_case_and_nothing_else_is_a_mailto_link() {
+        let draft = parse_mailto("MAILTO:a@example.com?Subject=Hi").expect("parses");
+        assert_eq!(draft.to, vec!["a@example.com".to_owned()]);
+        assert_eq!(draft.subject, "Hi");
+        for link in [
+            "",
+            "mailto",
+            "mail:a@example.com",
+            " mailto:a@example.com",
+            "javascript:alert(1)//mailto:a@example.com",
+            "https://example.com/?mailto:a@example.com",
+            "file:///etc/passwd",
+            "élan:x",
+        ] {
+            assert_eq!(parse_mailto(link), None, "{link:?}");
+        }
+    }
+
+    #[test]
+    fn fields_other_than_the_draft_s_are_ignored() {
+        let draft = parse_mailto(
+            "mailto:a@example.com?attach=/home/u/.ssh/id_rsa&from=boss@example.com\
+             &X-Mailer=evil&in-reply-to=%3Cx%40y%3E&noequals&subject=Hi",
+        )
+        .expect("parses");
+        assert_eq!(
+            draft,
+            MailtoDraft {
+                to: vec!["a@example.com".to_owned()],
+                subject: "Hi".to_owned(),
+                ..MailtoDraft::default()
+            }
+        );
+        // An empty link is an empty draft.
+        assert_eq!(parse_mailto("mailto:"), Some(MailtoDraft::default()));
     }
 }

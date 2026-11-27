@@ -42,6 +42,11 @@ extended-description = "Zmail is a fast, standards-compliant desktop email clien
 [dependencies]
 anyhow.workspace = true
 rpassword.workspace = true
+# Names the channel a second launch hands its mailto: link through
+# (src/single_instance.rs).
+sha2.workspace = true
+# That channel: a Unix domain socket or a Windows named pipe.
+tokio.workspace = true
 url.workspace = true
 zmail-assets = { path = "../zmail-assets" }
 zmail-auth = { path = "../zmail-auth" }

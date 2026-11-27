@@ -10,7 +10,8 @@
 //! dialog says so. Which targets open, the addresses written in text and
 //! that check are `zmail_security::links`, shared with the terminal UI; a
 //! `mailto:` link keeps only its `to`, `cc`, `bcc`, `subject` and `body`
-//! fields.
+//! fields, and opens in a new message in Zmail, not in the system's mail
+//! app.
 
 use std::ops::Range;
 
@@ -21,8 +22,9 @@ use gpui::{
 use url::Url;
 pub(crate) use zmail_security::links::link_target;
 use zmail_security::links::{misleading_host, written_urls};
+use zmail_security::mailto::parse_mailto;
 
-use super::ReaderView;
+use super::{ReaderEvent, ReaderView};
 use crate::a11y::readable;
 use crate::components::{Button, Modal};
 use crate::styles::{ICON_SIZE_SM, UiColors};
@@ -95,6 +97,13 @@ impl LinkPrompt {
         }
     }
 
+    /// Whether the link writes an email rather than opening a page.
+    pub(crate) fn is_mailto(&self) -> bool {
+        self.target
+            .get(..7)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("mailto:"))
+    }
+
     /// Whether the link's text shows a different site from its target.
     pub(crate) fn is_mismatched(&self) -> bool {
         self.shown_host.is_some()
@@ -140,11 +149,16 @@ impl ReaderView {
         cx.notify();
     }
 
-    /// Opens the dialog's link in the system browser (or mail app) and
-    /// closes the dialog.
+    /// Opens the dialog's link and closes the dialog: a web link in the
+    /// system browser, a `mailto:` link in a new message in Zmail (#457),
+    /// which the shell opens.
     fn open_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(prompt) = self.link_prompt.as_ref() {
-            cx.open_url(&prompt.target);
+        if let Some(prompt) = self.link_prompt.take() {
+            if prompt.is_mailto() {
+                cx.emit(ReaderEvent::Mailto(parse_mailto(&prompt.target)));
+            } else {
+                cx.open_url(&prompt.target);
+            }
         }
         self.close_link_prompt(window, cx);
     }
@@ -159,7 +173,7 @@ impl ReaderView {
             .link_prompt
             .as_ref()
             .filter(|_| self.link_modal.is_open())?;
-        let mailto = prompt.host.is_none();
+        let mailto = prompt.is_mailto();
         let target = prompt.target.clone();
         let warning = prompt.shown_host.as_ref().map(|shown| {
             let goes_to = prompt
@@ -220,7 +234,7 @@ impl ReaderView {
         };
         let description: SharedString = match &prompt.host {
             Some(host) => format!("It goes to {host} and opens in your browser.").into(),
-            None => "It opens in your email app.".into(),
+            None => "It opens a new message in Zmail.".into(),
         };
         Some(
             Modal::new("reader-link", self.link_modal.focus_handle())
@@ -342,6 +356,15 @@ mod tests {
             "/relative",
         ] {
             assert_eq!(link_target(href), None, "{href}");
+        }
+    }
+
+    #[test]
+    fn mailto_links_write_an_email_and_web_links_open_a_page() {
+        assert!(LinkPrompt::new("Mail", "mailto:help@example.com").is_mailto());
+        assert!(LinkPrompt::new("Mail", "MAILTO:help@example.com").is_mailto());
+        for target in ["https://example.com/", "http://mailto.example/"] {
+            assert!(!LinkPrompt::new("Site", target).is_mailto(), "{target}");
         }
     }
 
