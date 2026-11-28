@@ -771,6 +771,7 @@ fn every_onboarding_fixture_step_renders(cx: &mut TestAppContext) {
         OnboardingStep::Discovering,
         OnboardingStep::Consent,
         OnboardingStep::Result,
+        OnboardingStep::ResultOutsideDomain,
         OnboardingStep::Manual,
         OnboardingStep::ManualCleartext,
         OnboardingStep::SignInRefused,
@@ -789,7 +790,7 @@ fn every_onboarding_fixture_step_renders(cx: &mut TestAppContext) {
             OnboardingStep::GoogleGuide | OnboardingStep::GoogleGuideInvalid => Stage::GoogleGuide,
             OnboardingStep::Discovering => Stage::Discovering,
             OnboardingStep::Consent => Stage::Consent,
-            OnboardingStep::Result => Stage::Result,
+            OnboardingStep::Result | OnboardingStep::ResultOutsideDomain => Stage::Result,
             OnboardingStep::Manual | OnboardingStep::ManualCleartext => Stage::Manual,
             OnboardingStep::SignInRefused => Stage::Credentials,
             OnboardingStep::Colour => Stage::Colour,
@@ -798,6 +799,16 @@ fn every_onboarding_fixture_step_renders(cx: &mut TestAppContext) {
         assert_eq!(stage(&setup, window_cx), expected, "{step:?}");
         if step == OnboardingStep::ManualCleartext {
             assert!(drawn("account-setup-cleartext".into(), window_cx));
+        }
+        // Only servers outside the mail domain ask before Add account.
+        let outside = step == OnboardingStep::ResultOutsideDomain;
+        assert_eq!(
+            drawn("account-setup-outside-domain".into(), window_cx),
+            outside,
+            "{step:?}"
+        );
+        if outside {
+            assert!(window_cx.read_entity(&setup, |setup, _| setup.awaiting_confirmation()));
         }
         if step == OnboardingStep::SignInRefused {
             assert_eq!(errors(&setup, window_cx), [AccountField::Password]);

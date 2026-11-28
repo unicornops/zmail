@@ -106,6 +106,8 @@ MATRIX=(
   "onboarding-consent-dark onboarding-consent dark 1440 920"
   "onboarding-consent-light onboarding-consent light 1440 920"
   "onboarding-result-dark onboarding-result dark 1440 920"
+  "onboarding-result-outside-domain-dark onboarding-result-outside-domain dark 1440 920"
+  "onboarding-result-outside-domain-light onboarding-result-outside-domain light 1440 920"
   "onboarding-manual-dark onboarding-manual dark 1440 920"
   "onboarding-manual-light onboarding-manual light 1440 920"
   "onboarding-manual-cleartext-dark onboarding-manual-cleartext dark 1440 920"

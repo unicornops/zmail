@@ -306,6 +306,9 @@ pub struct AddAccount {
     pub running: Option<zmail_autodiscover::Step>,
     /// What a preset or discovery found.
     pub found: Option<MailSettings>,
+    /// Whether the user pressed Y to use servers that a DNS record
+    /// outside the mail domain points to.
+    pub servers_confirmed: bool,
     /// The browser sign-in's URL.
     pub sign_in_url: Option<String>,
     /// Stops the browser sign-in's wait, freeing its port.
@@ -342,6 +345,7 @@ impl AddAccount {
             discovery: None,
             running: None,
             found: None,
+            servers_confirmed: false,
             sign_in_url: None,
             browser: None,
             tokens: None,
@@ -410,6 +414,18 @@ impl AddAccount {
             Step::ProtonMailboxPassword => vec![field(AccountField::ProtonMailboxPassword)],
             _ => Vec::new(),
         }
+    }
+
+    /// Whether what discovery found includes servers that only a DNS
+    /// record outside the mail domain points to, which the user has not
+    /// confirmed yet (RFC 6186 section 6): Y uses them, E types the
+    /// servers instead, and nothing goes on to the sign-in before either.
+    pub fn awaiting_confirmation(&self) -> bool {
+        !self.servers_confirmed
+            && self
+                .found
+                .as_ref()
+                .is_some_and(discovery::needs_confirmation)
     }
 
     /// The focused row.
@@ -814,6 +830,14 @@ impl App {
                     }
                     KeyCode::Enter | KeyCode::Char('>' | '.') => self.choose_method(),
                     KeyCode::Char('<' | ',') | KeyCode::Left => self.add_back(),
+                    // Servers outside the mail domain: use them, or type
+                    // the servers by hand instead.
+                    KeyCode::Char('y' | 'Y') if add.awaiting_confirmation() => {
+                        add.servers_confirmed = true;
+                    }
+                    KeyCode::Char('e' | 'E') if add.awaiting_confirmation() => {
+                        add.found = None;
+                    }
                     _ => {}
                 }
                 return;
@@ -1020,6 +1044,7 @@ impl App {
         // Back from Proton's sign-in, the account is a server account again.
         add.form.protocol = ProtocolKind::Imap;
         add.found = None;
+        add.servers_confirmed = false;
         add.discovery = None;
         match providers::provider_for_address(&email) {
             Some(provider) => {
@@ -1113,6 +1138,7 @@ impl App {
             return;
         };
         add.running = None;
+        add.servers_confirmed = false;
         match discovery::finish(&discovery, &mut add.form) {
             Outcome::Found(settings) => {
                 // A domain whose mail goes to a provider Zmail knows (Google
@@ -1138,6 +1164,9 @@ impl App {
         let Some(add) = self.add.as_mut() else {
             return;
         };
+        if add.awaiting_confirmation() {
+            return;
+        }
         let methods = methods(add.form.provider);
         add.method = methods
             .get(add.method_cursor)
@@ -1879,6 +1908,14 @@ impl App {
                 entries.extend([entry("E", "Manual", key(KeyCode::Char('e'))), back, cancel]);
                 entries
             }
+            Step::Method if add.awaiting_confirmation() => vec![
+                entry("Y", "Use them", key(KeyCode::Char('y'))),
+                entry("E", "Manual", key(KeyCode::Char('e'))),
+                entry("P", "Prev", key(KeyCode::Up)),
+                entry("N", "Next", key(KeyCode::Down)),
+                back,
+                cancel,
+            ],
             Step::Method => vec![
                 entry(">", "[Select]", enter),
                 entry("P", "Prev", key(KeyCode::Up)),

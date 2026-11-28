@@ -22,6 +22,20 @@ const FIXTURE_SECRET: &str = "GOCSPX-fixture-not-a-secret";
 const NAME: &str = "Sam Taylor";
 const EMAIL: &str = "sam.taylor@example.com";
 
+/// A TLS server for the fixture's address, found by `source`.
+fn server(host: &str, port: u16, source: Source) -> Option<Found<ServerSettings>> {
+    Some(Found::new(
+        ServerSettings {
+            host: host.to_owned(),
+            port,
+            security: Security::Tls,
+            username: EMAIL.to_owned(),
+            auth: AuthMethod::Password,
+        },
+        source,
+    ))
+}
+
 impl AccountSetupView {
     /// Puts the flow into `step`'s screenshot state.
     pub(crate) fn show_fixture(
@@ -110,27 +124,40 @@ impl AccountSetupView {
                 let source = Source::DomainAutoconfig {
                     url: "https://autoconfig.example.com/mail/config-v1.1.xml".to_owned(),
                 };
-                let server = |host: &str, port, security| {
-                    Some(Found::new(
-                        ServerSettings {
-                            host: host.to_owned(),
-                            port,
-                            security,
-                            username: EMAIL.to_owned(),
-                            auth: AuthMethod::Password,
-                        },
-                        source.clone(),
-                    ))
-                };
                 let mut discovery = Discovery::new(email, false);
                 discovery.record(
                     Step::DomainAutoconfig,
                     Ok(StepFindings {
-                        imap: server("imap.example.com", 993, Security::Tls),
-                        smtp: server("smtp.example.com", 465, Security::Tls),
+                        imap: server("imap.example.com", 993, source.clone()),
+                        smtp: server("smtp.example.com", 465, source),
                         ..StepFindings::default()
                     }),
                 );
+                self.discovery = Some(discovery);
+                self.finish_discovery(window, cx);
+                path.push(Stage::Discovering);
+                Stage::Result
+            }
+            OnboardingStep::ResultOutsideDomain => {
+                fill(self, None, cx);
+                // A hosting provider's servers, which only DNS names: the
+                // domain's own HTTPS sources had nothing.
+                let srv = |record: &str| Source::DnsSrv {
+                    record: format!("{record}.example.com"),
+                    outside_domain: true,
+                };
+                let mut discovery = Discovery::new(email, true);
+                discovery.record(
+                    Step::DnsSrv,
+                    Ok(StepFindings {
+                        imap: server("mail.example.net", 993, srv("_imaps._tcp")),
+                        smtp: server("mail.example.net", 465, srv("_submissions._tcp")),
+                        ..StepFindings::default()
+                    }),
+                );
+                for step in [Step::DomainAutoconfig, Step::WellKnownJmap] {
+                    discovery.record(step, Ok(StepFindings::default()));
+                }
                 self.discovery = Some(discovery);
                 self.finish_discovery(window, cx);
                 path.push(Stage::Discovering);

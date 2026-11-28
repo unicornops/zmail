@@ -13,6 +13,7 @@ use std::{
 };
 
 use crossterm::event::KeyCode;
+use ratatui::style::Color;
 use url::Url;
 use zmail_autodiscover::{
     Discovery, DnsLookup, EmailAddress, Fetch, FetchResponse, MxRecord, Network, PortProbe,
@@ -25,7 +26,7 @@ use zmail_store::LocalStore;
 
 use super::{
     app_with, assert_printable, assert_snapshot, control, draw, environment, key, keys, now,
-    open_work_inbox, seeded_store, text_of,
+    open_work_inbox, row_of, seeded_store, text_of,
 };
 use crate::{
     accounts::Step,
@@ -950,6 +951,13 @@ fn servers_dns_points_outside_the_domain_need_y_before_signing_in() {
         "the question shows:\n{text}"
     );
     assert!(text.contains("Press Y to use these servers"), "{text}");
+    let buffer = draw(&mut app, 80, 24);
+    let row = row_of(&buffer, "The DNS records");
+    assert_eq!(
+        buffer[(2, row)].fg,
+        Color::Red,
+        "the question is in the flag colour"
+    );
     // Enter (or >) does nothing until the servers are confirmed.
     key(&mut app, KeyCode::Enter);
     keys(&mut app, ">");

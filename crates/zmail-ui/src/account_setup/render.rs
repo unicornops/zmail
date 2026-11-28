@@ -659,7 +659,7 @@ impl AccountSetupView {
             .into_any_element()
     }
 
-    fn render_result(&self, colors: &UiColors, _cx: &mut Context<Self>) -> AnyElement {
+    fn render_result(&self, colors: &UiColors, cx: &mut Context<Self>) -> AnyElement {
         let Some(found) = &self.found else {
             return div().into_any_element();
         };
@@ -709,6 +709,7 @@ impl AccountSetupView {
                 "Zmail will connect with these settings. Check them, or edit them if your provider says otherwise.",
                 colors,
             ))
+            .children(self.render_outside_domain(found, cx))
             .when(guessed, |this| {
                 this.child(
                     Banner::new(
@@ -731,6 +732,37 @@ impl AccountSetupView {
             .children(cards)
             .children(self.render_password_with_servers(colors))
             .into_any_element()
+    }
+
+    /// The question to answer before signing in to servers that a DNS
+    /// record outside the mail domain points to (RFC 6186 section 6), with
+    /// "Use these servers"; `None` when nothing needs confirming.
+    fn render_outside_domain(
+        &self,
+        found: &MailSettings,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let domain = self.discovery.as_ref()?.email().domain().to_owned();
+        let question = discovery::confirmation(found, &domain)?;
+        let confirmed = self.servers_confirmed;
+        Some(
+            Banner::new("account-setup-outside-domain", question)
+                .tone(BannerTone::Caution)
+                .title("Check these servers")
+                .action(
+                    div()
+                        .debug_selector(|| "account-setup-use-servers".into())
+                        .child(
+                            Button::new("account-setup-use-servers", "Use these servers")
+                                .icon(if confirmed { "check" } else { "square" })
+                                .selected(confirmed)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.toggle_servers_confirmed(cx);
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The password, on a server settings step, once the server has
@@ -1031,13 +1063,14 @@ impl AccountSetupView {
     /// The footer: Back on the left, the stage's actions on the right.
     /// `None` when the stage has neither (its actions are in the body).
     fn render_footer(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
-        // Nothing moves on while the sign-in is tested.
-        let checking = self.checking.is_some();
+        // Nothing moves on while the sign-in is tested, or before servers
+        // outside the mail domain are confirmed.
+        let disabled = self.checking.is_some() || self.awaiting_confirmation();
         let primary = |id: &'static str, label: &'static str, cx: &mut Context<Self>| {
             div().debug_selector(move || id.into()).child(
                 Button::new(id, label)
                     .primary()
-                    .disabled(checking)
+                    .disabled(disabled)
                     .shortcut("secondary-enter")
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.advance(window, cx);
