@@ -229,9 +229,9 @@ It has been run against Apache James 3.9 (through Zmail's live tests: reading, w
 
 ## Features
 
-- `reqwest` (default): `ReqwestTransport`, which also streams, and `ClientBuilder::connect`. It brings `tokio` for its timer (the idle time of a stream). Without it the crate needs no async runtime: implement `HttpTransport`, and `StreamingTransport` for push over the event source, for your own HTTP client.
+- `reqwest` (default): `ReqwestTransport`, which also streams, and `ClientBuilder::connect`. It checks servers against the Mozilla roots bundled with reqwest (webpki-roots), or against a rustls configuration of yours (`ReqwestTransport::with_preconfigured_tls`, for the operating system's verifier or a root of your own). It brings `tokio` for its timer (the idle time of a stream). Without it the crate needs no async runtime: implement `HttpTransport`, and `StreamingTransport` for push over the event source, for your own HTTP client.
 - `gzip` (default): gzip-compressed answers, decompressed with `flate2`.
-- `tungstenite` (off by default): `TungsteniteTransport`, a WebSocket transport on `tokio-tungstenite` with rustls and the system's root certificates. Without it, JMAP over WebSocket runs over any socket you implement `WebSocketTransport` and `WebSocket` for.
+- `tungstenite` (off by default): `TungsteniteTransport`, a WebSocket transport on `tokio-tungstenite` with rustls and the system's root certificates, or a rustls configuration of yours (`TungsteniteTransport::with_connector`). Without it, JMAP over WebSocket runs over any socket you implement `WebSocketTransport` and `WebSocket` for.
 
 Without any of them, the crate depends only on `serde`, `serde_json`, `url`, `base64` and `thiserror`.
 

@@ -9,6 +9,10 @@ publish = false
 [features]
 # `StoreKey::from_fixture`, for checked-in test stores. Dev-dependencies only.
 test-fixtures = []
+# `tls::test_ca`: a throwaway CA the shared TLS configuration trusts once a
+# test calls `tls::test_ca::trust()`, and loopback servers with its
+# certificate. Dev-dependencies only.
+test-ca = []
 
 [dependencies]
 aes-gcm.workspace = true
@@ -20,12 +24,18 @@ hmac.workspace = true
 html5ever.workspace = true
 keyring.workspace = true
 rand.workspace = true
+rustls-platform-verifier.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tokio-rustls.workspace = true
 url.workspace = true
 zeroize.workspace = true
 zmail-core = { path = "../zmail-core" }
+
+[dev-dependencies]
+# The TLS tests' loopback servers.
+tokio.workspace = true
 
 [lints]
 workspace = true

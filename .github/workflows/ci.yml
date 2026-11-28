@@ -348,6 +348,15 @@ jobs:
               if: runner.os != 'Linux'
               run: cargo test --release --locked -p zmail-app -- single_instance --nocapture
 
+            # Mail connections check certificates with the operating
+            # system's verifier (ADR 0009, #471): Security.framework on
+            # macOS, CryptoAPI on Windows. Each client's test, and the
+            # shared configuration's own, against a loopback server with
+            # the test CA's certificate, on this platform's verifier.
+            - name: TLS trust tests (this platform's verifier)
+              if: runner.os != 'Linux'
+              run: cargo test --release --locked -p zmail-security -p zmail-imap -p zmail-smtp -p zmail-jmap -p zmail-auth -p zmail-autodiscover -- shared_tls tls::tests --nocapture
+
             # The MSI the release builds, from crates/zmail-app/wix/main.wxs,
             # installed and uninstalled: its mailto: and Default apps
             # registration, and nothing of Zmail's left after (#457).

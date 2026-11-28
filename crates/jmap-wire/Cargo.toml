@@ -17,12 +17,14 @@ default = ["reqwest", "gzip"]
 # decompresses them in the client, whatever the transport, with the
 # response size limit applied to the decompressed size.
 gzip = ["dep:flate2"]
-# The default HTTP transport, on reqwest with rustls. Without it the crate
+# The default HTTP transport, on reqwest with rustls: the bundled Mozilla
+# roots, or a TLS configuration of the caller's. Without it the crate
 # is the protocol core alone, for a transport of your own. tokio is here
 # for its timer alone: the idle timeout of a streamed response.
 reqwest = ["dep:reqwest", "dep:tokio"]
 # A WebSocket transport for JMAP over WebSocket (RFC 8887), on
-# tokio-tungstenite with rustls and the system's root certificates. Off
+# tokio-tungstenite with rustls: the system's root certificates, or a TLS
+# configuration of the caller's. Off
 # by default: the WebSocket binding itself (messages, the two traits,
 # `Client::connect_websocket`) needs no feature.
 tungstenite = ["dep:tokio-tungstenite", "dep:tokio", "dep:futures-util"]
@@ -31,7 +33,10 @@ tungstenite = ["dep:tokio-tungstenite", "dep:tokio", "dep:futures-util"]
 base64.workspace = true
 flate2 = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
-reqwest = { workspace = true, optional = true }
+# With rustls and the bundled Mozilla roots (webpki-roots) for
+# `ReqwestTransport::new`; a caller can bring a TLS configuration of its
+# own instead (`ReqwestTransport::with_preconfigured_tls`).
+reqwest = { workspace = true, optional = true, features = ["rustls-tls-webpki-roots"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

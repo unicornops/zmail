@@ -10464,6 +10464,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "sha2 0.11.1",
+ "zmail-security",
 ]
 
 [[package]]
@@ -10475,6 +10476,7 @@ dependencies = [
  "roxmltree 0.21.2",
  "tokio",
  "url",
+ "zmail-security",
 ]
 
 [[package]]
@@ -10494,7 +10496,6 @@ dependencies = [
  "async-imap",
  "futures-util",
  "mail-parser",
- "rustls-native-certs",
  "serde",
  "serde_json",
  "tokio",
@@ -10620,9 +10621,12 @@ dependencies = [
  "html5ever",
  "keyring",
  "rand 0.10.4",
+ "rustls-platform-verifier",
  "serde_json",
  "sha2 0.11.1",
  "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
  "url",
  "zeroize",
  "zmail-core",
@@ -10657,6 +10661,7 @@ dependencies = [
  "tokio-rustls",
  "zeroize",
  "zmail-core",
+ "zmail-security",
 ]
 
 [[package]]

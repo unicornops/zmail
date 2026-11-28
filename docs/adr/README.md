@@ -12,3 +12,4 @@ Each architecture decision record (ADR) explains one decision about how Zmail is
 | [0006](./0006-html-email-renderer.md) | Rendering HTML mail safely | Accepted |
 | [0007](./0007-terminal-ui.md) | A terminal UI as a second frontend | Accepted |
 | [0008](./0008-own-jmap-client-library.md) | Zmail's own JMAP client library | Accepted |
+| [0009](./0009-one-tls-trust-policy.md) | One TLS trust policy for mail connections | Accepted |

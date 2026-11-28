@@ -4,13 +4,11 @@
 mod connection_tests;
 mod qresync;
 mod stall;
+#[cfg(test)]
+mod tls_tests;
 mod watch;
 
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Once, OnceLock},
-    time::Duration,
-};
+use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_imap::{
@@ -26,13 +24,7 @@ use tokio::{
     net::TcpStream,
     time::timeout,
 };
-use tokio_rustls::{
-    TlsConnector,
-    rustls::{
-        ClientConfig, RootCertStore,
-        pki_types::{CertificateDer, ServerName},
-    },
-};
+use tokio_rustls::{TlsConnector, rustls::pki_types::ServerName};
 use url::Url;
 use zmail_core::threading::bare_message_id;
 use zmail_core::{
@@ -75,14 +67,6 @@ const HYDRATE_QUERY: &str = "(UID INTERNALDATE FLAGS BODY.PEEK[])";
 const MAX_ATTACHMENTS_PER_MESSAGE: usize = 25;
 /// Maximum size of a single persisted attachment blob.
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
-
-fn ensure_rustls_provider() {
-    static RUSTLS_PROVIDER: Once = Once::new();
-
-    RUSTLS_PROVIDER.call_once(|| {
-        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
-    });
-}
 
 /// Connects to a live IMAP account and returns the mailbox snapshot written into the local store.
 pub async fn discover_and_sync(
@@ -1032,38 +1016,6 @@ impl Authenticator for Xoauth2Authenticator<'_> {
     }
 }
 
-/// The TLS settings for every IMAP connection, built once: the operating
-/// system's trusted roots load on the first TLS connection, not on each.
-///
-/// A root the system store holds but rustls cannot parse is skipped rather
-/// than failing every connection; only a store with no usable root at all
-/// is an error (and is tried again on the next connection).
-fn tls_config() -> Result<Arc<ClientConfig>> {
-    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
-    if let Some(config) = CONFIG.get() {
-        return Ok(config.clone());
-    }
-    ensure_rustls_provider();
-    let roots = root_store(rustls_native_certs::load_native_certs().certs)?;
-    let config = Arc::new(
-        ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    );
-    Ok(CONFIG.get_or_init(|| config).clone())
-}
-
-/// A root store from the system's certificates, skipping any that do not
-/// parse.
-fn root_store(certificates: Vec<CertificateDer<'static>>) -> Result<RootCertStore> {
-    let mut roots = RootCertStore::empty();
-    roots.add_parsable_certificates(certificates);
-    if roots.is_empty() {
-        bail!("no TLS root certificates were loaded for the IMAP connection");
-    }
-    Ok(roots)
-}
-
 async fn connect_session(
     endpoint: &ImapEndpoint,
     username: &str,
@@ -1093,7 +1045,12 @@ async fn connect_session_with(
     let stream: Box<dyn ImapIo> = match endpoint.security {
         ImapSecurity::Plain => Box::new(tcp),
         ImapSecurity::ImplicitTls => {
-            let connector = TlsConnector::from(tls_config()?);
+            // The shared configuration of every mail connection (ADR 0009):
+            // the operating system's verifier, built once.
+            let connector = TlsConnector::from(
+                zmail_security::tls::client_config()
+                    .context("failed to set up TLS for the IMAP connection")?,
+            );
             let server_name = ServerName::try_from(endpoint.host.clone())
                 .with_context(|| format!("invalid IMAP server name {}", endpoint.host))?;
             let tls_stream = timeout(CONNECT_TIMEOUT, connector.connect(server_name, tcp))
@@ -2052,37 +2009,6 @@ mod tests {
         xoauth2_response,
     };
     use zmail_core::{MailboxSnapshot, MessageSnapshot, ThreadSnapshot};
-
-    #[test]
-    fn an_unparsable_system_root_is_skipped_not_fatal() {
-        use tokio_rustls::rustls::pki_types::CertificateDer;
-
-        let garbage = CertificateDer::from(vec![0x30, 0x03, 0x02, 0x01, 0x00]);
-        let error = super::root_store(vec![garbage.clone()])
-            .expect_err("a store with no usable root is an error");
-        assert!(format!("{error:#}").contains("no TLS root certificates"));
-
-        // The system's own roots, where the machine has any, with one bad
-        // certificate among them.
-        let native = rustls_native_certs::load_native_certs().certs;
-        if native.is_empty() {
-            return;
-        }
-        let mut certificates = vec![garbage];
-        certificates.extend(native);
-        let roots = super::root_store(certificates).expect("the good roots still load");
-        assert!(!roots.is_empty());
-    }
-
-    #[test]
-    fn the_tls_config_is_built_once() {
-        if rustls_native_certs::load_native_certs().certs.is_empty() {
-            return;
-        }
-        let first = super::tls_config().expect("TLS config");
-        let second = super::tls_config().expect("TLS config");
-        assert!(std::sync::Arc::ptr_eq(&first, &second));
-    }
 
     #[test]
     fn search_criteria_map_operators_onto_search_keys() {

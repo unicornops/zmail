@@ -665,3 +665,5 @@ pub fn discover(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tls_tests;

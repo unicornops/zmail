@@ -12,7 +12,10 @@ anyhow.workspace = true
 gpui.workspace = true
 # Remote images the user allowed are fetched by Zmail, not the engine
 # (src/remote.rs): https only, pinned to checked public addresses.
-reqwest.workspace = true
+# Remote images, when the user loads them, are fetched against reqwest's
+# bundled Mozilla roots, as before ADR 0009 (which leaves them out of the
+# shared mail-server configuration).
+reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 url.workspace = true
 zmail-render = { path = "../zmail-render" }
 

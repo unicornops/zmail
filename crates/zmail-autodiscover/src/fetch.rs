@@ -66,7 +66,13 @@ impl HttpsFetcher {
     fn client(&self) -> Result<&reqwest::blocking::Client, String> {
         self.client
             .get_or_init(|| {
+                // The shared configuration of every mail connection
+                // (ADR 0009), so discovery trusts the servers the
+                // protocols it finds will.
+                let tls = zmail_security::tls::client_config()
+                    .map_err(|error| format!("couldn't prepare the HTTPS client: {error}"))?;
                 reqwest::blocking::Client::builder()
+                    .use_preconfigured_tls((*tls).clone())
                     .https_only(true)
                     .timeout(TIMEOUT)
                     .connect_timeout(Duration::from_secs(5))

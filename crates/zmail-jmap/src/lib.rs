@@ -1297,8 +1297,15 @@ pub(crate) async fn connect_client(
     auth: AuthKind,
 ) -> Result<Connection> {
     let credentials = credentials(auth, username, secret)?;
-    let transport = jmap_wire::ReqwestTransport::new()
+    // The shared configuration of every mail connection (ADR 0009): the
+    // session, the API, blobs and the event source all go through this
+    // transport.
+    let tls = zmail_security::tls::client_config()
         .map_err(|error| anyhow!("failed to set up the JMAP connection: {error}"))?;
+    let transport = jmap_wire::ReqwestTransport::with_preconfigured_tls(
+        tokio_rustls::rustls::ClientConfig::clone(&tls),
+    )
+    .map_err(|error| anyhow!("failed to set up the JMAP connection: {error}"))?;
     let session = session_url(&transport, endpoint).await?;
     // Same-host redirects only: a session or API URL that moves to another
     // host would take the credentials with it.
@@ -2930,3 +2937,6 @@ mod mailbox_identity_tests;
 
 #[cfg(test)]
 mod unchanged_sync_tests;
+
+#[cfg(test)]
+mod tls_tests;
