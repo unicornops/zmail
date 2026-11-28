@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.0](https://github.com/unicornops/zmail/compare/v0.38.2...v0.39.0) (2026-11-28)
+
+
+### Features
+
+* **proton:** sign in again while the session is still live ([#551](https://github.com/unicornops/zmail/issues/551)) ([369abde](https://github.com/unicornops/zmail/commit/369abdee45159c068c0c1877fbd005e597366246)), closes [#464](https://github.com/unicornops/zmail/issues/464)
+
 ## [0.38.2](https://github.com/unicornops/zmail/compare/v0.38.1...v0.38.2) (2026-11-28)
 
 
