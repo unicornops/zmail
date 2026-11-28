@@ -65,6 +65,9 @@ mod window;
 pub(crate) use form::{AccountField, Check, validate_account_form};
 #[cfg(test)]
 pub(crate) use window::open_window;
+// The seam a view test fakes Proton at.
+#[cfg(all(test, feature = "proton"))]
+pub(crate) use proton::{BoxFuture, ProtonBackend, ProtonSide, ProtonSteps};
 pub(crate) use zmail_setup::SyncProgress;
 
 use form::{AccountForm, IMAP_SECURITY, SMTP_SECURITY, security_label};
@@ -133,8 +136,9 @@ pub(crate) fn open_add_account(cx: &mut App) {
 }
 
 /// Signs in to the Proton account `account_id` again, in the Add Account
-/// window, keeping the account and its mail. Settings → Accounts offers it
-/// once Proton has ended the account's session.
+/// window, keeping the account and its mail. Settings → Accounts'
+/// Re-authenticate offers it, whether or not Proton has ended the
+/// account's session.
 #[cfg(feature = "proton")]
 pub(crate) fn open_proton_sign_in_again(account_id: i64, cx: &mut App) {
     window::open_sign_in_again(account_id, cx);

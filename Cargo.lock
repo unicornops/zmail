@@ -10686,6 +10686,7 @@ name = "zmail-sync"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "serde_json",
  "tokio",
  "zeroize",
  "zmail-auth",
@@ -10694,6 +10695,7 @@ dependencies = [
  "zmail-jmap",
  "zmail-notify",
  "zmail-proton",
+ "zmail-proton-api",
  "zmail-security",
  "zmail-smtp",
  "zmail-store",

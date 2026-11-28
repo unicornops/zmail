@@ -10,8 +10,9 @@
 //!   when opened.
 //! - **Re-authenticate** asks for the password again, for OAuth2
 //!   accounts runs the browser sign-in again with the stored client, and
-//!   for a Proton account whose session Proton has ended runs Proton's
-//!   sign-in again for that account, keeping its mail. A new
+//!   for a Proton account runs Proton's sign-in again for that account,
+//!   keeping its mail (the old session is signed out, even while it still
+//!   works). A new
 //!   password is tested against the incoming server before it replaces
 //!   the saved one (`zmail_setup::check`); when the test fails, the dialog
 //!   says why and offers Save anyway.
@@ -477,25 +478,11 @@ impl AccountsSettings {
     }
 
     /// Re-authenticate on a Proton account: Proton's sign-in again for
-    /// this account, once Proton has ended its session. While the session
-    /// is still in use it would write its own refresh token over the new
-    /// one, so until then this only says there is nothing to do.
+    /// this account, whether or not Proton has ended its session. Once
+    /// signed in, the old session is signed out and the new one takes its
+    /// place in the account's keychain slots, keeping the mail.
     fn sign_in_to_proton_again(&mut self, account_id: i64, cx: &mut Context<Self>) {
-        let Some(card) = self.cards.iter().find(|card| card.account.id == account_id) else {
-            return;
-        };
-        // The last failure, still standing (a retry may be under way):
-        // the session ended, or was never kept.
-        let status = &card.account.sync_status;
-        let ended = (status.phase == SyncPhase::Failed || status.failure_count > 0)
-            && status
-                .last_error_message
-                .as_deref()
-                .is_some_and(|error| sync_failure(error) == SyncFailure::SignIn);
-        if !ended {
-            cx.emit(SettingsEvent::Status(
-                "Proton hasn't ended Zmail's session, so there is nothing to sign in to again. If it does, this account says so here, and Re-authenticate signs you in again, keeping your mail.".to_owned(),
-            ));
+        if !self.cards.iter().any(|card| card.account.id == account_id) {
             return;
         }
         #[cfg(feature = "proton")]

@@ -454,6 +454,37 @@ impl SyncService {
         let _ = (account_id, uid, refresh_token);
     }
 
+    /// Replaces a Proton account's session with a new sign-in (Sign In
+    /// Again), while the old session may still be in use: `store` keeps
+    /// the new session in the account's keychain slots
+    /// (`zmail_setup::proton::store_signed_in_again`).
+    ///
+    /// Under the Proton sessions lock, the account's open session is
+    /// dropped and stops writing refreshed tokens to the keychain, then it
+    /// is signed out on Proton's side as [`Self::sign_out_proton_session`]
+    /// does (best effort: the open session, else the stored one), and only
+    /// then does `store` run. No session of the account is resumed until
+    /// it has finished, so the keychain ends up holding the new UID and
+    /// refresh token and nothing of the old session, even when the old one
+    /// refreshes during the swap ([`zmail_proton::ProtonSessions::replace`]).
+    #[cfg(feature = "proton")]
+    pub fn replace_proton_session<F>(
+        &self,
+        account_id: i64,
+        store: F,
+    ) -> impl std::future::Future<Output = Result<()>> + Send + 'static + use<F>
+    where
+        F: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        let sessions = self.proton_sessions();
+        async move {
+            sessions
+                .context("Proton support has not been configured")?
+                .replace(account_id, store)
+                .await
+        }
+    }
+
     /// Watches a Proton account until the next reconnect: Bridge's event
     /// loop. Every 20 s plus up to 20 s of jitter it polls the event stream
     /// from the stored checkpoint, and syncs when something changed (the
@@ -528,6 +559,17 @@ impl SyncService {
 
 #[cfg(all(test, feature = "proton"))]
 mod tests {
+    use std::sync::{Arc, Condvar, Mutex};
+
+    use anyhow::Result;
+    use zeroize::Zeroizing;
+    use zmail_proton_api::{
+        Auth, SaltedKeyPass,
+        mock::{MockServer, Recorded, Reply},
+    };
+    use zmail_security::{InMemorySecretStore, SecretSlot, SecretStore};
+    use zmail_store::LocalStore;
+
     use crate::SyncService;
 
     /// A send stopped by an unverifiable contact card is recognised
@@ -610,5 +652,329 @@ mod tests {
                 .expect("pins")
                 .is_empty()
         );
+    }
+
+    // Issue #464: signing in to a Proton account again while its session
+    // is still in use. The old session may refresh at any moment, and its
+    // auth handler writes each new refresh token to the account's keychain
+    // slot, so the swap must leave the new session alone in the keychain.
+
+    const ACCOUNT: i64 = 7;
+    /// The access token the old session holds once resumed. Requests with
+    /// it are refused, so the old session refreshes on its next request.
+    const STALE_ACCESS: &str = "old-access-2";
+
+    /// A gate one thread opens and others wait at.
+    #[derive(Clone, Default)]
+    struct Latch(Arc<(Mutex<bool>, Condvar)>);
+
+    impl Latch {
+        fn open(&self) {
+            let (open, changed) = &*self.0;
+            *open.lock().expect("latch") = true;
+            changed.notify_all();
+        }
+
+        /// Blocks until the latch opens. On a runtime worker (the mock
+        /// server and the keychain wait there) the worker's other tasks
+        /// are handed on first, so they do not wait with it.
+        fn wait(&self) {
+            tokio::task::block_in_place(|| {
+                let (open, changed) = &*self.0;
+                let mut guard = open.lock().expect("latch");
+                while !*guard {
+                    guard = changed.wait(guard).expect("latch");
+                }
+            });
+        }
+
+        /// Waits off the async workers.
+        async fn reached(&self) {
+            let latch = self.clone();
+            tokio::task::spawn_blocking(move || latch.wait())
+                .await
+                .expect("the wait finished");
+        }
+    }
+
+    /// A keychain that can hold one write of a refresh token half done.
+    #[derive(Default)]
+    struct Keychain {
+        inner: InMemorySecretStore,
+        /// The refresh token whose write is held, if any.
+        held: Option<&'static str>,
+        /// Opened when the held write starts.
+        held_started: Latch,
+        /// The held write goes on once this opens.
+        release: Latch,
+        /// Opened when the held write is done.
+        held_done: Latch,
+    }
+
+    impl Keychain {
+        fn read(&self, slot: SecretSlot) -> Option<String> {
+            self.inner
+                .get_account_secret_from_slot(ACCOUNT, slot)
+                .ok()
+                .map(|secret| secret.as_str().to_owned())
+        }
+    }
+
+    impl SecretStore for Keychain {
+        fn set_account_secret(&self, account_id: i64, secret: &str) -> Result<()> {
+            self.inner.set_account_secret(account_id, secret)
+        }
+
+        fn get_account_secret(&self, account_id: i64) -> Result<Zeroizing<String>> {
+            self.inner.get_account_secret(account_id)
+        }
+
+        fn delete_account_secret(&self, account_id: i64) -> Result<()> {
+            self.inner.delete_account_secret(account_id)
+        }
+
+        fn set_account_secret_in_slot(
+            &self,
+            account_id: i64,
+            slot: SecretSlot,
+            secret: &str,
+        ) -> Result<()> {
+            if slot == SecretSlot::ProtonRefreshToken && self.held == Some(secret) {
+                self.held_started.open();
+                self.release.wait();
+                self.inner
+                    .set_account_secret_in_slot(account_id, slot, secret)?;
+                self.held_done.open();
+                return Ok(());
+            }
+            if self.held.is_some() && slot == SecretSlot::ProtonKeyPass && secret == "new-key-pass"
+            {
+                // The new session's last write: a held write still under
+                // way finishes first, as it would if nothing waited for it.
+                self.release.open();
+                self.held_done.wait();
+            }
+            self.inner
+                .set_account_secret_in_slot(account_id, slot, secret)
+        }
+
+        fn get_account_secret_from_slot(
+            &self,
+            account_id: i64,
+            slot: SecretSlot,
+        ) -> Result<Zeroizing<String>> {
+            self.inner.get_account_secret_from_slot(account_id, slot)
+        }
+
+        fn delete_account_secret_in_slot(&self, account_id: i64, slot: SecretSlot) -> Result<()> {
+            self.inner.delete_account_secret_in_slot(account_id, slot)
+        }
+    }
+
+    fn tokens(uid: &str, access: &str, refresh: &str) -> Reply {
+        Reply::json(
+            200,
+            serde_json::json!({"Code": 1000, "UID": uid, "AccessToken": access, "RefreshToken": refresh, "Scope": "full mail"}),
+        )
+    }
+
+    /// Proton for the old and new sessions: each refresh token is good
+    /// once; `refresh` answers the old session's second refresh.
+    fn proton(request: &Recorded, refresh: impl Fn() -> Reply) -> Reply {
+        match (request.method.as_str(), request.path.as_str()) {
+            ("POST", "/auth/v4/refresh") => match request.json()["RefreshToken"].as_str() {
+                Some("old-1") => tokens("uid-old", STALE_ACCESS, "old-2"),
+                Some("old-2") => refresh(),
+                Some("new-1") => tokens("uid-new", "new-access-2", "new-2"),
+                _ => Reply::json(
+                    422,
+                    serde_json::json!({"Code": 10013, "Error": "Invalid refresh token"}),
+                ),
+            },
+            ("DELETE", "/auth/v4") => Reply::json(200, serde_json::json!({"Code": 1000})),
+            _ if request.header("authorization") == Some(&format!("Bearer {STALE_ACCESS}")) => {
+                Reply::json(
+                    401,
+                    serde_json::json!({"Code": 401, "Error": "Invalid access token"}),
+                )
+            }
+            _ => Reply::json(
+                200,
+                serde_json::json!({"Code": 1000, "User": {"ID": "user-1", "Name": "rob", "Email": "rob@proton.test"}}),
+            ),
+        }
+    }
+
+    /// A sync service with Proton on `server`, and the old session
+    /// stored for the account.
+    fn service(
+        runtime: &tokio::runtime::Runtime,
+        server: &MockServer,
+        keychain: &Arc<Keychain>,
+    ) -> SyncService {
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store"));
+        let service = SyncService::new(runtime.handle().clone(), store, keychain.clone());
+        service
+            .configure_proton(zmail_proton_api::mock::config(&server.url, None))
+            .expect("Proton");
+        for (slot, secret) in [
+            (SecretSlot::ProtonUid, "uid-old"),
+            (SecretSlot::ProtonRefreshToken, "old-1"),
+            (SecretSlot::ProtonKeyPass, "old-key-pass"),
+        ] {
+            keychain
+                .inner
+                .set_account_secret_in_slot(ACCOUNT, slot, secret)
+                .expect("stored");
+        }
+        service
+    }
+
+    /// What Sign In Again stores: the new session, as
+    /// `ProtonSignIn::store` writes it.
+    fn store_new_session(
+        keychain: &Arc<Keychain>,
+    ) -> impl Future<Output = Result<()>> + Send + 'static {
+        let keychain = keychain.clone();
+        async move {
+            let auth = Auth {
+                uid: "uid-new".to_owned(),
+                access_token: "new-access-1".to_owned().into(),
+                refresh_token: "new-1".to_owned().into(),
+                ..Auth::default()
+            };
+            zmail_proton::store_new_session(
+                keychain.as_ref(),
+                ACCOUNT,
+                &auth,
+                &SaltedKeyPass::from_secret("new-key-pass"),
+            )
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        // The mock server and the keychain hold threads while they wait.
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("runtime")
+    }
+
+    fn assert_only_the_new_session_is_kept(keychain: &Keychain) {
+        assert_eq!(
+            keychain.read(SecretSlot::ProtonUid).as_deref(),
+            Some("uid-new")
+        );
+        assert_eq!(
+            keychain.read(SecretSlot::ProtonRefreshToken).as_deref(),
+            Some("new-1"),
+            "the old session's refreshed token must not be written over the new one"
+        );
+        assert_eq!(
+            keychain.read(SecretSlot::ProtonKeyPass).as_deref(),
+            Some("new-key-pass")
+        );
+    }
+
+    /// The old session's refresh is answered only once the new session is
+    /// stored: what it then gets is written nowhere.
+    #[test]
+    fn a_refresh_answered_after_the_swap_leaves_the_new_session_alone() {
+        let runtime = runtime();
+        let keychain = Arc::new(Keychain::default());
+        let refresh_started = Latch::default();
+        let answer_refresh = Latch::default();
+        let server = {
+            let (started, answer) = (refresh_started.clone(), answer_refresh.clone());
+            runtime.block_on(MockServer::start(move |request, _| {
+                proton(request, || {
+                    started.open();
+                    answer.wait();
+                    tokens("uid-old", "old-access-3", "old-3")
+                })
+            }))
+        };
+        let service = service(&runtime, &server, &keychain);
+
+        runtime.block_on(async {
+            let sessions = service.proton_sessions().expect("Proton is configured");
+            let old = sessions
+                .session(ACCOUNT)
+                .await
+                .expect("the old session resumes");
+            assert_eq!(
+                keychain.read(SecretSlot::ProtonRefreshToken).as_deref(),
+                Some("old-2")
+            );
+            // A request on the old session refreshes it, and Proton is slow
+            // to answer.
+            let request = tokio::spawn(async move { old.client().get_user().await.map(|_| ()) });
+            refresh_started.reached().await;
+
+            service
+                .replace_proton_session(ACCOUNT, store_new_session(&keychain))
+                .await
+                .expect("replaced");
+            answer_refresh.open();
+            let _ = request.await.expect("the request finished");
+            assert_only_the_new_session_is_kept(&keychain);
+
+            // The old session was signed out on Proton's side, and the next
+            // sync resumes the new one.
+            let signed_out = server.requests().into_iter().any(|request| {
+                request.method == "DELETE" && request.header("x-pm-uid") == Some("uid-old")
+            });
+            assert!(signed_out, "the old session is signed out");
+            let new = sessions
+                .session(ACCOUNT)
+                .await
+                .expect("the new session resumes");
+            assert_eq!(new.client().uid(), "uid-new");
+            assert_eq!(
+                keychain.read(SecretSlot::ProtonRefreshToken).as_deref(),
+                Some("new-2")
+            );
+        });
+    }
+
+    /// The old session's refreshed token is being written when the swap
+    /// starts: that write finishes before the new session goes in.
+    #[test]
+    fn a_refresh_written_during_the_swap_leaves_the_new_session_alone() {
+        let runtime = runtime();
+        let keychain = Arc::new(Keychain {
+            held: Some("old-3"),
+            ..Keychain::default()
+        });
+        let server = {
+            let release = keychain.release.clone();
+            runtime.block_on(MockServer::start(move |request, _| {
+                if request.method == "DELETE" {
+                    // Once the old session is signed out, the held write
+                    // may finish.
+                    release.open();
+                }
+                proton(request, || tokens("uid-old", "old-access-3", "old-3"))
+            }))
+        };
+        let service = service(&runtime, &server, &keychain);
+
+        runtime.block_on(async {
+            let sessions = service.proton_sessions().expect("Proton is configured");
+            let old = sessions
+                .session(ACCOUNT)
+                .await
+                .expect("the old session resumes");
+            let request = tokio::spawn(async move { old.client().get_user().await.map(|_| ()) });
+            keychain.held_started.reached().await;
+
+            service
+                .replace_proton_session(ACCOUNT, store_new_session(&keychain))
+                .await
+                .expect("replaced");
+            let _ = request.await.expect("the request finished");
+            assert_only_the_new_session_is_kept(&keychain);
+        });
     }
 }

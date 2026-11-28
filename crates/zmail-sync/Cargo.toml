@@ -26,5 +26,11 @@ zmail-store = { path = "../zmail-store" }
 # (#139).
 proton = ["dep:zmail-proton"]
 
+[dev-dependencies]
+serde_json.workspace = true
+# The mock Proton server (`zmail_proton_api::mock`) for the Proton session
+# tests; never a dependency of the sync runtime itself.
+zmail-proton-api = { path = "../zmail-proton-api", features = ["test-harness"] }
+
 [lints]
 workspace = true
