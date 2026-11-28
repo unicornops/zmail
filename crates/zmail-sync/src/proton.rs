@@ -454,6 +454,37 @@ impl SyncService {
         let _ = (account_id, uid, refresh_token);
     }
 
+    /// Replaces a Proton account's session with a new sign-in (Sign In
+    /// Again), while the old session may still be in use: `store` keeps
+    /// the new session in the account's keychain slots
+    /// (`zmail_setup::proton::store_signed_in_again`).
+    ///
+    /// Under the Proton sessions lock, the account's open session is
+    /// dropped and stops writing refreshed tokens to the keychain, then it
+    /// is signed out on Proton's side as [`Self::sign_out_proton_session`]
+    /// does (best effort: the open session, else the stored one), and only
+    /// then does `store` run. No session of the account is resumed until
+    /// it has finished, so the keychain ends up holding the new UID and
+    /// refresh token and nothing of the old session, even when the old one
+    /// refreshes during the swap ([`zmail_proton::ProtonSessions::replace`]).
+    #[cfg(feature = "proton")]
+    pub fn replace_proton_session<F>(
+        &self,
+        account_id: i64,
+        store: F,
+    ) -> impl std::future::Future<Output = Result<()>> + Send + 'static + use<F>
+    where
+        F: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        let sessions = self.proton_sessions();
+        async move {
+            sessions
+                .context("Proton support has not been configured")?
+                .replace(account_id, store)
+                .await
+        }
+    }
+
     /// Watches a Proton account until the next reconnect: Bridge's event
     /// loop. Every 20 s plus up to 20 s of jitter it polls the event stream
     /// from the stored checkpoint, and syncs when something changed (the

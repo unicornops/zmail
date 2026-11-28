@@ -366,13 +366,16 @@ pub fn store_signed_in<S: SignInSteps>(
 }
 
 /// Keeps a finished sign-in for an account already in Zmail, signing in
-/// again after Proton ended its session: checks that it is the same
-/// Proton account, then hands back the storing of the new session in the
-/// account's keychain slots, to run on the sync runtime. The account's
-/// mail, folders and settings stay as they are; nothing downloads again.
+/// again: checks that it is the same Proton account, then hands back the
+/// storing of the new session in the account's keychain slots, to run on
+/// the sync runtime. The account's mail, folders and settings stay as they
+/// are; nothing downloads again.
 ///
-/// Only for an account whose session has ended: a session still in use
-/// would write its own refresh token over the new one.
+/// Run the storing inside `SyncService::replace_proton_session`, which
+/// signs the old session out and keeps it from writing its own refresh
+/// token over the new one while it may still be in use. A sign-in as
+/// another Proton account is refused here, before anything happens to the
+/// old session.
 pub fn store_signed_in_again<S: SignInSteps>(
     store: &LocalStore,
     secrets: &Arc<dyn SecretStore>,

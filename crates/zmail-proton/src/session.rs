@@ -15,6 +15,12 @@
 //! Removing an account signs its session out on Proton's side
 //! ([`ProtonSessions::sign_out`]), best effort: the refresh token is
 //! worthless afterwards, wherever a copy of it may be.
+//!
+//! Signing in to an account again replaces its session
+//! ([`ProtonSessions::replace`]): the old one stops writing to the
+//! keychain and is signed out before the new one is stored, so a refresh
+//! of the old session during the swap cannot leave its token beside the
+//! new UID.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -196,15 +202,22 @@ impl RefreshTokenSlot {
         }
     }
 
+    fn unsaved(&self) -> std::sync::MutexGuard<'_, Option<Zeroizing<String>>> {
+        self.unsaved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Writes a rotated token, remembering it if the write fails.
+    ///
+    /// The slot is checked for being closed while its lock is held, and
+    /// the lock is held through the write, so once [`Self::close`] and
+    /// [`Self::settle`] have returned nothing more is written.
     fn save(&self, refresh_token: &str) {
+        let mut unsaved = self.unsaved();
         if self.closed.load(Ordering::SeqCst) {
             return;
         }
-        let mut unsaved = self
-            .unsaved
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *unsaved = write_refresh_token(self.secrets.as_ref(), self.account_id, refresh_token)
             .is_err()
             .then(|| Zeroizing::new(refresh_token.to_owned()));
@@ -212,13 +225,10 @@ impl RefreshTokenSlot {
 
     /// Writes the remembered token, if a write failed earlier.
     fn save_unsaved(&self) -> Result<()> {
+        let mut unsaved = self.unsaved();
         if self.closed.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let mut unsaved = self
-            .unsaved
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(refresh_token) = unsaved.as_ref() {
             write_refresh_token(self.secrets.as_ref(), self.account_id, refresh_token)?;
             *unsaved = None;
@@ -226,8 +236,15 @@ impl RefreshTokenSlot {
         Ok(())
     }
 
+    /// Stops all writes from now on. A write already under way may still
+    /// finish: [`Self::settle`] waits for it.
     fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
+    }
+
+    /// Waits for a write that started before [`Self::close`] to finish.
+    fn settle(&self) {
+        drop(self.unsaved());
     }
 }
 
@@ -338,20 +355,70 @@ impl ProtonSessions {
     /// keychain. Returns whether Proton confirmed the sign-out.
     pub async fn sign_out(&self, account_id: i64, stored: Option<StoredSession>) -> bool {
         let live = self.sessions.lock().await.remove(&account_id);
-        if let Some(session) = &live {
-            session.tokens.close();
+        self.end(live, move || stored).await
+    }
+
+    /// Replaces the account's session with a new sign-in (Sign In Again)
+    /// while the old one may still be in use: `store` keeps the new
+    /// session in the account's keychain slots.
+    ///
+    /// All of it happens under the sessions lock, so no session of the
+    /// account is resumed until `store` has finished. First the open
+    /// session is dropped and stops writing refreshed tokens to the
+    /// keychain: a refresh answered from now on is written nowhere. Then it
+    /// is signed out on Proton's side, as [`Self::sign_out`] does (best
+    /// effort, at most `SIGN_OUT_TIMEOUT`): the open session, or else the
+    /// stored one. A refreshed token that was already being written when
+    /// the writes stopped is waited for. Only then does `store` run, so the
+    /// keychain ends up with the new UID and refresh token and nothing of
+    /// the old session. Holding the lock that long keeps every account's
+    /// session waiting for as long as the sign-out takes; signing in again
+    /// is rare and the user is waiting for it anyway.
+    pub async fn replace<T>(
+        &self,
+        account_id: i64,
+        store: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let mut sessions = self.sessions.lock().await;
+        let live = sessions.remove(&account_id);
+        let secrets = self.secrets.clone();
+        // Read only once the open session can write no more, so it is the
+        // newest token the old session had.
+        self.end(live, move || stored_session(secrets.as_ref(), account_id))
+            .await;
+        let stored = store.await;
+        drop(sessions);
+        stored
+    }
+
+    /// Ends a session being dropped: no more keychain writes, then a sign
+    /// out on Proton's side, with the open session `live` when there is
+    /// one, else with the session `stored` gives. Returns whether Proton
+    /// confirmed the sign-out.
+    async fn end(
+        &self,
+        live: Option<Arc<ProtonSession>>,
+        stored: impl FnOnce() -> Option<StoredSession>,
+    ) -> bool {
+        let tokens = live.as_ref().map(|session| session.tokens.clone());
+        if let Some(tokens) = &tokens {
+            tokens.close();
         }
         let sign_out = async {
-            if let Some(session) = live.filter(|session| !session.is_signed_out()) {
-                let signed_out = session.client.auth_delete().await.is_ok();
+            if let Some(session) = live {
+                let signed_out =
+                    !session.is_signed_out() && session.client.auth_delete().await.is_ok();
                 session.client.close();
+                // A refresh being written when the slot closed is done
+                // before anything else is read or written.
+                session.tokens.settle();
                 if signed_out {
                     return true;
                 }
                 // The open session may have been replaced by one resumed
                 // from the keychain since; try the stored one too.
             }
-            let Some(stored) = stored else {
+            let Some(stored) = stored() else {
                 return false;
             };
             let Ok((client, _)) = self
@@ -365,9 +432,14 @@ impl ProtonSessions {
             client.close();
             signed_out
         };
-        tokio::time::timeout(SIGN_OUT_TIMEOUT, sign_out)
+        let signed_out = tokio::time::timeout(SIGN_OUT_TIMEOUT, sign_out)
             .await
-            .unwrap_or(false)
+            .unwrap_or(false);
+        // Also when the sign-out ran out of time before it got that far.
+        if let Some(tokens) = &tokens {
+            tokens.settle();
+        }
+        signed_out
     }
 
     async fn resume(&self, account_id: i64) -> Result<ProtonSession> {

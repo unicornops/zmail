@@ -18,35 +18,187 @@
 //! password) in the keychain, and the flow carries on with the colour and
 //! first-sync steps.
 //!
-//! The same steps sign in to an existing Proton account again, once Proton
-//! has ended its session ([`AccountSetupView::sign_in_to_proton_again`],
-//! from Settings → Accounts' Re-authenticate): the new session goes into
-//! that account's keychain slots, so its mail stays and nothing downloads
-//! again. Every step runs on the sync runtime; the view shows a
-//! spinner and keeps the user on the step until it answers. The steps
+//! The same steps sign in to an existing Proton account again
+//! ([`AccountSetupView::sign_in_to_proton_again`], from Settings →
+//! Accounts' Re-authenticate), whether or not Proton has ended its session:
+//! the old session is signed out and the new one goes into that account's
+//! keychain slots (`SyncService::replace_proton_session`), so its mail
+//! stays and nothing downloads again. A sign-in as another Proton account
+//! is refused before anything happens to the old session. Every step runs
+//! on the sync runtime; the view shows a spinner and keeps the user on the
+//! step until it answers. The steps
 //! themselves are `zmail_setup::proton`'s, shared with the terminal UI;
 //! this file draws them.
 
+use std::{future::Future, pin::Pin, sync::Arc};
+
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, IntoElement, ParentElement as _,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Global, IntoElement, ParentElement as _,
     SharedString, Styled as _, Task, Window, div, px,
 };
-use zmail_core::{AccountColor, ProtocolKind};
+use zmail_core::{AccountColor, ProtocolKind, SyncPhase};
 use zmail_proton::SignInStep;
+use zmail_security::SecretStore;
+use zmail_setup::accounts::{SyncFailure, sync_failure};
 use zmail_setup::proton::{
-    self as shared, ProtonAction, RISK_NOTE, RISK_TITLE, VERIFICATION_CAPTION, VERIFICATION_DETAIL,
+    self as shared, ProtonAction, RISK_NOTE, RISK_TITLE, SignInSteps, VERIFICATION_CAPTION,
+    VERIFICATION_DETAIL,
 };
+use zmail_sync::SyncService;
 
 use super::render::{caption, field, heading, spinner};
 use super::{AccountField, AccountSetupEvent, AccountSetupServices, AccountSetupView, Stage};
 use crate::components::{Banner, BannerTone, Button};
 use crate::styles::{SPACE_2, SPACE_4, UiColors};
 
+/// A boxed future, as [`ProtonSide`] and [`Steps`] hand them back.
+pub(crate) type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+/// What the Proton steps run against: the sync service's Proton
+/// connection. View tests install a fake as a global instead, as they have
+/// no Proton server to talk to.
+#[derive(Clone)]
+pub(crate) struct ProtonBackend(pub(crate) Arc<dyn ProtonSide>);
+
+impl Global for ProtonBackend {}
+
+impl ProtonBackend {
+    /// The installed backend, or the sync service's.
+    fn get(cx: &App) -> Self {
+        cx.try_global::<Self>().cloned().unwrap_or_else(|| {
+            let sync_service = cx.global::<AccountSetupServices>().sync_service.clone();
+            Self(Arc::new(sync_service))
+        })
+    }
+}
+
+/// The Proton operations the sign-in steps need.
+pub(crate) trait ProtonSide: Send + Sync {
+    /// Starts signing in (no network yet).
+    fn begin_sign_in(&self, username: &str, password: &str) -> anyhow::Result<ProtonSteps>;
+
+    /// Replaces the account's session with the finished sign-in that
+    /// `store` keeps in its keychain slots, signing the old one out first
+    /// ([`SyncService::replace_proton_session`]).
+    fn replace_session(
+        &self,
+        account_id: i64,
+        store: BoxFuture<anyhow::Result<()>>,
+    ) -> BoxFuture<anyhow::Result<()>>;
+
+    /// After signing in again: syncs the account and sends the messages
+    /// refused for the old session again.
+    fn signed_in_again(&self, account_id: i64);
+}
+
+impl ProtonSide for SyncService {
+    fn begin_sign_in(&self, username: &str, password: &str) -> anyhow::Result<ProtonSteps> {
+        self.begin_proton_sign_in(username, password)
+            .map(ProtonSteps::new)
+    }
+
+    fn replace_session(
+        &self,
+        account_id: i64,
+        store: BoxFuture<anyhow::Result<()>>,
+    ) -> BoxFuture<anyhow::Result<()>> {
+        Box::pin(self.replace_proton_session(account_id, store))
+    }
+
+    fn signed_in_again(&self, account_id: i64) {
+        let _ = self.sync_account(account_id);
+        let _ = self.sync_watchers();
+        let _ = self.retry_refused_sends(account_id);
+    }
+}
+
+/// A sign-in's steps as the flow runs them: Proton's
+/// (`zmail_proton::ProtonSignIn`), or a view test's fake.
+#[derive(Clone)]
+pub(crate) struct ProtonSteps(Arc<dyn Steps>);
+
+impl ProtonSteps {
+    pub(crate) fn new(steps: impl SignInSteps) -> Self {
+        Self(Arc::new(steps))
+    }
+}
+
+/// [`SignInSteps`] with its futures boxed, so the steps can be any type.
+trait Steps: Send + Sync {
+    fn login(&self) -> BoxFuture<anyhow::Result<SignInStep>>;
+    fn submit_totp(&self, code: String) -> BoxFuture<anyhow::Result<SignInStep>>;
+    fn submit_mailbox_password(&self, password: String) -> BoxFuture<anyhow::Result<SignInStep>>;
+    fn store(
+        &self,
+        secrets: Arc<dyn SecretStore>,
+        account_id: i64,
+    ) -> BoxFuture<anyhow::Result<()>>;
+    fn abort(&self) -> BoxFuture<()>;
+}
+
+impl<S: SignInSteps> Steps for S {
+    fn login(&self) -> BoxFuture<anyhow::Result<SignInStep>> {
+        Box::pin(SignInSteps::login(self))
+    }
+
+    fn submit_totp(&self, code: String) -> BoxFuture<anyhow::Result<SignInStep>> {
+        Box::pin(SignInSteps::submit_totp(self, code))
+    }
+
+    fn submit_mailbox_password(&self, password: String) -> BoxFuture<anyhow::Result<SignInStep>> {
+        Box::pin(SignInSteps::submit_mailbox_password(self, password))
+    }
+
+    fn store(
+        &self,
+        secrets: Arc<dyn SecretStore>,
+        account_id: i64,
+    ) -> BoxFuture<anyhow::Result<()>> {
+        Box::pin(SignInSteps::store(self, secrets, account_id))
+    }
+
+    fn abort(&self) -> BoxFuture<()> {
+        Box::pin(SignInSteps::abort(self))
+    }
+}
+
+impl SignInSteps for ProtonSteps {
+    fn login(&self) -> impl Future<Output = anyhow::Result<SignInStep>> + Send + 'static + use<> {
+        self.0.login()
+    }
+
+    fn submit_totp(
+        &self,
+        code: String,
+    ) -> impl Future<Output = anyhow::Result<SignInStep>> + Send + 'static + use<> {
+        self.0.submit_totp(code)
+    }
+
+    fn submit_mailbox_password(
+        &self,
+        password: String,
+    ) -> impl Future<Output = anyhow::Result<SignInStep>> + Send + 'static + use<> {
+        self.0.submit_mailbox_password(password)
+    }
+
+    fn store(
+        &self,
+        secrets: Arc<dyn SecretStore>,
+        account_id: i64,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send + 'static + use<> {
+        self.0.store(secrets, account_id)
+    }
+
+    fn abort(&self) -> impl Future<Output = ()> + Send + 'static + use<> {
+        self.0.abort()
+    }
+}
+
 /// The Proton sign-in in progress: the shared state machine and the task
 /// running its current step.
 #[derive(Default)]
 pub(crate) struct ProtonFlow {
-    pub(crate) core: shared::ProtonFlow,
+    pub(crate) core: shared::ProtonFlow<ProtonSteps>,
     task: Option<Task<()>>,
     /// The existing account this sign-in is for, when signing in again.
     pub(crate) again: Option<SignInAgain>,
@@ -57,6 +209,10 @@ pub(crate) struct ProtonFlow {
 pub(crate) struct SignInAgain {
     pub(crate) account_id: i64,
     pub(crate) name: String,
+    /// Whether Proton has ended the account's session (its last failure,
+    /// still standing, is a sign-in one), rather than the user asking to
+    /// sign in again while it works.
+    pub(crate) ended: bool,
 }
 
 impl AccountSetupView {
@@ -85,9 +241,17 @@ impl AccountSetupView {
             .set_text(AccountField::Email, &account.username, cx);
         self.form.set_text(AccountField::Password, "", cx);
         self.proton.core.error = None;
+        // The last failure, still standing (a retry may be under way).
+        let status = &account.sync_status;
+        let ended = (status.phase == SyncPhase::Failed || status.failure_count > 0)
+            && status
+                .last_error_message
+                .as_deref()
+                .is_some_and(|error| sync_failure(error) == SyncFailure::SignIn);
         self.proton.again = Some(SignInAgain {
             account_id,
             name: account.display_name,
+            ended,
         });
         self.history.clear();
         self.stage = Stage::ProtonSignIn;
@@ -149,10 +313,7 @@ impl AccountSetupView {
             return;
         }
         self.proton_abort(cx);
-        let sign_in = match services
-            .sync_service
-            .begin_proton_sign_in(&email, &password)
-        {
+        let sign_in = match ProtonBackend::get(cx).0.begin_sign_in(&email, &password) {
             Ok(sign_in) => sign_in,
             Err(error) => {
                 self.proton.core.error = Some(format!("{error:#}"));
@@ -267,9 +428,11 @@ impl AccountSetupView {
         cx.notify();
     }
 
-    /// Keeps the new session for the account signed in to again, then
+    /// Keeps the new session for the account signed in to again, in place
+    /// of the old one (signed out first, even while it still works), then
     /// syncs it, with the messages refused for the old session sent again,
-    /// and closes the flow.
+    /// and closes the flow. A sign-in as another Proton account is refused
+    /// before anything happens to the old session.
     fn proton_store_again(
         &mut self,
         again: SignInAgain,
@@ -301,7 +464,11 @@ impl AccountSetupView {
                 return;
             }
         };
-        let run = services.sync_service.run_proton(store_session);
+        let backend = ProtonBackend::get(cx);
+        let replace = backend
+            .0
+            .replace_session(again.account_id, Box::pin(store_session));
+        let run = services.sync_service.run_proton(replace);
         self.proton.core.busy = true;
         self.proton.task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = run.await.and_then(|stored| stored);
@@ -316,12 +483,9 @@ impl AccountSetupView {
                 this.form
                     .set_text(AccountField::ProtonMailboxPassword, "", cx);
                 this.proton.core.done();
-                let services = cx.global::<AccountSetupServices>().clone();
                 let account_id = again.account_id;
-                let _ = services.sync_service.sync_account(account_id);
-                let _ = services.sync_service.sync_watchers();
                 // Messages refused for the old session go now.
-                let _ = services.sync_service.retry_refused_sends(account_id);
+                backend.0.signed_in_again(account_id);
                 let message = format!("Signed in to Proton again. {} is syncing.", again.name);
                 cx.defer(move |cx| super::window::show_status_everywhere(&message, cx));
                 cx.emit(AccountSetupEvent::Finished {
@@ -345,10 +509,17 @@ impl AccountSetupView {
     /// The Proton sign-in step.
     pub(crate) fn render_proton_sign_in(&self, colors: &UiColors) -> AnyElement {
         let (title, detail) = match &self.proton.again {
-            Some(again) => (
+            Some(again) if again.ended => (
                 "Sign in to Proton Mail again".to_owned(),
                 format!(
                     "Proton ended Zmail's session for {}. Sign in to carry on: its mail stays on this computer and nothing downloads again.",
+                    again.name
+                ),
+            ),
+            Some(again) => (
+                "Sign in to Proton Mail again".to_owned(),
+                format!(
+                    "Once you have signed in, Zmail signs out of the session it has been using for {}. Its mail stays on this computer and nothing downloads again.",
                     again.name
                 ),
             ),
