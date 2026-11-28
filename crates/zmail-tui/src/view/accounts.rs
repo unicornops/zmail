@@ -213,8 +213,9 @@ fn status_label(account: &AccountSummary) -> &'static str {
 
 /// The sync state of the account under the cursor, below the list: what
 /// the last sync said, when it last worked, how much older mail is still
-/// to fetch (Proton) and the last error. The detail and the error come
-/// from the sync and the server, so both are filtered.
+/// to fetch and what the last stretch of it cost (Proton), and the last
+/// error. The detail and the error come from the sync and the server, so
+/// both are filtered.
 fn sync_details(out: &mut Lines, app: &App, account: &AccountSummary) {
     let theme = out.theme;
     let status = &account.sync_status;
@@ -244,6 +245,10 @@ fn sync_details(out: &mut Lines, app: &App, account: &AccountSummary) {
     }
     if let Some(fill) = backfill(account) {
         rows.push(("Older mail", fill.label()));
+        if let Some(stretch) = fill.last_stretch {
+            rows.push(("Last stretch", stretch.label()));
+            rows.push(("Its requests", stretch.requests_label()));
+        }
     }
     if status.failure_count > 0 {
         rows.push((

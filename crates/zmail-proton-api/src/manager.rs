@@ -11,7 +11,9 @@
 // connect are only retried for GET requests. TLS pin mismatches are never
 // retried. Pre/post request hooks, the logger and the panic handler are
 // not ported. Modified on 2026-11-27 (#462): response bodies are read in
-// chunks up to a limit for the kind of route, instead of whole.
+// chunks up to a limit for the kind of route, instead of whole. Modified
+// on 2026-11-28 (#478): each request, rate-limited answer and retry wait
+// is counted in the running request tally (`tally.rs`).
 
 //! The API manager: one HTTP client, cookie jar and status per API host.
 
@@ -182,8 +184,15 @@ impl Manager {
     ) -> Result<Response, Error> {
         let policy = self.inner.config.retry;
         let mut attempt = 0;
+        crate::tally::count_request();
         loop {
             let outcome = self.send_once(request, auth).await;
+            if outcome
+                .as_ref()
+                .is_ok_and(|response| is_retryable_status(response.status))
+            {
+                crate::tally::count_rate_limited();
+            }
             let delay = match &outcome {
                 Ok(response)
                     if is_retryable_status(response.status) && attempt < policy.max_retries =>
@@ -207,6 +216,7 @@ impl Manager {
             };
             match delay {
                 Some(delay) => {
+                    crate::tally::count_retry_wait(delay);
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                 }

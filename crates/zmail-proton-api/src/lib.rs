@@ -14,7 +14,8 @@
 //!   trust: the platform's roots plus Bridge's SPKI pins.
 //! - [`Manager`] owns the HTTP connection pool, the cookie jar, the
 //!   connection status and the retry rules (429 and 503 honour
-//!   `Retry-After`; failed connects back off).
+//!   `Retry-After`; failed connects back off). [`tally`] counts the
+//!   requests, rate limiting and retry waits of one piece of work.
 //! - [`Client`] is one session: it sends `x-pm-uid` and the bearer token,
 //!   and on 401 refreshes the session once and retries once.
 //! - [`Manager::login`] signs in with SRP (`proton-srp`, with the modulus
@@ -56,6 +57,7 @@ mod pinning;
 mod response;
 mod salt;
 mod srp_modulus;
+mod tally;
 mod unlock;
 mod user;
 mod vcard;
@@ -97,5 +99,6 @@ pub use paging::{MAX_PAGE_SIZE, MAX_PAGED_ITEMS, fetch_paged};
 pub use pinning::{PinMismatch, PinParseError, PinSet};
 pub use response::{ApiError, Code, Error};
 pub use salt::{Salt, SaltedKeyPass, Salts};
+pub use tally::{RequestTally, tally};
 pub use unlock::{UnlockedAccount, key_password, unlock};
 pub use user::{ProductUsedSpace, User};

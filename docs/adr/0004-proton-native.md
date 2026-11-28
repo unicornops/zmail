@@ -230,6 +230,16 @@ against counting and rebuilding after every write, and fail if writing a
 stretch into a mirror sixteen times larger takes more than a quarter
 more work (`crates/zmail-store/src/merge/incremental_tests.rs`).
 
+The write is a small part of a stretch: the requests are the rest. Each
+stretch keeps what it cost in the checkpoint (`StretchCost`: its
+messages, the event poll, the addresses and labels and the metadata
+pages, each with its requests, rate-limited answers and time waiting to
+retry, the write, and the time since the stretch before), counted by
+`zmail_proton_api::tally` for the sync's own task only, and the
+terminal UI's sync details show it with the download rate while older
+mail arrives. Older Zmail ignores the field, and one that does not read
+is dropped rather than making the checkpoint unusable.
+
 ### Bounded requests
 
 What the server sends never keeps a request or a sync going, or fills

@@ -16,6 +16,8 @@
 // `attachment.rs`. Modified on 2026-11-27 (#462): a page the server keeps
 // answering as stale is asked for a few times with a short back-off, not
 // forever, and a full message is read up to the data response limit.
+// Modified on 2026-11-28 (#478): the stale back-off counts as a retry
+// wait in the running request tally.
 
 //! Message metadata: what a message list needs, without the encrypted body.
 
@@ -424,7 +426,9 @@ impl Client {
         let backoff = self.manager().config().retry;
         for attempt in 0..MAX_STALE_ATTEMPTS {
             if attempt > 0 {
-                tokio::time::sleep(backoff.backoff_delay(attempt - 1)).await;
+                let delay = backoff.backoff_delay(attempt - 1);
+                crate::tally::count_retry_wait(delay);
+                tokio::time::sleep(delay).await;
             }
             let res: Res = self.json(&request).await?;
             if !res.stale {

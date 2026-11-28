@@ -29,7 +29,7 @@ use zmail_core::{
 };
 use zmail_proton_api::{Address, AddressStatus, User};
 
-pub use checkpoint::ProtonCheckpoint;
+pub use checkpoint::{ProtonCheckpoint, RequestCost, StretchCost};
 use events::EventsOutcome;
 pub use events::{EVENT_JITTER, EVENT_PERIOD, event_poll_delay, has_new_events};
 pub use hydrate::fetch_message_bodies;
@@ -40,7 +40,7 @@ pub use session::{
 };
 pub use signin::{ProtonSignIn, SignInStep, SignedInAccount};
 pub use sync::SyncPaging;
-pub use zmail_proton_api::{API_HOST_URL, AppVersion, ClientConfig};
+pub use zmail_proton_api::{API_HOST_URL, AppVersion, ClientConfig, RequestTally, tally};
 
 /// Reports how far a sync has got, as a status line.
 pub type Progress<'a> = &'a (dyn Fn(&str) + Send + Sync);
@@ -108,6 +108,13 @@ pub struct Backfill {
     /// listed in this step: write the step as a [`MailDelta`] covering
     /// them, so each listed message ends up exactly where Proton has it.
     pub relisted: Option<Vec<String>>,
+    /// Messages this step listed.
+    pub listed: usize,
+    /// The requests for the addresses and labels the messages are placed
+    /// with (#478).
+    pub lookups: RequestTally,
+    /// The requests for the pages of message metadata.
+    pub pages: RequestTally,
 }
 
 impl Backfill {
@@ -284,6 +291,7 @@ async fn relist(
         listed: pages.messages.len(),
         total,
         labels: label_names,
+        last_stretch: None,
     };
     let detail = if checkpoint.backfill_pending() {
         backfill_progress(&checkpoint)
@@ -347,6 +355,7 @@ async fn first_sync(
         total,
         labels: events::label_map(&labels),
         relist: false,
+        last_stretch: None,
     };
     let detail = if checkpoint.backfill_pending() {
         backfill_progress(&checkpoint)
@@ -387,29 +396,36 @@ pub async fn backfill_older_mail(
         return Ok(None);
     };
     let client = session.client();
-    let addresses = client.get_addresses().await?;
+    let (lookups, lookup_requests) = tally(async {
+        let addresses = client.get_addresses().await?;
+        let labels = client.get_labels(&sync::LABEL_TYPES).await?;
+        anyhow::Ok((addresses, labels))
+    })
+    .await;
+    let (addresses, labels) = lookups?;
     let (identity_for_address, fallback_identity) = address_identities(&addresses, "");
-    let labels = client.get_labels(&sync::LABEL_TYPES).await?;
     let listed = |count: usize| {
         progress(&backfill_progress(&ProtonCheckpoint {
             listed: checkpoint.listed + count,
             ..checkpoint.clone()
         }))
     };
-    let pages = sync::fetch_metadata_pages(
+    let (pages, page_requests) = tally(sync::fetch_metadata_pages(
         client,
         &end_id,
         paging.backfill_pages_per_run,
         paging.page_size,
         &listed,
-    )
-    .await?;
+    ))
+    .await;
+    let pages = pages?;
     let mailboxes = sync::build_mailboxes(
         &labels,
         &pages.messages,
         &identity_for_address,
         &fallback_identity,
     );
+    let stretch_len = pages.messages.len();
     let relisted = checkpoint
         .relist
         .then(|| pages.messages.iter().map(|meta| meta.id.clone()).collect());
@@ -437,6 +453,9 @@ pub async fn backfill_older_mail(
         },
         complete,
         relisted,
+        listed: stretch_len,
+        lookups: lookup_requests,
+        pages: page_requests,
     }))
 }
 
