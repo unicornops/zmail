@@ -244,6 +244,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0034_address_history_incremental",
         address_history::ADDRESS_HISTORY_INCREMENTAL_SCHEMA,
     ),
+    ("0035_recipient_key_pins", key_trust::KEY_PINS_SCHEMA),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -1299,8 +1300,8 @@ impl LocalStore {
 
     /// Deletes an account and everything stored locally for it: its synced
     /// mail, downloaded bodies and attachments, drafts, outbox, queued
-    /// changes, address history and search index entries, and its place
-    /// in the UI preferences. Nothing is deleted on the server, and the
+    /// changes, address history, saved recipient keys and search index
+    /// entries, and its place in the UI preferences. Nothing is deleted on the server, and the
     /// caller removes the account's keychain secrets.
     pub fn delete_account(&self, account_id: i64) -> Result<()> {
         let mut conn = self.connection()?;
@@ -8848,6 +8849,191 @@ mod tests {
                 .expect("trusts")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn remembered_pins_are_per_account_and_recipient_and_go_with_the_account() {
+        use zmail_core::key_change::RecipientPins;
+
+        let (store, work, home) = two_account_store();
+        let pinned = "0123456789abcdef0123456789abcdef01234567";
+        let served = "89abcdef0123456789abcdef0123456789abcdef";
+        store
+            .remember_recipient_pins(
+                work,
+                &RecipientPins::new(" Bob@Example.org ", [pinned.to_owned()], true),
+            )
+            .expect("remembered");
+        assert_eq!(
+            store.remembered_recipient_pins(work).expect("pins"),
+            [RecipientPins {
+                recipient: "bob@example.org".to_owned(),
+                fingerprints: vec![pinned.to_uppercase()],
+                encrypt: true,
+            }]
+        );
+        // A later card replaces the record; the same address in another
+        // case is the same record.
+        store
+            .remember_recipient_pins(
+                work,
+                &RecipientPins::new(
+                    "BOB@example.org",
+                    [pinned.to_owned(), served.to_owned()],
+                    true,
+                ),
+            )
+            .expect("remembered");
+        // Encryption required with no pins is a record too.
+        store
+            .remember_recipient_pins(work, &RecipientPins::new("alice@example.org", [], true))
+            .expect("remembered");
+        let pins = store.remembered_recipient_pins(work).expect("pins");
+        assert_eq!(pins.len(), 2);
+        assert_eq!(pins[0], RecipientPins::new("alice@example.org", [], true));
+        assert_eq!(
+            pins[1].fingerprints,
+            [pinned.to_uppercase(), served.to_uppercase()]
+        );
+        assert!(
+            store
+                .remembered_recipient_pins(home)
+                .expect("pins")
+                .is_empty()
+        );
+        assert!(
+            store
+                .remember_recipient_pins(
+                    work,
+                    &RecipientPins::new("bob@example.org", ["not hex".to_owned()], true)
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .remember_recipient_pins(work, &RecipientPins::new(" ", [], true))
+                .is_err()
+        );
+
+        store.delete_account(work).expect("removed");
+        assert!(
+            store
+                .remembered_recipient_pins(work)
+                .expect("pins")
+                .is_empty()
+        );
+        let rows: i64 = store
+            .connection()
+            .expect("connects")
+            .query_row("SELECT COUNT(*) FROM recipient_key_pins", [], |row| {
+                row.get(0)
+            })
+            .expect("counted");
+        assert_eq!(rows, 0, "nothing is left of the removed account");
+    }
+
+    #[test]
+    fn forgetting_a_recipient_removes_its_pins_and_trusts_only() {
+        use zmail_core::key_change::RecipientPins;
+
+        let (store, work, home) = two_account_store();
+        let pinned = "0123456789ABCDEF0123456789ABCDEF01234567";
+        let served = "89ABCDEF0123456789ABCDEF0123456789ABCDEF";
+        for account in [work, home] {
+            for recipient in ["bob@example.org", "alice@example.org"] {
+                store
+                    .remember_recipient_pins(
+                        account,
+                        &RecipientPins::new(recipient, [pinned.to_owned()], true),
+                    )
+                    .expect("remembered");
+                store
+                    .trust_recipient_key(account, recipient, served)
+                    .expect("trusted");
+            }
+        }
+        store
+            .forget_recipient_keys(work, " BOB@example.org ")
+            .expect("forgotten");
+        let recipients = |pins: Vec<RecipientPins>| -> Vec<String> {
+            pins.into_iter().map(|pins| pins.recipient).collect()
+        };
+        assert_eq!(
+            recipients(store.remembered_recipient_pins(work).expect("pins")),
+            ["alice@example.org"]
+        );
+        assert_eq!(
+            store
+                .trusted_recipient_keys(work)
+                .expect("trusts")
+                .into_iter()
+                .map(|trust| trust.recipient)
+                .collect::<Vec<_>>(),
+            ["alice@example.org"]
+        );
+        assert_eq!(
+            recipients(store.remembered_recipient_pins(home).expect("pins")),
+            ["alice@example.org", "bob@example.org"]
+        );
+        assert_eq!(store.trusted_recipient_keys(home).expect("trusts").len(), 2);
+        // Forgetting what is not there is not an error.
+        store
+            .forget_recipient_keys(work, "bob@example.org")
+            .expect("nothing to forget");
+    }
+
+    #[test]
+    fn the_recipient_pins_migration_adds_the_table_and_keeps_key_trusts() {
+        use zmail_core::key_change::RecipientPins;
+
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Proton)
+            .expect("account should be created");
+        let served = "89ABCDEF0123456789ABCDEF0123456789ABCDEF";
+        store
+            .trust_recipient_key(account_id, "bob@example.org", served)
+            .expect("trusted");
+        // The store as it was before migration 0035.
+        store
+            .connection()
+            .expect("connects")
+            .execute_batch(
+                "DROP TABLE recipient_key_pins; \
+                 DELETE FROM schema_migrations WHERE version = '0035_recipient_key_pins';",
+            )
+            .expect("rolled back");
+        assert!(store.remembered_recipient_pins(account_id).is_err());
+        store.apply_migrations().expect("migrates");
+        assert!(
+            store
+                .remembered_recipient_pins(account_id)
+                .expect("pins")
+                .is_empty()
+        );
+        store
+            .remember_recipient_pins(
+                account_id,
+                &RecipientPins::new("bob@example.org", [served.to_owned()], false),
+            )
+            .expect("remembered");
+        assert_eq!(
+            store
+                .remembered_recipient_pins(account_id)
+                .expect("pins")
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .trusted_recipient_keys(account_id)
+                .expect("trusts")
+                .len(),
+            1,
+            "the key trusts are kept"
+        );
+        // Opening again applies nothing twice.
+        store.apply_migrations().expect("migrates again");
     }
 
     #[test]

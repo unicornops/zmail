@@ -32,6 +32,39 @@ use crate::{SyncService, backoff::Backoff, wake::unless_woken};
 #[cfg(feature = "proton")]
 const BACKFILL_PAUSE: Duration = Duration::from_millis(1500);
 
+/// The account's saved key records a Proton send starts from: the keys the
+/// user trusted and the pins remembered from verified contact cards.
+#[cfg(feature = "proton")]
+pub(crate) fn recipient_keys(
+    store: &zmail_store::LocalStore,
+    account_id: i64,
+) -> Result<zmail_core::key_change::RecipientKeys> {
+    Ok(zmail_core::key_change::RecipientKeys::new(
+        store.trusted_recipient_keys(account_id)?,
+        store.remembered_recipient_pins(account_id)?,
+    ))
+}
+
+/// Saves what a Proton send saw on verified contact cards (ADR 0004,
+/// "Contact cards that go missing"), whether the send went or stopped,
+/// and hands back how the send went. A send that went is never reported
+/// failed for a record that could not be saved, which would send it
+/// again; a send that failed keeps its own error.
+#[cfg(feature = "proton")]
+pub(crate) fn save_noted_pins(
+    store: &zmail_store::LocalStore,
+    account_id: i64,
+    sent: Result<()>,
+    keys: &zmail_core::key_change::RecipientKeys,
+) -> Result<()> {
+    for pins in keys.take_noted() {
+        // A record that cannot be saved now is noted again by the next
+        // send that uses the card.
+        let _ = store.remember_recipient_pins(account_id, &pins);
+    }
+    sent
+}
+
 /// What a protocol adapter connects with.
 pub(crate) enum Credentials {
     /// A password or OAuth2 access token (IMAP and JMAP), wiped when
@@ -283,8 +316,9 @@ impl SyncService {
             let Credentials::Proton(session) = self.connect_proton(target).await? else {
                 anyhow::bail!("Proton accounts need a Proton session");
             };
-            let trusted = self.inner.store.trusted_recipient_keys(target.id)?;
-            zmail_proton::submit_outgoing_message(&session, message, &trusted).await
+            let keys = recipient_keys(&self.inner.store, target.id)?;
+            let sent = zmail_proton::submit_outgoing_message(&session, message, &keys).await;
+            save_noted_pins(&self.inner.store, target.id, sent, &keys)
         }
         #[cfg(not(feature = "proton"))]
         {
@@ -338,8 +372,9 @@ impl SyncService {
             let Credentials::Proton(session) = self.connect_proton(target).await? else {
                 anyhow::bail!("Proton accounts need a Proton session");
             };
-            let trusted = self.inner.store.trusted_recipient_keys(target.id)?;
-            zmail_proton::send_existing_draft(&session, draft_id, message, &trusted).await
+            let keys = recipient_keys(&self.inner.store, target.id)?;
+            let sent = zmail_proton::send_existing_draft(&session, draft_id, message, &keys).await;
+            save_noted_pins(&self.inner.store, target.id, sent, &keys)
         }
         #[cfg(not(feature = "proton"))]
         {
@@ -510,5 +545,70 @@ mod tests {
         assert!(message.contains("Proton Mail web app"), "{message}");
         assert!(!message.contains("signature verification failed"));
         assert!(SyncService::unverified_contact_card(&anyhow::anyhow!("other")).is_none());
+    }
+
+    /// A Proton send reads the account's saved keys, and what it saw on
+    /// verified contact cards is saved for the next one, failed or not.
+    #[test]
+    fn a_send_reads_the_saved_keys_and_saves_the_pins_it_saw() {
+        use zmail_core::{
+            ProtocolKind,
+            key_change::{RecipientKeys, RecipientPins},
+        };
+        use zmail_store::LocalStore;
+
+        const PINNED: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
+        const SERVED: &str = "89ABCDEF0123456789ABCDEF0123456789ABCDEF";
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Proton)
+            .expect("account");
+        let other = store
+            .create_demo_account(ProtocolKind::Proton)
+            .expect("account");
+        store
+            .trust_recipient_key(account_id, "bob@example.org", SERVED)
+            .expect("trusted");
+        store
+            .remember_recipient_pins(
+                account_id,
+                &RecipientPins::new("bob@example.org", [PINNED.to_owned()], false),
+            )
+            .expect("remembered");
+
+        let keys: RecipientKeys = super::recipient_keys(&store, account_id).expect("keys");
+        assert_eq!(keys.trusted.len(), 1);
+        assert_eq!(
+            keys.pins_for("Bob@example.org").map(|pins| pins.encrypt),
+            Some(false)
+        );
+        assert!(
+            super::recipient_keys(&store, other)
+                .expect("keys")
+                .pins
+                .is_empty()
+        );
+
+        keys.note(RecipientPins::new(
+            "bob@example.org",
+            [SERVED.to_owned()],
+            true,
+        ));
+        keys.note(RecipientPins::new("alice@example.org", [], true));
+        super::save_noted_pins(&store, account_id, Ok(()), &keys).expect("saved");
+        assert!(keys.take_noted().is_empty(), "saved once");
+        assert_eq!(
+            store.remembered_recipient_pins(account_id).expect("pins"),
+            [
+                RecipientPins::new("alice@example.org", [], true),
+                RecipientPins::new("bob@example.org", [SERVED.to_owned()], true),
+            ]
+        );
+        assert!(
+            store
+                .remembered_recipient_pins(other)
+                .expect("pins")
+                .is_empty()
+        );
     }
 }

@@ -27,7 +27,7 @@ use gpui::{
 use zmail_core::{
     AccountColor, DraftState, DraftSummary, OutboxJobState, OutboxJobSummary, SearchHit,
     ThreadSummary, is_interrupted_send,
-    key_change::PinnedKeyChanged,
+    key_change::{EncryptionKeyMissing, PinnedKeyChanged},
     participants::{parse_address_list, participant_names, sender_identity},
     reauth::ReauthReason,
     text::count_noun,
@@ -397,6 +397,10 @@ pub(crate) struct OutboxStatus {
     /// A recipient's key no longer matches their contact card: offer to
     /// trust the new key instead of Retry now, which stops again.
     pub(crate) key_change: Option<PinnedKeyChanged>,
+    /// Zmail remembers a recipient as encrypt-required and has no key to
+    /// encrypt to: offer sending again or forgetting the saved keys
+    /// instead of Retry now.
+    pub(crate) saved_keys: Option<EncryptionKeyMissing>,
 }
 
 /// "Sending…", "Failed — retrying in 5 min", "Couldn't send" and so on,
@@ -411,6 +415,7 @@ pub(crate) fn outbox_status(
         can_retry,
         needs_reauth: false,
         key_change: None,
+        saved_keys: None,
     };
     let refused = job
         .last_error_message
@@ -421,6 +426,10 @@ pub(crate) fn outbox_status(
         .last_error_message
         .as_deref()
         .and_then(PinnedKeyChanged::of_message);
+    let saved_keys = job
+        .last_error_message
+        .as_deref()
+        .and_then(EncryptionKeyMissing::of_message);
     match job.state {
         OutboxJobState::Failed if refused => OutboxStatus {
             needs_reauth: true,
@@ -429,6 +438,10 @@ pub(crate) fn outbox_status(
         OutboxJobState::Failed if key_change.is_some() => OutboxStatus {
             key_change,
             ..status("A recipient\u{2019}s key changed", true, false)
+        },
+        OutboxJobState::Failed if saved_keys.is_some() => OutboxStatus {
+            saved_keys,
+            ..status("Can\u{2019}t encrypt to a recipient", true, false)
         },
         OutboxJobState::Queued => status("Waiting to send", false, false),
         OutboxJobState::Sending => status("Sending\u{2026}", false, false),
@@ -462,6 +475,7 @@ pub(crate) fn outbox_status(
                 can_retry: true,
                 needs_reauth: false,
                 key_change: None,
+                saved_keys: None,
             }
         }
     }
@@ -1232,6 +1246,24 @@ mod tests {
         // Only a failed job: a retry in progress is not a decision.
         changed.state = OutboxJobState::Retrying;
         assert_eq!(outbox_status(&changed, &now).key_change, None);
+    }
+
+    #[test]
+    fn a_missing_key_asks_to_fix_the_contact_or_forget_the_saved_keys() {
+        let now = zmail_core::time::clock_at("2026-10-18T10:00:00Z")
+            .expect("a timestamp")
+            .with_time_zone(zmail_core::time::system_zone());
+        let missing = zmail_core::key_change::EncryptionKeyMissing::new("kai@example.test");
+        let mut failed = job(OutboxJobState::Failed, None);
+        failed.last_error_message = Some(missing.to_string());
+        let status = outbox_status(&failed, &now);
+        assert_eq!(status.text, "Can\u{2019}t encrypt to a recipient");
+        assert!(status.failed && !status.needs_reauth);
+        assert!(!status.can_retry, "the dialog offers sending again");
+        assert_eq!(status.key_change, None);
+        assert_eq!(status.saved_keys, Some(missing));
+        failed.state = OutboxJobState::Retrying;
+        assert_eq!(outbox_status(&failed, &now).saved_keys, None);
     }
 
     #[test]

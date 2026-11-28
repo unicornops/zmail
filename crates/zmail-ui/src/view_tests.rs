@@ -2525,6 +2525,145 @@ fn a_changed_recipient_key_offers_to_trust_exactly_the_new_key(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn the_keys_saved_for_a_recipient_can_be_forgotten_from_the_outbox(cx: &mut TestAppContext) {
+    use zmail_core::key_change::{EncryptionKeyMissing, PinnedKeyChanged, RecipientPins};
+
+    const PINNED: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
+    const SERVED: &str = "89ABCDEF0123456789ABCDEF0123456789ABCDEF";
+    let (view, cx, harness) = open_workspace(cx, Setup::Mail);
+    let account_id = cx.read_entity(&view, |view, _| view.accounts[0].id);
+    let save_keys = || {
+        harness
+            .store
+            .remember_recipient_pins(
+                account_id,
+                &RecipientPins::new("kai@example.test", [PINNED.to_owned()], true),
+            )
+            .expect("remembered");
+        harness
+            .store
+            .trust_recipient_key(account_id, "kai@example.test", SERVED)
+            .expect("trusted");
+    };
+    let saved = || {
+        (
+            harness
+                .store
+                .remembered_recipient_pins(account_id)
+                .expect("pins")
+                .len(),
+            harness
+                .store
+                .trusted_recipient_keys(account_id)
+                .expect("trusts")
+                .len(),
+        )
+    };
+    let state = |job: i64| {
+        harness
+            .store
+            .list_outbox_jobs(Some(account_id))
+            .expect("jobs")
+            .into_iter()
+            .find(|summary| summary.id == job)
+            .expect("the job is kept")
+            .state
+    };
+    let refresh = |cx: &mut VisualTestContext| {
+        view.update(cx, |view, cx| {
+            view.refresh_from_store(cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    };
+    save_keys();
+
+    // The key change dialog offers to forget them.
+    let changed = queue_test_message(&harness.store, "Key changed");
+    harness
+        .store
+        .record_outbox_failure(
+            changed,
+            PinnedKeyChanged::new("kai@example.test", [PINNED.to_owned()], [SERVED.to_owned()])
+                .to_string(),
+        )
+        .expect("the failure is recorded");
+    cx.dispatch_action(crate::actions::ShowOutbox);
+    refresh(cx);
+    click_on(format!("outbox-row-{changed}-trust-key"), cx);
+    cx.run_until_parked();
+    assert!(drawn("key-change-forget".to_owned(), cx));
+    // Cancel has the focus, not the forget button in the body.
+    let list = cx.read_entity(&view, |view, _| view.message_list.clone());
+    assert!(cx.update(|window, cx| list.read(cx).key_change_cancel_focused(window)));
+    click_on("key-change-forget".to_owned(), cx);
+    cx.run_until_parked();
+    assert_eq!(saved(), (0, 0));
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.status_message.clone()),
+        Some("Saved keys forgotten. Sending the message again.".to_owned())
+    );
+    assert_ne!(
+        state(changed),
+        zmail_core::OutboxJobState::Failed,
+        "sent again"
+    );
+
+    // A recipient with no key to encrypt to: its own dialog.
+    save_keys();
+    let missing = queue_test_message(&harness.store, "No key");
+    harness
+        .store
+        .record_outbox_failure(
+            missing,
+            EncryptionKeyMissing::new("kai@example.test").to_string(),
+        )
+        .expect("the failure is recorded");
+    refresh(cx);
+    assert!(!drawn(format!("outbox-row-{missing}-retry"), cx));
+    click_on(format!("outbox-row-{missing}-saved-keys"), cx);
+    cx.run_until_parked();
+    // Cancel forgets nothing.
+    click_on("saved-keys-cancel".to_owned(), cx);
+    cx.run_until_parked();
+    assert!(!drawn("saved-keys-forget".to_owned(), cx));
+    assert_eq!(saved(), (1, 1));
+    assert_eq!(state(missing), zmail_core::OutboxJobState::Failed);
+
+    // Send again (after fixing the contact) keeps them.
+    click_on(format!("outbox-row-{missing}-saved-keys"), cx);
+    cx.run_until_parked();
+    click_on("saved-keys-send-again".to_owned(), cx);
+    cx.run_until_parked();
+    assert_eq!(saved(), (1, 1));
+    assert_ne!(
+        state(missing),
+        zmail_core::OutboxJobState::Failed,
+        "sent again"
+    );
+
+    let again = queue_test_message(&harness.store, "No key again");
+    harness
+        .store
+        .record_outbox_failure(
+            again,
+            EncryptionKeyMissing::new("kai@example.test").to_string(),
+        )
+        .expect("the failure is recorded");
+    refresh(cx);
+    click_on(format!("outbox-row-{again}-saved-keys"), cx);
+    cx.run_until_parked();
+    click_on("saved-keys-forget".to_owned(), cx);
+    cx.run_until_parked();
+    assert_eq!(saved(), (0, 0));
+    assert_ne!(
+        state(again),
+        zmail_core::OutboxJobState::Failed,
+        "sent again"
+    );
+}
+
+#[gpui::test]
 fn a_send_refused_for_the_sign_in_offers_re_authenticate(cx: &mut TestAppContext) {
     let (view, cx, harness) = open_workspace(cx, Setup::Mail);
     let account_id = cx.read_entity(&view, |view, _| view.accounts[0].id);

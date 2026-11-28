@@ -511,14 +511,24 @@ pub async fn apply_pending_ops(
 /// When a recipient's contact card pins keys and Proton serves none of
 /// them, the send fails with a
 /// [`PinnedKeyChanged`](zmail_core::key_change::PinnedKeyChanged) error
-/// unless `trusted` holds the user's trust in the served key for that
+/// unless `keys` holds the user's trust in the served key for that
 /// recipient.
+///
+/// What a verified card pins and whether it requires encryption is noted
+/// in `keys` ([`RecipientKeys::take_noted`]) for the caller to save,
+/// whether or not the send goes; a later send whose card is gone or pins
+/// nothing keeps to the remembered pins in `keys`, and never sends in
+/// clear to a recipient remembered as encrypt-required
+/// ([`EncryptionKeyMissing`]) (ADR 0004, "Contact cards that go missing").
+///
+/// [`RecipientKeys::take_noted`]: zmail_core::key_change::RecipientKeys::take_noted
+/// [`EncryptionKeyMissing`]: zmail_core::key_change::EncryptionKeyMissing
 pub async fn submit_outgoing_message(
     session: &ProtonSession,
     message: &OutgoingMessage,
-    trusted: &[zmail_core::key_change::KeyTrust],
+    keys: &zmail_core::key_change::RecipientKeys,
 ) -> Result<()> {
-    send::send_message(session, message, trusted).await
+    send::send_message(session, message, keys).await
 }
 
 /// Looks for the message an interrupted send was sending (Zmail stopped
@@ -538,9 +548,9 @@ pub async fn send_existing_draft(
     session: &ProtonSession,
     draft_id: &str,
     message: &OutgoingMessage,
-    trusted: &[zmail_core::key_change::KeyTrust],
+    keys: &zmail_core::key_change::RecipientKeys,
 ) -> Result<()> {
-    send::send_existing_draft(session, draft_id, message, trusted).await
+    send::send_existing_draft(session, draft_id, message, keys).await
 }
 
 #[cfg(test)]

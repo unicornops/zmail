@@ -2,7 +2,8 @@
 //!
 //! - **Outbox**: messages waiting to send, sending, and those that
 //!   couldn't (failed, or refused by the server until the account signs
-//!   in again, or held because a recipient's key changed), with the GUI's
+//!   in again, or held because a recipient's key changed or there is no
+//!   key to encrypt to a recipient that needs it), with the GUI's
 //!   wording. `R` sends a failed one again ([`MailActions::retry_outbox_job`]
 //!   and the outbox pass, as the GUI's Retry does) and `D` takes back one
 //!   that hasn't started sending (the store can't take back the others),
@@ -15,7 +16,7 @@
 
 use zmail_core::{
     DraftSummary, OutboxJobState, OutboxJobSummary, is_interrupted_send,
-    key_change::PinnedKeyChanged,
+    key_change::{EncryptionKeyMissing, PinnedKeyChanged},
     reauth::ReauthReason,
     text::count_noun,
     time::{Stamp, parse_timestamp},
@@ -77,6 +78,11 @@ fn status(job: &OutboxJobSummary, now: Stamp) -> (String, bool, bool, bool) {
         .as_deref()
         .and_then(PinnedKeyChanged::of_message)
         .is_some();
+    let saved_keys = job
+        .last_error_message
+        .as_deref()
+        .and_then(EncryptionKeyMissing::of_message)
+        .is_some();
     // (text, failed, can retry, can take back)
     match job.state {
         OutboxJobState::Failed if refused => (
@@ -89,6 +95,14 @@ fn status(job: &OutboxJobSummary, now: Stamp) -> (String, bool, bool, bool) {
             "A recipient\u{2019}s key changed (decide in the Zmail window)".to_owned(),
             true,
             false,
+            false,
+        ),
+        // `R` sends it again once the contact is fixed in Proton Mail;
+        // forgetting the saved keys is done in the Zmail window.
+        OutboxJobState::Failed if saved_keys => (
+            "Can\u{2019}t encrypt to a recipient (decide in the Zmail window)".to_owned(),
+            true,
+            true,
             false,
         ),
         OutboxJobState::Queued => match job
@@ -331,7 +345,48 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::short_duration;
+    use zmail_core::{
+        OutboxJobState, OutboxJobSummary,
+        key_change::{EncryptionKeyMissing, PinnedKeyChanged},
+        time::parse_timestamp,
+    };
+
+    use super::{short_duration, status};
+
+    #[test]
+    fn recipient_key_failures_point_to_the_zmail_window() {
+        let now = parse_timestamp("2026-10-18T10:00:00Z").expect("a timestamp");
+        let job = |message: String| OutboxJobSummary {
+            id: 3,
+            draft_id: 4,
+            account_id: 1,
+            state: OutboxJobState::Failed,
+            attempt_count: 1,
+            next_attempt_at: None,
+            last_error_message: Some(message),
+        };
+        let (text, failed, can_retry, _) = status(
+            &job(
+                PinnedKeyChanged::new("kai@example.test", ["AB".repeat(20)], ["CD".repeat(20)])
+                    .to_string(),
+            ),
+            now,
+        );
+        assert!(text.contains("decide in the Zmail window"), "{text}");
+        assert!(failed && !can_retry);
+        let (text, failed, can_retry, _) = status(
+            &job(EncryptionKeyMissing::new("kai@example.test").to_string()),
+            now,
+        );
+        assert_eq!(
+            text,
+            "Can\u{2019}t encrypt to a recipient (decide in the Zmail window)"
+        );
+        assert!(
+            failed && can_retry,
+            "R sends again once the contact is fixed"
+        );
+    }
 
     #[test]
     fn waits_read_as_the_guis_outbox_says_them() {
