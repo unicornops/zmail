@@ -2593,6 +2593,9 @@ fn the_keys_saved_for_a_recipient_can_be_forgotten_from_the_outbox(cx: &mut Test
     click_on(format!("outbox-row-{changed}-trust-key"), cx);
     cx.run_until_parked();
     assert!(drawn("key-change-forget".to_owned(), cx));
+    // Cancel has the focus, not the forget button in the body.
+    let list = cx.read_entity(&view, |view, _| view.message_list.clone());
+    assert!(cx.update(|window, cx| list.read(cx).key_change_cancel_focused(window)));
     click_on("key-change-forget".to_owned(), cx);
     cx.run_until_parked();
     assert_eq!(saved(), (0, 0));
@@ -2600,7 +2603,11 @@ fn the_keys_saved_for_a_recipient_can_be_forgotten_from_the_outbox(cx: &mut Test
         cx.read_entity(&view, |view, _| view.status_message.clone()),
         Some("Saved keys forgotten. Sending the message again.".to_owned())
     );
-    assert_ne!(state(changed), zmail_core::OutboxJobState::Failed, "sent again");
+    assert_ne!(
+        state(changed),
+        zmail_core::OutboxJobState::Failed,
+        "sent again"
+    );
 
     // A recipient with no key to encrypt to: its own dialog.
     save_keys();
@@ -2629,7 +2636,11 @@ fn the_keys_saved_for_a_recipient_can_be_forgotten_from_the_outbox(cx: &mut Test
     click_on("saved-keys-send-again".to_owned(), cx);
     cx.run_until_parked();
     assert_eq!(saved(), (1, 1));
-    assert_ne!(state(missing), zmail_core::OutboxJobState::Failed, "sent again");
+    assert_ne!(
+        state(missing),
+        zmail_core::OutboxJobState::Failed,
+        "sent again"
+    );
 
     let again = queue_test_message(&harness.store, "No key again");
     harness
@@ -2645,7 +2656,11 @@ fn the_keys_saved_for_a_recipient_can_be_forgotten_from_the_outbox(cx: &mut Test
     click_on("saved-keys-forget".to_owned(), cx);
     cx.run_until_parked();
     assert_eq!(saved(), (0, 0));
-    assert_ne!(state(again), zmail_core::OutboxJobState::Failed, "sent again");
+    assert_ne!(
+        state(again),
+        zmail_core::OutboxJobState::Failed,
+        "sent again"
+    );
 }
 
 #[gpui::test]

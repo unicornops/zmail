@@ -13,11 +13,18 @@
 // `PinnedKeyChanged` unless the user trusted the served key for this
 // recipient, where Bridge sends to the first served key (ADR 0004). For
 // WKD keys the key is only picked when the mail is encrypted.
+// Modified by UnicornOps on 2026-11-28: what Zmail remembers of the
+// recipient's earlier verified contact card stands in for pins and
+// "always encrypt" the card no longer has (a card that is gone, or one
+// that pins nothing): `pickSendingKey` keeps to the remembered pins, and a
+// recipient remembered as encrypt-required is encrypted to or not sent
+// to at all (`EncryptionKeyMissing`), never sent in clear (ADR 0004).
+// `matchFingerprints` is folded into `pickSendingKey`.
 
 //! Deciding how to send to each recipient: Bridge's send preferences.
 
 use anyhow::{Context as _, Result, bail};
-use zmail_core::key_change::{KeyTrust, PinnedKeyChanged};
+use zmail_core::key_change::{EncryptionKeyMissing, KeyTrust, PinnedKeyChanged, RecipientPins};
 use zmail_proton_api::{
     ContactSettings, EncryptionScheme, MULTIPART_MIXED, MailSettings, PublicKey, RecipientKey,
     SendPreferences, SignatureType, TEXT_PLAIN,
@@ -65,13 +72,18 @@ fn new_contact_settings(settings: &ContactSettings) -> Result<VCardData> {
     Ok(metadata)
 }
 
-/// The recipient a send preference is for, and the served keys the user
-/// trusted although the contact card pins others.
+/// The recipient a send preference is for, the served keys the user
+/// trusted although the contact card pins others, and what Zmail
+/// remembers of the recipient's earlier verified contact card.
+#[derive(Clone, Copy)]
 pub(crate) struct Recipient<'a> {
     /// The recipient's address.
     pub(crate) address: &'a str,
     /// The account's key trust decisions.
     pub(crate) trusted: &'a [KeyTrust],
+    /// The pins and "always encrypt" remembered for this recipient. A
+    /// record for another address is ignored.
+    pub(crate) remembered: Option<&'a RecipientPins>,
 }
 
 /// Works out how to send to one recipient (`buildSendPrefs`).
@@ -83,20 +95,38 @@ pub(crate) fn build_send_prefs(
     mime_type: &str,
     is_internal: bool,
 ) -> Result<SendPreferences> {
+    let recipient = &Recipient {
+        remembered: recipient
+            .remembered
+            .filter(|remembered| remembered.is_for(recipient.address)),
+        ..*recipient
+    };
+    let mut vcard = new_contact_settings(contact_settings)?;
+    // A recipient remembered as encrypt-required is encrypted to, whatever
+    // the card says now (Zmail's rule, ADR 0004).
+    let encrypt_required = recipient
+        .remembered
+        .is_some_and(|remembered| remembered.encrypt);
+    if encrypt_required {
+        vcard.encrypt = true;
+        vcard.encrypt_untrusted = true;
+    }
     let mut builder = SendPrefsBuilder::default();
     // `context` rather than Bridge's flattened message, so a
     // `PinnedKeyChanged` stays findable in the error chain.
     builder
-        .set_pgp_settings(
-            recipient,
-            new_contact_settings(contact_settings)?,
-            pub_keys,
-            is_internal,
-        )
+        .set_pgp_settings(recipient, vcard, pub_keys, is_internal)
         .context("failed to set PGP settings")?;
     builder.set_encryption_preferences(mail_settings);
     builder.set_mime_preferences(mime_type);
-    Ok(builder.build())
+    let prefs = builder.build();
+    // Never in clear, and never "encrypted" with no key: with nothing to
+    // encrypt to, the send stops.
+    if encrypt_required && (!prefs.encrypt || prefs.pub_key.is_none()) {
+        return Err(EncryptionKeyMissing::new(recipient.address))
+            .context("failed to set PGP settings");
+    }
+    Ok(prefs)
 }
 
 #[derive(Default)]
@@ -446,14 +476,27 @@ fn pick_sending_key(
             recipient.address
         );
     }
-    if vcard.keys.is_empty() {
+    // The card's pins, or when it pins none, those remembered from an
+    // earlier verified card (Zmail's rule, ADR 0004).
+    let pinned: Vec<String> = if vcard.keys.is_empty() {
+        recipient
+            .remembered
+            .map(|remembered| remembered.fingerprints.clone())
+            .unwrap_or_default()
+    } else {
+        vcard.keys.iter().map(RecipientKey::fingerprint).collect()
+    };
+    if pinned.is_empty() {
         return Ok(api_keys.swap_remove(0));
     }
-    if let Some(key) = match_fingerprints(&vcard.keys, &api_keys)
-        .into_iter()
-        .next()
-    {
-        return Ok(key);
+    // The first served key that is pinned (`matchFingerprints`).
+    if let Some(key) = api_keys.iter().find(|key| {
+        let fingerprint = key.fingerprint();
+        pinned
+            .iter()
+            .any(|pin| pin.eq_ignore_ascii_case(&fingerprint))
+    }) {
+        return Ok(key.clone());
     }
     let trusted = api_keys.iter().find(|key| {
         recipient
@@ -465,21 +508,11 @@ fn pick_sending_key(
         Some(key) => Ok(key.clone()),
         None => Err(PinnedKeyChanged::new(
             recipient.address,
-            vcard.keys.iter().map(RecipientKey::fingerprint),
+            pinned,
             api_keys.iter().map(RecipientKey::fingerprint),
         )
         .into()),
     }
-}
-
-/// The keys of `b` whose fingerprint is also in `a` (`matchFingerprints`).
-fn match_fingerprints(a: &[RecipientKey], b: &[RecipientKey]) -> Vec<RecipientKey> {
-    let pinned: std::collections::HashSet<String> =
-        a.iter().map(RecipientKey::fingerprint).collect();
-    b.iter()
-        .filter(|key| pinned.contains(&key.fingerprint()))
-        .cloned()
-        .collect()
 }
 
 #[cfg(test)]

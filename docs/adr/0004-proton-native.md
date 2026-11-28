@@ -456,9 +456,49 @@ send to that contact. The mail goes, and the account's sync report (the
 status both frontends show under the account) then names the contact and
 says to check it in the Proton Mail web app, until a later send to that
 address finds the contact in order or Zmail is restarted; nothing is
-marked failed. This does not protect against a server that leaves
-the card out altogether; that needs Zmail to remember pins itself, which
-it does not do yet.
+marked failed. A server that leaves the card out altogether, or serves
+an older copy that pins nothing, is covered by the pins Zmail remembers
+(below).
+
+**Contact cards that go missing (November 28, 2026).** Zmail remembers,
+per account and recipient (the address in lower case, compared without
+regard to case), what the recipient's verified contact card pinned and
+whether it required encryption ("always encrypt", `X-PM-ENCRYPT`), in
+the store's `recipient_key_pins` table (migration
+`0035_recipient_key_pins`): the pinned fingerprints and an encrypt flag.
+A record is written whenever a send uses a card that pins keys or
+requires encryption, before anything can stop that send, so a send that
+fails still records it. Only a verified card can do either: a missing
+card, and one that does not verify, read as no settings. A later card
+that pins keys replaces the pinned fingerprints; one that pins none
+leaves them. "Always encrypt" is turned on by a card and stays on. Only
+the user takes a record away, or removing the account does.
+
+When a later send finds no pins in the card (it is gone, its type
+changed, it did not verify and held nothing, or it pins nothing), the
+remembered fingerprints stand in for the card's: a served key that
+matches one is used, and otherwise the send stops with
+`PinnedKeyChanged`, so the outbox's "Trust New Key…" applies as for a
+card that still pins keys. A recipient remembered as encrypt-required is
+encrypted to whatever the card now says (Zmail asks for encryption to
+WKD keys too), and when there is no key to encrypt to (an external
+recipient whose card held the only key), the send stops with
+`EncryptionKeyMissing` and the outbox fails the message at once: "Not
+sent: your Proton contact for `<recipient>` asked for encrypted mail
+when Zmail last sent to them, and Zmail now has no key to encrypt this
+message to. ...". It is never sent in clear. A record that does not
+require encryption leaves an external recipient with no key to Bridge's
+rules.
+
+The user can forget a recipient's record: "Forget saved keys and send"
+in the key change dialog, and "Forget Saved Keys…" on an outbox row
+stopped by `EncryptionKeyMissing`, whose dialog also offers "Send
+again" once the contact is fixed. Forgetting removes the remembered
+pins and every key trusted for that address on that account, then sends
+again as if Zmail had never seen the card, which may mean unencrypted;
+the dialog says so. The terminal UI points to the Zmail window for
+this, as for a key change. Bridge keeps nothing of the kind, so this is
+a deviation for the same reason as pinned keys that no longer match.
 
 If Proton accounts with post-quantum keys need support later, `pgp`'s
 `pqc` feature adds them. Messages compressed with bzip2 by external

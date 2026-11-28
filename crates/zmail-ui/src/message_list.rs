@@ -30,7 +30,7 @@ use std::sync::Arc;
 use zmail_core::{
     AccountColor, DraftSummary, MailboxRole, MailboxSelection, MailboxSummary, OutboxJobSummary,
     SearchHit, ThreadFilter, ThreadSummary,
-    key_change::{PinnedKeyChanged, grouped_fingerprint},
+    key_change::{EncryptionKeyMissing, PinnedKeyChanged, grouped_fingerprint},
     preferences::Density,
     time::HourCycle,
 };
@@ -191,6 +191,10 @@ pub(crate) enum MessageListEvent {
     /// The user trusted a recipient's new key in an outbox row's key
     /// change dialog: the job, and the fingerprint the dialog showed.
     TrustNewKey { job_id: i64, fingerprint: String },
+    /// The user chose to forget the keys Zmail saved for the recipient
+    /// whose keys stopped an outbox message: the job, and the address the
+    /// dialog showed.
+    ForgetSavedKeys { job_id: i64, recipient: String },
     /// Enter: move on to the detail pane.
     Activate,
     /// A thread, search result or draft row was clicked (after its open
@@ -278,6 +282,13 @@ pub(crate) struct MessageListView {
     /// The outbox job whose recipient key change the dialog shows.
     key_change: Option<(i64, PinnedKeyChanged)>,
     key_change_modal: ModalState,
+    /// The key change dialog's Cancel, focused when it opens (the body
+    /// holds the forget button, which must not be the first control).
+    key_change_cancel: FocusHandle,
+    /// The outbox job whose recipient has no key to encrypt to.
+    saved_keys: Option<(i64, EncryptionKeyMissing)>,
+    saved_keys_modal: ModalState,
+    saved_keys_cancel: FocusHandle,
     /// Test instrumentation: renders and store queries for rows.
     #[cfg(test)]
     pub(crate) counters: crate::pane::RenderCounters,
@@ -320,6 +331,10 @@ impl MessageListView {
             move_picker: None,
             key_change: None,
             key_change_modal: ModalState::new(cx),
+            key_change_cancel: cx.focus_handle(),
+            saved_keys: None,
+            saved_keys_modal: ModalState::new(cx),
+            saved_keys_cancel: cx.focus_handle(),
             context_menu: None,
             #[cfg(test)]
             counters: Default::default(),
@@ -704,6 +719,7 @@ impl Render for MessageListView {
                 ListMode::Outbox => self.render_outbox(&colors, focused, cx),
             })
             .children(self.render_key_change_dialog(cx))
+            .children(self.render_saved_keys_dialog(cx))
     }
 }
 
@@ -1061,6 +1077,8 @@ impl MessageListView {
                             Some(self.reauthenticate_button(job.account_id, &row_id, cx))
                         } else if let Some(change) = status.key_change {
                             Some(self.trust_key_button(job_id, change, &row_id, cx))
+                        } else if let Some(missing) = status.saved_keys {
+                            Some(self.saved_keys_button(job_id, missing, &row_id, cx))
                         } else {
                             status
                                 .can_retry
@@ -1182,8 +1200,15 @@ impl MessageListView {
         cx: &mut Context<Self>,
     ) {
         self.key_change = Some((job_id, change));
-        self.key_change_modal.open(window, cx);
+        let cancel = self.key_change_cancel.clone();
+        self.key_change_modal.open_focusing(&cancel, window, cx);
         cx.notify();
+    }
+
+    /// Whether the key change dialog's Cancel has the focus.
+    #[cfg(test)]
+    pub(crate) fn key_change_cancel_focused(&self, window: &Window) -> bool {
+        self.key_change_cancel.is_focused(window)
     }
 
     fn close_key_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1205,6 +1230,129 @@ impl MessageListView {
                 fingerprint: fingerprint.to_owned(),
             });
         }
+    }
+
+    /// The dialog's "Forget saved keys and send": the shell forgets what
+    /// Zmail saved for this recipient, and sends again.
+    fn forget_saved_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let recipient = self
+            .key_change
+            .as_ref()
+            .filter(|_| self.key_change_modal.is_open())
+            .map(|(job_id, change)| (*job_id, change.recipient.clone()))
+            .or_else(|| {
+                self.saved_keys
+                    .as_ref()
+                    .filter(|_| self.saved_keys_modal.is_open())
+                    .map(|(job_id, missing)| (*job_id, missing.recipient.clone()))
+            });
+        self.close_key_change(window, cx);
+        self.close_saved_keys(window, cx);
+        if let Some((job_id, recipient)) = recipient {
+            cx.emit(MessageListEvent::ForgetSavedKeys { job_id, recipient });
+        }
+    }
+
+    /// The dialogs' "Forget saved keys and send", in the body under the
+    /// fingerprints: a way out the dialog's text explains, less prominent
+    /// than its main choice.
+    fn forget_saved_keys_button(&self, id: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .debug_selector(move || id.into())
+            .child(
+                Button::new(id, "Forget saved keys and send")
+                    .size(ButtonSize::Small)
+                    .danger()
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.forget_saved_keys(window, cx)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The "Forget Saved Keys…" button on an outbox row whose recipient
+    /// Zmail remembers as encrypt-required, with no key to encrypt to.
+    fn saved_keys_button(
+        &self,
+        job_id: i64,
+        missing: EncryptionKeyMissing,
+        row_id: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = format!("{row_id}-saved-keys");
+        div()
+            .debug_selector({
+                let id = id.clone();
+                move || id
+            })
+            .child(
+                Button::new(SharedString::from(id), "Forget Saved Keys\u{2026}")
+                    .size(ButtonSize::Small)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        // Not the row's click as well.
+                        cx.stop_propagation();
+                        this.saved_keys = Some((job_id, missing.clone()));
+                        let cancel = this.saved_keys_cancel.clone();
+                        this.saved_keys_modal.open_focusing(&cancel, window, cx);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn close_saved_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.saved_keys = None;
+        self.saved_keys_modal.close(window, cx);
+        cx.notify();
+    }
+
+    /// The saved keys dialog's "Send again": after the contact is fixed in
+    /// the Proton Mail web app.
+    fn send_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((job_id, _)) = self.saved_keys.clone() else {
+            return;
+        };
+        self.close_saved_keys(window, cx);
+        cx.emit(MessageListEvent::RetryOutboxJob(job_id));
+    }
+
+    fn render_saved_keys_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (_, missing) = self
+            .saved_keys
+            .as_ref()
+            .filter(|_| self.saved_keys_modal.is_open())?;
+        let recipient = missing.recipient.clone();
+        Some(
+            Modal::new("saved-keys-dialog", self.saved_keys_modal.focus_handle())
+                .title(format!("No key to encrypt to {recipient}"))
+                .description(saved_keys_description(&recipient))
+                .child(self.forget_saved_keys_button("saved-keys-forget", cx))
+                .footer(
+                    div().debug_selector(|| "saved-keys-cancel".into()).child(
+                        Button::new("saved-keys-cancel", "Cancel")
+                            .track_focus(&self.saved_keys_cancel)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.close_saved_keys(window, cx)
+                                }),
+                            ),
+                    ),
+                )
+                .footer(
+                    div()
+                        .debug_selector(|| "saved-keys-send-again".into())
+                        .child(
+                            Button::new("saved-keys-send-again", "Send again")
+                                .primary()
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.send_again(window, cx)),
+                                ),
+                        ),
+                )
+                .on_dismiss(cx.listener(|this, _, window, cx| this.close_saved_keys(window, cx)))
+                .into_any_element(),
+        )
     }
 
     fn render_key_change_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1237,11 +1385,18 @@ impl MessageListView {
                         .map(|fingerprint| line("Pinned in your contact card", fingerprint)),
                 )
                 .child(line("Served by Proton now", new_key))
-                .footer(div().debug_selector(|| "key-change-cancel".into()).child(
-                    Button::new("key-change-cancel", "Cancel").on_click(
-                        cx.listener(|this, _, window, cx| this.close_key_change(window, cx)),
+                .child(self.forget_saved_keys_button("key-change-forget", cx))
+                .footer(
+                    div().debug_selector(|| "key-change-cancel".into()).child(
+                        Button::new("key-change-cancel", "Cancel")
+                            .track_focus(&self.key_change_cancel)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.close_key_change(window, cx)
+                                }),
+                            ),
                     ),
-                ))
+                )
                 .footer(
                     div().debug_selector(|| "key-change-trust".into()).child(
                         Button::new(
@@ -1263,7 +1418,14 @@ impl MessageListView {
 /// What the key change dialog says before the user decides.
 pub(crate) fn key_change_description(recipient: &str) -> String {
     format!(
-        "Your contact card for {recipient} pins an encryption key, but Proton now serves a different one, so Zmail stopped sending. Trust the new key only if {recipient} told you it changed: compare the fingerprint with them in person or on a call. Zmail remembers your choice on this computer for this address and this key only, and leaves the contact card as it is."
+        "Your contact card for {recipient} pins an encryption key, or did when Zmail last sent to them, but Proton now serves a different one, so Zmail stopped sending. Trust the new key only if {recipient} told you it changed: compare the fingerprint with them in person or on a call. Zmail remembers your choice on this computer for this address and this key only, and leaves the contact card as it is. If you removed the key from the contact on purpose, forget the keys Zmail saved for {recipient} instead."
+    )
+}
+
+/// What the saved keys dialog says before the user decides.
+pub(crate) fn saved_keys_description(recipient: &str) -> String {
+    format!(
+        "When Zmail last sent to {recipient}, your Proton contact for them asked for encrypted mail. Now Zmail has no key to encrypt this message to, so it stopped sending rather than send it unencrypted. If the contact changed by mistake, fix it in the Proton Mail web app and send again. If you changed it on purpose, forget the keys Zmail saved for {recipient}: this message then goes as the contact says now, which may be unencrypted."
     )
 }
 

@@ -61,6 +61,10 @@
 // as if there were no contact (ADR 0004). A card that does not verify and
 // holds nothing for the recipient is ignored as in Bridge, and the
 // recipient is noted so the user is told to check the contact.
+// Modified by UnicornOps on 2026-11-28: `getRecipients` remembers what each
+// verified contact card pins and whether it requires encryption, through
+// the caller's `RecipientKeys`, and keeps a later send to those pins when
+// the card is gone or pins nothing (`send_prefs.rs`, ADR 0004).
 
 //! Sending a message through Proton: Bridge's SMTP service.
 
@@ -69,15 +73,15 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, anyhow, bail};
 use zmail_core::{
     OutgoingMessage, ReplyAction, UnconfirmedSend,
-    key_change::KeyTrust,
+    key_change::{RecipientKeys, RecipientPins},
     participants::{Participant, envelope_address},
 };
 use zmail_proton_api::{
     ATTACHMENT_DISPOSITION, Address, AddressStatus, CardType, Client, ContactEmail,
     ContactSettings, CreateAttachmentReq, CreateDraftAction, CreateDraftReq, DraftTemplate,
     EmailAddress, EncryptionScheme, Error, KeyRing, MULTIPART_MIXED, MailSettings, Message,
-    MessageFilter, MessageFlags, RecipientType, SendDraftReq, SendPreferences, SessionKey,
-    TEXT_HTML, TEXT_PLAIN, UnlockedKey, same_address,
+    MessageFilter, MessageFlags, PublicKey, RecipientType, SendDraftReq, SendPreferences,
+    SessionKey, TEXT_HTML, TEXT_PLAIN, UnlockedKey, same_address,
 };
 
 use crate::{
@@ -98,14 +102,16 @@ const MESSAGE_TOO_LARGE: i64 = 2024;
 const INVALID_LIST_OF_RECIPIENTS: i64 = 2002;
 
 /// Sends a composed message from one of the account's addresses
-/// (`smtpSendMail`). `trusted` holds the served keys the user trusted for
-/// recipients whose contact card pins other keys.
+/// (`smtpSendMail`). `keys` holds the served keys the user trusted for
+/// recipients whose contact card pins other keys and the pins remembered
+/// from earlier verified cards; the send notes there what it sees on
+/// verified cards, for the caller to save.
 pub(crate) async fn send_message(
     session: &ProtonSession,
     message: &OutgoingMessage,
-    trusted: &[KeyTrust],
+    keys: &RecipientKeys,
 ) -> Result<()> {
-    send(session, message, trusted, None).await
+    send(session, message, keys, None).await
 }
 
 /// What the account's mail shows of a message whose send was interrupted.
@@ -159,16 +165,16 @@ pub(crate) async fn send_existing_draft(
     session: &ProtonSession,
     draft_id: &str,
     message: &OutgoingMessage,
-    trusted: &[KeyTrust],
+    keys: &RecipientKeys,
 ) -> Result<()> {
-    send(session, message, trusted, Some(draft_id)).await
+    send(session, message, keys, Some(draft_id)).await
 }
 
 /// [`send_message`], from a new draft or the existing `draft_id`.
 async fn send(
     session: &ProtonSession,
     message: &OutgoingMessage,
-    trusted: &[KeyTrust],
+    recipient_keys: &RecipientKeys,
     draft_id: Option<&str>,
 ) -> Result<()> {
     message.check_recipients()?;
@@ -243,7 +249,7 @@ async fn send(
             emails: &emails,
             from,
             to: &to,
-            trusted,
+            keys: recipient_keys,
             warnings: session.contact_warnings(),
         },
         message,
@@ -287,8 +293,9 @@ struct SendContext<'a> {
     from: &'a str,
     /// Every recipient (the SMTP envelope).
     to: &'a [String],
-    /// The served keys the user trusted despite a contact card's pins.
-    trusted: &'a [KeyTrust],
+    /// The served keys the user trusted despite a contact card's pins,
+    /// and the pins remembered from earlier verified cards.
+    keys: &'a RecipientKeys,
     /// Where contacts whose card did not verify are noted for the user.
     warnings: &'a ContactWarnings,
 }
@@ -309,7 +316,7 @@ async fn send_with_key(
         emails,
         from,
         to,
-        trusted,
+        keys,
         warnings,
     } = *context;
     // A plain-text message: the body is the plain body and the rich body.
@@ -385,7 +392,7 @@ async fn send_with_key(
         let att_keys = create_attachments(client, addr_key, &draft.metadata.id, attachments)
             .await
             .context("failed to create attachments")?;
-        let recipients = get_recipients(client, user_kr, settings, &draft, trusted, warnings)
+        let recipients = get_recipients(client, user_kr, settings, &draft, keys, warnings)
             .await
             .context("failed to get recipients")?;
         create_send_req(addr_key, &mime_body, body, body, &recipients, &att_keys)
@@ -659,7 +666,7 @@ async fn get_recipients(
     user_kr: &KeyRing,
     settings: &MailSettings,
     draft: &Message,
-    trusted: &[KeyTrust],
+    keys: &RecipientKeys,
     warnings: &ContactWarnings,
 ) -> Result<Recipients> {
     let meta = &draft.metadata;
@@ -690,11 +697,9 @@ async fn get_recipients(
         // A card that did not verify but holds nothing for the recipient
         // does not stop the send; the user is told to check the contact.
         warnings.record(&recipient, contact_settings.card_unverified);
-        let prefs = build_send_prefs(
-            &Recipient {
-                address: &recipient,
-                trusted,
-            },
+        let prefs = recipient_prefs(
+            &recipient,
+            keys,
             &contact_settings,
             settings,
             &pub_keys,
@@ -704,6 +709,46 @@ async fn get_recipients(
         recipients.insert(recipient, prefs);
     }
     Ok(recipients)
+}
+
+/// How to send to one recipient: Bridge's send preferences from the
+/// contact card, kept to what Zmail remembers of earlier verified cards
+/// (ADR 0004, "Contact cards that go missing").
+///
+/// Only a card that verified can pin keys or ask for encryption (a
+/// missing card, and one that did not verify, read as no settings), so a
+/// card that does either is noted in `keys`, before anything can stop the
+/// send, for the caller to save.
+fn recipient_prefs(
+    recipient: &str,
+    keys: &RecipientKeys,
+    contact_settings: &ContactSettings,
+    settings: &MailSettings,
+    pub_keys: &[PublicKey],
+    mime_type: &str,
+    is_internal: bool,
+) -> Result<SendPreferences> {
+    let remembered = keys.pins_for(recipient);
+    if let Some(updated) = RecipientPins::seen_on_card(
+        recipient,
+        contact_settings.keys.iter().map(|key| key.fingerprint()),
+        contact_settings.encrypt == Some(true),
+        remembered,
+    ) {
+        keys.note(updated);
+    }
+    build_send_prefs(
+        &Recipient {
+            address: recipient,
+            trusted: &keys.trusted,
+            remembered,
+        },
+        contact_settings,
+        settings,
+        pub_keys,
+        mime_type,
+        is_internal,
+    )
 }
 
 /// What the user's contact card says about a recipient
@@ -891,6 +936,8 @@ mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use zmail_proton_api::{RecipientKey, SignatureType};
+
+    use zmail_core::key_change::{EncryptionKeyMissing, KeyTrust, PinnedKeyChanged};
 
     use crate::send_prefs::tests::{KEY_A, KEY_B};
 
@@ -1220,7 +1267,8 @@ mod tests {
         let keys = RecipientKeys::default();
         let sent = prefs(&keys, &card, &[served(KEY_B)], true).expect("sent");
         assert_eq!(
-            sent.pub_key.map(|key| key.fingerprint().to_ascii_uppercase()),
+            sent.pub_key
+                .map(|key| key.fingerprint().to_ascii_uppercase()),
             Some(fingerprint(KEY_B))
         );
         let noted = keys.take_noted();
@@ -1269,16 +1317,12 @@ mod tests {
             }],
             noted,
         );
-        let sent = prefs(
-            &keys,
-            &ContactSettings::default(),
-            &[served(KEY_A)],
-            true,
-        )
-        .expect("trusted");
+        let sent =
+            prefs(&keys, &ContactSettings::default(), &[served(KEY_A)], true).expect("trusted");
         assert!(sent.encrypt);
         assert_eq!(
-            sent.pub_key.map(|key| key.fingerprint().to_ascii_uppercase()),
+            sent.pub_key
+                .map(|key| key.fingerprint().to_ascii_uppercase()),
             Some(fingerprint(KEY_A))
         );
     }

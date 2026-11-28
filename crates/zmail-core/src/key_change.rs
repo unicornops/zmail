@@ -10,6 +10,12 @@
 //! [`PinnedKeyChanged::of_message`] to offer trusting the served key for
 //! that recipient. Trusting records a [`KeyTrust`] in the local store; the
 //! contact card on the server is never changed.
+//!
+//! Zmail also remembers what each verified card pinned and whether it
+//! required encryption ([`RecipientPins`]), so a card that later goes
+//! missing still stops a send to another key with [`PinnedKeyChanged`],
+//! and a recipient whose card required encryption is never sent to in
+//! clear ([`EncryptionKeyMissing`]).
 
 use std::fmt;
 
@@ -116,6 +122,183 @@ impl KeyTrust {
     }
 }
 
+/// What a recipient's verified Proton contact card asked for when a send
+/// last used it: the keys it pins and whether it requires encryption.
+///
+/// Zmail keeps this per account (ADR 0004, "Contact cards that go
+/// missing"), so that a later send whose card is gone, or no longer pins
+/// keys, cannot quietly go to another key or in clear. Only the user
+/// removes a record (or removing the account does); a later verified card
+/// can replace the pins or turn "always encrypt" on, never take them away.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RecipientPins {
+    /// The recipient's address, trimmed and in lower case.
+    pub recipient: String,
+    /// The fingerprints the card pinned, upper-case hex. Empty when it
+    /// only required encryption.
+    pub fingerprints: Vec<String>,
+    /// The card required encryption ("always encrypt").
+    pub encrypt: bool,
+}
+
+impl RecipientPins {
+    /// The record for `recipient`, with the address in lower case and the
+    /// fingerprints in upper case, each once.
+    pub fn new(
+        recipient: &str,
+        fingerprints: impl IntoIterator<Item = String>,
+        encrypt: bool,
+    ) -> Self {
+        let mut unique: Vec<String> = Vec::new();
+        for fingerprint in fingerprints {
+            let fingerprint = fingerprint.to_ascii_uppercase();
+            if !unique.contains(&fingerprint) {
+                unique.push(fingerprint);
+            }
+        }
+        Self {
+            recipient: recipient.trim().to_lowercase(),
+            fingerprints: unique,
+            encrypt,
+        }
+    }
+
+    /// Whether this is the record for `recipient`, whatever its case.
+    pub fn is_for(&self, recipient: &str) -> bool {
+        self.recipient.eq_ignore_ascii_case(recipient.trim())
+    }
+
+    /// The record to keep once a send used a verified card for
+    /// `recipient` that pins `card_fingerprints` and asks for encryption
+    /// when `card_encrypt`, given the record kept so far; `None` when
+    /// nothing changes. A card that pins keys replaces the pins kept; a
+    /// card that pins none keeps them. "Always encrypt" is turned on by a
+    /// card and stays on.
+    pub fn seen_on_card(
+        recipient: &str,
+        card_fingerprints: impl IntoIterator<Item = String>,
+        card_encrypt: bool,
+        remembered: Option<&Self>,
+    ) -> Option<Self> {
+        let card_fingerprints: Vec<String> = card_fingerprints.into_iter().collect();
+        if card_fingerprints.is_empty() && !card_encrypt {
+            return None;
+        }
+        let fingerprints = if card_fingerprints.is_empty() {
+            remembered
+                .map(|remembered| remembered.fingerprints.clone())
+                .unwrap_or_default()
+        } else {
+            card_fingerprints
+        };
+        let encrypt = card_encrypt || remembered.is_some_and(|remembered| remembered.encrypt);
+        let updated = Self::new(recipient, fingerprints, encrypt);
+        (remembered != Some(&updated)).then_some(updated)
+    }
+}
+
+/// The account's saved key records a Proton send reads: the served keys
+/// the user trusted, and the pins Zmail remembers from verified contact
+/// cards. The send notes here what it saw on verified cards for the
+/// caller to save, whether or not the send then goes.
+#[derive(Debug, Default)]
+pub struct RecipientKeys {
+    /// The account's key trust decisions.
+    pub trusted: Vec<KeyTrust>,
+    /// The pins remembered for the account's recipients.
+    pub pins: Vec<RecipientPins>,
+    noted: std::sync::Mutex<Vec<RecipientPins>>,
+}
+
+impl RecipientKeys {
+    /// The records a send starts from.
+    pub fn new(trusted: Vec<KeyTrust>, pins: Vec<RecipientPins>) -> Self {
+        Self {
+            trusted,
+            pins,
+            noted: std::sync::Mutex::default(),
+        }
+    }
+
+    /// The pins remembered for `recipient`, whatever its case.
+    pub fn pins_for(&self, recipient: &str) -> Option<&RecipientPins> {
+        self.pins.iter().find(|pins| pins.is_for(recipient))
+    }
+
+    /// Notes a record to save; a later one for the same address replaces
+    /// it.
+    pub fn note(&self, pins: RecipientPins) {
+        let mut noted = self
+            .noted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match noted
+            .iter_mut()
+            .find(|noted| noted.recipient == pins.recipient)
+        {
+            Some(earlier) => *earlier = pins,
+            None => noted.push(pins),
+        }
+    }
+
+    /// The records noted so far, which are then cleared.
+    pub fn take_noted(&self) -> Vec<RecipientPins> {
+        std::mem::take(
+            &mut *self
+                .noted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
+/// The fixed parts of a stored [`EncryptionKeyMissing`] message. Changing
+/// them orphans messages already stored, which then read as ordinary
+/// errors.
+const MISSING_LEAD: &str = "Not sent: your Proton contact for ";
+const MISSING_MIDDLE: &str = " asked for encrypted mail when Zmail last sent to them, and Zmail now has no key to encrypt this message to. Check the contact in the Proton Mail web app, or forget the keys Zmail saved for ";
+const MISSING_TAIL: &str = ", then send again.";
+
+/// A send stopped because Zmail remembers that a recipient's contact card
+/// required encryption (or pinned keys it must encrypt to), and nothing
+/// now gives it a key it may encrypt to: the card is gone and Proton
+/// serves no key. Zmail never sends such a message in clear.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptionKeyMissing {
+    /// The recipient's address.
+    pub recipient: String,
+}
+
+impl EncryptionKeyMissing {
+    /// The error for `recipient`.
+    pub fn new(recipient: impl Into<String>) -> Self {
+        Self {
+            recipient: recipient.into(),
+        }
+    }
+
+    /// The error a stored outbox message records, if it is one.
+    pub fn of_message(message: &str) -> Option<Self> {
+        let rest = message
+            .strip_prefix(MISSING_LEAD)?
+            .strip_suffix(MISSING_TAIL)?;
+        let (recipient, again) = rest.split_once(MISSING_MIDDLE)?;
+        (!recipient.is_empty() && recipient == again).then(|| Self::new(recipient))
+    }
+}
+
+impl fmt::Display for EncryptionKeyMissing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{MISSING_LEAD}{0}{MISSING_MIDDLE}{0}{MISSING_TAIL}",
+            self.recipient
+        )
+    }
+}
+
+impl std::error::Error for EncryptionKeyMissing {}
+
 /// A fingerprint in groups of four, for reading aloud or comparing by eye.
 pub fn grouped_fingerprint(fingerprint: &str) -> String {
     fingerprint
@@ -219,8 +402,9 @@ mod tests {
             encrypt: false,
             ..first.clone()
         };
-        let kept = RecipientPins::seen_on_card("bob@example.org", Vec::new(), true, Some(&unencrypted))
-            .expect("updated");
+        let kept =
+            RecipientPins::seen_on_card("bob@example.org", Vec::new(), true, Some(&unencrypted))
+                .expect("updated");
         assert_eq!(kept.fingerprints, first.fingerprints);
         assert!(kept.encrypt);
     }
@@ -255,8 +439,12 @@ mod tests {
         for message in [
             "",
             "failed to send the message through Proton",
-            &PinnedKeyChanged::new("bob@example.org", [PINNED_FP.to_owned()], [SERVED_FP.to_owned()])
-                .to_string(),
+            &PinnedKeyChanged::new(
+                "bob@example.org",
+                [PINNED_FP.to_owned()],
+                [SERVED_FP.to_owned()],
+            )
+            .to_string(),
             &EncryptionKeyMissing::new("").to_string(),
         ] {
             assert_eq!(EncryptionKeyMissing::of_message(message), None, "{message}");

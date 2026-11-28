@@ -27,7 +27,7 @@ use gpui::{
 use zmail_core::{
     AccountColor, DraftState, DraftSummary, OutboxJobState, OutboxJobSummary, SearchHit,
     ThreadSummary, is_interrupted_send,
-    key_change::PinnedKeyChanged,
+    key_change::{EncryptionKeyMissing, PinnedKeyChanged},
     participants::{parse_address_list, participant_names, sender_identity},
     reauth::ReauthReason,
     text::count_noun,
@@ -397,6 +397,10 @@ pub(crate) struct OutboxStatus {
     /// A recipient's key no longer matches their contact card: offer to
     /// trust the new key instead of Retry now, which stops again.
     pub(crate) key_change: Option<PinnedKeyChanged>,
+    /// Zmail remembers a recipient as encrypt-required and has no key to
+    /// encrypt to: offer sending again or forgetting the saved keys
+    /// instead of Retry now.
+    pub(crate) saved_keys: Option<EncryptionKeyMissing>,
 }
 
 /// "Sending…", "Failed — retrying in 5 min", "Couldn't send" and so on,
@@ -411,6 +415,7 @@ pub(crate) fn outbox_status(
         can_retry,
         needs_reauth: false,
         key_change: None,
+        saved_keys: None,
     };
     let refused = job
         .last_error_message
@@ -421,6 +426,10 @@ pub(crate) fn outbox_status(
         .last_error_message
         .as_deref()
         .and_then(PinnedKeyChanged::of_message);
+    let saved_keys = job
+        .last_error_message
+        .as_deref()
+        .and_then(EncryptionKeyMissing::of_message);
     match job.state {
         OutboxJobState::Failed if refused => OutboxStatus {
             needs_reauth: true,
@@ -429,6 +438,10 @@ pub(crate) fn outbox_status(
         OutboxJobState::Failed if key_change.is_some() => OutboxStatus {
             key_change,
             ..status("A recipient\u{2019}s key changed", true, false)
+        },
+        OutboxJobState::Failed if saved_keys.is_some() => OutboxStatus {
+            saved_keys,
+            ..status("Can\u{2019}t encrypt to a recipient", true, false)
         },
         OutboxJobState::Queued => status("Waiting to send", false, false),
         OutboxJobState::Sending => status("Sending\u{2026}", false, false),
@@ -462,6 +475,7 @@ pub(crate) fn outbox_status(
                 can_retry: true,
                 needs_reauth: false,
                 key_change: None,
+                saved_keys: None,
             }
         }
     }

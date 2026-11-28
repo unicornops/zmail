@@ -981,7 +981,7 @@ fn interrupted_sends_are_settled_from_what_proton_shows() -> Result<()> {
         .block_on(zmail_proton::submit_outgoing_message(
             &session,
             &job.message,
-            &[],
+            &zmail_core::key_change::RecipientKeys::default(),
         ))
         .with_context(|| format!("the first send; server log:\n{}", harness.logs()))?;
     let message_id = job.message.message_id.clone().context("a Message-ID")?;

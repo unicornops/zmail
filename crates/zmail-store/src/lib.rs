@@ -244,6 +244,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0034_address_history_incremental",
         address_history::ADDRESS_HISTORY_INCREMENTAL_SCHEMA,
     ),
+    ("0035_recipient_key_pins", key_trust::KEY_PINS_SCHEMA),
 ];
 
 /// Failed background body fetches after which a message is skipped by the
@@ -1299,8 +1300,8 @@ impl LocalStore {
 
     /// Deletes an account and everything stored locally for it: its synced
     /// mail, downloaded bodies and attachments, drafts, outbox, queued
-    /// changes, address history and search index entries, and its place
-    /// in the UI preferences. Nothing is deleted on the server, and the
+    /// changes, address history, saved recipient keys and search index
+    /// entries, and its place in the UI preferences. Nothing is deleted on the server, and the
     /// caller removes the account's keychain secrets.
     pub fn delete_account(&self, account_id: i64) -> Result<()> {
         let mut conn = self.connection()?;

@@ -35,7 +35,7 @@ use zmail_core::{
     AuthKind, INTERRUPTED_SEND_MESSAGE, MailboxSnapshot, OutboxJobState, PendingOutboxJob,
     ProtocolKind, RuntimeSummary, SubmissionKind, SyncPhase, SyncTarget, UnconfirmedSend,
     is_interrupted_send,
-    key_change::PinnedKeyChanged,
+    key_change::{EncryptionKeyMissing, PinnedKeyChanged},
     reauth::{ReauthReason, ReauthRequired},
     time::parse_timestamp,
 };
@@ -1218,6 +1218,44 @@ impl SyncService {
         self.process_outbox(Some(job.account_id))
     }
 
+    /// Forgets every key Zmail saved for the recipient whose keys stopped
+    /// an outbox message ([`PinnedKeyChanged`] or
+    /// [`EncryptionKeyMissing`]): the pins remembered from their contact
+    /// card and the new keys the user trusted, on the job's account. Then
+    /// sends the message again, as if Zmail had never seen the card.
+    ///
+    /// `recipient` is the address the user was shown; if the job's
+    /// failure names another, nothing is forgotten.
+    pub fn forget_saved_keys_and_retry(&self, job_id: i64, recipient: &str) -> Result<()> {
+        let job = self
+            .inner
+            .store
+            .list_outbox_jobs(None)?
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .with_context(|| format!("outbox job {job_id} does not exist"))?;
+        let named = job
+            .last_error_message
+            .as_deref()
+            .filter(|_| job.state == OutboxJobState::Failed)
+            .and_then(|message| {
+                PinnedKeyChanged::of_message(message)
+                    .map(|change| change.recipient)
+                    .or_else(|| {
+                        EncryptionKeyMissing::of_message(message).map(|missing| missing.recipient)
+                    })
+            })
+            .with_context(|| format!("outbox job {job_id} did not stop over a recipient's keys"))?;
+        if !named.trim().eq_ignore_ascii_case(recipient.trim()) {
+            bail!("outbox job {job_id} stopped over the keys of {named}, not {recipient}");
+        }
+        self.inner
+            .store
+            .forget_recipient_keys(job.account_id, &named)?;
+        self.inner.store.retry_outbox_job(job_id)?;
+        self.process_outbox(Some(job.account_id))
+    }
+
     /// Queues a draft and immediately schedules outbox processing for its account.
     pub fn queue_draft_and_send(&self, draft_id: i64) -> Result<i64> {
         self.queue_draft_and_send_after(draft_id, Duration::ZERO)
@@ -1708,6 +1746,13 @@ impl SyncService {
             self.inner
                 .store
                 .record_outbox_failure(job.job_id, changed.to_string())
+        } else if let Some(missing) = encryption_key_missing(&error) {
+            // So does a recipient remembered as encrypt-required with no
+            // key to encrypt to: the user fixes the contact or forgets the
+            // saved keys.
+            self.inner
+                .store
+                .record_outbox_failure(job.job_id, missing.to_string())
         } else if let Some(unverified) = Self::unverified_contact_card(&error) {
             // So does a Proton contact card that could not be verified:
             // the user has to check the contact first.
@@ -2107,6 +2152,13 @@ fn no_recipients(error: &anyhow::Error) -> Option<&zmail_core::participants::NoR
 /// The [`PinnedKeyChanged`] failure somewhere in `error`'s chain, if any:
 /// the user has to trust a recipient's new key before the message can go.
 fn pinned_key_changed(error: &anyhow::Error) -> Option<&PinnedKeyChanged> {
+    error.chain().find_map(|cause| cause.downcast_ref())
+}
+
+/// The [`EncryptionKeyMissing`] failure somewhere in `error`'s chain, if
+/// any: a recipient Zmail remembers as encrypt-required has no key to
+/// encrypt to.
+fn encryption_key_missing(error: &anyhow::Error) -> Option<&EncryptionKeyMissing> {
     error.chain().find_map(|cause| cause.downcast_ref())
 }
 

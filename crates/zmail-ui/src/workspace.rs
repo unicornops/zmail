@@ -2336,6 +2336,33 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// "Forget saved keys and send": forget the pins and trusted keys Zmail
+    /// saved for that recipient, and send the message again.
+    fn forget_saved_keys(
+        &mut self,
+        job_id: i64,
+        recipient: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_outbox_job_id = Some(job_id);
+        match self
+            .sync_service
+            .forget_saved_keys_and_retry(job_id, recipient)
+        {
+            Ok(()) => {
+                self.show_status(
+                    "Saved keys forgotten. Sending the message again.".to_owned(),
+                    cx,
+                );
+                self.refresh_from_store(cx);
+                self.schedule_refresh(window, cx);
+            }
+            Err(error) => self.show_error(format!("{error:#}"), cx),
+        }
+        cx.notify();
+    }
+
     // -----------------------------------------------------------------------
     // Account setup
     // -----------------------------------------------------------------------
@@ -3228,6 +3255,9 @@ impl WorkspaceView {
                 job_id,
                 fingerprint,
             } => self.trust_new_key(*job_id, fingerprint, window, cx),
+            MessageListEvent::ForgetSavedKeys { job_id, recipient } => {
+                self.forget_saved_keys(*job_id, recipient, window, cx)
+            }
             MessageListEvent::Activate => self.focus_pane(Pane::Detail, window, cx),
             // In a stacked layout a click opens the row's detail;
             // elsewhere the detail is already beside the list.
