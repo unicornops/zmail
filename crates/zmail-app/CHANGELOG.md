@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.1](https://github.com/unicornops/zmail/compare/v0.40.0...v0.40.1) (2026-11-28)
+
+
+### Performance Improvements
+
+* **proton:** time each backfill stretch's requests and show the download rate ([#560](https://github.com/unicornops/zmail/issues/560)) ([3737a29](https://github.com/unicornops/zmail/commit/3737a29cb5b19a5ee6d6841d4fd46c350afcf6ea))
+
 ## [0.40.0](https://github.com/unicornops/zmail/compare/v0.39.0...v0.40.0) (2026-11-28)
 
 
