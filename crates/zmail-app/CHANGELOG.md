@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.0](https://github.com/unicornops/zmail/compare/v0.37.8...v0.38.0) (2026-11-28)
+
+
+### Features
+
+* **setup:** ask before using servers DNS points outside the mail domain ([#545](https://github.com/unicornops/zmail/issues/545)) ([367a0f2](https://github.com/unicornops/zmail/commit/367a0f25c123e82216fa3448e1ae7d7b0325aa5d)), closes [#466](https://github.com/unicornops/zmail/issues/466)
+
 ## [0.37.8](https://github.com/unicornops/zmail/compare/v0.37.7...v0.37.8) (2026-11-28)
 
 
