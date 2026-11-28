@@ -65,6 +65,11 @@ zmail-ui = { path = "../zmail-ui" }
 # Core dumps off at start (src/hardening.rs).
 rustix.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Windows Error Reporting's exclusion list at start (src/hardening.rs): a
+# safe registry API, already in the tree through zmail-ui.
+windows-registry = "0.100.0"
+
 [dev-dependencies]
 # A fixed store key, so a second test process can open the same store (the
 # sync-lock test).

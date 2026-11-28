@@ -10432,6 +10432,7 @@ dependencies = [
  "sha2 0.11.1",
  "tokio",
  "url",
+ "windows-registry 0.100.0",
  "winresource",
  "zmail-assets",
  "zmail-auth",

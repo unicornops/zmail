@@ -15,14 +15,33 @@
 //!   caller through `/proc/PID/root`, which a process that isn't dumpable
 //!   doesn't let it open, so file dialogs and other portal calls would
 //!   fail.
-//! - Windows: nothing here yet.
+//! - Windows: the executable is put on Windows Error Reporting's
+//!   exclusion list for the user (`ExcludedApplications`, the value
+//!   `WerAddExcludedApplication` writes), so WER queues no report of a
+//!   crash: no minidump for Microsoft, and no fault dialog. WER's
+//!   local dumps (`LocalDumps`, off unless an administrator or a program
+//!   turned them on for the machine) ignore that list and can only be
+//!   turned off for an executable by an administrator: the MSI does it
+//!   for `zmail-app.exe`, and puts it on the exclusion list for every
+//!   user too (`wix/main.wxs`). A portable copy on a machine with local
+//!   dumps on still leaves one. The desktop app and `zmail-app tui` are
+//!   the same executable. WebView2's processes keep their crash dumps in
+//!   Zmail's own user data folder (`zmail-render-web`). CI crashes both
+//!   on purpose (`scripts/check-windows-crash-dumps.ps1`).
 //!
 //! Files the CLI writes with mail or crash reports in them (the mbox
 //! export, the crash log) are created readable by their owner only.
 
-/// Turns core dumps off for this process and its children (Unix). A
-/// failure is reported on stderr and the command goes on.
+/// Turns core dumps off for this process and its children (Unix), or
+/// keeps Windows Error Reporting from queueing a report with a dump
+/// (Windows). A failure is reported on stderr and the command goes on.
 pub(crate) fn forbid_core_dumps() {
+    #[cfg(windows)]
+    if let Err(error) = exclude_from_error_reporting() {
+        eprintln!(
+            "warning: couldn't keep Windows Error Reporting from saving crash dumps: {error}"
+        );
+    }
     #[cfg(unix)]
     if let Err(error) = rustix::process::setrlimit(
         rustix::process::Resource::Core,
@@ -33,6 +52,46 @@ pub(crate) fn forbid_core_dumps() {
     ) {
         eprintln!("warning: couldn't turn core dumps off: {error}");
     }
+}
+
+/// Windows Error Reporting's per-user exclusion list, under
+/// `HKEY_CURRENT_USER`: a DWORD 1 named after an executable's file name
+/// (`zmail-app.exe`) keeps WER from reporting its crashes. It is what
+/// `WerAddExcludedApplication(path, FALSE)` writes (tried on a Windows
+/// runner: the file name only, whatever the path), written here through
+/// the safe registry API, as the workspace forbids `unsafe` outside the
+/// web renderer's platform code.
+#[cfg_attr(not(windows), allow(dead_code))]
+const WER_EXCLUDED_APPLICATIONS: &str =
+    r"Software\Microsoft\Windows\Windows Error Reporting\ExcludedApplications";
+
+/// The name WER's exclusion list knows `exe` by: its file name.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn error_reporting_name(exe: &std::path::Path) -> Option<&str> {
+    exe.file_name()?.to_str()
+}
+
+/// Puts this executable on the user's WER exclusion list, unless it is
+/// there already. WER reads the list when a process crashes.
+#[cfg(windows)]
+fn exclude_from_error_reporting() -> Result<(), String> {
+    exclude_from_error_reporting_in(windows_registry::CURRENT_USER, WER_EXCLUDED_APPLICATIONS)
+}
+
+/// [`exclude_from_error_reporting`] with the root and key given, for tests.
+#[cfg(windows)]
+fn exclude_from_error_reporting_in(root: &windows_registry::Key, key: &str) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|error| format!("no executable path: {error}"))?;
+    let name =
+        error_reporting_name(&exe).ok_or_else(|| format!("no file name in {}", exe.display()))?;
+    let key = root
+        .create(key)
+        .map_err(|error| format!("opening {key}: {error}"))?;
+    if key.get_u32(name).ok() == Some(1) {
+        return Ok(());
+    }
+    key.set_u32(name, 1)
+        .map_err(|error| format!("setting {name}: {error}"))
 }
 
 /// Marks the process not dumpable (Linux), for the commands that open no
@@ -246,10 +305,21 @@ mod tests {
     }
 }
 
-#[cfg(all(test, debug_assertions))]
+#[cfg(test)]
 mod crash_dump_tests {
     use super::*;
 
+    #[test]
+    fn wer_knows_the_executable_by_its_file_name() {
+        let exe = std::path::Path::new("C:/Program Files/Zmail/zmail-app.exe");
+        assert_eq!(error_reporting_name(exe), Some("zmail-app.exe"));
+        assert_eq!(error_reporting_name(std::path::Path::new("/")), None);
+        assert!(
+            WER_EXCLUDED_APPLICATIONS.ends_with(r"Windows Error Reporting\ExcludedApplications")
+        );
+    }
+
+    #[cfg(debug_assertions)]
     #[test]
     fn forced_crashes_are_read_strictly() {
         use std::time::Duration;
@@ -264,5 +334,21 @@ mod crash_dump_tests {
         for value in ["", "ABORT", "abort:", "abort:soon", "segfault", "abort:-1"] {
             assert_eq!(parse_forced_crash(value), None, "{value:?}");
         }
+    }
+
+    /// The exclusion is written once, as a DWORD 1 named after the test
+    /// binary, here under a scratch key instead of WER's.
+    #[cfg(windows)]
+    #[test]
+    fn the_executable_goes_on_the_exclusion_list() {
+        let root = windows_registry::CURRENT_USER;
+        let key = format!(r"Software\Zmail\tests\wer-{}", std::process::id());
+        let name = std::env::current_exe().expect("the test binary");
+        let name = error_reporting_name(&name).expect("a file name").to_owned();
+        exclude_from_error_reporting_in(root, &key).expect("the first write");
+        exclude_from_error_reporting_in(root, &key).expect("already there");
+        let value = root.open(&key).and_then(|key| key.get_u32(&name));
+        let _ = root.remove_tree(&key);
+        assert_eq!(value.ok(), Some(1));
     }
 }

@@ -18,6 +18,10 @@ Amended again in November 2026 (#475): account secrets in the keychain
 are named by their store as well as their account, and a store never
 hands out an account id twice (§3, "Account secrets").
 
+Amended again in November 2026 (#431, #467): a crash must not write
+Zmail's memory, and with it the key and decrypted mail, to disk (§6,
+"Crash dumps").
+
 ## Context
 
 Everything Zmail keeps lives in one data directory:
@@ -620,7 +624,9 @@ It does not protect against:
   memory while it runs (account secrets are wiped after use, §3, but not
   the copies libraries make). SQLCipher's `cipher_memory_security` (wiping
   and locking its buffers) is off: it costs a lot and protects little
-  once an attacker can read the process.
+  once an attacker can read the process. A crash dump would write that
+  memory to disk; how Zmail keeps them off, and where it can't, is under
+  "Crash dumps" below.
 - **Swap and hibernation.** Pages of Zmail's memory, and on Linux the
   tmpfs open cache, can be written to swap or the hibernation image
   unencrypted, unless the OS encrypts those (macOS always does; Windows
@@ -651,6 +657,78 @@ It does not protect against:
 Full-disk encryption (FileVault, BitLocker, LUKS) covers several of
 these (swap, the open cache, old blocks) and is what Zmail recommends
 alongside this.
+
+#### Crash dumps
+
+A crash dump of a running Zmail holds the store key, decrypted pages,
+bodies and secrets in plaintext, outside the store. At start
+(`crates/zmail-app/src/hardening.rs`, before anything holds a secret):
+
+- **Unix** (#431): the core file size limit is 0, soft and hard, so a
+  crash writes no core file, and systemd-coredump and apport, which
+  honour it, keep nothing; children inherit it. On Linux the commands
+  that open no window are also not dumpable (`PR_SET_DUMPABLE` 0). The
+  desktop app stays dumpable, as xdg-desktop-portal needs to open its
+  `/proc/PID/root`.
+- **Windows** (#467): Windows Error Reporting (WER) can do two things
+  with a crash: queue a report (in `ReportQueue` under `%ProgramData%`
+  or `%LOCALAPPDATA%\Microsoft\Windows\WER`), which takes a minidump
+  and is sent to Microsoft as the machine's consent settings allow, with
+  a fault dialog, and, if local dumps are on for the machine (the `LocalDumps`
+  key: off by default, but an administrator or other software may turn
+  them on, as the Service Fabric SDK on GitHub's Windows runner image
+  does), write a dump to `%LOCALAPPDATA%\CrashDumps`.
+  - The app puts its executable on WER's exclusion list for the user
+    (`HKCU\...\Windows Error Reporting\ExcludedApplications`, value
+    `zmail-app.exe` = 1). That is exactly what
+    `WerAddExcludedApplication(path, FALSE)` writes (tried on a runner);
+    the app writes it with `windows-registry`, a safe API already in the
+    tree, because the WER API and `SetErrorMode` are `unsafe` FFI calls
+    and only `zmail-render-web`'s platform modules may use `unsafe`. WER
+    reads the list when a process crashes, so from the first start no
+    report is queued, and with it goes WER's fault dialog (not seen on
+    CI, whose runner has the dialog off). The value stays after an
+    uninstall; it excludes only a program of that name.
+  - The exclusion does not stop local dumps (tried on a runner), and
+    turning them off for one executable needs an administrator
+    (`HKLM\...\LocalDumps\zmail-app.exe`, `DumpCount` 0; a per-user
+    key is ignored). The MSI, which installs per machine, writes that,
+    and the exclusion for every user under `HKLM`; both go on uninstall
+    (`crates/zmail-app/wix/main.wxs`).
+  - The desktop app and `zmail-app tui` are one executable, so both are
+    covered. WebView2's processes (`msedgewebview2.exe`, the HTML
+    renderer of ADR 0006) are not Zmail's executable and are not
+    excluded, which would exclude every app's WebView2. Their crashes go
+    to WebView2's own crash handler, which with
+    `IsCustomCrashReportingEnabled` keeps the dumps in Zmail's WebView2
+    user data folder instead of sending them to Microsoft; that folder
+    (under the temporary folder) is deleted when the browser process
+    exits, and at the next start if Zmail died first. They hold the
+    sanitised HTML of the messages shown, not the store key.
+  - CI's Windows web renderer job crashes the debug build on purpose
+    (`ZMAIL_DEBUG_FORCE_CRASH`, which release builds don't have), with
+    the runner's diagnostic data raised from 0 to Required (at 0 WER
+    queues nothing, which would hide a report), reports only queued,
+    and local dumps on: a control crash leaves a local dump and a queued
+    report, the app's exclusion alone leaves no report, and with the
+    MSI's values the desktop app and the terminal UI, crashed by an
+    abort and by a stack overflow, leave neither
+    (`scripts/check-windows-crash-dumps.ps1`).
+  - Gaps: a portable copy (the release zip, not the MSI) on a machine
+    with local dumps on still leaves a local dump, unless an
+    administrator adds the key above; a debugger, or any process of the
+    same user, can still dump the running app (above); a dump written by
+    other software (for example a crash reporter injected into every
+    process) is not covered; and a crash before the first lines of
+    `main` (none is known) would precede the exclusion on the very first
+    run of a portable copy.
+- **macOS**: the core limit as on Unix. ReportCrash's crash reports
+  (`~/Library/Logs/DiagnosticReports`) hold a backtrace and the
+  registers, not the process's memory.
+
+The crash log (`docs/phase5-hardening.md`, "Crash And Error Reporting
+Policy") still records each panic's message: it is written by Zmail's
+panic hook before the process aborts.
 
 ## Consequences
 
