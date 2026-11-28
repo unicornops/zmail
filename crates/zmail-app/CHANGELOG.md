@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.2](https://github.com/unicornops/zmail/compare/v0.38.1...v0.38.2) (2026-11-28)
+
+
+### Bug Fixes
+
+* **proton:** remember pinned recipient keys locally ([#549](https://github.com/unicornops/zmail/issues/549)) ([62c1e12](https://github.com/unicornops/zmail/commit/62c1e12efb3b234485865d54e59d568dac6315c1)), closes [#463](https://github.com/unicornops/zmail/issues/463)
+
 ## [0.38.1](https://github.com/unicornops/zmail/compare/v0.38.0...v0.38.1) (2026-11-28)
 
 
