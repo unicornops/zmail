@@ -1069,7 +1069,7 @@ mod tests {
             }),
         };
         store
-            .record_sync_checkpoint(account_id, &previous.to_json())
+            .record_sync_checkpoint(account_id, previous.to_json())
             .expect("checkpoint");
         let target = store
             .sync_target(account_id)

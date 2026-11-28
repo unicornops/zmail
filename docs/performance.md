@@ -436,7 +436,7 @@ tests, so on every pull request:
   data. So at those sizes most of each stretch was spent elsewhere,
   which leaves the requests (a stretch is the event poll, the addresses,
   the labels and 8 metadata pages, one after another) and their retries;
-  nothing here measures them. The write would have reached about 12 s
+  nothing here measures them (the next section does). The write would have reached about 12 s
   a stretch by 1.32 million messages. Real mail has longer headers than
   the synthetic account and some stored bodies, so its rebuild was
   probably slower than measured here, but not by the factor of 20 the
@@ -453,3 +453,80 @@ tests, so on every pull request:
   6.5 s at a million messages, and counts the threads of each mailbox
   the message left, as before.
 
+
+## Fetching a stretch of older Proton mail (2026-11-28, #478)
+
+The write still does not grow. Two runs of the bench on `main` at
+e62cca4 (0.39.0), same machine, shared with other work (load average 4
+to 9), milliseconds for one stretch:
+
+| Mirror | merge, run 1 | merge, run 2 | delta of new mail, run 1 | run 2 | unchanged relist, run 1 | run 2 |
+|---|---|---|---|---|---|---|
+| 10,000 | 173 | 170 | 185 | 185 | 192 | 193 |
+| 100,000 | 233 | 181 | 468 | 190 | 201 | 194 |
+| 1,000,000 | 208 | 209 | 250 | 247 | 195 | 196 |
+
+The two outliers at 100,000 are the commit (101 and 335 ms against 83
+and 61 ms in the other run), which is noise on a busy machine; every
+other phase matches the "After" table above.
+
+The write is about 0.2 s of a stretch. #478 observed 57 to 66 s
+for each stretch, so nearly all of it is the requests, and nothing timed
+them. Now each stretch keeps what it cost in the account's checkpoint,
+and the terminal UI shows it under the account's sync details (Setup →
+Accounts) while older mail arrives:
+
+```text
+Last stretch : 1,016 messages in 16.6 s, writing 0.2 s; about 3,331 a minute
+Its requests : 13 in 16.1 s: events 0.3 s, addresses and labels 12.5 s, 8 pages 3.3 s; 1 rate limited, 12.0 s waiting to retry
+```
+
+- **Last stretch** is the whole sync that fetched and wrote it, from the
+  event poll to the stored checkpoint. The rate divides its messages by
+  that time plus the time since the stretch before ended (the 1.5 s
+  pause and anything else the sync service did in between), so it is
+  the download rate as it runs. It is left out after a gap of more than
+  ten minutes (Zmail was closed) and for the first stretch.
+- **Its requests** splits the requests into the event poll the sync
+  starts with, the addresses and the three label types the stretch
+  places its messages with, and the metadata pages. A request retried
+  after rate limiting or a dropped connection counts once; a page Proton
+  answers as stale and that is asked for again counts again, so more
+  than 8 pages means stale answers. "Rate limited" counts 429 and 503
+  answers; the wait is the time spent before retries (`Retry-After`, or
+  10 s plus up to 10 s of jitter without one, at most a minute each).
+
+The counts come from `zmail_proton_api::tally`, which counts the
+requests of the future it runs in a task-local, so a message opened or
+another account syncing on the same connection at the same time is not
+in them. `a_backfill_stretch_records_its_requests_and_rate_limiting`
+in `zmail-sync` runs a stretch against the mock Proton server, with one
+429, and checks what is stored.
+
+### What to expect
+
+A stretch with the default paging is 13 requests (one event poll, the
+addresses, three label types, eight pages of 128) for 1,016 new
+messages (each page repeats the cursor message), then a write of about
+0.2 s and the 1.5 s pause, one after another. So a stretch takes about
+1.7 s plus its requests, and 1,000,000 messages are 985 stretches:
+
+| Time per request | Rate limited answers per stretch | Stretch | Messages a minute | 1,000,000 messages |
+|---|---|---|---|---|
+| 0.25 s | none | 5.0 s | about 12,300 | 1.4 hours |
+| 0.5 s | none | 8.2 s | about 7,400 | 2.2 hours |
+| 1 s | none | 14.7 s | about 4,100 | 4.0 hours |
+| 0.5 s | 1, waiting 15 s on average | 23.7 s | about 2,600 | 6.5 hours |
+| 0.5 s | 3 | 54.7 s | about 1,100 | 15 hours |
+
+The times per request are assumptions, not measurements: nothing here
+reaches Proton. The observed 57 to 66 s a stretch fit either three or
+four rate-limited answers a stretch, or 4.3 to 4.9 s for each request
+with none; the sync details now say which. The live figure for a large
+account is still to be recorded here.
+
+What is left to decide once it is (#478): not reading the addresses and
+labels again for every stretch (4 of the 13 requests; label and address
+changes arrive as events), more pages per stretch, or a shorter pause.
+Bridge's own metadata stage lists sequential pages of 128 too, so
+listing in parallel is out. None of these is changed yet.

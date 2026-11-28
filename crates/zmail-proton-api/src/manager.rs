@@ -184,8 +184,15 @@ impl Manager {
     ) -> Result<Response, Error> {
         let policy = self.inner.config.retry;
         let mut attempt = 0;
+        crate::tally::count_request();
         loop {
             let outcome = self.send_once(request, auth).await;
+            if outcome
+                .as_ref()
+                .is_ok_and(|response| is_retryable_status(response.status))
+            {
+                crate::tally::count_rate_limited();
+            }
             let delay = match &outcome {
                 Ok(response)
                     if is_retryable_status(response.status) && attempt < policy.max_retries =>
@@ -209,6 +216,7 @@ impl Manager {
             };
             match delay {
                 Some(delay) => {
+                    crate::tally::count_retry_wait(delay);
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                 }

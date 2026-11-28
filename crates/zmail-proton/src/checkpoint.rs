@@ -68,7 +68,8 @@ pub struct StretchCost {
     /// The whole sync, from the event poll to the stored checkpoint, in
     /// milliseconds.
     pub total_ms: u64,
-    /// The event poll the sync starts with.
+    /// The sync's first step: the event poll (or, when Proton asked for
+    /// a full resync, the newest mail listed again).
     pub events: RequestCost,
     /// The addresses and labels the stretch places its messages with.
     pub lookups: RequestCost,
