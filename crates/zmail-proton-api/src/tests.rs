@@ -328,6 +328,68 @@ async fn retries_429_and_503_honouring_retry_after() {
     assert_eq!(server.requests().len(), 3);
 }
 
+// Issue #478: a backfill stretch reports what its requests cost.
+#[tokio::test]
+async fn a_tally_counts_requests_rate_limiting_and_retry_waits() {
+    let server = MockServer::start(|_, index| match index {
+        0 => api_error(429, 2028, "Too many requests").with_header("Retry-After", "0"),
+        // No Retry-After: the mock config's 20 ms fallback.
+        1 => api_error(503, 0, "Unavailable"),
+        _ => user_reply(),
+    })
+    .await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = manager.new_client("uid", "access", "refresh");
+
+    let (users, counted) = crate::tally(async {
+        let first = client.get_user().await;
+        let second = client.get_user().await;
+        (first, second)
+    })
+    .await;
+    users.0.expect("user after retries");
+    users.1.expect("user");
+    assert_eq!(server.requests().len(), 4, "three attempts and one");
+    assert_eq!(counted.requests, 2, "a retried request counts once");
+    assert_eq!(counted.rate_limited, 2);
+    assert!(
+        counted.retry_wait >= Duration::from_millis(20),
+        "waited {:?}",
+        counted.retry_wait
+    );
+    assert!(counted.elapsed >= counted.retry_wait);
+
+    // Outside a tally nothing is counted, and an inner tally's requests
+    // are the outer one's too.
+    client.get_user().await.expect("user");
+    let ((_, inner), outer) = crate::tally(async {
+        let _ = client.get_user().await;
+        crate::tally(client.get_user()).await
+    })
+    .await;
+    assert_eq!((inner.requests, outer.requests), (1, 2));
+}
+
+// Another task's requests on the same manager are not in the tally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tally_leaves_out_other_tasks_requests() {
+    let server = MockServer::start(|_, _| user_reply()).await;
+    let manager = Manager::new(test_config(&server.url, None)).expect("manager");
+    let client = Arc::new(manager.new_client("uid", "access", "refresh"));
+
+    let (_, counted) = crate::tally(async {
+        let other = {
+            let client = client.clone();
+            tokio::spawn(async move { client.get_user().await.map(|_| ()) })
+        };
+        client.get_user().await.expect("user");
+        other.await.expect("joined").expect("user");
+    })
+    .await;
+    assert_eq!(server.requests().len(), 2);
+    assert_eq!(counted.requests, 1);
+}
+
 #[tokio::test]
 async fn gives_up_after_the_retry_budget() {
     let server =

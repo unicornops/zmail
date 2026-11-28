@@ -32,6 +32,34 @@ use crate::{SyncService, backoff::Backoff, wake::unless_woken};
 #[cfg(feature = "proton")]
 const BACKFILL_PAUSE: Duration = Duration::from_millis(1500);
 
+/// `checkpoint` with the cost of the stretch that produced it, or without
+/// one once the history is complete.
+#[cfg(feature = "proton")]
+fn with_stretch(checkpoint: &str, stretch: Option<zmail_proton::StretchCost>) -> String {
+    match zmail_proton::ProtonCheckpoint::parse(checkpoint) {
+        Some(parsed) => zmail_proton::ProtonCheckpoint {
+            last_stretch: stretch,
+            ..parsed
+        }
+        .to_json(),
+        None => checkpoint.to_owned(),
+    }
+}
+
+/// Whole milliseconds, saturating.
+#[cfg(feature = "proton")]
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The wall clock in milliseconds since the Unix epoch; 0 before it.
+#[cfg(feature = "proton")]
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, millis)
+}
+
 /// The account's saved key records a Proton send starts from: the keys the
 /// user trusted and the pins remembered from verified contact cards.
 #[cfg(feature = "proton")]
@@ -160,9 +188,21 @@ impl SyncService {
             let _ = store.record_sync_progress(account_id, detail);
         };
 
-        let update =
-            zmail_proton::discover_and_sync(target, session, &mailboxes, &paging, &progress)
-                .await?;
+        // What a stretch of older mail costs is kept for the sync details
+        // (#478), timed from here.
+        let started = std::time::Instant::now();
+        let started_at_ms = unix_millis();
+        let previous_stretch = target
+            .checkpoint
+            .as_deref()
+            .and_then(zmail_proton::ProtonCheckpoint::parse)
+            .and_then(|checkpoint| checkpoint.last_stretch);
+
+        let (update, event_requests) = zmail_proton::tally(zmail_proton::discover_and_sync(
+            target, session, &mailboxes, &paging, &progress,
+        ))
+        .await;
+        let update = update?;
         match &update {
             zmail_proton::MirrorUpdate::Replace(snapshot) => {
                 // A resync diffs against the whole mirror for its new-mail
@@ -209,6 +249,7 @@ impl SyncService {
             zmail_proton::backfill_older_mail(session, &checkpoint, &paging, &progress).await?;
         if let Some(backfill) = backfill {
             store.begin_sync_attempt(account_id, SyncPhase::Syncing, &backfill.snapshot.detail)?;
+            let writing = std::time::Instant::now();
             // Older mail never notifies: it is history, not new mail.
             match backfill.relist_delta() {
                 Some(delta) => {
@@ -216,9 +257,24 @@ impl SyncService {
                 }
                 None => store.merge_account_snapshot(account_id, &backfill.snapshot)?,
             }
-            store.record_sync_checkpoint(account_id, &backfill.snapshot.checkpoint)?;
+            let write_ms = millis(writing.elapsed());
+            let stretch = (!backfill.complete).then(|| zmail_proton::StretchCost {
+                messages: backfill.listed,
+                total_ms: millis(started.elapsed()),
+                events: event_requests.into(),
+                lookups: backfill.lookups.into(),
+                pages: backfill.pages.into(),
+                write_ms,
+                ended_at_ms: unix_millis(),
+                since_previous_ms: zmail_proton::StretchCost::gap_after(
+                    previous_stretch.as_ref(),
+                    started_at_ms,
+                ),
+            });
+            let stored = with_stretch(&backfill.snapshot.checkpoint, stretch);
+            store.record_sync_checkpoint(account_id, &stored)?;
             self.inner.index_wake.notify_one();
-            checkpoint = backfill.snapshot.checkpoint;
+            checkpoint = stored;
             if !backfill.complete {
                 detail = backfill.snapshot.detail;
                 let service = self.clone();
@@ -875,6 +931,194 @@ mod tests {
             keychain.read(SecretSlot::ProtonKeyPass).as_deref(),
             Some("new-key-pass")
         );
+    }
+
+    // Issue #478: a stretch of older mail stores what it cost, request by
+    // request, in the checkpoint the sync details read.
+    #[test]
+    fn a_backfill_stretch_records_its_requests_and_rate_limiting() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use zmail_core::ProtocolKind;
+
+        fn meta(id: &str, time: i64) -> serde_json::Value {
+            serde_json::json!({
+                "ID": id, "AddressID": "addr-1", "ConversationID": format!("c-{id}"),
+                "LabelIDs": ["0", "5"], "Subject": format!("Subject {id}"),
+                "Sender": {"Name": "Alice", "Address": "alice@example.com"},
+                "ToList": [{"Name": "", "Address": "rob@proton.test"}],
+                "Flags": 1, "Time": time, "Unread": 0, "NumAttachments": 0,
+            })
+        }
+        let ok = |body: serde_json::Value| {
+            let mut body = body;
+            body["Code"] = serde_json::json!(1000);
+            Reply::json(200, body)
+        };
+
+        let runtime = runtime();
+        let limited_once = Arc::new(AtomicBool::new(false));
+        let server = {
+            let limited_once = limited_once.clone();
+            runtime.block_on(MockServer::start(move |request, _| {
+                let path = request.path.split('?').next().unwrap_or_default();
+                match (request.method.as_str(), path) {
+                    ("POST", "/auth/v4/refresh") => tokens("uid-1", "access-1", "refresh-2"),
+                    ("GET", "/core/v4/events/ev-1") => {
+                        ok(serde_json::json!({"EventID": "ev-2", "More": 0}))
+                    }
+                    ("GET", "/core/v4/addresses") => {
+                        if !limited_once.swap(true, Ordering::SeqCst) {
+                            return Reply::json(
+                                429,
+                                serde_json::json!({"Code": 2028, "Error": "Too many requests"}),
+                            )
+                            .with_header("Retry-After", "0");
+                        }
+                        ok(serde_json::json!({"Addresses": [{
+                            "ID": "addr-1", "Email": "rob@proton.test", "Status": 1,
+                            "Type": 1, "Order": 1, "DisplayName": "Rob"
+                        }]}))
+                    }
+                    ("GET", "/core/v4/labels") => {
+                        let labels = if request.path.contains("Type=4") {
+                            serde_json::json!([
+                                {"ID": "0", "Name": "Inbox", "Path": "Inbox", "Type": 4},
+                                {"ID": "5", "Name": "All Mail", "Path": "All Mail", "Type": 4}
+                            ])
+                        } else {
+                            serde_json::json!([])
+                        };
+                        ok(serde_json::json!({"Labels": labels}))
+                    }
+                    ("POST", "/mail/v4/messages") => {
+                        // Pages of four from the cursor, which comes back
+                        // first.
+                        let end_id = request.json()["EndID"].as_str().unwrap_or("").to_owned();
+                        let start: i64 = end_id
+                            .strip_prefix('m')
+                            .and_then(|number| number.parse().ok())
+                            .expect("a cursor");
+                        let page: Vec<_> = (0..4)
+                            .map(|step| {
+                                let number = start - step;
+                                meta(&format!("m{number}"), 1_700_000_000 + number)
+                            })
+                            .collect();
+                        ok(serde_json::json!({"Messages": page}))
+                    }
+                    other => panic!("unexpected request {other:?}"),
+                }
+            }))
+        };
+
+        let keychain = Arc::new(Keychain::default());
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store"));
+        let account_id = store
+            .create_demo_account(ProtocolKind::Proton)
+            .expect("account");
+        for (slot, secret) in [
+            (SecretSlot::ProtonUid, "uid-1"),
+            (SecretSlot::ProtonRefreshToken, "refresh-1"),
+            (SecretSlot::ProtonKeyPass, "key-pass"),
+        ] {
+            keychain
+                .inner
+                .set_account_secret_in_slot(account_id, slot, secret)
+                .expect("stored");
+        }
+        let service = SyncService::new(runtime.handle().clone(), store.clone(), keychain);
+        service
+            .configure_proton(zmail_proton_api::mock::config(&server.url, None))
+            .expect("Proton");
+        service.set_proton_paging(zmail_proton::SyncPaging {
+            page_size: 4,
+            first_sync_pages: 1,
+            backfill_pages_per_run: 2,
+        });
+        // A mirror with mail, part way through its older mail, whose last
+        // stretch ended a moment ago.
+        store
+            .merge_account_snapshot(
+                account_id,
+                &zmail_core::AccountSyncSnapshot {
+                    checkpoint: String::new(),
+                    detail: String::new(),
+                    identities: None,
+                    mailboxes: vec![zmail_core::MailboxSnapshot {
+                        name: "INBOX".to_owned(),
+                        role: Some("inbox".to_owned()),
+                        ..zmail_core::MailboxSnapshot::default()
+                    }],
+                },
+            )
+            .expect("mirror");
+        let previous = zmail_proton::ProtonCheckpoint {
+            event_id: "ev-1".to_owned(),
+            backfill_end_id: Some("m100".to_owned()),
+            listed: 400,
+            total: Some(10_000),
+            labels: [("0", "INBOX"), ("5", "All Mail")]
+                .into_iter()
+                .map(|(id, name)| (id.to_owned(), name.to_owned()))
+                .collect(),
+            relist: false,
+            last_stretch: Some(zmail_proton::StretchCost {
+                ended_at_ms: super::unix_millis().saturating_sub(1_500),
+                ..zmail_proton::StretchCost::default()
+            }),
+        };
+        store
+            .record_sync_checkpoint(account_id, &previous.to_json())
+            .expect("checkpoint");
+        let target = store
+            .sync_target(account_id)
+            .expect("target")
+            .expect("the account");
+
+        let (_, checkpoint) = runtime.block_on(async {
+            let session = service
+                .proton_sessions()
+                .expect("Proton is configured")
+                .session(account_id)
+                .await
+                .expect("the session resumes");
+            service
+                .sync_proton_mail(&target, &session)
+                .await
+                .expect("synced")
+        });
+
+        let stored = zmail_proton::ProtonCheckpoint::parse(&checkpoint).expect("checkpoint");
+        assert_eq!(stored.backfill_end_id.as_deref(), Some("m94"));
+        let stretch = stored.last_stretch.expect("the stretch cost");
+        assert_eq!(stretch.messages, 6, "two pages of three after the cursor");
+        assert_eq!(stretch.events.requests, 1);
+        // The addresses (once, retried after a 429) and three label types.
+        assert_eq!(
+            (stretch.lookups.requests, stretch.lookups.rate_limited),
+            (4, 1)
+        );
+        assert_eq!((stretch.pages.requests, stretch.pages.rate_limited), (2, 0));
+        assert_eq!(stretch.requests().requests, 7);
+        assert!(stretch.lookups.waited_ms < 1_000, "Retry-After: 0");
+        assert!(stretch.total_ms >= stretch.write_ms);
+        assert!(stretch.ended_at_ms >= previous.last_stretch.expect("set").ended_at_ms);
+        let gap = stretch.since_previous_ms.expect("a stretch just ended");
+        assert!((1_500..60_000).contains(&gap), "{gap}");
+        assert!(stretch.messages_per_minute().is_some());
+        // What the store holds is what the sync returned.
+        let summary = store
+            .list_accounts()
+            .expect("accounts")
+            .into_iter()
+            .find(|account| account.id == account_id)
+            .expect("the account");
+        assert_eq!(
+            summary.sync_status.checkpoint.as_deref(),
+            Some(checkpoint.as_str())
+        );
+        drop(server);
     }
 
     /// The old session's refresh is answered only once the new session is

@@ -302,6 +302,59 @@ fn the_accounts_list_shows_the_sync_details_of_the_account_under_the_cursor() {
     }
 }
 
+// Issue #478: while older Proton mail arrives, the details say what the
+// last stretch of it cost, so the download rate can be read off.
+#[cfg(feature = "proton")]
+#[test]
+fn the_proton_sync_details_show_what_the_last_stretch_cost() {
+    let store = seeded_store();
+    let (_, proton) = seed_jmap_and_proton(&store);
+    store
+        .record_sync_success(
+            proton,
+            "Fetched 5,080 of 85,000 messages; older mail is still arriving",
+            r#"{"event_id":"ev","backfill_end_id":"m9","listed":5080,"total":85000,
+            "stretch":{"messages":1016,"total_ms":16600,
+            "events":{"requests":1,"ms":300},
+            "lookups":{"requests":4,"rate_limited":1,"ms":12500,"waited_ms":12000},
+            "pages":{"requests":8,"ms":3300},
+            "write_ms":200,"ended_at_ms":1800000000000,"since_previous_ms":1700}}"#,
+        )
+        .expect("recorded");
+    let (mut app, _) = setup_app(store, environment(), true);
+    keys(&mut app, "sa");
+    app.refresh();
+    for account in &mut app.accounts {
+        let status = &mut account.sync_status;
+        status.last_attempt_at = Some(super::ago(1));
+        if status.last_success_at.is_some() {
+            status.last_success_at = Some(super::ago(1));
+        }
+    }
+    let row = app
+        .accounts
+        .iter()
+        .position(|account| account.id == proton)
+        .expect("the Proton account");
+    for _ in 0..row {
+        keys(&mut app, "n");
+    }
+    let buffer = draw(&mut app, 160, 48);
+    assert_printable(&buffer);
+    assert_snapshot("accounts-details-proton-stretch-160x48", &buffer);
+    let text = text_of(&buffer);
+    assert!(
+        text.contains(
+            "Last stretch : 1,016 messages in 16.6 s, writing 0.2 s; about 3,331 a minute"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("Its requests : 13 in 16.1 s: events 0.3 s, addresses and labels 12.5 s"),
+        "{text}"
+    );
+}
+
 #[test]
 fn delete_asks_then_removes_the_account_and_its_secrets() {
     let (mut app, secrets) = setup_app(seeded_store(), environment(), true);

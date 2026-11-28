@@ -6,7 +6,8 @@
 //!   OAuth2 browser flow that ends in it.
 //! - [`read_sync_progress`] reads the first sync's progress from the store.
 //! - [`backfill`] reads how much of a Proton account's older mail is
-//!   still to fetch, for the account's details.
+//!   still to fetch, and what the last stretch of it cost, for the
+//!   account's details.
 //! - [`remove_account`] removes an account's local data and every keychain
 //!   secret it has.
 //! - [`sync_failure`] reads what kind of failure an account's last sync
@@ -252,6 +253,87 @@ pub struct Backfill {
     pub total: Option<usize>,
     /// The whole history is in.
     pub complete: bool,
+    /// What the last stretch cost, while older mail is still arriving
+    /// (#478).
+    pub last_stretch: Option<Stretch>,
+}
+
+/// What one stretch of a Proton account's older mail cost: the sync that
+/// fetched and wrote it. Times are in milliseconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Stretch {
+    /// Messages listed.
+    pub messages: usize,
+    /// The whole sync.
+    pub total_ms: u64,
+    /// Writing the messages into the mirror.
+    pub write_ms: u64,
+    /// The event poll the sync starts with.
+    pub events_ms: u64,
+    /// Reading the addresses and labels.
+    pub lookups_ms: u64,
+    /// Reading the pages of message metadata.
+    pub pages_ms: u64,
+    /// Requests for those pages.
+    pub page_requests: u32,
+    /// All the sync's requests.
+    pub requests: u32,
+    /// Answers that were rate limiting (429) or Proton unavailable (503).
+    pub rate_limited: u32,
+    /// Time spent waiting to retry.
+    pub waited_ms: u64,
+    /// The download rate, with the time since the stretch before, when
+    /// one ended shortly before.
+    pub per_minute: Option<u64>,
+}
+
+impl Stretch {
+    /// "1,016 messages in 4.3 s, writing 0.2 s; about 10,160 a minute".
+    pub fn label(&self) -> String {
+        let mut label = format!(
+            "{} in {}, writing {}",
+            count_noun_thousands(self.messages, "message", "messages"),
+            seconds(self.total_ms),
+            seconds(self.write_ms)
+        );
+        if let Some(rate) = self.per_minute {
+            label.push_str(&format!("; about {} a minute", thousands_u64(rate)));
+        }
+        label
+    }
+
+    /// "13 in 4.1 s: events 0.3 s, addresses and labels 0.5 s, 8 pages
+    /// 3.3 s; none rate limited", or "...; 2 rate limited, 21.0 s waiting".
+    pub fn requests_label(&self) -> String {
+        let limited = match self.rate_limited {
+            0 => "none rate limited".to_owned(),
+            count => format!("{count} rate limited"),
+        };
+        let waited = if self.waited_ms > 0 {
+            format!(", {} waiting to retry", seconds(self.waited_ms))
+        } else {
+            String::new()
+        };
+        format!(
+            "{} in {}: events {}, addresses and labels {}, {} {}; {limited}{waited}",
+            self.requests,
+            seconds(self.events_ms + self.lookups_ms + self.pages_ms),
+            seconds(self.events_ms),
+            seconds(self.lookups_ms),
+            count_noun(self.page_requests as usize, "page", "pages"),
+            seconds(self.pages_ms),
+        )
+    }
+}
+
+/// Milliseconds as seconds to a tenth: `4.3 s`.
+fn seconds(ms: u64) -> String {
+    let tenths = ms.saturating_add(50) / 100;
+    format!("{}.{} s", thousands_u64(tenths / 10), tenths % 10)
+}
+
+fn thousands_u64(value: u64) -> String {
+    usize::try_from(value).map_or_else(|_| value.to_string(), thousands)
 }
 
 impl Backfill {
@@ -297,10 +379,27 @@ pub fn backfill(account: &AccountSummary) -> Option<Backfill> {
         zmail_core::ProtocolKind::Proton => {
             let checkpoint =
                 zmail_proton::ProtonCheckpoint::parse(account.sync_status.checkpoint.as_deref()?)?;
+            let complete = !checkpoint.backfill_pending();
             Some(Backfill {
                 fetched: checkpoint.listed,
                 total: checkpoint.total,
-                complete: !checkpoint.backfill_pending(),
+                complete,
+                last_stretch: checkpoint.last_stretch.filter(|_| !complete).map(|cost| {
+                    let all = cost.requests();
+                    Stretch {
+                        messages: cost.messages,
+                        total_ms: cost.total_ms,
+                        write_ms: cost.write_ms,
+                        events_ms: cost.events.ms,
+                        lookups_ms: cost.lookups.ms,
+                        pages_ms: cost.pages.ms,
+                        page_requests: cost.pages.requests,
+                        requests: all.requests,
+                        rate_limited: all.rate_limited,
+                        waited_ms: all.waited_ms,
+                        per_minute: cost.messages_per_minute(),
+                    }
+                }),
             })
         }
         _ => None,
@@ -612,8 +711,8 @@ mod tests {
     use zmail_store::{AccountRemovalImpact, LocalStore};
 
     use super::{
-        Backfill, CACHE_BUDGETS, backfill, budget_label, budget_options, read_sync_progress,
-        removal_blocker, removal_description, removal_lines, remove_account,
+        Backfill, CACHE_BUDGETS, Stretch, backfill, budget_label, budget_options,
+        read_sync_progress, removal_blocker, removal_description, removal_lines, remove_account,
     };
 
     fn account() -> NewAccount {
@@ -921,6 +1020,7 @@ mod tests {
             fetched: 1_536,
             total: Some(85_000),
             complete: false,
+            last_stretch: None,
         };
         assert_eq!(pending.remaining(), Some(83_464));
         assert_eq!(pending.label(), "83,464 of 85,000 messages still to fetch");
@@ -962,6 +1062,7 @@ mod tests {
                 fetched: 512,
                 total: Some(2_000),
                 complete: false,
+                last_stretch: None,
             })
         );
         let complete = summary(
@@ -972,5 +1073,42 @@ mod tests {
         // Zmail 0.17.0 and earlier stored the bare event ID: history complete.
         let legacy = summary(ProtocolKind::Proton, Some("ACXDmTaBub14w=="));
         assert_eq!(backfill(&legacy).map(|fill| fill.complete), Some(true));
+    }
+
+    // Issue #478: the details say what the last stretch of older mail cost.
+    #[cfg(feature = "proton")]
+    #[test]
+    fn a_proton_backfill_reads_the_last_stretch_cost() {
+        let checkpoint = r#"{"event_id":"ev","backfill_end_id":"m9","listed":5080,"total":85000,
+            "stretch":{"messages":1016,"total_ms":16600,
+            "events":{"requests":1,"ms":300},
+            "lookups":{"requests":4,"rate_limited":1,"ms":12500,"waited_ms":12000},
+            "pages":{"requests":8,"ms":3300},
+            "write_ms":200,"ended_at_ms":1800000000000,"since_previous_ms":1700}}"#;
+        let fill = backfill(&summary(ProtocolKind::Proton, Some(checkpoint))).expect("backfill");
+        let stretch = fill.last_stretch.expect("the last stretch");
+        assert_eq!(
+            stretch.label(),
+            "1,016 messages in 16.6 s, writing 0.2 s; about 3,331 a minute"
+        );
+        assert_eq!(
+            stretch.requests_label(),
+            "13 in 16.1 s: events 0.3 s, addresses and labels 12.5 s, 8 pages 3.3 s; \
+             1 rate limited, 12.0 s waiting to retry"
+        );
+        let first = Stretch {
+            per_minute: None,
+            rate_limited: 0,
+            waited_ms: 0,
+            ..stretch
+        };
+        assert_eq!(first.label(), "1,016 messages in 16.6 s, writing 0.2 s");
+        assert!(first.requests_label().ends_with("; none rate limited"));
+
+        // Once the history is complete there is no stretch to show.
+        let done = checkpoint.replace(r#""backfill_end_id":"m9","#, "");
+        let fill = backfill(&summary(ProtocolKind::Proton, Some(&done))).expect("backfill");
+        assert!(fill.complete);
+        assert_eq!(fill.last_stretch, None);
     }
 }

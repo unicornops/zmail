@@ -11,7 +11,9 @@
 // connect are only retried for GET requests. TLS pin mismatches are never
 // retried. Pre/post request hooks, the logger and the panic handler are
 // not ported. Modified on 2026-11-27 (#462): response bodies are read in
-// chunks up to a limit for the kind of route, instead of whole.
+// chunks up to a limit for the kind of route, instead of whole. Modified
+// on 2026-11-28 (#478): each request, rate-limited answer and retry wait
+// is counted in the running request tally (`tally.rs`).
 
 //! The API manager: one HTTP client, cookie jar and status per API host.
 
