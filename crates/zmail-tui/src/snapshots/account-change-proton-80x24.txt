@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test               CHANGE ACCOUNT                   Folder: Inbox
+  Change rob@proton.test
+  Up and Down choose a row; Enter changes it.
+
+  Sign in to Proton again (Enter)
+  Cache budget : < No limit >
+
+  The cache budget caps the downloaded bodies and attachments kept for this
+  account; the oldest go first and download again when opened.
+
+  Identities
+  Rob <rob@proton.test>  (primary)
+
+  Ret/E: Edit   D: Remove   *: Make primary
+  Proton addresses are added and removed in Proton's settings; Zmail lists them
+  after the next sync.
+
+
+
+
+
+                        [Not signed in to Proton again]
+Ret [Change] ^U Clear
+Tab NextRow  Esc Accounts

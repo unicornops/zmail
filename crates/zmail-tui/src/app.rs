@@ -657,6 +657,10 @@ pub struct App {
     pub(crate) save_folder: Option<std::path::PathBuf>,
     /// The user's keymap file.
     pub(crate) keymap: crate::keymap::UserKeymap,
+    /// What Proton's sign-in runs against, when not the sync service
+    /// (tests install a fake: they have no Proton server).
+    #[cfg(feature = "proton")]
+    pub(crate) proton_backend: Option<Arc<dyn zmail_setup::proton::ProtonSide>>,
 }
 
 /// News from work running elsewhere.
@@ -769,6 +773,8 @@ impl App {
             attachments: None,
             save_folder: None,
             keymap: crate::keymap::UserKeymap::default(),
+            #[cfg(feature = "proton")]
+            proton_backend: None,
         };
         app.load_folders();
         app.open_default_folder();

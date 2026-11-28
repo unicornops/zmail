@@ -35,6 +35,8 @@ mod keymap;
 mod palette;
 mod screenshot;
 mod screenshots;
+#[cfg(feature = "proton")]
+mod sign_in_again;
 mod triage;
 mod warnings;
 

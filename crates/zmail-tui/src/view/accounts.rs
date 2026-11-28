@@ -306,9 +306,7 @@ pub(super) fn draw_edit(app: &mut App, frame: &mut Frame, theme: Theme, body: Re
             }
         ),
         AuthKind::OAuth2 => "Sign in again in the browser (Enter)".to_owned(),
-        AuthKind::ProtonSession => {
-            "Signing in to Proton again: delete the account and add it again".to_owned()
-        }
+        AuthKind::ProtonSession => "Sign in to Proton again (Enter)".to_owned(),
     };
     let rows = [
         sign_in,
@@ -574,10 +572,29 @@ pub(super) fn draw_add(app: &mut App, frame: &mut Frame, theme: Theme, body: Rec
         Step::Done => done_lines(&mut out, add, syncs_here),
         #[cfg(feature = "proton")]
         Step::ProtonSignIn => {
-            out.heading(
-                "Sign in to Proton Mail",
-                "Use your Proton address or username and your Proton password.",
-            );
+            match &add.again {
+                Some(again) if again.ended => out.heading(
+                    "Sign in to Proton Mail again",
+                    &format!(
+                        "Proton ended Zmail's session for {}. Sign in to carry on: its mail \
+                         stays on this computer and nothing downloads again.",
+                        sanitize_line(&again.name)
+                    ),
+                ),
+                Some(again) => out.heading(
+                    "Sign in to Proton Mail again",
+                    &format!(
+                        "Once you have signed in, Zmail signs out of the session it has been \
+                         using for {}. Its mail stays on this computer and nothing downloads \
+                         again.",
+                        sanitize_line(&again.name)
+                    ),
+                ),
+                None => out.heading(
+                    "Sign in to Proton Mail",
+                    "Use your Proton address or username and your Proton password.",
+                ),
+            }
             out.line(zmail_setup::proton::RISK_TITLE, theme.bold());
             out.para(zmail_setup::proton::RISK_NOTE, Style::new(), 0);
             out.blank();
@@ -679,11 +696,34 @@ fn place_cursor(app: &App, frame: &mut Frame, id: PaneId, body: Rect, line: usiz
 fn form_lines(out: &mut Lines, add: &AddAccount) -> Option<(usize, Option<usize>)> {
     let theme = out.theme;
     let rows = add.rows();
+    let fixed = add.fixed_rows();
     let label_width = rows
         .iter()
-        .map(|row| text::width(row.label(&add.form)))
+        .map(|row| row.label(&add.form))
+        .chain(fixed.iter().map(|(field, _)| field.label()))
+        .map(text::width)
         .max()
         .unwrap_or(0);
+    // Fields that can't change: drawn faint, never focused.
+    for (field, value) in fixed {
+        let label = field.label();
+        let prefix = format!(
+            "{MARGIN}{}{label} : ",
+            " ".repeat(label_width.saturating_sub(text::width(label)))
+        );
+        let shown = fit(
+            &sanitize_line(value),
+            out.width.saturating_sub(text::width(&prefix)),
+            theme.ellipsis(),
+        );
+        out.lines.push(PaneLine {
+            spans: vec![
+                Span::styled(prefix, theme.faint()),
+                Span::styled(shown, theme.faint()),
+            ],
+            ..PaneLine::default()
+        });
+    }
     let mut focus = None;
     for (index, row) in rows.iter().enumerate() {
         let focused = index == add.focus;
