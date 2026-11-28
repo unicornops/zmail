@@ -1400,6 +1400,14 @@ const CRASH_LOG_FILE_NAME: &str = "crash.log";
 /// to the platform's crash-log directory, per the crash policy in
 /// `docs/phase5-hardening.md`. Nothing is uploaded.
 pub(crate) fn install_panic_log() {
+    open_panic_log();
+    // A debug build's forced crash for CI's crash dump check, once the
+    // log records panics.
+    hardening::crash_if_asked();
+}
+
+/// [`install_panic_log`]'s log and hook.
+fn open_panic_log() {
     let log_dir = match panic_log_dir() {
         Ok(dir) => dir,
         Err(error) => {

@@ -15,14 +15,33 @@
 //!   caller through `/proc/PID/root`, which a process that isn't dumpable
 //!   doesn't let it open, so file dialogs and other portal calls would
 //!   fail.
-//! - Windows: nothing here yet.
+//! - Windows: the executable is put on Windows Error Reporting's
+//!   exclusion list for the user (`ExcludedApplications`, the value
+//!   `WerAddExcludedApplication` writes), so WER queues no report of a
+//!   crash: no minidump for Microsoft, and no fault dialog. WER's
+//!   local dumps (`LocalDumps`, off unless an administrator or a program
+//!   turned them on for the machine) ignore that list and can only be
+//!   turned off for an executable by an administrator: the MSI does it
+//!   for `zmail-app.exe`, and puts it on the exclusion list for every
+//!   user too (`wix/main.wxs`). A portable copy on a machine with local
+//!   dumps on still leaves one. The desktop app and `zmail-app tui` are
+//!   the same executable. WebView2's processes keep their crash dumps in
+//!   Zmail's own user data folder (`zmail-render-web`). CI crashes both
+//!   on purpose (`scripts/check-windows-crash-dumps.ps1`).
 //!
 //! Files the CLI writes with mail or crash reports in them (the mbox
 //! export, the crash log) are created readable by their owner only.
 
-/// Turns core dumps off for this process and its children (Unix). A
-/// failure is reported on stderr and the command goes on.
+/// Turns core dumps off for this process and its children (Unix), or
+/// keeps Windows Error Reporting from queueing a report with a dump
+/// (Windows). A failure is reported on stderr and the command goes on.
 pub(crate) fn forbid_core_dumps() {
+    #[cfg(windows)]
+    if let Err(error) = exclude_from_error_reporting() {
+        eprintln!(
+            "warning: couldn't keep Windows Error Reporting from saving crash dumps: {error}"
+        );
+    }
     #[cfg(unix)]
     if let Err(error) = rustix::process::setrlimit(
         rustix::process::Resource::Core,
@@ -35,6 +54,46 @@ pub(crate) fn forbid_core_dumps() {
     }
 }
 
+/// Windows Error Reporting's per-user exclusion list, under
+/// `HKEY_CURRENT_USER`: a DWORD 1 named after an executable's file name
+/// (`zmail-app.exe`) keeps WER from reporting its crashes. It is what
+/// `WerAddExcludedApplication(path, FALSE)` writes (tried on a Windows
+/// runner: the file name only, whatever the path), written here through
+/// the safe registry API, as the workspace forbids `unsafe` outside the
+/// web renderer's platform code.
+#[cfg_attr(not(windows), allow(dead_code))]
+const WER_EXCLUDED_APPLICATIONS: &str =
+    r"Software\Microsoft\Windows\Windows Error Reporting\ExcludedApplications";
+
+/// The name WER's exclusion list knows `exe` by: its file name.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn error_reporting_name(exe: &std::path::Path) -> Option<&str> {
+    exe.file_name()?.to_str()
+}
+
+/// Puts this executable on the user's WER exclusion list, unless it is
+/// there already. WER reads the list when a process crashes.
+#[cfg(windows)]
+fn exclude_from_error_reporting() -> Result<(), String> {
+    exclude_from_error_reporting_in(windows_registry::CURRENT_USER, WER_EXCLUDED_APPLICATIONS)
+}
+
+/// [`exclude_from_error_reporting`] with the root and key given, for tests.
+#[cfg(windows)]
+fn exclude_from_error_reporting_in(root: &windows_registry::Key, key: &str) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|error| format!("no executable path: {error}"))?;
+    let name =
+        error_reporting_name(&exe).ok_or_else(|| format!("no file name in {}", exe.display()))?;
+    let key = root
+        .create(key)
+        .map_err(|error| format!("opening {key}: {error}"))?;
+    if key.get_u32(name).ok() == Some(1) {
+        return Ok(());
+    }
+    key.set_u32(name, 1)
+        .map_err(|error| format!("setting {name}: {error}"))
+}
+
 /// Marks the process not dumpable (Linux), for the commands that open no
 /// window. A failure is reported on stderr and the command goes on.
 pub(crate) fn make_undumpable() {
@@ -44,6 +103,87 @@ pub(crate) fn make_undumpable() {
     {
         eprintln!("warning: couldn't mark the process not dumpable: {error}");
     }
+}
+
+/// Debug builds only: crash the app on purpose, so CI can check that a
+/// crash leaves no dump (`scripts/check-windows-crash-dumps.ps1`).
+/// `abort` panics (the crash log records it) and then aborts, as a panic
+/// that cannot unwind does; `stack-overflow` overflows a thread's stack, an
+/// exception nothing handles. `:MS` waits that many milliseconds first, on
+/// a thread of its own, so the window or the terminal UI is up by then.
+/// Release builds have neither the variable nor the code: a user's
+/// environment or a message can't reach it there (CI's build job checks
+/// the release binary for the name).
+#[cfg(debug_assertions)]
+pub(crate) const FORCE_CRASH_ENV: &str = "ZMAIL_DEBUG_FORCE_CRASH";
+
+/// A crash [`FORCE_CRASH_ENV`] asks for.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForcedCrash {
+    Abort,
+    StackOverflow,
+}
+
+/// Reads a [`FORCE_CRASH_ENV`] value: the crash and how long to wait.
+#[cfg(debug_assertions)]
+pub(crate) fn parse_forced_crash(value: &str) -> Option<(ForcedCrash, std::time::Duration)> {
+    let (kind, delay) = match value.split_once(':') {
+        Some((kind, delay)) => (kind, delay.parse().ok()?),
+        None => (value, 0),
+    };
+    let kind = match kind {
+        "abort" => ForcedCrash::Abort,
+        "stack-overflow" => ForcedCrash::StackOverflow,
+        _ => return None,
+    };
+    Some((kind, std::time::Duration::from_millis(delay)))
+}
+
+/// Crashes the process if [`FORCE_CRASH_ENV`] asks for it (debug builds;
+/// nothing in release builds). Called once the crash log is in place.
+pub(crate) fn crash_if_asked() {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var(FORCE_CRASH_ENV) {
+        let Some((kind, delay)) = parse_forced_crash(&value) else {
+            eprintln!("warning: {FORCE_CRASH_ENV}={value} isn't abort or stack-overflow[:MS]");
+            return;
+        };
+        eprintln!("{FORCE_CRASH_ENV}: crashing ({kind:?}) in {delay:?}");
+        let crash = move || {
+            std::thread::sleep(delay);
+            crash(kind);
+        };
+        if let Err(error) = std::thread::Builder::new()
+            .name("forced-crash".to_owned())
+            .spawn(crash)
+        {
+            eprintln!("warning: {FORCE_CRASH_ENV}: no thread to crash on: {error}");
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+fn crash(kind: ForcedCrash) {
+    match kind {
+        ForcedCrash::Abort => {
+            let _ = std::panic::catch_unwind(|| panic!("forced crash ({FORCE_CRASH_ENV})"));
+            std::process::abort();
+        }
+        ForcedCrash::StackOverflow => {
+            std::hint::black_box(overflow(0));
+        }
+    }
+}
+
+/// Recurses until the thread's stack runs out.
+#[cfg(debug_assertions)]
+fn overflow(depth: u64) -> u64 {
+    if depth == u64::MAX {
+        return 0;
+    }
+    let frame = std::hint::black_box([depth; 4096]);
+    overflow(depth + 1).wrapping_add(frame[0])
 }
 
 /// Options that create a file readable and writable by its owner only
@@ -162,5 +302,53 @@ mod tests {
                     .expect("the spawned process runs");
             print!("{}", String::from_utf8_lossy(&output.stdout));
         }
+    }
+}
+
+#[cfg(test)]
+mod crash_dump_tests {
+    use super::*;
+
+    #[test]
+    fn wer_knows_the_executable_by_its_file_name() {
+        let exe = std::path::Path::new("C:/Program Files/Zmail/zmail-app.exe");
+        assert_eq!(error_reporting_name(exe), Some("zmail-app.exe"));
+        assert_eq!(error_reporting_name(std::path::Path::new("/")), None);
+        assert!(
+            WER_EXCLUDED_APPLICATIONS.ends_with(r"Windows Error Reporting\ExcludedApplications")
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn forced_crashes_are_read_strictly() {
+        use std::time::Duration;
+        assert_eq!(
+            parse_forced_crash("abort"),
+            Some((ForcedCrash::Abort, Duration::ZERO))
+        );
+        assert_eq!(
+            parse_forced_crash("stack-overflow:2500"),
+            Some((ForcedCrash::StackOverflow, Duration::from_millis(2500)))
+        );
+        for value in ["", "ABORT", "abort:", "abort:soon", "segfault", "abort:-1"] {
+            assert_eq!(parse_forced_crash(value), None, "{value:?}");
+        }
+    }
+
+    /// The exclusion is written once, as a DWORD 1 named after the test
+    /// binary, here under a scratch key instead of WER's.
+    #[cfg(windows)]
+    #[test]
+    fn the_executable_goes_on_the_exclusion_list() {
+        let root = windows_registry::CURRENT_USER;
+        let key = format!(r"Software\Zmail\tests\wer-{}", std::process::id());
+        let name = std::env::current_exe().expect("the test binary");
+        let name = error_reporting_name(&name).expect("a file name").to_owned();
+        exclude_from_error_reporting_in(root, &key).expect("the first write");
+        exclude_from_error_reporting_in(root, &key).expect("already there");
+        let value = root.open(&key).and_then(|key| key.get_u32(&name));
+        let _ = root.remove_tree(&key);
+        assert_eq!(value.ok(), Some(1));
     }
 }

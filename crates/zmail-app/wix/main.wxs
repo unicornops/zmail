@@ -128,6 +128,31 @@
                                        Value="SOFTWARE\Clients\Mail\Zmail\Capabilities"
                                        KeyPath="yes" />
                     </Component>
+                    <!-- No crash dump of Zmail holds its store key or mail
+                         (#467, ADR 0005): Windows Error Reporting starts no
+                         report of a crash for any user (the app adds itself
+                         for its user too, for portable copies), and WER's
+                         local dumps, which ignore that list and which an
+                         administrator or a program may have turned on for
+                         the machine, are off for zmail-app.exe (DumpCount
+                         0). Both go on uninstall. -->
+                    <Component Id="crash_dumps"
+                               Guid="DCCF2316-9B9F-4BB3-840C-3E76E5543A31"
+                               Win64="yes">
+                        <RegistryValue Root="HKLM"
+                                       Key="SOFTWARE\Microsoft\Windows\Windows Error Reporting\ExcludedApplications"
+                                       Name="zmail-app.exe"
+                                       Type="integer"
+                                       Value="1"
+                                       KeyPath="yes" />
+                        <RegistryKey Root="HKLM"
+                                     Key="SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\zmail-app.exe"
+                                     ForceDeleteOnUninstall="yes">
+                            <RegistryValue Name="DumpCount"
+                                           Type="integer"
+                                           Value="0" />
+                        </RegistryKey>
+                    </Component>
                 </Directory>
             </Directory>
             <Directory Id="ProgramMenuFolder">
@@ -141,6 +166,7 @@
             <ComponentRef Id="zmail_app.exe" />
             <ComponentRef Id="mailto_scheme" />
             <ComponentRef Id="mailto_registration" />
+            <ComponentRef Id="crash_dumps" />
         </ComponentGroup>
         <ComponentGroup Id="StartMenuComponents" Directory="ApplicationProgramsFolder">
             <Component Id="start_menu_shortcut"
