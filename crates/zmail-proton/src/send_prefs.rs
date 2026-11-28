@@ -494,10 +494,11 @@ pub(crate) mod tests {
     const BOB: Recipient<'static> = Recipient {
         address: "bob@example.org",
         trusted: &[],
+        remembered: None,
     };
 
     pub(crate) const KEY_A: &str = include_str!("testdata/public-key-a.asc");
-    const KEY_B: &str = include_str!("testdata/public-key-b.asc");
+    pub(crate) const KEY_B: &str = include_str!("testdata/public-key-b.asc");
     const KEY_C: &str = include_str!("testdata/public-key-c.asc");
     /// A valid key with nothing to encrypt to: an EdDSA primary key alone.
     const KEY_SIGN_ONLY: &str = include_str!("testdata/public-key-sign-only.asc");
@@ -847,6 +848,7 @@ pub(crate) mod tests {
         let bob = Recipient {
             address: "Bob@example.org",
             trusted: &trusted,
+            remembered: None,
         };
         let prefs = send(&bob, &[api_key(KEY_A)], true).expect("trusted");
         assert_eq!(
@@ -864,6 +866,7 @@ pub(crate) mod tests {
         let alice = Recipient {
             address: "alice@example.org",
             trusted: &trusted,
+            remembered: None,
         };
         assert!(send(&alice, &[api_key(KEY_A)], true).is_err());
 
@@ -884,5 +887,218 @@ pub(crate) mod tests {
             changed(&error).served_fingerprints,
             [fingerprint(KEY_A).to_ascii_uppercase()]
         );
+    }
+
+    fn missing(error: &anyhow::Error) -> &EncryptionKeyMissing {
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<EncryptionKeyMissing>())
+            .unwrap_or_else(|| panic!("not a missing key: {error:#}"))
+    }
+
+    #[test]
+    fn remembered_pins_stand_in_for_a_card_that_is_gone() {
+        let remembered = RecipientPins::new("bob@example.org", [fingerprint(KEY_B)], false);
+        let bob = Recipient {
+            address: "Bob@Example.org",
+            trusted: &[],
+            remembered: Some(&remembered),
+        };
+        // No card at all, and a verified card that pins nothing (an older
+        // copy, say).
+        let no_pins = ContactSettings {
+            sign: Some(true),
+            ..ContactSettings::default()
+        };
+        for card in [ContactSettings::default(), no_pins] {
+            let send = |recipient: &Recipient<'_>, keys: &[PublicKey], internal: bool| {
+                build_send_prefs(
+                    recipient,
+                    &card,
+                    &settings(0, EncryptionScheme(0), "text/html"),
+                    keys,
+                    "text/html",
+                    internal,
+                )
+            };
+            // Proton recipients and external ones with WKD keys.
+            for internal in [true, false] {
+                let error = send(&bob, &[api_key(KEY_A)], internal).expect_err("stops");
+                let change = changed(&error);
+                assert_eq!(change.recipient, "Bob@Example.org");
+                assert_eq!(
+                    change.pinned_fingerprints,
+                    [fingerprint(KEY_B).to_ascii_uppercase()]
+                );
+                assert_eq!(
+                    change.served_fingerprints,
+                    [fingerprint(KEY_A).to_ascii_uppercase()]
+                );
+
+                // The remembered key, still served, is used.
+                let prefs = send(&bob, &[api_key(KEY_A), api_key(KEY_B)], internal)
+                    .expect("the remembered key is served");
+                assert!(prefs.encrypt);
+                assert_eq!(
+                    prefs.pub_key.map(|key| key.fingerprint()),
+                    Some(fingerprint(KEY_B))
+                );
+
+                // Once the user trusts the new key, it goes to that key.
+                let trusted = [KeyTrust {
+                    recipient: "bob@example.org".to_owned(),
+                    fingerprint: fingerprint(KEY_A).to_ascii_uppercase(),
+                }];
+                let trusting = Recipient {
+                    trusted: &trusted,
+                    ..bob
+                };
+                let prefs = send(&trusting, &[api_key(KEY_A)], internal).expect("trusted");
+                assert!(prefs.encrypt);
+                assert_eq!(
+                    prefs.pub_key.map(|key| key.fingerprint()),
+                    Some(fingerprint(KEY_A))
+                );
+                // Another key still stops it.
+                assert!(send(&trusting, &[api_key(KEY_C)], internal).is_err());
+            }
+        }
+
+        // A record for someone else changes nothing.
+        let alice = Recipient {
+            address: "alice@example.org",
+            trusted: &[],
+            remembered: Some(&remembered),
+        };
+        let prefs = build_send_prefs(
+            &alice,
+            &ContactSettings::default(),
+            &settings(0, EncryptionScheme(0), "text/html"),
+            &[api_key(KEY_A)],
+            "text/html",
+            true,
+        )
+        .expect("not pinned");
+        assert_eq!(
+            prefs.pub_key.map(|key| key.fingerprint()),
+            Some(fingerprint(KEY_A))
+        );
+    }
+
+    #[test]
+    fn an_encrypt_required_recipient_is_never_sent_in_clear() {
+        let encrypt_only = RecipientPins::new("bob@example.org", [], true);
+        let pinned = RecipientPins::new("bob@example.org", [fingerprint(KEY_B)], true);
+        // No card, a card that says not to encrypt (an older copy, say),
+        // and one that pins a key without "always encrypt".
+        let cards = [
+            ContactSettings::default(),
+            ContactSettings {
+                encrypt: Some(false),
+                encrypt_untrusted: Some(false),
+                sign: Some(false),
+                ..ContactSettings::default()
+            },
+            ContactSettings {
+                encrypt: Some(false),
+                keys: vec![RecipientKey::from_armored(KEY_B).expect("key")],
+                ..ContactSettings::default()
+            },
+        ];
+        let served: [&[PublicKey]; 3] = [&[], &[api_key(KEY_A)], &[api_key(KEY_B)]];
+        for remembered in [&encrypt_only, &pinned] {
+            let bob = Recipient {
+                address: "bob@example.org",
+                trusted: &[],
+                remembered: Some(remembered),
+            };
+            for card in &cards {
+                for keys in served {
+                    for (sign, scheme) in [
+                        (0, EncryptionScheme(0)),
+                        (1, EncryptionScheme::PGP_INLINE),
+                        (1, EncryptionScheme::PGP_MIME),
+                    ] {
+                        let sent = build_send_prefs(
+                            &bob,
+                            card,
+                            &settings(sign, scheme, "text/html"),
+                            keys,
+                            "text/html",
+                            false,
+                        );
+                        if let Ok(prefs) = sent {
+                            assert!(
+                                prefs.encrypt && prefs.pub_key.is_some(),
+                                "sent in clear: {card:?}, {keys:?}, {remembered:?}"
+                            );
+                            assert!(
+                                prefs.encryption_scheme != EncryptionScheme::CLEAR
+                                    && prefs.encryption_scheme != EncryptionScheme::CLEAR_MIME
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // With no key to encrypt to, the send stops and says so.
+        let bob = Recipient {
+            address: "bob@example.org",
+            trusted: &[],
+            remembered: Some(&encrypt_only),
+        };
+        let error = build_send_prefs(
+            &bob,
+            &ContactSettings::default(),
+            &settings(0, EncryptionScheme(0), "text/html"),
+            &[],
+            "text/html",
+            false,
+        )
+        .expect_err("stops");
+        assert_eq!(missing(&error).recipient, "bob@example.org");
+        // A WKD key is used for it, and a key the card still pins.
+        let prefs = build_send_prefs(
+            &bob,
+            &cards[1],
+            &settings(0, EncryptionScheme(0), "text/html"),
+            &[api_key(KEY_A)],
+            "text/html",
+            false,
+        )
+        .expect("encrypted to the WKD key");
+        assert!(prefs.encrypt);
+        let prefs = build_send_prefs(
+            &bob,
+            &cards[2],
+            &settings(0, EncryptionScheme(0), "text/html"),
+            &[],
+            "text/html",
+            false,
+        )
+        .expect("encrypted to the pinned key");
+        assert!(prefs.encrypt);
+        assert_eq!(
+            prefs.pub_key.map(|key| key.fingerprint()),
+            Some(fingerprint(KEY_B))
+        );
+
+        // A record that does not ask for encryption leaves an external
+        // recipient with no key to Bridge's rules: clear, as before.
+        let unencrypted = RecipientPins::new("bob@example.org", [fingerprint(KEY_B)], false);
+        let prefs = build_send_prefs(
+            &Recipient {
+                remembered: Some(&unencrypted),
+                ..bob
+            },
+            &ContactSettings::default(),
+            &settings(0, EncryptionScheme(0), "text/html"),
+            &[],
+            "text/html",
+            false,
+        )
+        .expect("clear");
+        assert!(!prefs.encrypt);
     }
 }

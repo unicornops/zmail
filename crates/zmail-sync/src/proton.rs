@@ -511,4 +511,64 @@ mod tests {
         assert!(!message.contains("signature verification failed"));
         assert!(SyncService::unverified_contact_card(&anyhow::anyhow!("other")).is_none());
     }
+
+    /// A Proton send reads the account's saved keys, and what it saw on
+    /// verified contact cards is saved for the next one, failed or not.
+    #[test]
+    fn a_send_reads_the_saved_keys_and_saves_the_pins_it_saw() {
+        use zmail_core::{
+            ProtocolKind,
+            key_change::{RecipientKeys, RecipientPins},
+        };
+        use zmail_store::LocalStore;
+
+        const PINNED: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
+        const SERVED: &str = "89ABCDEF0123456789ABCDEF0123456789ABCDEF";
+        let store = LocalStore::open_ephemeral().expect("store should open");
+        let account_id = store
+            .create_demo_account(ProtocolKind::Proton)
+            .expect("account");
+        let other = store
+            .create_demo_account(ProtocolKind::Proton)
+            .expect("account");
+        store
+            .trust_recipient_key(account_id, "bob@example.org", SERVED)
+            .expect("trusted");
+        store
+            .remember_recipient_pins(
+                account_id,
+                &RecipientPins::new("bob@example.org", [PINNED.to_owned()], false),
+            )
+            .expect("remembered");
+
+        let keys: RecipientKeys = super::recipient_keys(&store, account_id).expect("keys");
+        assert_eq!(keys.trusted.len(), 1);
+        assert_eq!(
+            keys.pins_for("Bob@example.org").map(|pins| pins.encrypt),
+            Some(false)
+        );
+        assert!(
+            super::recipient_keys(&store, other)
+                .expect("keys")
+                .pins
+                .is_empty()
+        );
+
+        keys.note(RecipientPins::new("bob@example.org", [SERVED.to_owned()], true));
+        keys.note(RecipientPins::new("alice@example.org", [], true));
+        super::save_noted_pins(&store, account_id, &keys).expect("saved");
+        assert_eq!(
+            store.remembered_recipient_pins(account_id).expect("pins"),
+            [
+                RecipientPins::new("alice@example.org", [], true),
+                RecipientPins::new("bob@example.org", [SERVED.to_owned()], true),
+            ]
+        );
+        assert!(
+            store
+                .remembered_recipient_pins(other)
+                .expect("pins")
+                .is_empty()
+        );
+    }
 }

@@ -175,6 +175,95 @@ mod tests {
     }
 
     #[test]
+    fn a_verified_card_updates_the_remembered_pins_but_never_drops_them() {
+        let pinned = || vec![PINNED_FP.to_owned()];
+        // A card that pins a key and asks for encryption is remembered,
+        // under the address in lower case.
+        let first =
+            RecipientPins::seen_on_card(" Bob@Example.org ", pinned(), true, None).expect("saved");
+        assert_eq!(
+            first,
+            RecipientPins {
+                recipient: "bob@example.org".to_owned(),
+                fingerprints: vec![PINNED_FP.to_ascii_uppercase()],
+                encrypt: true,
+            }
+        );
+        // The same card again: nothing new to save.
+        assert_eq!(
+            RecipientPins::seen_on_card("bob@example.org", pinned(), true, Some(&first)),
+            None
+        );
+        // A card that pins nothing and does not ask for encryption is not
+        // remembered, and leaves an earlier record as it is.
+        assert_eq!(
+            RecipientPins::seen_on_card("bob@example.org", Vec::new(), false, None),
+            None
+        );
+        assert_eq!(
+            RecipientPins::seen_on_card("bob@example.org", Vec::new(), false, Some(&first)),
+            None
+        );
+        // New pins replace the old ones; "always encrypt" stays.
+        let moved = RecipientPins::seen_on_card(
+            "bob@example.org",
+            vec![SERVED_FP.to_owned()],
+            false,
+            Some(&first),
+        )
+        .expect("updated");
+        assert_eq!(moved.fingerprints, [SERVED_FP]);
+        assert!(moved.encrypt);
+        // "Always encrypt" with no pins keeps the pins remembered.
+        let unencrypted = RecipientPins {
+            encrypt: false,
+            ..first.clone()
+        };
+        let kept = RecipientPins::seen_on_card("bob@example.org", Vec::new(), true, Some(&unencrypted))
+            .expect("updated");
+        assert_eq!(kept.fingerprints, first.fingerprints);
+        assert!(kept.encrypt);
+    }
+
+    #[test]
+    fn recipient_keys_find_a_recipient_whatever_the_case_and_collect_what_a_send_saw() {
+        let pins = RecipientPins::new("bob@example.org", [PINNED_FP.to_owned()], true);
+        let keys = RecipientKeys::new(Vec::new(), vec![pins.clone()]);
+        assert_eq!(keys.pins_for("BOB@example.org"), Some(&pins));
+        assert_eq!(keys.pins_for("alice@example.org"), None);
+        assert!(keys.take_noted().is_empty());
+        let moved = RecipientPins::new("bob@example.org", [SERVED_FP.to_owned()], true);
+        keys.note(pins.clone());
+        // A second note for the same address replaces the first.
+        keys.note(moved.clone());
+        keys.note(RecipientPins::new("alice@example.org", [], true));
+        let noted = keys.take_noted();
+        assert_eq!(noted.len(), 2);
+        assert_eq!(noted[0], moved);
+        assert!(keys.take_noted().is_empty(), "taken once");
+    }
+
+    #[test]
+    fn stored_missing_key_messages_read_back_as_the_error() {
+        let error = EncryptionKeyMissing::new("bob@example.org");
+        let message = error.to_string();
+        assert!(message.starts_with("Not sent: "), "{message}");
+        assert!(message.contains("bob@example.org"), "{message}");
+        assert!(message.contains("Proton Mail web app"), "{message}");
+        assert!(!message.contains('\u{2014}'), "no dashes: {message}");
+        assert_eq!(EncryptionKeyMissing::of_message(&message), Some(error));
+        for message in [
+            "",
+            "failed to send the message through Proton",
+            &PinnedKeyChanged::new("bob@example.org", [PINNED_FP.to_owned()], [SERVED_FP.to_owned()])
+                .to_string(),
+            &EncryptionKeyMissing::new("").to_string(),
+        ] {
+            assert_eq!(EncryptionKeyMissing::of_message(message), None, "{message}");
+        }
+    }
+
+    #[test]
     fn groups_fingerprints_by_four() {
         assert_eq!(grouped_fingerprint("ABCDEF0123"), "ABCD EF01 23");
     }

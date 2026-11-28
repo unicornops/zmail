@@ -3586,7 +3586,10 @@ mod outbox_reauth_tests {
 mod outbox_key_change_tests {
     use std::sync::Arc;
 
-    use zmail_core::{AuthKind, OutboxJobState, key_change::PinnedKeyChanged};
+    use zmail_core::{
+        AuthKind, OutboxJobState,
+        key_change::{EncryptionKeyMissing, PinnedKeyChanged, RecipientPins},
+    };
     use zmail_security::{InMemorySecretStore, SecretStore};
     use zmail_store::LocalStore;
 
@@ -3674,6 +3677,163 @@ mod outbox_key_change_tests {
                 .state
         };
         assert_ne!(state(changed), OutboxJobState::Failed, "requeued");
+        assert_eq!(state(other), OutboxJobState::Failed);
+    }
+
+    #[test]
+    fn a_missing_key_fails_the_message_at_once_with_its_own_words() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the runtime starts");
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let account_id = insert_account(&store, AuthKind::Password);
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        let service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+        let draft_id = store
+            .create_draft(&zmail_core::NewDraft {
+                account_id,
+                identity_id,
+                to: vec!["bob@example.org".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "Encrypted".to_owned(),
+                body: "Hello".to_owned(),
+                threading: Default::default(),
+            })
+            .expect("draft");
+        store.queue_draft(draft_id).expect("queued");
+        let job = store
+            .claim_due_outbox_job(Some(account_id))
+            .expect("claimed")
+            .expect("due");
+        let missing = EncryptionKeyMissing::new("bob@example.org");
+        let error = anyhow::Error::new(missing.clone())
+            .context("failed to set PGP settings")
+            .context("failed to get recipients")
+            .context("failed to send the message through Proton");
+        service.record_attempt(&job, Err(error)).expect("recorded");
+        let failed = store
+            .list_outbox_jobs(Some(account_id))
+            .expect("jobs")
+            .into_iter()
+            .find(|summary| summary.id == job.job_id)
+            .expect("job");
+        assert_eq!(failed.state, OutboxJobState::Failed, "not retried");
+        assert_eq!(
+            failed.last_error_message.as_deref(),
+            Some(missing.to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn forgetting_saved_keys_covers_the_failed_jobs_recipient_only() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the runtime starts");
+        let store = Arc::new(LocalStore::open_ephemeral().expect("store should open"));
+        let account_id = insert_account(&store, AuthKind::Password);
+        let identity_id = store.list_identities(account_id).expect("identities")[0].id;
+        let queue = |subject: &str, to: &str| {
+            let draft_id = store
+                .create_draft(&zmail_core::NewDraft {
+                    account_id,
+                    identity_id,
+                    to: vec![to.to_owned()],
+                    cc: Vec::new(),
+                    bcc: Vec::new(),
+                    subject: subject.to_owned(),
+                    body: "Hello".to_owned(),
+                    threading: Default::default(),
+                })
+                .expect("draft");
+            store.queue_draft(draft_id).expect("queued")
+        };
+        for recipient in ["bob@example.org", "carol@example.org", "dan@example.org"] {
+            store
+                .remember_recipient_pins(
+                    account_id,
+                    &RecipientPins::new(recipient, [PINNED.to_owned()], true),
+                )
+                .expect("remembered");
+            store
+                .trust_recipient_key(account_id, recipient, SERVED)
+                .expect("trusted");
+        }
+        let changed = queue("Key changed", "bob@example.org");
+        store
+            .record_outbox_failure(
+                changed,
+                PinnedKeyChanged::new("Bob@Example.org", [PINNED.to_owned()], [SERVED.to_owned()])
+                    .to_string(),
+            )
+            .expect("failed");
+        let missing = queue("No key", "carol@example.org");
+        store
+            .record_outbox_failure(
+                missing,
+                EncryptionKeyMissing::new("carol@example.org").to_string(),
+            )
+            .expect("failed");
+        let other = queue("Other failure", "dan@example.org");
+        store
+            .record_outbox_failure(other, "Connection refused")
+            .expect("failed");
+        let secrets: Arc<dyn SecretStore> = InMemorySecretStore::shared();
+        let service = SyncService::new(runtime.handle().clone(), store.clone(), secrets);
+        let remembered = || -> Vec<String> {
+            store
+                .remembered_recipient_pins(account_id)
+                .expect("pins")
+                .into_iter()
+                .map(|pins| pins.recipient)
+                .collect()
+        };
+
+        // Only a job stopped over that recipient's keys, and only for the
+        // recipient it names.
+        assert!(
+            service
+                .forget_saved_keys_and_retry(other, "dan@example.org")
+                .is_err()
+        );
+        assert!(
+            service
+                .forget_saved_keys_and_retry(changed, "carol@example.org")
+                .is_err()
+        );
+        assert_eq!(remembered().len(), 3);
+
+        service
+            .forget_saved_keys_and_retry(changed, "bob@example.org")
+            .expect("forgotten");
+        assert_eq!(remembered(), ["carol@example.org", "dan@example.org"]);
+        assert!(
+            store
+                .trusted_recipient_keys(account_id)
+                .expect("trusts")
+                .iter()
+                .all(|trust| trust.recipient != "bob@example.org")
+        );
+        service
+            .forget_saved_keys_and_retry(missing, "Carol@Example.org")
+            .expect("forgotten");
+        assert_eq!(remembered(), ["dan@example.org"]);
+        let state = |job_id: i64| {
+            store
+                .list_outbox_jobs(Some(account_id))
+                .expect("jobs")
+                .into_iter()
+                .find(|job| job.id == job_id)
+                .expect("job")
+                .state
+        };
+        assert_ne!(state(changed), OutboxJobState::Failed, "requeued");
+        assert_ne!(state(missing), OutboxJobState::Failed, "requeued");
         assert_eq!(state(other), OutboxJobState::Failed);
     }
 }

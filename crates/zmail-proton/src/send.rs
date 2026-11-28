@@ -892,7 +892,7 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use zmail_proton_api::{RecipientKey, SignatureType};
 
-    use crate::send_prefs::tests::KEY_A;
+    use crate::send_prefs::tests::{KEY_A, KEY_B};
 
     #[test]
     fn finds_the_contact_whatever_the_case_of_the_address() {
@@ -1173,5 +1173,162 @@ mod tests {
             "Flags": 3,
         }))
         .expect("key")
+    }
+
+    fn served(armored: &str) -> zmail_proton_api::PublicKey {
+        zmail_proton_api::PublicKey {
+            flags: zmail_proton_api::KeyFlags(
+                zmail_proton_api::KeyFlags::TRUSTED | zmail_proton_api::KeyFlags::ACTIVE,
+            ),
+            public_key: armored.to_owned(),
+        }
+    }
+
+    fn fingerprint(armored: &str) -> String {
+        RecipientKey::from_armored(armored)
+            .expect("key")
+            .fingerprint()
+            .to_ascii_uppercase()
+    }
+
+    /// The whole story of #463 for one recipient, with the record saved
+    /// and read back between sends as the outbox does.
+    #[test]
+    fn a_card_that_goes_missing_stops_the_send_until_the_new_key_is_trusted() {
+        let card = ContactSettings {
+            keys: vec![RecipientKey::from_armored(KEY_B).expect("key")],
+            encrypt: Some(true),
+            ..ContactSettings::default()
+        };
+        let settings = MailSettings::default();
+        let prefs = |keys: &RecipientKeys,
+                     contact: &ContactSettings,
+                     served: &[zmail_proton_api::PublicKey],
+                     internal: bool| {
+            recipient_prefs(
+                "Bob@Example.org",
+                keys,
+                contact,
+                &settings,
+                served,
+                TEXT_PLAIN,
+                internal,
+            )
+        };
+
+        // A send with the verified card remembers what it pins.
+        let keys = RecipientKeys::default();
+        let sent = prefs(&keys, &card, &[served(KEY_B)], true).expect("sent");
+        assert_eq!(
+            sent.pub_key.map(|key| key.fingerprint().to_ascii_uppercase()),
+            Some(fingerprint(KEY_B))
+        );
+        let noted = keys.take_noted();
+        assert_eq!(
+            noted,
+            [RecipientPins::new(
+                "bob@example.org",
+                [fingerprint(KEY_B)],
+                true
+            )]
+        );
+
+        // The card is gone and Proton serves another key: a key change.
+        let keys = RecipientKeys::new(Vec::new(), noted.clone());
+        for internal in [true, false] {
+            let error = prefs(
+                &keys,
+                &ContactSettings::default(),
+                &[served(KEY_A)],
+                internal,
+            )
+            .expect_err("stops");
+            let change = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<PinnedKeyChanged>())
+                .unwrap_or_else(|| panic!("not a key change: {error:#}"));
+            assert_eq!(change.pinned_fingerprints, [fingerprint(KEY_B)]);
+            assert_eq!(change.new_fingerprint(), Some(fingerprint(KEY_A).as_str()));
+        }
+        assert!(keys.take_noted().is_empty(), "nothing new was seen");
+
+        // An external recipient with no key at all is not sent in clear.
+        let error = prefs(&keys, &ContactSettings::default(), &[], false).expect_err("stops");
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.downcast_ref::<EncryptionKeyMissing>().is_some()),
+            "{error:#}"
+        );
+
+        // The user trusts the new key: it goes.
+        let keys = RecipientKeys::new(
+            vec![KeyTrust {
+                recipient: "bob@example.org".to_owned(),
+                fingerprint: fingerprint(KEY_A),
+            }],
+            noted,
+        );
+        let sent = prefs(
+            &keys,
+            &ContactSettings::default(),
+            &[served(KEY_A)],
+            true,
+        )
+        .expect("trusted");
+        assert!(sent.encrypt);
+        assert_eq!(
+            sent.pub_key.map(|key| key.fingerprint().to_ascii_uppercase()),
+            Some(fingerprint(KEY_A))
+        );
+    }
+
+    #[test]
+    fn a_send_that_stops_still_remembers_the_verified_card() {
+        let card = ContactSettings {
+            keys: vec![RecipientKey::from_armored(KEY_B).expect("key")],
+            ..ContactSettings::default()
+        };
+        let keys = RecipientKeys::default();
+        assert!(
+            recipient_prefs(
+                "bob@example.org",
+                &keys,
+                &card,
+                &MailSettings::default(),
+                &[served(KEY_A)],
+                TEXT_PLAIN,
+                true,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            keys.take_noted(),
+            [RecipientPins::new(
+                "bob@example.org",
+                [fingerprint(KEY_B)],
+                false
+            )]
+        );
+        // A card with nothing in it, or no card, is not remembered.
+        for contact in [
+            ContactSettings::default(),
+            ContactSettings {
+                sign: Some(true),
+                card_unverified: true,
+                ..ContactSettings::default()
+            },
+        ] {
+            let _ = recipient_prefs(
+                "bob@example.org",
+                &keys,
+                &contact,
+                &MailSettings::default(),
+                &[served(KEY_A)],
+                TEXT_PLAIN,
+                true,
+            );
+            assert!(keys.take_noted().is_empty());
+        }
     }
 }

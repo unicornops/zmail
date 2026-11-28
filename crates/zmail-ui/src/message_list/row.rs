@@ -1235,6 +1235,24 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_key_asks_to_fix_the_contact_or_forget_the_saved_keys() {
+        let now = zmail_core::time::clock_at("2026-10-18T10:00:00Z")
+            .expect("a timestamp")
+            .with_time_zone(zmail_core::time::system_zone());
+        let missing = zmail_core::key_change::EncryptionKeyMissing::new("kai@example.test");
+        let mut failed = job(OutboxJobState::Failed, None);
+        failed.last_error_message = Some(missing.to_string());
+        let status = outbox_status(&failed, &now);
+        assert_eq!(status.text, "Can\u{2019}t encrypt to a recipient");
+        assert!(status.failed && !status.needs_reauth);
+        assert!(!status.can_retry, "the dialog offers sending again");
+        assert_eq!(status.key_change, None);
+        assert_eq!(status.saved_keys, Some(missing));
+        failed.state = OutboxJobState::Retrying;
+        assert_eq!(outbox_status(&failed, &now).saved_keys, None);
+    }
+
+    #[test]
     fn outgoing_rows_name_their_recipients() {
         assert_eq!(
             recipient_line("Priya Raman <priya@example.org> +2", "Sam"),
