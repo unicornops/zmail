@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.8](https://github.com/unicornops/zmail/compare/v0.37.7...v0.37.8) (2026-11-28)
+
+
+### Bug Fixes
+
+* **security:** one TLS trust store for IMAP, SMTP, JMAP and OAuth ([#543](https://github.com/unicornops/zmail/issues/543)) ([a832a96](https://github.com/unicornops/zmail/commit/a832a96a3c8563f8823df9354ce8407a2c553f2c)), closes [#471](https://github.com/unicornops/zmail/issues/471)
+
 ## [0.37.7](https://github.com/unicornops/zmail/compare/v0.37.6...v0.37.7) (2026-11-27)
 
 
