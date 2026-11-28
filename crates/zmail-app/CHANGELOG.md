@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.0](https://github.com/unicornops/zmail/compare/v0.39.0...v0.40.0) (2026-11-28)
+
+
+### Features
+
+* **tui:** sign in to Proton again without removing the account ([#553](https://github.com/unicornops/zmail/issues/553)) ([e62cca4](https://github.com/unicornops/zmail/commit/e62cca41be2e72808afd1e6b281a4791ef881d24)), closes [#465](https://github.com/unicornops/zmail/issues/465)
+
 ## [0.39.0](https://github.com/unicornops/zmail/compare/v0.38.2...v0.39.0) (2026-11-28)
 
 
