@@ -1356,16 +1356,9 @@ fn re_authenticate_on_a_proton_account_is_never_silent(cx: &mut TestAppContext) 
     accounts.update(&mut window_cx, |accounts, cx| accounts.refresh(cx));
     window_cx.run_until_parked();
 
-    // A session Proton has not ended: nothing to do, and it says so.
-    click_selector(&format!("reauth-{proton}"), &mut window_cx);
-    let toasts = root.read_with(&window_cx, |root, cx| root.toast_messages(cx));
-    assert_eq!(toasts.len(), 1);
-    assert!(
-        toasts[0].starts_with("Proton hasn't ended Zmail's session"),
-        "{toasts:?}"
-    );
-
-    // Once Proton ends it, Re-authenticate signs in to that account again.
+    // Proton has ended the session: Re-authenticate signs in to that
+    // account again. (A session that still works: see
+    // `re_authenticate_on_a_healthy_proton_account_signs_in_again_keeping_its_mail`.)
     harness
         .store
         .record_sync_failure(
@@ -1376,13 +1369,7 @@ fn re_authenticate_on_a_proton_account_is_never_silent(cx: &mut TestAppContext) 
         .expect("the failure is recorded");
     accounts.update(&mut window_cx, |accounts, cx| accounts.refresh(cx));
     window_cx.run_until_parked();
-    // (The first answer's toast still covers the card's button.)
-    window_cx.update(|window, cx| {
-        accounts.update(cx, |accounts, cx| {
-            accounts.reauthenticate(proton, window, cx)
-        })
-    });
-    window_cx.run_until_parked();
+    click_selector(&format!("reauth-{proton}"), &mut window_cx);
     #[cfg(feature = "proton")]
     {
         let handle = window_cx
@@ -1394,8 +1381,10 @@ fn re_authenticate_on_a_proton_account_is_never_silent(cx: &mut TestAppContext) 
         setup.read_with(&window_cx, |setup, cx| {
             assert_eq!(setup.stage, crate::account_setup::Stage::ProtonSignIn);
             assert_eq!(
-                setup.signing_in_again().map(|again| again.account_id),
-                Some(proton)
+                setup
+                    .signing_in_again()
+                    .map(|again| (again.account_id, again.ended)),
+                Some((proton, true))
             );
             assert_eq!(
                 setup
@@ -1420,5 +1409,346 @@ fn re_authenticate_on_a_proton_account_is_never_silent(cx: &mut TestAppContext) 
                 .any(|toast| toast.contains("no Proton Mail support")),
             "{toasts:?}"
         );
+    }
+}
+
+/// What the fake Proton side was asked to do, in order.
+#[cfg(feature = "proton")]
+#[derive(Default)]
+struct FakeProton {
+    /// The address the next sign-in reaches.
+    signs_in_as: std::sync::Mutex<String>,
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+#[cfg(feature = "proton")]
+impl FakeProton {
+    fn record(&self, call: String) {
+        self.calls.lock().expect("calls").push(call);
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("calls").clone()
+    }
+}
+
+/// A Proton sign-in that signs in at once, as `FakeProton` says.
+#[cfg(feature = "proton")]
+#[derive(Clone)]
+struct FakeSteps(std::sync::Arc<FakeProton>);
+
+#[cfg(feature = "proton")]
+impl zmail_setup::proton::SignInSteps for FakeSteps {
+    fn login(
+        &self,
+    ) -> impl Future<Output = anyhow::Result<zmail_proton::SignInStep>> + Send + 'static + use<>
+    {
+        let email = self.0.signs_in_as.lock().expect("address").clone();
+        async move {
+            Ok(zmail_proton::SignInStep::SignedIn(
+                zmail_proton::SignedInAccount {
+                    email,
+                    display_name: "Rob".to_owned(),
+                },
+            ))
+        }
+    }
+
+    fn submit_totp(
+        &self,
+        _: String,
+    ) -> impl Future<Output = anyhow::Result<zmail_proton::SignInStep>> + Send + 'static + use<>
+    {
+        async { anyhow::bail!("no two-factor step") }
+    }
+
+    fn submit_mailbox_password(
+        &self,
+        _: String,
+    ) -> impl Future<Output = anyhow::Result<zmail_proton::SignInStep>> + Send + 'static + use<>
+    {
+        async { anyhow::bail!("no mailbox password step") }
+    }
+
+    fn store(
+        &self,
+        secrets: std::sync::Arc<dyn zmail_security::SecretStore>,
+        account_id: i64,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send + 'static + use<> {
+        let fake = self.0.clone();
+        async move {
+            fake.record(format!("store {account_id}"));
+            for (slot, secret) in [
+                (zmail_security::SecretSlot::ProtonUid, "uid-new"),
+                (
+                    zmail_security::SecretSlot::ProtonRefreshToken,
+                    "refresh-new",
+                ),
+                (zmail_security::SecretSlot::ProtonKeyPass, "key-pass-new"),
+            ] {
+                secrets.set_account_secret_in_slot(account_id, slot, secret)?;
+            }
+            Ok(())
+        }
+    }
+
+    fn abort(&self) -> impl Future<Output = ()> + Send + 'static + use<> {
+        let fake = self.0.clone();
+        async move { fake.record("abort".to_owned()) }
+    }
+}
+
+#[cfg(feature = "proton")]
+impl crate::account_setup::ProtonSide for std::sync::Arc<FakeProton> {
+    fn begin_sign_in(
+        &self,
+        username: &str,
+        _password: &str,
+    ) -> anyhow::Result<crate::account_setup::ProtonSteps> {
+        self.record(format!("sign in as {username}"));
+        Ok(crate::account_setup::ProtonSteps::new(FakeSteps(
+            self.clone(),
+        )))
+    }
+
+    fn replace_session(
+        &self,
+        account_id: i64,
+        store: crate::account_setup::BoxFuture<anyhow::Result<()>>,
+    ) -> crate::account_setup::BoxFuture<anyhow::Result<()>> {
+        let fake = self.clone();
+        Box::pin(async move {
+            fake.record(format!("sign out the session of {account_id}"));
+            let stored = store.await;
+            fake.record(format!("replaced the session of {account_id}"));
+            stored
+        })
+    }
+
+    fn signed_in_again(&self, account_id: i64) {
+        self.record(format!("sync {account_id}"));
+    }
+}
+
+/// Issue #464: Re-authenticate on a Proton account that syncs without
+/// trouble signs in again, puts the new session in place of the old one
+/// and syncs the account as it is, without downloading its mail again. A
+/// sign-in as another Proton account is still refused, and leaves the old
+/// session alone.
+#[cfg(feature = "proton")]
+#[gpui::test]
+fn re_authenticate_on_a_healthy_proton_account_signs_in_again_keeping_its_mail(
+    cx: &mut TestAppContext,
+) {
+    use std::sync::Arc;
+
+    use zmail_core::{
+        AccountSyncSnapshot, AuthKind, CachePolicySummary, MailboxSnapshot, NewAccount,
+        NewIdentity, ProtocolKind,
+    };
+    use zmail_security::SecretSlot;
+
+    use crate::account_setup::{AccountField, ProtonBackend, Stage};
+
+    let (view, cx, harness) = open_workspace_with(
+        cx,
+        Setup::Mail,
+        |_| InitialView::Settings(SettingsSection::Accounts),
+        |_| {},
+    );
+    let proton = harness
+        .store
+        .insert_account(&NewAccount {
+            display_name: "rob@proton.test".to_owned(),
+            protocol: ProtocolKind::Proton,
+            auth: AuthKind::ProtonSession,
+            endpoint: "https://mail-api.proton.me".to_owned(),
+            username: "rob".to_owned(),
+            cache_policy: CachePolicySummary::performance_first(),
+            outgoing: None,
+            identities: vec![NewIdentity {
+                display_name: "Rob".to_owned(),
+                email_address: "rob@proton.test".to_owned(),
+                signature: String::new(),
+                is_primary: true,
+            }],
+        })
+        .expect("stored");
+    // It has synced: its mail is here, with the place to carry on from.
+    let checkpoint = r#"{"event_id":"event-1"}"#;
+    harness
+        .store
+        .replace_account_snapshot(
+            proton,
+            &AccountSyncSnapshot {
+                checkpoint: checkpoint.to_owned(),
+                detail: "Proton account up to date".to_owned(),
+                identities: None,
+                mailboxes: vec![MailboxSnapshot {
+                    name: "Inbox".to_owned(),
+                    role: Some("inbox".to_owned()),
+                    threads: vec![super::thread_snapshot(0)],
+                    ..Default::default()
+                }],
+            },
+        )
+        .expect("the mail is stored");
+    harness
+        .store
+        .record_sync_success(proton, "Proton account up to date", checkpoint)
+        .expect("synced");
+    let inbox = harness
+        .store
+        .mailbox_id_by_role(proton, "inbox")
+        .expect("the lookup works")
+        .expect("an inbox");
+    let threads = || {
+        harness
+            .store
+            .list_threads(inbox, 0..10)
+            .expect("the threads load")
+            .into_iter()
+            .map(|thread| thread.id)
+            .collect::<Vec<_>>()
+    };
+    let mail = threads();
+    assert_eq!(mail.len(), 1);
+    let secrets = cx.update(|_, cx| settings::SettingsHost::get(cx).secrets.clone());
+    for (slot, secret) in [
+        (SecretSlot::ProtonUid, "uid-old"),
+        (SecretSlot::ProtonRefreshToken, "refresh-old"),
+        (SecretSlot::ProtonKeyPass, "key-pass-old"),
+    ] {
+        secrets
+            .set_account_secret_in_slot(proton, slot, secret)
+            .expect("the old session is stored");
+    }
+    let slot = |slot| {
+        secrets
+            .get_account_secret_from_slot(proton, slot)
+            .ok()
+            .map(|secret| secret.as_str().to_owned())
+    };
+    let fake = Arc::new(FakeProton::default());
+    *fake.signs_in_as.lock().expect("address") = "someone.else@proton.test".to_owned();
+    cx.update(|_, cx| cx.set_global(ProtonBackend(Arc::new(fake.clone()))));
+    let accounts_before = harness.store.list_accounts().expect("accounts").len();
+
+    let (root, mut window_cx) = settings_window(cx);
+    let accounts = root.read_with(&window_cx, |root, _| root.accounts().clone());
+    accounts.update(&mut window_cx, |accounts, cx| accounts.refresh(cx));
+    window_cx.run_until_parked();
+
+    // The session works, and Re-authenticate opens the sign-in for it.
+    click_selector(&format!("reauth-{proton}"), &mut window_cx);
+    let toasts = root.read_with(&window_cx, |root, cx| root.toast_messages(cx));
+    assert!(toasts.is_empty(), "{toasts:?}");
+    let handle = window_cx
+        .update(|_, cx| crate::account_setup::open_window(cx))
+        .expect("the sign-in window is open");
+    let setup = handle
+        .read_with(&window_cx, |root, _| root.setup().clone())
+        .expect("the window is open");
+    setup.read_with(&window_cx, |setup, cx| {
+        assert_eq!(setup.stage, Stage::ProtonSignIn);
+        let again = setup.signing_in_again().expect("signing in again");
+        assert_eq!(again.account_id, proton);
+        assert!(!again.ended, "Proton has not ended the session");
+        assert_eq!(setup.form.text(AccountField::Email, cx), "rob");
+    });
+    let sign_in = |window_cx: &mut VisualTestContext| {
+        handle
+            .update(window_cx, |root, window, cx| {
+                root.setup().clone().update(cx, |setup, cx| {
+                    setup.form.set_text(AccountField::Password, "password", cx);
+                    setup.proton_advance(window, cx);
+                });
+            })
+            .expect("the window is open");
+    };
+
+    // Signed in as another Proton account: refused, and the old session is
+    // left alone.
+    sign_in(&mut window_cx);
+    settle_until(&mut window_cx, |cx| {
+        setup.read_with(cx, |setup, _| setup.proton.core.error.is_some()) && fake.calls().len() == 2
+    });
+    let error = setup.read_with(&window_cx, |setup, _| setup.proton.core.error.clone());
+    assert!(
+        error.as_deref().is_some_and(|error| error.starts_with(
+            "You signed in as someone.else@proton.test, which isn't rob@proton.test."
+        )),
+        "{error:?}"
+    );
+    assert_eq!(fake.calls(), ["sign in as rob", "abort"]);
+    assert_eq!(slot(SecretSlot::ProtonUid).as_deref(), Some("uid-old"));
+
+    // Signed in as that account: the new session replaces the old one in
+    // the account's keychain slots, and the account syncs.
+    *fake.signs_in_as.lock().expect("address") = "rob@proton.test".to_owned();
+    sign_in(&mut window_cx);
+    settle_until(&mut window_cx, |_| {
+        fake.calls().last() == Some(&format!("sync {proton}"))
+    });
+    assert_eq!(
+        fake.calls(),
+        [
+            "sign in as rob".to_owned(),
+            "abort".to_owned(),
+            "sign in as rob".to_owned(),
+            format!("sign out the session of {proton}"),
+            format!("store {proton}"),
+            format!("replaced the session of {proton}"),
+            format!("sync {proton}"),
+        ]
+    );
+    assert_eq!(slot(SecretSlot::ProtonUid).as_deref(), Some("uid-new"));
+    assert_eq!(
+        slot(SecretSlot::ProtonRefreshToken).as_deref(),
+        Some("refresh-new")
+    );
+    assert_eq!(
+        slot(SecretSlot::ProtonKeyPass).as_deref(),
+        Some("key-pass-new")
+    );
+    assert!(
+        window_cx
+            .update(|_, cx| crate::account_setup::open_window(cx))
+            .and_then(|handle| handle.read_with(&window_cx, |_, _| ()).ok())
+            .is_none(),
+        "the sign-in window closed"
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_entity(&view, |view, _| view.status_message.clone())
+            .as_deref(),
+        Some("Signed in to Proton again. rob@proton.test is syncing.")
+    );
+    // Nothing downloads again: the same account, with its mail, carries on
+    // from where it had got to.
+    assert_eq!(
+        harness.store.list_accounts().expect("accounts").len(),
+        accounts_before
+    );
+    assert_eq!(threads(), mail);
+    let target = harness
+        .store
+        .sync_target(proton)
+        .expect("loads")
+        .expect("the account");
+    assert_eq!(target.checkpoint.as_deref(), Some(checkpoint));
+}
+
+/// Runs the windows until `done`, while the sync runtime answers.
+#[cfg(feature = "proton")]
+fn settle_until(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        cx.run_until_parked();
+        if done(cx) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out");
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
