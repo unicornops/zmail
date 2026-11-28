@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.1](https://github.com/unicornops/zmail/compare/v0.38.0...v0.38.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* **security:** keep Windows crash dumps free of the store key and mail ([#547](https://github.com/unicornops/zmail/issues/547)) ([791a076](https://github.com/unicornops/zmail/commit/791a0760dfab3d3c4dda40f639dbe4ce071fbbe0)), closes [#467](https://github.com/unicornops/zmail/issues/467)
+
 ## [0.38.0](https://github.com/unicornops/zmail/compare/v0.37.8...v0.38.0) (2026-11-28)
 
 
