@@ -1498,17 +1498,16 @@ impl zmail_setup::proton::SignInSteps for FakeSteps {
     }
 }
 
+/// The fake Proton side: its sign-ins are `FakeSteps` too.
 #[cfg(feature = "proton")]
-impl crate::account_setup::ProtonSide for std::sync::Arc<FakeProton> {
+impl crate::account_setup::ProtonSide for FakeSteps {
     fn begin_sign_in(
         &self,
         username: &str,
         _password: &str,
     ) -> anyhow::Result<crate::account_setup::ProtonSteps> {
-        self.record(format!("sign in as {username}"));
-        Ok(crate::account_setup::ProtonSteps::new(FakeSteps(
-            self.clone(),
-        )))
+        self.0.record(format!("sign in as {username}"));
+        Ok(crate::account_setup::ProtonSteps::new(self.clone()))
     }
 
     fn replace_session(
@@ -1516,7 +1515,7 @@ impl crate::account_setup::ProtonSide for std::sync::Arc<FakeProton> {
         account_id: i64,
         store: crate::account_setup::BoxFuture<anyhow::Result<()>>,
     ) -> crate::account_setup::BoxFuture<anyhow::Result<()>> {
-        let fake = self.clone();
+        let fake = self.0.clone();
         Box::pin(async move {
             fake.record(format!("sign out the session of {account_id}"));
             let stored = store.await;
@@ -1526,7 +1525,7 @@ impl crate::account_setup::ProtonSide for std::sync::Arc<FakeProton> {
     }
 
     fn signed_in_again(&self, account_id: i64) {
-        self.record(format!("sync {account_id}"));
+        self.0.record(format!("sync {account_id}"));
     }
 }
 
@@ -1631,7 +1630,7 @@ fn re_authenticate_on_a_healthy_proton_account_signs_in_again_keeping_its_mail(
     };
     let fake = Arc::new(FakeProton::default());
     *fake.signs_in_as.lock().expect("address") = "someone.else@proton.test".to_owned();
-    cx.update(|_, cx| cx.set_global(ProtonBackend(Arc::new(fake.clone()))));
+    cx.update(|_, cx| cx.set_global(ProtonBackend(Arc::new(FakeSteps(fake.clone())))));
     let accounts_before = harness.store.list_accounts().expect("accounts").len();
 
     let (root, mut window_cx) = settings_window(cx);

@@ -21,8 +21,14 @@
 //! steps it hands out on the sync runtime (`SyncService::run_proton`).
 //! The account is stored once signed in, with the session (never the
 //! password) in the keychain ([`store_signed_in`]).
+//!
+//! Both frontends reach Proton through [`ProtonSide`]: the sync service
+//! in the app, a fake in their tests, which have no Proton server to talk
+//! to. The steps it begins are [`ProtonSteps`], `ProtonSignIn`'s or the
+//! fake's.
 
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -30,6 +36,7 @@ use zmail_core::{AuthKind, CachePolicySummary, NewAccount, NewIdentity, Protocol
 use zmail_proton::{ProtonSignIn, SignInStep, SignedInAccount};
 use zmail_security::SecretStore;
 use zmail_store::LocalStore;
+use zmail_sync::SyncService;
 
 use crate::form::AccountField;
 
@@ -137,6 +144,131 @@ impl SignInSteps for ProtonSignIn {
     fn abort(&self) -> impl Future<Output = ()> + Send + 'static + use<> {
         let sign_in = self.clone();
         async move { sign_in.abort().await }
+    }
+}
+
+/// A boxed future, as [`ProtonSide`] and [`ProtonSteps`] hand them back.
+pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+/// The Proton operations the sign-in steps need: the sync service's
+/// Proton connection, or a frontend test's fake.
+pub trait ProtonSide: Send + Sync {
+    /// Starts signing in (no network yet).
+    fn begin_sign_in(&self, username: &str, password: &str) -> Result<ProtonSteps>;
+
+    /// Replaces the account's session with the finished sign-in that
+    /// `store` keeps in its keychain slots, signing the old one out first
+    /// (`SyncService::replace_proton_session`).
+    fn replace_session(
+        &self,
+        account_id: i64,
+        store: BoxFuture<Result<()>>,
+    ) -> BoxFuture<Result<()>>;
+
+    /// After signing in again: syncs the account and sends the messages
+    /// refused for the old session again.
+    fn signed_in_again(&self, account_id: i64);
+}
+
+impl ProtonSide for SyncService {
+    fn begin_sign_in(&self, username: &str, password: &str) -> Result<ProtonSteps> {
+        self.begin_proton_sign_in(username, password)
+            .map(ProtonSteps::new)
+    }
+
+    fn replace_session(
+        &self,
+        account_id: i64,
+        store: BoxFuture<Result<()>>,
+    ) -> BoxFuture<Result<()>> {
+        Box::pin(self.replace_proton_session(account_id, store))
+    }
+
+    fn signed_in_again(&self, account_id: i64) {
+        let _ = self.sync_account(account_id);
+        let _ = self.sync_watchers();
+        let _ = self.retry_refused_sends(account_id);
+    }
+}
+
+/// A sign-in's steps as the frontends run them: Proton's
+/// (`zmail_proton::ProtonSignIn`), or a test's fake.
+#[derive(Clone)]
+pub struct ProtonSteps(Arc<dyn Steps>);
+
+impl ProtonSteps {
+    /// Boxes `steps`.
+    pub fn new(steps: impl SignInSteps) -> Self {
+        Self(Arc::new(steps))
+    }
+}
+
+impl std::fmt::Debug for ProtonSteps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProtonSteps").finish_non_exhaustive()
+    }
+}
+
+/// [`SignInSteps`] with its futures boxed, so the steps can be any type.
+trait Steps: Send + Sync {
+    fn login(&self) -> BoxFuture<Result<SignInStep>>;
+    fn submit_totp(&self, code: String) -> BoxFuture<Result<SignInStep>>;
+    fn submit_mailbox_password(&self, password: String) -> BoxFuture<Result<SignInStep>>;
+    fn store(&self, secrets: Arc<dyn SecretStore>, account_id: i64) -> BoxFuture<Result<()>>;
+    fn abort(&self) -> BoxFuture<()>;
+}
+
+impl<S: SignInSteps> Steps for S {
+    fn login(&self) -> BoxFuture<Result<SignInStep>> {
+        Box::pin(SignInSteps::login(self))
+    }
+
+    fn submit_totp(&self, code: String) -> BoxFuture<Result<SignInStep>> {
+        Box::pin(SignInSteps::submit_totp(self, code))
+    }
+
+    fn submit_mailbox_password(&self, password: String) -> BoxFuture<Result<SignInStep>> {
+        Box::pin(SignInSteps::submit_mailbox_password(self, password))
+    }
+
+    fn store(&self, secrets: Arc<dyn SecretStore>, account_id: i64) -> BoxFuture<Result<()>> {
+        Box::pin(SignInSteps::store(self, secrets, account_id))
+    }
+
+    fn abort(&self) -> BoxFuture<()> {
+        Box::pin(SignInSteps::abort(self))
+    }
+}
+
+impl SignInSteps for ProtonSteps {
+    fn login(&self) -> impl Future<Output = Result<SignInStep>> + Send + 'static + use<> {
+        self.0.login()
+    }
+
+    fn submit_totp(
+        &self,
+        code: String,
+    ) -> impl Future<Output = Result<SignInStep>> + Send + 'static + use<> {
+        self.0.submit_totp(code)
+    }
+
+    fn submit_mailbox_password(
+        &self,
+        password: String,
+    ) -> impl Future<Output = Result<SignInStep>> + Send + 'static + use<> {
+        self.0.submit_mailbox_password(password)
+    }
+
+    fn store(
+        &self,
+        secrets: Arc<dyn SecretStore>,
+        account_id: i64,
+    ) -> impl Future<Output = Result<()>> + Send + 'static + use<> {
+        self.0.store(secrets, account_id)
+    }
+
+    fn abort(&self) -> impl Future<Output = ()> + Send + 'static + use<> {
+        self.0.abort()
     }
 }
 

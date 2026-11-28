@@ -325,7 +325,7 @@ pub struct AddAccount {
     generation: u64,
     /// The Proton sign-in.
     #[cfg(feature = "proton")]
-    pub proton: zmail_setup::proton::ProtonFlow,
+    pub proton: zmail_setup::proton::ProtonFlow<zmail_setup::proton::ProtonSteps>,
     /// The Proton step's field (the code or the mailbox password).
     #[cfg(feature = "proton")]
     pub proton_input: String,
@@ -1967,6 +1967,17 @@ impl App {
         }
     }
 
+    /// What Proton's sign-in runs against: the sync service, unless a
+    /// test installed a fake.
+    #[cfg(feature = "proton")]
+    fn proton_side(&self) -> Option<std::sync::Arc<dyn zmail_setup::proton::ProtonSide>> {
+        self.proton_backend.clone().or_else(|| {
+            self.sync.clone().map(|sync| {
+                std::sync::Arc::new(sync) as std::sync::Arc<dyn zmail_setup::proton::ProtonSide>
+            })
+        })
+    }
+
     /// ^P on the address step (or a Proton address): Proton's sign-in.
     #[cfg(feature = "proton")]
     fn start_proton(&mut self) {
@@ -1987,6 +1998,7 @@ impl App {
     /// The sign-in step's Enter: checks, then signs in.
     #[cfg(feature = "proton")]
     fn proton_sign_in(&mut self) {
+        let proton = self.proton_side();
         let Some(add) = self.add.as_mut() else {
             return;
         };
@@ -2004,7 +2016,7 @@ impl App {
             add.proton.error = Some(duplicate);
             return;
         }
-        let Some(sync) = self.sync.clone() else {
+        let Some(proton) = proton else {
             add.proton.error = Some("This Zmail has no sync service to sign in with".to_owned());
             return;
         };
@@ -2012,7 +2024,7 @@ impl App {
             self.run_on_sync(abort);
         }
         let add = self.add.as_mut().expect("checked above");
-        let sign_in = match sync.begin_proton_sign_in(&email, &add.form.password) {
+        let sign_in = match proton.begin_sign_in(&email, &add.form.password) {
             Ok(sign_in) => sign_in,
             Err(error) => {
                 add.proton.error = Some(format!("{error:#}"));
