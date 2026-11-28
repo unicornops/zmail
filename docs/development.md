@@ -7,6 +7,7 @@ Building Zmail from source, testing it, and where the design documents are. Most
 - [`PLAN.md`](../PLAN.md): master delivery plan
 - [`docs/upstream/zed.md`](./upstream/zed.md): Zed and GPUI upstream pin record (GPUI is normally pinned to a Zed stable release tag and bumped by a weekly workflow; for now it is pinned to Zed PR #62379 for the web renderer)
 - [`docs/upstream/proton.md`](./upstream/proton.md): Proton Mail Bridge and go-proton-api upstream pins and ported files
+- [`docs/upstream/git-pins.md`](./upstream/git-pins.md): the crates taken from git forks pinned by commit (GPUI, rPGP, proton-srp), the weekly report on their upstream state and when each fork can be dropped
 - [`docs/adr/`](./adr/): architecture decision records:
   - [ADR 0001](./adr/0001-jmap-client-strategy.md): the first JMAP implementation decision, superseded by ADR 0008
   - [ADR 0002](./adr/0002-message-encryption-protocol.md): message encryption protocol

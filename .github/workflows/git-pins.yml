@@ -1,0 +1,55 @@
+name: Git Pins Upstream
+
+# Watches the dependencies taken from git forks pinned by commit (GPUI,
+# rPGP, proton-srp; docs/upstream/git-pins.md), which Dependabot skips and
+# RustSec cannot match. Every week it compares each pin with the upstream
+# pull request it follows, the latest upstream release and the RustSec
+# advisories for the upstream crate names, and keeps the result in a single
+# issue, updated in place (issue #472). It never changes the repository.
+on:
+  schedule:
+    # Mondays, 07:09 UTC (after zed-upstream and proton-upstream).
+    - cron: "9 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: git-pins
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check git pins
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+
+      - name: Self-test against fixtures
+        run: scripts/test-check-git-pins.sh
+
+      - name: Report the pins in the tracking issue
+        id: check
+        env:
+          # Read-only calls against public upstream repositories, plus the
+          # one tracking issue in this repository.
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_BODY_FILE: ${{ runner.temp }}/git-pins-issue.md
+        run: scripts/check-git-pins.py --update-issue
+
+      - name: Summary
+        if: always() && steps.check.outputs.body_file != ''
+        env:
+          TITLE: ${{ steps.check.outputs.title }}
+          BODY_FILE: ${{ steps.check.outputs.body_file }}
+        run: |
+          {
+            echo "# ${TITLE}"
+            echo
+            cat "${BODY_FILE}"
+          } >> "${GITHUB_STEP_SUMMARY}"

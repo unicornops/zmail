@@ -24,6 +24,7 @@
   - [Checking OAuth2 sign-in by hand](./oauth2-live-verification.md)
   - [Upstream: Zed and GPUI](./upstream/zed.md)
   - [Upstream: Proton Mail](./upstream/proton.md)
+  - [Upstream: Git-Pinned Dependencies](./upstream/git-pins.md)
   - [The documentation site](./site.md)
 
 # Architecture decisions

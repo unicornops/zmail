@@ -19,7 +19,7 @@ ships in normal releases built on this pin instead of a preview build.
 
 | | |
 | --- | --- |
-| Pull request | [zed-industries/zed#62379](https://github.com/zed-industries/zed/pull/62379), open |
+| Pull request | [zed-industries/zed#62379](https://github.com/zed-industries/zed/pull/62379), closed without being merged on November 21, 2026, with its head moved on from the pin (see below) |
 | Repository | [`huacnlee/zed`](https://github.com/huacnlee/zed), branch `window-composition-tree` |
 | Commit | [`840e095adddab3b7a644b137c22254fb2d111491`](https://github.com/huacnlee/zed/commit/840e095adddab3b7a644b137c22254fb2d111491) (committed 2026-09-27, based on Zed `main` of that time) |
 | Rust toolchain (the PR's `rust-toolchain.toml`) | `1.98.1`, the same as `v1.24.2` |
@@ -48,7 +48,23 @@ What changes while the pin is on the pull request:
   unmerged, or merged but in no stable release yet, the script stops with
   a notice. Once a Zed stable release contains the merge commit, it bumps
   to that release as usual, which ends the deviation; then delete this
-  section and the `deny.toml` entry for the fork.
+  section and the `deny.toml` entry for the fork. A pull request closed
+  without being merged makes the script stop with a warning instead, since
+  no release will ever contain it.
+- The weekly `git-pins` workflow ([git-pins.md](./git-pins.md)) reports
+  the pull request's state, whether its head is still the pinned commit,
+  Zed's latest release and any RustSec advisory for `gpui`, in one issue
+  updated in place.
+
+### Pull request #62379 closed
+
+The weekly `git-pins` check found #62379 closed without being merged
+(November 21, 2026), its head at `91d0a514a558` instead of the pinned
+`840e095addda`. The pin still builds and works, so nothing changes until
+there is a decision on where GPUI goes next: a pull request that replaces
+#62379, a fork Zmail maintains, or a stable tag without native window
+composition (which the web renderer of ADR 0006 needs on macOS, Windows and
+X11). Until then `scripts/bump-zed-gpui.sh` stops with a warning.
 
 ### Windows composition issues at this pin
 
@@ -123,7 +139,7 @@ pull request.
 <!-- zed-pin:start -->
 | | |
 | --- | --- |
-| Zed pull request | [#62379](https://github.com/zed-industries/zed/pull/62379) (unmerged; see the deviation above) |
+| Zed pull request | [#62379](https://github.com/zed-industries/zed/pull/62379) (closed unmerged; see the deviation above) |
 | Commit | [`840e095adddab3b7a644b137c22254fb2d111491`](https://github.com/huacnlee/zed/commit/840e095adddab3b7a644b137c22254fb2d111491) |
 | Last stable tag before it | [`v1.24.2`](https://github.com/zed-industries/zed/releases/tag/v1.24.2) (`fb69067729cb16a7f6135e2c1600c26a28c59659`, 2026-10-14) |
 | Rust toolchain (the PR's `rust-toolchain.toml`) | `1.98.1` |

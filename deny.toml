@@ -70,7 +70,8 @@ unknown-git = "deny"
 unknown-registry = "deny"
 # Exactly the git repositories the pinned GPUI needs (docs/upstream/zed.md),
 # plus the rPGP and proton-srp forks below. Each revision is fixed by
-# Cargo.lock; keep the GPUI entries in step with Zed.
+# Cargo.lock; keep the GPUI entries in step with Zed. The weekly git-pins
+# workflow reports on the forks' upstreams (docs/upstream/git-pins.md).
 allow-git = [
     # rPGP fork at the head of rpgp/rpgp#573 (RustCrypto 0.14 stack,
     # crypto-bigint 0.7.6), pinned by `rev` in Cargo.toml, so that pgp no

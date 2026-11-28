@@ -54,6 +54,9 @@ chmod +x "${WORK}/bin/gh"
 run() {
   local name="$1" state="$2" cargo_toml="$3" manifest="$4"
   shift 4
+  # Cargo-X.toml goes with Cargo-X.lock when there is one.
+  local lock="${FIXTURES}/${cargo_toml%.toml}.lock"
+  [[ -f "${lock}" ]] || lock="${FIXTURES}/Cargo.lock"
   : > "${WORK}/${name}.out"
   : > "${WORK}/gh.log"
   status=0
@@ -62,7 +65,7 @@ run() {
     GH_STUB_ISSUES="${WORK}/issues.json" \
     GIT_PINS_FIXTURES="${FIXTURES}/${state}" \
     GIT_PINS_CARGO_TOML="${FIXTURES}/${cargo_toml}" \
-    GIT_PINS_CARGO_LOCK="${FIXTURES}/Cargo.lock" \
+    GIT_PINS_CARGO_LOCK="${lock}" \
     GIT_PINS_MANIFEST="${FIXTURES}/${manifest}" \
     ISSUE_BODY_FILE="${WORK}/${name}.body" \
     GITHUB_OUTPUT="${WORK}/${name}.out" \
@@ -123,7 +126,7 @@ expect_in current md "[RUSTSEC-2024-0447](https://rustsec.org/advisories/RUSTSEC
 expect_in current md "None for \`gpui\`, \`gpui_platform\`."
 expect_in current md "no pull request"
 expect_in current md "A crates.io pgp release contains rpgp/rpgp#573"
-expect_not_in current md "[ ]"
+expect_not_in current md "- **"
 expect_not_in current md "RUSTSEC-2099"
 [[ ! -s "${WORK}/gh.log" ]] || fail "current: the dry run called gh: $(cat "${WORK}/gh.log")"
 cmp -s <(sed '1,/^$/d' "${WORK}/current.md") "${WORK}/current.body" \
@@ -134,11 +137,11 @@ run moved moved Cargo.toml git-pins.toml
 expect_status moved 0
 expect_output moved findings 5
 expect_output moved title "Git pins: 5 findings"
-expect_in moved md "- [ ] **gpui, gpui_platform**: [zed-industries/zed#62379](https://github.com/zed-industries/zed/pull/62379) was closed without being merged (2026-11-20)."
-expect_in moved md "- [ ] **gpui, gpui_platform**: the head of [zed-industries/zed#62379](https://github.com/zed-industries/zed/pull/62379) moved to [\`dddddddddddd\`](https://github.com/huacnlee/zed/commit/${D}); the pin is [\`aaaaaaaaaaaa\`](https://github.com/huacnlee/zed/commit/${A}) ([changes](https://github.com/huacnlee/zed/compare/${A}...${D}))."
-expect_in moved md "- [ ] **pgp**: [rpgp/rpgp#573](https://github.com/rpgp/rpgp/pull/573) was merged (2026-11-24) as [\`eeeeeeeeeeee\`](https://github.com/rpgp/rpgp/commit/${E}), and pgp 0.22.0 contains it: the fork can be dropped"
-expect_in moved md "- [ ] **pgp**: [RUSTSEC-2099-0001](https://rustsec.org/advisories/RUSTSEC-2099-0001) (Signature forgery in a fixture) affects pgp 0.21.0, the version the fork declares; patched: \`>= 0.21.2\`."
-expect_in moved md "- [ ] **proton-srp**: proton-srp 0.9.0 is out on crates.io (the fork declares 0.8.4); its \`crypto-bigint\` requirement is \`^0.7.6\`."
+expect_in moved md "- **gpui, gpui_platform**: [zed-industries/zed#62379](https://github.com/zed-industries/zed/pull/62379) was closed without being merged (2026-11-20)."
+expect_in moved md "- **gpui, gpui_platform**: the head of [zed-industries/zed#62379](https://github.com/zed-industries/zed/pull/62379) moved to [\`dddddddddddd\`](https://github.com/huacnlee/zed/commit/${D}); the pin is [\`aaaaaaaaaaaa\`](https://github.com/huacnlee/zed/commit/${A}) ([changes](https://github.com/huacnlee/zed/compare/${A}...${D}))."
+expect_in moved md "- **pgp**: [rpgp/rpgp#573](https://github.com/rpgp/rpgp/pull/573) was merged (2026-11-24) as [\`eeeeeeeeeeee\`](https://github.com/rpgp/rpgp/commit/${E}), and pgp 0.22.0 contains it: the fork can be dropped"
+expect_in moved md "- **pgp**: [RUSTSEC-2099-0001](https://rustsec.org/advisories/RUSTSEC-2099-0001) (Signature forgery in a fixture) affects pgp 0.21.0, the version the fork declares; patched: \`>= 0.21.2\`."
+expect_in moved md "- **proton-srp**: proton-srp 0.9.0 is out on crates.io (the fork declares 0.8.4); its \`crypto-bigint\` requirement is \`^0.7.6\`."
 expect_in moved md "| \`crypto-bigint\` in that release | \`^0.7.6\` |"
 expect_in moved md "closed without being merged"
 expect_in moved md "moved since the pin"
@@ -180,7 +183,7 @@ expect_in unchanged log "already up to date"
 # Cargo.toml and the manifest must agree.
 run unlisted current Cargo-unlisted.toml git-pins.toml
 expect_status unlisted 1
-expect_in unlisted log "extra is a git dependency in Cargo.toml but no [[pin]] in"
+expect_in unlisted log "extra is a git dependency in scripts/fixtures/git-pins/Cargo-unlisted.toml but no [[pin]] in scripts/fixtures/git-pins/git-pins.toml lists it"
 
 run split current Cargo-split.toml git-pins.toml
 expect_status split 1
@@ -189,6 +192,32 @@ expect_in split log "gpui and gpui_platform share one [[pin]] but not one git so
 run stale current Cargo.toml git-pins-stale.toml
 expect_status stale 1
 expect_in stale log "lists gone, which is not a git dependency in"
+
+# The RustSec version ranges, read as Cargo reads requirements.
+if ! python3 -I -B - "${CHECK}" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("check_git_pins", sys.argv[1])
+check = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(check)
+cases = [
+    (">= 0.21.2", "0.21.1", False), (">= 0.21.2", "0.21.2", True), (">= 0.21.2", "1.0.0", True),
+    ("< 0.10.0", "0.9.9", True), ("< 0.10.0", "0.10.0", False),
+    (">= 0.9.3, < 0.10.0", "0.9.5", True), (">= 0.9.3, < 0.10.0", "0.10.1", False),
+    ("^0.8.5", "0.8.9", True), ("^0.8.5", "0.9.0", False), ("^1.2", "1.9.0", True), ("^1.2", "2.0.0", False),
+    ("^0.0.3", "0.0.3", True), ("^0.0.3", "0.0.4", False), ("0.4.2", "0.4.7", True),
+    ("~1.2.3", "1.2.9", True), ("~1.2.3", "1.3.0", False), ("=1.2", "1.2.5", True), ("=1.2.3", "1.2.4", False),
+    ("> 1.2", "1.2.9", False), ("> 1.2", "1.3.0", True), ("<= 1.2", "1.2.9", True), ("<= 1.2", "1.3.0", False),
+    (">= 1.0.0", "1.0.0-rc.1", False), ("*", "3.1.4", True),
+]
+bad = [c for c in cases if check.requirement_matches(c[0], c[1]) != c[2]]
+for requirement, version, expected in bad:
+    print(f"'{requirement}' on {version}: expected {expected}", file=sys.stderr)
+assert check.version_key("1.0.0-alpha.2") < check.version_key("1.0.0-alpha.10") < check.version_key("1.0.0")
+sys.exit(1 if bad else 0)
+PY
+then
+  fail "requirement_matches reads a RustSec range wrongly"
+fi
 
 # The real Cargo.toml, Cargo.lock and docs/upstream/git-pins.toml agree.
 status=0

@@ -22,6 +22,8 @@ updates:
           - minor
           - patch
     ignore:
+      # The four git pins below are watched by the weekly git-pins
+      # workflow instead (docs/upstream/git-pins.md).
       # GPUI is pinned to the head of Zed PR #62379 for the web renderer
       # (docs/upstream/zed.md); the zed-upstream workflow and manual pin
       # moves own it.

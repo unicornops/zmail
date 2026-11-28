@@ -22,10 +22,14 @@ set -euo pipefail
 #
 # While GPUI is pinned by `rev` to a Zed pull request instead of a tag
 # (docs/upstream/zed.md, "Deviation From ADR 0003"; the pull request is
-# $ZED_PR, default 62379), the script never moves back to a release that
-# lacks that work: it bumps only once the pull request is merged and the
-# target stable release contains its merge commit, and otherwise stops
-# with a notice.
+# $ZED_PR, default 62379, the `pull_request` of the GPUI [[pin]] in
+# docs/upstream/git-pins.toml), the script never moves back to a release
+# that lacks that work: it bumps only once the pull request is merged and
+# the target stable release contains its merge commit, and otherwise stops
+# with a notice (a warning when the pull request was closed unmerged, which
+# no release will ever contain). It never follows a new head of the pull
+# request; the weekly git-pins report says when the head moves, and
+# docs/upstream/zed.md has the manual steps.
 #
 # It writes a pull request body to $PR_BODY_FILE (default: a temp file)
 # and, when $GITHUB_OUTPUT is set, the outputs updated, tag, previous_tag,
@@ -57,7 +61,7 @@ zed_raw() {
 notice() {
   echo "$1"
   if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
-    echo "::notice::$1"
+    echo "::${2:-notice}::$1"
   fi
 }
 
@@ -83,6 +87,13 @@ if [[ -n "$pr_rev" ]]; then
   # Pinned to Zed PR $ZED_PR: only a release that contains it may replace it.
   pr_json="$(gh api "repos/${ZED_REPO}/pulls/${ZED_PR}")"
   merge_commit="$(jq -r 'select(.merged == true) | .merge_commit_sha // empty' <<<"$pr_json")"
+  if [[ -z "$merge_commit" && "$(jq -r '.state' <<<"$pr_json")" == "closed" ]]; then
+    # A closed pull request never merges: no release will ever contain it,
+    # so the pin needs a decision rather than another weekly no-op.
+    notice "GPUI is pinned to Zed PR #${ZED_PR} (${pr_rev:0:12}), which was closed without being merged; no stable release will contain it, so the pin needs a decision (see docs/upstream/zed.md and the git-pins issue)." warning
+    output updated false
+    exit 0
+  fi
   if [[ -z "$merge_commit" ]]; then
     notice "GPUI is pinned to Zed PR #${ZED_PR} (${pr_rev:0:12}), which is not merged; not moving to ${target_tag}, which lacks it. See docs/upstream/zed.md."
     output updated false
@@ -199,8 +210,10 @@ if count != 1:
 open(doc, "w", encoding="utf-8").write(new)
 PY
 
-# Release notes for every stable release in (current, target].
-release_links="$(gh api "repos/${ZED_REPO}/releases?per_page=100" \
+# Release notes for every stable release in (current, target]; a pull
+# request pin has no "current" release, so it links the target's only.
+release_links=""
+[[ -n "$pr_rev" ]] || release_links="$(gh api "repos/${ZED_REPO}/releases?per_page=100" \
   --jq '.[] | select(.prerelease == false and .draft == false) | .tag_name' \
   | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V \
   | awk -v lo="$current_tag" -v hi="$target_tag" '
@@ -218,9 +231,8 @@ release_links="$(gh api "repos/${ZED_REPO}/releases?per_page=100" \
 from_text="Zed [\`${current_tag}\`](${ZED_URL}/releases/tag/${current_tag})"
 if [[ -n "$pr_rev" ]]; then
   from_text="the head of Zed [PR #${ZED_PR}](${ZED_URL}/pull/${ZED_PR})"
-  release_links=""
   compare_link="- The pin was the head of [Zed PR #${ZED_PR}](${ZED_URL}/pull/${ZED_PR}) (\`${pr_rev:0:12}\` on a fork), which ${target_tag} contains."
-  deviation_note="- [ ] End the ADR 0003 deviation: delete \"Deviation From ADR 0003\" in \`docs/upstream/zed.md\` and its notes in \`AGENTS.md\`, \`docs/features.md\`, \`docs/development.md\` and ADR 0003, the fork's \`allow-git\` entry in \`deny.toml\`, and the pull request wording in the \`Cargo.toml\` comments."
+  deviation_note="- [ ] End the ADR 0003 deviation: delete \"Deviation From ADR 0003\" in \`docs/upstream/zed.md\` and its notes in \`AGENTS.md\`, \`docs/features.md\`, \`docs/development.md\` and ADR 0003, the fork's \`allow-git\` entry in \`deny.toml\`, the pull request wording in the \`Cargo.toml\` comments (and the \`calloop\` patch comment), and in \`docs/upstream/git-pins.toml\` the GPUI \`[[pin]]\`'s \`pull_request\` (its \`drop_when\` becomes: not a fork, the \`zed-upstream\` workflow moves it)."
 else
   compare_link="- [Full diff ${current_tag}...${target_tag}](${ZED_URL}/compare/${current_tag}...${target_tag}) (GPUI lives in \`crates/gpui*\`)"
   deviation_note=""
