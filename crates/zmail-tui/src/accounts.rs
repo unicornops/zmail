@@ -15,12 +15,19 @@
 //! this Zmail holds the sync lock, otherwise in the Zmail that does.
 //!
 //! **Change** has the account's sign-in and cache budget, then its
-//! identities, each with how it stands against a JMAP server
-//! (`zmail_setup::identities`). On one that differs, `U` updates the
-//! server with Zmail's name, reply-to and signature and `S` takes the
-//! server's instead; on one the server no longer lists, `R` creates it
-//! there again. On any, `Ret` or `E` edits it, `D` removes it after
-//! asking and `*` makes it primary; `A` adds one (`crate::identities`).
+//! identities. Its sign-in row takes a new password, runs the browser
+//! sign-in again for OAuth2, or, for a Proton account, opens Proton's
+//! sign-in steps for it, its address fixed, whether or not Proton has
+//! ended the session: the new session replaces the old one (signed out
+//! first) in the account's keychain slots, as in the desktop app, so the
+//! mail stays and nothing downloads again; a sign-in as another Proton
+//! account is refused. The identities follow, each with how it stands
+//! against a JMAP server (`zmail_setup::identities`). On one that
+//! differs, `U` updates the server with Zmail's name, reply-to and
+//! signature and `S` takes the server's instead; on one the server no
+//! longer lists, `R` creates it there again. On any, `Ret` or `E` edits
+//! it, `D` removes it after asking and `*` makes it primary; `A` adds one
+//! (`crate::identities`).
 //!
 //! Safety:
 //!
@@ -329,6 +336,25 @@ pub struct AddAccount {
     /// The Proton step's field (the code or the mailbox password).
     #[cfg(feature = "proton")]
     pub proton_input: String,
+    /// The account this sign-in is for, when signing in to Proton again
+    /// (Change); `None` adds an account.
+    #[cfg(feature = "proton")]
+    pub again: Option<SignInAgain>,
+}
+
+/// Signing in to a Proton account again: the account keeps its id, its
+/// mail and its settings, and the new session takes the old one's place.
+#[cfg(feature = "proton")]
+#[derive(Debug, Clone)]
+pub struct SignInAgain {
+    /// The account.
+    pub account_id: i64,
+    /// Its name (untrusted: filtered when drawn).
+    pub name: String,
+    /// Whether Proton has ended its session (its last failure, still
+    /// standing, is a sign-in one), rather than the user asking to sign
+    /// in again while it works.
+    pub ended: bool,
 }
 
 impl AddAccount {
@@ -357,6 +383,8 @@ impl AddAccount {
             proton: zmail_setup::proton::ProtonFlow::default(),
             #[cfg(feature = "proton")]
             proton_input: String::new(),
+            #[cfg(feature = "proton")]
+            again: None,
         }
     }
 
@@ -406,6 +434,10 @@ impl AddAccount {
                 field(AccountField::IdentityEmail),
                 field(AccountField::Signature),
             ],
+            // Signing in again, the address is the account's own: drawn,
+            // never edited (`fixed_rows`).
+            #[cfg(feature = "proton")]
+            Step::ProtonSignIn if self.again.is_some() => vec![field(AccountField::Password)],
             #[cfg(feature = "proton")]
             Step::ProtonSignIn => vec![field(AccountField::Email), field(AccountField::Password)],
             #[cfg(feature = "proton")]
@@ -414,6 +446,29 @@ impl AddAccount {
             Step::ProtonMailboxPassword => vec![field(AccountField::ProtonMailboxPassword)],
             _ => Vec::new(),
         }
+    }
+
+    /// Whether this signs in to a Proton account again, rather than adding
+    /// an account.
+    pub fn signing_in_again(&self) -> bool {
+        #[cfg(feature = "proton")]
+        {
+            self.again.is_some()
+        }
+        #[cfg(not(feature = "proton"))]
+        {
+            false
+        }
+    }
+
+    /// The fields the step shows above its form that can't change, with
+    /// their values: signing in to Proton again, the account's address.
+    pub fn fixed_rows(&self) -> Vec<(AccountField, &str)> {
+        #[cfg(feature = "proton")]
+        if self.step == Step::ProtonSignIn && self.again.is_some() {
+            return vec![(AccountField::Email, self.form.email.as_str())];
+        }
+        Vec::new()
     }
 
     /// Whether what discovery found includes servers that only a DNS
@@ -972,8 +1027,10 @@ impl App {
         self.cancel_add();
     }
 
-    /// ^C: leaves Add without saving anything.
+    /// ^C: leaves Add without saving anything. Signing in to Proton
+    /// again, back to the account's Change, which it came from.
     fn cancel_add(&mut self) {
+        let again = self.add.as_ref().is_some_and(AddAccount::signing_in_again);
         if let Some(mut add) = self.add.take() {
             #[cfg(feature = "proton")]
             if let Some(abort) = add.proton.abort() {
@@ -982,8 +1039,23 @@ impl App {
             add.forget_secrets();
         }
         self.setup_generation += 1;
+        if again {
+            self.back_to_change();
+            self.status = Some("Not signed in to Proton again".to_owned());
+            return;
+        }
         self.goto(Screen::Accounts);
         self.status = Some("No account added".to_owned());
+    }
+
+    /// Back to Change, after signing in to Proton again from there.
+    fn back_to_change(&mut self) {
+        if self.edit.is_some() {
+            self.refresh();
+            self.goto(Screen::EditAccount);
+        } else {
+            self.open_accounts();
+        }
     }
 
     /// Done: back to the Accounts list, on the new account.
@@ -1751,9 +1823,16 @@ impl App {
                 ));
             }
             AuthKind::ProtonSession => {
-                self.status = Some(
-                    "To sign in to Proton again, delete the account and add it again".to_owned(),
-                );
+                #[cfg(feature = "proton")]
+                self.sign_in_to_proton_again(account_id);
+                #[cfg(not(feature = "proton"))]
+                {
+                    self.status = Some(
+                        "This build of Zmail has no Proton Mail support, so it can't sign in to \
+                         Proton. A build with Proton keeps the account and signs in again."
+                            .to_owned(),
+                    );
+                }
             }
         }
     }
@@ -1995,6 +2074,41 @@ impl App {
         }
     }
 
+    /// Change's first row on a Proton account: Proton's sign-in again for
+    /// it, whether or not Proton has ended its session, with its address
+    /// filled in and fixed. Once signed in, the old session is signed out
+    /// and the new one takes its place, keeping the account's mail.
+    #[cfg(feature = "proton")]
+    fn sign_in_to_proton_again(&mut self, account_id: i64) {
+        let Some(account) = self
+            .store
+            .list_accounts()
+            .ok()
+            .and_then(|found| found.into_iter().find(|account| account.id == account_id))
+        else {
+            self.status = Some("This account is no longer in Zmail".to_owned());
+            return;
+        };
+        // The last failure, still standing (a retry may be under way).
+        let status = &account.sync_status;
+        let ended = (status.phase == zmail_core::SyncPhase::Failed || status.failure_count > 0)
+            && status.last_error_message.as_deref().is_some_and(|error| {
+                accounts::sync_failure(error) == accounts::SyncFailure::SignIn
+            });
+        self.setup_generation += 1;
+        let mut add = AddAccount::new(self.setup_generation);
+        add.form.protocol = ProtocolKind::Proton;
+        add.form.email = account.username;
+        add.again = Some(SignInAgain {
+            account_id,
+            name: account.display_name,
+            ended,
+        });
+        add.step = Step::ProtonSignIn;
+        self.add = Some(add);
+        self.goto(Screen::AddAccount);
+    }
+
     /// The sign-in step's Enter: checks, then signs in.
     #[cfg(feature = "proton")]
     fn proton_sign_in(&mut self) {
@@ -2012,7 +2126,9 @@ impl App {
             add.focus_error();
             return;
         }
-        if let Some(duplicate) = zmail_setup::proton::duplicate(&self.store, &email) {
+        if add.again.is_none()
+            && let Some(duplicate) = zmail_setup::proton::duplicate(&self.store, &email)
+        {
             add.proton.error = Some(duplicate);
             return;
         }
@@ -2097,6 +2213,9 @@ impl App {
                 wipe(&mut add.proton_input);
                 add.go(Step::ProtonMailboxPassword);
             }
+            ProtonAction::SignedIn(account) if add.again.is_some() => {
+                self.proton_store_again(&account);
+            }
             ProtonAction::SignedIn(account) => self.proton_store(account),
         }
     }
@@ -2142,8 +2261,67 @@ impl App {
         });
     }
 
+    /// Keeps the new session for the Proton account signed in to again, in
+    /// place of the old one (signed out first, even while it still works),
+    /// as the desktop app does. A sign-in as another Proton account is
+    /// refused before anything happens to the old session.
+    #[cfg(feature = "proton")]
+    fn proton_store_again(&mut self, account: &zmail_proton::SignedInAccount) {
+        let proton = self.proton_side();
+        let (Some(secrets), Some(add)) = (self.secrets.clone(), self.add.as_mut()) else {
+            return;
+        };
+        let (Some(again), Some(sign_in)) = (add.again.clone(), add.proton.sign_in().cloned())
+        else {
+            return;
+        };
+        let store_session = match zmail_setup::proton::store_signed_in_again(
+            &self.store,
+            &secrets,
+            &sign_in,
+            again.account_id,
+            account,
+        ) {
+            Ok(store_session) => store_session,
+            Err(message) => {
+                // Signed in to another account: sign that session out and
+                // start again from the password.
+                if let Some(abort) = add.proton.abort() {
+                    self.run_on_sync(abort);
+                }
+                let add = self.add.as_mut().expect("checked above");
+                wipe(&mut add.proton_input);
+                add.proton.error = Some(message);
+                add.history.clear();
+                add.step = Step::ProtonSignIn;
+                add.focus = 0;
+                return;
+            }
+        };
+        let (Some(proton), Some(sync), Some(runtime)) =
+            (proton, self.sync.clone(), self.runtime.clone())
+        else {
+            return;
+        };
+        add.proton.busy = true;
+        let generation = add.generation;
+        let sender = self.notice_sender();
+        let run =
+            sync.run_proton(proton.replace_session(again.account_id, Box::pin(store_session)));
+        runtime.spawn(async move {
+            let result = run.await.and_then(|stored| stored);
+            let _ = sender.send(Notice::Setup(Box::new(SetupEvent::ProtonStored {
+                generation,
+                account_id: again.account_id,
+                name: again.name,
+                result,
+            })));
+        });
+    }
+
     #[cfg(feature = "proton")]
     fn proton_stored(&mut self, account_id: i64, name: String, result: anyhow::Result<()>) {
+        let proton = self.proton_side();
         let Some(add) = self.add.as_mut() else {
             return;
         };
@@ -2153,6 +2331,22 @@ impl App {
             return;
         }
         add.proton.done();
+        if add.again.is_some() {
+            // Signed in again: the account syncs on from where it had got
+            // to, and messages refused for the old session go now.
+            if let Some(mut add) = self.add.take() {
+                add.forget_secrets();
+            }
+            if let Some(proton) = proton {
+                proton.signed_in_again(account_id);
+            }
+            self.back_to_change();
+            self.status = Some(format!(
+                "Signed in to Proton again. {} is syncing.",
+                sanitize_line(&name)
+            ));
+            return;
+        }
         if let Some(sync) = &self.sync {
             let _ = sync.sync_account(account_id);
             let _ = sync.sync_watchers();

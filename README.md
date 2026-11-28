@@ -48,7 +48,7 @@ Each release also has `SHA256SUMS-Linux`, `SHA256SUMS-macOS` and `SHA256SUMS-Win
 1. Install Zmail from the [latest release](https://github.com/unicornops/zmail/releases/latest).
 2. Start it from your applications menu or Start menu, or run `zmail-app`. With no account yet, it shows a welcome screen: choose your provider and sign in, and Zmail finds the server settings, tests the connection, saves the account and starts the first sync.
 3. Gmail needs an app password or an OAuth client of your own; the Add Account flow explains both.
-4. For the terminal UI, run `zmail-app tui`; `S` on its Main Menu adds an account.
+4. For the terminal UI, run `zmail-app tui`; `S` on its Main Menu adds an account. To sign in to an account again without removing it, choose it in Setup → Accounts, press `C`, then Enter on the first row: a new password, the browser for OAuth, or Proton's sign-in (whether or not Proton has ended Zmail's session). Its mail stays and nothing downloads again.
 5. To open `mailto:` links in Zmail, make it your default mail app: in Mail's **Settings > General** on macOS, **Settings > Apps > Default apps** on Windows, or your desktop's default apps (or `xdg-mime default ie.unicornops.zmail.desktop x-scheme-handler/mailto`) on Linux. [Make Zmail your mail app](./docs/install.md#make-zmail-your-mail-app) has the details.
 
 Zmail needs the system keychain: Keychain on macOS, Credential Manager on Windows, or a Secret Service such as GNOME Keyring or KWallet on Linux. Over SSH, see [Using Zmail over SSH or on a headless machine](./docs/install.md#using-zmail-over-ssh-or-on-a-headless-machine).
