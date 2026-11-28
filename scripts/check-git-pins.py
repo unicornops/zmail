@@ -42,18 +42,22 @@ Environment:
   GIT_PINS_FIXTURES     answer GitHub, crates.io and advisory-db lookups from
                         this directory (api/, index/, advisory-db/) instead of
                         the network (see scripts/test-check-git-pins.sh)
-  ISSUE_BODY_FILE       where to write the issue body (default: a temp file)
-  GITHUB_OUTPUT         when set, receives findings, title and body_file
+  ISSUE_BODY_FILE       also write the issue body here (with --update-issue,
+                        a temporary file is used when this is unset)
+  GITHUB_OUTPUT         when set, receives findings, title and (with
+                        ISSUE_BODY_FILE) body_file
 
 Requires python3 >= 3.11, gh (authenticated; read access to public
 repositories is enough, plus issue write access for --update-issue) and git.
 """
 
 import argparse
+import atexit
 import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -327,7 +331,9 @@ class Upstream:
         if not path and self.fixtures:
             path = os.path.join(self.fixtures, "advisory-db")
         if not path:
-            path = os.path.join(tempfile.mkdtemp(prefix="git-pins-"), "advisory-db")
+            clone_root = tempfile.mkdtemp(prefix="git-pins-")
+            atexit.register(shutil.rmtree, clone_root, ignore_errors=True)
+            path = os.path.join(clone_root, "advisory-db")
             result = subprocess.run(
                 ["git", "clone", "--quiet", "--depth", "1", ADVISORY_DB_URL, path],
                 capture_output=True,
@@ -632,14 +638,19 @@ def main():
         upstream = Upstream(os.environ.get("GIT_PINS_FIXTURES"))
         title, body, count = build_report(pins, git_dependencies, upstream)
         body_file = os.environ.get("ISSUE_BODY_FILE")
-        if not body_file:
+        if body_file:
+            write_output(body_file=body_file)
+        elif args.update_issue:
+            # gh reads the body from a file; this one goes when the run ends.
             fd, body_file = tempfile.mkstemp(prefix="git-pins-", suffix=".md")
             os.close(fd)
-        with open(body_file, "w", encoding="utf-8") as f:
-            f.write(body)
+            atexit.register(os.remove, body_file)
+        if body_file:
+            with open(body_file, "w", encoding="utf-8") as f:
+                f.write(body)
         if upstream.calls:
             log(f"{upstream.calls} GitHub API call(s).")
-        write_output(findings=count, title=title, body_file=body_file)
+        write_output(findings=count, title=title)
         if args.update_issue:
             log(title)
             update_issue(title, body, body_file, no_pins=not pins)
