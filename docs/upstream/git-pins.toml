@@ -1,0 +1,51 @@
+# The git pins in the root Cargo.toml's [workspace.dependencies] and what
+# each one follows upstream (docs/upstream/git-pins.md).
+#
+# scripts/check-git-pins.py reads the pinned commits, fork URLs and crate
+# versions from Cargo.toml and Cargo.lock, so this file holds only what they
+# cannot say: the upstream repository, the pull request the fork follows,
+# where upstream releases come from, and when the fork can go. Every git
+# dependency in [workspace.dependencies] must be listed here, and every
+# crate listed here must be one: the check fails otherwise, so a new pin
+# cannot go unwatched. The [patch.crates-io] git entries mirror Zed's own
+# patches and are owned by scripts/bump-zed-gpui.sh, so they are not listed.
+#
+# Fields of each [[pin]]:
+#   crates           crates that share one git source and commit; the first
+#                    names the pin. RustSec advisories are looked up for all.
+#   upstream         owner/repo the fork comes from.
+#   pull_request     upstream pull request number the fork follows (optional).
+#   releases         "github": the latest GitHub release of `upstream`;
+#                    "crates.io": the newest crates.io release of crates[0].
+#   release_tag      upstream's git tag for a crates.io version, with
+#                    {version} in it (optional; enables diff links and the
+#                    "does the release contain the merged pull request" check).
+#   show_dependency  a dependency whose requirement in the newest release is
+#                    shown, when the fork exists because of it (optional).
+#   docs             where the fork and its removal are documented.
+#   drop_when        when the fork can be dropped, in one sentence.
+
+[[pin]]
+crates = ["gpui", "gpui_platform"]
+upstream = "zed-industries/zed"
+pull_request = 62379
+releases = "github"
+docs = "docs/upstream/zed.md"
+drop_when = "A Zed stable release contains the merged #62379 (or whatever replaces it): the weekly zed-upstream workflow then moves both lines back to that release tag."
+
+[[pin]]
+crates = ["pgp"]
+upstream = "rpgp/rpgp"
+pull_request = 573
+releases = "crates.io"
+release_tag = "v{version}"
+docs = "docs/upstream/proton.md"
+drop_when = "A crates.io pgp release contains rpgp/rpgp#573, so pgp no longer pulls the crypto-bigint 0.5.5 of RUSTSEC-2026-0387."
+
+[[pin]]
+crates = ["proton-srp"]
+upstream = "ProtonMail/proton-crypto-rs"
+releases = "crates.io"
+show_dependency = "crypto-bigint"
+docs = "docs/upstream/proton.md"
+drop_when = "A crates.io proton-srp release depends on crypto-bigint 0.7.6 or later instead of 0.5 (RUSTSEC-2026-0387); upstream takes no pull requests, so there is none to follow."
