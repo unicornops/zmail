@@ -26,6 +26,7 @@ The app is organised as a Rust workspace with separate crates for UI, store, syn
 - `docs/upstream/zed.md`: pinned upstream GPUI and Zed context
 - `docs/adr/0001-jmap-client-strategy.md`: the first JMAP implementation decision (`jmap-client` behind `zmail-jmap`), superseded by ADR 0008
 - `docs/adr/0004-proton-native.md` and `docs/upstream/proton.md`: native Proton Mail decision, upstream pins and ported files
+- `docs/upstream/git-pins.md` and `docs/upstream/git-pins.toml`: the git-pinned forks (GPUI, rPGP, proton-srp), what each follows upstream and when it can be dropped
 - `docs/adr/0005-store-encryption.md`: encryption of the local store at rest (SQLCipher, encrypted attachment files, the store key in the OS keychain)
 - `docs/adr/0006-html-email-renderer.md`: rendering HTML mail (OS web engines behind a renderer boundary, the shared sanitiser and remote-content policy); tracked in #294
 - `docs/adr/0007-terminal-ui.md`: a terminal UI as a second frontend (`zmail-tui`, `zmail-app tui`), terminal escape-sequence filtering, one syncing process; Pine/Alpine-style screens, Zellij-style copy and paste
@@ -156,7 +157,7 @@ python3 -I scripts/docs-site/test_stage.py
 
 `build-site.sh` builds the latest release at `/` and the working tree at `/dev/`, and fails on any mdBook warning, broken link or anchor between pages, or resource loaded from another origin. CI's Docs Site workflow runs the same on every pull request. Every image in `docs/images` is a screenshot named after a UI screenshot matrix state (`scripts/docs-site/capture-screenshots.sh --check` checks it): each release captures them and `/` uses the release's copies (`docs/site.md`, Screenshots).
 
-Dependabot (`.github/dependabot.yml`) opens weekly update pull requests for Cargo (`fix(deps)`, minor and patch grouped) and GitHub Actions (`ci(deps)`), plus security updates for Dependabot alerts. It skips the GPUI pin and the `pgp` and `proton-srp` forks; move those by hand. The fuzz crate's own lockfile gets one grouped `test(deps)` pull request a month.
+Dependabot (`.github/dependabot.yml`) opens weekly update pull requests for Cargo (`fix(deps)`, minor and patch grouped) and GitHub Actions (`ci(deps)`), plus security updates for Dependabot alerts. It skips the GPUI pin and the `pgp` and `proton-srp` forks; move those by hand. The weekly `git-pins` workflow (`scripts/check-git-pins.py`) watches those instead: it keeps one issue up to date with each pin's upstream pull request (open, merged, closed, head moved), the latest upstream release and any RustSec advisory for the crate names. Every git dependency in `[workspace.dependencies]` needs a `[[pin]]` in `docs/upstream/git-pins.toml`; `scripts/test-check-git-pins.sh` (CI's quality job) checks that and the script, offline. The fuzz crate's own lockfile gets one grouped `test(deps)` pull request a month.
 
 Fuzzing (nightly, `cargo install cargo-fuzz`; see `fuzz/README.md` for the SIMD tiers and findings):
 

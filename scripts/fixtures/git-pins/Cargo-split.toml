@@ -1,0 +1,15 @@
+# Fixture for scripts/test-check-git-pins.sh: the git pins as the root
+# Cargo.toml declares them.
+[workspace]
+members = []
+
+[workspace.dependencies]
+anyhow = "1"
+gpui = { git = "https://github.com/huacnlee/zed", rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+gpui_platform = { git = "https://github.com/huacnlee/zed", rev = "ffffffffffffffffffffffffffffffffffffffff", default-features = false }
+pgp = { git = "https://github.com/lazzurs/rpgp", rev = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", default-features = false }
+proton-srp = { git = "https://github.com/lazzurs/proton-crypto-rs", rev = "cccccccccccccccccccccccccccccccccccccccc", default-features = false }
+
+# Mirrors of Zed's patches: owned by scripts/bump-zed-gpui.sh, not reported.
+[patch.crates-io]
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "ffffffffffffffffffffffffffffffffffffffff" }

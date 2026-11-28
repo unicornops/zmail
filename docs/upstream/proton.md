@@ -41,7 +41,10 @@ covers every `crypto-bigint` before 0.7.6 (timing side channels in
 subtraction, division and Montgomery multiplication). The newest
 crates.io releases of both Proton crypto dependencies still use
 `crypto-bigint` 0.5.5, so Zmail takes both from forks pinned by `rev`
-until upstream releases move. `deny.toml` allows both git sources.
+until upstream releases move. `deny.toml` allows both git sources. The
+weekly `git-pins` workflow ([git-pins.md](./git-pins.md)) watches both
+forks: the state of #573, the newest crates.io releases and the RustSec
+advisories for `pgp` and `proton-srp`.
 
 ### rPGP
 
@@ -50,8 +53,9 @@ until upstream releases move. `deny.toml` allows both git sources.
 `696fe2f437e401f21cac8a1f32f9144a4b95d951` (branch
 `zmail/rustcrypto-0.14`), the head of upstream pull request
 [rpgp/rpgp#573](https://github.com/rpgp/rpgp/pull/573) "Adopt
-RustCrypto new releases". The fork holds that commit unchanged; Zmail
-carries no patches of its own.
+RustCrypto new releases" when it was pinned (the head has moved on
+since; the weekly `git-pins` report says where it is). The fork holds that
+commit unchanged; Zmail carries no patches of its own.
 
 Why: `pgp` 0.21.0, the newest release, depends on `crypto-bigint` 0.5.5
 (through `cx448` and the `elliptic-curve` 0.13 curves). #573 moves rPGP to the

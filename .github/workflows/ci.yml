@@ -82,6 +82,9 @@ jobs:
                       scripts/check-proton-upstream.sh|scripts/test-check-proton-upstream.sh|scripts/fixtures/proton-upstream/*)
                         workspace_checks=true
                         ;;
+                      scripts/check-git-pins.py|scripts/test-check-git-pins.sh|scripts/fixtures/git-pins/*|docs/upstream/git-pins.toml)
+                        workspace_checks=true
+                        ;;
                       crates/*)
                         if [[ "$file" != *.md ]]; then
                           app_code=true
@@ -164,6 +167,12 @@ jobs:
             # Offline: runs the weekly proton-upstream check against fixtures.
             - name: Proton upstream check self-test
               run: scripts/test-check-proton-upstream.sh
+
+            # Offline: runs the weekly git-pins check against fixtures, and
+            # checks that every git dependency in Cargo.toml is described in
+            # docs/upstream/git-pins.toml.
+            - name: Git pins check self-test
+              run: scripts/test-check-git-pins.sh
 
             - name: Clippy
               run: cargo clippy --workspace --all-targets --locked -- -D warnings
