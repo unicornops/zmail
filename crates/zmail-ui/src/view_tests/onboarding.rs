@@ -14,7 +14,9 @@ use std::{
 
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
 use url::Url;
-use zmail_autodiscover::{Fetch, FetchResponse, Network, PortProbe, Security};
+use zmail_autodiscover::{
+    DnsLookup, Fetch, FetchResponse, MxRecord, Network, PortProbe, Security, SrvRecord,
+};
 use zmail_core::{AccountColor, ProtocolKind};
 use zmail_setup::check::{CheckFailure, CheckPart};
 
@@ -64,12 +66,63 @@ impl PortProbe for NoPorts {
 
 /// Points discovery at `web`.
 fn fake_network(web: &Arc<FakeWeb>, cx: &mut VisualTestContext) {
+    fake_network_with_dns(web, None, cx);
+}
+
+/// Points discovery at `web` and, when given, `dns`.
+fn fake_network_with_dns(
+    web: &Arc<FakeWeb>,
+    dns: Option<Arc<dyn DnsLookup>>,
+    cx: &mut VisualTestContext,
+) {
     let network = Network {
         fetch: web.clone(),
-        dns: None,
+        dns,
         probe: Arc::new(NoPorts),
     };
     cx.update(|_, cx| cx.global_mut::<AccountSetupServices>().network = network);
+}
+
+/// DNS whose `_imaps` and `_submissions` records for example.test point
+/// at the host it holds.
+struct SrvTo(&'static str);
+
+impl DnsLookup for SrvTo {
+    fn srv(&self, name: &str) -> Result<Vec<SrvRecord>, String> {
+        let port = match name {
+            "_imaps._tcp.example.test" => 993,
+            "_submissions._tcp.example.test" => 465,
+            _ => return Ok(Vec::new()),
+        };
+        Ok(vec![SrvRecord {
+            priority: 0,
+            weight: 0,
+            port,
+            target: format!("{}.", self.0),
+        }])
+    }
+
+    fn mx(&self, _: &str) -> Result<Vec<MxRecord>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// From the first-run onboarding to discovery's result for
+/// me@example.test, with `dns` and no HTTPS answers.
+fn discover_with_srv(
+    dns: SrvTo,
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+) -> Entity<AccountSetupView> {
+    fake_network_with_dns(&Arc::new(FakeWeb::default()), Some(Arc::new(dns)), cx);
+    let setup = onboarding(view, cx);
+    keys("secondary-enter", cx);
+    click("account-setup-provider-other", cx);
+    fill(&setup, AccountField::Email, "me@example.test", cx);
+    fill(&setup, AccountField::Password, "secret", cx);
+    keys("enter", cx);
+    assert_eq!(stage(&setup, cx), Stage::Result);
+    setup
 }
 
 /// What the fake sign-in test answers, and what it was asked.
@@ -482,6 +535,10 @@ fn discovered_settings_are_shown_with_their_source_then_stored(cx: &mut TestAppC
         [AUTOCONFIG_URL],
         "discovery stopped at the domain's own file"
     );
+    assert!(
+        !drawn("account-setup-outside-domain".into(), cx),
+        "the domain's own file needs no confirming"
+    );
     click("account-setup-add", cx);
     // The sign-in was tested on both servers, with the password, before
     // the account was stored.
@@ -512,6 +569,59 @@ fn discovered_settings_are_shown_with_their_source_then_stored(cx: &mut TestAppC
     click("account-setup-done", cx);
     assert!(cx.read_entity(&view, |view, _| view.onboarding.is_none()));
     assert_eq!(super::focused_pane(&view, cx), Some(Pane::MessageList));
+}
+
+#[gpui::test]
+fn servers_dns_points_outside_the_domain_are_used_only_once_confirmed(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::NoAccount);
+    let check = fake_sign_in_check(cx);
+    let setup = discover_with_srv(SrvTo("mail.provider.test"), &view, cx);
+    assert!(
+        drawn("account-setup-outside-domain".into(), cx),
+        "the question about the servers shows"
+    );
+
+    // Add account, by click or by Secondary+Enter, does nothing yet: no
+    // sign-in is tested and nothing is stored.
+    click("account-setup-add", cx);
+    keys("secondary-enter", cx);
+    assert_eq!(stage(&setup, cx), Stage::Result);
+    assert!(check.parts().is_empty(), "nothing was signed in to");
+    assert!(
+        harness
+            .store
+            .list_accounts()
+            .expect("accounts load")
+            .is_empty()
+    );
+    // Editing the settings by hand stays available.
+    assert!(drawn("account-setup-edit".into(), cx));
+
+    // Once confirmed, Add account tests the sign-in and stores the account.
+    click("account-setup-use-servers", cx);
+    click("account-setup-add", cx);
+    assert_eq!(check.parts(), [CheckPart::Incoming, CheckPart::Outgoing]);
+    assert_eq!(stage(&setup, cx), Stage::Colour);
+    assert_eq!(
+        only_account(&harness).endpoint,
+        "imaps://mail.provider.test:993"
+    );
+}
+
+#[gpui::test]
+fn servers_dns_points_inside_the_domain_need_no_confirming(cx: &mut TestAppContext) {
+    let (view, cx, harness) = open_workspace(cx, Setup::NoAccount);
+    let check = fake_sign_in_check(cx);
+    let setup = discover_with_srv(SrvTo("mail.example.test"), &view, cx);
+    assert!(!drawn("account-setup-outside-domain".into(), cx));
+    assert!(!drawn("account-setup-use-servers".into(), cx));
+    click("account-setup-add", cx);
+    assert_eq!(check.parts(), [CheckPart::Incoming, CheckPart::Outgoing]);
+    assert_eq!(stage(&setup, cx), Stage::Colour);
+    assert_eq!(
+        only_account(&harness).endpoint,
+        "imaps://mail.example.test:993"
+    );
 }
 
 #[gpui::test]
@@ -661,6 +771,7 @@ fn every_onboarding_fixture_step_renders(cx: &mut TestAppContext) {
         OnboardingStep::Discovering,
         OnboardingStep::Consent,
         OnboardingStep::Result,
+        OnboardingStep::ResultOutsideDomain,
         OnboardingStep::Manual,
         OnboardingStep::ManualCleartext,
         OnboardingStep::SignInRefused,
@@ -679,7 +790,7 @@ fn every_onboarding_fixture_step_renders(cx: &mut TestAppContext) {
             OnboardingStep::GoogleGuide | OnboardingStep::GoogleGuideInvalid => Stage::GoogleGuide,
             OnboardingStep::Discovering => Stage::Discovering,
             OnboardingStep::Consent => Stage::Consent,
-            OnboardingStep::Result => Stage::Result,
+            OnboardingStep::Result | OnboardingStep::ResultOutsideDomain => Stage::Result,
             OnboardingStep::Manual | OnboardingStep::ManualCleartext => Stage::Manual,
             OnboardingStep::SignInRefused => Stage::Credentials,
             OnboardingStep::Colour => Stage::Colour,
@@ -688,6 +799,16 @@ fn every_onboarding_fixture_step_renders(cx: &mut TestAppContext) {
         assert_eq!(stage(&setup, window_cx), expected, "{step:?}");
         if step == OnboardingStep::ManualCleartext {
             assert!(drawn("account-setup-cleartext".into(), window_cx));
+        }
+        // Only servers outside the mail domain ask before Add account.
+        let outside = step == OnboardingStep::ResultOutsideDomain;
+        assert_eq!(
+            drawn("account-setup-outside-domain".into(), window_cx),
+            outside,
+            "{step:?}"
+        );
+        if outside {
+            assert!(window_cx.read_entity(&setup, |setup, _| setup.awaiting_confirmation()));
         }
         if step == OnboardingStep::SignInRefused {
             assert_eq!(errors(&setup, window_cx), [AccountField::Password]);

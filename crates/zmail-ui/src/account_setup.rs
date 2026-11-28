@@ -16,7 +16,9 @@
 //! 5. **Result**, or the **manual form** when nothing was found (or the
 //!    user wants to edit): separate host and port fields and a security
 //!    Select per server. TLS is the default; an unencrypted connection
-//!    needs an explicit opt-in.
+//!    needs an explicit opt-in. Servers that only a DNS record outside the
+//!    mail domain points to are used once the user confirms them (RFC 6186
+//!    section 6, `discovery::needs_confirmation`).
 //! 6. **Colour**, then the **first sync** with progress.
 //!
 //! Before a password account is stored, its sign-in is tested on both
@@ -222,6 +224,9 @@ pub enum OnboardingStep {
     Consent,
     /// Settings found in the domain's own autoconfig file.
     Result,
+    /// Settings that only DNS records pointing outside the domain gave,
+    /// waiting for the user to confirm them.
+    ResultOutsideDomain,
     /// The manual form after discovery found nothing.
     Manual,
     /// The manual form with an unencrypted SMTP server chosen.
@@ -272,6 +277,9 @@ pub(crate) struct AccountSetupView {
     discovery_task: Option<Task<()>>,
     /// What discovery (or a preset) found, shown on the result step.
     pub(crate) found: Option<MailSettings>,
+    /// Whether the user confirmed servers that a DNS record outside the
+    /// mail domain points to ("Use these servers").
+    pub(crate) servers_confirmed: bool,
     /// The manual form's controls.
     pub(crate) protocol_select: Entity<Select>,
     pub(crate) imap_security_select: Entity<Select>,
@@ -365,6 +373,7 @@ impl AccountSetupView {
             running_step: None,
             discovery_task: None,
             found: None,
+            servers_confirmed: false,
             protocol_select,
             imap_security_select,
             smtp_security_select,
@@ -596,6 +605,24 @@ impl AccountSetupView {
         cx.notify();
     }
 
+    /// Whether the result step waits for the user to confirm servers that
+    /// a DNS record outside the mail domain points to before Add account
+    /// does anything.
+    pub(crate) fn awaiting_confirmation(&self) -> bool {
+        self.stage == Stage::Result
+            && !self.servers_confirmed
+            && self
+                .found
+                .as_ref()
+                .is_some_and(discovery::needs_confirmation)
+    }
+
+    /// "Use these servers", on or off.
+    pub(crate) fn toggle_servers_confirmed(&mut self, cx: &mut Context<Self>) {
+        self.servers_confirmed = !self.servers_confirmed;
+        cx.notify();
+    }
+
     /// Turns the cleartext opt-in on or off.
     pub(crate) fn toggle_cleartext(&mut self, cx: &mut Context<Self>) {
         self.form.allow_cleartext = !self.form.allow_cleartext;
@@ -669,6 +696,7 @@ impl AccountSetupView {
         let network = &cx.global::<AccountSetupServices>().network;
         self.discovery = Some(Discovery::new(email, network.dns.is_some()));
         self.found = None;
+        self.servers_confirmed = false;
         self.go(Stage::Discovering, window, cx);
         self.run_next_step(window, cx);
     }
@@ -738,6 +766,7 @@ impl AccountSetupView {
         match outcome {
             Outcome::Found(settings) => {
                 self.found = Some(settings);
+                self.servers_confirmed = false;
                 self.go(Stage::Result, window, cx);
             }
             Outcome::Manual => self.go(Stage::Manual, window, cx),
@@ -777,7 +806,7 @@ impl AccountSetupView {
     /// Validates everything, tests a password sign-in, and stores the
     /// account, then moves to the colour step.
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.checking.is_some() {
+        if self.checking.is_some() || self.awaiting_confirmation() {
             return;
         }
         let Some(values) = self.validated(window, cx) else {
@@ -798,7 +827,7 @@ impl AccountSetupView {
     /// Save anyway, after a failed sign-in test: stores the account
     /// untested, as someone setting up offline needs.
     pub(crate) fn save_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.checking.is_some() {
+        if self.checking.is_some() || self.awaiting_confirmation() {
             return;
         }
         let Some(values) = self.validated(window, cx) else {

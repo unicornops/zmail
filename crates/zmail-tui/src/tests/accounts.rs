@@ -13,10 +13,11 @@ use std::{
 };
 
 use crossterm::event::KeyCode;
+use ratatui::style::Color;
 use url::Url;
 use zmail_autodiscover::{
-    Discovery, EmailAddress, Fetch, FetchResponse, Network, PortProbe, Step as DiscoveryStep,
-    StepFindings,
+    Discovery, DnsLookup, EmailAddress, Fetch, FetchResponse, MxRecord, Network, PortProbe,
+    SrvRecord, Step as DiscoveryStep, StepFindings,
 };
 use zmail_core::{AuthKind, ProtocolKind, time::HourCycle};
 use zmail_security::{InMemorySecretStore, SecretStore};
@@ -25,7 +26,7 @@ use zmail_store::LocalStore;
 
 use super::{
     app_with, assert_printable, assert_snapshot, control, draw, environment, key, keys, now,
-    open_work_inbox, seeded_store, text_of,
+    open_work_inbox, row_of, seeded_store, text_of,
 };
 use crate::{
     accounts::Step,
@@ -87,6 +88,63 @@ fn network(autoconfig: bool) -> Network {
         dns: None,
         probe: Arc::new(NoPorts),
     }
+}
+
+/// A domain that publishes no settings: every request is a 404.
+struct NoSettings;
+
+impl Fetch for NoSettings {
+    fn get(&self, url: &Url) -> Result<FetchResponse, String> {
+        Ok(FetchResponse {
+            status: 404,
+            url: url.clone(),
+            body: Vec::new(),
+        })
+    }
+}
+
+/// DNS whose `_imaps` and `_submissions` records for example.test point
+/// at the host it holds.
+struct SrvTo(&'static str);
+
+impl DnsLookup for SrvTo {
+    fn srv(&self, name: &str) -> Result<Vec<SrvRecord>, String> {
+        let port = match name {
+            "_imaps._tcp.example.test" => 993,
+            "_submissions._tcp.example.test" => 465,
+            _ => return Ok(Vec::new()),
+        };
+        Ok(vec![SrvRecord {
+            priority: 0,
+            weight: 0,
+            port,
+            target: format!("{}.", self.0),
+        }])
+    }
+
+    fn mx(&self, _: &str) -> Result<Vec<MxRecord>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// An app whose discovery finds `jane@example.test`'s servers only in
+/// DNS records pointing at `target` (the domain serves no settings
+/// file), at the step after discovery.
+fn discovered_by_srv(target: &'static str) -> App {
+    let store = Arc::new(LocalStore::open_ephemeral().expect("a store"));
+    let (mut app, _) = setup_app(store, environment(), true);
+    app.network = Network {
+        dns: Some(Arc::new(SrvTo(target))),
+        fetch: Arc::new(NoSettings),
+        probe: Arc::new(NoPorts),
+    };
+    start_adding(&mut app);
+    keys(&mut app, "jane@example.test");
+    key(&mut app, KeyCode::Enter);
+    wait_for(&mut app, "discovery to finish", |app| {
+        app.add.as_ref().is_some_and(|add| add.step == Step::Method)
+    });
+    app
 }
 
 /// An app that can add accounts: an in-memory keychain, the fake network
@@ -875,6 +933,76 @@ fn discovery_runs_in_the_background_and_fills_the_servers() {
     let text = screen(&mut app, 80, 24);
     assert!(text.contains("imap.example.test:993"), "{text}");
     assert!(text.contains("Password"), "{text}");
+    assert!(
+        !text.contains("Press Y"),
+        "no question for the domain's own file"
+    );
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(add(&app).step, Step::Credentials);
+}
+
+#[test]
+fn servers_dns_points_outside_the_domain_need_y_before_signing_in() {
+    let mut app = discovered_by_srv("mail.provider.test");
+    let text = screen(&mut app, 80, 24);
+    assert!(text.contains("mail.provider.test:993"), "{text}");
+    assert!(
+        text.contains("The DNS records for example.test point to mail.provider.test"),
+        "the question shows:\n{text}"
+    );
+    assert!(text.contains("Press Y to use these servers"), "{text}");
+    let buffer = draw(&mut app, 80, 24);
+    let row = row_of(&buffer, "The DNS records");
+    assert_eq!(
+        buffer[(2, row)].fg,
+        Color::Red,
+        "the question is in the flag colour"
+    );
+    // Enter (or >) does nothing until the servers are confirmed.
+    key(&mut app, KeyCode::Enter);
+    keys(&mut app, ">");
+    assert_eq!(add(&app).step, Step::Method, "no sign-in yet");
+    assert_snapshot("add-method-outside-domain-80x24", &draw(&mut app, 80, 24));
+
+    keys(&mut app, "y");
+    let text = screen(&mut app, 80, 24);
+    assert!(!text.contains("Press Y"), "{text}");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(add(&app).step, Step::Credentials);
+    assert_eq!(add(&app).form.imap_host, "mail.provider.test");
+}
+
+#[test]
+fn servers_dns_points_outside_the_domain_can_be_typed_instead() {
+    let mut app = discovered_by_srv("mail.provider.test");
+    keys(&mut app, "e");
+    let text = screen(&mut app, 80, 24);
+    assert!(!text.contains("The DNS records"), "{text}");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(add(&app).step, Step::Credentials, "on to the sign-in");
+    keys(&mut app, "Jane Doe");
+    key(&mut app, KeyCode::Tab);
+    keys(&mut app, PASSWORD);
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(add(&app).step, Step::Servers);
+    let text = screen(&mut app, 80, 24);
+    assert!(
+        !text.contains("couldn't find"),
+        "discovery did find something:\n{text}"
+    );
+    assert!(text.contains("mail.provider.test"), "editable:\n{text}");
+}
+
+#[test]
+fn servers_dns_points_inside_the_domain_need_no_confirming() {
+    let mut app = discovered_by_srv("mail.example.test");
+    let text = screen(&mut app, 80, 24);
+    assert!(text.contains("mail.example.test:993"), "{text}");
+    assert!(!text.contains("The DNS records"), "{text}");
+    assert!(!text.contains("Press Y"), "{text}");
+    assert_snapshot("add-method-in-domain-80x24", &draw(&mut app, 80, 24));
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(add(&app).step, Step::Credentials);
 }
 
 #[test]

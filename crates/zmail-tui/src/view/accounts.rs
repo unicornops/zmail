@@ -970,7 +970,13 @@ fn credentials_intro(out: &mut Lines, add: &AddAccount, over_ssh: bool) {
 fn found_lines(out: &mut Lines, add: &AddAccount) {
     let theme = out.theme;
     let Some(found) = &add.found else {
-        if add.discovery.is_some() {
+        // Only when discovery found nothing: after E on servers outside
+        // the mail domain, what it found is in the form, to be checked.
+        if add
+            .discovery
+            .as_ref()
+            .is_some_and(|discovery| discovery.result().is_none())
+        {
             out.para(
                 "Zmail couldn't find your settings. Enter them from your provider's help \
                  pages; it guessed the usual names.",
@@ -1027,6 +1033,22 @@ fn found_lines(out: &mut Lines, add: &AddAccount) {
             theme.flag(),
             0,
         );
+    }
+    // Servers that only a DNS record outside the mail domain points to.
+    let domain = add
+        .discovery
+        .as_ref()
+        .map(|discovery| discovery.email().domain().to_owned());
+    if let Some(question) = domain.and_then(|domain| discovery::confirmation(found, &domain)) {
+        out.blank();
+        out.para(&sanitize_line(&question), theme.flag(), 0);
+        if add.awaiting_confirmation() {
+            out.para(
+                "Press Y to use these servers, or E to type your provider's servers instead.",
+                Style::new(),
+                0,
+            );
+        }
     }
     out.blank();
 }

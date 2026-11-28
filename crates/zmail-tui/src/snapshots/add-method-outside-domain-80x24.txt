@@ -1,0 +1,24 @@
+  ZMAIL 0.0.0-test                ADD ACCOUNT
+  How do you sign in?
+
+  Incoming (IMAP): mail.provider.test:993 · TLS
+      Found in DNS record _imaps._tcp.example.test, which points outside
+      example.test. Check that this server is your provider's before you sign in
+  Outgoing (SMTP): mail.provider.test:465 · TLS
+      Found in DNS record _submissions._tcp.example.test, which points outside
+      example.test. Check that this server is your provider's before you sign in
+
+  The DNS records for example.test point to mail.provider.test, outside
+  example.test. DNS answers can be forged on an untrusted network to send your
+  password elsewhere, so continue only if mail.provider.test is where your mail
+  provider says your mail is.
+  Press Y to use these servers, or E to type your provider's servers instead.
+
+  > Password
+    App password
+    OAuth in the browser, with your provider's client
+
+  Your password stays on this computer, in the system keychain.
+
+Y Use them   P Prev       Esc Back
+E Manual     N Next       ^C Cancel

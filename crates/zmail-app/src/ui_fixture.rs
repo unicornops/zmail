@@ -244,6 +244,9 @@ impl FixtureView {
             "onboarding-discovering" => Self::Onboarding(OnboardingStep::Discovering),
             "onboarding-consent" => Self::Onboarding(OnboardingStep::Consent),
             "onboarding-result" => Self::Onboarding(OnboardingStep::Result),
+            "onboarding-result-outside-domain" => {
+                Self::Onboarding(OnboardingStep::ResultOutsideDomain)
+            },
             "onboarding-manual" => Self::Onboarding(OnboardingStep::Manual),
             "onboarding-manual-cleartext" => Self::Onboarding(OnboardingStep::ManualCleartext),
             "onboarding-sign-in-refused" => Self::Onboarding(OnboardingStep::SignInRefused),
@@ -1772,6 +1775,7 @@ mod tests {
             "onboarding-google-guide",
             "onboarding-google-guide-invalid",
             "onboarding-sign-in-refused",
+            "onboarding-result-outside-domain",
             "settings-appearance",
             "settings-mail",
             "settings-keyboard",
