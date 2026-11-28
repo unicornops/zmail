@@ -105,6 +105,10 @@ jobs:
                       scripts/check-linux-glibc.sh|scripts/test-check-linux-glibc.sh|scripts/check-windows-msi.ps1)
                         app_code=true
                         ;;
+                      # The Windows web renderer job's crash dump check.
+                      scripts/check-windows-crash-dumps.ps1)
+                        app_code=true
+                        ;;
                     esac
                   done < <(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
 
@@ -320,6 +324,17 @@ jobs:
             - name: Build release binary
               run: cargo build -p zmail-app --release --locked
 
+            # Debug builds can be crashed on purpose for the crash dump
+            # check (ZMAIL_DEBUG_FORCE_CRASH, src/hardening.rs); a release
+            # binary must not have it.
+            - name: Check the release binary has no forced crash
+              shell: bash
+              run: |
+                  if grep -a -q ZMAIL_DEBUG_FORCE_CRASH "${{ matrix.binary_path }}"; then
+                    echo "::error::${{ matrix.binary_path }} has the debug-only ZMAIL_DEBUG_FORCE_CRASH"
+                    exit 1
+                  fi
+
             # The Linux binary must not need a newer glibc than the release
             # supports (scripts/check-linux-glibc.sh, #483).
             - name: Check the glibc requirement
@@ -343,10 +358,11 @@ jobs:
 
             # The hand-off of a mailto: link from a second launch to the
             # running app (#457) goes through a Unix domain socket on macOS
-            # and a named pipe on Windows: their tests run on each.
-            - name: Single-instance tests (this platform's socket or pipe)
+            # and a named pipe on Windows: their tests run on each. So do
+            # the crash dump settings' (#467: the registry on Windows).
+            - name: Single-instance and crash dump tests (this platform's socket or pipe, registry)
               if: runner.os != 'Linux'
-              run: cargo test --release --locked -p zmail-app -- single_instance --nocapture
+              run: cargo test --release --locked -p zmail-app -- single_instance hardening --nocapture
 
             # Mail connections check certificates with the operating
             # system's verifier (ADR 0009, #471): Security.framework on
@@ -526,6 +542,17 @@ jobs:
             # interactions. Uploaded as the windows-web-screenshots artefact.
             - name: Build the app
               run: cargo build -p zmail-app --locked
+
+            # A crash of the desktop app or the terminal UI must leave no
+            # dump (#467): no WER report queued and, as the MSI installs
+            # it, no WER local dump, which is on for the check; a control
+            # crash shows both would be seen
+            # (scripts/check-windows-crash-dumps.ps1, on the debug build's
+            # ZMAIL_DEBUG_FORCE_CRASH).
+            - name: Crash dumps (Windows)
+              timeout-minutes: 15
+              shell: pwsh
+              run: ./scripts/check-windows-crash-dumps.ps1
 
             - name: Capture web renderer screenshots
               timeout-minutes: 15

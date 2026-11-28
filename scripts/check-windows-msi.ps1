@@ -1,8 +1,9 @@
 # check-windows-msi.ps1 - Installs the Zmail MSI, checks what it registers
-# for mailto: links (#457), uninstalls it and checks nothing of Zmail's is
-# left. CI's Windows build runs it on every pull request that changes the
-# app, so crates/zmail-app/wix/main.wxs is checked before a release builds
-# it. Needs an administrator (the MSI installs per machine).
+# for mailto: links (#457) and with Windows Error Reporting (#467),
+# uninstalls it and checks nothing of Zmail's is left. CI's Windows build
+# runs it on every pull request that changes the app, so
+# crates/zmail-app/wix/main.wxs is checked before a release builds it.
+# Needs an administrator (the MSI installs per machine).
 #
 # Usage: pwsh scripts/check-windows-msi.ps1 PATH-TO.msi
 
@@ -48,6 +49,9 @@ function Expect-Key([string]$key, [bool]$present) {
     }
 }
 
+$werExcluded = 'SOFTWARE\Microsoft\Windows\Windows Error Reporting\ExcludedApplications'
+$werLocalDumps = 'SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\zmail-app.exe'
+
 $msiPath = (Resolve-Path $Msi).Path
 $exe = Join-Path $env:ProgramFiles 'Zmail\zmail-app.exe'
 $command = "`"$exe`" `"%1`""
@@ -65,6 +69,11 @@ Expect-Value 'SOFTWARE\Classes\Zmail.Url.mailto\shell\open\command' '(default)' 
 # The scheme's own handler, used until the user picks another.
 Expect-Value 'SOFTWARE\Classes\mailto' 'URL Protocol' ''
 Expect-Value 'SOFTWARE\Classes\mailto\shell\open\command' '(default)' $command
+# No crash report or local dump of Zmail (#467): out of Windows Error
+# Reporting for every user, and none of WER's local dumps of it, which an
+# administrator may have turned on for the machine.
+Expect-Value $werExcluded 'zmail-app.exe' '1'
+Expect-Value $werLocalDumps 'DumpCount' '0'
 
 Write-Host 'Uninstalling'
 Run-Msiexec @('/x', $msiPath) 'msi-uninstall.log'
@@ -78,10 +87,14 @@ if ($null -ne (Value 'SOFTWARE\RegisteredApplications' 'Zmail')) {
 if ((Value 'SOFTWARE\Classes\mailto\shell\open\command' '(default)') -eq $command) {
     Fail 'the mailto: scheme still opens Zmail after uninstall'
 }
+if ($null -ne (Value $werExcluded 'zmail-app.exe')) {
+    Fail "HKLM\$werExcluded [zmail-app.exe] is left after uninstall"
+}
+Expect-Key $werLocalDumps $false
 # Windows' own definition of the scheme stays for the other mail apps.
 Expect-Value 'SOFTWARE\Classes\mailto' 'URL Protocol' ''
 
 if ($failures -gt 0) {
     exit 1
 }
-Write-Host 'The MSI registers Zmail for mailto: links and uninstalls cleanly.'
+Write-Host 'The MSI registers Zmail for mailto: links, keeps its crash dumps off and uninstalls cleanly.'

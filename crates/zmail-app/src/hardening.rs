@@ -46,6 +46,87 @@ pub(crate) fn make_undumpable() {
     }
 }
 
+/// Debug builds only: crash the app on purpose, so CI can check that a
+/// crash leaves no dump (`scripts/check-windows-crash-dumps.ps1`).
+/// `abort` panics (the crash log records it) and then aborts, as a panic
+/// that cannot unwind does; `stack-overflow` overflows a thread's stack, an
+/// exception nothing handles. `:MS` waits that many milliseconds first, on
+/// a thread of its own, so the window or the terminal UI is up by then.
+/// Release builds have neither the variable nor the code: a user's
+/// environment or a message can't reach it there (CI's build job checks
+/// the release binary for the name).
+#[cfg(debug_assertions)]
+pub(crate) const FORCE_CRASH_ENV: &str = "ZMAIL_DEBUG_FORCE_CRASH";
+
+/// A crash [`FORCE_CRASH_ENV`] asks for.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForcedCrash {
+    Abort,
+    StackOverflow,
+}
+
+/// Reads a [`FORCE_CRASH_ENV`] value: the crash and how long to wait.
+#[cfg(debug_assertions)]
+pub(crate) fn parse_forced_crash(value: &str) -> Option<(ForcedCrash, std::time::Duration)> {
+    let (kind, delay) = match value.split_once(':') {
+        Some((kind, delay)) => (kind, delay.parse().ok()?),
+        None => (value, 0),
+    };
+    let kind = match kind {
+        "abort" => ForcedCrash::Abort,
+        "stack-overflow" => ForcedCrash::StackOverflow,
+        _ => return None,
+    };
+    Some((kind, std::time::Duration::from_millis(delay)))
+}
+
+/// Crashes the process if [`FORCE_CRASH_ENV`] asks for it (debug builds;
+/// nothing in release builds). Called once the crash log is in place.
+pub(crate) fn crash_if_asked() {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var(FORCE_CRASH_ENV) {
+        let Some((kind, delay)) = parse_forced_crash(&value) else {
+            eprintln!("warning: {FORCE_CRASH_ENV}={value} isn't abort or stack-overflow[:MS]");
+            return;
+        };
+        eprintln!("{FORCE_CRASH_ENV}: crashing ({kind:?}) in {delay:?}");
+        let crash = move || {
+            std::thread::sleep(delay);
+            crash(kind);
+        };
+        if let Err(error) = std::thread::Builder::new()
+            .name("forced-crash".to_owned())
+            .spawn(crash)
+        {
+            eprintln!("warning: {FORCE_CRASH_ENV}: no thread to crash on: {error}");
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+fn crash(kind: ForcedCrash) {
+    match kind {
+        ForcedCrash::Abort => {
+            let _ = std::panic::catch_unwind(|| panic!("forced crash ({FORCE_CRASH_ENV})"));
+            std::process::abort();
+        }
+        ForcedCrash::StackOverflow => {
+            std::hint::black_box(overflow(0));
+        }
+    }
+}
+
+/// Recurses until the thread's stack runs out.
+#[cfg(debug_assertions)]
+fn overflow(depth: u64) -> u64 {
+    if depth == u64::MAX {
+        return 0;
+    }
+    let frame = std::hint::black_box([depth; 4096]);
+    overflow(depth + 1).wrapping_add(frame[0])
+}
+
 /// Options that create a file readable and writable by its owner only
 /// (mode 0600 on Unix); an existing file keeps its mode.
 pub(crate) fn private_file() -> std::fs::OpenOptions {
@@ -161,6 +242,27 @@ mod tests {
                     .output()
                     .expect("the spawned process runs");
             print!("{}", String::from_utf8_lossy(&output.stdout));
+        }
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod crash_dump_tests {
+    use super::*;
+
+    #[test]
+    fn forced_crashes_are_read_strictly() {
+        use std::time::Duration;
+        assert_eq!(
+            parse_forced_crash("abort"),
+            Some((ForcedCrash::Abort, Duration::ZERO))
+        );
+        assert_eq!(
+            parse_forced_crash("stack-overflow:2500"),
+            Some((ForcedCrash::StackOverflow, Duration::from_millis(2500)))
+        );
+        for value in ["", "ABORT", "abort:", "abort:soon", "segfault", "abort:-1"] {
+            assert_eq!(parse_forced_crash(value), None, "{value:?}");
         }
     }
 }
